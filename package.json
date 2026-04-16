@@ -1,0 +1,20 @@
+{
+  "name": "typeclaw",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsgo --noEmit",
+    "lint": "oxlint",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt ."
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@typescript/native-preview": "^7.0.0-dev.20260416.1",
+    "oxfmt": "^0.45.0",
+    "oxlint": "^1.60.0"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
