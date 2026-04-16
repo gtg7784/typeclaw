@@ -1,0 +1,79 @@
+import type { ServerWebSocket } from 'bun'
+
+import { createSession, type AgentSession } from '@/agent'
+import type { ClientMessage, ServerMessage } from '@/shared'
+
+export type ServerOptions = {
+  port: number
+}
+
+export type Server = ReturnType<typeof createServer>
+
+type WsData = { sessionId: string }
+type Ws = ServerWebSocket<WsData>
+
+function send(ws: Ws, msg: ServerMessage) {
+  ws.send(JSON.stringify(msg))
+}
+
+export function createServer({ port }: ServerOptions) {
+  const sessions = new WeakMap<Ws, AgentSession>()
+
+  function start() {
+    Bun.serve<WsData>({
+      port,
+      fetch(req, server) {
+        const sessionId = crypto.randomUUID()
+        if (server.upgrade(req, { data: { sessionId } })) return
+        return new Response('typeclaw agent', { status: 200 })
+      },
+      websocket: {
+        async open(ws) {
+          const session = await createSession()
+          sessions.set(ws, session)
+
+          session.subscribe((event) => {
+            switch (event.type) {
+              case 'message_update':
+                if (event.assistantMessageEvent.type === 'text_delta') {
+                  send(ws, { type: 'text_delta', delta: event.assistantMessageEvent.delta })
+                }
+                break
+              case 'tool_execution_start':
+                send(ws, { type: 'tool_start', name: event.toolName })
+                break
+              case 'tool_execution_end':
+                send(ws, { type: 'tool_end', name: event.toolName, error: event.isError })
+                break
+            }
+          })
+
+          send(ws, { type: 'connected', sessionId: ws.data.sessionId })
+          console.log(`session ${ws.data.sessionId}: open`)
+        },
+        async message(ws, raw) {
+          const session = sessions.get(ws)
+          if (!session) return
+
+          const msg = JSON.parse(String(raw)) as ClientMessage
+          if (msg.type !== 'prompt') return
+
+          try {
+            await session.prompt(msg.text)
+            send(ws, { type: 'done' })
+          } catch (err) {
+            send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
+          }
+        },
+        close(ws) {
+          sessions.delete(ws)
+          console.log(`session ${ws.data.sessionId}: close`)
+        },
+      },
+    })
+
+    console.log(`typeclaw agent listening on ws://localhost:${port}`)
+  }
+
+  return { start }
+}

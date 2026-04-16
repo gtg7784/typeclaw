@@ -1,6 +1,9 @@
 {
   "name": "typeclaw",
   "private": true,
+  "bin": {
+    "typeclaw": "src/cli/index.ts"
+  },
   "type": "module",
   "scripts": {
     "typecheck": "tsgo --noEmit",
@@ -9,7 +12,8 @@
     "format:check": "oxfmt ."
   },
   "dependencies": {
-    "@mariozechner/pi-coding-agent": "^0.67.3"
+    "@mariozechner/pi-coding-agent": "^0.67.3",
+    "citty": "^0.2.2"
   },
   "devDependencies": {
     "@types/bun": "latest",
