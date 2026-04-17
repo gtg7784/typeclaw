@@ -2,11 +2,16 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, statSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import * as z from 'zod'
 
 import { configSchema } from '@/config/config'
 
 import { initGitRepo, isDirectoryNonEmpty, scaffold, writeSecrets } from './init'
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
 let root: string
 
@@ -70,6 +75,16 @@ describe('scaffold', () => {
 
     const raw = await readFile(join(root, 'config.json'), 'utf8')
     expect(() => configSchema.parse(JSON.parse(raw))).not.toThrow()
+  })
+
+  test('writes config.json that passes config.schema.json validation', async () => {
+    await scaffold(root)
+
+    const rawConfig = await readFile(join(root, 'config.json'), 'utf8')
+    const rawSchema = await readFile(join(repoRoot, 'config.schema.json'), 'utf8')
+    const schema = z.fromJSONSchema(JSON.parse(rawSchema))
+
+    expect(() => schema.parse(JSON.parse(rawConfig))).not.toThrow()
   })
 
   test('creates empty markdown files', async () => {

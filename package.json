@@ -4,8 +4,12 @@
   "bin": {
     "typeclaw": "src/cli/index.ts"
   },
+  "files": [
+    "src",
+    "scripts",
+    "config.schema.json"
+  ],
   "type": "module",
-  "files": ["src", "scripts", "config.schema.json"],
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "lint": "oxlint",
