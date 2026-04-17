@@ -81,6 +81,40 @@ describe('scaffold', () => {
     }
   })
 
+  test('writes a private package.json with typeclaw as a file: dependency', async () => {
+    await scaffold(root, { name: 'coder' })
+
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<string, unknown>
+    expect(pkg.name).toBe('coder')
+    expect(pkg.private).toBe(true)
+    expect(pkg.type).toBe('module')
+    const deps = pkg.dependencies as Record<string, string>
+    expect(deps.typeclaw).toMatch(/^file:/)
+    expect(pkg.scripts).toBeUndefined()
+  })
+
+  test('package.json typeclaw file: dependency points at the typeclaw repo', async () => {
+    await scaffold(root, { name: 'coder' })
+
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    const spec = pkg.dependencies.typeclaw ?? ''
+    expect(spec.startsWith('file:')).toBe(true)
+    const target = join(root, spec.slice('file:'.length))
+    const targetPkg = JSON.parse(await readFile(join(target, 'package.json'), 'utf8')) as { name: string }
+    expect(targetPkg.name).toBe('typeclaw')
+  })
+
+  test('preserves existing package.json instead of overwriting', async () => {
+    const original = '{"name":"keep-me"}\n'
+    await writeFile(join(root, 'package.json'), original)
+
+    await scaffold(root, { name: 'coder' })
+
+    expect(await readFile(join(root, 'package.json'), 'utf8')).toBe(original)
+  })
+
   test('writes .gitignore with secret and workspace entries', async () => {
     await scaffold(root, { name: 'coder' })
 

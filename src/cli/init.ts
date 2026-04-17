@@ -1,6 +1,7 @@
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { cancel, confirm, intro, isCancel, outro, password, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
@@ -8,6 +9,7 @@ import { defineCommand } from 'citty'
 const CONFIG_FILE = 'config.json'
 const SECRETS_FILE = '.env'
 const GITIGNORE_FILE = '.gitignore'
+const PACKAGE_FILE = 'package.json'
 
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'MEMORY.md'] as const
 
@@ -104,6 +106,15 @@ export const init = defineCommand({
     }
     s.stop(`${name} is ready.`)
 
+    const installSpinner = spinner()
+    installSpinner.start('Installing dependencies with bun...')
+    const result = await runBunInstall(cwd)
+    if (result.ok) {
+      installSpinner.stop('Dependencies installed.')
+    } else {
+      installSpinner.stop(`Skipped bun install: ${result.reason}`)
+    }
+
     outro('Continue with `typeclaw tui` or `typeclaw up`.')
   },
 })
@@ -132,9 +143,72 @@ export async function scaffold(root: string, { name }: ScaffoldOptions): Promise
   }
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 
+  const pkg = buildPackageJson(root, name)
+  await writeFile(join(root, PACKAGE_FILE), `${JSON.stringify(pkg, null, 2)}\n`, { flag: 'wx' }).catch(ignoreExists)
+
   await Promise.all(MARKDOWN_FILES.map((file) => writeFile(join(root, file), '', { flag: 'wx' }).catch(ignoreExists)))
 
   await writeFile(join(root, GITIGNORE_FILE), GITIGNORE_CONTENT, { flag: 'wx' }).catch(ignoreExists)
+}
+
+function buildPackageJson(root: string, name: string): Record<string, unknown> {
+  const typeclawRoot = findTypeclawRoot()
+  // FIXME: temporary dev-stage wiring. Switch to a published version range
+  // (e.g. "typeclaw": "^x.y.z") once typeclaw is released. The `file:` spec is
+  // computed relative to the agent root because `file:` resolves relative to
+  // the consuming package.
+  const fileSpec = typeclawRoot ? `file:${toFileSpec(relative(root, typeclawRoot))}` : 'file:../typeclaw'
+  return {
+    name,
+    private: true,
+    type: 'module',
+    dependencies: {
+      typeclaw: fileSpec,
+    },
+  }
+}
+
+function toFileSpec(rel: string): string {
+  if (rel === '') return '.'
+  // bun/npm accept POSIX-style paths in file: specifiers; normalize separators.
+  return rel.split(/[\\/]/).join('/')
+}
+
+function findTypeclawRoot(): string | null {
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url))
+    const root = resolve('/')
+    while (dir !== root) {
+      const pkgPath = join(dir, 'package.json')
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { name?: string }
+        if (pkg.name === 'typeclaw') return dir
+      }
+      dir = dirname(dir)
+    }
+  } catch {}
+  return null
+}
+
+type InstallResult = { ok: true } | { ok: false; reason: string }
+
+export async function runBunInstall(cwd: string): Promise<InstallResult> {
+  const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
+  if (!bun) return { ok: false, reason: 'bun runtime not available' }
+  try {
+    const proc = bun.spawn({
+      cmd: ['bun', 'install'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const code = await proc.exited
+    if (code === 0) return { ok: true }
+    const stderr = await new Response(proc.stderr).text()
+    return { ok: false, reason: `bun install exited with code ${code}: ${stderr.trim() || 'no stderr'}` }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 // TODO: generalize to arbitrary provider secrets and switch to secrets.json
