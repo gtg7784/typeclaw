@@ -7,7 +7,7 @@ import { config } from '@/config'
 import { up } from '@/container'
 import { createTui } from '@/tui'
 
-import { HATCHING_PROMPT } from './hatching'
+import { HATCHING_GREETING, HATCHING_PROMPT } from './hatching'
 
 const CONFIG_FILE = 'typeclaw.json'
 const SECRETS_FILE = '.env'
@@ -94,7 +94,11 @@ async function defaultRunHatching({ cwd, port }: { cwd: string; port: number }):
 
     await waitForAgent(`http://localhost:${port}`, { timeoutMs: 30_000 })
 
-    const tui = createTui({ url: `ws://localhost:${port}`, initialPrompt: HATCHING_PROMPT })
+    const tui = createTui({
+      url: `ws://localhost:${port}`,
+      initialPrompt: HATCHING_PROMPT,
+      displayInitialPrompt: HATCHING_GREETING,
+    })
     await tui.run()
     return { ok: true }
   } catch (error) {

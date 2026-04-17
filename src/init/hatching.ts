@@ -64,8 +64,10 @@ After that final message, stop. If the user keeps talking, answer briefly and re
 
 This is the only time you will receive these instructions. After the \`Hatched 🐣\` commit, your identity takes over and you run as yourself.`
 
+export const HATCHING_GREETING = `Wake up, my friend!`
+
 export const HATCHING_PROMPT = `<hatching>
 ${HATCHING_INSTRUCTIONS}
 </hatching>
 
-Wake up, my friend!`
+${HATCHING_GREETING}`

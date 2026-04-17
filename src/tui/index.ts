@@ -1,13 +1,28 @@
-import { createClient } from './client'
-import { createInput } from './input'
-import { createRenderer } from './renderer'
+import { createClient as createClientDefault, type Client } from './client'
+import { createInput as createInputDefault, type Input } from './input'
+import { createRenderer as createRendererDefault, type Renderer } from './renderer'
+
+export type ClientFactory = (url: string) => Promise<Client>
+export type InputFactory = () => Input
+export type RendererFactory = () => Renderer
 
 export type TuiOptions = {
   url: string
   initialPrompt?: string
+  displayInitialPrompt?: string
+  createClient?: ClientFactory
+  createInput?: InputFactory
+  createRenderer?: RendererFactory
 }
 
-export function createTui({ url, initialPrompt }: TuiOptions) {
+export function createTui({
+  url,
+  initialPrompt,
+  displayInitialPrompt,
+  createClient = createClientDefault,
+  createInput = createInputDefault,
+  createRenderer = createRendererDefault,
+}: TuiOptions) {
   async function run() {
     const renderer = createRenderer()
     const input = createInput()
@@ -51,7 +66,7 @@ export function createTui({ url, initialPrompt }: TuiOptions) {
     }
 
     if (initialPrompt) {
-      renderer.userPrompt(initialPrompt)
+      renderer.userPrompt(displayInitialPrompt ?? initialPrompt)
       await send(initialPrompt)
     }
 
