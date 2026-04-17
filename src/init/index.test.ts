@@ -9,7 +9,15 @@ import * as z from 'zod'
 
 import { configSchema } from '@/config/config'
 
-import { initGitRepo, isDirectoryNonEmpty, scaffold, writeSecrets } from './init'
+import {
+  initGitRepo,
+  type InitStepEvent,
+  isDirectoryNonEmpty,
+  isInitialized,
+  runInit,
+  scaffold,
+  writeSecrets,
+} from './index'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -21,6 +29,94 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await rm(root, { recursive: true, force: true })
+})
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+  const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const out = await new Response(proc.stdout).text()
+  await proc.exited
+  return out.trim()
+}
+
+describe('runInit', () => {
+  test('runs scaffold, install, and git steps in order', async () => {
+    const events: InitStepEvent[] = []
+
+    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
+      'scaffold:start',
+      'scaffold:done',
+      'install:start',
+      'install:done',
+      'git:start',
+      'git:done',
+    ])
+  })
+
+  test('produces an initialized agent folder (config, secrets, markdown, git repo)', async () => {
+    await runInit({ cwd: root, apiKey: 'fw_integration_key' })
+
+    expect(isInitialized(root)).toBe(true)
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_integration_key\n')
+    expect(existsSync(join(root, 'AGENTS.md'))).toBe(true)
+    expect(existsSync(join(root, '.git'))).toBe(true)
+    expect(await runGit(root, ['log', '--oneline'])).toContain('Initial commit 🥚')
+  })
+
+  test('git step sees scaffolded files (step ordering)', async () => {
+    await runInit({ cwd: root, apiKey: 'fw_test_key' })
+
+    const tracked = (await runGit(root, ['ls-files'])).split('\n')
+    expect(tracked).toContain('config.json')
+    expect(tracked).toContain('package.json')
+    expect(tracked).toContain('.gitignore')
+    expect(tracked).toContain('AGENTS.md')
+  })
+
+  test('emits install result (ok or reason) in done event', async () => {
+    const events: InitStepEvent[] = []
+
+    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+
+    const installDone = events.find((e) => e.step === 'install' && e.phase === 'done')
+    expect(installDone).toBeDefined()
+    if (installDone && installDone.step === 'install' && installDone.phase === 'done') {
+      expect(typeof installDone.result.ok).toBe('boolean')
+    }
+  })
+
+  test('emits git result with skipped flag in done event', async () => {
+    const events: InitStepEvent[] = []
+
+    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+
+    const gitDone = events.find((e) => e.step === 'git' && e.phase === 'done')
+    expect(gitDone).toBeDefined()
+    if (gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok) {
+      expect(gitDone.result.skipped).toBe(false)
+    }
+  })
+
+  test('skips git init when .git already exists', async () => {
+    await mkdir(join(root, '.git'))
+    const events: InitStepEvent[] = []
+
+    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+
+    const gitDone = events.find((e) => e.step === 'git' && e.phase === 'done')
+    if (gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok) {
+      expect(gitDone.result.skipped).toBe(true)
+    } else {
+      throw new Error('expected git:done with ok result')
+    }
+  })
+
+  test('works without onProgress callback', async () => {
+    await runInit({ cwd: root, apiKey: 'fw_test_key' })
+
+    expect(isInitialized(root)).toBe(true)
+  })
 })
 
 describe('isDirectoryNonEmpty', () => {
@@ -45,6 +141,17 @@ describe('isDirectoryNonEmpty', () => {
 
   test('returns false for a nonexistent directory', () => {
     expect(isDirectoryNonEmpty(join(root, 'does-not-exist'))).toBe(false)
+  })
+})
+
+describe('isInitialized', () => {
+  test('returns false when no config.json exists', () => {
+    expect(isInitialized(root)).toBe(false)
+  })
+
+  test('returns true when config.json exists', async () => {
+    await writeFile(join(root, 'config.json'), '{}')
+    expect(isInitialized(root)).toBe(true)
   })
 })
 
@@ -159,13 +266,6 @@ describe('scaffold', () => {
 })
 
 describe('initGitRepo', () => {
-  async function runGit(cwd: string, args: string[]): Promise<string> {
-    const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
-    const out = await new Response(proc.stdout).text()
-    await proc.exited
-    return out.trim()
-  }
-
   test('initializes a git repo with an initial commit on main', async () => {
     await scaffold(root)
 
@@ -184,18 +284,6 @@ describe('initGitRepo', () => {
 
     expect(await runGit(root, ['log', '-1', '--format=%an'])).toBe('TypeClaw')
     expect(await runGit(root, ['log', '-1', '--format=%ae'])).toBe('hello@typeclaw.dev')
-  })
-
-  test('includes scaffolded files in the initial commit', async () => {
-    await scaffold(root)
-
-    await initGitRepo(root)
-
-    const tracked = await runGit(root, ['ls-files'])
-    expect(tracked).toContain('config.json')
-    expect(tracked).toContain('package.json')
-    expect(tracked).toContain('.gitignore')
-    expect(tracked).toContain('AGENTS.md')
   })
 
   test('respects .gitignore (does not track .env)', async () => {
