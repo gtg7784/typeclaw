@@ -1,9 +1,9 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { mkdir, writeFile } from 'node:fs/promises'
-import { dirname, join, relative, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { cancel, confirm, intro, isCancel, outro, password, spinner, text } from '@clack/prompts'
+import { cancel, confirm, intro, isCancel, outro, password, spinner } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 const CONFIG_FILE = 'config.json'
@@ -14,21 +14,6 @@ const PACKAGE_FILE = 'package.json'
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'MEMORY.md'] as const
 
 const DIRECTORIES = ['workspace', 'sessions', 'memory', 'skills', '.agents/skills'] as const
-
-const NAME_SUGGESTIONS = [
-  'coder',
-  'scribe',
-  'mentor',
-  'rover',
-  'pixie',
-  'echo',
-  'nova',
-  'atlas',
-  'juno',
-  'ember',
-  'finch',
-  'mako',
-] as const
 
 const GITIGNORE_CONTENT = `.env
 .env.local
@@ -66,16 +51,6 @@ export const init = defineCommand({
 
     intro('Initializing TypeClaw...')
 
-    const name = await text({
-      message: "What's your agent's name? (you can change this later)",
-      placeholder: NAME_SUGGESTIONS[Math.floor(Math.random() * NAME_SUGGESTIONS.length)],
-      validate: (value) => (value && value.length > 0 ? undefined : 'Name is required'),
-    })
-    if (isCancel(name)) {
-      cancel('Aborted.')
-      process.exit(0)
-    }
-
     // TODO: provider/model selection. For now we assume Fireworks + Kimi K2.5 Turbo
     // because that's the only provider wired up in src/agent/auth.ts and src/config.
     // Expand to a provider picker (OpenAI, Anthropic, Fireworks, ...) once the
@@ -95,16 +70,16 @@ export const init = defineCommand({
     //   - cron.json scaffolding — Phase 9
     //   - compose.yml registration in $HOME/.typeclaw — Phase 12
     const s = spinner()
-    s.start(`${name} is hatching...`)
+    s.start('Laying the egg...')
     try {
-      await scaffold(cwd, { name })
+      await scaffold(cwd)
       await writeSecrets(cwd, { fireworksApiKey: apiKey })
     } catch (error) {
       s.stop('Failed to initialize.')
       console.error(error)
       process.exit(1)
     }
-    s.stop(`${name} is ready.`)
+    s.stop('Egg laid. 🥚')
 
     const installSpinner = spinner()
     installSpinner.start('Installing dependencies with bun...')
@@ -113,6 +88,15 @@ export const init = defineCommand({
       installSpinner.stop('Dependencies installed.')
     } else {
       installSpinner.stop(`Skipped bun install: ${result.reason}`)
+    }
+
+    const gitSpinner = spinner()
+    gitSpinner.start('Initializing git repository...')
+    const gitResult = await initGitRepo(cwd)
+    if (gitResult.ok) {
+      gitSpinner.stop(gitResult.skipped ? 'Git repository already exists.' : 'Git repository initialized.')
+    } else {
+      gitSpinner.stop(`Skipped git init: ${gitResult.reason}`)
     }
 
     outro('Continue with `typeclaw tui` or `typeclaw up`.')
@@ -127,23 +111,18 @@ export function isDirectoryNonEmpty(dir: string): boolean {
   }
 }
 
-type ScaffoldOptions = {
-  name: string
-}
-
-export async function scaffold(root: string, { name }: ScaffoldOptions): Promise<void> {
+export async function scaffold(root: string): Promise<void> {
   await Promise.all(DIRECTORIES.map((dir) => mkdir(join(root, dir), { recursive: true })))
 
   // TODO: hardcoded model. Mirror src/config/index.ts until the config loader
   // and provider registry exist (TypeClaw.md Phase 1 + Phase 4).
   const config = {
     $schema: './node_modules/typeclaw/config.schema.json',
-    name,
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
   }
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 
-  const pkg = buildPackageJson(root, name)
+  const pkg = buildPackageJson(root, basename(root))
   await writeFile(join(root, PACKAGE_FILE), `${JSON.stringify(pkg, null, 2)}\n`, { flag: 'wx' }).catch(ignoreExists)
 
   await Promise.all(MARKDOWN_FILES.map((file) => writeFile(join(root, file), '', { flag: 'wx' }).catch(ignoreExists)))
@@ -206,6 +185,57 @@ export async function runBunInstall(cwd: string): Promise<InstallResult> {
     if (code === 0) return { ok: true }
     const stderr = await new Response(proc.stderr).text()
     return { ok: false, reason: `bun install exited with code ${code}: ${stderr.trim() || 'no stderr'}` }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason: string }
+
+export async function initGitRepo(cwd: string): Promise<GitInitResult> {
+  const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
+  if (!bun) return { ok: false, reason: 'bun runtime not available' }
+
+  if (existsSync(join(cwd, '.git'))) return { ok: true, skipped: true }
+
+  // Author the initial commit as TypeClaw itself. The agent is still unnamed
+  // (IDENTITY.md is empty and hatching hasn't run), so the agent identity will
+  // take over from the hatching commit onward. This also avoids depending on
+  // the user's global `user.name`/`user.email`.
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: 'TypeClaw',
+    GIT_AUTHOR_EMAIL: 'hello@typeclaw.dev',
+    GIT_COMMITTER_NAME: 'TypeClaw',
+    GIT_COMMITTER_EMAIL: 'hello@typeclaw.dev',
+  }
+
+  try {
+    const init = bun.spawn({ cmd: ['git', 'init', '-b', 'main'], cwd, env, stdout: 'pipe', stderr: 'pipe' })
+    if ((await init.exited) !== 0) {
+      const stderr = await new Response(init.stderr).text()
+      return { ok: false, reason: `git init failed: ${stderr.trim() || 'no stderr'}` }
+    }
+
+    const add = bun.spawn({ cmd: ['git', 'add', '.'], cwd, env, stdout: 'pipe', stderr: 'pipe' })
+    if ((await add.exited) !== 0) {
+      const stderr = await new Response(add.stderr).text()
+      return { ok: false, reason: `git add failed: ${stderr.trim() || 'no stderr'}` }
+    }
+
+    const commit = bun.spawn({
+      cmd: ['git', 'commit', '-m', 'Initial commit 🥚'],
+      cwd,
+      env,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    if ((await commit.exited) !== 0) {
+      const stderr = await new Response(commit.stderr).text()
+      return { ok: false, reason: `git commit failed: ${stderr.trim() || 'no stderr'}` }
+    }
+
+    return { ok: true, skipped: false }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }

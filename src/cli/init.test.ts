@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, statSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { configSchema } from '@/config/config'
 
-import { isDirectoryNonEmpty, scaffold, writeSecrets } from './init'
+import { initGitRepo, isDirectoryNonEmpty, scaffold, writeSecrets } from './init'
 
 let root: string
 
@@ -45,7 +45,7 @@ describe('isDirectoryNonEmpty', () => {
 
 describe('scaffold', () => {
   test('creates expected directories', async () => {
-    await scaffold(root, { name: 'coder' })
+    await scaffold(root)
 
     for (const dir of ['workspace', 'sessions', 'memory', 'skills', '.agents/skills']) {
       const path = join(root, dir)
@@ -54,38 +54,37 @@ describe('scaffold', () => {
     }
   })
 
-  test('writes config.json with the given agent name and $schema reference', async () => {
-    await scaffold(root, { name: 'coder' })
+  test('writes config.json with $schema reference and model, without name', async () => {
+    await scaffold(root)
 
     const raw = await readFile(join(root, 'config.json'), 'utf8')
     expect(raw.endsWith('\n')).toBe(true)
     expect(JSON.parse(raw)).toEqual({
       $schema: './node_modules/typeclaw/config.schema.json',
-      name: 'coder',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
     })
   })
 
   test('writes config.json that passes configSchema validation', async () => {
-    await scaffold(root, { name: 'coder' })
+    await scaffold(root)
 
     const raw = await readFile(join(root, 'config.json'), 'utf8')
     expect(() => configSchema.parse(JSON.parse(raw))).not.toThrow()
   })
 
   test('creates empty markdown files', async () => {
-    await scaffold(root, { name: 'coder' })
+    await scaffold(root)
 
     for (const file of ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'MEMORY.md']) {
       expect(await readFile(join(root, file), 'utf8')).toBe('')
     }
   })
 
-  test('writes a private package.json with typeclaw as a file: dependency', async () => {
-    await scaffold(root, { name: 'coder' })
+  test('writes a private package.json named after the folder with typeclaw as a file: dependency', async () => {
+    await scaffold(root)
 
     const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<string, unknown>
-    expect(pkg.name).toBe('coder')
+    expect(pkg.name).toBe(basename(root))
     expect(pkg.private).toBe(true)
     expect(pkg.type).toBe('module')
     const deps = pkg.dependencies as Record<string, string>
@@ -94,7 +93,7 @@ describe('scaffold', () => {
   })
 
   test('package.json typeclaw file: dependency points at the typeclaw repo', async () => {
-    await scaffold(root, { name: 'coder' })
+    await scaffold(root)
 
     const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
       dependencies: Record<string, string>
@@ -110,13 +109,13 @@ describe('scaffold', () => {
     const original = '{"name":"keep-me"}\n'
     await writeFile(join(root, 'package.json'), original)
 
-    await scaffold(root, { name: 'coder' })
+    await scaffold(root)
 
     expect(await readFile(join(root, 'package.json'), 'utf8')).toBe(original)
   })
 
   test('writes .gitignore with secret and workspace entries', async () => {
-    await scaffold(root, { name: 'coder' })
+    await scaffold(root)
 
     const gitignore = await readFile(join(root, '.gitignore'), 'utf8')
     expect(gitignore).toContain('.env')
@@ -129,7 +128,7 @@ describe('scaffold', () => {
     const original = '# existing content\n'
     await writeFile(join(root, 'AGENTS.md'), original)
 
-    await scaffold(root, { name: 'coder' })
+    await scaffold(root)
 
     expect(await readFile(join(root, 'AGENTS.md'), 'utf8')).toBe(original)
   })
@@ -138,9 +137,69 @@ describe('scaffold', () => {
     const original = 'custom-entry\n'
     await writeFile(join(root, '.gitignore'), original)
 
-    await scaffold(root, { name: 'coder' })
+    await scaffold(root)
 
     expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe(original)
+  })
+})
+
+describe('initGitRepo', () => {
+  async function runGit(cwd: string, args: string[]): Promise<string> {
+    const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+    const out = await new Response(proc.stdout).text()
+    await proc.exited
+    return out.trim()
+  }
+
+  test('initializes a git repo with an initial commit on main', async () => {
+    await scaffold(root)
+
+    const result = await initGitRepo(root)
+
+    expect(result).toEqual({ ok: true, skipped: false })
+    expect(existsSync(join(root, '.git'))).toBe(true)
+    expect(await runGit(root, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe('main')
+    expect(await runGit(root, ['log', '--oneline'])).toContain('Initial commit 🥚')
+  })
+
+  test('authors the initial commit as TypeClaw', async () => {
+    await scaffold(root)
+
+    await initGitRepo(root)
+
+    expect(await runGit(root, ['log', '-1', '--format=%an'])).toBe('TypeClaw')
+    expect(await runGit(root, ['log', '-1', '--format=%ae'])).toBe('hello@typeclaw.dev')
+  })
+
+  test('includes scaffolded files in the initial commit', async () => {
+    await scaffold(root)
+
+    await initGitRepo(root)
+
+    const tracked = await runGit(root, ['ls-files'])
+    expect(tracked).toContain('config.json')
+    expect(tracked).toContain('package.json')
+    expect(tracked).toContain('.gitignore')
+    expect(tracked).toContain('AGENTS.md')
+  })
+
+  test('respects .gitignore (does not track .env)', async () => {
+    await scaffold(root)
+    await writeSecrets(root, { fireworksApiKey: 'fw_test' })
+
+    await initGitRepo(root)
+
+    const tracked = await runGit(root, ['ls-files'])
+    expect(tracked.split('\n')).not.toContain('.env')
+  })
+
+  test('skips when .git already exists', async () => {
+    await scaffold(root)
+    await mkdir(join(root, '.git'))
+
+    const result = await initGitRepo(root)
+
+    expect(result).toEqual({ ok: true, skipped: true })
   })
 })
 
