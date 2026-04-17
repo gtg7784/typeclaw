@@ -1,7 +1,7 @@
-import { cancel, confirm, intro, isCancel, outro, password, spinner } from '@clack/prompts'
+import { cancel, confirm, intro, isCancel, password, spinner } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
-import { isDirectoryNonEmpty, isInitialized, runInit, type InitStepEvent } from '@/init'
+import { isDirectoryNonEmpty, isInitialized, runInit, type InitStep, type InitStepEvent } from '@/init'
 
 export const init = defineCommand({
   meta: {
@@ -54,7 +54,7 @@ export const init = defineCommand({
       process.exit(1)
     }
 
-    outro('Continue with `typeclaw tui` or `typeclaw up`.')
+    console.log('\nContainer is still running. Run `typeclaw tui` to reattach or `typeclaw down` to stop.')
   },
 })
 
@@ -62,6 +62,11 @@ function reportProgress(): (event: InitStepEvent) => void {
   const spinners: Partial<Record<InitStepEvent['step'], ReturnType<typeof spinner>>> = {}
 
   return (event) => {
+    if (event.step === 'hatching') {
+      reportHatching(event)
+      return
+    }
+
     if (event.phase === 'start') {
       const s = spinner()
       s.start(START_MESSAGES[event.step])
@@ -97,7 +102,22 @@ function reportProgress(): (event: InitStepEvent) => void {
   }
 }
 
-const START_MESSAGES: Record<InitStepEvent['step'], string> = {
+// Hatching launches the container and foregrounds the TUI, so it steals stdin
+// and cannot share the spinner lifecycle with the other steps. Print plain
+// lines instead.
+function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): void {
+  if (event.phase === 'start') {
+    console.log('Hatching...')
+    return
+  }
+  if (event.result.ok) {
+    console.log('Hatched. 🐣')
+  } else {
+    console.error(`Hatching failed: ${event.result.reason}`)
+  }
+}
+
+const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
   scaffold: 'Laying the egg...',
   install: 'Installing dependencies with bun...',
   dockerfile: 'Writing Dockerfile...',

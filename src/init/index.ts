@@ -3,6 +3,12 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { config } from '@/config'
+import { up } from '@/container'
+import { createTui } from '@/tui'
+
+import { HATCHING_PROMPT } from './hatching'
+
 const CONFIG_FILE = 'typeclaw.json'
 const SECRETS_FILE = '.env'
 const GITIGNORE_FILE = '.gitignore'
@@ -25,23 +31,37 @@ workspace/downloads/
 export type InstallResult = { ok: true } | { ok: false; reason: string }
 export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason: string }
 export type DockerAssetsResult = { ok: true; devMode: boolean } | { ok: false; reason: string }
+export type HatchingResult = { ok: true } | { ok: false; reason: string }
 
-export type InitStep = 'scaffold' | 'install' | 'dockerfile' | 'git'
+export type InitStep = 'scaffold' | 'install' | 'dockerfile' | 'git' | 'hatching'
 
 export type InitStepEvent =
-  | { step: InitStep; phase: 'start' }
+  | { step: 'scaffold'; phase: 'start' }
   | { step: 'scaffold'; phase: 'done' }
+  | { step: 'install'; phase: 'start' }
   | { step: 'install'; phase: 'done'; result: InstallResult }
+  | { step: 'dockerfile'; phase: 'start' }
   | { step: 'dockerfile'; phase: 'done'; result: DockerAssetsResult }
+  | { step: 'git'; phase: 'start' }
   | { step: 'git'; phase: 'done'; result: GitInitResult }
+  | { step: 'hatching'; phase: 'start' }
+  | { step: 'hatching'; phase: 'done'; result: HatchingResult }
+
+export type HatchRunner = (options: { cwd: string; port: number }) => Promise<HatchingResult>
 
 export type InitOptions = {
   cwd: string
   apiKey: string
   onProgress?: (event: InitStepEvent) => void
+  runHatching?: HatchRunner
 }
 
-export async function runInit({ cwd, apiKey, onProgress }: InitOptions): Promise<void> {
+export async function runInit({
+  cwd,
+  apiKey,
+  onProgress,
+  runHatching = defaultRunHatching,
+}: InitOptions): Promise<void> {
   const emit = onProgress ?? (() => {})
 
   emit({ step: 'scaffold', phase: 'start' })
@@ -61,6 +81,45 @@ export async function runInit({ cwd, apiKey, onProgress }: InitOptions): Promise
   emit({ step: 'git', phase: 'start' })
   const git = await initGitRepo(cwd)
   emit({ step: 'git', phase: 'done', result: git })
+
+  emit({ step: 'hatching', phase: 'start' })
+  const hatching = await runHatching({ cwd, port: config.port })
+  emit({ step: 'hatching', phase: 'done', result: hatching })
+}
+
+async function defaultRunHatching({ cwd, port }: { cwd: string; port: number }): Promise<HatchingResult> {
+  try {
+    const launch = await up({ cwd, port })
+    if (!launch.ok) return { ok: false, reason: launch.reason }
+
+    await waitForAgent(`http://localhost:${port}`, { timeoutMs: 30_000 })
+
+    const tui = createTui({ url: `ws://localhost:${port}`, initialPrompt: HATCHING_PROMPT })
+    await tui.run()
+    return { ok: true }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+// Probe the server's plain HTTP fallback (non-upgrade requests get a 200 with
+// body "typeclaw agent") instead of opening a WebSocket. Opening a WS here
+// would trigger createSession on the server and burn an LLM session just to
+// learn the port is up.
+async function waitForAgent(httpUrl: string, { timeoutMs }: { timeoutMs: number }): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  let lastError: unknown
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(httpUrl)
+      if (res.status === 200) return
+      lastError = new Error(`unexpected status ${res.status}`)
+    } catch (error) {
+      lastError = error
+    }
+    await new Promise((r) => setTimeout(r, 250))
+  }
+  throw new Error(`timed out waiting for agent at ${httpUrl}: ${lastError instanceof Error ? lastError.message : ''}`)
 }
 
 export function isDirectoryNonEmpty(dir: string): boolean {

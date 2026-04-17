@@ -10,6 +10,8 @@ import * as z from 'zod'
 import { configSchema } from '@/config/config'
 
 import {
+  type HatchingResult,
+  type HatchRunner,
   initGitRepo,
   type InitStepEvent,
   isDirectoryNonEmpty,
@@ -28,6 +30,17 @@ beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'typeclaw-init-'))
 })
 
+const okHatch: HatchRunner = async () => ({ ok: true }) as HatchingResult
+
+function captureHatch(): { runner: HatchRunner; calls: Array<{ cwd: string; port: number }> } {
+  const calls: Array<{ cwd: string; port: number }> = []
+  const runner: HatchRunner = async (options) => {
+    calls.push(options)
+    return { ok: true }
+  }
+  return { runner, calls }
+}
+
 afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
@@ -40,10 +53,10 @@ async function runGit(cwd: string, args: string[]): Promise<string> {
 }
 
 describe('runInit', () => {
-  test('runs scaffold, install, and git steps in order', async () => {
+  test('runs scaffold, install, dockerfile, git, and hatching steps in order', async () => {
     const events: InitStepEvent[] = []
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
 
     expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
       'scaffold:start',
@@ -54,11 +67,51 @@ describe('runInit', () => {
       'dockerfile:done',
       'git:start',
       'git:done',
+      'hatching:start',
+      'hatching:done',
     ])
   })
 
+  test('hatching runs after git (sees committed agent folder)', async () => {
+    const seenAt: Array<{ hasGit: boolean; hasDockerfile: boolean }> = []
+    const runHatching: HatchRunner = async ({ cwd }) => {
+      seenAt.push({
+        hasGit: existsSync(join(cwd, '.git')),
+        hasDockerfile: existsSync(join(cwd, 'Dockerfile')),
+      })
+      return { ok: true }
+    }
+
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching })
+
+    expect(seenAt).toEqual([{ hasGit: true, hasDockerfile: true }])
+  })
+
+  test('hatching receives the init cwd and the configured port', async () => {
+    const { runner, calls } = captureHatch()
+
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: runner })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.cwd).toBe(root)
+    expect(calls[0]?.port).toBeGreaterThan(0)
+  })
+
+  test('hatching failure is reported via event, not thrown', async () => {
+    const runHatching: HatchRunner = async () => ({ ok: false, reason: 'simulated boom' })
+    const events: InitStepEvent[] = []
+
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching, onProgress: (e) => events.push(e) })
+
+    const hatchDone = events.find((e) => e.step === 'hatching' && e.phase === 'done')
+    if (!(hatchDone && hatchDone.step === 'hatching' && hatchDone.phase === 'done')) {
+      throw new Error('expected hatching:done')
+    }
+    expect(hatchDone.result).toEqual({ ok: false, reason: 'simulated boom' })
+  })
+
   test('produces an initialized agent folder (config, secrets, markdown, git repo)', async () => {
-    await runInit({ cwd: root, apiKey: 'fw_integration_key' })
+    await runInit({ cwd: root, apiKey: 'fw_integration_key', runHatching: okHatch })
 
     expect(isInitialized(root)).toBe(true)
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_integration_key\n')
@@ -68,7 +121,7 @@ describe('runInit', () => {
   })
 
   test('git step sees scaffolded files (step ordering)', async () => {
-    await runInit({ cwd: root, apiKey: 'fw_test_key' })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch })
 
     const tracked = (await runGit(root, ['ls-files'])).split('\n')
     expect(tracked).toContain('typeclaw.json')
@@ -81,7 +134,7 @@ describe('runInit', () => {
   test('dockerfile step writes Dockerfile and reports devMode via event', async () => {
     const events: InitStepEvent[] = []
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
 
     expect(existsSync(join(root, 'Dockerfile'))).toBe(true)
 
@@ -95,7 +148,7 @@ describe('runInit', () => {
   test('emits git done event with skipped: false when repo is freshly initialized', async () => {
     const events: InitStepEvent[] = []
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
 
     const gitDone = events.find((e) => e.step === 'git' && e.phase === 'done')
     if (!(gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok)) {
@@ -108,7 +161,7 @@ describe('runInit', () => {
     await mkdir(join(root, '.git'))
     const events: InitStepEvent[] = []
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
 
     const gitDone = events.find((e) => e.step === 'git' && e.phase === 'done')
     if (!(gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok)) {
@@ -124,21 +177,24 @@ describe('runInit', () => {
     const events: InitStepEvent[] = []
 
     // when
-    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
 
-    // then: dockerfile failed softly, git still ran
+    // then: dockerfile failed softly, git and hatching still ran
     const dockerDone = events.find((e) => e.step === 'dockerfile' && e.phase === 'done')
     if (!(dockerDone && dockerDone.step === 'dockerfile' && dockerDone.phase === 'done')) {
       throw new Error('expected dockerfile:done')
     }
     expect(dockerDone.result.ok).toBe(false)
 
-    expect(events.map((e) => `${e.step}:${e.phase}`)).toContain('git:start')
-    expect(events.map((e) => `${e.step}:${e.phase}`)).toContain('git:done')
+    const steps = events.map((e) => `${e.step}:${e.phase}`)
+    expect(steps).toContain('git:start')
+    expect(steps).toContain('git:done')
+    expect(steps).toContain('hatching:start')
+    expect(steps).toContain('hatching:done')
   })
 
   test('works without onProgress callback', async () => {
-    await runInit({ cwd: root, apiKey: 'fw_test_key' })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch })
 
     expect(isInitialized(root)).toBe(true)
   })
