@@ -1,4 +1,4 @@
-import type { ServerWebSocket } from 'bun'
+import type { Server as BunServer, ServerWebSocket } from 'bun'
 
 import { createSession, type AgentSession } from '@/agent'
 import type { ClientMessage, ServerMessage } from '@/shared'
@@ -19,8 +19,8 @@ function send(ws: Ws, msg: ServerMessage) {
 export function createServer({ port }: ServerOptions) {
   const sessions = new WeakMap<Ws, AgentSession>()
 
-  function start() {
-    Bun.serve<WsData>({
+  function start(): BunServer<WsData> {
+    const bunServer = Bun.serve<WsData>({
       port,
       fetch(req, server) {
         const sessionId = crypto.randomUUID()
@@ -72,7 +72,8 @@ export function createServer({ port }: ServerOptions) {
       },
     })
 
-    console.log(`typeclaw agent listening on ws://localhost:${port}`)
+    console.log(`typeclaw agent listening on ws://localhost:${bunServer.port}`)
+    return bunServer
   }
 
   return { start }

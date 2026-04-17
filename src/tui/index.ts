@@ -22,9 +22,10 @@ export function createTui({ url, initialPrompt }: TuiOptions) {
     let onReplyDone: (() => void) | null = null
 
     const sessionId = await new Promise<string>((resolve) => {
-      const off = client.onMessage((msg) => {
+      let off: (() => void) | undefined
+      off = client.onMessage((msg) => {
         if (msg.type === 'connected') {
-          off()
+          off?.()
           resolve(msg.sessionId)
         }
       })
