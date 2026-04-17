@@ -1,27 +1,21 @@
 import { describe, expect, test } from 'bun:test'
+import { readFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import { z } from 'zod'
 
 import { configSchema } from '@/config/config'
 
-describe('config json schema', () => {
-  test('toJSONSchema produces a draft 2020-12 object schema', () => {
-    const schema = z.toJSONSchema(configSchema, { io: 'input', reused: 'inline' }) as Record<string, unknown>
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-    expect(schema.$schema).toBe('https://json-schema.org/draft/2020-12/schema')
-    expect(schema.type).toBe('object')
+describe('config.schema.json', () => {
+  test('checked-in config.schema.json matches the current configSchema (drift guard)', async () => {
+    // If this test fails, someone edited `configSchema` without regenerating
+    // config.schema.json. Run `bun run generate:schema` and commit the result.
+    const checkedIn = JSON.parse(await readFile(join(repoRoot, 'config.schema.json'), 'utf8'))
+    const generated = z.toJSONSchema(configSchema, { io: 'input', reused: 'inline' })
 
-    const properties = schema.properties as Record<string, unknown>
-    expect(properties.model).toBeDefined()
-    expect(properties.port).toBeDefined()
-  })
-
-  test('fields with defaults are not required in the input schema', () => {
-    const schema = z.toJSONSchema(configSchema, { io: 'input', reused: 'inline' }) as {
-      required?: string[]
-    }
-
-    expect(schema.required ?? []).not.toContain('port')
-    expect(schema.required ?? []).not.toContain('model')
+    expect(checkedIn).toEqual(generated)
   })
 })
