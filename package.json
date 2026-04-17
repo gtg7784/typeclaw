@@ -9,9 +9,11 @@
     "typecheck": "tsgo --noEmit",
     "lint": "oxlint",
     "format": "oxfmt --write .",
-    "format:check": "oxfmt ."
+    "format:check": "oxfmt .",
+    "test": "bun test"
   },
   "dependencies": {
+    "@clack/prompts": "^1.2.0",
     "@mariozechner/pi-coding-agent": "^0.67.3",
     "citty": "^0.2.2"
   },

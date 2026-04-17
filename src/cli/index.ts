@@ -2,6 +2,7 @@
 
 import { defineCommand, runMain } from 'citty'
 
+import { init } from './init'
 import { tui } from './tui'
 import { up } from './up'
 
@@ -10,7 +11,7 @@ const main = defineCommand({
     name: 'typeclaw',
     description: 'TypeClaw agent runtime',
   },
-  subCommands: { up, tui },
+  subCommands: { init, up, tui },
 })
 
 runMain(main)
