@@ -1,5 +1,38 @@
 # Agent Guidelines
 
+## Stages
+
+TypeClaw runs code in three distinct stages. Each stage has a different filesystem, a different process owner, and a different invocation path. Confusing them is the single most common source of bugs in this codebase, so always name the stage explicitly when discussing any command, path, or mount.
+
+### dev stage — this repo
+
+Where you are when you run `bun test` or `bun run typecheck` on the typeclaw source tree. The `typeclaw` CLI is executed directly from `src/cli/index.ts` (no install step). There is no agent folder and no container — only the source code of typeclaw itself. Changes here affect how agents are scaffolded and how the CLI behaves, but never an agent's runtime state.
+
+### host stage — the user's machine
+
+Where an end user lives once they run `typeclaw init`. Their cwd is an agent folder (e.g. `~/coder/`), which holds `config.json`, `.env`, `package.json` with `typeclaw` as a dependency, markdown files, and session/memory/workspace dirs. Commands that run here are **launchers**, not the agent itself:
+
+- `typeclaw up` — spawn the container (`docker run`) or load the service (`launchctl load`) configured in `config.json`.
+- `typeclaw down` — stop it.
+- `typeclaw tui` — attach a TUI client over a websocket to a running agent.
+- `typeclaw compose …` — orchestrate multiple agents across multiple agent folders.
+
+Nothing in the host stage loads the agent runtime itself. Filesystem access is native (no mounts). Secrets live plainly in `.env` for later injection.
+
+### container stage — inside Docker or under launchctl
+
+Where the actual agent process lives. The host stage bind-mounts the agent folder at a well-known path (`/agent` inside Docker; the folder itself under launchctl) and starts a single process that foregrounds the agent loop:
+
+- `typeclaw run` — the foreground process the container/service is configured to execute. Starts the websocket server (`src/server/`), creates an `AgentSession` (`src/agent/`), and speaks to the TUI or channels.
+
+Inside the container, `FIREWORKS_API_KEY` and friends arrive through `--env-file .env`; the `typeclaw` binary itself is resolved through `node_modules/typeclaw` (which in dev-stage scaffolding is a symlink into the dev-stage repo — the host-stage launcher must mount that source at the same path the symlink expects).
+
+### Rules of thumb
+
+- **CLI command names encode stage.** `init` is host-only (it _creates_ the host stage). `up` / `down` / `tui` / `compose` are host-only launchers. `run` is container-only. Anything that reads `process.cwd()` implicitly assumes host stage unless it's called from `run`.
+- **When writing paths, annotate the stage.** `./config.json` means the host-stage agent folder; `/agent/config.json` means the container stage. Never ship a string that silently conflates them.
+- **The Dockerfile lives at the boundary.** `typeclaw init` (dev code running in host stage) writes a Dockerfile that `typeclaw up` (host stage) feeds to `docker run`, which then invokes `typeclaw run` (container stage) as the entrypoint.
+
 ## Testing Philosophy
 
 ### 1. Test behavior, not implementation
@@ -63,6 +96,7 @@ From the common coding rules: simple data classes, type-only files, auto-generat
 ### 7. TDD is the default, not a ceremony
 
 Write the failing test first when:
+
 - Behavior is non-trivial
 - Edge cases matter
 - The API shape is unclear (tests force you to be a consumer)
