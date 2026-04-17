@@ -16,6 +16,7 @@ import {
   isInitialized,
   runInit,
   scaffold,
+  writeDockerAssets,
   writeSecrets,
 } from './index'
 
@@ -49,6 +50,8 @@ describe('runInit', () => {
       'scaffold:done',
       'install:start',
       'install:done',
+      'dockerfile:start',
+      'dockerfile:done',
       'git:start',
       'git:done',
     ])
@@ -72,6 +75,21 @@ describe('runInit', () => {
     expect(tracked).toContain('package.json')
     expect(tracked).toContain('.gitignore')
     expect(tracked).toContain('AGENTS.md')
+    expect(tracked).toContain('Dockerfile')
+  })
+
+  test('dockerfile step writes Dockerfile and reports devMode via event', async () => {
+    const events: InitStepEvent[] = []
+
+    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+
+    expect(existsSync(join(root, 'Dockerfile'))).toBe(true)
+
+    const dockerDone = events.find((e) => e.step === 'dockerfile' && e.phase === 'done')
+    expect(dockerDone).toBeDefined()
+    if (dockerDone && dockerDone.step === 'dockerfile' && dockerDone.phase === 'done' && dockerDone.result.ok) {
+      expect(dockerDone.result.devMode).toBe(true)
+    }
   })
 
   test('emits install result (ok or reason) in done event', async () => {
@@ -303,6 +321,49 @@ describe('initGitRepo', () => {
     const result = await initGitRepo(root)
 
     expect(result).toEqual({ ok: true, skipped: true })
+  })
+})
+
+describe('writeDockerAssets', () => {
+  test('writes a Dockerfile with oven/bun base image', async () => {
+    await scaffold(root)
+
+    await writeDockerAssets(root)
+
+    const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
+    expect(dockerfile).toContain('FROM oven/bun:1-slim')
+    expect(dockerfile).toContain('WORKDIR /agent')
+    expect(dockerfile).toContain('typeclaw')
+  })
+
+  test('returns devMode true when typeclaw dep is a file: spec', async () => {
+    await scaffold(root)
+
+    const result = await writeDockerAssets(root)
+
+    expect(result).toEqual({ ok: true, devMode: true })
+  })
+
+  test('returns devMode false when typeclaw dep is a version range', async () => {
+    await scaffold(root)
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<string, unknown>
+    ;(pkg.dependencies as Record<string, string>).typeclaw = '^0.1.0'
+    await writeFile(join(root, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
+
+    const result = await writeDockerAssets(root)
+
+    expect(result).toEqual({ ok: true, devMode: false })
+    expect(existsSync(join(root, 'Dockerfile'))).toBe(true)
+  })
+
+  test('preserves an existing Dockerfile instead of overwriting', async () => {
+    await scaffold(root)
+    const original = '# my custom Dockerfile\n'
+    await writeFile(join(root, 'Dockerfile'), original)
+
+    await writeDockerAssets(root)
+
+    expect(await readFile(join(root, 'Dockerfile'), 'utf8')).toBe(original)
   })
 })
 

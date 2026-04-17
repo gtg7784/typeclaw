@@ -79,6 +79,13 @@ function reportProgress(): (event: InitStepEvent) => void {
       case 'install':
         s.stop(event.result.ok ? 'Dependencies installed.' : `Skipped bun install: ${event.result.reason}`)
         break
+      case 'dockerfile':
+        if (event.result.ok) {
+          s.stop(event.result.devMode ? 'Dockerfile + compose.yml written (dev mode).' : 'Dockerfile written.')
+        } else {
+          s.stop(`Skipped Dockerfile: ${event.result.reason}`)
+        }
+        break
       case 'git':
         if (event.result.ok) {
           s.stop(event.result.skipped ? 'Git repository already exists.' : 'Git repository initialized.')
@@ -93,5 +100,6 @@ function reportProgress(): (event: InitStepEvent) => void {
 const START_MESSAGES: Record<InitStepEvent['step'], string> = {
   scaffold: 'Laying the egg...',
   install: 'Installing dependencies with bun...',
+  dockerfile: 'Writing Dockerfile...',
   git: 'Initializing git repository...',
 }

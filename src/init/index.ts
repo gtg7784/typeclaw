@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -24,13 +24,15 @@ workspace/downloads/
 
 export type InstallResult = { ok: true } | { ok: false; reason: string }
 export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason: string }
+export type DockerAssetsResult = { ok: true; devMode: boolean } | { ok: false; reason: string }
 
-export type InitStep = 'scaffold' | 'install' | 'git'
+export type InitStep = 'scaffold' | 'install' | 'dockerfile' | 'git'
 
 export type InitStepEvent =
   | { step: InitStep; phase: 'start' }
   | { step: 'scaffold'; phase: 'done' }
   | { step: 'install'; phase: 'done'; result: InstallResult }
+  | { step: 'dockerfile'; phase: 'done'; result: DockerAssetsResult }
   | { step: 'git'; phase: 'done'; result: GitInitResult }
 
 export type InitOptions = {
@@ -50,6 +52,11 @@ export async function runInit({ cwd, apiKey, onProgress }: InitOptions): Promise
   emit({ step: 'install', phase: 'start' })
   const install = await runBunInstall(cwd)
   emit({ step: 'install', phase: 'done', result: install })
+
+  // TODO: supports Docker/launchctl/...
+  emit({ step: 'dockerfile', phase: 'start' })
+  const docker = await writeDockerAssets(cwd)
+  emit({ step: 'dockerfile', phase: 'done', result: docker })
 
   emit({ step: 'git', phase: 'start' })
   const git = await initGitRepo(cwd)
@@ -124,6 +131,43 @@ function findTypeclawRoot(): string | null {
     }
   } catch {}
   return null
+}
+
+const DOCKERFILE = 'Dockerfile'
+
+export async function writeDockerAssets(root: string): Promise<DockerAssetsResult> {
+  try {
+    const pkg = await readPackageJson(root)
+    const typeclawSpec = pkg.dependencies?.typeclaw ?? ''
+    const devMode = typeclawSpec.startsWith('file:')
+
+    await writeFile(join(root, DOCKERFILE), buildDockerfile(), { flag: 'wx' }).catch(ignoreExists)
+
+    return { ok: true, devMode }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+function buildDockerfile(): string {
+  return `FROM oven/bun:1-slim
+
+WORKDIR /agent
+
+# The agent folder (including node_modules) is bind-mounted at runtime by
+# \`typeclaw up\`, so we do not COPY or install here. This keeps the image
+# tiny and lets edits on the host take effect without rebuilds.
+
+ENV NODE_ENV=production
+
+ENTRYPOINT ["bun", "run", "typeclaw"]
+CMD ["run"]
+`
+}
+
+async function readPackageJson(root: string): Promise<{ name?: string; dependencies?: Record<string, string> }> {
+  const raw = await readFile(join(root, PACKAGE_FILE), 'utf8')
+  return JSON.parse(raw) as { name?: string; dependencies?: Record<string, string> }
 }
 
 export async function runBunInstall(cwd: string): Promise<InstallResult> {
