@@ -4,6 +4,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { configSchema } from '@/config/config'
+
 import { isDirectoryNonEmpty, scaffold, writeSecrets } from './init'
 
 let root: string
@@ -60,11 +62,15 @@ describe('scaffold', () => {
     expect(JSON.parse(raw)).toEqual({
       name: 'coder',
       version: 1,
-      model: {
-        provider: 'fireworks',
-        id: 'accounts/fireworks/routers/kimi-k2p5-turbo',
-      },
+      model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
     })
+  })
+
+  test('writes config.json that passes configSchema validation', async () => {
+    await scaffold(root, { name: 'coder' })
+
+    const raw = await readFile(join(root, 'config.json'), 'utf8')
+    expect(() => configSchema.parse(JSON.parse(raw))).not.toThrow()
   })
 
   test('creates empty markdown files', async () => {
