@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const CONFIG_FILE = 'config.json'
+const CONFIG_FILE = 'typeclaw.json'
 const SECRETS_FILE = '.env'
 const GITIGNORE_FILE = '.gitignore'
 const PACKAGE_FILE = 'package.json'
@@ -81,7 +81,7 @@ export async function scaffold(root: string): Promise<void> {
   // TODO: hardcoded model. Mirror src/config/index.ts until the config loader
   // and provider registry exist (TypeClaw.md Phase 1 + Phase 4).
   const config = {
-    $schema: './node_modules/typeclaw/config.schema.json',
+    $schema: './node_modules/typeclaw/typeclaw.schema.json',
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
   }
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)

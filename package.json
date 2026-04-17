@@ -7,7 +7,7 @@
   "files": [
     "src",
     "scripts",
-    "config.schema.json"
+    "typeclaw.schema.json"
   ],
   "type": "module",
   "scripts": {

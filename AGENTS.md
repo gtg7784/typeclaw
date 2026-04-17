@@ -10,9 +10,9 @@ Where you are when you run `bun test` or `bun run typecheck` on the typeclaw sou
 
 ### host stage — the user's machine
 
-Where an end user lives once they run `typeclaw init`. Their cwd is an agent folder (e.g. `~/coder/`), which holds `config.json`, `.env`, `package.json` with `typeclaw` as a dependency, markdown files, and session/memory/workspace dirs. Commands that run here are **launchers**, not the agent itself:
+Where an end user lives once they run `typeclaw init`. Their cwd is an agent folder (e.g. `~/coder/`), which holds `typeclaw.json`, `.env`, `package.json` with `typeclaw` as a dependency, markdown files, and session/memory/workspace dirs. Commands that run here are **launchers**, not the agent itself:
 
-- `typeclaw up` — spawn the container (`docker run`) or load the service (`launchctl load`) configured in `config.json`.
+- `typeclaw up` — spawn the container (`docker run`) or load the service (`launchctl load`) configured in `typeclaw.json`.
 - `typeclaw down` — stop it.
 - `typeclaw tui` — attach a TUI client over a websocket to a running agent.
 - `typeclaw compose …` — orchestrate multiple agents across multiple agent folders.
@@ -30,7 +30,7 @@ Inside the container, `FIREWORKS_API_KEY` and friends arrive through `--env-file
 ### Rules of thumb
 
 - **CLI command names encode stage.** `init` is host-only (it _creates_ the host stage). `up` / `down` / `tui` / `compose` are host-only launchers. `run` is container-only. Anything that reads `process.cwd()` implicitly assumes host stage unless it's called from `run`.
-- **When writing paths, annotate the stage.** `./config.json` means the host-stage agent folder; `/agent/config.json` means the container stage. Never ship a string that silently conflates them.
+- **When writing paths, annotate the stage.** `./typeclaw.json` means the host-stage agent folder; `/agent/typeclaw.json` means the container stage. Never ship a string that silently conflates them.
 - **The Dockerfile lives at the boundary.** `typeclaw init` (dev code running in host stage) writes a Dockerfile that `typeclaw up` (host stage) feeds to `docker run`, which then invokes `typeclaw run` (container stage) as the entrypoint.
 
 ## Testing Philosophy

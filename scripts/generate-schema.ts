@@ -9,7 +9,7 @@ import { z } from 'zod'
 import { configSchema } from '../src/config/config'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
-const outPath = join(repoRoot, 'config.schema.json')
+const outPath = join(repoRoot, 'typeclaw.schema.json')
 
 const schema = z.toJSONSchema(configSchema, { io: 'input', reused: 'inline' })
 await writeFile(outPath, `${JSON.stringify(schema, null, 2)}\n`)

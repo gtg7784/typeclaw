@@ -71,7 +71,7 @@ describe('runInit', () => {
     await runInit({ cwd: root, apiKey: 'fw_test_key' })
 
     const tracked = (await runGit(root, ['ls-files'])).split('\n')
-    expect(tracked).toContain('config.json')
+    expect(tracked).toContain('typeclaw.json')
     expect(tracked).toContain('package.json')
     expect(tracked).toContain('.gitignore')
     expect(tracked).toContain('AGENTS.md')
@@ -170,12 +170,12 @@ describe('isDirectoryNonEmpty', () => {
 })
 
 describe('isInitialized', () => {
-  test('returns false when no config.json exists', () => {
+  test('returns false when no typeclaw.json exists', () => {
     expect(isInitialized(root)).toBe(false)
   })
 
-  test('returns true when config.json exists', async () => {
-    await writeFile(join(root, 'config.json'), '{}')
+  test('returns true when typeclaw.json exists', async () => {
+    await writeFile(join(root, 'typeclaw.json'), '{}')
     expect(isInitialized(root)).toBe(true)
   })
 })
@@ -191,29 +191,29 @@ describe('scaffold', () => {
     }
   })
 
-  test('writes config.json with $schema reference and model, without name', async () => {
+  test('writes typeclaw.json with $schema reference and model, without name', async () => {
     await scaffold(root)
 
-    const raw = await readFile(join(root, 'config.json'), 'utf8')
+    const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
     expect(raw.endsWith('\n')).toBe(true)
     expect(JSON.parse(raw)).toEqual({
-      $schema: './node_modules/typeclaw/config.schema.json',
+      $schema: './node_modules/typeclaw/typeclaw.schema.json',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
     })
   })
 
-  test('writes config.json that passes configSchema validation', async () => {
+  test('writes typeclaw.json that passes configSchema validation', async () => {
     await scaffold(root)
 
-    const raw = await readFile(join(root, 'config.json'), 'utf8')
+    const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
     expect(() => configSchema.parse(JSON.parse(raw))).not.toThrow()
   })
 
-  test('writes config.json that passes config.schema.json validation', async () => {
+  test('writes typeclaw.json that passes typeclaw.schema.json validation', async () => {
     await scaffold(root)
 
-    const rawConfig = await readFile(join(root, 'config.json'), 'utf8')
-    const rawSchema = await readFile(join(repoRoot, 'config.schema.json'), 'utf8')
+    const rawConfig = await readFile(join(root, 'typeclaw.json'), 'utf8')
+    const rawSchema = await readFile(join(repoRoot, 'typeclaw.schema.json'), 'utf8')
     const schema = z.fromJSONSchema(JSON.parse(rawSchema))
 
     expect(() => schema.parse(JSON.parse(rawConfig))).not.toThrow()
