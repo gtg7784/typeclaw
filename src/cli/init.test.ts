@@ -54,14 +54,14 @@ describe('scaffold', () => {
     }
   })
 
-  test('writes config.json with the given agent name', async () => {
+  test('writes config.json with the given agent name and $schema reference', async () => {
     await scaffold(root, { name: 'coder' })
 
     const raw = await readFile(join(root, 'config.json'), 'utf8')
     expect(raw.endsWith('\n')).toBe(true)
     expect(JSON.parse(raw)).toEqual({
+      $schema: './node_modules/typeclaw/config.schema.json',
       name: 'coder',
-      version: 1,
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
     })
   })

@@ -137,8 +137,8 @@ export async function scaffold(root: string, { name }: ScaffoldOptions): Promise
   // TODO: hardcoded model. Mirror src/config/index.ts until the config loader
   // and provider registry exist (TypeClaw.md Phase 1 + Phase 4).
   const config = {
+    $schema: './node_modules/typeclaw/config.schema.json',
     name,
-    version: 1,
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
   }
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)

@@ -5,12 +5,15 @@
     "typeclaw": "src/cli/index.ts"
   },
   "type": "module",
+  "files": ["src", "scripts", "config.schema.json"],
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "lint": "oxlint",
     "format": "oxfmt --write .",
     "format:check": "oxfmt .",
-    "test": "bun test"
+    "test": "bun test",
+    "generate:schema": "bun run scripts/generate-schema.ts",
+    "postinstall": "bun run scripts/generate-schema.ts"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",
