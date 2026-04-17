@@ -1,12 +1,13 @@
 import { defineCommand } from 'citty'
 
 import { config } from '@/config'
+import { isInitialized } from '@/init'
 import { createServer } from '@/server'
 
-export const up = defineCommand({
+export const run = defineCommand({
   meta: {
-    name: 'up',
-    description: 'start the agent server',
+    name: 'run',
+    description: 'run the agent in the foreground (container stage)',
   },
   args: {
     port: {
@@ -16,6 +17,11 @@ export const up = defineCommand({
     },
   },
   run({ args }) {
+    if (!isInitialized(process.cwd())) {
+      console.error('TypeClaw config file not found. Run `typeclaw init` first.')
+      process.exit(1)
+    }
+
     const server = createServer({ port: Number(args.port) })
     server.start()
   },
