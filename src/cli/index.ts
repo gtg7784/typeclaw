@@ -2,19 +2,20 @@
 
 import { defineCommand, runMain } from 'citty'
 
+import { downCommand } from './down'
 import { init } from './init'
 import { run } from './run'
 import { tui } from './tui'
+import { upCommand } from './up'
 
 const main = defineCommand({
   meta: {
     name: 'typeclaw',
     description: 'TypeClaw agent runtime',
   },
-  // TODO: add `up` (host stage) and `down` commands. `up` will launch the
-  // container (docker run) or service (launchctl load) per config, then keep
-  // foreground logs attached. `run` is invoked inside that container/service.
-  subCommands: { init, run, tui },
+  // TODO: `up` currently launches a Docker container. Add launchctl support
+  // for macOS services per TypeClaw.md Phase 3.
+  subCommands: { init, run, tui, up: upCommand, down: downCommand },
 })
 
 runMain(main)

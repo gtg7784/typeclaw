@@ -1,0 +1,25 @@
+import { defineCommand } from 'citty'
+
+import { down } from '@/container'
+
+export const downCommand = defineCommand({
+  meta: {
+    name: 'down',
+    description: 'stop the agent container (host stage)',
+  },
+  async run() {
+    const cwd = process.cwd()
+    const result = await down({ cwd })
+
+    if (!result.ok) {
+      console.error(result.reason)
+      process.exit(1)
+    }
+
+    if (result.running) {
+      console.log(`Stopped ${result.containerName}.`)
+    } else {
+      console.log(`Container ${result.containerName} is not running.`)
+    }
+  },
+})
