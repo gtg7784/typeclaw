@@ -86,34 +86,22 @@ describe('runInit', () => {
     expect(existsSync(join(root, 'Dockerfile'))).toBe(true)
 
     const dockerDone = events.find((e) => e.step === 'dockerfile' && e.phase === 'done')
-    expect(dockerDone).toBeDefined()
-    if (dockerDone && dockerDone.step === 'dockerfile' && dockerDone.phase === 'done' && dockerDone.result.ok) {
-      expect(dockerDone.result.devMode).toBe(true)
+    if (!(dockerDone && dockerDone.step === 'dockerfile' && dockerDone.phase === 'done' && dockerDone.result.ok)) {
+      throw new Error('expected dockerfile:done with ok result')
     }
+    expect(dockerDone.result.devMode).toBe(true)
   })
 
-  test('emits install result (ok or reason) in done event', async () => {
-    const events: InitStepEvent[] = []
-
-    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
-
-    const installDone = events.find((e) => e.step === 'install' && e.phase === 'done')
-    expect(installDone).toBeDefined()
-    if (installDone && installDone.step === 'install' && installDone.phase === 'done') {
-      expect(typeof installDone.result.ok).toBe('boolean')
-    }
-  })
-
-  test('emits git result with skipped flag in done event', async () => {
+  test('emits git done event with skipped: false when repo is freshly initialized', async () => {
     const events: InitStepEvent[] = []
 
     await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
 
     const gitDone = events.find((e) => e.step === 'git' && e.phase === 'done')
-    expect(gitDone).toBeDefined()
-    if (gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok) {
-      expect(gitDone.result.skipped).toBe(false)
+    if (!(gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok)) {
+      throw new Error('expected git:done with ok result')
     }
+    expect(gitDone.result.skipped).toBe(false)
   })
 
   test('skips git init when .git already exists', async () => {
@@ -123,11 +111,30 @@ describe('runInit', () => {
     await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
 
     const gitDone = events.find((e) => e.step === 'git' && e.phase === 'done')
-    if (gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok) {
-      expect(gitDone.result.skipped).toBe(true)
-    } else {
+    if (!(gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok)) {
       throw new Error('expected git:done with ok result')
     }
+    expect(gitDone.result.skipped).toBe(true)
+  })
+
+  test('step failure is reported via event, not thrown, and later steps still run', async () => {
+    // given: invalid package.json so writeDockerAssets fails to parse it.
+    // scaffold preserves existing package.json, so this sticks through the pipeline.
+    await writeFile(join(root, 'package.json'), '{ not valid json')
+    const events: InitStepEvent[] = []
+
+    // when
+    await runInit({ cwd: root, apiKey: 'fw_test_key', onProgress: (e) => events.push(e) })
+
+    // then: dockerfile failed softly, git still ran
+    const dockerDone = events.find((e) => e.step === 'dockerfile' && e.phase === 'done')
+    if (!(dockerDone && dockerDone.step === 'dockerfile' && dockerDone.phase === 'done')) {
+      throw new Error('expected dockerfile:done')
+    }
+    expect(dockerDone.result.ok).toBe(false)
+
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toContain('git:start')
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toContain('git:done')
   })
 
   test('works without onProgress callback', async () => {
