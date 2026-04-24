@@ -106,8 +106,8 @@ If you set `timezone`, the schedule is interpreted in that zone. **Always set `t
 1. **Read the whole file first** with the `read` tool. Don't assume what's in it.
 2. **Modify in memory.** Add, remove, or change jobs in the parsed JSON.
 3. **Write the whole file back** with the `write` tool. Always pretty-printed (2-space indent), trailing newline, sorted-stable order.
-4. **Validate before declaring done.** The next `typeclaw up` will silently disable cron entirely if the file is malformed (you'll see `[cron] failed to load cron.json: ...` in container logs but the agent will keep running). Sanity-check your JSON manually or with `bash` (`cat cron.json | jq .`) before considering the edit done.
-5. **Commit the change.** `git add cron.json && git commit -m "Add daily-summary cron"`. Use the imperative mood; explain in the body if the schedule choice is non-obvious. This is part of your version-control discipline (see AGENTS.md / system prompt) — `cron.json` is not gitignored, so an uncommitted edit will pollute your next commit.
+4. **Apply with the `reload` tool.** Call the `reload` tool — it re-reads `cron.json` and updates the live scheduler. The tool returns `[cron] ok: ...` with an added/removed/updated/unchanged summary on success, or `[cron] failed: ...` with the exact validation error on failure. **If reload fails, the live schedule is left unchanged** — fix `cron.json` based on the error message and call `reload` again.
+5. **Commit the change** _after_ a successful reload. `git add cron.json && git commit -m "Add daily-summary cron"`. Use the imperative mood; explain in the body if the schedule choice is non-obvious. This is part of your version-control discipline (see AGENTS.md / system prompt) — `cron.json` is not gitignored, so an uncommitted edit will pollute your next commit.
 
 ### Required fields checklist (catch this before writing)
 
@@ -121,18 +121,19 @@ For every job you add:
 - If `exec`: `command` is a non-empty array of non-empty strings
 - If a wall-clock schedule was requested: `timezone` is set
 
-### Restart is required for changes to take effect
+### Applying changes — the `reload` tool
 
-The scheduler loads `cron.json` **once at container startup**. There is no file watcher. Editing `cron.json` while the container runs does **nothing** until the next restart.
+The scheduler does **not** auto-reload `cron.json` when you edit it. You must call the `reload` tool to apply changes. There is no file watcher by design — reload is explicit so you always know when the live schedule changed.
 
-When you change `cron.json`, **tell the user this explicitly**: "Edited `cron.json`. Run `typeclaw down && typeclaw up` (host stage) to pick up the change." Do not silently leave them thinking the job is now active.
+**Safety contract**: reload validates `cron.json` first. If validation fails (bad JSON, invalid cron expression, duplicate id, etc.), the live schedule is left running with the previous configuration and `reload` returns the failure reason. Reload cannot break the running agent.
 
-You yourself cannot run `typeclaw down`/`up` — those are host-stage commands and you live inside the container. Only the user can restart you. Do not try.
+**The user can also reload from the host** with `typeclaw reload`. You don't need to ask them to — call the tool yourself when you finish an edit. But be aware they have the same primitive available.
+
+If you finished an edit and the user only sees an in-flight job from the previous schedule, that job will complete naturally — reload never interrupts a running fire. Tell the user this if they wonder why their old job is still wrapping up.
 
 ## Things you must not do
 
-- **Do not edit `cron.json` from inside an `exec` job's `command`.** That mutates the file behind the scheduler's back; the change does not apply until the next restart anyway, and chained edits across fires will race.
-- **Do not schedule a `prompt` job whose prompt is "edit cron.json to ..."** unless the user explicitly asked for cron jobs to manage cron jobs. That is almost always a bug.
+- **Do not edit `cron.json` from inside an `exec` job's `command`.** Exec jobs run without an LLM and have no way to call the `reload` tool, so the file mutation will not take effect until something else triggers a reload. If you genuinely need scheduled cron-management, write a `prompt` job whose prompt is "edit cron.json to ..." and let the prompt-fire's session call `reload` itself.
 - **Do not put secrets in `prompt` or `command`.** `cron.json` is committed to git. Reference env vars or files instead (`["sh", "-c", "curl -H \"Authorization: Bearer $TOKEN\" ..."]`).
 - **Do not promise sub-second precision or guaranteed execution.** This is best-effort — see "What cron actually does" above.
 - **Do not invent fields the schema doesn't support** (no `retry`, `timeout`, `onFailure`, `concurrency`, etc.). They will be silently ignored at best, or rejected at worst.
@@ -145,7 +146,7 @@ Pick `kind` first, then schedule, then timezone:
 2. **Translate the cadence to cron.** "Every morning at 7" → `0 7 * * *`. "Every weekday at 9:30" → `30 9 * * 1-5`. "Every five minutes" → `*/5 * * * *`. If you are not sure, ask once. Don't guess on tricky cases like "every other Friday".
 3. **Timezone.** If the user mentioned a wall-clock time, set `timezone` to their zone. If unknown, ask once or default to the timezone in `USER.md` if it's recorded there.
 4. **Pick a stable `id`.** Use kebab-case that describes the job, not the schedule. `daily-summary` not `0-23-30`.
-5. **Write it. Commit it. Tell the user to restart.**
+5. **Write it. Call `reload`. If reload succeeded, commit it.** If reload failed, fix `cron.json` based on the error and retry — do not commit a broken file.
 
 ## Reading cron history
 
