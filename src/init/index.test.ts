@@ -311,7 +311,7 @@ describe('scaffold', () => {
     expect(raw.endsWith('\n')).toBe(true)
     expect(JSON.parse(raw)).toEqual({
       $schema: './node_modules/typeclaw/typeclaw.schema.json',
-      model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+      model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
     })
   })
 

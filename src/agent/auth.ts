@@ -12,7 +12,7 @@ export function getAuth(): Auth {
 
   const apiKey = process.env.FIREWORKS_API_KEY
   if (!apiKey) {
-    console.error('Set FIREWORKS_API_KEY to use Kimi K2.5 Turbo via Fireworks.')
+    console.error('Set FIREWORKS_API_KEY to use Kimi K2.6 Turbo via Fireworks.')
     process.exit(1)
   }
 

@@ -161,7 +161,7 @@ export async function scaffold(root: string): Promise<void> {
   // and provider registry exist (TypeClaw.md Phase 1 + Phase 4).
   const config = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
-    model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+    model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
   }
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 

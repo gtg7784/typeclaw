@@ -11,7 +11,7 @@ const DEFAULT_PORT = 8973
 export const configSchema = z.object({
   $schema: z.string().optional(),
   port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
-  model: z.enum(knownModelRefs).default('fireworks/accounts/fireworks/routers/kimi-k2p5-turbo'), // FIXME: TEMP default
+  model: z.enum(knownModelRefs).default('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'), // FIXME: TEMP default
 })
 
 export type Config = z.infer<typeof configSchema>
