@@ -126,6 +126,7 @@ describe('runInit', () => {
 
     const tracked = (await runGit(root, ['ls-files'])).split('\n')
     expect(tracked).toContain('typeclaw.json')
+    expect(tracked).toContain('cron.json')
     expect(tracked).toContain('package.json')
     expect(tracked).toContain('.gitignore')
     expect(tracked).toContain('AGENTS.md')
@@ -315,6 +316,26 @@ describe('scaffold', () => {
     })
   })
 
+  test('writes cron.json with an empty jobs array and $schema reference', async () => {
+    await scaffold(root)
+
+    const raw = await readFile(join(root, 'cron.json'), 'utf8')
+    expect(raw.endsWith('\n')).toBe(true)
+    expect(JSON.parse(raw)).toEqual({
+      $schema: './node_modules/typeclaw/cron.schema.json',
+      jobs: [],
+    })
+  })
+
+  test('preserves existing cron.json instead of overwriting', async () => {
+    const original = '{"jobs":[{"id":"mine","schedule":"* * * * *","kind":"prompt","prompt":"hi"}]}\n'
+    await writeFile(join(root, 'cron.json'), original)
+
+    await scaffold(root)
+
+    expect(await readFile(join(root, 'cron.json'), 'utf8')).toBe(original)
+  })
+
   test('writes typeclaw.json that passes configSchema validation', async () => {
     await scaffold(root)
 
@@ -330,6 +351,16 @@ describe('scaffold', () => {
     const schema = z.fromJSONSchema(JSON.parse(rawSchema))
 
     expect(() => schema.parse(JSON.parse(rawConfig))).not.toThrow()
+  })
+
+  test('writes cron.json that passes cron.schema.json validation', async () => {
+    await scaffold(root)
+
+    const rawCron = await readFile(join(root, 'cron.json'), 'utf8')
+    const rawSchema = await readFile(join(repoRoot, 'cron.schema.json'), 'utf8')
+    const schema = z.fromJSONSchema(JSON.parse(rawSchema))
+
+    expect(() => schema.parse(JSON.parse(rawCron))).not.toThrow()
   })
 
   test('creates empty markdown files', async () => {

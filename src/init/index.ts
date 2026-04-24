@@ -10,6 +10,7 @@ import { createTui } from '@/tui'
 import { HATCHING_GREETING, HATCHING_PROMPT } from './hatching'
 
 const CONFIG_FILE = 'typeclaw.json'
+const CRON_FILE = 'cron.json'
 const SECRETS_FILE = '.env'
 const GITIGNORE_FILE = '.gitignore'
 const PACKAGE_FILE = 'package.json'
@@ -164,6 +165,12 @@ export async function scaffold(root: string): Promise<void> {
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
   }
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
+
+  const cron = {
+    $schema: './node_modules/typeclaw/cron.schema.json',
+    jobs: [],
+  }
+  await writeFile(join(root, CRON_FILE), `${JSON.stringify(cron, null, 2)}\n`, { flag: 'wx' }).catch(ignoreExists)
 
   const pkg = buildPackageJson(root, basename(root))
   await writeFile(join(root, PACKAGE_FILE), `${JSON.stringify(pkg, null, 2)}\n`, { flag: 'wx' }).catch(ignoreExists)
