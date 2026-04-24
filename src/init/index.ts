@@ -7,6 +7,7 @@ import { config } from '@/config'
 import { up } from '@/container'
 import { createTui } from '@/tui'
 
+import { buildDockerfile, DOCKERFILE } from './dockerfile'
 import { HATCHING_GREETING, HATCHING_PROMPT } from './hatching'
 
 const CONFIG_FILE = 'typeclaw.json'
@@ -219,8 +220,6 @@ function findTypeclawRoot(): string | null {
   return null
 }
 
-const DOCKERFILE = 'Dockerfile'
-
 export async function writeDockerAssets(root: string): Promise<DockerAssetsResult> {
   try {
     const pkg = await readPackageJson(root)
@@ -233,29 +232,6 @@ export async function writeDockerAssets(root: string): Promise<DockerAssetsResul
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
-}
-
-function buildDockerfile(): string {
-  return `FROM oven/bun:1-slim
-
-WORKDIR /agent
-
-# git is required for the agent runtime (cloning, committing workspace state,
-# version-controlled tooling), so it ships in every agent image regardless of
-# what the user installs on top.
-RUN apt-get update \\
- && apt-get install -y --no-install-recommends git ca-certificates \\
- && rm -rf /var/lib/apt/lists/*
-
-# The agent folder (including node_modules) is bind-mounted at runtime by
-# \`typeclaw up\`, so we do not COPY or install here. This keeps the image
-# tiny and lets edits on the host take effect without rebuilds.
-
-ENV NODE_ENV=production
-
-ENTRYPOINT ["bun", "run", "typeclaw"]
-CMD ["run"]
-`
 }
 
 async function readPackageJson(root: string): Promise<{ name?: string; dependencies?: Record<string, string> }> {
