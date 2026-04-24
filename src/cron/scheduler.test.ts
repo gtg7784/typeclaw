@@ -502,4 +502,38 @@ describe('Scheduler.replaceJobs', () => {
 
     sched.stop()
   })
+
+  test('replaceJobs during an in-flight fire does not leak a duplicate timer', async () => {
+    const clock = createFakeClock()
+    const resolveBox: { fn: (() => void) | null } = { fn: null }
+    const runner: JobRunner = {
+      runPrompt: () =>
+        new Promise<void>((resolve) => {
+          resolveBox.fn = resolve
+        }),
+      runExec: async () => {},
+    }
+    const sched = createScheduler({
+      jobs: [promptJob('long', '* * * * *', { prompt: 'old' })],
+      runner,
+      clock,
+      logger: silentLogger,
+    })
+    sched.start()
+    expect(clock.handleCount()).toBe(1)
+
+    await clock.advance(60 * 1000 + 100)
+    expect(resolveBox.fn).not.toBeNull()
+    expect(clock.handleCount()).toBe(0)
+
+    sched.replaceJobs([promptJob('long', '* * * * *', { prompt: 'new' })])
+    expect(clock.handleCount()).toBe(1)
+
+    resolveBox.fn?.()
+    await new Promise((r) => setImmediate(r))
+
+    expect(clock.handleCount()).toBe(1)
+
+    sched.stop()
+  })
 })

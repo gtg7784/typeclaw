@@ -82,6 +82,13 @@ export function createScheduler({
     const nextFire = computeNextFire(job, clock.now())
     if (nextFire === null) return
 
+    // Cancel any pending timer for this id before installing a new one. Without
+    // this, an external caller (e.g. replaceJobs racing with an in-flight fire's
+    // done() callback) can leave the previous timer pending in the runtime even
+    // though it's no longer in `handles`, and it will fire — silently doubling
+    // the schedule rate every time the race occurs.
+    cancel(id)
+
     const delay = Math.max(0, nextFire - clock.now())
     const handle = clock.setTimeout(() => {
       handles.delete(id)
