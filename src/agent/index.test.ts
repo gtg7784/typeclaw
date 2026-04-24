@@ -72,23 +72,35 @@ describe('createResourceLoader', () => {
     expect(cronSkill).toBeDefined()
     expect(cronSkill?.description.length).toBeGreaterThan(0)
   })
+
+  test('exposes the typeclaw-config bundled skill to the agent', async () => {
+    const loader = await createResourceLoader({ agentDir })
+
+    const { skills } = loader.getSkills()
+    const configSkill = skills.find((s) => s.name === 'typeclaw-config')
+    expect(configSkill).toBeDefined()
+    expect(configSkill?.description.length).toBeGreaterThan(0)
+  })
 })
 
 describe('getBundledSkillsDir', () => {
-  test('points at a directory containing typeclaw-cron/SKILL.md', () => {
+  test.each([['typeclaw-cron'], ['typeclaw-config']])('points at a directory containing %s/SKILL.md', (skill) => {
     const dir = getBundledSkillsDir()
-    expect(existsSync(join(dir, 'typeclaw-cron', 'SKILL.md'))).toBe(true)
+    expect(existsSync(join(dir, skill, 'SKILL.md'))).toBe(true)
   })
 
-  test('typeclaw-cron SKILL.md has YAML frontmatter with name and description', async () => {
-    const path = join(getBundledSkillsDir(), 'typeclaw-cron', 'SKILL.md')
-    const raw = await readFile(path, 'utf8')
+  test.each([['typeclaw-cron'], ['typeclaw-config']])(
+    '%s SKILL.md has YAML frontmatter with name and description',
+    async (skill) => {
+      const path = join(getBundledSkillsDir(), skill, 'SKILL.md')
+      const raw = await readFile(path, 'utf8')
 
-    expect(raw.startsWith('---\n')).toBe(true)
-    const frontmatterEnd = raw.indexOf('\n---\n', 4)
-    expect(frontmatterEnd).toBeGreaterThan(0)
-    const frontmatter = raw.slice(4, frontmatterEnd)
-    expect(frontmatter).toMatch(/^name:\s*typeclaw-cron\s*$/m)
-    expect(frontmatter).toMatch(/^description:\s*\S/m)
-  })
+      expect(raw.startsWith('---\n')).toBe(true)
+      const frontmatterEnd = raw.indexOf('\n---\n', 4)
+      expect(frontmatterEnd).toBeGreaterThan(0)
+      const frontmatter = raw.slice(4, frontmatterEnd)
+      expect(frontmatter).toMatch(new RegExp(`^name:\\s*${skill}\\s*$`, 'm'))
+      expect(frontmatter).toMatch(/^description:\s*\S/m)
+    },
+  )
 })
