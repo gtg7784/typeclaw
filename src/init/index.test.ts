@@ -147,6 +147,13 @@ describe('runInit', () => {
     expect(dockerDone.result.devMode).toBe(true)
   })
 
+  test('Dockerfile installs git so agents can use it at runtime', async () => {
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: () => {} })
+
+    const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
+    expect(dockerfile).toMatch(/apt-get[\s\S]+install[\s\S]+\bgit\b/)
+  })
+
   test('emits git done event with skipped: false when repo is freshly initialized', async () => {
     const events: InitStepEvent[] = []
 
