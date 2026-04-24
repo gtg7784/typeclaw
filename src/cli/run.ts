@@ -41,7 +41,7 @@ export const run = defineCommand({
       isTTY: Boolean(process.stdin.isTTY),
     })
 
-    const { tuiPromise, stop } = startAgent({
+    const { tuiPromise, stop } = await startAgent({
       port: Number(args.port),
       attachTui,
       initialPrompt: args.prompt,
