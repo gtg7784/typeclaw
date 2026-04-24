@@ -11,6 +11,7 @@ import { getAuth } from './auth'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
+import { websearchTool } from './tools/websearch'
 
 export type { AgentSession }
 
@@ -21,7 +22,10 @@ export type CreateSessionOptions = {
 export async function createSession(options: CreateSessionOptions = {}): Promise<AgentSession> {
   const { authStorage, modelRegistry } = getAuth()
   const resourceLoader = await createResourceLoader()
-  const customTools = options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []
+  const customTools = [
+    websearchTool,
+    ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
+  ]
 
   const { session } = await createAgentSession({
     model: resolveModel(config.model),
