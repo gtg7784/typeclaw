@@ -39,6 +39,9 @@ export function createServer({ port, reloadAll, reloadRegistry, createSession = 
           const session = await createSession({ reloadRegistry })
           sessions.set(ws, session)
 
+          // Upstream tool events have no duration; we derive it by correlating start/end via toolCallId.
+          const toolStartedAt = new Map<string, number>()
+
           session.subscribe((event) => {
             switch (event.type) {
               case 'message_update':
@@ -47,11 +50,28 @@ export function createServer({ port, reloadAll, reloadRegistry, createSession = 
                 }
                 break
               case 'tool_execution_start':
-                send(ws, { type: 'tool_start', name: event.toolName })
+                toolStartedAt.set(event.toolCallId, Date.now())
+                send(ws, {
+                  type: 'tool_start',
+                  toolCallId: event.toolCallId,
+                  name: event.toolName,
+                  args: event.args,
+                })
                 break
-              case 'tool_execution_end':
-                send(ws, { type: 'tool_end', name: event.toolName, error: event.isError })
+              case 'tool_execution_end': {
+                const startedAt = toolStartedAt.get(event.toolCallId)
+                toolStartedAt.delete(event.toolCallId)
+                const durationMs = startedAt === undefined ? 0 : Date.now() - startedAt
+                send(ws, {
+                  type: 'tool_end',
+                  toolCallId: event.toolCallId,
+                  name: event.toolName,
+                  error: event.isError,
+                  result: event.result,
+                  durationMs,
+                })
                 break
+              }
             }
           })
 
@@ -63,6 +83,13 @@ export function createServer({ port, reloadAll, reloadRegistry, createSession = 
 
           if (msg.type === 'reload') {
             await handleReload(ws, reloadAll)
+            return
+          }
+
+          if (msg.type === 'abort') {
+            const session = sessions.get(ws)
+            if (!session) return
+            await session.abort()
             return
           }
 
