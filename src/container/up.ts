@@ -28,7 +28,10 @@ export type PlanUpOptions = {
 
 export type DockerExecResult = { exitCode: number; stdout: string; stderr: string }
 
-export type DockerExec = (args: string[], options?: { cwd?: string; inheritStdio?: boolean }) => Promise<DockerExecResult>
+export type DockerExec = (
+  args: string[],
+  options?: { cwd?: string; inheritStdio?: boolean },
+) => Promise<DockerExecResult>
 
 export type UpOptions = {
   cwd: string
