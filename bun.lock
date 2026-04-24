@@ -7,6 +7,7 @@
       "dependencies": {
         "@clack/prompts": "^1.2.0",
         "@mariozechner/pi-coding-agent": "^0.67.3",
+        "@mariozechner/pi-tui": "^0.67.3",
         "citty": "^0.2.2",
         "cron-parser": "^5.5.0",
       },
