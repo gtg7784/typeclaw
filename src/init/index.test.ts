@@ -15,6 +15,7 @@ import {
   initGitRepo,
   type InitStepEvent,
   isDirectoryNonEmpty,
+  isHatched,
   isInitialized,
   runInit,
   scaffold,
@@ -198,6 +199,38 @@ describe('runInit', () => {
 
     expect(isInitialized(root)).toBe(true)
   })
+
+  test('is idempotent: re-running after a failed hatching re-runs all steps without crashing', async () => {
+    // given: a prior run where hatching failed (e.g. docker daemon was down).
+    const failingHatch: HatchRunner = async () => ({ ok: false, reason: 'docker build failed' })
+    await runInit({ cwd: root, apiKey: 'fw_first_key', runHatching: failingHatch })
+    expect(isInitialized(root)).toBe(true)
+    expect(await isHatched(root)).toBe(false)
+
+    // when: the user retries `typeclaw init` with a working setup.
+    const events: InitStepEvent[] = []
+    await runInit({ cwd: root, apiKey: 'fw_second_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
+
+    // then: every step ran again, and git step reports skipped because the repo already exists.
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
+      'scaffold:start',
+      'scaffold:done',
+      'install:start',
+      'install:done',
+      'dockerfile:start',
+      'dockerfile:done',
+      'git:start',
+      'git:done',
+      'hatching:start',
+      'hatching:done',
+    ])
+    const gitDone = events.find((e) => e.step === 'git' && e.phase === 'done')
+    if (!(gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok)) {
+      throw new Error('expected git:done with ok result')
+    }
+    expect(gitDone.result.skipped).toBe(true)
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_second_key\n')
+  })
 })
 
 describe('isDirectoryNonEmpty', () => {
@@ -233,6 +266,30 @@ describe('isInitialized', () => {
   test('returns true when typeclaw.json exists', async () => {
     await writeFile(join(root, 'typeclaw.json'), '{}')
     expect(isInitialized(root)).toBe(true)
+  })
+})
+
+describe('isHatched', () => {
+  test('returns false for a fresh directory (no git)', async () => {
+    expect(await isHatched(root)).toBe(false)
+  })
+
+  test('returns false after initGitRepo (initial commit only, no Hatched)', async () => {
+    await scaffold(root)
+    await initGitRepo(root)
+
+    expect(await isHatched(root)).toBe(false)
+  })
+
+  test('returns true once a Hatched 🐣 commit exists', async () => {
+    // given: a scaffolded repo with the exact commit subject the hatching ritual produces.
+    await scaffold(root)
+    await initGitRepo(root)
+    await writeFile(join(root, 'IDENTITY.md'), 'I am Test.\n')
+    await runGit(root, ['add', 'IDENTITY.md'])
+    await runGit(root, ['commit', '-m', 'Hatched 🐣'])
+
+    expect(await isHatched(root)).toBe(true)
   })
 })
 

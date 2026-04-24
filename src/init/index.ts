@@ -138,6 +138,22 @@ export function isInitialized(dir: string): boolean {
   return existsSync(join(dir, CONFIG_FILE))
 }
 
+const HATCHED_COMMIT_SUBJECT = 'Hatched 🐣'
+
+export async function isHatched(dir: string): Promise<boolean> {
+  if (!existsSync(join(dir, '.git'))) return false
+  const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
+  if (!bun) return false
+  try {
+    const proc = bun.spawn({ cmd: ['git', 'log', '--format=%s'], cwd: dir, stdout: 'pipe', stderr: 'pipe' })
+    if ((await proc.exited) !== 0) return false
+    const subjects = (await new Response(proc.stdout).text()).split('\n')
+    return subjects.includes(HATCHED_COMMIT_SUBJECT)
+  } catch {
+    return false
+  }
+}
+
 export async function scaffold(root: string): Promise<void> {
   await Promise.all(DIRECTORIES.map((dir) => mkdir(join(root, dir), { recursive: true })))
 

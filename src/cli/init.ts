@@ -1,7 +1,7 @@
 import { cancel, confirm, intro, isCancel, password, spinner } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
-import { isDirectoryNonEmpty, isInitialized, runInit, type InitStep, type InitStepEvent } from '@/init'
+import { isDirectoryNonEmpty, isHatched, runInit, type InitStep, type InitStepEvent } from '@/init'
 
 export const init = defineCommand({
   meta: {
@@ -11,8 +11,8 @@ export const init = defineCommand({
   async run() {
     const cwd = process.cwd()
 
-    if (isInitialized(cwd)) {
-      console.error(`TypeClaw is already initialized in ${cwd}.`)
+    if (await isHatched(cwd)) {
+      console.error(`TypeClaw has already hatched in ${cwd}.`)
       process.exit(1)
     }
 
