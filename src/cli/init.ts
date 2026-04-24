@@ -47,23 +47,33 @@ export const init = defineCommand({
     //   - git backup (url + PAT) — Phase 10
     //   - cron.json scaffolding — Phase 9
     //   - compose.yml registration in $HOME/.typeclaw — Phase 12
+    let hatchingOk = false
     try {
-      await runInit({ cwd, apiKey, onProgress: reportProgress() })
+      await runInit({
+        cwd,
+        apiKey,
+        onProgress: reportProgress((ok) => {
+          hatchingOk = ok
+        }),
+      })
     } catch (error) {
       console.error(error)
       process.exit(1)
     }
 
-    console.log('\nContainer is still running. Run `typeclaw tui` to reattach or `typeclaw down` to stop.')
+    if (hatchingOk) {
+      console.log('\nContainer is still running. Run `typeclaw tui` to reattach or `typeclaw down` to stop.')
+    }
   },
 })
 
-function reportProgress(): (event: InitStepEvent) => void {
+function reportProgress(onHatchingDone: (ok: boolean) => void): (event: InitStepEvent) => void {
   const spinners: Partial<Record<InitStepEvent['step'], ReturnType<typeof spinner>>> = {}
 
   return (event) => {
     if (event.step === 'hatching') {
       reportHatching(event)
+      if (event.phase === 'done') onHatchingDone(event.result.ok)
       return
     }
 
