@@ -94,7 +94,7 @@ describe('startAgent', () => {
     expect(running.scheduler).toBeNull()
   })
 
-  test('skips scheduler when cron.json has no jobs', async () => {
+  test('creates scheduler when cron.json exists but has no jobs (so reload can later swap in jobs)', async () => {
     const loadCron: LoadCronFn = async () => ({ ok: true, file: { jobs: [] } }) as LoadCronResult
     const factoryCalls: Array<{ cwd: string; file: CronFile }> = []
     const createSchedulerFor: SchedulerFactory = (opts) => {
@@ -104,8 +104,8 @@ describe('startAgent', () => {
 
     running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
 
-    expect(factoryCalls).toHaveLength(0)
-    expect(running.scheduler).toBeNull()
+    expect(factoryCalls).toHaveLength(1)
+    expect(running.scheduler).not.toBeNull()
   })
 
   test('starts scheduler when cron.json has jobs', async () => {
@@ -133,6 +133,21 @@ describe('startAgent', () => {
 
     running.stop()
     expect(stopped).toBe(true)
+  })
+
+  test('registers cron in the reload registry when scheduler is created', async () => {
+    const loadCron: LoadCronFn = async () => ({ ok: true, file: { jobs: [] } }) as LoadCronResult
+    const createSchedulerFor: SchedulerFactory = () => stubScheduler()
+
+    running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
+
+    expect(running.reloadRegistry.has('cron')).toBe(true)
+  })
+
+  test('does not register cron in the reload registry when cron.json is absent', async () => {
+    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
+
+    expect(running.reloadRegistry.has('cron')).toBe(false)
   })
 
   test('logs and continues when cron.json fails to load', async () => {

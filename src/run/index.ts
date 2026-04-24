@@ -1,5 +1,6 @@
 import { createSession } from '@/agent'
 import {
+  createCronReloadable,
   createExecRunner,
   createPromptRunner,
   createScheduler,
@@ -9,6 +10,7 @@ import {
   loadCron as loadCronDefault,
   type Scheduler,
 } from '@/cron'
+import { ReloadRegistry } from '@/reload'
 import { createServer, type Server } from '@/server'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
 
@@ -33,6 +35,7 @@ export type StartAgentResult = {
   server: BunServer
   tuiPromise: Promise<void> | null
   scheduler: Scheduler | null
+  reloadRegistry: ReloadRegistry
   stop: () => void
 }
 
@@ -45,9 +48,13 @@ export async function startAgent({
   loadCron = loadCronDefault,
   createSchedulerFor = defaultSchedulerFactory,
 }: StartAgentOptions): Promise<StartAgentResult> {
-  const server = createServer({ port }).start()
-
+  const reloadRegistry = new ReloadRegistry()
   const scheduler = await startScheduler({ cwd, loadCron, createSchedulerFor })
+  if (scheduler) {
+    reloadRegistry.register(createCronReloadable({ cwd, scheduler }))
+  }
+
+  const server = createServer({ port }).start()
 
   let stopped = false
   const stop = () => {
@@ -58,13 +65,13 @@ export async function startAgent({
   }
 
   if (!attachTui) {
-    return { server, tuiPromise: null, scheduler, stop }
+    return { server, tuiPromise: null, scheduler, reloadRegistry, stop }
   }
 
   const url = `ws://localhost:${server.port}`
   const tui = createTui({ url, initialPrompt })
   const tuiPromise = tui.run()
-  return { server, tuiPromise, scheduler, stop }
+  return { server, tuiPromise, scheduler, reloadRegistry, stop }
 }
 
 async function startScheduler({
@@ -87,7 +94,10 @@ async function startScheduler({
     console.error(`[cron] failed to load cron.json: ${result.reason}`)
     return null
   }
-  if (!result.file || result.file.jobs.length === 0) return null
+  // Create the scheduler even when there are zero jobs so that reload can
+  // later swap in a non-empty schedule without a restart. Skip only when
+  // cron.json does not exist at all.
+  if (!result.file) return null
 
   const scheduler = createSchedulerFor({ cwd, file: result.file })
   scheduler.start()

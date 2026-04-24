@@ -4,7 +4,8 @@ import { join } from 'node:path'
 
 import { type CronFile, type ExecJob, parseCronFile, type PromptJob } from './schema'
 
-export { createScheduler, type JobRunner, type Scheduler, type SchedulerLogger } from './scheduler'
+export { createCronReloadable, type CreateCronReloadableOptions } from './reloadable'
+export { createScheduler, type JobDiff, type JobRunner, type Scheduler, type SchedulerLogger } from './scheduler'
 export { cronFileSchema, cronJobSchema, type CronFile, type CronJob, type ExecJob, type PromptJob } from './schema'
 
 const CRON_FILE = 'cron.json'
