@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createResourceLoader } from './index'
+import { createResourceLoader, getBundledSkillsDir } from './index'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
 
 let agentDir: string
@@ -61,5 +62,33 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('[MISSING]')
     expect(prompt).toContain('IDENTITY.md')
     expect(prompt).toContain('SOUL.md')
+  })
+
+  test('exposes the typeclaw-cron bundled skill to the agent', async () => {
+    const loader = await createResourceLoader({ agentDir })
+
+    const { skills } = loader.getSkills()
+    const cronSkill = skills.find((s) => s.name === 'typeclaw-cron')
+    expect(cronSkill).toBeDefined()
+    expect(cronSkill?.description.length).toBeGreaterThan(0)
+  })
+})
+
+describe('getBundledSkillsDir', () => {
+  test('points at a directory containing typeclaw-cron/SKILL.md', () => {
+    const dir = getBundledSkillsDir()
+    expect(existsSync(join(dir, 'typeclaw-cron', 'SKILL.md'))).toBe(true)
+  })
+
+  test('typeclaw-cron SKILL.md has YAML frontmatter with name and description', async () => {
+    const path = join(getBundledSkillsDir(), 'typeclaw-cron', 'SKILL.md')
+    const raw = await readFile(path, 'utf8')
+
+    expect(raw.startsWith('---\n')).toBe(true)
+    const frontmatterEnd = raw.indexOf('\n---\n', 4)
+    expect(frontmatterEnd).toBeGreaterThan(0)
+    const frontmatter = raw.slice(4, frontmatterEnd)
+    expect(frontmatter).toMatch(/^name:\s*typeclaw-cron\s*$/m)
+    expect(frontmatter).toMatch(/^description:\s*\S/m)
   })
 })

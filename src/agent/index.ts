@@ -1,3 +1,6 @@
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
 import { createAgentSession, DefaultResourceLoader, SessionManager } from '@mariozechner/pi-coding-agent'
 import type { AgentSession } from '@mariozechner/pi-coding-agent'
 
@@ -31,7 +34,12 @@ export async function createResourceLoader(options: { agentDir?: string } = {}):
   const loader = new DefaultResourceLoader({
     systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
+    additionalSkillPaths: [getBundledSkillsDir()],
   })
   await loader.reload()
   return loader
+}
+
+export function getBundledSkillsDir(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', 'skills')
 }
