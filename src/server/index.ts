@@ -1,7 +1,7 @@
 import type { Server as BunServer, ServerWebSocket } from 'bun'
 
 import { createSession, type AgentSession } from '@/agent'
-import type { ReloadAllResult } from '@/reload'
+import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { ClientMessage, ReloadResultPayload, ServerMessage } from '@/shared'
 
 export type ReloadAllFn = () => Promise<ReloadAllResult>
@@ -9,6 +9,7 @@ export type ReloadAllFn = () => Promise<ReloadAllResult>
 export type ServerOptions = {
   port: number
   reloadAll?: ReloadAllFn
+  reloadRegistry?: ReloadRegistry
 }
 
 export type Server = ReturnType<typeof createServer>
@@ -20,7 +21,7 @@ function send(ws: Ws, msg: ServerMessage) {
   ws.send(JSON.stringify(msg))
 }
 
-export function createServer({ port, reloadAll }: ServerOptions) {
+export function createServer({ port, reloadAll, reloadRegistry }: ServerOptions) {
   const sessions = new WeakMap<Ws, AgentSession>()
 
   function start(): BunServer<WsData> {
@@ -33,7 +34,7 @@ export function createServer({ port, reloadAll }: ServerOptions) {
       },
       websocket: {
         async open(ws) {
-          const session = await createSession()
+          const session = await createSession({ reloadRegistry })
           sessions.set(ws, session)
 
           session.subscribe((event) => {

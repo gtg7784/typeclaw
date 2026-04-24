@@ -5,16 +5,23 @@ import { createAgentSession, DefaultResourceLoader, SessionManager } from '@mari
 import type { AgentSession } from '@mariozechner/pi-coding-agent'
 
 import { config, resolveModel } from '@/config'
+import type { ReloadRegistry } from '@/reload'
 
 import { getAuth } from './auth'
+import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
 
 export type { AgentSession }
 
-export async function createSession(): Promise<AgentSession> {
+export type CreateSessionOptions = {
+  reloadRegistry?: ReloadRegistry
+}
+
+export async function createSession(options: CreateSessionOptions = {}): Promise<AgentSession> {
   const { authStorage, modelRegistry } = getAuth()
   const resourceLoader = await createResourceLoader()
+  const customTools = options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []
 
   const { session } = await createAgentSession({
     model: resolveModel(config.model),
@@ -22,6 +29,7 @@ export async function createSession(): Promise<AgentSession> {
     authStorage,
     modelRegistry,
     resourceLoader,
+    customTools,
   })
   return session
 }

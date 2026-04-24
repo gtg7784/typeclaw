@@ -46,15 +46,20 @@ export async function startAgent({
   cwd = process.cwd(),
   createTui = createTuiDefault,
   loadCron = loadCronDefault,
-  createSchedulerFor = defaultSchedulerFactory,
+  createSchedulerFor,
 }: StartAgentOptions): Promise<StartAgentResult> {
   const reloadRegistry = new ReloadRegistry()
-  const scheduler = await startScheduler({ cwd, loadCron, createSchedulerFor })
+  const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(reloadRegistry)
+  const scheduler = await startScheduler({ cwd, loadCron, createSchedulerFor: factory })
   if (scheduler) {
     reloadRegistry.register(createCronReloadable({ cwd, scheduler }))
   }
 
-  const server = createServer({ port, reloadAll: () => reloadRegistry.reloadAll() }).start()
+  const server = createServer({
+    port,
+    reloadAll: () => reloadRegistry.reloadAll(),
+    reloadRegistry,
+  }).start()
 
   let stopped = false
   const stop = () => {
@@ -104,10 +109,12 @@ async function startScheduler({
   return scheduler
 }
 
-function defaultSchedulerFactory({ cwd, file }: { cwd: string; file: CronFile }): Scheduler {
-  const runner: JobRunner = {
-    ...createPromptRunner({ createSessionForCron: () => createSession() }),
-    ...createExecRunner({ cwd }),
+function makeDefaultSchedulerFactory(reloadRegistry: ReloadRegistry): SchedulerFactory {
+  return ({ cwd, file }) => {
+    const runner: JobRunner = {
+      ...createPromptRunner({ createSessionForCron: () => createSession({ reloadRegistry }) }),
+      ...createExecRunner({ cwd }),
+    }
+    return createScheduler({ jobs: file.jobs, runner })
   }
-  return createScheduler({ jobs: file.jobs, runner })
 }
