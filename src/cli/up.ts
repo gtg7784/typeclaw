@@ -15,6 +15,11 @@ export const upCommand = defineCommand({
       description: 'port to publish on the host',
       default: String(config.port),
     },
+    build: {
+      type: 'boolean',
+      description: 'regenerate the Dockerfile from the latest template and rebuild the image',
+      default: false,
+    },
   },
   async run({ args }) {
     const cwd = process.cwd()
@@ -24,7 +29,7 @@ export const upCommand = defineCommand({
       process.exit(1)
     }
 
-    const result = await up({ cwd, port: Number(args.port) })
+    const result = await up({ cwd, port: Number(args.port), forceBuild: args.build })
     if (!result.ok) {
       console.error(result.reason)
       process.exit(1)

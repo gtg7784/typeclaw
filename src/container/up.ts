@@ -1,11 +1,12 @@
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
-import { containerExists, containerNameFromCwd, getBun, imageExists, imageTagFromCwd } from './shared'
+import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
+
+import { containerNameFromCwd, getBun, imageTagFromCwd } from './shared'
 
 const PACKAGE_FILE = 'package.json'
-const DOCKERFILE = 'Dockerfile'
 const ENV_FILE = '.env'
 const COMPOSE_PROJECT = 'typeclaw'
 
@@ -22,47 +23,58 @@ export type PlanUpOptions = {
   cwd: string
   port: number
   imageExists: boolean
+  forceBuild?: boolean
+}
+
+export type DockerExecResult = { exitCode: number; stdout: string; stderr: string }
+
+export type DockerExec = (args: string[], options?: { cwd?: string; inheritStdio?: boolean }) => Promise<DockerExecResult>
+
+export type UpOptions = {
+  cwd: string
+  port: number
+  forceBuild?: boolean
+  exec?: DockerExec
 }
 
 export type UpResult = { ok: true; plan: UpPlan; containerId: string; built: boolean } | { ok: false; reason: string }
 
-export async function up({ cwd, port }: { cwd: string; port: number }): Promise<UpResult> {
-  const bun = getBun()
-  if (!bun) return { ok: false, reason: 'bun runtime not available' }
-
+export async function up({ cwd, port, forceBuild = false, exec = defaultDockerExec }: UpOptions): Promise<UpResult> {
   try {
-    const plan = await planUp({ cwd, port, imageExists: await imageExists(imageTagFromCwd(cwd)) })
+    const plan = await planUp({
+      cwd,
+      port,
+      imageExists: await imageExists(exec, imageTagFromCwd(cwd)),
+      forceBuild,
+    })
 
-    if (await containerExists(plan.containerName)) {
+    if (await containerExists(exec, plan.containerName)) {
       return { ok: false, reason: `Container ${plan.containerName} is already running. Run \`typeclaw down\` first.` }
     }
 
     let built = false
     if (plan.needsBuild) {
-      const build = bun.spawn({
-        cmd: ['docker', 'build', '-t', plan.imageTag, plan.buildContext],
-        cwd,
-        stdout: 'inherit',
-        stderr: 'inherit',
-      })
-      if ((await build.exited) !== 0) return { ok: false, reason: 'docker build failed' }
+      // --build implies the user wants the latest TypeClaw template too.
+      // Overwriting is intentional: TypeClaw owns the Dockerfile.
+      if (forceBuild) await refreshDockerfile(cwd)
+
+      const build = await exec(['build', '-t', plan.imageTag, plan.buildContext], { cwd, inheritStdio: true })
+      if (build.exitCode !== 0) return { ok: false, reason: 'docker build failed' }
       built = true
     }
 
-    const run = bun.spawn({ cmd: ['docker', ...plan.runArgs], cwd, stdout: 'pipe', stderr: 'pipe' })
-    if ((await run.exited) !== 0) {
-      const stderr = await new Response(run.stderr).text()
-      return { ok: false, reason: `docker run failed: ${stderr.trim() || 'no stderr'}` }
+    const run = await exec(plan.runArgs, { cwd })
+    if (run.exitCode !== 0) {
+      return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
     }
 
-    const containerId = (await new Response(run.stdout).text()).trim()
-    return { ok: true, plan, containerId, built }
+    return { ok: true, plan, containerId: run.stdout.trim(), built }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
 }
 
-export async function planUp({ cwd, port, imageExists }: PlanUpOptions): Promise<UpPlan> {
+export async function planUp({ cwd, port, imageExists, forceBuild = false }: PlanUpOptions): Promise<UpPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
 
@@ -98,8 +110,38 @@ export async function planUp({ cwd, port, imageExists }: PlanUpOptions): Promise
     buildContext: cwd,
     dockerfile: join(cwd, DOCKERFILE),
     runArgs,
-    needsBuild: !imageExists,
+    needsBuild: forceBuild || !imageExists,
   }
+}
+
+export async function refreshDockerfile(cwd: string): Promise<void> {
+  await writeFile(join(cwd, DOCKERFILE), buildDockerfile())
+}
+
+export const defaultDockerExec: DockerExec = async (args, options) => {
+  const bun = getBun()
+  if (!bun) return { exitCode: -1, stdout: '', stderr: 'bun runtime not available' }
+  const proc = bun.spawn({
+    cmd: ['docker', ...args],
+    cwd: options?.cwd,
+    stdout: options?.inheritStdio ? 'inherit' : 'pipe',
+    stderr: options?.inheritStdio ? 'inherit' : 'pipe',
+  })
+  const exitCode = await proc.exited
+  const stdout = options?.inheritStdio ? '' : await new Response(proc.stdout).text()
+  const stderr = options?.inheritStdio ? '' : await new Response(proc.stderr).text()
+  return { exitCode, stdout, stderr }
+}
+
+async function imageExists(exec: DockerExec, tag: string): Promise<boolean> {
+  const result = await exec(['image', 'inspect', tag])
+  return result.exitCode === 0
+}
+
+async function containerExists(exec: DockerExec, name: string): Promise<boolean> {
+  const result = await exec(['ps', '-a', '--filter', `name=^${name}$`, '--format', '{{.Names}}'])
+  if (result.exitCode !== 0) return false
+  return result.stdout.trim().split('\n').includes(name)
 }
 
 // Mirror the canonical labels `docker compose up` sets so Docker Desktop groups
