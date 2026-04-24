@@ -54,7 +54,7 @@ export async function startAgent({
     reloadRegistry.register(createCronReloadable({ cwd, scheduler }))
   }
 
-  const server = createServer({ port }).start()
+  const server = createServer({ port, reloadAll: () => reloadRegistry.reloadAll() }).start()
 
   let stopped = false
   const stop = () => {

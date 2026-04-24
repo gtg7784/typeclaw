@@ -1,1 +1,1 @@
-export { type ClientMessage, type ServerMessage } from './protocol'
+export { type ClientMessage, type ReloadResultPayload, type ServerMessage } from './protocol'

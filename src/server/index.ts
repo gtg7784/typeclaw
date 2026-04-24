@@ -1,10 +1,14 @@
 import type { Server as BunServer, ServerWebSocket } from 'bun'
 
 import { createSession, type AgentSession } from '@/agent'
-import type { ClientMessage, ServerMessage } from '@/shared'
+import type { ReloadAllResult } from '@/reload'
+import type { ClientMessage, ReloadResultPayload, ServerMessage } from '@/shared'
+
+export type ReloadAllFn = () => Promise<ReloadAllResult>
 
 export type ServerOptions = {
   port: number
+  reloadAll?: ReloadAllFn
 }
 
 export type Server = ReturnType<typeof createServer>
@@ -16,7 +20,7 @@ function send(ws: Ws, msg: ServerMessage) {
   ws.send(JSON.stringify(msg))
 }
 
-export function createServer({ port }: ServerOptions) {
+export function createServer({ port, reloadAll }: ServerOptions) {
   const sessions = new WeakMap<Ws, AgentSession>()
 
   function start(): BunServer<WsData> {
@@ -52,17 +56,23 @@ export function createServer({ port }: ServerOptions) {
           console.log(`session ${ws.data.sessionId}: open`)
         },
         async message(ws, raw) {
-          const session = sessions.get(ws)
-          if (!session) return
-
           const msg = JSON.parse(String(raw)) as ClientMessage
-          if (msg.type !== 'prompt') return
 
-          try {
-            await session.prompt(msg.text)
-            send(ws, { type: 'done' })
-          } catch (err) {
-            send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
+          if (msg.type === 'reload') {
+            await handleReload(ws, reloadAll)
+            return
+          }
+
+          if (msg.type === 'prompt') {
+            const session = sessions.get(ws)
+            if (!session) return
+            try {
+              await session.prompt(msg.text)
+              send(ws, { type: 'done' })
+            } catch (err) {
+              send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
+            }
+            return
           }
         },
         close(ws) {
@@ -77,4 +87,21 @@ export function createServer({ port }: ServerOptions) {
   }
 
   return { start }
+}
+
+async function handleReload(ws: Ws, reloadAll: ReloadAllFn | undefined): Promise<void> {
+  if (!reloadAll) {
+    const empty: ReloadResultPayload[] = []
+    send(ws, { type: 'reload_result', results: empty })
+    return
+  }
+  try {
+    const { results } = await reloadAll()
+    send(ws, { type: 'reload_result', results })
+  } catch (err) {
+    send(ws, {
+      type: 'reload_result',
+      results: [{ scope: 'reload', ok: false, reason: err instanceof Error ? err.message : String(err) }],
+    })
+  }
 }
