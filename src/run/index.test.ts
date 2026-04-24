@@ -7,6 +7,14 @@ import { type LoadCronFn, type SchedulerFactory, startAgent, type TuiFactory } f
 
 const noCron: LoadCronFn = async () => ({ ok: true, file: null }) as LoadCronResult
 
+function stubScheduler(): Scheduler {
+  return {
+    start: () => {},
+    stop: () => {},
+    replaceJobs: () => ({ added: [], removed: [], updated: [], unchanged: [] }),
+  }
+}
+
 let running: Awaited<ReturnType<typeof startAgent>> | null = null
 
 afterEach(async () => {
@@ -77,7 +85,7 @@ describe('startAgent', () => {
     const factoryCalls: Array<{ cwd: string; file: CronFile }> = []
     const createSchedulerFor: SchedulerFactory = (opts) => {
       factoryCalls.push(opts)
-      return { start: () => {}, stop: () => {} }
+      return stubScheduler()
     }
 
     running = await startAgent({ port: 0, attachTui: false, loadCron: noCron, createSchedulerFor })
@@ -91,7 +99,7 @@ describe('startAgent', () => {
     const factoryCalls: Array<{ cwd: string; file: CronFile }> = []
     const createSchedulerFor: SchedulerFactory = (opts) => {
       factoryCalls.push(opts)
-      return { start: () => {}, stop: () => {} }
+      return stubScheduler()
     }
 
     running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
@@ -114,6 +122,7 @@ describe('startAgent', () => {
       stop: () => {
         stopped = true
       },
+      replaceJobs: () => ({ added: [], removed: [], updated: [], unchanged: [] }),
     }
     const createSchedulerFor: SchedulerFactory = () => fakeScheduler
 
@@ -131,7 +140,7 @@ describe('startAgent', () => {
     const factoryCalls: Array<{ cwd: string; file: CronFile }> = []
     const createSchedulerFor: SchedulerFactory = (opts) => {
       factoryCalls.push(opts)
-      return { start: () => {}, stop: () => {} }
+      return stubScheduler()
     }
 
     running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })

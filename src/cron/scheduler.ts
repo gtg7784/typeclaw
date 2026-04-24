@@ -27,9 +27,17 @@ export type CreateSchedulerOptions = {
   onError?: (job: CronJob, error: unknown) => void
 }
 
+export type JobDiff = {
+  added: CronJob[]
+  removed: CronJob[]
+  updated: CronJob[]
+  unchanged: CronJob[]
+}
+
 export type Scheduler = {
   start: () => void
   stop: () => void
+  replaceJobs: (jobs: CronJob[]) => JobDiff
 }
 
 const realClock: SchedulerClock = {
@@ -52,31 +60,44 @@ export function createScheduler({
   onError,
 }: CreateSchedulerOptions): Scheduler {
   const handleError = onError ?? ((job: CronJob, err: unknown) => defaultOnError(logger, job, err))
-  const enabled = jobs.filter((j) => j.enabled)
+
+  const registry = new Map<string, CronJob>()
+  for (const job of jobs) registry.set(job.id, job)
+
   const handles = new Map<string, number>()
   const running = new Set<string>()
   let started = false
 
-  function scheduleNext(job: CronJob): void {
+  function currentEnabled(id: string): CronJob | null {
+    const job = registry.get(id)
+    if (!job || !job.enabled) return null
+    return job
+  }
+
+  function scheduleNext(id: string): void {
     if (!started) return
+    const job = currentEnabled(id)
+    if (!job) return
 
     const nextFire = computeNextFire(job, clock.now())
     if (nextFire === null) return
 
     const delay = Math.max(0, nextFire - clock.now())
     const handle = clock.setTimeout(() => {
-      handles.delete(job.id)
+      handles.delete(id)
       if (!started) return
+      const live = currentEnabled(id)
+      if (!live) return
       // Coalesce-skip: if the previous invocation hasn't finished, drop this
       // tick rather than queuing a parallel run. This honors "best effort".
-      if (running.has(job.id)) {
-        logger.warn(`[cron] ${job.id}: previous run still in progress, skipping tick`)
-        scheduleNext(job)
+      if (running.has(id)) {
+        logger.warn(`[cron] ${id}: previous run still in progress, skipping tick`)
+        scheduleNext(id)
         return
       }
-      fire(job)
+      fire(live)
     }, delay)
-    handles.set(job.id, handle)
+    handles.set(id, handle)
   }
 
   function fire(job: CronJob): void {
@@ -85,7 +106,7 @@ export function createScheduler({
     const done = (err?: unknown) => {
       running.delete(job.id)
       if (err !== undefined) handleError(job, err)
-      scheduleNext(job)
+      scheduleNext(job.id)
     }
     const promise = job.kind === 'prompt' ? runner.runPrompt(job) : runner.runExec(job)
     promise.then(
@@ -94,18 +115,80 @@ export function createScheduler({
     )
   }
 
+  function cancel(id: string): void {
+    const handle = handles.get(id)
+    if (handle === undefined) return
+    clock.clearTimeout(handle)
+    handles.delete(id)
+  }
+
+  function diff(next: CronJob[]): JobDiff {
+    const added: CronJob[] = []
+    const removed: CronJob[] = []
+    const updated: CronJob[] = []
+    const unchanged: CronJob[] = []
+
+    const nextById = new Map<string, CronJob>()
+    for (const job of next) nextById.set(job.id, job)
+
+    for (const [id, before] of registry) {
+      const after = nextById.get(id)
+      if (!after) {
+        removed.push(before)
+        continue
+      }
+      if (jobFingerprint(before) === jobFingerprint(after)) {
+        unchanged.push(after)
+      } else {
+        updated.push(after)
+      }
+    }
+    for (const [id, after] of nextById) {
+      if (!registry.has(id)) added.push(after)
+    }
+
+    return { added, removed, updated, unchanged }
+  }
+
   return {
     start() {
       if (started) return
       started = true
-      for (const job of enabled) scheduleNext(job)
+      for (const id of registry.keys()) scheduleNext(id)
     },
     stop() {
       started = false
       for (const handle of handles.values()) clock.clearTimeout(handle)
       handles.clear()
     },
+    replaceJobs(next) {
+      const result = diff(next)
+
+      const newRegistry = new Map<string, CronJob>()
+      for (const job of next) newRegistry.set(job.id, job)
+      registry.clear()
+      for (const [id, job] of newRegistry) registry.set(id, job)
+
+      for (const job of result.removed) cancel(job.id)
+      for (const job of result.updated) {
+        cancel(job.id)
+        scheduleNext(job.id)
+      }
+      for (const job of result.added) scheduleNext(job.id)
+
+      return result
+    },
   }
+}
+
+function jobFingerprint(job: CronJob): string {
+  return JSON.stringify({
+    schedule: job.schedule,
+    enabled: job.enabled,
+    timezone: job.timezone ?? null,
+    kind: job.kind,
+    payload: job.kind === 'prompt' ? job.prompt : job.command,
+  })
 }
 
 function computeNextFire(job: CronJob, now: number): number | null {
