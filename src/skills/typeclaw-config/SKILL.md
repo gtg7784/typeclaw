@@ -75,7 +75,7 @@ Never echo, log, or commit values from `.env`. `.env` is gitignored by default â
 2. **Modify in memory.** Change only the field(s) the user asked about. Leave `$schema` alone.
 3. **Write the whole file back** with the `write` tool. Always pretty-printed (2-space indent), trailing newline, fields in stable order: `$schema` first, then alphabetical (`model`, `port`).
 4. **Validate before declaring done.** A malformed `typeclaw.json` will refuse to boot the agent on next restart. Sanity-check your JSON manually or with `bash` (`cat typeclaw.json | jq .`) before considering the edit done.
-5. **Commit the change.** `git add typeclaw.json && git commit -m "Change <field> to <value>"`. Use the imperative mood; explain in the body why if it isn't obvious. `typeclaw.json` is not gitignored, so an uncommitted edit will pollute your next commit.
+5. **Commit the change.** See the `typeclaw-git` skill for the commit-message rule (decision context required). `typeclaw.json` is not gitignored, so an uncommitted edit will pollute your next commit.
 6. **Tell the user to restart.** "Edited `typeclaw.json`. Run `typeclaw down && typeclaw up` (host stage) to pick up the change."
 
 ### Required-shape checklist (catch this before writing)

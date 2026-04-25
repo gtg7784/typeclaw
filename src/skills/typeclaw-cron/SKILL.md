@@ -107,7 +107,7 @@ If you set `timezone`, the schedule is interpreted in that zone. **Always set `t
 2. **Modify in memory.** Add, remove, or change jobs in the parsed JSON.
 3. **Write the whole file back** with the `write` tool. Always pretty-printed (2-space indent), trailing newline, sorted-stable order.
 4. **Apply with the `reload` tool.** Call the `reload` tool — it re-reads `cron.json` and updates the live scheduler. The tool returns `[cron] ok: ...` with an added/removed/updated/unchanged summary on success, or `[cron] failed: ...` with the exact validation error on failure. **If reload fails, the live schedule is left unchanged** — fix `cron.json` based on the error message and call `reload` again.
-5. **Commit the change** _after_ a successful reload. `git add cron.json && git commit -m "Add daily-summary cron"`. Use the imperative mood; explain in the body if the schedule choice is non-obvious. This is part of your version-control discipline (see AGENTS.md / system prompt) — `cron.json` is not gitignored, so an uncommitted edit will pollute your next commit.
+5. **Commit the change** _after_ a successful reload. See the `typeclaw-git` skill for the commit-message rule (decision context required). `cron.json` is not gitignored, so an uncommitted edit will pollute your next commit.
 
 ### Required fields checklist (catch this before writing)
 
