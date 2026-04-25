@@ -20,6 +20,15 @@ const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'MEMOR
 
 const DIRECTORIES = ['workspace', 'sessions', 'memory', 'skills', '.agents/skills'] as const
 
+// TODO: post-init sync. This template is written once by `typeclaw init`. If
+// the CLI later adds or removes entries, existing agent folders won't pick
+// them up. Decide on a sync strategy (explicit `typeclaw doctor`, version-
+// stamped migration, or auto-run on `up`) and a merge approach (section
+// markers vs append-only) before relying on `.gitignore` drift to be safe.
+//
+// `sessions/` and `memory/` are system-managed (written by the runtime, not
+// the user); the future Phase 10 backup should `git add -f` them despite
+// this gitignore.
 const GITIGNORE_CONTENT = `.env
 .env.local
 node_modules/
