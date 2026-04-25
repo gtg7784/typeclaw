@@ -3,8 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createExecRunner, loadCron } from './index'
-import type { ExecJob } from './schema'
+import { loadCron } from './index'
 
 let root: string
 
@@ -70,36 +69,5 @@ describe('loadCron', () => {
 
     if (result.ok) throw new Error('expected failure')
     expect(result.reason).toMatch(/bogus/)
-  })
-})
-
-describe('createExecRunner', () => {
-  test('spawns the configured command in the agent dir', async () => {
-    const runner = createExecRunner({ cwd: root })
-    const job: ExecJob = {
-      id: 'touch',
-      schedule: '* * * * *',
-      enabled: true,
-      kind: 'exec',
-      command: ['sh', '-c', 'echo hello > out.txt'],
-    }
-
-    await runner.runExec(job)
-
-    const contents = await Bun.file(join(root, 'out.txt')).text()
-    expect(contents.trim()).toBe('hello')
-  })
-
-  test('rejects when the command exits non-zero', async () => {
-    const runner = createExecRunner({ cwd: root })
-    const job: ExecJob = {
-      id: 'fail',
-      schedule: '* * * * *',
-      enabled: true,
-      kind: 'exec',
-      command: ['sh', '-c', 'exit 3'],
-    }
-
-    await expect(runner.runExec(job)).rejects.toThrow(/exited with code 3/)
   })
 })

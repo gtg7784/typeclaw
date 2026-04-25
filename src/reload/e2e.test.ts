@@ -80,7 +80,7 @@ describe('reload end-to-end via ws', () => {
     const replacements: Array<Array<{ id: string }>> = []
     const realScheduler = createScheduler({
       jobs: [],
-      runner: { runPrompt: async () => {}, runExec: async () => {} },
+      onFire: () => {},
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     const scheduler: Scheduler = {

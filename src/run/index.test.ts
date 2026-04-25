@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { CronFile, LoadCronResult, Scheduler } from '@/cron'
+import type { CronFile, CronJob, LoadCronResult, Scheduler } from '@/cron'
 import type { SessionFactory } from '@/sessions'
 import type { TuiOptions } from '@/tui'
 
@@ -168,6 +168,49 @@ describe('startAgent', () => {
     expect(factoryCalls).toHaveLength(0)
     expect(running.scheduler).toBeNull()
     expect(running.server.port).toBeGreaterThan(0)
+  })
+
+  test('passes onFire to the scheduler factory; firing publishes a kind:cron message to the stream', async () => {
+    // given
+    const file: CronFile = {
+      jobs: [{ id: 'job-x', schedule: '* * * * *', kind: 'prompt', prompt: 'x', enabled: true }],
+    }
+    const loadCron: LoadCronFn = async () => ({ ok: true, file }) as LoadCronResult
+    let captured: ((job: CronJob) => void) | null = null
+    const createSchedulerFor: SchedulerFactory = ({ onFire }) => {
+      captured = onFire
+      return stubScheduler()
+    }
+
+    running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
+
+    const cronMessages: unknown[] = []
+    running.stream.subscribe({ target: { kind: 'cron' } }, (msg) => {
+      cronMessages.push(msg.payload)
+    })
+
+    // when
+    expect(captured).not.toBeNull()
+    captured!(file.jobs[0]!)
+
+    // then
+    expect(cronMessages).toHaveLength(1)
+    expect(cronMessages[0]).toEqual(file.jobs[0]!)
+  })
+
+  test('cronConsumer is started when scheduler is created and stopped on stop()', async () => {
+    const loadCron: LoadCronFn = async () => ({ ok: true, file: { jobs: [] } }) as LoadCronResult
+    const createSchedulerFor: SchedulerFactory = () => stubScheduler()
+
+    running = await startAgent({ port: 0, attachTui: false, loadCron, createSchedulerFor })
+
+    expect(running.cronConsumer).not.toBeNull()
+  })
+
+  test('cronConsumer is null when scheduler is null (no cron.json)', async () => {
+    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
+
+    expect(running.cronConsumer).toBeNull()
   })
 })
 

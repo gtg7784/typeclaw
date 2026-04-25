@@ -1,11 +1,6 @@
 import { CronExpressionParser } from 'cron-parser'
 
-import type { CronJob, ExecJob, PromptJob } from './schema'
-
-export type JobRunner = {
-  runPrompt: (job: PromptJob) => Promise<void>
-  runExec: (job: ExecJob) => Promise<void>
-}
+import type { CronJob } from './schema'
 
 export type SchedulerClock = {
   now: () => number
@@ -21,10 +16,9 @@ export type SchedulerLogger = {
 
 export type CreateSchedulerOptions = {
   jobs: CronJob[]
-  runner: JobRunner
+  onFire: (job: CronJob) => void
   clock?: SchedulerClock
   logger?: SchedulerLogger
-  onError?: (job: CronJob, error: unknown) => void
 }
 
 export type JobDiff = {
@@ -54,18 +48,14 @@ const consoleLogger: SchedulerLogger = {
 
 export function createScheduler({
   jobs,
-  runner,
+  onFire,
   clock = realClock,
   logger = consoleLogger,
-  onError,
 }: CreateSchedulerOptions): Scheduler {
-  const handleError = onError ?? ((job: CronJob, err: unknown) => defaultOnError(logger, job, err))
-
   const registry = new Map<string, CronJob>()
   for (const job of jobs) registry.set(job.id, job)
 
   const handles = new Map<string, number>()
-  const running = new Set<string>()
   let started = false
 
   function currentEnabled(id: string): CronJob | null {
@@ -82,11 +72,6 @@ export function createScheduler({
     const nextFire = computeNextFire(job, clock.now())
     if (nextFire === null) return
 
-    // Cancel any pending timer for this id before installing a new one. Without
-    // this, an external caller (e.g. replaceJobs racing with an in-flight fire's
-    // done() callback) can leave the previous timer pending in the runtime even
-    // though it's no longer in `handles`, and it will fire — silently doubling
-    // the schedule rate every time the race occurs.
     cancel(id)
 
     const delay = Math.max(0, nextFire - clock.now())
@@ -95,31 +80,20 @@ export function createScheduler({
       if (!started) return
       const live = currentEnabled(id)
       if (!live) return
-      // Coalesce-skip: if the previous invocation hasn't finished, drop this
-      // tick rather than queuing a parallel run. This honors "best effort".
-      if (running.has(id)) {
-        logger.warn(`[cron] ${id}: previous run still in progress, skipping tick`)
-        scheduleNext(id)
-        return
-      }
       fire(live)
+      scheduleNext(id)
     }, delay)
     handles.set(id, handle)
   }
 
   function fire(job: CronJob): void {
-    running.add(job.id)
     logger.info(`[cron] firing ${job.kind} ${job.id}`)
-    const done = (err?: unknown) => {
-      running.delete(job.id)
-      if (err !== undefined) handleError(job, err)
-      scheduleNext(job.id)
+    try {
+      onFire(job)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error(`[cron] ${job.id} onFire threw synchronously: ${message}`)
     }
-    const promise = job.kind === 'prompt' ? runner.runPrompt(job) : runner.runExec(job)
-    promise.then(
-      () => done(),
-      (err) => done(err),
-    )
   }
 
   function cancel(id: string): void {
@@ -208,9 +182,4 @@ function computeNextFire(job: CronJob, now: number): number | null {
   } catch {
     return null
   }
-}
-
-function defaultOnError(logger: SchedulerLogger, job: CronJob, error: unknown): void {
-  const message = error instanceof Error ? error.message : String(error)
-  logger.error(`[cron] ${job.id} failed: ${message}`)
 }

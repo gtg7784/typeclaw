@@ -2,12 +2,12 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession } from '@/agent'
 import {
-  createCronReloadable,
-  createExecRunner,
-  createPromptRunner,
-  createScheduler,
+  type CronConsumer,
+  type CronJob,
   type CronFile,
-  type JobRunner,
+  createCronConsumer,
+  createCronReloadable,
+  createScheduler,
   type LoadCronResult,
   loadCron as loadCronDefault,
   type Scheduler,
@@ -15,6 +15,7 @@ import {
 import { ReloadRegistry } from '@/reload'
 import { createServer, type Server } from '@/server'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
+import { createStream, type Stream } from '@/stream'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
 
 type BunServer = ReturnType<Server['start']>
@@ -22,7 +23,7 @@ type BunServer = ReturnType<Server['start']>
 export type TuiFactory = (options: TuiOptions) => { run: () => Promise<void> }
 
 export type LoadCronFn = (agentDir: string) => Promise<LoadCronResult>
-export type SchedulerFactory = (options: { cwd: string; file: CronFile }) => Scheduler
+export type SchedulerFactory = (options: { cwd: string; file: CronFile; onFire: (job: CronJob) => void }) => Scheduler
 
 export type StartAgentOptions = {
   port: number
@@ -33,13 +34,16 @@ export type StartAgentOptions = {
   loadCron?: LoadCronFn
   createSchedulerFor?: SchedulerFactory
   sessionFactory?: SessionFactory
+  stream?: Stream
 }
 
 export type StartAgentResult = {
   server: BunServer
   tuiPromise: Promise<void> | null
   scheduler: Scheduler | null
+  cronConsumer: CronConsumer | null
   reloadRegistry: ReloadRegistry
+  stream: Stream
   stop: () => void
 }
 
@@ -52,11 +56,25 @@ export async function startAgent({
   loadCron = loadCronDefault,
   createSchedulerFor,
   sessionFactory = createSessionFactory({ agentDir: cwd }),
+  stream = createStream(),
 }: StartAgentOptions): Promise<StartAgentResult> {
   const reloadRegistry = new ReloadRegistry()
-  const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(reloadRegistry, sessionFactory)
-  const scheduler = await startScheduler({ cwd, loadCron, createSchedulerFor: factory })
+
+  const cronConsumer = createCronConsumer({
+    stream,
+    cwd,
+    createSessionForCron: () =>
+      createSession({
+        reloadRegistry,
+        sessionManager: SessionManager.create(cwd, sessionFactory.sessionDir()),
+      }),
+  })
+
+  const factory = createSchedulerFor ?? makeDefaultSchedulerFactory()
+  const scheduler = await startScheduler({ cwd, loadCron, createSchedulerFor: factory, stream })
+
   if (scheduler) {
+    cronConsumer.start()
     reloadRegistry.register(createCronReloadable({ cwd, scheduler }))
   }
 
@@ -72,27 +90,38 @@ export async function startAgent({
     if (stopped) return
     stopped = true
     scheduler?.stop()
+    cronConsumer.stop()
     server.stop(true)
   }
 
   if (!attachTui) {
-    return { server, tuiPromise: null, scheduler, reloadRegistry, stop }
+    return {
+      server,
+      tuiPromise: null,
+      scheduler,
+      cronConsumer: scheduler ? cronConsumer : null,
+      reloadRegistry,
+      stream,
+      stop,
+    }
   }
 
   const url = `ws://localhost:${server.port}`
   const tui = createTui({ url, initialPrompt })
   const tuiPromise = tui.run()
-  return { server, tuiPromise, scheduler, reloadRegistry, stop }
+  return { server, tuiPromise, scheduler, cronConsumer: scheduler ? cronConsumer : null, reloadRegistry, stream, stop }
 }
 
 async function startScheduler({
   cwd,
   loadCron,
   createSchedulerFor,
+  stream,
 }: {
   cwd: string
   loadCron: LoadCronFn
   createSchedulerFor: SchedulerFactory
+  stream: Stream
 }): Promise<Scheduler | null> {
   let result: LoadCronResult
   try {
@@ -105,28 +134,16 @@ async function startScheduler({
     console.error(`[cron] failed to load cron.json: ${result.reason}`)
     return null
   }
-  // Create the scheduler even when there are zero jobs so that reload can
-  // later swap in a non-empty schedule without a restart. Skip only when
-  // cron.json does not exist at all.
   if (!result.file) return null
 
-  const scheduler = createSchedulerFor({ cwd, file: result.file })
+  const onFire = (job: CronJob) => {
+    stream.publish({ target: { kind: 'cron', jobId: job.id }, payload: job })
+  }
+  const scheduler = createSchedulerFor({ cwd, file: result.file, onFire })
   scheduler.start()
   return scheduler
 }
 
-function makeDefaultSchedulerFactory(reloadRegistry: ReloadRegistry, sessionFactory: SessionFactory): SchedulerFactory {
-  return ({ cwd, file }) => {
-    const runner: JobRunner = {
-      ...createPromptRunner({
-        createSessionForCron: () =>
-          createSession({
-            reloadRegistry,
-            sessionManager: SessionManager.create(cwd, sessionFactory.sessionDir()),
-          }),
-      }),
-      ...createExecRunner({ cwd }),
-    }
-    return createScheduler({ jobs: file.jobs, runner })
-  }
+function makeDefaultSchedulerFactory(): SchedulerFactory {
+  return ({ file, onFire }) => createScheduler({ jobs: file.jobs, onFire })
 }
