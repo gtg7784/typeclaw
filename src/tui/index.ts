@@ -1,7 +1,7 @@
 import { Editor, Key, Markdown, matchesKey, ProcessTerminal, type Terminal, Text, TUI } from '@mariozechner/pi-tui'
 
 import { createClient as createClientDefault, type Client } from './client'
-import { formatToolEnd, formatToolStart, formatUserPromptHistory } from './format'
+import { formatQueuePanel, formatToolEnd, formatToolStart, formatUserPromptHistory } from './format'
 import { colors, editorTheme, markdownTheme } from './theme'
 
 export type ClientFactory = (url: string) => Promise<Client>
@@ -58,17 +58,42 @@ export function createTui({
     let onReplyDone: (() => void) | null = null
     let currentAssistant: Markdown | null = null
     let currentAssistantText = ''
+    let queuePanel: Text | null = null
 
     // Pi-tui's Container.addChild appends to the end of the children array.
     // The editor must remain the LAST child at all times so it stays pinned
     // to the bottom of the viewport, with chat history scrolling above it.
-    // Any new history entry is inserted by removing the editor, appending the
-    // entry, and re-appending the editor. The editor instance is reused so
-    // its internal state (text, cursor, history) survives the swap.
+    // The queue panel, when present, sits immediately ABOVE the editor (so
+    // the layout is [...history, queuePanel?, editor]). Any new history entry
+    // is inserted by stripping the queue panel + editor from the tail,
+    // appending the entry, then re-appending them in order.
     const appendHistory = (component: Text | Markdown) => {
+      if (queuePanel) tui.removeChild(queuePanel)
       tui.removeChild(editor)
       tui.addChild(component)
+      if (queuePanel) tui.addChild(queuePanel)
       tui.addChild(editor)
+    }
+
+    const updateQueuePanel = (pending: ReadonlyArray<{ id: string; text: string; ts: number }>) => {
+      if (pending.length === 0) {
+        if (queuePanel) {
+          tui.removeChild(queuePanel)
+          queuePanel = null
+          tui.requestRender()
+        }
+        return
+      }
+      const text = formatQueuePanel(pending)
+      if (queuePanel) {
+        queuePanel.setText(text)
+      } else {
+        queuePanel = new Text(text, 0, 0)
+        tui.removeChild(editor)
+        tui.addChild(queuePanel)
+        tui.addChild(editor)
+      }
+      tui.requestRender()
     }
 
     // Reset between text segments so a new Markdown block is created after
@@ -126,6 +151,10 @@ export function createTui({
           appendHistory(new Text(colors.red(`error: ${msg.message}`), 0, 0))
           finishAssistantTurn()
           tui.requestRender()
+          break
+        }
+        case 'queue_state': {
+          updateQueuePanel(msg.pending)
           break
         }
       }

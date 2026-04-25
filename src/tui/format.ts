@@ -24,6 +24,18 @@ export function formatUserPromptHistory(text: string): string {
     .join('\n')
 }
 
+export function formatQueuePanel(items: ReadonlyArray<{ text: string }>): string {
+  return items.map((item) => `${colors.dim('[QUEUED]')} ${firstLine(item.text)}`).join('\n')
+}
+
+function firstLine(text: string): string {
+  const idx = text.indexOf('\n')
+  if (idx === -1) return text
+  const head = text.slice(0, idx)
+  const remaining = text.length - idx
+  return `${head} ${colors.dim(`(+${remaining} chars)`)}`
+}
+
 function previewArgs(args: unknown): string | null {
   if (args === undefined || args === null) return null
   if (typeof args === 'object' && Object.keys(args as object).length === 0) return null

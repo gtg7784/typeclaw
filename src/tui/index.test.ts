@@ -349,3 +349,175 @@ describe('createTui', () => {
     await runPromise
   })
 })
+
+describe('createTui queue panel', () => {
+  test('renders [QUEUED] lines for each pending item when queue_state arrives', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-queue' })
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    client.emit({
+      type: 'queue_state',
+      pending: [
+        { id: 'q1', text: 'fix the lint error', ts: 1 },
+        { id: 'q2', text: 'then run the tests', ts: 2 },
+      ],
+    })
+    await flush()
+
+    // then
+    const visible = terminal.visible()
+    expect(visible).toContain('[QUEUED] fix the lint error')
+    expect(visible).toContain('[QUEUED] then run the tests')
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('updates the panel when queue_state arrives again with different items', async () => {
+    // given: an initial queue with two items
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-queue-update' })
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+    client.emit({
+      type: 'queue_state',
+      pending: [
+        { id: 'q1', text: 'old-a', ts: 1 },
+        { id: 'q2', text: 'old-b', ts: 2 },
+      ],
+    })
+    await flush()
+
+    // when: a fresh queue_state replaces both items
+    terminal.written.length = 0
+    client.emit({ type: 'queue_state', pending: [{ id: 'q3', text: 'new-c', ts: 3 }] })
+    await flush()
+
+    // then: the latest render shows the new item; nothing about the dropped ids
+    const visible = terminal.visible()
+    expect(visible).toContain('[QUEUED] new-c')
+    expect(visible).not.toContain('old-a')
+    expect(visible).not.toContain('old-b')
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('hides the panel when queue_state arrives empty', async () => {
+    // given: queue is showing one item
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-queue-hide' })
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+    client.emit({ type: 'queue_state', pending: [{ id: 'q1', text: 'pending one', ts: 1 }] })
+    await flush()
+    expect(terminal.visible()).toContain('[QUEUED] pending one')
+
+    // when
+    terminal.written.length = 0
+    client.emit({ type: 'queue_state', pending: [] })
+    await flush()
+
+    // then
+    expect(terminal.visible()).not.toContain('[QUEUED]')
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('queue panel sits ABOVE the editor (between history and editor)', async () => {
+    // given: an initial prompt produces a user-history entry, then queue arrives
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-queue-pos' })
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      initialPrompt: 'first',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    client.emit({ type: 'queue_state', pending: [{ id: 'q1', text: 'queued thing', ts: 1 }] })
+    await flush()
+
+    // then: layout invariant is [...history, queuePanel, editor]
+    const visible = terminal.visible()
+    const queuedIdx = visible.indexOf('[QUEUED] queued thing')
+    const lastEditorBorderIdx = visible.lastIndexOf('─')
+    const userPromptIdx = visible.indexOf('> first')
+    expect(queuedIdx).toBeGreaterThan(-1)
+    expect(lastEditorBorderIdx).toBeGreaterThan(-1)
+    expect(userPromptIdx).toBeGreaterThan(-1)
+    expect(userPromptIdx).toBeLessThan(queuedIdx)
+    expect(queuedIdx).toBeLessThan(lastEditorBorderIdx)
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('a new history entry arriving while queue is non-empty does not push the queue out of position', async () => {
+    // given: queue panel is visible
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-queue-history' })
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+    client.emit({ type: 'queue_state', pending: [{ id: 'q1', text: 'still queued', ts: 1 }] })
+    await flush()
+
+    // when: a history-style event (tool start) arrives, then we capture only
+    // the writes from the next render so positions reflect the LATEST frame
+    // rather than the cumulative log of past frames.
+    terminal.written.length = 0
+    client.emit({ type: 'tool_start', toolCallId: 't', name: 'Read', args: {} })
+    await flush()
+
+    // then: layout invariant is [...history, queuePanel, editor]
+    const visible = terminal.visible()
+    const toolIdx = visible.indexOf('● Read')
+    const queuedIdx = visible.indexOf('[QUEUED] still queued')
+    const lastEditorBorderIdx = visible.lastIndexOf('─')
+    expect(toolIdx).toBeGreaterThan(-1)
+    expect(queuedIdx).toBeGreaterThan(-1)
+    expect(toolIdx).toBeLessThan(queuedIdx)
+    expect(queuedIdx).toBeLessThan(lastEditorBorderIdx)
+
+    client.triggerClose()
+    await runPromise
+  })
+})
