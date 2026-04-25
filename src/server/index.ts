@@ -3,7 +3,8 @@ import type { Server as BunServer, ServerWebSocket } from 'bun'
 import { createSession as defaultCreateSession, type AgentSession, type CreateSessionOptions } from '@/agent'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { SessionFactory } from '@/sessions'
-import type { ClientMessage, ReloadResultPayload, ServerMessage } from '@/shared'
+import type { ClientMessage, PromptDelivery, QueueStateItem, ReloadResultPayload, ServerMessage } from '@/shared'
+import type { Stream, StreamMessage, StreamMessageId, Unsubscribe } from '@/stream'
 
 export type ReloadAllFn = () => Promise<ReloadAllResult>
 export type CreateSessionFn = (options?: CreateSessionOptions) => Promise<AgentSession>
@@ -14,12 +15,29 @@ export type ServerOptions = {
   reloadRegistry?: ReloadRegistry
   createSession?: CreateSessionFn
   sessionFactory?: SessionFactory
+  stream?: Stream
 }
 
 export type Server = ReturnType<typeof createServer>
 
 type WsData = { sessionId: string }
 type Ws = ServerWebSocket<WsData>
+
+type QueuedPrompt = {
+  streamMessageId: StreamMessageId
+  text: string
+  delivery: PromptDelivery
+  ts: number
+}
+
+type SessionState = {
+  session: AgentSession
+  sessionFileId: string
+  drainQueue: QueuedPrompt[]
+  draining: boolean
+  unsubBroadcast: Unsubscribe | null
+  unsubPrompts: Unsubscribe | null
+}
 
 function send(ws: Ws, msg: ServerMessage) {
   ws.send(JSON.stringify(msg))
@@ -31,8 +49,9 @@ export function createServer({
   reloadRegistry,
   createSession = defaultCreateSession,
   sessionFactory,
+  stream,
 }: ServerOptions) {
-  const sessions = new WeakMap<Ws, AgentSession>()
+  const sessionStates = new WeakMap<Ws, SessionState>()
 
   function start(): BunServer<WsData> {
     const bunServer = Bun.serve<WsData>({
@@ -46,49 +65,42 @@ export function createServer({
         async open(ws) {
           const sessionManager = sessionFactory?.createPersisted()
           const session = await createSession({ reloadRegistry, sessionManager })
-          sessions.set(ws, session)
+          const sessionFileId = sessionManager?.getSessionId() ?? ws.data.sessionId
 
-          // Upstream tool events have no duration; we derive it by correlating start/end via toolCallId.
-          const toolStartedAt = new Map<string, number>()
+          const state: SessionState = {
+            session,
+            sessionFileId,
+            drainQueue: [],
+            draining: false,
+            unsubBroadcast: null,
+            unsubPrompts: null,
+          }
+          sessionStates.set(ws, state)
 
-          session.subscribe((event) => {
-            switch (event.type) {
-              case 'message_update':
-                if (event.assistantMessageEvent.type === 'text_delta') {
-                  send(ws, { type: 'text_delta', delta: event.assistantMessageEvent.delta })
-                }
-                break
-              case 'tool_execution_start':
-                toolStartedAt.set(event.toolCallId, Date.now())
-                send(ws, {
-                  type: 'tool_start',
-                  toolCallId: event.toolCallId,
-                  name: event.toolName,
-                  args: event.args,
-                })
-                break
-              case 'tool_execution_end': {
-                const startedAt = toolStartedAt.get(event.toolCallId)
-                toolStartedAt.delete(event.toolCallId)
-                const durationMs = startedAt === undefined ? 0 : Date.now() - startedAt
-                send(ws, {
-                  type: 'tool_end',
-                  toolCallId: event.toolCallId,
-                  name: event.toolName,
-                  error: event.isError,
-                  result: event.result,
-                  durationMs,
-                })
-                break
+          forwardSessionEvents(ws, session)
+
+          if (stream) {
+            state.unsubPrompts = stream.subscribe({ target: { kind: 'session', sessionId: sessionFileId } }, (msg) =>
+              enqueuePrompt(ws, state, msg),
+            )
+
+            state.unsubBroadcast = stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
+              const payload: ServerMessage = {
+                type: 'notification',
+                payload: msg.payload,
+                ...(msg.replyTo !== undefined ? { replyTo: msg.replyTo } : {}),
+                ...(msg.meta !== undefined ? { meta: msg.meta } : {}),
               }
-            }
-          })
+              send(ws, payload)
+            })
+          }
 
-          send(ws, { type: 'connected', sessionId: ws.data.sessionId })
-          console.log(`session ${ws.data.sessionId}: open`)
+          send(ws, { type: 'connected', sessionId: sessionFileId })
+          console.log(`session ${sessionFileId}: open`)
         },
         async message(ws, raw) {
           const msg = JSON.parse(String(raw)) as ClientMessage
+          const state = sessionStates.get(ws)
 
           if (msg.type === 'reload') {
             await handleReload(ws, reloadAll)
@@ -96,17 +108,31 @@ export function createServer({
           }
 
           if (msg.type === 'abort') {
-            const session = sessions.get(ws)
-            if (!session) return
-            await session.abort()
+            if (!state) return
+            await state.session.abort()
+            return
+          }
+
+          if (msg.type === 'queue_cancel') {
+            if (!state) return
+            const before = state.drainQueue.length
+            state.drainQueue = state.drainQueue.filter((q) => q.streamMessageId !== msg.messageId)
+            if (state.drainQueue.length !== before) pushQueueState(ws, state)
             return
           }
 
           if (msg.type === 'prompt') {
-            const session = sessions.get(ws)
-            if (!session) return
+            if (!state) return
+            if (stream) {
+              stream.publish({
+                target: { kind: 'session', sessionId: state.sessionFileId },
+                payload: { kind: 'prompt', text: msg.text, delivery: msg.delivery ?? 'queue' },
+                meta: { source: 'tui' },
+              })
+              return
+            }
             try {
-              await session.prompt(msg.text)
+              await state.session.prompt(msg.text)
               send(ws, { type: 'done' })
             } catch (err) {
               send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
@@ -115,7 +141,10 @@ export function createServer({
           }
         },
         close(ws) {
-          sessions.delete(ws)
+          const state = sessionStates.get(ws)
+          state?.unsubBroadcast?.()
+          state?.unsubPrompts?.()
+          sessionStates.delete(ws)
           console.log(`session ${ws.data.sessionId}: close`)
         },
       },
@@ -126,6 +155,92 @@ export function createServer({
   }
 
   return { start }
+}
+
+function forwardSessionEvents(ws: Ws, session: AgentSession): void {
+  const toolStartedAt = new Map<string, number>()
+
+  session.subscribe((event) => {
+    switch (event.type) {
+      case 'message_update':
+        if (event.assistantMessageEvent.type === 'text_delta') {
+          send(ws, { type: 'text_delta', delta: event.assistantMessageEvent.delta })
+        }
+        break
+      case 'tool_execution_start':
+        toolStartedAt.set(event.toolCallId, Date.now())
+        send(ws, {
+          type: 'tool_start',
+          toolCallId: event.toolCallId,
+          name: event.toolName,
+          args: event.args,
+        })
+        break
+      case 'tool_execution_end': {
+        const startedAt = toolStartedAt.get(event.toolCallId)
+        toolStartedAt.delete(event.toolCallId)
+        const durationMs = startedAt === undefined ? 0 : Date.now() - startedAt
+        send(ws, {
+          type: 'tool_end',
+          toolCallId: event.toolCallId,
+          name: event.toolName,
+          error: event.isError,
+          result: event.result,
+          durationMs,
+        })
+        break
+      }
+    }
+  })
+}
+
+function enqueuePrompt(ws: Ws, state: SessionState, msg: StreamMessage): void {
+  const payload = msg.payload as { kind?: string; text?: string; delivery?: PromptDelivery }
+  if (payload?.kind !== 'prompt' || typeof payload.text !== 'string') return
+  const delivery: PromptDelivery = payload.delivery ?? 'queue'
+  if (delivery === 'interrupt') {
+    void state.session.abort().catch((err) => {
+      send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
+    })
+  }
+  state.drainQueue.push({
+    streamMessageId: msg.id,
+    text: payload.text,
+    delivery,
+    ts: msg.ts,
+  })
+  pushQueueState(ws, state)
+  void drain(ws, state)
+}
+
+async function drain(ws: Ws, state: SessionState): Promise<void> {
+  if (state.draining) return
+  state.draining = true
+  try {
+    while (state.drainQueue.length > 0) {
+      const item = state.drainQueue.shift()
+      if (!item) break
+      pushQueueState(ws, state)
+
+      try {
+        await state.session.prompt(item.text)
+        send(ws, { type: 'done' })
+      } catch (err) {
+        send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
+      }
+    }
+  } finally {
+    state.draining = false
+  }
+}
+
+function pushQueueState(ws: Ws, state: SessionState): void {
+  const pending: QueueStateItem[] = state.drainQueue.map((q) => ({
+    id: q.streamMessageId,
+    text: q.text,
+    ts: q.ts,
+  }))
+  send(ws, { type: 'queue_state', pending })
 }
 
 async function handleReload(ws: Ws, reloadAll: ReloadAllFn | undefined): Promise<void> {

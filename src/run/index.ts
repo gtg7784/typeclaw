@@ -83,6 +83,7 @@ export async function startAgent({
     reloadAll: () => reloadRegistry.reloadAll(),
     reloadRegistry,
     sessionFactory,
+    stream,
   }).start()
 
   let stopped = false

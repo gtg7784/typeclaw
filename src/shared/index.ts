@@ -1,1 +1,7 @@
-export { type ClientMessage, type ReloadResultPayload, type ServerMessage } from './protocol'
+export {
+  type ClientMessage,
+  type PromptDelivery,
+  type QueueStateItem,
+  type ReloadResultPayload,
+  type ServerMessage,
+} from './protocol'

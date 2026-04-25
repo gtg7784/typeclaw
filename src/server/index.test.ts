@@ -5,6 +5,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 import type { AgentSession, CreateSessionOptions } from '@/agent'
 import type { SessionFactory } from '@/sessions'
 import type { ServerMessage } from '@/shared'
+import { createStream } from '@/stream'
 
 import { createServer } from './index'
 
@@ -57,8 +58,16 @@ function createFakeSession(): AgentSession & {
   return fake as unknown as ReturnType<typeof createFakeSession>
 }
 
-async function startWithSession(session: AgentSession): Promise<{ url: string }> {
-  const built = createServer({ port: 0, createSession: async () => session }).start()
+async function startWithSession(
+  session: AgentSession,
+  extra: { stream?: ReturnType<typeof createStream>; sessionFactory?: SessionFactory } = {},
+): Promise<{ url: string }> {
+  const built = createServer({
+    port: 0,
+    createSession: async () => session,
+    ...(extra.stream ? { stream: extra.stream } : {}),
+    ...(extra.sessionFactory ? { sessionFactory: extra.sessionFactory } : {}),
+  }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
 }
@@ -147,7 +156,7 @@ describe('createServer tool event forwarding', () => {
   })
 })
 
-describe('createServer abort handling', () => {
+describe('createServer abort handling (no stream — fallback path)', () => {
   test('client { type: "abort" } invokes session.abort()', async () => {
     const session = createFakeSession()
     const { url } = await startWithSession(session)
@@ -267,5 +276,220 @@ describe('createServer session persistence wiring', () => {
     expect(observed[0]?.sessionManager).toBeUndefined()
 
     ws.close()
+  })
+
+  test('connected message carries the persisted session file id when a factory is configured', async () => {
+    // given
+    const session = createFakeSession()
+    const { factory } = makeStubFactory()
+    const { url } = await startWithSession(session, { sessionFactory: factory })
+
+    // when
+    const { ws, waitFor } = await connect(url)
+    const connected = await waitFor((m) => m.type === 'connected')
+
+    // then
+    if (connected.type !== 'connected') throw new Error('unreachable')
+    expect(connected.sessionId).toBeDefined()
+    expect(connected.sessionId.length).toBeGreaterThan(0)
+
+    ws.close()
+  })
+})
+
+describe('createServer with stream — input queueing bugfix', () => {
+  test('a single prompt is published to the stream, drained, and yields a done message', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.send(JSON.stringify({ type: 'prompt', text: 'hello' }))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(session.promptCalls).toEqual(['hello'])
+
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    // then
+    expect(session.promptCalls).toEqual(['hello'])
+
+    ws.close()
+  })
+
+  test('two concurrent prompts are serialized via the drain loop (no concurrent session.prompt calls)', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when: fire two prompts back-to-back while the first is still in flight
+    ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
+    ws.send(JSON.stringify({ type: 'prompt', text: 'second' }))
+    await new Promise((r) => setTimeout(r, 30))
+
+    // then: only the first reached session.prompt — the second is queued
+    expect(session.promptCalls).toEqual(['first'])
+
+    // when: first completes
+    session.resolvePrompt()
+    await new Promise((r) => setTimeout(r, 30))
+
+    // then: second now reaches session.prompt
+    expect(session.promptCalls).toEqual(['first', 'second'])
+
+    session.resolvePrompt()
+    ws.close()
+  })
+
+  test('queue_state is pushed to the client when prompts are queued and drained', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor, received } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when: send two prompts; only the first should be in flight, the second should be visible in queue_state
+    ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
+    ws.send(JSON.stringify({ type: 'prompt', text: 'second' }))
+    await new Promise((r) => setTimeout(r, 30))
+
+    const queueStates = received.filter(
+      (m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state',
+    )
+    expect(queueStates.length).toBeGreaterThan(0)
+    const last = queueStates[queueStates.length - 1]!
+    expect(last.pending.map((p) => p.text)).toEqual(['second'])
+
+    session.resolvePrompt()
+    await new Promise((r) => setTimeout(r, 20))
+    session.resolvePrompt()
+    ws.close()
+  })
+
+  test('queue_cancel removes a queued prompt before it drains', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor, received } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
+    ws.send(JSON.stringify({ type: 'prompt', text: 'second' }))
+    await new Promise((r) => setTimeout(r, 30))
+
+    const queueStateBefore = received
+      .filter((m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state')
+      .at(-1)
+    expect(queueStateBefore?.pending.map((p) => p.text)).toEqual(['second'])
+    const queuedId = queueStateBefore!.pending[0]!.id
+
+    // when: cancel the queued one
+    ws.send(JSON.stringify({ type: 'queue_cancel', messageId: queuedId }))
+    await new Promise((r) => setTimeout(r, 20))
+
+    // then: queue is empty
+    const queueStateAfter = received
+      .filter((m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state')
+      .at(-1)
+    expect(queueStateAfter?.pending).toEqual([])
+
+    // and: when first completes, second is NOT processed
+    session.resolvePrompt()
+    await new Promise((r) => setTimeout(r, 30))
+    expect(session.promptCalls).toEqual(['first'])
+
+    ws.close()
+  })
+
+  test('broadcast stream messages are forwarded to the client as notification', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    stream.publish({ target: { kind: 'broadcast' }, payload: { kind: 'mood', value: 'happy' } })
+
+    // then
+    const msg = await waitFor((m) => m.type === 'notification')
+    if (msg.type !== 'notification') throw new Error('unreachable')
+    expect(msg.payload).toEqual({ kind: 'mood', value: 'happy' })
+
+    ws.close()
+  })
+
+  test('stream messages targeted at a different sessionId are not delivered to this session', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when: publish to a different session id
+    stream.publish({
+      target: { kind: 'session', sessionId: 'someone-else' },
+      payload: { kind: 'prompt', text: 'not for us' },
+    })
+    await new Promise((r) => setTimeout(r, 20))
+
+    // then: nothing reaches this session.prompt
+    expect(session.promptCalls).toEqual([])
+
+    ws.close()
+  })
+
+  test('an interrupt-delivery prompt aborts the in-flight prompt before sending the new one', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when: first prompt starts
+    ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(session.promptCalls).toEqual(['first'])
+    expect(session.abortCalls).toBe(0)
+
+    // when: interrupt-delivery prompt arrives
+    ws.send(JSON.stringify({ type: 'prompt', text: 'urgent', delivery: 'interrupt' }))
+    await new Promise((r) => setTimeout(r, 30))
+
+    // then: abort was called, then second prompt was sent
+    expect(session.abortCalls).toBeGreaterThanOrEqual(1)
+    expect(session.promptCalls.includes('urgent')).toBe(true)
+
+    session.resolvePrompt()
+    ws.close()
+  })
+
+  test('close() unsubscribes from the stream so further publishes do not error', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.close()
+    await new Promise((r) => setTimeout(r, 20))
+
+    // when: publish a broadcast after close
+    stream.publish({ target: { kind: 'broadcast' }, payload: { kind: 'noise' } })
+
+    // then: no crash; the test passes if we get here
+    expect(true).toBe(true)
   })
 })
