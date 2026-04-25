@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
-import type { AgentSession } from '@/agent'
+import { SessionManager } from '@mariozechner/pi-coding-agent'
+
+import type { AgentSession, CreateSessionOptions } from '@/agent'
+import type { SessionFactory } from '@/sessions'
 import type { ServerMessage } from '@/shared'
 
 import { createServer } from './index'
@@ -171,6 +174,98 @@ describe('createServer abort handling', () => {
     ws.send(JSON.stringify({ type: 'abort' }))
     await new Promise((r) => setTimeout(r, 20))
     expect(session.abortCalls).toBe(1)
+    ws.close()
+  })
+})
+
+describe('createServer session persistence wiring', () => {
+  function makeStubFactory() {
+    const created: SessionManager[] = []
+    const factory: SessionFactory = {
+      createPersisted: () => {
+        const mgr = SessionManager.inMemory()
+        created.push(mgr)
+        return mgr
+      },
+      sessionDir: () => '/stub/sessions',
+    }
+    return { factory, created }
+  }
+
+  test('invokes sessionFactory.createPersisted() once per ws open and forwards the manager into createSession', async () => {
+    // given
+    const session = createFakeSession()
+    const { factory, created } = makeStubFactory()
+    const observed: CreateSessionOptions[] = []
+    const built = createServer({
+      port: 0,
+      sessionFactory: factory,
+      createSession: async (options = {}) => {
+        observed.push(options)
+        return session
+      },
+    }).start()
+    server = built
+
+    // when
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    await waitFor((m) => m.type === 'connected')
+
+    // then
+    expect(created).toHaveLength(1)
+    expect(observed).toHaveLength(1)
+    expect(observed[0]?.sessionManager).toBe(created[0])
+
+    ws.close()
+  })
+
+  test('produces a fresh sessionManager for each ws connection', async () => {
+    // given
+    const session = createFakeSession()
+    const { factory, created } = makeStubFactory()
+    const built = createServer({
+      port: 0,
+      sessionFactory: factory,
+      createSession: async () => session,
+    }).start()
+    server = built
+    const url = `ws://localhost:${built.port}`
+
+    // when
+    const a = await connect(url)
+    await a.waitFor((m) => m.type === 'connected')
+    const b = await connect(url)
+    await b.waitFor((m) => m.type === 'connected')
+
+    // then
+    expect(created).toHaveLength(2)
+    expect(created[0]).not.toBe(created[1])
+
+    a.ws.close()
+    b.ws.close()
+  })
+
+  test('omits sessionManager from createSession options when no factory is configured (preserves in-memory default)', async () => {
+    // given
+    const session = createFakeSession()
+    const observed: CreateSessionOptions[] = []
+    const built = createServer({
+      port: 0,
+      createSession: async (options = {}) => {
+        observed.push(options)
+        return session
+      },
+    }).start()
+    server = built
+
+    // when
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    await waitFor((m) => m.type === 'connected')
+
+    // then
+    expect(observed).toHaveLength(1)
+    expect(observed[0]?.sessionManager).toBeUndefined()
+
     ws.close()
   })
 })

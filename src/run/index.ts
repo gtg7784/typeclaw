@@ -1,3 +1,5 @@
+import { SessionManager } from '@mariozechner/pi-coding-agent'
+
 import { createSession } from '@/agent'
 import {
   createCronReloadable,
@@ -12,6 +14,7 @@ import {
 } from '@/cron'
 import { ReloadRegistry } from '@/reload'
 import { createServer, type Server } from '@/server'
+import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
 
 type BunServer = ReturnType<Server['start']>
@@ -29,6 +32,7 @@ export type StartAgentOptions = {
   createTui?: TuiFactory
   loadCron?: LoadCronFn
   createSchedulerFor?: SchedulerFactory
+  sessionFactory?: SessionFactory
 }
 
 export type StartAgentResult = {
@@ -47,9 +51,10 @@ export async function startAgent({
   createTui = createTuiDefault,
   loadCron = loadCronDefault,
   createSchedulerFor,
+  sessionFactory = createSessionFactory({ agentDir: cwd }),
 }: StartAgentOptions): Promise<StartAgentResult> {
   const reloadRegistry = new ReloadRegistry()
-  const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(reloadRegistry)
+  const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(reloadRegistry, sessionFactory)
   const scheduler = await startScheduler({ cwd, loadCron, createSchedulerFor: factory })
   if (scheduler) {
     reloadRegistry.register(createCronReloadable({ cwd, scheduler }))
@@ -59,6 +64,7 @@ export async function startAgent({
     port,
     reloadAll: () => reloadRegistry.reloadAll(),
     reloadRegistry,
+    sessionFactory,
   }).start()
 
   let stopped = false
@@ -109,10 +115,16 @@ async function startScheduler({
   return scheduler
 }
 
-function makeDefaultSchedulerFactory(reloadRegistry: ReloadRegistry): SchedulerFactory {
+function makeDefaultSchedulerFactory(reloadRegistry: ReloadRegistry, sessionFactory: SessionFactory): SchedulerFactory {
   return ({ cwd, file }) => {
     const runner: JobRunner = {
-      ...createPromptRunner({ createSessionForCron: () => createSession({ reloadRegistry }) }),
+      ...createPromptRunner({
+        createSessionForCron: () =>
+          createSession({
+            reloadRegistry,
+            sessionManager: SessionManager.create(cwd, sessionFactory.sessionDir()),
+          }),
+      }),
       ...createExecRunner({ cwd }),
     }
     return createScheduler({ jobs: file.jobs, runner })

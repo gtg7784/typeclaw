@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import type { CronFile, LoadCronResult, Scheduler } from '@/cron'
+import type { SessionFactory } from '@/sessions'
 import type { TuiOptions } from '@/tui'
 
 import { type LoadCronFn, type SchedulerFactory, startAgent, type TuiFactory } from './index'
@@ -163,5 +168,55 @@ describe('startAgent', () => {
     expect(factoryCalls).toHaveLength(0)
     expect(running.scheduler).toBeNull()
     expect(running.server.port).toBeGreaterThan(0)
+  })
+})
+
+describe('startAgent session persistence wiring', () => {
+  let agentDir: string
+
+  afterEach(async () => {
+    if (agentDir) await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('creates <cwd>/sessions/ on disk when no sessionFactory is injected', async () => {
+    // given
+    agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-run-'))
+
+    // when
+    running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
+
+    // then
+    expect(existsSync(join(agentDir, 'sessions'))).toBe(true)
+  })
+
+  test('uses an injected sessionFactory instead of constructing the default one', async () => {
+    // given
+    agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-run-'))
+    const stubDir = join(agentDir, 'custom-sessions')
+    let dirCalls = 0
+    let createCalls = 0
+    const stubFactory: SessionFactory = {
+      sessionDir: () => {
+        dirCalls++
+        return stubDir
+      },
+      createPersisted: () => {
+        createCalls++
+        throw new Error('createPersisted should not be called without an active ws connection')
+      },
+    }
+
+    // when
+    running = await startAgent({
+      port: 0,
+      attachTui: false,
+      cwd: agentDir,
+      loadCron: noCron,
+      sessionFactory: stubFactory,
+    })
+
+    // then
+    expect(existsSync(join(agentDir, 'sessions'))).toBe(false)
+    expect(dirCalls + createCalls).toBe(0)
   })
 })

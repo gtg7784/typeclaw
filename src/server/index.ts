@@ -2,6 +2,7 @@ import type { Server as BunServer, ServerWebSocket } from 'bun'
 
 import { createSession as defaultCreateSession, type AgentSession, type CreateSessionOptions } from '@/agent'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
+import type { SessionFactory } from '@/sessions'
 import type { ClientMessage, ReloadResultPayload, ServerMessage } from '@/shared'
 
 export type ReloadAllFn = () => Promise<ReloadAllResult>
@@ -12,6 +13,7 @@ export type ServerOptions = {
   reloadAll?: ReloadAllFn
   reloadRegistry?: ReloadRegistry
   createSession?: CreateSessionFn
+  sessionFactory?: SessionFactory
 }
 
 export type Server = ReturnType<typeof createServer>
@@ -23,7 +25,13 @@ function send(ws: Ws, msg: ServerMessage) {
   ws.send(JSON.stringify(msg))
 }
 
-export function createServer({ port, reloadAll, reloadRegistry, createSession = defaultCreateSession }: ServerOptions) {
+export function createServer({
+  port,
+  reloadAll,
+  reloadRegistry,
+  createSession = defaultCreateSession,
+  sessionFactory,
+}: ServerOptions) {
   const sessions = new WeakMap<Ws, AgentSession>()
 
   function start(): BunServer<WsData> {
@@ -36,7 +44,8 @@ export function createServer({ port, reloadAll, reloadRegistry, createSession = 
       },
       websocket: {
         async open(ws) {
-          const session = await createSession({ reloadRegistry })
+          const sessionManager = sessionFactory?.createPersisted()
+          const session = await createSession({ reloadRegistry, sessionManager })
           sessions.set(ws, session)
 
           // Upstream tool events have no duration; we derive it by correlating start/end via toolCallId.

@@ -17,6 +17,7 @@ export type { AgentSession }
 
 export type CreateSessionOptions = {
   reloadRegistry?: ReloadRegistry
+  sessionManager?: SessionManager
 }
 
 export async function createSession(options: CreateSessionOptions = {}): Promise<AgentSession> {
@@ -29,7 +30,7 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
 
   const { session } = await createAgentSession({
     model: resolveModel(config.model),
-    sessionManager: SessionManager.inMemory(),
+    sessionManager: options.sessionManager ?? SessionManager.inMemory(),
     authStorage,
     modelRegistry,
     resourceLoader,
