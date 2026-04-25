@@ -67,6 +67,7 @@ export async function startAgent({
       createSession({
         reloadRegistry,
         sessionManager: SessionManager.create(cwd, sessionFactory.sessionDir()),
+        stream,
       }),
   })
 

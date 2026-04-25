@@ -1,6 +1,8 @@
 export { createStream } from './broker'
 export {
+  type CreateStreamOptions,
   type PublishAndAwaitOptions,
+  type ScanFilter,
   type Stream,
   type StreamMessage,
   type StreamMessageId,

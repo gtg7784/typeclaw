@@ -27,6 +27,11 @@ export type SubscribeFilter = {
   replyTo?: StreamMessageId
 }
 
+export type ScanFilter = SubscribeFilter & {
+  sinceTs?: number
+  limit?: number
+}
+
 export type TargetFilter =
   | { kind: 'broadcast' }
   | { kind: 'session'; sessionId?: string }
@@ -46,7 +51,11 @@ export type Stream = {
   publishAndAwait(message: StreamMessageInput, opts?: PublishAndAwaitOptions): Promise<StreamMessage>
   reply(toStreamMessageId: StreamMessageId, payload: unknown): StreamMessageId
   subscribe(filter: SubscribeFilter, onMessage: SubscribeListener): Unsubscribe
-  scan(filter?: SubscribeFilter): StreamMessage[]
+  scan(filter?: ScanFilter): StreamMessage[]
+}
+
+export type CreateStreamOptions = {
+  historySize?: number
 }
 
 export class StreamTimeoutError extends Error {

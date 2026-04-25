@@ -1,4 +1,5 @@
 import type {
+  CreateStreamOptions,
   Stream,
   StreamMessage,
   StreamMessageId,
@@ -16,14 +17,23 @@ type Subscription = {
 }
 
 const DEFAULT_AWAIT_TIMEOUT_MS = 30_000
+const DEFAULT_HISTORY_SIZE = 1000
 
-export function createStream(): Stream {
+export function createStream(opts: CreateStreamOptions = {}): Stream {
   const subscriptions = new Set<Subscription>()
+  const historySize = Math.max(0, opts.historySize ?? DEFAULT_HISTORY_SIZE)
+  const history: StreamMessage[] = []
   let counter = 0
 
   function generateId(): StreamMessageId {
     counter++
     return `s_${Date.now().toString(36)}_${counter.toString(36)}_${Math.random().toString(36).slice(2, 8)}`
+  }
+
+  function record(msg: StreamMessage): void {
+    if (historySize === 0) return
+    history.push(msg)
+    if (history.length > historySize) history.shift()
   }
 
   function deliver(msg: StreamMessage): void {
@@ -47,6 +57,7 @@ export function createStream(): Stream {
       ...(input.replyTo !== undefined ? { replyTo: input.replyTo } : {}),
       ...(input.meta !== undefined ? { meta: input.meta } : {}),
     }
+    record(msg)
     deliver(msg)
     return msg
   }
@@ -85,6 +96,7 @@ export function createStream(): Stream {
         subscriptions.add(subscription)
         const unsub = () => subscriptions.delete(subscription)
 
+        record(requestMessage)
         deliver(requestMessage)
       })
     },
@@ -107,8 +119,18 @@ export function createStream(): Stream {
     },
 
     scan(filter) {
-      void filter
-      return []
+      const since = filter?.sinceTs
+      const limit = filter?.limit
+      const filtered: StreamMessage[] = []
+      for (let i = history.length - 1; i >= 0; i--) {
+        const msg = history[i]
+        if (!msg) continue
+        if (since !== undefined && msg.ts < since) break
+        if (filter && !matchesFilter(filter, msg)) continue
+        filtered.push(msg)
+        if (limit !== undefined && filtered.length >= limit) break
+      }
+      return filtered.reverse()
     },
   }
 }

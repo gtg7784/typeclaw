@@ -64,7 +64,7 @@ export function createServer({
       websocket: {
         async open(ws) {
           const sessionManager = sessionFactory?.createPersisted()
-          const session = await createSession({ reloadRegistry, sessionManager })
+          const session = await createSession({ reloadRegistry, sessionManager, ...(stream ? { stream } : {}) })
           const sessionFileId = sessionManager?.getSessionId() ?? ws.data.sessionId
 
           const state: SessionState = {

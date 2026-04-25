@@ -211,6 +211,104 @@ describe('createStream — replyTo correlation', () => {
   })
 })
 
+describe('createStream — scan() over the in-memory history', () => {
+  test('returns published messages in publish order (oldest first)', () => {
+    const stream = createStream()
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'a' })
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'b' })
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'c' })
+
+    const all = stream.scan()
+    expect(all.map((m) => m.payload)).toEqual(['a', 'b', 'c'])
+  })
+
+  test('filters by target kind', () => {
+    const stream = createStream()
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'b1' })
+    stream.publish({ target: { kind: 'cron', jobId: 'j1' }, payload: 'c1' })
+    stream.publish({ target: { kind: 'session', sessionId: 's1' }, payload: 's1-msg' })
+    stream.publish({ target: { kind: 'cron', jobId: 'j2' }, payload: 'c2' })
+
+    const cron = stream.scan({ target: { kind: 'cron' } })
+    expect(cron.map((m) => m.payload)).toEqual(['c1', 'c2'])
+  })
+
+  test('filters by target kind + selector', () => {
+    const stream = createStream()
+    stream.publish({ target: { kind: 'cron', jobId: 'j1' }, payload: 'c1a' })
+    stream.publish({ target: { kind: 'cron', jobId: 'j2' }, payload: 'c2' })
+    stream.publish({ target: { kind: 'cron', jobId: 'j1' }, payload: 'c1b' })
+
+    const j1 = stream.scan({ target: { kind: 'cron', jobId: 'j1' } })
+    expect(j1.map((m) => m.payload)).toEqual(['c1a', 'c1b'])
+  })
+
+  test('filters by replyTo', () => {
+    const stream = createStream()
+    const requestId = stream.publish({ target: { kind: 'broadcast' }, payload: 'request' })
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'unrelated' })
+    stream.reply(requestId, 'response')
+
+    const replies = stream.scan({ replyTo: requestId })
+    expect(replies.map((m) => m.payload)).toEqual(['response'])
+  })
+
+  test('respects sinceTs to filter older entries', async () => {
+    const stream = createStream()
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'old' })
+
+    await new Promise((r) => setTimeout(r, 5))
+    const cutoff = Date.now()
+    await new Promise((r) => setTimeout(r, 5))
+
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'new' })
+
+    const recent = stream.scan({ sinceTs: cutoff })
+    expect(recent.map((m) => m.payload)).toEqual(['new'])
+  })
+
+  test('respects limit to cap the number of returned events (most recent kept)', () => {
+    const stream = createStream()
+    for (let i = 0; i < 10; i++) {
+      stream.publish({ target: { kind: 'broadcast' }, payload: `m${i}` })
+    }
+
+    const last3 = stream.scan({ limit: 3 })
+    expect(last3.map((m) => m.payload)).toEqual(['m7', 'm8', 'm9'])
+  })
+
+  test('evicts oldest entries when historySize is exceeded', () => {
+    const stream = createStream({ historySize: 3 })
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'a' })
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'b' })
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'c' })
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'd' })
+
+    const all = stream.scan()
+    expect(all.map((m) => m.payload)).toEqual(['b', 'c', 'd'])
+  })
+
+  test('historySize=0 disables history (scan always empty)', () => {
+    const stream = createStream({ historySize: 0 })
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'a' })
+    stream.publish({ target: { kind: 'broadcast' }, payload: 'b' })
+
+    expect(stream.scan()).toEqual([])
+  })
+
+  test('records publishAndAwait requests in history', async () => {
+    const stream = createStream()
+    stream.subscribe({ target: { kind: 'session', sessionId: 'sub' } }, (msg) => stream.reply(msg.id, { ok: true }))
+
+    await stream.publishAndAwait({ target: { kind: 'session', sessionId: 'sub' }, payload: 'q' }, { timeoutMs: 1000 })
+
+    const all = stream.scan()
+    const payloads = all.map((m) => m.payload)
+    expect(payloads).toContain('q')
+    expect(all.some((m) => m.replyTo !== undefined)).toBe(true)
+  })
+})
+
 describe('createStream — publishAndAwait', () => {
   test('resolves when a matching reply is published', async () => {
     const stream = createStream()
