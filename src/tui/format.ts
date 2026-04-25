@@ -18,10 +18,14 @@ export function formatToolEnd(name: string, error: boolean, result: unknown, dur
 }
 
 export function formatUserPromptHistory(text: string): string {
-  return text
+  return stripHiddenBlocks(text)
     .split('\n')
     .map((line, idx) => `${colors.dim(idx === 0 ? '>' : '.')} ${line}`)
     .join('\n')
+}
+
+function stripHiddenBlocks(text: string): string {
+  return text.replace(/<hatching>[\s\S]*?<\/hatching>\s*/g, '').trimStart()
 }
 
 export function formatQueuePanel(items: ReadonlyArray<{ text: string }>): string {

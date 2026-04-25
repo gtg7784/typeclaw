@@ -10,7 +10,6 @@ export type TerminalFactory = () => Terminal
 export type TuiOptions = {
   url: string
   initialPrompt?: string
-  displayInitialPrompt?: string
   createClient?: ClientFactory
   createTerminal?: TerminalFactory
   exit?: (code: number) => void
@@ -19,7 +18,6 @@ export type TuiOptions = {
 export function createTui({
   url,
   initialPrompt,
-  displayInitialPrompt,
   createClient = createClientDefault,
   createTerminal = () => new ProcessTerminal(),
   exit = process.exit.bind(process),
@@ -123,6 +121,11 @@ export function createTui({
 
     client.onMessage((msg) => {
       switch (msg.type) {
+        case 'prompt_started': {
+          appendHistory(new Text(formatUserPromptHistory(msg.text), 0, 0))
+          tui.requestRender()
+          break
+        }
         case 'text_delta': {
           const block = ensureAssistantBlock()
           currentAssistantText += msg.delta
@@ -201,7 +204,6 @@ export function createTui({
 
     editor.onSubmit = (text) => {
       if (text.trim().length === 0) return
-      appendHistory(new Text(formatUserPromptHistory(text), 0, 0))
       editor.setText('')
       editor.addToHistory(text)
       tui.requestRender()
@@ -212,8 +214,6 @@ export function createTui({
     tui.requestRender()
 
     if (initialPrompt) {
-      appendHistory(new Text(formatUserPromptHistory(displayInitialPrompt ?? initialPrompt), 0, 0))
-      tui.requestRender()
       await send(initialPrompt)
     }
 

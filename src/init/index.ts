@@ -8,7 +8,7 @@ import { up } from '@/container'
 import { createTui } from '@/tui'
 
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
-import { HATCHING_GREETING, HATCHING_PROMPT } from './hatching'
+import { HATCHING_PROMPT } from './hatching'
 
 const CONFIG_FILE = 'typeclaw.json'
 const CRON_FILE = 'cron.json'
@@ -108,7 +108,6 @@ async function defaultRunHatching({ cwd, port }: { cwd: string; port: number }):
     const tui = createTui({
       url: `ws://localhost:${port}`,
       initialPrompt: HATCHING_PROMPT,
-      displayInitialPrompt: HATCHING_GREETING,
     })
     await tui.run()
     return { ok: true }

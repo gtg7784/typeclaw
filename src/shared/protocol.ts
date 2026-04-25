@@ -22,3 +22,4 @@ export type ServerMessage =
   | { type: 'reload_result'; results: ReloadResultPayload[] }
   | { type: 'notification'; payload: unknown; replyTo?: string; meta?: Record<string, string> }
   | { type: 'queue_state'; pending: QueueStateItem[] }
+  | { type: 'prompt_started'; messageId: string; text: string }

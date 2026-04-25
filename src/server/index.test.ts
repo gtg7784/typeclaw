@@ -320,6 +320,28 @@ describe('createServer with stream — input queueing bugfix', () => {
     ws.close()
   })
 
+  test('emits prompt_started before invoking session.prompt() so the TUI can render execution-order history', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.send(JSON.stringify({ type: 'prompt', text: 'hi' }))
+    const started = await waitFor((m) => m.type === 'prompt_started')
+
+    // then: prompt_started arrived; session.prompt was called with the same text
+    if (started.type !== 'prompt_started') throw new Error('unreachable')
+    expect(started.text).toBe('hi')
+    expect(started.messageId).toBeDefined()
+    expect(session.promptCalls).toEqual(['hi'])
+
+    session.resolvePrompt()
+    ws.close()
+  })
+
   test('two concurrent prompts are serialized via the drain loop (no concurrent session.prompt calls)', async () => {
     // given
     const session = createFakeSession()

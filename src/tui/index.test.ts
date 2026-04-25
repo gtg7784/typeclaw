@@ -64,11 +64,15 @@ type FakeClient = Client & {
 type FakeClientOptions = {
   autoDoneOnPrompt?: boolean
   autoDoneOnAbort?: boolean
+  autoPromptStarted?: boolean
 }
+
+let fakePromptStartedCounter = 0
 
 function fakeClient(options: FakeClientOptions = {}): FakeClient {
   const autoDoneOnPrompt = options.autoDoneOnPrompt ?? true
   const autoDoneOnAbort = options.autoDoneOnAbort ?? false
+  const autoPromptStarted = options.autoPromptStarted ?? true
   const listeners = new Set<(msg: ServerMessage) => void>()
   const closeListeners = new Set<() => void>()
   const pending: ServerMessage[] = []
@@ -95,6 +99,10 @@ function fakeClient(options: FakeClientOptions = {}): FakeClient {
     onError: () => {},
     send: (msg) => {
       sent.push(msg)
+      if (msg.type === 'prompt' && autoPromptStarted) {
+        const messageId = `fake-${++fakePromptStartedCounter}`
+        queueMicrotask(() => broadcast({ type: 'prompt_started', messageId, text: msg.text }))
+      }
       if (msg.type === 'prompt' && autoDoneOnPrompt) queueMicrotask(() => broadcast({ type: 'done' }))
       if (msg.type === 'abort' && autoDoneOnAbort) queueMicrotask(() => broadcast({ type: 'done' }))
     },
@@ -122,7 +130,6 @@ describe('createTui', () => {
     const tui = createTui({
       url: 'ws://ignored',
       initialPrompt: '<hatching>secret</hatching>\n\nHello!',
-      displayInitialPrompt: 'Hello!',
       createClient: async () => client,
       createTerminal: () => terminal,
     })
@@ -479,6 +486,74 @@ describe('createTui queue panel', () => {
     expect(userPromptIdx).toBeGreaterThan(-1)
     expect(userPromptIdx).toBeLessThan(queuedIdx)
     expect(queuedIdx).toBeLessThan(lastEditorBorderIdx)
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('queued prompts appear in chat history at execution time, not submission time', async () => {
+    // given: a slow first turn so the user can queue a second prompt mid-stream
+    const terminal = new FakeTerminal()
+    const client = fakeClient({ autoPromptStarted: false, autoDoneOnPrompt: false })
+    client.emit({ type: 'connected', sessionId: 'sid-order' })
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when: user submits A; server starts the first turn (prompt_started → text_delta);
+    // user submits B while the first turn is still streaming
+    terminal.feed('A')
+    terminal.feed('\r')
+    await flush()
+    client.emit({ type: 'prompt_started', messageId: 'm-a', text: 'A' })
+    await flush()
+    client.emit({ type: 'text_delta', delta: 'response to A' })
+    await flush()
+
+    terminal.feed('B')
+    terminal.feed('\r')
+    await flush()
+    client.emit({ type: 'queue_state', pending: [{ id: 'm-b', text: 'B', ts: 1 }] })
+    await flush()
+
+    // then: B is shown in the QUEUED panel but NOT yet in the chat history
+    let visible = terminal.visible()
+    expect(visible).toContain('> A')
+    expect(visible).toContain('response to A')
+    expect(visible).toContain('[QUEUED] B')
+    const aIdxEarly = visible.indexOf('> A')
+    expect(visible.indexOf('> B', aIdxEarly + 1)).toBe(-1)
+
+    // when: A finishes, drain pops B and emits prompt_started for B
+    client.emit({ type: 'done' })
+    await flush()
+    client.emit({ type: 'queue_state', pending: [] })
+    await flush()
+    client.emit({ type: 'prompt_started', messageId: 'm-b', text: 'B' })
+    await flush()
+    client.emit({ type: 'text_delta', delta: 'response to B' })
+    await flush()
+    client.emit({ type: 'done' })
+    await flush()
+
+    // then: in the latest rendered frame, chat reads A → response A → B → response B
+    // in execution order, and the QUEUED panel for B is no longer rendered.
+    visible = terminal.visible()
+    const aPromptIdx = visible.lastIndexOf('> A')
+    const aReplyIdx = visible.lastIndexOf('response to A')
+    const bPromptIdx = visible.lastIndexOf('> B')
+    const bReplyIdx = visible.lastIndexOf('response to B')
+    const lastQueueBIdx = visible.lastIndexOf('[QUEUED] B')
+    expect(aPromptIdx).toBeGreaterThan(-1)
+    expect(aReplyIdx).toBeGreaterThan(aPromptIdx)
+    expect(bPromptIdx).toBeGreaterThan(aReplyIdx)
+    expect(bReplyIdx).toBeGreaterThan(bPromptIdx)
+    expect(lastQueueBIdx).toBeLessThan(bPromptIdx)
 
     client.triggerClose()
     await runPromise

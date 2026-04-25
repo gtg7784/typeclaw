@@ -131,6 +131,7 @@ export function createServer({
               })
               return
             }
+            send(ws, { type: 'prompt_started', messageId: `local-${crypto.randomUUID()}`, text: msg.text })
             try {
               await state.session.prompt(msg.text)
               send(ws, { type: 'done' })
@@ -221,6 +222,7 @@ async function drain(ws: Ws, state: SessionState): Promise<void> {
       const item = state.drainQueue.shift()
       if (!item) break
       pushQueueState(ws, state)
+      send(ws, { type: 'prompt_started', messageId: item.streamMessageId, text: item.text })
 
       try {
         await state.session.prompt(item.text)
