@@ -24,11 +24,18 @@
     "@clack/prompts": "^1.2.0",
     "@mariozechner/pi-coding-agent": "^0.67.3",
     "@mariozechner/pi-tui": "^0.67.3",
+    "@mozilla/readability": "^0.6.0",
+    "cheerio": "^1.2.0",
     "citty": "^0.2.2",
-    "cron-parser": "^5.5.0"
+    "cron-parser": "^5.5.0",
+    "jq-wasm": "^1.1.0-jq-1.8.1",
+    "jsdom": "^29.0.2",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@types/bun": "latest",
+    "@types/jsdom": "^28.0.1",
+    "@types/turndown": "^5.0.6",
     "@typescript/native-preview": "^7.0.0-dev.20260416.1",
     "oxfmt": "^0.45.0",
     "oxlint": "^1.60.0"

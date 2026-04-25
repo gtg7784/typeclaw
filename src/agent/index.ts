@@ -13,6 +13,7 @@ import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
 import { createStreamSnapshotTool } from './tools/stream-snapshot'
+import { webfetchTool } from './tools/webfetch'
 import { websearchTool } from './tools/websearch'
 
 export type { AgentSession }
@@ -28,6 +29,7 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
   const resourceLoader = await createResourceLoader()
   const customTools = [
     websearchTool,
+    webfetchTool,
     ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
     ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
   ]
