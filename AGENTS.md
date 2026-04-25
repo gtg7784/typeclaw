@@ -110,3 +110,45 @@ Domain logic lives in `src/<domain>/`. Examples: `src/init/`, `src/config/`, `sr
 - `src/cli/` is **UI only** — citty commands, clack prompts, spinners, `process.exit`. Delegate to `src/<domain>/` for anything testable.
 - Tests live next to code as `<file>.test.ts`.
 - Domain entry points are `src/<domain>/index.ts`. Split into multiple files only when a single file gets complex.
+
+## Message Stream
+
+`src/stream/` is the in-process coordination primitive that the WS server, cron, and the agent's own tool use to talk to each other. It's an in-memory pub/sub keyed by typed targets. **Nothing is persisted**; if the Bun process crashes, all in-flight stream state is lost. Persistence is deliberately out of scope — agentic work is not resumable mid-LLM-call, and the container is the failure unit.
+
+### Targets
+
+A `StreamMessage` carries a `target` discriminating four kinds, each with documented semantics:
+
+- **`broadcast`** — fan-out to every matching subscriber. Used for live notifications (mood, status, presence). The WS server forwards these to connected TUIs as `notification` messages.
+- **`session: { sessionId }`** — addressed to a specific live `AgentSession`. Used for TUI input queueing — the WS server publishes here, the per-session drain loop subscribes. Exactly one logical consumer per session.
+- **`new-session: { role? }`** — spawn a fresh session and deliver the initial message. Reserved for subagent delegation. Not wired to a consumer yet.
+- **`cron: { jobId }`** — emitted by the cron scheduler when a job fires. Consumed by the `CronConsumer` in `src/cron/consumer.ts`, which dispatches to the prompt or exec runner and handles per-jobId coalescing.
+
+Targets are typed unions, not stringly-typed topics. Adding a fifth kind is a deliberate design choice; we do not have a generic `handler` extension point.
+
+### Wire protocol contract
+
+The TUI ↔ WS protocol depends on the stream-driven drain loop in two non-obvious ways. **A wire-protocol change without an in-place container restart will silently break the live UX** because the server runs the source it loaded at process start.
+
+- **Concurrent prompts must not race.** When a `Stream` is wired into the server, `{ type: 'prompt' }` is **not** awaited inline. It's published to `target: { kind: 'session' }` and a per-session drain loop owns all `session.prompt()` calls. The fallback path (no stream) preserves the old direct-prompt behavior so `createServer` is still usable in tests that don't inject a stream. See `src/server/index.ts` `drain()` and `enqueuePrompt()`.
+- **Queued user prompts render in execution order, not submission order.** The TUI does not append the `> text` history line at submit time. The server emits `{ type: 'prompt_started', messageId, text }` from the drain loop right after `shift()` and before `await session.prompt()`. The TUI's `prompt_started` handler is what appends the history line. This means an old container running pre-`prompt_started` server code will leave typed messages invisible in the chat — restart the container after any change to the drain or protocol. The `[QUEUED]` panel above the editor still shows pending items in the meantime.
+- **`interrupt`-delivery prompts abort on receipt, not in queue order.** `delivery: 'interrupt'` calls `session.abort()` from the publish path so the in-flight `prompt()` resolves immediately, then the drain loop dequeues the new prompt as usual.
+
+### Cron split (celery model)
+
+`src/cron/scheduler.ts` is a **pure clock**. It computes next-fire times and invokes `onFire(job)`. It knows nothing about how a job runs.
+
+`src/cron/consumer.ts` is the **executor**. It subscribes to `target: { kind: 'cron' }`, dispatches by `job.kind` to the prompt or exec runner, and tracks `inFlight` jobIds for per-job coalescing. The scheduler does not coalesce; the consumer does.
+
+This split means a long-running job no longer blocks subsequent ticks at the scheduler layer — the scheduler fires N times for N ticks, and any overlapping fires for the same job are dropped by the consumer with a warning. Same observable behavior as before, cleaner ownership.
+
+### `stream_snapshot` agent tool
+
+`src/agent/tools/stream-snapshot.ts` exposes a read-only tool to the agent that reads from the broker's bounded ring buffer (default 1000 events). The agent can ask "what cron jobs fired in the last minute?" or "did any broadcasts arrive while I was thinking?" without any wire round-trip — the tool is in-process. Read-only by design: the agent cannot publish via this tool. Wired into `createSession` only when a `Stream` is injected.
+
+### Rules of thumb
+
+- **The stream is in-memory and ephemeral.** Anything that must survive a restart belongs elsewhere (session JSONL files, `cron.json`, MEMORY.md). Don't try to use the stream as a queue for important work.
+- **Wire-protocol changes require a container restart.** The Bun process loads the source once at start. Editing `src/server/` or `src/shared/protocol.ts` and reconnecting the TUI is not enough; the container must restart (`typeclaw down && typeclaw up`) so the server picks up the new code.
+- **Each new target kind is a deliberate addition.** When you find yourself wanting to use the stream for a new use case, prefer a typed target (`{ kind: 'whisper', ... }`, `{ kind: 'channel', ... }`) over a generic catch-all. The four current kinds each pay for themselves with a concrete consumer.
+- **Drain loops own serialization.** If a target should have one logical consumer (`session`, `cron`), the consumer is responsible for not running things concurrently. The broker fans out; it doesn't gate.
