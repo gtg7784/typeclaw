@@ -3,23 +3,23 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { planDown } from './down'
+import { planStop } from './stop'
 
 let root: string
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'typeclaw-container-down-'))
+  root = await mkdtemp(join(tmpdir(), 'typeclaw-container-stop-'))
 })
 
 afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
-describe('planDown', () => {
+describe('planStop', () => {
   test('derives container name from the folder basename', async () => {
     const folder = join(root, 'coder')
     await mkdir(folder)
 
-    expect(planDown(folder)).toEqual({ containerName: 'coder' })
+    expect(planStop(folder)).toEqual({ containerName: 'coder' })
   })
 })

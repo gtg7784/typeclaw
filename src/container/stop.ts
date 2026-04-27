@@ -1,25 +1,25 @@
 import { containerExists, containerNameFromCwd, getBun } from './shared'
 
-export type DownPlan = {
+export type StopPlan = {
   containerName: string
 }
 
-export type DownResult = { ok: true; containerName: string; running: boolean } | { ok: false; reason: string }
+export type StopResult = { ok: true; containerName: string; running: boolean } | { ok: false; reason: string }
 
-export async function down({ cwd }: { cwd: string }): Promise<DownResult> {
+export async function stop({ cwd }: { cwd: string }): Promise<StopResult> {
   const bun = getBun()
   if (!bun) return { ok: false, reason: 'bun runtime not available' }
 
-  const { containerName } = planDown(cwd)
+  const { containerName } = planStop(cwd)
 
   try {
     if (!(await containerExists(containerName))) {
       return { ok: true, containerName, running: false }
     }
 
-    const stop = bun.spawn({ cmd: ['docker', 'stop', containerName], cwd, stdout: 'pipe', stderr: 'pipe' })
-    if ((await stop.exited) !== 0) {
-      const stderr = await new Response(stop.stderr).text()
+    const dockerStop = bun.spawn({ cmd: ['docker', 'stop', containerName], cwd, stdout: 'pipe', stderr: 'pipe' })
+    if ((await dockerStop.exited) !== 0) {
+      const stderr = await new Response(dockerStop.stderr).text()
       return { ok: false, reason: `docker stop failed: ${stderr.trim() || 'no stderr'}` }
     }
     // `docker run --rm` auto-removes on stop, so no explicit `docker rm` needed.
@@ -30,6 +30,6 @@ export async function down({ cwd }: { cwd: string }): Promise<DownResult> {
   }
 }
 
-export function planDown(cwd: string): DownPlan {
+export function planStop(cwd: string): StopPlan {
   return { containerName: containerNameFromCwd(cwd) }
 }

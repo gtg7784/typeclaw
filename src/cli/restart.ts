@@ -1,7 +1,7 @@
 import { defineCommand } from 'citty'
 
 import { config, validateConfig } from '@/config'
-import { down, up } from '@/container'
+import { start, stop } from '@/container'
 import { isInitialized } from '@/init'
 
 export const restartCommand = defineCommand({
@@ -35,7 +35,7 @@ export const restartCommand = defineCommand({
       process.exit(1)
     }
 
-    const stopped = await down({ cwd })
+    const stopped = await stop({ cwd })
     if (!stopped.ok) {
       console.error(stopped.reason)
       process.exit(1)
@@ -44,7 +44,7 @@ export const restartCommand = defineCommand({
       console.log(`Stopped ${stopped.containerName}.`)
     }
 
-    const started = await up({ cwd, port: Number(args.port), forceBuild: args.build })
+    const started = await start({ cwd, port: Number(args.port), forceBuild: args.build })
     if (!started.ok) {
       console.error(started.reason)
       process.exit(1)

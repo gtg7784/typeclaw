@@ -1,6 +1,6 @@
 import { defineCommand } from 'citty'
 
-import { down } from '@/container'
+import { stop } from '@/container'
 
 export const stopCommand = defineCommand({
   meta: {
@@ -9,7 +9,7 @@ export const stopCommand = defineCommand({
   },
   async run() {
     const cwd = process.cwd()
-    const result = await down({ cwd })
+    const result = await stop({ cwd })
 
     if (!result.ok) {
       console.error(result.reason)

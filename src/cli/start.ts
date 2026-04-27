@@ -1,7 +1,7 @@
 import { defineCommand } from 'citty'
 
 import { config } from '@/config'
-import { up } from '@/container'
+import { start } from '@/container'
 import { isInitialized } from '@/init'
 
 export const startCommand = defineCommand({
@@ -29,7 +29,7 @@ export const startCommand = defineCommand({
       process.exit(1)
     }
 
-    const result = await up({ cwd, port: Number(args.port), forceBuild: args.build })
+    const result = await start({ cwd, port: Number(args.port), forceBuild: args.build })
     if (!result.ok) {
       console.error(result.reason)
       process.exit(1)

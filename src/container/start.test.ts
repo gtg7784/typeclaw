@@ -7,12 +7,12 @@ import { basename, join } from 'node:path'
 import { buildDockerfile } from '@/init/dockerfile'
 import { buildGitignore } from '@/init/gitignore'
 
-import { commitSystemFile, type DockerExec, planUp, refreshDockerfile, refreshGitignore, up } from './up'
+import { commitSystemFile, type DockerExec, planStart, refreshDockerfile, refreshGitignore, start } from './start'
 
 let root: string
 
 beforeEach(async () => {
-  root = await mkdtemp(join(tmpdir(), 'typeclaw-container-up-'))
+  root = await mkdtemp(join(tmpdir(), 'typeclaw-container-start-'))
 })
 
 afterEach(async () => {
@@ -50,9 +50,9 @@ function labelValue(runArgs: string[], key: string): string | undefined {
   return undefined
 }
 
-describe('planUp', () => {
+describe('planStart', () => {
   test('throws a helpful error when Dockerfile is missing', async () => {
-    await expect(planUp({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow(/Dockerfile not found/)
+    await expect(planStart({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow(/Dockerfile not found/)
   })
 
   test('produces a docker run command with name, port publish, env-file, and agent mount', async () => {
@@ -60,7 +60,7 @@ describe('planUp', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeFile(join(root, '.env'), 'FIREWORKS_API_KEY=fw_test\n')
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(plan.runArgs[0]).toBe('run')
     expect(plan.runArgs).toContain('-d')
@@ -79,7 +79,7 @@ describe('planUp', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(labelValue(plan.runArgs, 'com.docker.compose.project')).toBe('typeclaw')
   })
@@ -88,7 +88,7 @@ describe('planUp', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(labelValue(plan.runArgs, 'com.docker.compose.service')).toBe(basename(root))
   })
@@ -97,7 +97,7 @@ describe('planUp', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(labelValue(plan.runArgs, 'com.docker.compose.project.working_dir')).toBe(root)
     expect(labelValue(plan.runArgs, 'com.docker.compose.oneoff')).toBe('False')
@@ -109,7 +109,7 @@ describe('planUp', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(plan.runArgs).not.toContain('--env-file')
   })
@@ -120,7 +120,7 @@ describe('planUp', () => {
       await writeDockerfile(root)
       await writePackageJson(root, { typeclaw: `file:${typeclawRepo}` })
 
-      const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
       expect(plan.runArgs).toContain(`${typeclawRepo}:${typeclawRepo}:ro`)
     } finally {
@@ -133,7 +133,7 @@ describe('planUp', () => {
     await mkdir(join(root, 'vendor', 'typeclaw'), { recursive: true })
     await writePackageJson(root, { typeclaw: 'file:./vendor/typeclaw' })
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     const mirrorMounts = plan.runArgs.filter((a) => a.endsWith(':ro'))
     expect(mirrorMounts).toHaveLength(0)
@@ -143,7 +143,7 @@ describe('planUp', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(plan.runArgs.filter((a) => a.endsWith(':ro'))).toHaveLength(0)
   })
@@ -152,8 +152,8 @@ describe('planUp', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const missing = await planUp({ cwd: root, port: 8973, imageExists: false })
-    const present = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const missing = await planStart({ cwd: root, port: 8973, imageExists: false })
+    const present = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(missing.needsBuild).toBe(true)
     expect(present.needsBuild).toBe(false)
@@ -163,8 +163,8 @@ describe('planUp', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const forced = await planUp({ cwd: root, port: 8973, imageExists: true, forceBuild: true })
-    const notForced = await planUp({ cwd: root, port: 8973, imageExists: true, forceBuild: false })
+    const forced = await planStart({ cwd: root, port: 8973, imageExists: true, forceBuild: true })
+    const notForced = await planStart({ cwd: root, port: 8973, imageExists: true, forceBuild: false })
 
     expect(forced.needsBuild).toBe(true)
     expect(notForced.needsBuild).toBe(false)
@@ -174,19 +174,19 @@ describe('planUp', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(plan.containerName).toBe(basename(root))
     expect(plan.imageTag).toBe(`typeclaw-${basename(root)}`)
   })
 })
 
-describe('planUp mounts', () => {
+describe('planStart mounts', () => {
   test('emits no mount flags when typeclaw.json is missing', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
   })
@@ -196,7 +196,7 @@ describe('planUp mounts', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeTypeclawConfig(root, { mounts: [] })
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
   })
@@ -208,7 +208,7 @@ describe('planUp mounts', () => {
       await writePackageJson(root, { typeclaw: '^0.1.0' })
       await writeTypeclawConfig(root, { mounts: [{ name: 'projects', path: projectDir }] })
 
-      const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
       expect(plan.runArgs).toContain('-v')
       expect(plan.runArgs).toContain(`${projectDir}:/agent/mounts/projects`)
@@ -224,7 +224,7 @@ describe('planUp mounts', () => {
       await writePackageJson(root, { typeclaw: '^0.1.0' })
       await writeTypeclawConfig(root, { mounts: [{ name: 'notes', path: notesDir, readOnly: true }] })
 
-      const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
       expect(plan.runArgs).toContain(`${notesDir}:/agent/mounts/notes:ro`)
     } finally {
@@ -237,7 +237,7 @@ describe('planUp mounts', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeTypeclawConfig(root, { mounts: [{ name: 'home-thing', path: '~/some-dir' }] })
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     const home = process.env.HOME ?? ''
     expect(plan.runArgs).toContain(`${home}/some-dir:/agent/mounts/home-thing`)
@@ -256,7 +256,7 @@ describe('planUp mounts', () => {
         ],
       })
 
-      const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
       const mountFlags = plan.runArgs.filter((arg) => arg.includes(':/agent/mounts/'))
       expect(mountFlags).toEqual([`${a}:/agent/mounts/first`, `${b}:/agent/mounts/second`])
@@ -273,7 +273,7 @@ describe('planUp mounts', () => {
       await writePackageJson(root, { typeclaw: '^0.1.0' })
       await writeTypeclawConfig(root, { mounts: [{ name: 'projects', path: projectDir }] })
 
-      const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
       expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
       const mountIdx = plan.runArgs.indexOf(`${projectDir}:/agent/mounts/projects`)
@@ -289,7 +289,7 @@ describe('planUp mounts', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeFile(join(root, 'typeclaw.json'), '{ not valid json')
 
-    await expect(planUp({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow()
+    await expect(planStart({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow()
   })
 
   test('treats a typeclaw.json without a mounts field as no mounts', async () => {
@@ -300,7 +300,7 @@ describe('planUp mounts', () => {
       `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })}\n`,
     )
 
-    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
 
     expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
   })
@@ -310,7 +310,7 @@ describe('planUp mounts', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeTypeclawConfig(root, { mounts: [{ name: 'BadName', path: '/x' }] })
 
-    await expect(planUp({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow()
+    await expect(planStart({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow()
   })
 })
 
@@ -523,7 +523,7 @@ function fakeDockerExec(scenario: { imageExists: boolean; containerExists: boole
   return { exec, calls }
 }
 
-describe('up (composition)', () => {
+describe('start (composition)', () => {
   test('refreshes Dockerfile from the template on every start, even without --build', async () => {
     // given: a stale Dockerfile and an existing image (no rebuild needed)
     await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
@@ -531,7 +531,7 @@ describe('up (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
 
     // when: up runs WITHOUT --build
-    const result = await up({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, port: 8973, exec })
 
     // then: the Dockerfile on disk was refreshed even though docker build never ran
     expect(result.ok).toBe(true)
@@ -548,7 +548,7 @@ describe('up (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
 
     // when
-    const result = await up({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, port: 8973, exec })
 
     // then
     expect(result.ok).toBe(true)
@@ -562,7 +562,7 @@ describe('up (composition)', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({ imageExists: true, containerExists: false })
 
-    const result = await up({ cwd: root, port: 8973, forceBuild: true, exec })
+    const result = await start({ cwd: root, port: 8973, forceBuild: true, exec })
 
     expect(result.ok).toBe(true)
     const buildCall = calls.find((c) => c.args[0] === 'build')
@@ -583,7 +583,7 @@ describe('up (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
 
     // when: up runs (refresh will mutate both files, commit should land them)
-    const result = await up({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, port: 8973, exec })
 
     // then: HEAD advanced and the new commits exist with the expected subjects
     expect(result.ok).toBe(true)
@@ -606,7 +606,7 @@ describe('up (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
 
     // when
-    const result = await up({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, port: 8973, exec })
 
     // then: no new commits were created
     expect(result.ok).toBe(true)
@@ -619,7 +619,7 @@ describe('up (composition)', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({ imageExists: true, containerExists: false })
 
-    const result = await up({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, port: 8973, exec })
 
     expect(result.ok).toBe(true)
     expect(calls.find((c) => c.args[0] === 'build')).toBeUndefined()
@@ -631,7 +631,7 @@ describe('up (composition)', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({ imageExists: true, containerExists: true })
 
-    const result = await up({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, port: 8973, exec })
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toMatch(/already running/)

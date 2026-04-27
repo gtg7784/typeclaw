@@ -4,7 +4,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { config } from '@/config'
-import { up } from '@/container'
+import { start } from '@/container'
 import { createTui } from '@/tui'
 
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
@@ -81,7 +81,7 @@ export async function runInit({
 
 async function defaultRunHatching({ cwd, port }: { cwd: string; port: number }): Promise<HatchingResult> {
   try {
-    const launch = await up({ cwd, port })
+    const launch = await start({ cwd, port })
     if (!launch.ok) return { ok: false, reason: launch.reason }
 
     await waitForAgent(`http://localhost:${port}`, { timeoutMs: 30_000 })

@@ -16,7 +16,7 @@ const COMPOSE_PROJECT = 'typeclaw'
 
 const MOUNT_TARGET_PREFIX = '/agent/mounts'
 
-export type UpPlan = {
+export type StartPlan = {
   containerName: string
   imageTag: string
   buildContext: string
@@ -25,7 +25,7 @@ export type UpPlan = {
   needsBuild: boolean
 }
 
-export type PlanUpOptions = {
+export type PlanStartOptions = {
   cwd: string
   port: number
   imageExists: boolean
@@ -39,16 +39,23 @@ export type DockerExec = (
   options?: { cwd?: string; inheritStdio?: boolean },
 ) => Promise<DockerExecResult>
 
-export type UpOptions = {
+export type StartOptions = {
   cwd: string
   port: number
   forceBuild?: boolean
   exec?: DockerExec
 }
 
-export type UpResult = { ok: true; plan: UpPlan; containerId: string; built: boolean } | { ok: false; reason: string }
+export type StartResult =
+  | { ok: true; plan: StartPlan; containerId: string; built: boolean }
+  | { ok: false; reason: string }
 
-export async function up({ cwd, port, forceBuild = false, exec = defaultDockerExec }: UpOptions): Promise<UpResult> {
+export async function start({
+  cwd,
+  port,
+  forceBuild = false,
+  exec = defaultDockerExec,
+}: StartOptions): Promise<StartResult> {
   try {
     // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
     // CLI templates on every start (not just --build) so version drift between
@@ -59,7 +66,7 @@ export async function up({ cwd, port, forceBuild = false, exec = defaultDockerEx
     await commitSystemFile(cwd, DOCKERFILE, 'Update Dockerfile')
     await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
 
-    const plan = await planUp({
+    const plan = await planStart({
       cwd,
       port,
       imageExists: await imageExists(exec, imageTagFromCwd(cwd)),
@@ -88,7 +95,12 @@ export async function up({ cwd, port, forceBuild = false, exec = defaultDockerEx
   }
 }
 
-export async function planUp({ cwd, port, imageExists, forceBuild = false }: PlanUpOptions): Promise<UpPlan> {
+export async function planStart({
+  cwd,
+  port,
+  imageExists,
+  forceBuild = false,
+}: PlanStartOptions): Promise<StartPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
 
