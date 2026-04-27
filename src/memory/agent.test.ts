@@ -3,6 +3,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { formatLocalDate } from '@/shared'
+
 import {
   createMemoryLoggerSpawner,
   isMemoryLoggerPayload,
@@ -97,7 +99,7 @@ describe('createMemoryLoggerSpawner', () => {
     const agentDir = makeAgentDir()
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
-    const today = new Date().toISOString().slice(0, 10)
+    const today = formatLocalDate()
     const streamFile = join(agentDir, 'memory', `${today}.md`)
     writeFileSync(streamFile, ['<!-- fragment source=ses_abc entry=watermrk -->', '## prior', 'body', ''].join('\n'))
 

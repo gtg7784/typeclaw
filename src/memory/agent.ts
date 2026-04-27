@@ -4,6 +4,7 @@ import { createAgentSession, DefaultResourceLoader, readTool, SessionManager } f
 
 import { getAuth } from '@/agent/auth'
 import { config, resolveModel } from '@/config'
+import { formatLocalDate } from '@/shared'
 import type { SubagentSpawner } from '@/subagent'
 
 import { appendTool } from './append-tool'
@@ -45,7 +46,7 @@ export function createMemoryLoggerSpawner(options: CreateMemoryLoggerSpawnerOpti
       throw new Error('memory-logger: invalid payload shape')
     }
 
-    const today = new Date().toISOString().slice(0, 10)
+    const today = formatLocalDate()
     const streamFile = join(payload.agentDir, 'memory', `${today}.md`)
     const watermark = readWatermark(streamFile, payload.parentSessionId)
 

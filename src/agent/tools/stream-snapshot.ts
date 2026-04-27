@@ -1,6 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
+import { formatLocalDateTime } from '@/shared'
 import type { ScanFilter, Stream, StreamMessage, TargetFilter } from '@/stream'
 
 const DEFAULT_LIMIT = 50
@@ -146,7 +147,7 @@ function describeFilter(params: {
 }
 
 function formatEventLine(event: StreamMessage): string {
-  const time = new Date(event.ts).toISOString()
+  const time = formatLocalDateTime(new Date(event.ts))
   const targetLabel = describeTarget(event.target)
   const payloadSummary = summarizePayload(event.payload)
   const replyMarker = event.replyTo !== undefined ? ` [reply→${event.replyTo}]` : ''
