@@ -13,7 +13,7 @@ RUN apt-get update \\
  && rm -rf /var/lib/apt/lists/*
 
 # The agent folder (including node_modules) is bind-mounted at runtime by
-# \`typeclaw up\`, so we do not COPY or install here. This keeps the image
+# \`typeclaw start\`, so we do not COPY or install here. This keeps the image
 # tiny and lets edits on the host take effect without rebuilds.
 
 ENV NODE_ENV=production

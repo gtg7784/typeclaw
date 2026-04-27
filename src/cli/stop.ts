@@ -2,9 +2,9 @@ import { defineCommand } from 'citty'
 
 import { down } from '@/container'
 
-export const downCommand = defineCommand({
+export const stopCommand = defineCommand({
   meta: {
-    name: 'down',
+    name: 'stop',
     description: 'stop the agent container (host stage)',
   },
   async run() {

@@ -62,7 +62,7 @@ export const init = defineCommand({
     }
 
     if (hatchingOk) {
-      console.log('\nContainer is still running. Run `typeclaw tui` to reattach or `typeclaw down` to stop.')
+      console.log('\nContainer is still running. Run `typeclaw tui` to reattach or `typeclaw stop` to stop.')
     }
   },
 })

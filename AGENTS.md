@@ -12,8 +12,9 @@ Where you are when you run `bun test` or `bun run typecheck` on the typeclaw sou
 
 Where an end user lives once they run `typeclaw init`. Their cwd is an agent folder (e.g. `~/coder/`), which holds `typeclaw.json`, `.env`, `package.json` with `typeclaw` as a dependency, markdown files, and session/memory/workspace dirs. Commands that run here are **launchers**, not the agent itself:
 
-- `typeclaw up` — spawn the container (`docker run`) or load the service (`launchctl load`) configured in `typeclaw.json`.
-- `typeclaw down` — stop it.
+- `typeclaw start` — spawn the container (`docker run`) or load the service (`launchctl load`) configured in `typeclaw.json`.
+- `typeclaw stop` — stop it.
+- `typeclaw restart` — `stop` then `start` with the same flags as `start`.
 - `typeclaw tui` — attach a TUI client over a websocket to a running agent.
 - `typeclaw compose …` — orchestrate multiple agents across multiple agent folders.
 
@@ -29,9 +30,9 @@ Inside the container, `FIREWORKS_API_KEY` and friends arrive through `--env-file
 
 ### Rules of thumb
 
-- **CLI command names encode stage.** `init` is host-only (it _creates_ the host stage). `up` / `down` / `tui` / `compose` are host-only launchers. `run` is container-only. Anything that reads `process.cwd()` implicitly assumes host stage unless it's called from `run`.
+- **CLI command names encode stage.** `init` is host-only (it _creates_ the host stage). `start` / `stop` / `restart` / `tui` / `compose` are host-only launchers. `run` is container-only. Anything that reads `process.cwd()` implicitly assumes host stage unless it's called from `run`.
 - **When writing paths, annotate the stage.** `./typeclaw.json` means the host-stage agent folder; `/agent/typeclaw.json` means the container stage. Never ship a string that silently conflates them.
-- **The Dockerfile lives at the boundary.** `typeclaw init` (dev code running in host stage) writes a Dockerfile that `typeclaw up` (host stage) feeds to `docker run`, which then invokes `typeclaw run` (container stage) as the entrypoint.
+- **The Dockerfile lives at the boundary.** `typeclaw init` (dev code running in host stage) writes a Dockerfile that `typeclaw start` (host stage) feeds to `docker run`, which then invokes `typeclaw run` (container stage) as the entrypoint.
 
 ## Testing Philosophy
 
@@ -149,6 +150,6 @@ This split means a long-running job no longer blocks subsequent ticks at the sch
 ### Rules of thumb
 
 - **The stream is in-memory and ephemeral.** Anything that must survive a restart belongs elsewhere (session JSONL files, `cron.json`, MEMORY.md). Don't try to use the stream as a queue for important work.
-- **Wire-protocol changes require a container restart.** The Bun process loads the source once at start. Editing `src/server/` or `src/shared/protocol.ts` and reconnecting the TUI is not enough; the container must restart (`typeclaw down && typeclaw up`) so the server picks up the new code.
+- **Wire-protocol changes require a container restart.** The Bun process loads the source once at start. Editing `src/server/` or `src/shared/protocol.ts` and reconnecting the TUI is not enough; the container must restart (`typeclaw restart`) so the server picks up the new code.
 - **Each new target kind is a deliberate addition.** When you find yourself wanting to use the stream for a new use case, prefer a typed target (`{ kind: 'whisper', ... }`, `{ kind: 'channel', ... }`) over a generic catch-all. The four current kinds each pay for themselves with a concrete consumer.
 - **Drain loops own serialization.** If a target should have one logical consumer (`session`, `cron`), the consumer is responsible for not running things concurrently. The broker fans out; it doesn't gate.

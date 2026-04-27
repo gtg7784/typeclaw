@@ -57,7 +57,7 @@ export async function up({ cwd, port, forceBuild = false, exec = defaultDockerEx
     })
 
     if (await containerExists(exec, plan.containerName)) {
-      return { ok: false, reason: `Container ${plan.containerName} is already running. Run \`typeclaw down\` first.` }
+      return { ok: false, reason: `Container ${plan.containerName} is already running. Run \`typeclaw stop\` first.` }
     }
 
     let built = false

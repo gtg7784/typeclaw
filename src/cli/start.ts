@@ -4,9 +4,9 @@ import { config } from '@/config'
 import { up } from '@/container'
 import { isInitialized } from '@/init'
 
-export const upCommand = defineCommand({
+export const startCommand = defineCommand({
   meta: {
-    name: 'up',
+    name: 'start',
     description: 'launch the agent container in the background (host stage)',
   },
   args: {
@@ -41,6 +41,6 @@ export const upCommand = defineCommand({
     console.log(`Container ${result.plan.containerName} started (${result.containerId.slice(0, 12)}).`)
     console.log(`Follow logs:  docker logs -f ${result.plan.containerName}`)
     console.log(`Attach TUI:   typeclaw tui`)
-    console.log(`Stop:         typeclaw down`)
+    console.log(`Stop:         typeclaw stop`)
   },
 })
