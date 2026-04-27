@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
 import { buildDockerfile } from '@/init/dockerfile'
+import { buildGitignore } from '@/init/gitignore'
 
-import { type DockerExec, planUp, refreshDockerfile, up } from './up'
+import { commitSystemFile, type DockerExec, planUp, refreshDockerfile, refreshGitignore, up } from './up'
 
 let root: string
 
@@ -343,6 +345,147 @@ describe('refreshDockerfile', () => {
   })
 })
 
+describe('refreshGitignore', () => {
+  test('overwrites a stale .gitignore with the current template', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-gitignore-refresh-'))
+    try {
+      const stale = '# stale\nold-only-entry\n'
+      await writeFile(join(dir, '.gitignore'), stale)
+
+      await refreshGitignore(dir)
+
+      const updated = await readFile(join(dir, '.gitignore'), 'utf8')
+      expect(updated).toBe(buildGitignore())
+      expect(updated).not.toBe(stale)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('writes the .gitignore when none exists', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-gitignore-refresh-'))
+    try {
+      await refreshGitignore(dir)
+
+      const written = await readFile(join(dir, '.gitignore'), 'utf8')
+      expect(written).toBe(buildGitignore())
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+  const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const out = await new Response(proc.stdout).text()
+  await proc.exited
+  return out.trim()
+}
+
+async function gitInit(cwd: string): Promise<void> {
+  // The commitSystemFile path uses the user's global git config for authorship,
+  // but tests can run in CI with no global user.name/user.email. Set repo-local
+  // identity here so commits succeed deterministically without polluting global config.
+  for (const cmd of [
+    ['init', '-b', 'main'],
+    ['config', 'user.name', 'Test User'],
+    ['config', 'user.email', 'test@example.com'],
+  ]) {
+    const proc = Bun.spawn({ cmd: ['git', ...cmd], cwd, stdout: 'pipe', stderr: 'pipe' })
+    await proc.exited
+  }
+}
+
+describe('commitSystemFile', () => {
+  test('commits the file when it is dirty', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-commit-'))
+    try {
+      // given: a git repo with a tracked file
+      await gitInit(dir)
+      await writeFile(join(dir, 'Dockerfile'), 'FROM original\n')
+      await runGit(dir, ['add', 'Dockerfile'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+      // and: the file is now modified (dirty)
+      await writeFile(join(dir, 'Dockerfile'), 'FROM updated\n')
+
+      // when
+      await commitSystemFile(dir, 'Dockerfile', 'Update Dockerfile')
+
+      // then: HEAD points at the new commit with the new content
+      const subject = await runGit(dir, ['log', '-1', '--format=%s'])
+      expect(subject).toBe('Update Dockerfile')
+      const tree = await runGit(dir, ['show', 'HEAD:Dockerfile'])
+      expect(tree).toBe('FROM updated')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('skips silently when the file is clean (no changes since last commit)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-commit-clean-'))
+    try {
+      // given: a committed file with no pending changes
+      await gitInit(dir)
+      await writeFile(join(dir, 'Dockerfile'), 'FROM clean\n')
+      await runGit(dir, ['add', 'Dockerfile'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+      const headBefore = await runGit(dir, ['rev-parse', 'HEAD'])
+
+      // when
+      await commitSystemFile(dir, 'Dockerfile', 'Update Dockerfile')
+
+      // then: HEAD has not moved
+      const headAfter = await runGit(dir, ['rev-parse', 'HEAD'])
+      expect(headAfter).toBe(headBefore)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('skips silently when the directory is not a git repo', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-commit-nogit-'))
+    try {
+      // given: NO git init, but a Dockerfile exists
+      await writeFile(join(dir, 'Dockerfile'), 'FROM whatever\n')
+
+      // when: commit is invoked
+      await commitSystemFile(dir, 'Dockerfile', 'Update Dockerfile')
+
+      // then: no .git directory was created and no error was thrown
+      expect(existsSync(join(dir, '.git'))).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('only commits the named file, leaving other dirty files unstaged', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-commit-scope-'))
+    try {
+      // given: two dirty tracked files
+      await gitInit(dir)
+      await writeFile(join(dir, 'Dockerfile'), 'FROM original\n')
+      await writeFile(join(dir, 'AGENTS.md'), 'original\n')
+      await runGit(dir, ['add', '.'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+      await writeFile(join(dir, 'Dockerfile'), 'FROM new\n')
+      await writeFile(join(dir, 'AGENTS.md'), 'user wip\n')
+
+      // when: commit only the Dockerfile
+      await commitSystemFile(dir, 'Dockerfile', 'Update Dockerfile')
+
+      // then: HEAD's commit changed only Dockerfile, and AGENTS.md is still dirty
+      const filesInLastCommit = await runGit(dir, ['show', '--name-only', '--format=', 'HEAD'])
+      expect(filesInLastCommit).toBe('Dockerfile')
+      const agentsContent = await readFile(join(dir, 'AGENTS.md'), 'utf8')
+      expect(agentsContent).toBe('user wip\n')
+      const agentsInHead = await runGit(dir, ['show', 'HEAD:AGENTS.md'])
+      expect(agentsInHead).toBe('original')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 type RecordedCall = { args: string[]; dockerfileSnapshot: string | null }
 
 function fakeDockerExec(scenario: { imageExists: boolean; containerExists: boolean }): {
@@ -381,37 +524,94 @@ function fakeDockerExec(scenario: { imageExists: boolean; containerExists: boole
 }
 
 describe('up (composition)', () => {
-  test('forceBuild=true regenerates the Dockerfile BEFORE invoking docker build', async () => {
-    // given: a stale Dockerfile and an existing image
+  test('refreshes Dockerfile from the template on every start, even without --build', async () => {
+    // given: a stale Dockerfile and an existing image (no rebuild needed)
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
+
+    // when: up runs WITHOUT --build
+    const result = await up({ cwd: root, port: 8973, exec })
+
+    // then: the Dockerfile on disk was refreshed even though docker build never ran
+    expect(result.ok).toBe(true)
+    const onDisk = await readFile(join(root, 'Dockerfile'), 'utf8')
+    expect(onDisk).toBe(buildDockerfile())
+    expect(onDisk).not.toContain('FROM stale')
+  })
+
+  test('refreshes .gitignore from the template on every start', async () => {
+    // given: a stale .gitignore and an existing image
+    await writeFile(join(root, '.gitignore'), '# stale\nold-entry\n')
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
+
+    // when
+    const result = await up({ cwd: root, port: 8973, exec })
+
+    // then
+    expect(result.ok).toBe(true)
+    const onDisk = await readFile(join(root, '.gitignore'), 'utf8')
+    expect(onDisk).toBe(buildGitignore())
+    expect(onDisk).not.toContain('old-entry')
+  })
+
+  test('forceBuild=true also refreshes the Dockerfile so docker build sees the fresh template', async () => {
     await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({ imageExists: true, containerExists: false })
 
-    // when: up runs with --build
     const result = await up({ cwd: root, port: 8973, forceBuild: true, exec })
 
-    // then: build saw the FRESH Dockerfile, not the stale one
     expect(result.ok).toBe(true)
     const buildCall = calls.find((c) => c.args[0] === 'build')
     expect(buildCall).toBeDefined()
     expect(buildCall!.dockerfileSnapshot).toBe(buildDockerfile())
     expect(buildCall!.dockerfileSnapshot).not.toContain('FROM stale')
-    expect(buildCall!.dockerfileSnapshot).toMatch(/apt-get[\s\S]+install[\s\S]+\bgit\b/)
   })
 
-  test('forceBuild=false leaves the user-edited Dockerfile alone', async () => {
-    // given: a Dockerfile the user has edited and an image that needs rebuilding (missing)
-    const userEdited = 'FROM oven/bun:1-slim\n# user customization preserved\n'
-    await writeFile(join(root, 'Dockerfile'), userEdited)
+  test('commits the refreshed Dockerfile and .gitignore when the agent folder is a git repo', async () => {
+    // given: an agent folder that is a git repo with a stale committed Dockerfile and .gitignore
+    await gitInit(root)
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
+    await writeFile(join(root, '.gitignore'), '# stale\n')
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    const { exec, calls } = fakeDockerExec({ imageExists: false, containerExists: false })
+    await runGit(root, ['add', '.'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
+    const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
 
-    // when: up runs without --build (image is missing so build still happens)
-    await up({ cwd: root, port: 8973, exec })
+    // when: up runs (refresh will mutate both files, commit should land them)
+    const result = await up({ cwd: root, port: 8973, exec })
 
-    // then: build saw the user's Dockerfile unchanged
-    const buildCall = calls.find((c) => c.args[0] === 'build')
-    expect(buildCall!.dockerfileSnapshot).toBe(userEdited)
+    // then: HEAD advanced and the new commits exist with the expected subjects
+    expect(result.ok).toBe(true)
+    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfter).not.toBe(headBefore)
+    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
+    expect(subjects).toContain('Update Dockerfile')
+    expect(subjects).toContain('Update .gitignore')
+  })
+
+  test('does not commit when the refresh produces no change (clean working tree)', async () => {
+    // given: an agent folder where Dockerfile and .gitignore are already at the latest template
+    await gitInit(root)
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await runGit(root, ['add', '.'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
+    const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
+
+    // when
+    const result = await up({ cwd: root, port: 8973, exec })
+
+    // then: no new commits were created
+    expect(result.ok).toBe(true)
+    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfter).toBe(headBefore)
   })
 
   test('forceBuild=false skips build entirely when image already exists', async () => {

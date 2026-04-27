@@ -5,6 +5,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 
 import { configSchema, type Mount } from '@/config/config'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
+import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 
 import { containerNameFromCwd, getBun, imageTagFromCwd } from './shared'
 
@@ -49,6 +50,15 @@ export type UpResult = { ok: true; plan: UpPlan; containerId: string; built: boo
 
 export async function up({ cwd, port, forceBuild = false, exec = defaultDockerExec }: UpOptions): Promise<UpResult> {
   try {
+    // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
+    // CLI templates on every start (not just --build) so version drift between
+    // the agent folder and the CLI is corrected automatically. If the file
+    // is dirty in git afterwards, commit it so the change is tracked.
+    await refreshDockerfile(cwd)
+    await refreshGitignore(cwd)
+    await commitSystemFile(cwd, DOCKERFILE, 'Update Dockerfile')
+    await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
+
     const plan = await planUp({
       cwd,
       port,
@@ -62,10 +72,6 @@ export async function up({ cwd, port, forceBuild = false, exec = defaultDockerEx
 
     let built = false
     if (plan.needsBuild) {
-      // --build implies the user wants the latest TypeClaw template too.
-      // Overwriting is intentional: TypeClaw owns the Dockerfile.
-      if (forceBuild) await refreshDockerfile(cwd)
-
       const build = await exec(['build', '-t', plan.imageTag, plan.buildContext], { cwd, inheritStdio: true })
       if (build.exitCode !== 0) return { ok: false, reason: 'docker build failed' }
       built = true
@@ -131,6 +137,41 @@ export async function planUp({ cwd, port, imageExists, forceBuild = false }: Pla
 
 export async function refreshDockerfile(cwd: string): Promise<void> {
   await writeFile(join(cwd, DOCKERFILE), buildDockerfile())
+}
+
+export async function refreshGitignore(cwd: string): Promise<void> {
+  await writeFile(join(cwd, GITIGNORE_FILE), buildGitignore())
+}
+
+// Commits a TypeClaw-owned system file if it's dirty in git. Skips silently
+// when the agent folder is not a git repo, when bun is unavailable, or when
+// the file is clean (no changes since last commit). Uses the user's global
+// git config for authorship — TypeClaw does not impersonate the user here.
+export async function commitSystemFile(cwd: string, file: string, message: string): Promise<void> {
+  const bun = getBun()
+  if (!bun) return
+  if (!existsSync(join(cwd, '.git'))) return
+
+  const status = bun.spawn({
+    cmd: ['git', 'status', '--porcelain', '--', file],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  if ((await status.exited) !== 0) return
+  const dirty = (await new Response(status.stdout).text()).trim().length > 0
+  if (!dirty) return
+
+  const add = bun.spawn({ cmd: ['git', 'add', '--', file], cwd, stdout: 'pipe', stderr: 'pipe' })
+  if ((await add.exited) !== 0) return
+
+  const commit = bun.spawn({
+    cmd: ['git', 'commit', '-m', message, '--only', '--', file],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  await commit.exited
 }
 
 export const defaultDockerExec: DockerExec = async (args, options) => {

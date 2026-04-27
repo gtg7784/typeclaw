@@ -8,37 +8,17 @@ import { up } from '@/container'
 import { createTui } from '@/tui'
 
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
+import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { HATCHING_PROMPT } from './hatching'
 
 const CONFIG_FILE = 'typeclaw.json'
 const CRON_FILE = 'cron.json'
 const SECRETS_FILE = '.env'
-const GITIGNORE_FILE = '.gitignore'
 const PACKAGE_FILE = 'package.json'
 
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'MEMORY.md'] as const
 
 const DIRECTORIES = ['workspace', 'sessions', 'memory', 'skills', '.agents/skills', 'mounts'] as const
-
-// TODO: post-init sync. This template is written once by `typeclaw init`. If
-// the CLI later adds or removes entries, existing agent folders won't pick
-// them up. Decide on a sync strategy (explicit `typeclaw doctor`, version-
-// stamped migration, or auto-run on `up`) and a merge approach (section
-// markers vs append-only) before relying on `.gitignore` drift to be safe.
-//
-// `sessions/` and `memory/` are system-managed (written by the runtime, not
-// the user); the future Phase 10 backup should `git add -f` them despite
-// this gitignore.
-const GITIGNORE_CONTENT = `.env
-.env.local
-node_modules/
-sessions/
-memory/
-workspace/tmp/
-workspace/downloads/
-mounts/
-.DS_Store
-`
 
 export type InstallResult = { ok: true } | { ok: false; reason: string }
 export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason: string }
@@ -188,7 +168,7 @@ export async function scaffold(root: string): Promise<void> {
 
   await Promise.all(MARKDOWN_FILES.map((file) => writeFile(join(root, file), '', { flag: 'wx' }).catch(ignoreExists)))
 
-  await writeFile(join(root, GITIGNORE_FILE), GITIGNORE_CONTENT, { flag: 'wx' }).catch(ignoreExists)
+  await writeFile(join(root, GITIGNORE_FILE), buildGitignore(), { flag: 'wx' }).catch(ignoreExists)
 }
 
 // agent-browser ships in every agent: the bundled SKILL.md (src/skills/
