@@ -3,8 +3,8 @@ export {
   isMemoryLoggerPayload,
   type CreateMemoryLoggerSpawnerOptions,
   type MemoryLoggerPayload,
-  type SubagentSession,
-  type SubagentSessionConfig,
+  type MemoryLoggerSession,
 } from './agent'
+export { appendTool } from './append-tool'
 export { createIdleDetector, type CreateIdleDetectorOptions, type IdleDetector } from './idle-detector'
 export { readWatermark } from './watermark'

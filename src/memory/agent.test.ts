@@ -1,43 +1,39 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createMemoryLoggerSpawner, isMemoryLoggerPayload, type MemoryLoggerPayload } from './agent'
-
-type FakeSession = {
-  prompt: (text: string) => Promise<void>
-  dispose: () => void
-}
+import {
+  createMemoryLoggerSpawner,
+  isMemoryLoggerPayload,
+  type MemoryLoggerPayload,
+  type MemoryLoggerSession,
+} from './agent'
+import { appendTool } from './append-tool'
 
 type SpawnRecord = {
-  config: {
-    tools: unknown
-    systemPrompt: string
-    sessionManager: unknown
-  }
   promptText: string
   disposed: boolean
 }
 
-function makeFakeSessionFactory() {
+function makeFakeSessionFactory(): {
+  factory: () => Promise<MemoryLoggerSession>
+  records: SpawnRecord[]
+} {
   const records: SpawnRecord[] = []
-  const sessionsCreated: FakeSession[] = []
-  const factory = async (cfg: { tools: unknown; systemPrompt: string; sessionManager: unknown }) => {
-    const record: SpawnRecord = { config: cfg, promptText: '', disposed: false }
-    const session: FakeSession = {
-      prompt: async (text) => {
+  const factory = async (): Promise<MemoryLoggerSession> => {
+    const record: SpawnRecord = { promptText: '', disposed: false }
+    records.push(record)
+    return {
+      prompt: async (text: string) => {
         record.promptText = text
       },
       dispose: () => {
         record.disposed = true
       },
     }
-    records.push(record)
-    sessionsCreated.push(session)
-    return session
   }
-  return { factory, records, sessionsCreated }
+  return { factory, records }
 }
 
 function makeAgentDir(): string {
@@ -76,19 +72,8 @@ describe('isMemoryLoggerPayload', () => {
 })
 
 describe('createMemoryLoggerSpawner', () => {
-  test('spawns a session with read+write tools and an in-memory SessionManager', async () => {
-    const { factory, records } = makeFakeSessionFactory()
-    const agentDir = makeAgentDir()
-    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
-    writeFileSync(transcript, '')
-
-    const spawner = createMemoryLoggerSpawner({ createSubagentSession: factory })
-    await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
-
-    expect(records).toHaveLength(1)
-    const tools = records[0]!.config.tools as Array<{ name: string }>
-    const toolNames = tools.map((t) => t.name).sort()
-    expect(toolNames).toEqual(['read', 'write'])
+  test('the memory module exposes an `append` tool (not a `write` tool)', () => {
+    expect(appendTool.name).toBe('append')
   })
 
   test('the initial prompt mentions parent transcript path, session id, and target stream file', async () => {
@@ -97,7 +82,7 @@ describe('createMemoryLoggerSpawner', () => {
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
 
-    const spawner = createMemoryLoggerSpawner({ createSubagentSession: factory })
+    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
     await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
 
     const prompt = records[0]!.promptText
@@ -115,7 +100,7 @@ describe('createMemoryLoggerSpawner', () => {
     const streamFile = join(agentDir, 'memory', `${today}.md`)
     writeFileSync(streamFile, ['<!-- fragment source=ses_abc entry=watermrk -->', '## prior', 'body', ''].join('\n'))
 
-    const spawner = createMemoryLoggerSpawner({ createSubagentSession: factory })
+    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
     await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
 
     expect(records[0]!.promptText).toContain('watermrk')
@@ -127,11 +112,8 @@ describe('createMemoryLoggerSpawner', () => {
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
 
-    const spawner = createMemoryLoggerSpawner({ createSubagentSession: factory })
-    await spawner(
-      { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
-      'memory-logger',
-    )
+    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
+    await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
 
     const prompt = records[0]!.promptText
     expect(prompt.toLowerCase()).toMatch(/bare watermark|advance the watermark/)
@@ -143,7 +125,7 @@ describe('createMemoryLoggerSpawner', () => {
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
 
-    const spawner = createMemoryLoggerSpawner({ createSubagentSession: factory })
+    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
     await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
 
     const prompt = records[0]!.promptText
@@ -152,7 +134,7 @@ describe('createMemoryLoggerSpawner', () => {
 
   test('throws on invalid payload', async () => {
     const { factory } = makeFakeSessionFactory()
-    const spawner = createMemoryLoggerSpawner({ createSubagentSession: factory })
+    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
 
     await expect(spawner({ wrong: 'shape' }, 'memory-logger')).rejects.toThrow()
     await expect(spawner(null, 'memory-logger')).rejects.toThrow()
@@ -160,8 +142,8 @@ describe('createMemoryLoggerSpawner', () => {
 
   test('disposes the session even when prompt throws', async () => {
     const records: SpawnRecord[] = []
-    const factory = async (cfg: { tools: unknown; systemPrompt: string; sessionManager: unknown }) => {
-      const record: SpawnRecord = { config: cfg, promptText: '', disposed: false }
+    const factory = async (): Promise<MemoryLoggerSession> => {
+      const record: SpawnRecord = { promptText: '', disposed: false }
       records.push(record)
       return {
         prompt: async () => {
@@ -176,7 +158,7 @@ describe('createMemoryLoggerSpawner', () => {
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
 
-    const spawner = createMemoryLoggerSpawner({ createSubagentSession: factory })
+    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
 
     await expect(
       spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger'),

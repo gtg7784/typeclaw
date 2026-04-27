@@ -1,10 +1,12 @@
 import { join } from 'node:path'
 
-import { readTool, SessionManager, writeTool } from '@mariozechner/pi-coding-agent'
+import { createAgentSession, DefaultResourceLoader, readTool, SessionManager } from '@mariozechner/pi-coding-agent'
 
-import type { Tool } from '@/agent'
+import { getAuth } from '@/agent/auth'
+import { config, resolveModel } from '@/config'
 import type { SubagentSpawner } from '@/subagent'
 
+import { appendTool } from './append-tool'
 import { readWatermark } from './watermark'
 
 export type MemoryLoggerPayload = {
@@ -26,24 +28,18 @@ export function isMemoryLoggerPayload(value: unknown): value is MemoryLoggerPayl
   )
 }
 
-export type SubagentSession = {
+export type MemoryLoggerSession = {
   prompt: (text: string) => Promise<void>
   dispose: () => void
 }
 
-export type SubagentSessionConfig = {
-  tools: Tool[]
-  systemPrompt: string
-  sessionManager: SessionManager
-}
-
 export type CreateMemoryLoggerSpawnerOptions = {
-  createSubagentSession: (config: SubagentSessionConfig) => Promise<SubagentSession>
+  createMemoryLoggerSession?: () => Promise<MemoryLoggerSession>
 }
 
-export function createMemoryLoggerSpawner({
-  createSubagentSession,
-}: CreateMemoryLoggerSpawnerOptions): SubagentSpawner {
+export function createMemoryLoggerSpawner(options: CreateMemoryLoggerSpawnerOptions = {}): SubagentSpawner {
+  const factory = options.createMemoryLoggerSession ?? defaultCreateMemoryLoggerSession
+
   return async (payload) => {
     if (!isMemoryLoggerPayload(payload)) {
       throw new Error('memory-logger: invalid payload shape')
@@ -53,11 +49,7 @@ export function createMemoryLoggerSpawner({
     const streamFile = join(payload.agentDir, 'memory', `${today}.md`)
     const watermark = readWatermark(streamFile, payload.parentSessionId)
 
-    const session = await createSubagentSession({
-      tools: [readTool, writeTool],
-      systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
-      sessionManager: SessionManager.inMemory(),
-    })
+    const session = await factory()
 
     try {
       await session.prompt(buildInitialPrompt(payload, streamFile, watermark))
@@ -67,11 +59,30 @@ export function createMemoryLoggerSpawner({
   }
 }
 
+async function defaultCreateMemoryLoggerSession(): Promise<MemoryLoggerSession> {
+  const { authStorage, modelRegistry } = getAuth()
+  const loader = new DefaultResourceLoader({
+    systemPromptOverride: () => MEMORY_LOGGER_SYSTEM_PROMPT,
+    appendSystemPromptOverride: () => [],
+  })
+  await loader.reload()
+  const { session } = await createAgentSession({
+    model: resolveModel(config.model),
+    sessionManager: SessionManager.inMemory(),
+    authStorage,
+    modelRegistry,
+    resourceLoader: loader,
+    tools: [readTool],
+    customTools: [appendTool],
+  })
+  return session
+}
+
 const MEMORY_LOGGER_SYSTEM_PROMPT = `You are the typeclaw memory-logger subagent.
 
 Your job is narrow: read a session transcript, identify content worth remembering, and append fragments to a daily memory stream file. Then exit.
 
-You have only two tools: \`read\` and \`write\`. You cannot run shell commands or edit other files.
+You have only two tools: \`read\` and \`append\`. You cannot run shell commands, overwrite files, or edit existing content.
 
 # Marker format
 
@@ -120,9 +131,11 @@ You MUST advance the watermark on every run, regardless of whether you wrote any
 
 Never exit without either a new fragment or a new watermark. If you skip this, the next run re-evaluates content you already considered.
 
-# Append, never rewrite
+# Using the append tool
 
-Use \`write\` only in append mode. Never rewrite or truncate the daily stream file. If \`write\` is given a path that already has content, your responsibility is to preserve the existing content and add new markers at the end.
+Call \`append\` with the daily stream file path and the marker text. The tool always appends — it cannot truncate or overwrite. It also auto-inserts a separating newline if the existing file does not end in one, so consecutive markers do not run together.
+
+End each marker's content with a trailing newline (\`\\n\`). For separation between markers, end the body with a blank line (i.e., \`\\n\\n\`).
 
 When you are done, simply stop. There is no completion message to emit.`
 
@@ -139,7 +152,7 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
   }
   lines.push(
     '',
-    'Read the transcript. Identify worth-remembering content past the watermark. Append fragments to the daily stream file. If nothing meets the bar, append a single bare watermark marker recording the latest entry id you evaluated. Either way, advance the watermark before you stop.',
+    'Read the transcript. Identify worth-remembering content past the watermark. Append fragments to the daily stream file using the `append` tool. If nothing meets the bar, append a single bare watermark marker recording the latest entry id you evaluated. Either way, advance the watermark before you stop.',
   )
   return lines.join('\n')
 }

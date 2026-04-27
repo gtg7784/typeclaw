@@ -1,6 +1,6 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
-import { createSession, createSubagentSession } from '@/agent'
+import { createSession } from '@/agent'
 import { config } from '@/config'
 import {
   type CronConsumer,
@@ -78,7 +78,7 @@ export async function startAgent({
   const subagentConsumer = createSubagentConsumer({
     stream,
     spawners: {
-      'memory-logger': createMemoryLoggerSpawner({ createSubagentSession }),
+      'memory-logger': createMemoryLoggerSpawner(),
     },
     inFlightKey: (subagent, payload) => {
       if (subagent === 'memory-logger' && isMemoryLoggerPayload(payload)) {
