@@ -18,7 +18,7 @@ const PACKAGE_FILE = 'package.json'
 
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'MEMORY.md'] as const
 
-const DIRECTORIES = ['workspace', 'sessions', 'memory', 'skills', '.agents/skills'] as const
+const DIRECTORIES = ['workspace', 'sessions', 'memory', 'skills', '.agents/skills', 'mounts'] as const
 
 // TODO: post-init sync. This template is written once by `typeclaw init`. If
 // the CLI later adds or removes entries, existing agent folders won't pick
@@ -36,6 +36,7 @@ sessions/
 memory/
 workspace/tmp/
 workspace/downloads/
+mounts/
 .DS_Store
 `
 
@@ -172,6 +173,7 @@ export async function scaffold(root: string): Promise<void> {
   const config = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+    mounts: [],
   }
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 

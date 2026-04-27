@@ -305,14 +305,14 @@ describe('scaffold', () => {
   test('creates expected directories', async () => {
     await scaffold(root)
 
-    for (const dir of ['workspace', 'sessions', 'memory', 'skills', '.agents/skills']) {
+    for (const dir of ['workspace', 'sessions', 'memory', 'skills', '.agents/skills', 'mounts']) {
       const path = join(root, dir)
       expect(existsSync(path)).toBe(true)
       expect(statSync(path).isDirectory()).toBe(true)
     }
   })
 
-  test('writes typeclaw.json with $schema reference and model, without name', async () => {
+  test('writes typeclaw.json with $schema reference, model, and empty mounts array', async () => {
     await scaffold(root)
 
     const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
@@ -320,6 +320,7 @@ describe('scaffold', () => {
     expect(JSON.parse(raw)).toEqual({
       $schema: './node_modules/typeclaw/typeclaw.schema.json',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+      mounts: [],
     })
   })
 
@@ -412,7 +413,7 @@ describe('scaffold', () => {
     expect(await readFile(join(root, 'package.json'), 'utf8')).toBe(original)
   })
 
-  test('writes .gitignore with secret and workspace entries', async () => {
+  test('writes .gitignore with secret, workspace, and mounts entries', async () => {
     await scaffold(root)
 
     const gitignore = await readFile(join(root, '.gitignore'), 'utf8')
@@ -420,6 +421,7 @@ describe('scaffold', () => {
     expect(gitignore).toContain('sessions/')
     expect(gitignore).toContain('memory/')
     expect(gitignore).toContain('workspace/tmp/')
+    expect(gitignore).toContain('mounts/')
   })
 
   test('preserves existing markdown files instead of overwriting', async () => {

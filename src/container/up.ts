@@ -1,14 +1,19 @@
 import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
+import { configSchema, type Mount } from '@/config/config'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 
 import { containerNameFromCwd, getBun, imageTagFromCwd } from './shared'
 
 const PACKAGE_FILE = 'package.json'
+const CONFIG_FILE = 'typeclaw.json'
 const ENV_FILE = '.env'
 const COMPOSE_PROJECT = 'typeclaw'
+
+const MOUNT_TARGET_PREFIX = '/agent/mounts'
 
 export type UpPlan = {
   containerName: string
@@ -86,6 +91,7 @@ export async function planUp({ cwd, port, imageExists, forceBuild = false }: Pla
   }
 
   const devSourcePath = await detectDevSource(cwd)
+  const mounts = await loadMounts(cwd)
 
   const runArgs = ['run', '-d', '--name', containerName, '--rm', '-p', `${port}:${port}`]
 
@@ -103,6 +109,12 @@ export async function planUp({ cwd, port, imageExists, forceBuild = false }: Pla
   // outside /agent. Mirror-mount that path so the symlink resolves in-container.
   if (devSourcePath && !devSourcePath.startsWith(cwd)) {
     runArgs.push('-v', `${devSourcePath}:${devSourcePath}:ro`)
+  }
+
+  for (const mount of mounts) {
+    const hostPath = expandMountPath(mount.path, cwd)
+    const target = `${MOUNT_TARGET_PREFIX}/${mount.name}`
+    runArgs.push('-v', mount.readOnly ? `${hostPath}:${target}:ro` : `${hostPath}:${target}`)
   }
 
   runArgs.push(imageTag)
@@ -172,4 +184,26 @@ async function detectDevSource(cwd: string): Promise<string | null> {
   } catch {
     return null
   }
+}
+
+// A missing typeclaw.json is tolerated (e.g. test fixtures, freshly-cloned
+// folder mid-init). Anything else — malformed JSON, schema-invalid config,
+// invalid mount entry — must surface so the user sees they configured a mount
+// that won't be applied.
+async function loadMounts(cwd: string): Promise<Mount[]> {
+  let raw: string
+  try {
+    raw = await readFile(join(cwd, CONFIG_FILE), 'utf8')
+  } catch {
+    return []
+  }
+  const parsed = configSchema.parse(JSON.parse(raw))
+  return parsed.mounts
+}
+
+function expandMountPath(input: string, cwd: string): string {
+  if (input === '~' || input.startsWith('~/')) {
+    return join(homedir(), input.slice(1))
+  }
+  return isAbsolute(input) ? input : resolve(cwd, input)
 }

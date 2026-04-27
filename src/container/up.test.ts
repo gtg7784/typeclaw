@@ -26,6 +26,19 @@ async function writeDockerfile(dir: string): Promise<void> {
   await writeFile(join(dir, 'Dockerfile'), 'FROM oven/bun:1-slim\n')
 }
 
+type ScaffoldedConfig = {
+  mounts?: Array<{ name: string; path: string; readOnly?: boolean; description?: string }>
+}
+
+async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
+  const config = {
+    $schema: './node_modules/typeclaw/typeclaw.schema.json',
+    model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+    mounts: overrides.mounts ?? [],
+  }
+  await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
+}
+
 function labelValue(runArgs: string[], key: string): string | undefined {
   for (let i = 0; i < runArgs.length - 1; i++) {
     if (runArgs[i] === '--label' && runArgs[i + 1]?.startsWith(`${key}=`)) {
@@ -163,6 +176,137 @@ describe('planUp', () => {
 
     expect(plan.containerName).toBe(basename(root))
     expect(plan.imageTag).toBe(`typeclaw-${basename(root)}`)
+  })
+})
+
+describe('planUp mounts', () => {
+  test('emits no mount flags when typeclaw.json is missing', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+
+    expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
+  })
+
+  test('emits no mount flags when mounts array is empty', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { mounts: [] })
+
+    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+
+    expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
+  })
+
+  test('emits a -v flag for each mount, mapping to /agent/mounts/<name>', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'typeclaw-mount-target-'))
+    try {
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: '^0.1.0' })
+      await writeTypeclawConfig(root, { mounts: [{ name: 'projects', path: projectDir }] })
+
+      const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+
+      expect(plan.runArgs).toContain('-v')
+      expect(plan.runArgs).toContain(`${projectDir}:/agent/mounts/projects`)
+    } finally {
+      await rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
+  test('appends :ro suffix when readOnly is true', async () => {
+    const notesDir = await mkdtemp(join(tmpdir(), 'typeclaw-mount-target-'))
+    try {
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: '^0.1.0' })
+      await writeTypeclawConfig(root, { mounts: [{ name: 'notes', path: notesDir, readOnly: true }] })
+
+      const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+
+      expect(plan.runArgs).toContain(`${notesDir}:/agent/mounts/notes:ro`)
+    } finally {
+      await rm(notesDir, { recursive: true, force: true })
+    }
+  })
+
+  test('expands ~ to the home directory', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { mounts: [{ name: 'home-thing', path: '~/some-dir' }] })
+
+    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+
+    const home = process.env.HOME ?? ''
+    expect(plan.runArgs).toContain(`${home}/some-dir:/agent/mounts/home-thing`)
+  })
+
+  test('emits mounts in declared order', async () => {
+    const a = await mkdtemp(join(tmpdir(), 'typeclaw-mount-a-'))
+    const b = await mkdtemp(join(tmpdir(), 'typeclaw-mount-b-'))
+    try {
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: '^0.1.0' })
+      await writeTypeclawConfig(root, {
+        mounts: [
+          { name: 'first', path: a },
+          { name: 'second', path: b },
+        ],
+      })
+
+      const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+
+      const mountFlags = plan.runArgs.filter((arg) => arg.includes(':/agent/mounts/'))
+      expect(mountFlags).toEqual([`${a}:/agent/mounts/first`, `${b}:/agent/mounts/second`])
+    } finally {
+      await rm(a, { recursive: true, force: true })
+      await rm(b, { recursive: true, force: true })
+    }
+  })
+
+  test('mount flags appear before imageTag (last positional arg)', async () => {
+    const projectDir = await mkdtemp(join(tmpdir(), 'typeclaw-mount-target-'))
+    try {
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: '^0.1.0' })
+      await writeTypeclawConfig(root, { mounts: [{ name: 'projects', path: projectDir }] })
+
+      const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+
+      expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
+      const mountIdx = plan.runArgs.indexOf(`${projectDir}:/agent/mounts/projects`)
+      expect(mountIdx).toBeGreaterThan(-1)
+      expect(mountIdx).toBeLessThan(plan.runArgs.length - 1)
+    } finally {
+      await rm(projectDir, { recursive: true, force: true })
+    }
+  })
+
+  test('throws when typeclaw.json is malformed JSON', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'typeclaw.json'), '{ not valid json')
+
+    await expect(planUp({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow()
+  })
+
+  test('throws when typeclaw.json is missing required mounts field', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(
+      join(root, 'typeclaw.json'),
+      `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })}\n`,
+    )
+
+    await expect(planUp({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow(/mounts/)
+  })
+
+  test('throws when a mount name violates the pattern', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { mounts: [{ name: 'BadName', path: '/x' }] })
+
+    await expect(planUp({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow()
   })
 })
 
