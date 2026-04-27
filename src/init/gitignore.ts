@@ -6,8 +6,7 @@ export function buildGitignore(): string {
 node_modules/
 sessions/
 memory/
-workspace/tmp/
-workspace/downloads/
+workspace/
 mounts/
 .DS_Store
 `

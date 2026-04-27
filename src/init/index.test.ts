@@ -430,7 +430,7 @@ describe('scaffold', () => {
     expect(gitignore).toContain('.env')
     expect(gitignore).toContain('sessions/')
     expect(gitignore).toContain('memory/')
-    expect(gitignore).toContain('workspace/tmp/')
+    expect(gitignore).toMatch(/^workspace\/$/m)
     expect(gitignore).toContain('mounts/')
   })
 
