@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from 'node:fs'
 
-const WATERMARK_MARKER = /<!--\s*(?:fragment|watermark)\s+source=(\S+)\s+entry=(\S+)\s*-->/g
+const WATERMARK_MARKER = /<!--\s*(?:fragment|watermark)\s+source=(\S+)\s+entry=(\S+)(?:\s+\S+=\S+)*\s*-->/g
 
 export function readWatermark(streamFilePath: string, parentSessionId: string): string | null {
   if (!existsSync(streamFilePath)) return null

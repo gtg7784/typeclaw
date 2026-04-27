@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   createMemoryLoggerSpawner,
   isMemoryLoggerPayload,
+  MEMORY_LOGGER_SYSTEM_PROMPT,
   type MemoryLoggerPayload,
   type MemoryLoggerSession,
 } from './agent'
@@ -117,6 +118,51 @@ describe('createMemoryLoggerSpawner', () => {
 
     const prompt = records[0]!.promptText
     expect(prompt.toLowerCase()).toMatch(/bare watermark|advance the watermark/)
+  })
+
+  test('the initial prompt mentions the certainty discipline at a summary level', async () => {
+    const { factory, records } = makeFakeSessionFactory()
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+
+    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
+    await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
+
+    const prompt = records[0]!.promptText
+    expect(prompt).toMatch(/explicit/i)
+    expect(prompt).toMatch(/inductive/i)
+  })
+})
+
+describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
+  test('defines the three certainty levels', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('certainty=explicit')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('certainty=deductive')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('certainty=inductive')
+  })
+
+  test('requires verbatim quotes for explicit fragments', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('verbatim quote')
+  })
+
+  test('requires two or more sources for inductive fragments', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/two or more separate occurrences|≥2.*sources|two.*sources/)
+  })
+
+  test('bans speculation language explicitly by listing the forbidden words', () => {
+    const banned = ['likely', 'probably', 'enjoys', 'loves', 'tends to', 'is interested in']
+    for (const word of banned) {
+      expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain(word)
+    }
+  })
+
+  test('states the default-skip stance', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/default is to write nothing|bar is high/)
+  })
+
+  test('states that the marker format requires a certainty attribute', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/fragment source=.+ entry=.+ certainty=/)
   })
 
   test('the initial prompt indicates "no prior watermark" when none exists', async () => {

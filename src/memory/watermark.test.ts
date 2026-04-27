@@ -138,4 +138,34 @@ describe('readWatermark', () => {
     expect(readWatermark(path, 'ses_abc')).toBe('22222222')
     expect(readWatermark(path, 'ses_xyz')).toBe('33333333')
   })
+
+  test('fragment markers with a trailing certainty attribute still match', () => {
+    const path = tmpFile(
+      [
+        '<!-- fragment source=ses_abc entry=cert0001 certainty=explicit -->',
+        '## an explicit fact',
+        'body',
+        '',
+      ].join('\n'),
+    )
+    expect(readWatermark(path, 'ses_abc')).toBe('cert0001')
+  })
+
+  test('the latest marker wins across mixed fragment and watermark with extra attributes', () => {
+    const path = tmpFile(
+      [
+        '<!-- fragment source=ses_abc entry=11111111 certainty=explicit -->',
+        '## first',
+        'body',
+        '',
+        '<!-- fragment source=ses_abc entry=22222222 certainty=inductive sources=2 -->',
+        '## second',
+        'body',
+        '',
+        '<!-- watermark source=ses_abc entry=33333333 -->',
+        '',
+      ].join('\n'),
+    )
+    expect(readWatermark(path, 'ses_abc')).toBe('33333333')
+  })
 })
