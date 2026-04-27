@@ -1,6 +1,9 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import { configSchema, mountSchema } from './config'
+import { configSchema, mountSchema, validateConfig } from './config'
 
 const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
 
@@ -79,5 +82,74 @@ describe('mountSchema path validation', () => {
 
   test("accepts relative path (resolution is the caller's problem)", () => {
     expect(() => mountSchema.parse({ name: 'p', path: './rel' })).not.toThrow()
+  })
+})
+
+describe('validateConfig', () => {
+  let cwd: string
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'typeclaw-validate-'))
+  })
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  test('returns ok when typeclaw.json is missing', () => {
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(true)
+  })
+
+  test('returns ok for a valid config', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, mounts: [] }))
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(true)
+  })
+
+  test('returns ok for a valid config with a mount', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL, mounts: [{ name: 'projects', path: '~/projects' }] }),
+    )
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(true)
+  })
+
+  test('fails on malformed JSON', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), '{ not json')
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('typeclaw.json')
+      expect(result.reason).toContain('not valid JSON')
+    }
+  })
+
+  test('returns ok when mounts is omitted (defaults to [])', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL }))
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(true)
+  })
+
+  test('fails when a mount name violates the pattern', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL, mounts: [{ name: 'Bad Name', path: '/x' }] }),
+    )
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('mount name')
+    }
+  })
+
+  test('fails when port is out of range', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL, mounts: [], port: 99999 }),
+    )
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(false)
   })
 })

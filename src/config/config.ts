@@ -1,7 +1,12 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import type { Model } from '@mariozechner/pi-ai'
 import { z } from 'zod'
 
 import { KNOWN_PROVIDERS, listKnownModelRefs, type KnownModelRef, type KnownProviderId } from './providers'
+
+const CONFIG_FILE = 'typeclaw.json'
 
 const knownModelRefs = listKnownModelRefs() as [KnownModelRef, ...KnownModelRef[]]
 
@@ -51,3 +56,41 @@ export function resolveModel(ref: KnownModelRef): Model<'openai-completions'> {
 
 // FIXME: TEMP — hard-coded dev defaults; replace with loader.
 export const config: Config = configSchema.parse({ mounts: [] })
+
+export type ValidateConfigResult = { ok: true } | { ok: false; reason: string }
+
+// Missing file → ok (matches `loadMounts` in src/container/up.ts; `isInitialized`
+// is the dedicated check for "not initialized"). Present but invalid → fail, so
+// `restart` doesn't stop the container before discovering the config is broken.
+export function validateConfig(cwd: string): ValidateConfigResult {
+  let raw: string
+  try {
+    raw = readFileSync(join(cwd, CONFIG_FILE), 'utf8')
+  } catch {
+    return { ok: true }
+  }
+
+  let json: unknown
+  try {
+    json = JSON.parse(raw)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    return { ok: false, reason: `${CONFIG_FILE} is not valid JSON: ${detail}` }
+  }
+
+  const result = configSchema.safeParse(json)
+  if (!result.success) {
+    return { ok: false, reason: `${CONFIG_FILE} is invalid: ${formatZodError(result.error)}` }
+  }
+
+  return { ok: true }
+}
+
+function formatZodError(error: z.ZodError): string {
+  return error.issues
+    .map((issue) => {
+      const path = issue.path.length > 0 ? issue.path.join('.') : '<root>'
+      return `${path}: ${issue.message}`
+    })
+    .join('; ')
+}
