@@ -81,15 +81,27 @@ describe('createResourceLoader', () => {
     expect(configSkill).toBeDefined()
     expect(configSkill?.description.length).toBeGreaterThan(0)
   })
+
+  test('exposes the agent-browser bundled skill to the agent', async () => {
+    const loader = await createResourceLoader({ agentDir })
+
+    const { skills } = loader.getSkills()
+    const browserSkill = skills.find((s) => s.name === 'agent-browser')
+    expect(browserSkill).toBeDefined()
+    expect(browserSkill?.description.length).toBeGreaterThan(0)
+  })
 })
 
 describe('getBundledSkillsDir', () => {
-  test.each([['typeclaw-cron'], ['typeclaw-config']])('points at a directory containing %s/SKILL.md', (skill) => {
-    const dir = getBundledSkillsDir()
-    expect(existsSync(join(dir, skill, 'SKILL.md'))).toBe(true)
-  })
+  test.each([['typeclaw-cron'], ['typeclaw-config'], ['agent-browser']])(
+    'points at a directory containing %s/SKILL.md',
+    (skill) => {
+      const dir = getBundledSkillsDir()
+      expect(existsSync(join(dir, skill, 'SKILL.md'))).toBe(true)
+    },
+  )
 
-  test.each([['typeclaw-cron'], ['typeclaw-config']])(
+  test.each([['typeclaw-cron'], ['typeclaw-config'], ['agent-browser']])(
     '%s SKILL.md has YAML frontmatter with name and description',
     async (skill) => {
       const path = join(getBundledSkillsDir(), skill, 'SKILL.md')

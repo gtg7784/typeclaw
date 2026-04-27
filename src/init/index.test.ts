@@ -391,6 +391,16 @@ describe('scaffold', () => {
     expect(pkg.scripts).toBeUndefined()
   })
 
+  test('package.json bundles agent-browser so the agent-browser skill can shell out to the CLI', async () => {
+    await scaffold(root)
+
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as {
+      dependencies: Record<string, string>
+    }
+    expect(pkg.dependencies['agent-browser']).toBeDefined()
+    expect(pkg.dependencies['agent-browser']).toMatch(/^[\^~]?\d+\.\d+\.\d+/)
+  })
+
   test('package.json typeclaw file: dependency points at the typeclaw repo', async () => {
     await scaffold(root)
 
@@ -494,6 +504,17 @@ describe('writeDockerAssets', () => {
     expect(dockerfile).toContain('FROM oven/bun:1-slim')
     expect(dockerfile).toContain('WORKDIR /agent')
     expect(dockerfile).toContain('typeclaw')
+  })
+
+  test('Dockerfile installs agent-browser globally and pre-downloads Chromium with system deps', async () => {
+    await scaffold(root)
+
+    await writeDockerAssets(root)
+
+    const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
+    // anchored to the start of a line so a commented-out RUN does not match.
+    expect(dockerfile).toMatch(/^RUN[^\n]*\bbun install -g agent-browser\b/m)
+    expect(dockerfile).toMatch(/^[^#\n]*\bagent-browser install --with-deps\b/m)
   })
 
   test('returns devMode true when typeclaw dep is a file: spec', async () => {

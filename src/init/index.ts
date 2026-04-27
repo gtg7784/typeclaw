@@ -191,6 +191,13 @@ export async function scaffold(root: string): Promise<void> {
   await writeFile(join(root, GITIGNORE_FILE), GITIGNORE_CONTENT, { flag: 'wx' }).catch(ignoreExists)
 }
 
+// agent-browser ships in every agent: the bundled SKILL.md (src/skills/
+// agent-browser/SKILL.md) is a discovery stub that calls `agent-browser
+// skills get core` at runtime, so the CLI must be installed for the skill
+// to function. The Dockerfile pre-downloads Chromium too, so the agent
+// can drive a browser without any first-run setup.
+const AGENT_BROWSER_VERSION = '^0.26.0'
+
 function buildPackageJson(root: string, name: string): Record<string, unknown> {
   const typeclawRoot = findTypeclawRoot()
   // FIXME: temporary dev-stage wiring. Switch to a published version range
@@ -204,6 +211,7 @@ function buildPackageJson(root: string, name: string): Record<string, unknown> {
     type: 'module',
     dependencies: {
       typeclaw: fileSpec,
+      'agent-browser': AGENT_BROWSER_VERSION,
     },
   }
 }
