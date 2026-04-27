@@ -14,34 +14,48 @@ WORKDIR /agent
 # strategy for the build platform.
 ARG TARGETARCH
 
-# git is required for the agent runtime (cloning, committing workspace state,
-# version-controlled tooling), so it ships in every agent image regardless of
-# what the user installs on top.
+# Layers are ordered most-stable first to maximize Docker layer cache hits on
+# rebuilds. Anything that pulls from npm (volatile) sits below anything that
+# pulls from apt (stable, version-pinned by the base image's debian release),
+# and the heavy Chrome-for-Testing download on amd64 is isolated in its own
+# final layer so unrelated changes do not invalidate it.
+
+# Layer 1 (stable): all apt packages in a single update/install/cleanup cycle.
+#   - git + ca-certificates: required by the agent runtime (cloning,
+#     committing workspace state, version-controlled tooling).
+#   - chromium (arm64 only): Chrome for Testing has no Linux ARM64 build, so
+#     we use Debian's chromium package on that arch. Bundling it into the same
+#     apt invocation avoids a second \`apt-get update\` later and keeps the
+#     image's apt cache cleanup in one place.
 RUN apt-get update \\
  && apt-get install -y --no-install-recommends git ca-certificates \\
+ && if [ "$TARGETARCH" = "arm64" ]; then \\
+      apt-get install -y --no-install-recommends chromium; \\
+    fi \\
  && rm -rf /var/lib/apt/lists/*
 
-# agent-browser is bundled in every agent image so browser automation works
-# out of the box. The CLI is installed globally (outside /agent) so it survives
-# the runtime bind-mount that overlays node_modules at /agent/node_modules.
-#
-# Chromium acquisition is arch-dependent:
-#   - amd64: \`agent-browser install --with-deps\` downloads a pinned Chrome for
-#     Testing into ~/.cache/agent-browser and apt-installs the libs Chrome needs.
-#   - arm64: Chrome for Testing has no Linux ARM64 build, so we install Debian's
-#     chromium package and point agent-browser at /usr/bin/chromium via its
-#     global config (~/.agent-browser/config.json, lowest-priority layer that
-#     env vars and CLI flags can still override).
-# Either way, Chromium lands in the image's writable layer at build time so
-# cold starts are zero-setup.
-RUN bun install -g agent-browser \\
- && if [ "$TARGETARCH" = "arm64" ]; then \\
-      apt-get update \\
-   && apt-get install -y --no-install-recommends chromium \\
-   && rm -rf /var/lib/apt/lists/* \\
-   && mkdir -p /root/.agent-browser \\
+# Layer 2 (stable, arm64 only): point agent-browser at the apt-installed
+# chromium via its global config (~/.agent-browser/config.json — lowest-
+# priority layer that env vars and CLI flags can still override). Independent
+# of the npm install below, so it stays cached across agent-browser version
+# bumps.
+RUN if [ "$TARGETARCH" = "arm64" ]; then \\
+      mkdir -p /root/.agent-browser \\
    && printf '%s\\n' '{"executablePath":"/usr/bin/chromium"}' > /root/.agent-browser/config.json; \\
-    else \\
+    fi
+
+# Layer 3 (volatile): install the agent-browser CLI globally so it survives
+# the runtime bind-mount that overlays node_modules at /agent/node_modules.
+# Isolated from the heavy Chrome download below so an npm-only version bump
+# only re-runs this small layer (on amd64 the next layer still re-runs, but
+# on arm64 nothing else has to).
+RUN bun install -g agent-browser
+
+# Layer 4 (heavy, amd64 only): download the pinned Chrome for Testing build
+# into ~/.cache/agent-browser and apt-install the libs it needs. Kept last so
+# it benefits from every layer above being cached, and so changes to git or
+# the apt base don't invalidate hundreds of MB of Chrome state.
+RUN if [ "$TARGETARCH" != "arm64" ]; then \\
       agent-browser install --with-deps; \\
     fi
 
