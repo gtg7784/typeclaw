@@ -1,6 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
-import { createSession } from '@/agent'
+import { createSession, createSubagentSession } from '@/agent'
+import { config } from '@/config'
 import {
   type CronConsumer,
   type CronJob,
@@ -12,10 +13,12 @@ import {
   loadCron as loadCronDefault,
   type Scheduler,
 } from '@/cron'
+import { createMemoryLoggerSpawner, isMemoryLoggerPayload } from '@/memory'
 import { ReloadRegistry } from '@/reload'
 import { createServer, type Server } from '@/server'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
+import { createSubagentConsumer, type SubagentConsumer } from '@/subagent'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
 
 type BunServer = ReturnType<Server['start']>
@@ -42,6 +45,7 @@ export type StartAgentResult = {
   tuiPromise: Promise<void> | null
   scheduler: Scheduler | null
   cronConsumer: CronConsumer | null
+  subagentConsumer: SubagentConsumer
   reloadRegistry: ReloadRegistry
   stream: Stream
   stop: () => void
@@ -71,6 +75,20 @@ export async function startAgent({
       }),
   })
 
+  const subagentConsumer = createSubagentConsumer({
+    stream,
+    spawners: {
+      'memory-logger': createMemoryLoggerSpawner({ createSubagentSession }),
+    },
+    inFlightKey: (subagent, payload) => {
+      if (subagent === 'memory-logger' && isMemoryLoggerPayload(payload)) {
+        return `${subagent}:${payload.parentSessionId}`
+      }
+      return subagent
+    },
+  })
+  subagentConsumer.start()
+
   const factory = createSchedulerFor ?? makeDefaultSchedulerFactory()
   const scheduler = await startScheduler({ cwd, loadCron, createSchedulerFor: factory, stream })
 
@@ -85,6 +103,8 @@ export async function startAgent({
     reloadRegistry,
     sessionFactory,
     stream,
+    memoryIdleMs: config.memory.idleMs,
+    agentDir: cwd,
   }).start()
 
   let stopped = false
@@ -93,6 +113,7 @@ export async function startAgent({
     stopped = true
     scheduler?.stop()
     cronConsumer.stop()
+    subagentConsumer.stop()
     server.stop(true)
   }
 
@@ -102,6 +123,7 @@ export async function startAgent({
       tuiPromise: null,
       scheduler,
       cronConsumer: scheduler ? cronConsumer : null,
+      subagentConsumer,
       reloadRegistry,
       stream,
       stop,
@@ -111,7 +133,16 @@ export async function startAgent({
   const url = `ws://localhost:${server.port}`
   const tui = createTui({ url, initialPrompt })
   const tuiPromise = tui.run()
-  return { server, tuiPromise, scheduler, cronConsumer: scheduler ? cronConsumer : null, reloadRegistry, stream, stop }
+  return {
+    server,
+    tuiPromise,
+    scheduler,
+    cronConsumer: scheduler ? cronConsumer : null,
+    subagentConsumer,
+    reloadRegistry,
+    stream,
+    stop,
+  }
 }
 
 async function startScheduler({

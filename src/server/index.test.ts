@@ -60,13 +60,20 @@ function createFakeSession(): AgentSession & {
 
 async function startWithSession(
   session: AgentSession,
-  extra: { stream?: ReturnType<typeof createStream>; sessionFactory?: SessionFactory } = {},
+  extra: {
+    stream?: ReturnType<typeof createStream>
+    sessionFactory?: SessionFactory
+    memoryIdleMs?: number
+    agentDir?: string
+  } = {},
 ): Promise<{ url: string }> {
   const built = createServer({
     port: 0,
     createSession: async () => session,
     ...(extra.stream ? { stream: extra.stream } : {}),
     ...(extra.sessionFactory ? { sessionFactory: extra.sessionFactory } : {}),
+    ...(extra.memoryIdleMs !== undefined ? { memoryIdleMs: extra.memoryIdleMs } : {}),
+    ...(extra.agentDir !== undefined ? { agentDir: extra.agentDir } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
@@ -513,5 +520,168 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     // then: no crash; the test passes if we get here
     expect(true).toBe(true)
+  })
+})
+
+describe('createServer memory idle detector', () => {
+  function stubSessionFactory(opts: { transcriptPath?: string }): SessionFactory {
+    return {
+      sessionDir: () => '/tmp/test-sessions',
+      createPersisted: () =>
+        ({
+          getSessionId: () => 'ses_fake',
+          getSessionFile: () => opts.transcriptPath,
+        }) as unknown as SessionManager,
+    }
+  }
+
+  test('publishes a new-session memory-logger message after idle window when transcript exists', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const newSessionMessages: Array<{ subagent?: string; payload: unknown }> = []
+    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => {
+      const target = msg.target as { kind: 'new-session'; subagent?: string }
+      newSessionMessages.push({ subagent: target.subagent, payload: msg.payload })
+    })
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/test-sessions/ses_fake.jsonl' }),
+      memoryIdleMs: 30,
+      agentDir: '/tmp/agent-dir',
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when: send a prompt and let it complete
+    stream.publish({
+      target: { kind: 'session', sessionId: 'ses_fake' },
+      payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    // then: after the idle window, the memory-logger publish fires
+    await new Promise((r) => setTimeout(r, 60))
+
+    expect(newSessionMessages).toHaveLength(1)
+    expect(newSessionMessages[0]?.subagent).toBe('memory-logger')
+    expect(newSessionMessages[0]?.payload).toEqual({
+      parentSessionId: 'ses_fake',
+      parentTranscriptPath: '/tmp/test-sessions/ses_fake.jsonl',
+      agentDir: '/tmp/agent-dir',
+    })
+    ws.close()
+  })
+
+  test('skips publishing when the session has no persisted transcript yet', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const newSessionMessages: unknown[] = []
+    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => newSessionMessages.push(msg))
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubSessionFactory({ transcriptPath: undefined }),
+      memoryIdleMs: 30,
+      agentDir: '/tmp/agent-dir',
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when: prompt completes but no transcript is persisted
+    stream.publish({
+      target: { kind: 'session', sessionId: 'ses_fake' },
+      payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    // then: idle fires but publish is suppressed
+    await new Promise((r) => setTimeout(r, 60))
+
+    expect(newSessionMessages).toHaveLength(0)
+    ws.close()
+  })
+
+  test('does not install an idle detector when memoryIdleMs is omitted', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const newSessionMessages: unknown[] = []
+    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => newSessionMessages.push(msg))
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
+      // memoryIdleMs intentionally omitted
+      agentDir: '/tmp/agent-dir',
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    stream.publish({
+      target: { kind: 'session', sessionId: 'ses_fake' },
+      payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    await new Promise((r) => setTimeout(r, 60))
+
+    expect(newSessionMessages).toHaveLength(0)
+    ws.close()
+  })
+
+  test('a new prompt arriving during the idle window cancels the pending publish', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const newSessionMessages: unknown[] = []
+    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => newSessionMessages.push(msg))
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
+      memoryIdleMs: 50,
+      agentDir: '/tmp/agent-dir',
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // first prompt completes
+    stream.publish({
+      target: { kind: 'session', sessionId: 'ses_fake' },
+      payload: { kind: 'prompt', text: 'first', delivery: 'queue' },
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    // second prompt arrives within the idle window (20ms < 50ms)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(newSessionMessages).toHaveLength(0)
+    stream.publish({
+      target: { kind: 'session', sessionId: 'ses_fake' },
+      payload: { kind: 'prompt', text: 'second', delivery: 'queue' },
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    session.resolvePrompt()
+    await new Promise((r) => setTimeout(r, 5))
+
+    // the original 50ms idle window from the first prompt would now have elapsed.
+    // if cancel() worked, no publish has fired yet.
+    await new Promise((r) => setTimeout(r, 30))
+    expect(newSessionMessages).toHaveLength(0)
+
+    // after the second idle window also elapses, exactly one publish has fired
+    await new Promise((r) => setTimeout(r, 50))
+    expect(newSessionMessages).toHaveLength(1)
+    ws.close()
   })
 })

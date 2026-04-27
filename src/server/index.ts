@@ -1,6 +1,7 @@
 import type { Server as BunServer, ServerWebSocket } from 'bun'
 
 import { createSession as defaultCreateSession, type AgentSession, type CreateSessionOptions } from '@/agent'
+import { createIdleDetector, type IdleDetector } from '@/memory'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { SessionFactory } from '@/sessions'
 import type { ClientMessage, PromptDelivery, QueueStateItem, ReloadResultPayload, ServerMessage } from '@/shared'
@@ -16,6 +17,8 @@ export type ServerOptions = {
   createSession?: CreateSessionFn
   sessionFactory?: SessionFactory
   stream?: Stream
+  memoryIdleMs?: number
+  agentDir?: string
 }
 
 export type Server = ReturnType<typeof createServer>
@@ -33,10 +36,12 @@ type QueuedPrompt = {
 type SessionState = {
   session: AgentSession
   sessionFileId: string
+  sessionManager: { getSessionFile: () => string | undefined } | undefined
   drainQueue: QueuedPrompt[]
   draining: boolean
   unsubBroadcast: Unsubscribe | null
   unsubPrompts: Unsubscribe | null
+  idleDetector: IdleDetector | null
 }
 
 function send(ws: Ws, msg: ServerMessage) {
@@ -50,6 +55,8 @@ export function createServer({
   createSession = defaultCreateSession,
   sessionFactory,
   stream,
+  memoryIdleMs,
+  agentDir,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
 
@@ -70,12 +77,21 @@ export function createServer({
           const state: SessionState = {
             session,
             sessionFileId,
+            sessionManager,
             drainQueue: [],
             draining: false,
             unsubBroadcast: null,
             unsubPrompts: null,
+            idleDetector: null,
           }
           sessionStates.set(ws, state)
+
+          if (stream && memoryIdleMs !== undefined && agentDir !== undefined) {
+            state.idleDetector = createIdleDetector({
+              idleMs: memoryIdleMs,
+              onIdle: () => publishMemoryLoggerSpawn(state, stream, agentDir),
+            })
+          }
 
           forwardSessionEvents(ws, session)
 
@@ -145,6 +161,7 @@ export function createServer({
           const state = sessionStates.get(ws)
           state?.unsubBroadcast?.()
           state?.unsubPrompts?.()
+          state?.idleDetector?.dispose()
           sessionStates.delete(ws)
           console.log(`session ${ws.data.sessionId}: close`)
         },
@@ -224,16 +241,31 @@ async function drain(ws: Ws, state: SessionState): Promise<void> {
       pushQueueState(ws, state)
       send(ws, { type: 'prompt_started', messageId: item.streamMessageId, text: item.text })
 
+      state.idleDetector?.cancel()
       try {
         await state.session.prompt(item.text)
         send(ws, { type: 'done' })
       } catch (err) {
         send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
       }
+      state.idleDetector?.arm()
     }
   } finally {
     state.draining = false
   }
+}
+
+function publishMemoryLoggerSpawn(state: SessionState, stream: Stream, agentDir: string): void {
+  const transcriptPath = state.sessionManager?.getSessionFile()
+  if (transcriptPath === undefined) return
+  stream.publish({
+    target: { kind: 'new-session', subagent: 'memory-logger' },
+    payload: {
+      parentSessionId: state.sessionFileId,
+      parentTranscriptPath: transcriptPath,
+      agentDir,
+    },
+  })
 }
 
 function pushQueueState(ws: Ws, state: SessionState): void {

@@ -212,6 +212,42 @@ describe('startAgent', () => {
 
     expect(running.cronConsumer).toBeNull()
   })
+
+  test('subagentConsumer is started and exposed (does not depend on cron)', async () => {
+    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
+
+    expect(running.subagentConsumer).not.toBeNull()
+    expect(running.subagentConsumer.inFlightCount()).toBe(0)
+  })
+
+  test('publishing new-session with an unknown subagent is dropped without crashing', async () => {
+    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
+
+    expect(() =>
+      running!.stream.publish({
+        target: { kind: 'new-session', subagent: 'no-such-subagent' },
+        payload: null,
+      }),
+    ).not.toThrow()
+    expect(running.subagentConsumer.inFlightCount()).toBe(0)
+  })
+
+  test('subagentConsumer.stop is called when startAgent.stop() runs', async () => {
+    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
+
+    const subConsumer = running.subagentConsumer
+    running.stop()
+
+    let gotIt = 0
+    running.stream.publish({
+      target: { kind: 'new-session', subagent: 'memory-logger' },
+      payload: { parentSessionId: 'x', parentTranscriptPath: '/x', agentDir: '/x' },
+    })
+    await new Promise((r) => setTimeout(r, 5))
+
+    expect(subConsumer.inFlightCount()).toBe(0)
+    expect(gotIt).toBe(0)
+  })
 })
 
 describe('startAgent session persistence wiring', () => {

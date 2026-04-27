@@ -1,8 +1,12 @@
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import type { AgentTool } from '@mariozechner/pi-agent-core'
 import { createAgentSession, DefaultResourceLoader, SessionManager } from '@mariozechner/pi-coding-agent'
 import type { AgentSession } from '@mariozechner/pi-coding-agent'
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type Tool = AgentTool<any>
 
 import { config, resolveModel } from '@/config'
 import type { ReloadRegistry } from '@/reload'
@@ -41,6 +45,34 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
     modelRegistry,
     resourceLoader,
     customTools,
+  })
+  return session
+}
+
+export type CreateSubagentSessionOptions = {
+  tools: Tool[]
+  systemPrompt: string
+  sessionManager: SessionManager
+}
+
+export async function createSubagentSession({
+  tools,
+  systemPrompt,
+  sessionManager,
+}: CreateSubagentSessionOptions): Promise<AgentSession> {
+  const { authStorage, modelRegistry } = getAuth()
+  const loader = new DefaultResourceLoader({
+    systemPromptOverride: () => systemPrompt,
+    appendSystemPromptOverride: () => [],
+  })
+  await loader.reload()
+  const { session } = await createAgentSession({
+    model: resolveModel(config.model),
+    sessionManager,
+    authStorage,
+    modelRegistry,
+    resourceLoader: loader,
+    tools,
   })
   return session
 }
