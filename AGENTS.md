@@ -33,6 +33,7 @@ Inside the container, `FIREWORKS_API_KEY` and friends arrive through `--env-file
 - **CLI command names encode stage.** `init` is host-only (it _creates_ the host stage). `start` / `stop` / `restart` / `tui` / `compose` are host-only launchers. `run` is container-only. Anything that reads `process.cwd()` implicitly assumes host stage unless it's called from `run`.
 - **When writing paths, annotate the stage.** `./typeclaw.json` means the host-stage agent folder; `/agent/typeclaw.json` means the container stage. Never ship a string that silently conflates them.
 - **The Dockerfile lives at the boundary.** `typeclaw init` (dev code running in host stage) writes a Dockerfile that `typeclaw start` (host stage) feeds to `docker run`, which then invokes `typeclaw run` (container stage) as the entrypoint.
+- **TypeClaw owns the Dockerfile and `.gitignore`, and rewrites them on every `start` — not just on `init`.** The agent folder is treated as a managed workspace, not a one-time scaffold. `start` calls `refreshDockerfile` / `refreshGitignore` unconditionally so version drift between the CLI and the agent folder is corrected automatically, and commits the change if git is dirty afterward. **Consequence: to ship a Dockerfile template change, edit `src/init/dockerfile.ts` and run `typeclaw start --build` in any agent folder. Do not instruct users to delete their Dockerfile or re-run `init`.** The `wx` flag inside `writeDockerAssets` only governs the `init`-time write and is not the system's overwrite policy.
 
 ## Testing Philosophy
 
