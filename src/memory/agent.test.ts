@@ -121,6 +121,22 @@ describe('createMemoryLoggerSpawner', () => {
     expect(records[0]!.promptText).toContain('watermrk')
   })
 
+  test('the initial prompt instructs to advance the watermark even when nothing is worth remembering', async () => {
+    const { factory, records } = makeFakeSessionFactory()
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+
+    const spawner = createMemoryLoggerSpawner({ createSubagentSession: factory })
+    await spawner(
+      { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+      'memory-logger',
+    )
+
+    const prompt = records[0]!.promptText
+    expect(prompt.toLowerCase()).toMatch(/bare watermark|advance the watermark/)
+  })
+
   test('the initial prompt indicates "no prior watermark" when none exists', async () => {
     const { factory, records } = makeFakeSessionFactory()
     const agentDir = makeAgentDir()

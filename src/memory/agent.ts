@@ -73,9 +73,11 @@ Your job is narrow: read a session transcript, identify content worth rememberin
 
 You have only two tools: \`read\` and \`write\`. You cannot run shell commands or edit other files.
 
-# Fragment format
+# Marker format
 
-Each fragment in the daily stream file is delimited by an HTML comment marker, followed by a markdown heading and body:
+Two kinds of HTML-comment markers can appear in the daily stream file:
+
+A **fragment marker** introduces a memory you decided to keep. It is followed by a markdown heading and body:
 
 \`\`\`
 <!-- fragment source=<sessionId> entry=<entryId> -->
@@ -83,10 +85,16 @@ Each fragment in the daily stream file is delimited by an HTML comment marker, f
 <body, one or more paragraphs>
 \`\`\`
 
+A **watermark marker** is a bare line that records "I evaluated up to this entry id but found nothing worth keeping." It has no heading or body:
+
+\`\`\`
+<!-- watermark source=<sessionId> entry=<entryId> -->
+\`\`\`
+
+For both markers:
 - \`source\` is the parent session id passed in the user message.
-- \`entry\` is the stable id of the LATEST transcript entry your fragment incorporates. Always quote the most recent entry id you considered, so the next memory-logger run knows where you left off.
-- Separate fragments by a blank line.
-- Topics do not need to be unique.
+- \`entry\` is the stable id of the LATEST transcript entry you considered (whether or not you wrote a fragment for it). The next memory-logger run uses this to know where you left off.
+- Separate markers by a blank line.
 
 # Worth-remembering criteria
 
@@ -101,15 +109,20 @@ Do NOT write fragments for:
 - Transient context that will not matter tomorrow.
 - Information already encoded in IDENTITY.md, SOUL.md, or USER.md.
 
-If nothing in the transcript meets the bar, write nothing and exit cleanly.
+# Watermark contract — IMPORTANT
 
-# Watermark contract
+The user message will tell you the watermark — the entry id of the last transcript entry processed in a previous run, if any. Skip everything at or before that watermark.
 
-The user message will tell you the watermark — the entry id of the last transcript entry processed in a previous run, if any. Skip everything at or before that watermark. If there is no prior watermark, consider the entire transcript.
+You MUST advance the watermark on every run, regardless of whether you wrote any fragments. There are exactly two valid outcomes:
+
+1. **You wrote one or more fragments.** The last fragment's \`entry=\` value already records the latest entry you considered. Done.
+2. **You wrote no fragments** (nothing met the bar). You MUST append a single bare watermark marker recording the latest entry id you evaluated, then stop.
+
+Never exit without either a new fragment or a new watermark. If you skip this, the next run re-evaluates content you already considered.
 
 # Append, never rewrite
 
-Use \`write\` only in append mode. Never rewrite or truncate the daily stream file. If \`write\` is given a path that already has content, your responsibility is to preserve the existing content and add new fragments at the end.
+Use \`write\` only in append mode. Never rewrite or truncate the daily stream file. If \`write\` is given a path that already has content, your responsibility is to preserve the existing content and add new markers at the end.
 
 When you are done, simply stop. There is no completion message to emit.`
 
@@ -126,7 +139,7 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
   }
   lines.push(
     '',
-    'Read the transcript. Identify worth-remembering content past the watermark. Append fragments to the daily stream file. Then stop.',
+    'Read the transcript. Identify worth-remembering content past the watermark. Append fragments to the daily stream file. If nothing meets the bar, append a single bare watermark marker recording the latest entry id you evaluated. Either way, advance the watermark before you stop.',
   )
   return lines.join('\n')
 }

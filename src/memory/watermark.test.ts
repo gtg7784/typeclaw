@@ -80,7 +80,62 @@ describe('readWatermark', () => {
 
   test('does not match when source value is a prefix of the requested session id', () => {
     // Guards against accidental substring matching: ses_a should NOT match ses_abc.
-    const path = tmpFile(['<!-- fragment source=ses_a entry=00000001 -->', '## prefix', ''].join('\n'))
+    const path = tmpFile(
+      [
+        '<!-- fragment source=ses_a entry=00000001 -->',
+        '## prefix',
+        '',
+      ].join('\n'),
+    )
     expect(readWatermark(path, 'ses_abc')).toBeNull()
+  })
+
+  test('recognizes a bare watermark marker (no fragment body) as a valid watermark', () => {
+    const path = tmpFile('<!-- watermark source=ses_abc entry=quietday -->\n')
+    expect(readWatermark(path, 'ses_abc')).toBe('quietday')
+  })
+
+  test('the latest marker wins regardless of whether it is a fragment or a bare watermark', () => {
+    const path = tmpFile(
+      [
+        '<!-- fragment source=ses_abc entry=11111111 -->',
+        '## first',
+        'body',
+        '',
+        '<!-- watermark source=ses_abc entry=22222222 -->',
+        '',
+        '<!-- fragment source=ses_abc entry=33333333 -->',
+        '## third',
+        'body',
+        '',
+      ].join('\n'),
+    )
+    expect(readWatermark(path, 'ses_abc')).toBe('33333333')
+  })
+
+  test('a bare watermark following a fragment advances the watermark', () => {
+    const path = tmpFile(
+      [
+        '<!-- fragment source=ses_abc entry=11111111 -->',
+        '## first',
+        'body',
+        '',
+        '<!-- watermark source=ses_abc entry=22222222 -->',
+        '',
+      ].join('\n'),
+    )
+    expect(readWatermark(path, 'ses_abc')).toBe('22222222')
+  })
+
+  test('bare watermarks are filtered by session like fragments', () => {
+    const path = tmpFile(
+      [
+        '<!-- watermark source=ses_xyz entry=11111111 -->',
+        '<!-- watermark source=ses_abc entry=22222222 -->',
+        '<!-- watermark source=ses_xyz entry=33333333 -->',
+      ].join('\n'),
+    )
+    expect(readWatermark(path, 'ses_abc')).toBe('22222222')
+    expect(readWatermark(path, 'ses_xyz')).toBe('33333333')
   })
 })
