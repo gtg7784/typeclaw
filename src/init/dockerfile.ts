@@ -5,6 +5,10 @@ export function buildDockerfile(): string {
 
 WORKDIR /agent
 
+# Populated by buildkit. Used below to pick the right Chromium acquisition
+# strategy for the build platform.
+ARG TARGETARCH
+
 # git is required for the agent runtime (cloning, committing workspace state,
 # version-controlled tooling), so it ships in every agent image regardless of
 # what the user installs on top.
@@ -15,12 +19,26 @@ RUN apt-get update \\
 # agent-browser is bundled in every agent image so browser automation works
 # out of the box. The CLI is installed globally (outside /agent) so it survives
 # the runtime bind-mount that overlays node_modules at /agent/node_modules.
-# \`agent-browser install --with-deps\` downloads Chrome for Testing into
-# ~/.cache/agent-browser and installs the apt packages Chrome needs (libnss,
-# libxss, fonts, etc.). Both land in the image's writable layer at build time
-# so cold starts are zero-setup.
+#
+# Chromium acquisition is arch-dependent:
+#   - amd64: \`agent-browser install --with-deps\` downloads a pinned Chrome for
+#     Testing into ~/.cache/agent-browser and apt-installs the libs Chrome needs.
+#   - arm64: Chrome for Testing has no Linux ARM64 build, so we install Debian's
+#     chromium package and point agent-browser at /usr/bin/chromium via its
+#     global config (~/.agent-browser/config.json, lowest-priority layer that
+#     env vars and CLI flags can still override).
+# Either way, Chromium lands in the image's writable layer at build time so
+# cold starts are zero-setup.
 RUN bun install -g agent-browser \\
- && agent-browser install --with-deps
+ && if [ "$TARGETARCH" = "arm64" ]; then \\
+      apt-get update \\
+   && apt-get install -y --no-install-recommends chromium \\
+   && rm -rf /var/lib/apt/lists/* \\
+   && mkdir -p /root/.agent-browser \\
+   && printf '%s\\n' '{"executablePath":"/usr/bin/chromium"}' > /root/.agent-browser/config.json; \\
+    else \\
+      agent-browser install --with-deps; \\
+    fi
 
 # The agent folder (including node_modules) is bind-mounted at runtime by
 # \`typeclaw start\`, so we do not COPY or install here. This keeps the image

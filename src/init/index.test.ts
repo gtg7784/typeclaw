@@ -517,6 +517,20 @@ describe('writeDockerAssets', () => {
     expect(dockerfile).toMatch(/^[^#\n]*\bagent-browser install --with-deps\b/m)
   })
 
+  test('Dockerfile falls back to apt chromium on arm64 since Chrome for Testing has no linux/arm64 build', async () => {
+    await scaffold(root)
+
+    await writeDockerAssets(root)
+
+    const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
+    expect(dockerfile).toContain('ARG TARGETARCH')
+    // arm64 branch must apt-install chromium and configure agent-browser to use it,
+    // since `agent-browser install` would fail (no upstream linux/arm64 binary).
+    expect(dockerfile).toMatch(/\$TARGETARCH.*=.*["']?arm64["']?/)
+    expect(dockerfile).toMatch(/apt-get install[^\n]*\bchromium\b/)
+    expect(dockerfile).toMatch(/"executablePath"\s*:\s*"\/usr\/bin\/chromium"/)
+  })
+
   test('returns devMode true when typeclaw dep is a file: spec', async () => {
     await scaffold(root)
 
