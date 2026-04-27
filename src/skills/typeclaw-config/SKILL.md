@@ -28,7 +28,7 @@ There is no file watcher. **Editing `typeclaw.json` while the container runs doe
 | `$schema` | no       | string           | Path to `typeclaw.schema.json` for editor autocompletion. Scaffolded as `./node_modules/typeclaw/typeclaw.schema.json`. Leave it alone unless the user moves it. |
 | `port`    | no       | integer          | 1â€“65535. Defaults to `8973` (T9 spelling of "TYPE"). Change only if the default collides with something on the user's host.                                      |
 | `model`   | no       | string           | Must be one of the values listed in the **Allowed models** section below. Defaults to `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`.                    |
-| `mounts`  | **yes**  | array of objects | Host directories bind-mounted into your container. Empty array `[]` is valid and is what `typeclaw init` writes. See **Mounts** section below.                   |
+| `mounts`  | no       | array of objects | Host directories bind-mounted into your container. Defaults to `[]` (no host paths exposed). `typeclaw init` writes `[]` explicitly. See **Mounts** section below. |
 
 The runtime parses this file with a strict schema (`zod`). **Unknown fields are tolerated but ignored** â€” they do nothing. Do not invent fields like `provider`, `apiKey`, `temperature`, `maxTokens`, `systemPrompt`, `tools`, `timeout`, etc. They will be silently dropped. If the user asks for one of those, say it is not yet supported and (if it makes sense) suggest they file a request.
 
@@ -42,7 +42,7 @@ A scaffolded `typeclaw.json` looks like:
 }
 ```
 
-The runtime will fill in `port` from the default if it is omitted. `mounts` is required: omitting it makes the file fail to load.
+The runtime fills in defaults for any omitted field: `port` falls back to `8973` and `mounts` falls back to `[]` (no host paths exposed). New configs scaffolded by `typeclaw init` write `mounts: []` explicitly so the field is visible to the user even when empty.
 
 ## Mounts
 
@@ -134,7 +134,7 @@ Never echo, log, or commit values from `.env`. `.env` is gitignored by default â
 
 - The file parses as JSON
 - Top-level is an object (not an array, not a string)
-- `mounts` is present and is an array (use `[]` if no host paths are exposed)
+- If `mounts` is present, it is an array (omit it or use `[]` if no host paths are exposed)
 - Each `mounts[].name` matches `^[a-z0-9][a-z0-9-_]*$` and is unique within the array
 - Each `mounts[].path` is a non-empty string
 - If `port` is set: integer, 1â€“65535
@@ -149,7 +149,7 @@ Never echo, log, or commit values from `.env`. `.env` is gitignored by default â
 - **Do not change `model` to something not in the registry.** The agent will refuse to boot. If the user wants a model that isn't there, this is a typeclaw-side change, not a config edit.
 - **Do not edit `typeclaw.json` from inside an `exec` cron job's `command`.** That mutates the file behind the runtime's back; the change does not apply until the next restart anyway.
 - **Do not delete `$schema`.** It powers editor autocompletion for the user. Leaving it in costs nothing.
-- **Do not delete or omit `mounts`.** It is required. If you have no host paths exposed, write `"mounts": []`. Omitting the field will fail config load on next restart.
+- **Prefer writing `"mounts": []` explicitly over omitting the field.** Omitting it loads fine (defaults to `[]`), but an explicit empty array signals to the user that you considered host file access and chose none.
 - **Do not promise to write to a `readOnly: true` mount.** Docker enforces it via `:ro`; writes will fail with EROFS. If the user wants you to edit a read-only mount, the fix is to flip `readOnly` to `false` in `typeclaw.json` and restart, not to retry the write.
 - **Do not invent mount entries the user did not request.** Mounts expose host paths to your container; adding them silently is a security surprise.
 

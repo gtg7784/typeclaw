@@ -5,8 +5,9 @@ import { configSchema, mountSchema } from './config'
 const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
 
 describe('configSchema', () => {
-  test('rejects config without mounts (mounts is required)', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL })).toThrow()
+  test('defaults mounts to [] when omitted (predating the field is fine)', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.mounts).toEqual([])
   })
 
   test('accepts config with empty mounts array', () => {

@@ -33,10 +33,10 @@ export const configSchema = z.object({
       idleMs: z.number().int().min(1000).default(DEFAULT_MEMORY_IDLE_MS),
     })
     .default({ idleMs: DEFAULT_MEMORY_IDLE_MS }),
-  // Required so users explicitly opt in to host file access and so the absence
-  // of mounts is a deliberate choice, not a forgotten field. Empty array is
-  // valid and is what `typeclaw init` writes.
-  mounts: z.array(mountSchema),
+  // Defaults to `[]` so configs predating the field still load. `typeclaw init`
+  // writes `"mounts": []` explicitly, but a missing field is treated the same
+  // way (no host paths exposed) rather than failing the whole config load.
+  mounts: z.array(mountSchema).default([]),
 })
 
 export type Config = z.infer<typeof configSchema>

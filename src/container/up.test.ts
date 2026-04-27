@@ -290,7 +290,7 @@ describe('planUp mounts', () => {
     await expect(planUp({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow()
   })
 
-  test('throws when typeclaw.json is missing required mounts field', async () => {
+  test('treats a typeclaw.json without a mounts field as no mounts', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeFile(
@@ -298,7 +298,9 @@ describe('planUp mounts', () => {
       `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })}\n`,
     )
 
-    await expect(planUp({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow(/mounts/)
+    const plan = await planUp({ cwd: root, port: 8973, imageExists: true })
+
+    expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
   })
 
   test('throws when a mount name violates the pattern', async () => {
