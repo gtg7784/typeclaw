@@ -7,11 +7,17 @@ const knownModelRefs = listKnownModelRefs() as [KnownModelRef, ...KnownModelRef[
 
 // T9 keypad: T=8, Y=9, P=7, E=3
 const DEFAULT_PORT = 8973
+const DEFAULT_MEMORY_IDLE_MS = 30_000
 
 export const configSchema = z.object({
   $schema: z.string().optional(),
   port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
   model: z.enum(knownModelRefs).default('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'), // FIXME: TEMP default
+  memory: z
+    .object({
+      idleMs: z.number().int().min(1000).default(DEFAULT_MEMORY_IDLE_MS),
+    })
+    .default({ idleMs: DEFAULT_MEMORY_IDLE_MS }),
 })
 
 export type Config = z.infer<typeof configSchema>
