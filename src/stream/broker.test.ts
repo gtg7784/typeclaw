@@ -167,14 +167,14 @@ describe('createStream — target selectors', () => {
     expect(seen).toHaveLength(2)
   })
 
-  test('new-session role selector filters by role', () => {
+  test('new-session subagent selector filters by subagent', () => {
     const stream = createStream()
     const reflectionSeen: StreamMessage[] = []
     const allNewSeen: StreamMessage[] = []
-    stream.subscribe({ target: { kind: 'new-session', role: 'reflection' } }, (msg) => reflectionSeen.push(msg))
+    stream.subscribe({ target: { kind: 'new-session', subagent: 'reflection' } }, (msg) => reflectionSeen.push(msg))
     stream.subscribe({ target: { kind: 'new-session' } }, (msg) => allNewSeen.push(msg))
 
-    stream.publish({ target: { kind: 'new-session', role: 'reflection' }, payload: 1 })
+    stream.publish({ target: { kind: 'new-session', subagent: 'reflection' }, payload: 1 })
     stream.publish({ target: { kind: 'new-session' }, payload: 2 })
 
     expect(reflectionSeen).toHaveLength(1)

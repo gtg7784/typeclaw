@@ -3,7 +3,7 @@ export type StreamMessageId = string
 export type StreamTarget =
   | { kind: 'broadcast' }
   | { kind: 'session'; sessionId: string }
-  | { kind: 'new-session'; role?: string }
+  | { kind: 'new-session'; subagent?: string }
   | { kind: 'cron'; jobId: string }
 
 export type StreamMessage = {
@@ -35,7 +35,7 @@ export type ScanFilter = SubscribeFilter & {
 export type TargetFilter =
   | { kind: 'broadcast' }
   | { kind: 'session'; sessionId?: string }
-  | { kind: 'new-session'; role?: string }
+  | { kind: 'new-session'; subagent?: string }
   | { kind: 'cron'; jobId?: string }
 
 export type Unsubscribe = () => void
