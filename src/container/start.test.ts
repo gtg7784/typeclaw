@@ -114,6 +114,44 @@ describe('planStart', () => {
     expect(plan.runArgs).not.toContain('--env-file')
   })
 
+  test('propagates host TZ via -e so cron schedules fire at the wall-clock the user expects', async () => {
+    const original = process.env.TZ
+    process.env.TZ = 'Asia/Seoul'
+    try {
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+
+      const tzIdx = plan.runArgs.findIndex((a, i) => a === '-e' && plan.runArgs[i + 1] === 'TZ=Asia/Seoul')
+      expect(tzIdx).toBeGreaterThanOrEqual(0)
+    } finally {
+      if (original === undefined) {
+        delete process.env.TZ
+      } else {
+        process.env.TZ = original
+      }
+    }
+  })
+
+  test('falls back to Intl-detected timezone when TZ env var is unset (typical macOS host)', async () => {
+    const original = process.env.TZ
+    delete process.env.TZ
+    try {
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+
+      const eIdx = plan.runArgs.findIndex((a, i) => a === '-e' && plan.runArgs[i + 1]?.startsWith('TZ='))
+      expect(eIdx).toBeGreaterThanOrEqual(0)
+      const detected = plan.runArgs[eIdx + 1]?.slice('TZ='.length)
+      expect(detected).toBeTruthy()
+    } finally {
+      if (original !== undefined) process.env.TZ = original
+    }
+  })
+
   test('adds a mirror mount for the typeclaw source when dependency is a file: spec outside cwd', async () => {
     const typeclawRepo = await mkdtemp(join(tmpdir(), 'typeclaw-repo-'))
     try {

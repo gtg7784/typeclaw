@@ -95,12 +95,7 @@ export async function start({
   }
 }
 
-export async function planStart({
-  cwd,
-  port,
-  imageExists,
-  forceBuild = false,
-}: PlanStartOptions): Promise<StartPlan> {
+export async function planStart({ cwd, port, imageExists, forceBuild = false }: PlanStartOptions): Promise<StartPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
 
@@ -119,6 +114,15 @@ export async function planStart({
 
   if (existsSync(join(cwd, ENV_FILE))) {
     runArgs.push('--env-file', join(cwd, ENV_FILE))
+  }
+
+  // Propagate the host timezone so cron schedules in typeclaw.json (and
+  // cron.json jobs without an explicit `timezone`) fire at wall-clock times
+  // the user expects. oven/bun:1-slim ships tzdata, so just setting TZ is
+  // enough — no Dockerfile change required.
+  const hostTz = resolveHostTimezone()
+  if (hostTz) {
+    runArgs.push('-e', `TZ=${hostTz}`)
   }
 
   runArgs.push('-v', `${cwd}:/agent`)
@@ -259,4 +263,19 @@ function expandMountPath(input: string, cwd: string): string {
     return join(homedir(), input.slice(1))
   }
   return isAbsolute(input) ? input : resolve(cwd, input)
+}
+
+// process.env.TZ is honored first because users who explicitly set it (e.g.
+// `TZ=UTC typeclaw start` for testing) expect that to win over their system
+// default. Falls back to Intl, which works reliably on macOS where TZ is
+// usually unset. Returns null if neither yields an IANA zone name.
+function resolveHostTimezone(): string | null {
+  const explicit = process.env.TZ
+  if (explicit && explicit.length > 0) return explicit
+  try {
+    const detected = Intl.DateTimeFormat().resolvedOptions().timeZone
+    return detected && detected.length > 0 ? detected : null
+  } catch {
+    return null
+  }
 }
