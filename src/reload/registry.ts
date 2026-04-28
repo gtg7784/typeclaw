@@ -22,14 +22,19 @@ export class ReloadRegistry {
     return Array.from(this.items.values())
   }
 
+  // Runs serially in registration order. Reloadables observe the side
+  // effects of earlier ones — e.g. cron reload reads the freshly swapped
+  // config when it runs after the config reloadable. Manual reload is rare,
+  // so deterministic ordering wins over parallelism.
   async reloadAll(): Promise<ReloadAllResult> {
-    const items = this.list()
-    const settled = await Promise.allSettled(items.map((item) => item.reload()))
-    const results: ReloadResult[] = settled.map((s, i) => {
-      const scope = items[i]!.scope
-      if (s.status === 'fulfilled') return s.value
-      return { scope, ok: false, reason: errorMessage(s.reason) }
-    })
+    const results: ReloadResult[] = []
+    for (const item of this.list()) {
+      try {
+        results.push(await item.reload())
+      } catch (err) {
+        results.push({ scope: item.scope, ok: false, reason: errorMessage(err) })
+      }
+    }
     return { results }
   }
 

@@ -87,7 +87,7 @@ describe('ReloadRegistry.reloadAll', () => {
     ])
   })
 
-  test('runs reloadables in parallel', async () => {
+  test('runs reloadables serially in registration order', async () => {
     const reg = new ReloadRegistry()
     const order: string[] = []
     reg.register({
@@ -111,7 +111,33 @@ describe('ReloadRegistry.reloadAll', () => {
 
     await reg.reloadAll()
 
-    expect(order).toEqual(['fast', 'slow'])
+    expect(order).toEqual(['slow', 'fast'])
+  })
+
+  test('a later reloadable observes the side effects of an earlier one', async () => {
+    const reg = new ReloadRegistry()
+    let shared = 0
+    reg.register({
+      scope: 'first',
+      description: '',
+      reload: async () => {
+        shared = 42
+        return { scope: 'first', ok: true, summary: '' }
+      },
+    })
+    const observed: number[] = []
+    reg.register({
+      scope: 'second',
+      description: '',
+      reload: async () => {
+        observed.push(shared)
+        return { scope: 'second', ok: true, summary: '' }
+      },
+    })
+
+    await reg.reloadAll()
+
+    expect(observed).toEqual([42])
   })
 
   test('one failing reloadable does not prevent others from running', async () => {
