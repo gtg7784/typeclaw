@@ -3,7 +3,17 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { DREAMING_STATE_FILE } from '@/memory'
+
 import { loadMemory } from './memory'
+
+async function writeDreamingState(
+  dir: string,
+  dreamedThrough: Record<string, { lines: number; ts: string }>,
+): Promise<void> {
+  await mkdir(join(dir, 'memory'), { recursive: true })
+  await writeFile(join(dir, DREAMING_STATE_FILE), JSON.stringify({ version: 1, dreamedThrough }))
+}
 
 let agentDir: string
 
@@ -162,5 +172,85 @@ describe('loadMemory', () => {
 
     // then
     expect(section).toContain('[truncated]')
+  })
+})
+
+describe('loadMemory undreamed-tail filtering', () => {
+  test('omits a stream entirely when its line count equals the watermark (fully dreamed)', async () => {
+    // given
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'consolidated\n')
+    await writeDreamingState(agentDir, { '2026-04-27': { lines: 1, ts: 'past' } })
+
+    // when
+    const section = await loadMemory(agentDir)
+
+    // then
+    expect(section).not.toContain('## memory/2026-04-27.md')
+  })
+
+  test('injects only the tail past the watermark when partially dreamed', async () => {
+    // given: 5 lines total, first 2 already consolidated
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      'old line 1\nold line 2\nnew line 3\nnew line 4\nnew line 5\n',
+    )
+    await writeDreamingState(agentDir, { '2026-04-27': { lines: 2, ts: 'past' } })
+
+    // when
+    const section = await loadMemory(agentDir)
+
+    // then
+    expect(section).toContain('## memory/2026-04-27.md (undreamed tail)')
+    expect(section).toContain('new line 3')
+    expect(section).toContain('new line 4')
+    expect(section).toContain('new line 5')
+    expect(section).not.toContain('old line 1')
+    expect(section).not.toContain('old line 2')
+  })
+
+  test('injects the full file when no watermark is recorded for that date', async () => {
+    // given: another date is watermarked, this one is not
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(join(agentDir, 'memory', '2026-04-26.md'), 'fully consumed\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'untouched\n')
+    await writeDreamingState(agentDir, { '2026-04-26': { lines: 1, ts: 'past' } })
+
+    // when
+    const section = await loadMemory(agentDir)
+
+    // then
+    expect(section).not.toContain('## memory/2026-04-26.md')
+    expect(section).toContain('## memory/2026-04-27.md')
+    expect(section).not.toContain('(undreamed tail)')
+    expect(section).toContain('untouched')
+  })
+
+  test('falls back to injecting all streams when .dreaming-state.json is malformed', async () => {
+    // given: state file is junk; loader should fail open
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'fragment')
+    await writeFile(join(agentDir, DREAMING_STATE_FILE), '{ broken')
+
+    // when
+    const section = await loadMemory(agentDir)
+
+    // then
+    expect(section).toContain('## memory/2026-04-27.md')
+    expect(section).toContain('fragment')
+  })
+
+  test('treats a hand-edited stream that shrank below its watermark as fully dreamed', async () => {
+    // given: file has 1 line but watermark says 99
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'just one line\n')
+    await writeDreamingState(agentDir, { '2026-04-27': { lines: 99, ts: 'past' } })
+
+    // when
+    const section = await loadMemory(agentDir)
+
+    // then
+    expect(section).not.toContain('## memory/2026-04-27.md')
   })
 })

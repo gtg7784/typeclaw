@@ -1,8 +1,11 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { getDreamedLines, loadDreamingState } from '@/memory/dreaming-state'
+
 const MAX_FILE_BYTES = 12 * 1024
 const STREAM_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}\.md$/
+const STREAM_DATE_FROM_FILENAME = /^(\d{4}-\d{2}-\d{2})\.md$/
 const MEMORY_FRAMING =
   'Long-term memory below survives across sessions. Daily streams below capture undreamed observations from recent sessions; the newest day is closest to the current task. Read both before answering anything that plausibly connects to past context.'
 
@@ -10,6 +13,7 @@ type FileEntry = {
   name: string
   path: string
   content: string | null
+  fullyDreamed?: boolean
 }
 
 export async function loadMemory(agentDir: string): Promise<string> {
@@ -38,13 +42,32 @@ async function readStreamEntries(agentDir: string): Promise<FileEntry[]> {
     return []
   }
 
+  const state = await loadDreamingState(agentDir)
   const dated = names.filter((n) => STREAM_FILE_PATTERN.test(n)).sort()
-  return Promise.all(
+  const entries = await Promise.all(
     dated.map(async (name) => {
+      const date = STREAM_DATE_FROM_FILENAME.exec(name)?.[1] ?? ''
+      const dreamedLines = getDreamedLines(state, date)
       const entry = await readEntry(memoryDir, name)
-      return { ...entry, name: `memory/${name}` }
+      return sliceUndreamedTail({ ...entry, name: `memory/${name}` }, dreamedLines)
     }),
   )
+  return entries.filter((e) => !e.fullyDreamed)
+}
+
+// Slice off the lines already consolidated into MEMORY.md so the agent never
+// sees a fragment twice (once in MEMORY.md and once in the daily stream). When
+// the entire file is dreamed, return a sentinel `fullyDreamed: true` so the
+// caller can drop it from the prompt entirely. When the file was hand-edited
+// to be shorter than the watermark, we treat it as fully dreamed (the lost
+// fragments are already consolidated into MEMORY.md).
+function sliceUndreamedTail(entry: FileEntry, dreamedLines: number): FileEntry {
+  if (dreamedLines <= 0 || entry.content === null) return entry
+  const lines = entry.content.split('\n')
+  if (dreamedLines >= lines.length) return { ...entry, fullyDreamed: true }
+  const tail = lines.slice(dreamedLines).join('\n').trimStart()
+  if (tail.trim() === '') return { ...entry, fullyDreamed: true }
+  return { ...entry, name: `${entry.name} (undreamed tail)`, content: tail }
 }
 
 function renderSection(longTerm: FileEntry, streams: FileEntry[]): string {
