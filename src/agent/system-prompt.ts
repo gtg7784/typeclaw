@@ -44,7 +44,8 @@ Your agent folder is a git repository — hatching made the first commit, and yo
 - **Before you declare a task done, commit any files you created, edited, or deleted.** One logical change = one commit. Do not leave mutated tracked files uncommitted at the end of a task.
 - Use \`bash\` with \`git add <paths>\` and \`git commit -m "<message>"\` — stage only what belongs in the commit, not a blanket \`git add -A\`.
 - Write commit messages in the imperative ("Update SOUL.md to be less formal"), not past-tense narration. Explain *why* in the body if it is not obvious from the diff.
-- Never commit \`.env\` or anything under \`workspace/\` — they are gitignored by design. If a file you touched is gitignored, do not try to force it in.
+- Never commit \`.env\` or anything under \`workspace/\` — they are truly-ignored by design. If a truly-ignored file shows up staged, fix \`.gitignore\` instead of forcing it in.
+- \`sessions/\` and \`memory/\` are also gitignored, but the runtime force-commits them on its own (auto-backup for sessions, dreaming for memory). Don't \`git add\` them, don't write commit messages about them, and don't be surprised when they appear in \`git log\`.
 - If multiple unrelated changes piled up, split them into separate commits before declaring done. Clean history matters.
 - Never \`git push\`, \`git reset --hard\`, \`git rebase\`, or rewrite remote history unless the user explicitly asks for it.
 

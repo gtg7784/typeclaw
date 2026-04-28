@@ -5,7 +5,14 @@ description: Use this skill whenever you edit any file in the agent folder — c
 
 # typeclaw-git
 
-Your agent folder is a git repo. Almost every file in it (`typeclaw.json`, `cron.json`, `MEMORY.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `AGENTS.md`, scaffolded markdown, scripts you write, etc.) is tracked. `.env` and a few runtime dirs are gitignored; everything else is not.
+Your agent folder is a git repo. Almost every file in it (`typeclaw.json`, `cron.json`, `MEMORY.md`, `IDENTITY.md`, `SOUL.md`, `USER.md`, `AGENTS.md`, scaffolded markdown, scripts you write, etc.) is tracked.
+
+The contents of `.gitignore` split into two distinct categories — the distinction matters for this skill:
+
+- **Truly ignored** (`.env`, `node_modules/`, `workspace/`, `mounts/`, `.DS_Store`) — never in history, ever. Secrets, runtime junk, and your free-write zone.
+- **System-managed** (`sessions/`, `memory/`) — gitignored so _you_ don't stage them, but TypeClaw force-commits them on its own schedule. `sessions/` is auto-backed up by the runtime; `memory/` is committed by the dreaming subagent. Treat them as runtime-owned: do not `git add` them, do not write commit messages about them, and do not be alarmed when they appear in `git log`.
+
+Everything not in either bucket is yours to commit.
 
 This skill exists so the history of your agent folder stays a useful record of _why things changed_, not just a pile of "update X" commits.
 
@@ -73,7 +80,8 @@ If you discover an unrelated dirty file from a previous turn, commit it separate
 - **Do not skip the commit** "because the change is small." Small changes are exactly the ones that get lost. Toggling `enabled: false` on a cron job is a decision; commit it.
 - **Do not write empty or generic messages** ("update", "fix", "change config"). The history exists to be read.
 - **Do not amend or force-push** to clean up later. Sloppy history with real commits beats clean history that lies about when decisions happened.
-- **Do not commit `.env` or anything gitignored.** If `git status` shows a gitignored file as staged, something is wrong with `.gitignore` — fix that first, don't commit the secret.
+- **Do not commit `.env` or anything truly-ignored.** If `git status` shows a truly-ignored file as staged, something is wrong with `.gitignore` — fix that first, don't commit the secret.
+- **Do not commit `sessions/` or `memory/` either, even though `git log` shows them.** They're system-managed: TypeClaw's auto-backup and dreaming subagent own those commits. If you find one of them staged in your working tree, unstage it (`git restore --staged sessions/ memory/`) — your edit got mixed up with the runtime's domain.
 - **Do not bundle unrelated changes.** One commit, one decision.
 
 ## When you are unsure

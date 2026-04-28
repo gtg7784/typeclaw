@@ -1,13 +1,19 @@
 export const GITIGNORE_FILE = '.gitignore'
 
 export function buildGitignore(): string {
-  return `.env
+  return `# Truly ignored: secrets, runtime junk, and the agent's free-write zone.
+# Never enter git history under any circumstance.
+.env
 .env.local
 node_modules/
-sessions/
-memory/
 workspace/
 mounts/
 .DS_Store
+
+# System-managed: gitignored by default so the agent never stages them by hand,
+# but TypeClaw force-commits them on its own schedule (sessions/ via auto-backup,
+# memory/ via the dreaming subagent). Treat them as runtime-owned, not agent-owned.
+sessions/
+memory/
 `
 }

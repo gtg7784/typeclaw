@@ -423,7 +423,7 @@ describe('scaffold', () => {
     expect(await readFile(join(root, 'package.json'), 'utf8')).toBe(original)
   })
 
-  test('writes .gitignore with secret, workspace, and mounts entries', async () => {
+  test('writes .gitignore with both truly-ignored entries and system-managed entries', async () => {
     await scaffold(root)
 
     const gitignore = await readFile(join(root, '.gitignore'), 'utf8')
