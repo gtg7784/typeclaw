@@ -58,6 +58,14 @@ describe('cronFileSchema', () => {
     ).toThrow()
   })
 
+  test('rejects subagent kind (internal-only — must not be writable from cron.json)', () => {
+    expect(() =>
+      cronFileSchema.parse({
+        jobs: [{ id: 'j', schedule: '* * * * *', kind: 'subagent', subagent: 'dreaming', payload: {} }],
+      }),
+    ).toThrow()
+  })
+
   test('rejects prompt job missing prompt', () => {
     expect(() => cronFileSchema.parse({ jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt' }] })).toThrow()
   })

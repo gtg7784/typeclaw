@@ -1,7 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession } from '@/agent'
-import { config } from '@/config'
+import { type Config, config } from '@/config'
 import {
   type CronConsumer,
   type CronJob,
@@ -12,14 +12,17 @@ import {
   type LoadCronResult,
   loadCron as loadCronDefault,
   type Scheduler,
+  type SubagentJob,
 } from '@/cron'
-import { createMemoryLoggerSpawner, isMemoryLoggerPayload } from '@/memory'
+import { createDreamingSpawner, createMemoryLoggerSpawner, isDreamingPayload, isMemoryLoggerPayload } from '@/memory'
 import { ReloadRegistry } from '@/reload'
 import { createServer, type Server } from '@/server'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
 import { createSubagentConsumer, type SubagentConsumer } from '@/subagent'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
+
+const DREAMING_JOB_ID = '__internal_dreaming'
 
 type BunServer = ReturnType<Server['start']>
 
@@ -79,22 +82,33 @@ export async function startAgent({
     stream,
     spawners: {
       'memory-logger': createMemoryLoggerSpawner(),
+      dreaming: createDreamingSpawner(),
     },
     inFlightKey: (subagent, payload) => {
       if (subagent === 'memory-logger' && isMemoryLoggerPayload(payload)) {
         return `${subagent}:${payload.parentSessionId}`
+      }
+      if (subagent === 'dreaming' && isDreamingPayload(payload)) {
+        return `${subagent}:${payload.agentDir}`
       }
       return subagent
     },
   })
   subagentConsumer.start()
 
-  const factory = createSchedulerFor ?? makeDefaultSchedulerFactory()
-  const scheduler = await startScheduler({ cwd, loadCron, createSchedulerFor: factory, stream })
+  const internalJobs = () => buildInternalJobs(cwd, config)
+  const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(internalJobs)
+  const scheduler = await startScheduler({
+    cwd,
+    loadCron,
+    createSchedulerFor: factory,
+    stream,
+    hasInternalJobs: internalJobs().length > 0,
+  })
 
   if (scheduler) {
     cronConsumer.start()
-    reloadRegistry.register(createCronReloadable({ cwd, scheduler }))
+    reloadRegistry.register(createCronReloadable({ cwd, scheduler, internalJobs }))
   }
 
   const server = createServer({
@@ -150,11 +164,13 @@ async function startScheduler({
   loadCron,
   createSchedulerFor,
   stream,
+  hasInternalJobs,
 }: {
   cwd: string
   loadCron: LoadCronFn
   createSchedulerFor: SchedulerFactory
   stream: Stream
+  hasInternalJobs: boolean
 }): Promise<Scheduler | null> {
   let result: LoadCronResult
   try {
@@ -167,16 +183,36 @@ async function startScheduler({
     console.error(`[cron] failed to load cron.json: ${result.reason}`)
     return null
   }
-  if (!result.file) return null
+  // Without cron.json, the scheduler still needs to run if internal jobs
+  // (like dreaming) are configured. Construct an empty file in that case.
+  const file: CronFile = result.file ?? { jobs: [] }
+  if (!result.file && !hasInternalJobs) return null
 
   const onFire = (job: CronJob) => {
     stream.publish({ target: { kind: 'cron', jobId: job.id }, payload: job })
   }
-  const scheduler = createSchedulerFor({ cwd, file: result.file, onFire })
+  const scheduler = createSchedulerFor({ cwd, file, onFire })
   scheduler.start()
   return scheduler
 }
 
-function makeDefaultSchedulerFactory(): SchedulerFactory {
-  return ({ file, onFire }) => createScheduler({ jobs: file.jobs, onFire })
+function makeDefaultSchedulerFactory(internalJobs: () => CronJob[]): SchedulerFactory {
+  return ({ file, onFire }) => createScheduler({ jobs: [...file.jobs, ...internalJobs()], onFire })
+}
+
+function buildInternalJobs(cwd: string, cfg: Config): CronJob[] {
+  const jobs: CronJob[] = []
+  const dreaming = cfg.memory.dreaming
+  if (dreaming) {
+    const job: SubagentJob = {
+      id: DREAMING_JOB_ID,
+      schedule: dreaming.schedule,
+      enabled: true,
+      kind: 'subagent',
+      subagent: 'dreaming',
+      payload: { agentDir: cwd },
+    }
+    jobs.push(job)
+  }
+  return jobs
 }

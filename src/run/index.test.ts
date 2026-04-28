@@ -4,6 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { config } from '@/config'
 import type { CronFile, CronJob, LoadCronResult, Scheduler } from '@/cron'
 import type { SessionFactory } from '@/sessions'
 import type { TuiOptions } from '@/tui'
@@ -247,6 +248,139 @@ describe('startAgent', () => {
 
     expect(subConsumer.inFlightCount()).toBe(0)
     expect(gotIt).toBe(0)
+  })
+})
+
+describe('startAgent dreaming wiring', () => {
+  function withDreamingConfig(schedule: string | null): () => void {
+    const original = config.memory.dreaming
+    config.memory.dreaming = schedule === null ? undefined : { schedule }
+    return () => {
+      config.memory.dreaming = original
+    }
+  }
+
+  test('does NOT register a scheduler when dreaming is unconfigured AND cron.json is absent', async () => {
+    const restore = withDreamingConfig(null)
+    try {
+      const factoryCalls: Array<{ cwd: string; file: CronFile }> = []
+      const createSchedulerFor: SchedulerFactory = (opts) => {
+        factoryCalls.push(opts)
+        return stubScheduler()
+      }
+
+      running = await startAgent({ port: 0, attachTui: false, loadCron: noCron, createSchedulerFor })
+
+      expect(factoryCalls).toHaveLength(0)
+      expect(running.scheduler).toBeNull()
+    } finally {
+      restore()
+    }
+  })
+
+  test('starts a scheduler when dreaming is configured even if cron.json is absent', async () => {
+    const restore = withDreamingConfig('0 4 * * *')
+    try {
+      const factoryCalls: Array<{ cwd: string; file: CronFile }> = []
+      const createSchedulerFor: SchedulerFactory = (opts) => {
+        factoryCalls.push(opts)
+        return stubScheduler()
+      }
+
+      running = await startAgent({ port: 0, attachTui: false, loadCron: noCron, createSchedulerFor })
+
+      expect(factoryCalls).toHaveLength(1)
+      expect(running.scheduler).not.toBeNull()
+    } finally {
+      restore()
+    }
+  })
+
+  test('cron reload merges the internal dreaming job with user jobs from cron.json', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-dream-reload-'))
+    try {
+      await Bun.write(
+        join(agentDir, 'cron.json'),
+        JSON.stringify({
+          jobs: [{ id: 'user-job', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+        }),
+      )
+      const restore = withDreamingConfig('0 4 * * *')
+      try {
+        const replacements: CronJob[][] = []
+        const fakeScheduler: Scheduler = {
+          start: () => {},
+          stop: () => {},
+          replaceJobs: (jobs) => {
+            replacements.push([...jobs])
+            return { added: [], removed: [], updated: [], unchanged: [] }
+          },
+        }
+        const createSchedulerFor: SchedulerFactory = () => fakeScheduler
+
+        running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, createSchedulerFor })
+        await running.reloadRegistry.reloadAll()
+
+        expect(replacements).toHaveLength(1)
+        const ids = replacements[0]?.map((j) => j.id) ?? []
+        expect(ids).toContain('__internal_dreaming')
+        expect(ids).toContain('user-job')
+      } finally {
+        restore()
+      }
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('firing the dreaming cron job publishes a new-session message for the dreaming subagent', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-dream-fire-'))
+    try {
+      const restore = withDreamingConfig('0 4 * * *')
+      try {
+        let captured: ((job: CronJob) => void) | null = null
+        const createSchedulerFor: SchedulerFactory = ({ onFire }) => {
+          captured = onFire
+          return stubScheduler()
+        }
+
+        running = await startAgent({
+          port: 0,
+          attachTui: false,
+          cwd: agentDir,
+          loadCron: noCron,
+          createSchedulerFor,
+        })
+
+        const newSessionMessages: Array<{ subagent?: string; payload: unknown }> = []
+        running.stream.subscribe({ target: { kind: 'new-session' } }, (msg) => {
+          const target = msg.target as { kind: 'new-session'; subagent?: string }
+          newSessionMessages.push({ subagent: target.subagent, payload: msg.payload })
+        })
+
+        // when: the scheduler fires the dreaming job (onFire publishes to target:cron;
+        // the consumer is expected to translate kind:'subagent' into a new-session publish)
+        const dreamJob: CronJob = {
+          id: '__internal_dreaming',
+          schedule: '0 4 * * *',
+          enabled: true,
+          kind: 'subagent',
+          subagent: 'dreaming',
+          payload: { agentDir },
+        }
+        expect(captured).not.toBeNull()
+        captured!(dreamJob)
+        await new Promise((r) => setImmediate(r))
+
+        const dreamingMsg = newSessionMessages.find((m) => m.subagent === 'dreaming')
+        expect(dreamingMsg).toBeDefined()
+        expect(dreamingMsg?.payload).toEqual({ agentDir })
+      } finally {
+        restore()
+      }
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
   })
 })
 

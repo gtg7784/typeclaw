@@ -2,26 +2,31 @@ import type { Reloadable, ReloadResult } from '@/reload'
 
 import { loadCron } from './index'
 import type { JobDiff, Scheduler } from './scheduler'
+import type { CronJob } from './schema'
 
 export type CreateCronReloadableOptions = {
   cwd: string
   scheduler: Scheduler
+  // Internal jobs (e.g. dreaming) survive cron.json reloads. The reloadable
+  // recomputes them on every reload so config-driven changes propagate too.
+  internalJobs?: () => CronJob[]
 }
 
-export function createCronReloadable({ cwd, scheduler }: CreateCronReloadableOptions): Reloadable {
+export function createCronReloadable({ cwd, scheduler, internalJobs }: CreateCronReloadableOptions): Reloadable {
   return {
     scope: 'cron',
     description: 'cron jobs from cron.json',
-    reload: async () => doReload({ cwd, scheduler }),
+    reload: async () => doReload({ cwd, scheduler, internalJobs }),
   }
 }
 
-async function doReload({ cwd, scheduler }: CreateCronReloadableOptions): Promise<ReloadResult> {
+async function doReload({ cwd, scheduler, internalJobs }: CreateCronReloadableOptions): Promise<ReloadResult> {
   const loaded = await loadCron(cwd)
   if (!loaded.ok) {
     return { scope: 'cron', ok: false, reason: loaded.reason }
   }
-  const nextJobs = loaded.file?.jobs ?? []
+  const userJobs = loaded.file?.jobs ?? []
+  const nextJobs: CronJob[] = [...userJobs, ...(internalJobs?.() ?? [])]
 
   let diff: JobDiff
   try {

@@ -43,6 +43,44 @@ describe('configSchema', () => {
   })
 })
 
+describe('configSchema memory.dreaming', () => {
+  test('omits dreaming by default (memory.dreaming is undefined)', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.memory.dreaming).toBeUndefined()
+  })
+
+  test('fills in default schedule when memory.dreaming is present but empty', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, memory: { dreaming: {} } })
+    expect(parsed.memory.dreaming?.schedule).toBe('0 4 * * *')
+  })
+
+  test('respects an explicit schedule', () => {
+    const parsed = configSchema.parse({
+      model: VALID_MODEL,
+      memory: { dreaming: { schedule: '30 3 * * *' } },
+    })
+    expect(parsed.memory.dreaming?.schedule).toBe('30 3 * * *')
+  })
+
+  test('rejects an invalid cron expression in memory.dreaming.schedule', () => {
+    expect(() =>
+      configSchema.parse({
+        model: VALID_MODEL,
+        memory: { dreaming: { schedule: 'not-a-cron' } },
+      }),
+    ).toThrow()
+  })
+
+  test('rejects an empty schedule string', () => {
+    expect(() =>
+      configSchema.parse({
+        model: VALID_MODEL,
+        memory: { dreaming: { schedule: '' } },
+      }),
+    ).toThrow()
+  })
+})
+
 describe('mountSchema name validation', () => {
   test.each([
     ['lowercase', 'projects'],
@@ -145,10 +183,7 @@ describe('validateConfig', () => {
   })
 
   test('fails when port is out of range', async () => {
-    await writeFile(
-      join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL, mounts: [], port: 99999 }),
-    )
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, mounts: [], port: 99999 }))
     const result = validateConfig(cwd)
     expect(result.ok).toBe(false)
   })

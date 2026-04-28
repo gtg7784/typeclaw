@@ -158,6 +158,57 @@ describe('createCronReloadable', () => {
     expect(result.reason).toMatch(/apply blew up/)
   })
 
+  test('merges internalJobs() with user jobs on reload', async () => {
+    const scheduler = recordingScheduler()
+    await writeFile(
+      join(agentDir, 'cron.json'),
+      JSON.stringify({
+        jobs: [{ id: 'user-job', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+      }),
+    )
+    const internal: CronJob = {
+      id: '__internal_dreaming',
+      schedule: '0 4 * * *',
+      enabled: true,
+      kind: 'subagent',
+      subagent: 'dreaming',
+      payload: { agentDir: '/x' },
+    }
+
+    const reloadable = createCronReloadable({
+      cwd: agentDir,
+      scheduler,
+      internalJobs: () => [internal],
+    })
+    await asSuccess(reloadable.reload())
+
+    expect(scheduler.replacements).toHaveLength(1)
+    expect(scheduler.replacements[0]?.map((j) => j.id)).toEqual(['user-job', '__internal_dreaming'])
+  })
+
+  test('absent cron.json with internalJobs() still hands the internal jobs to the scheduler', async () => {
+    const scheduler = recordingScheduler()
+    const internal: CronJob = {
+      id: '__internal_dreaming',
+      schedule: '0 4 * * *',
+      enabled: true,
+      kind: 'subagent',
+      subagent: 'dreaming',
+      payload: { agentDir: '/x' },
+    }
+
+    const reloadable = createCronReloadable({
+      cwd: agentDir,
+      scheduler,
+      internalJobs: () => [internal],
+    })
+    const result = await asSuccess(reloadable.reload())
+
+    expect(scheduler.replacements).toHaveLength(1)
+    expect(scheduler.replacements[0]?.map((j) => j.id)).toEqual(['__internal_dreaming'])
+    expect(result.summary).toMatch(/added 1/)
+  })
+
   test('summary describes added/removed/updated/unchanged counts', async () => {
     let diff: JobDiff = { added: [], removed: [], updated: [], unchanged: [] }
     const scheduler: Scheduler = {

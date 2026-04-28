@@ -43,7 +43,7 @@ function createFakeClock(start = new Date('2026-01-01T00:00:00Z').getTime()): Sc
   }
 }
 
-type FireRecord = { kind: 'prompt' | 'exec'; id: string; firedAt: number }
+type FireRecord = { kind: CronJob['kind']; id: string; firedAt: number }
 
 function createFireRecorder(): {
   fires: FireRecord[]

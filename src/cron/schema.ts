@@ -27,10 +27,28 @@ export const cronFileSchema = z.object({
   jobs: z.array(cronJobSchema).default([]),
 })
 
-export type CronJob = z.infer<typeof cronJobSchema>
-export type PromptJob = Extract<CronJob, { kind: 'prompt' }>
-export type ExecJob = Extract<CronJob, { kind: 'exec' }>
+export type UserCronJob = z.infer<typeof cronJobSchema>
+export type PromptJob = Extract<UserCronJob, { kind: 'prompt' }>
+export type ExecJob = Extract<UserCronJob, { kind: 'exec' }>
 export type CronFile = z.infer<typeof cronFileSchema>
+
+// Internal cron jobs. Constructed only from code (e.g., from typeclaw.json's
+// `memory.dreaming` config), never accepted from cron.json. They share the
+// scheduler's clock and the consumer's coalescing, but dispatch by handing
+// the payload to a registered subagent.
+export type SubagentJob = {
+  id: string
+  schedule: string
+  enabled: boolean
+  timezone?: string
+  kind: 'subagent'
+  subagent: string
+  payload: unknown
+}
+
+// The runtime job union. The scheduler and consumer accept `CronJob`; only
+// `cronJobSchema` is parsed from disk.
+export type CronJob = UserCronJob | SubagentJob
 
 export type ParseCronResult = { ok: true; file: CronFile } | { ok: false; reason: string }
 

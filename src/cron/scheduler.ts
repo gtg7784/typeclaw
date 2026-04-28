@@ -168,8 +168,14 @@ function jobFingerprint(job: CronJob): string {
     enabled: job.enabled,
     timezone: job.timezone ?? null,
     kind: job.kind,
-    payload: job.kind === 'prompt' ? job.prompt : job.command,
+    payload: jobPayload(job),
   })
+}
+
+function jobPayload(job: CronJob): unknown {
+  if (job.kind === 'prompt') return job.prompt
+  if (job.kind === 'exec') return job.command
+  return { subagent: job.subagent, payload: job.payload }
 }
 
 function computeNextFire(job: CronJob, now: number): number | null {

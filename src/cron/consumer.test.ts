@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { createStream } from '@/stream'
 
 import { createCronConsumer, type CronConsumerLogger, type CronSession } from './consumer'
-import type { CronJob, ExecJob, PromptJob } from './schema'
+import type { CronJob, ExecJob, PromptJob, SubagentJob } from './schema'
 
 const silentLogger: CronConsumerLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
@@ -307,6 +307,42 @@ describe('createCronConsumer', () => {
     await new Promise((r) => setImmediate(r))
 
     expect(warnings.some((w) => /invalid payload/.test(w))).toBe(true)
+    expect(factory.callsByJob.size).toBe(0)
+
+    consumer.stop()
+  })
+
+  test('dispatches a subagent job by publishing a new-session message to the stream', async () => {
+    const stream = createStream()
+    const factory = makeFakeSessionFactory()
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: factory.createSessionForCron,
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    const newSessionMessages: Array<{ subagent?: string; payload: unknown }> = []
+    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => {
+      const target = msg.target as { kind: 'new-session'; subagent?: string }
+      newSessionMessages.push({ subagent: target.subagent, payload: msg.payload })
+    })
+
+    const job: SubagentJob = {
+      id: 'dream',
+      schedule: '0 4 * * *',
+      enabled: true,
+      kind: 'subagent',
+      subagent: 'dreaming',
+      payload: { agentDir: '/some/path' },
+    }
+    publishCron(stream, job)
+    await new Promise((r) => setImmediate(r))
+
+    expect(newSessionMessages).toHaveLength(1)
+    expect(newSessionMessages[0]?.subagent).toBe('dreaming')
+    expect(newSessionMessages[0]?.payload).toEqual({ agentDir: '/some/path' })
     expect(factory.callsByJob.size).toBe(0)
 
     consumer.stop()

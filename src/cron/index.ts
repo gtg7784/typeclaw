@@ -13,7 +13,16 @@ export {
   type CronSession,
 } from './consumer'
 export { createScheduler, type JobDiff, type Scheduler, type SchedulerLogger } from './scheduler'
-export { cronFileSchema, cronJobSchema, type CronFile, type CronJob, type ExecJob, type PromptJob } from './schema'
+export {
+  cronFileSchema,
+  cronJobSchema,
+  type CronFile,
+  type CronJob,
+  type ExecJob,
+  type PromptJob,
+  type SubagentJob,
+  type UserCronJob,
+} from './schema'
 
 const CRON_FILE = 'cron.json'
 

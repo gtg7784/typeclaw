@@ -1,6 +1,6 @@
 import type { Stream, Unsubscribe } from '@/stream'
 
-import type { CronJob, ExecJob, PromptJob } from './schema'
+import type { CronJob, ExecJob, PromptJob, SubagentJob } from './schema'
 
 export type CronSession = { prompt: (text: string) => Promise<void> }
 
@@ -55,8 +55,10 @@ export function createCronConsumer({
         try {
           if (job.kind === 'prompt') {
             await runPrompt(job, createSessionForCron)
-          } else {
+          } else if (job.kind === 'exec') {
             await runExec(job, cwd)
+          } else {
+            await runSubagent(job, stream)
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
@@ -95,9 +97,17 @@ async function runExec(job: ExecJob, cwd: string): Promise<void> {
   }
 }
 
+async function runSubagent(job: SubagentJob, stream: Stream): Promise<void> {
+  stream.publish({
+    target: { kind: 'new-session', subagent: job.subagent },
+    payload: job.payload,
+  })
+}
+
 function isCronJob(value: unknown): value is CronJob {
   if (typeof value !== 'object' || value === null) return false
-  const v = value as { id?: unknown; kind?: unknown }
+  const v = value as { id?: unknown; kind?: unknown; subagent?: unknown }
   if (typeof v.id !== 'string') return false
-  return v.kind === 'prompt' || v.kind === 'exec'
+  if (v.kind === 'prompt' || v.kind === 'exec') return true
+  return v.kind === 'subagent' && typeof v.subagent === 'string'
 }
