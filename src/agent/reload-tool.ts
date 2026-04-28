@@ -12,10 +12,13 @@ export function createReloadTool({ registry }: CreateReloadToolOptions) {
     name: 'reload',
     label: 'Reload',
     description:
-      'Reload all reloadable typeclaw subsystems (currently: cron jobs from cron.json). ' +
-      'Validates the on-disk config first; if validation fails, the live state is left unchanged ' +
-      'and the failure reason is returned. Use this after editing cron.json so the change takes ' +
-      'effect without restarting the container. Safe to call any time.',
+      'Reload all reloadable typeclaw subsystems (currently: typeclaw.json runtime config, then ' +
+      'cron jobs from cron.json — runs serially in registration order so cron observes the ' +
+      'freshly-swapped config). Validates each on-disk file first; if validation fails for one, ' +
+      'its live state is left unchanged and the failure reason is reported in that scope\'s ' +
+      'result. Boot-only fields (port, mounts, memory.idleMs) are reported as restart-required. ' +
+      'Use this after editing typeclaw.json or cron.json so the change takes effect without ' +
+      'restarting the container. Safe to call any time.',
     parameters: Type.Object({}),
     execute: async () => {
       const items = registry.list()
