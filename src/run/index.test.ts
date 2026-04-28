@@ -305,6 +305,13 @@ describe('startAgent dreaming wiring', () => {
           jobs: [{ id: 'user-job', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
         }),
       )
+      await Bun.write(
+        join(agentDir, 'typeclaw.json'),
+        JSON.stringify({
+          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          memory: { dreaming: { schedule: '0 4 * * *' } },
+        }),
+      )
       const restore = withDreamingConfig('0 4 * * *')
       try {
         const replacements: CronJob[][] = []
@@ -333,9 +340,70 @@ describe('startAgent dreaming wiring', () => {
     }
   })
 
+  test('reloadAll: cron picks up dreaming schedule changes that landed via the config reloadable in the same call', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-dream-order-'))
+    try {
+      await Bun.write(
+        join(agentDir, 'cron.json'),
+        JSON.stringify({
+          jobs: [{ id: 'placeholder', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+        }),
+      )
+      await Bun.write(
+        join(agentDir, 'typeclaw.json'),
+        JSON.stringify({
+          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          memory: { dreaming: { schedule: '0 4 * * *' } },
+        }),
+      )
+
+      const replacements: CronJob[][] = []
+      const fakeScheduler: Scheduler = {
+        start: () => {},
+        stop: () => {},
+        replaceJobs: (jobs) => {
+          replacements.push([...jobs])
+          return { added: [], removed: [], updated: [], unchanged: [] }
+        },
+      }
+      const createSchedulerFor: SchedulerFactory = () => fakeScheduler
+
+      running = await startAgent({
+        port: 0,
+        attachTui: false,
+        cwd: agentDir,
+        createSchedulerFor,
+      })
+
+      await Bun.write(
+        join(agentDir, 'typeclaw.json'),
+        JSON.stringify({
+          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          memory: { dreaming: { schedule: '15 5 * * *' } },
+        }),
+      )
+
+      await running.reloadRegistry.reloadAll()
+
+      expect(replacements).toHaveLength(1)
+      const dreamingJob = replacements[0]?.find((j) => j.id === '__internal_dreaming')
+      expect(dreamingJob).toBeDefined()
+      expect(dreamingJob?.schedule).toBe('15 5 * * *')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
   test('firing the dreaming cron job publishes a new-session message for the dreaming subagent', async () => {
     const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-dream-fire-'))
     try {
+      await Bun.write(
+        join(agentDir, 'typeclaw.json'),
+        JSON.stringify({
+          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          memory: { dreaming: { schedule: '0 4 * * *' } },
+        }),
+      )
       const restore = withDreamingConfig('0 4 * * *')
       try {
         let captured: ((job: CronJob) => void) | null = null

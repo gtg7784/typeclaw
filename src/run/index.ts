@@ -1,7 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession } from '@/agent'
-import { type Config, config } from '@/config'
+import { config, type Config, createConfigReloadable, getConfig } from '@/config'
 import {
   type CronConsumer,
   type CronJob,
@@ -66,6 +66,7 @@ export async function startAgent({
   stream = createStream(),
 }: StartAgentOptions): Promise<StartAgentResult> {
   const reloadRegistry = new ReloadRegistry()
+  reloadRegistry.register(createConfigReloadable({ cwd }))
 
   const cronConsumer = createCronConsumer({
     stream,
@@ -96,7 +97,7 @@ export async function startAgent({
   })
   subagentConsumer.start()
 
-  const internalJobs = () => buildInternalJobs(cwd, config)
+  const internalJobs = () => buildInternalJobs(cwd, getConfig())
   const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(internalJobs)
   const scheduler = await startScheduler({
     cwd,
