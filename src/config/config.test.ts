@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { configSchema, mountSchema, validateConfig } from './config'
+import { configSchema, loadConfigSync, mountSchema, validateConfig } from './config'
 
 const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
 
@@ -186,5 +186,59 @@ describe('validateConfig', () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, mounts: [], port: 99999 }))
     const result = validateConfig(cwd)
     expect(result.ok).toBe(false)
+  })
+})
+
+describe('loadConfigSync', () => {
+  let cwd: string
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'typeclaw-load-'))
+  })
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  test('returns schema defaults when typeclaw.json is missing (fresh agent / dev tree)', () => {
+    const cfg = loadConfigSync(cwd)
+    expect(cfg.port).toBe(8973)
+    expect(cfg.memory.idleMs).toBe(30000)
+    expect(cfg.memory.dreaming).toBeUndefined()
+    expect(cfg.mounts).toEqual([])
+  })
+
+  test('reads memory.dreaming.schedule from disk so dreaming actually picks up user config', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        model: VALID_MODEL,
+        memory: { dreaming: { schedule: '9 16 * * *' } },
+      }),
+    )
+    const cfg = loadConfigSync(cwd)
+    expect(cfg.memory.dreaming?.schedule).toBe('9 16 * * *')
+  })
+
+  test('reads port from disk', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, port: 9999 }))
+    const cfg = loadConfigSync(cwd)
+    expect(cfg.port).toBe(9999)
+  })
+
+  test('throws on malformed JSON so the user sees the error at startup, not silent fallback', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), '{ not json')
+    expect(() => loadConfigSync(cwd)).toThrow(/not valid JSON/)
+  })
+
+  test('throws on schema-invalid config (e.g. invalid dreaming schedule)', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        model: VALID_MODEL,
+        memory: { dreaming: { schedule: 'not-a-cron' } },
+      }),
+    )
+    expect(() => loadConfigSync(cwd)).toThrow(/typeclaw\.json is invalid/)
   })
 })

@@ -78,8 +78,35 @@ export function resolveModel(ref: KnownModelRef): Model<'openai-completions'> {
   return KNOWN_PROVIDERS[providerId].models[modelId as never]
 }
 
-// FIXME: TEMP — hard-coded dev defaults; replace with loader.
-export const config: Config = configSchema.parse({ mounts: [] })
+// Loaded eagerly from process.cwd()/typeclaw.json at module-import time so
+// citty arg defaults (e.g. config.port in src/cli/*.ts) see real values, not
+// hardcoded fallbacks. Missing file → schema defaults; malformed file → throw,
+// which surfaces during CLI startup instead of silently reverting to defaults
+// and confusing the user.
+export const config: Config = loadConfigSync(process.cwd())
+
+export function loadConfigSync(cwd: string): Config {
+  let raw: string
+  try {
+    raw = readFileSync(join(cwd, CONFIG_FILE), 'utf8')
+  } catch {
+    return configSchema.parse({})
+  }
+
+  let json: unknown
+  try {
+    json = JSON.parse(raw)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`${CONFIG_FILE} is not valid JSON: ${detail}`)
+  }
+
+  const result = configSchema.safeParse(json)
+  if (!result.success) {
+    throw new Error(`${CONFIG_FILE} is invalid: ${formatZodError(result.error)}`)
+  }
+  return result.data
+}
 
 export type ValidateConfigResult = { ok: true } | { ok: false; reason: string }
 
