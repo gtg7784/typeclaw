@@ -9,6 +9,7 @@ import type { ReloadRegistry } from '@/reload'
 import type { Stream } from '@/stream'
 
 import { getAuth } from './auth'
+import { loadMemory } from './memory'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
@@ -47,8 +48,8 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
 
 export async function createResourceLoader(options: { agentDir?: string } = {}): Promise<DefaultResourceLoader> {
   const agentDir = options.agentDir ?? process.cwd()
-  const self = await loadSelf(agentDir)
-  const systemPrompt = `${DEFAULT_SYSTEM_PROMPT}\n\n${self}`
+  const [self, memory] = await Promise.all([loadSelf(agentDir), loadMemory(agentDir)])
+  const systemPrompt = `${DEFAULT_SYSTEM_PROMPT}\n\n${self}\n\n${memory}`
 
   const loader = new DefaultResourceLoader({
     systemPromptOverride: () => systemPrompt,

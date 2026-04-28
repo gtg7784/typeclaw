@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -62,6 +62,46 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('[MISSING]')
     expect(prompt).toContain('IDENTITY.md')
     expect(prompt).toContain('SOUL.md')
+  })
+
+  test('injects MEMORY.md content into the system prompt', async () => {
+    // given
+    await writeFile(join(agentDir, 'MEMORY.md'), 'Neo prefers terse replies.')
+
+    // when
+    const loader = await createResourceLoader({ agentDir })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('# Memory')
+    expect(prompt).toContain('Neo prefers terse replies.')
+  })
+
+  test('injects undreamed memory stream files into the system prompt', async () => {
+    // given
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'fragment from tuesday')
+
+    // when
+    const loader = await createResourceLoader({ agentDir })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('## memory/2026-04-27.md')
+    expect(prompt).toContain('fragment from tuesday')
+  })
+
+  test('places identity before memory so SOUL framing is read first', async () => {
+    // given
+    await writeFile(join(agentDir, 'IDENTITY.md'), 'I am Tester.')
+    await writeFile(join(agentDir, 'MEMORY.md'), 'remembered fact')
+
+    // when
+    const loader = await createResourceLoader({ agentDir })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt.indexOf('# Identity')).toBeLessThan(prompt.indexOf('# Memory'))
   })
 
   test('exposes the typeclaw-cron bundled skill to the agent', async () => {
