@@ -11,7 +11,7 @@ import {
 } from '@mariozechner/pi-coding-agent'
 
 import { getAuth } from '@/agent/auth'
-import { config, resolveModel } from '@/config'
+import { getConfig, resolveModel } from '@/config'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
 import type { SubagentSpawner } from '@/subagent'
 
@@ -159,7 +159,7 @@ async function defaultCreateDreamingSession(): Promise<DreamingSession> {
   })
   await loader.reload()
   const { session } = await createAgentSession({
-    model: resolveModel(config.model),
+    model: resolveModel(getConfig().model),
     sessionManager: SessionManager.inMemory(),
     authStorage,
     modelRegistry,

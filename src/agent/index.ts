@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import { createAgentSession, DefaultResourceLoader, SessionManager } from '@mariozechner/pi-coding-agent'
 import type { AgentSession } from '@mariozechner/pi-coding-agent'
 
-import { config, resolveModel } from '@/config'
+import { getConfig, resolveModel } from '@/config'
 import type { ReloadRegistry } from '@/reload'
 import type { Stream } from '@/stream'
 
@@ -36,7 +36,7 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
   ]
 
   const { session } = await createAgentSession({
-    model: resolveModel(config.model),
+    model: resolveModel(getConfig().model),
     sessionManager: options.sessionManager ?? SessionManager.inMemory(),
     authStorage,
     modelRegistry,
