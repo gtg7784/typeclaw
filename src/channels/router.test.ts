@@ -320,4 +320,118 @@ describe('ChannelRouter stop', () => {
     expect(sessions[0]!.disposed).toBe(1)
     expect(router.liveCount()).toBe(0)
   })
+
+  test('clears the typing heartbeat on stop', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const calls: number[] = []
+    router.registerTyping('discord-bot', async () => {
+      calls.push(1)
+    })
+    await router.route(inbound())
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    await router.stop()
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+  })
+})
+
+describe('ChannelRouter typing indicator', () => {
+  test('does not fire typing for an observe-only inbound', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const calls: Array<{ chat: string }> = []
+    router.registerTyping('discord-bot', async (target) => {
+      calls.push({ chat: target.chat })
+    })
+    // Prime with carol (mention) so alice's next plain message hits the
+    // strict gate and observes (the test contract).
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol' }))
+    await router.__testing!.flushDebounce(KEY)
+    calls.length = 0
+    await router.route(inbound({ isBotMention: false, text: 'unrelated' }))
+    expect(calls).toHaveLength(0)
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+  })
+
+  test('fires typing immediately when an engaged inbound arrives', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const calls: Array<{ chat: string; thread: string | null | undefined }> = []
+    router.registerTyping('discord-bot', async (target) => {
+      calls.push({ chat: target.chat, thread: target.thread })
+    })
+    await router.route(inbound({ text: 'hi bot' }))
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toEqual({ chat: 'c1', thread: null })
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+  })
+
+  test('repeats typing every heartbeat tick while still draining', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const calls: number[] = []
+    router.registerTyping('discord-bot', async () => {
+      calls.push(1)
+    })
+    await router.route(inbound({ text: 'hi bot' }))
+    expect(calls).toHaveLength(1)
+    await router.__testing!.fireTypingHeartbeat(KEY)
+    await router.__testing!.fireTypingHeartbeat(KEY)
+    expect(calls).toHaveLength(3)
+  })
+
+  test('stops the heartbeat after drain completes', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerTyping('discord-bot', async () => {})
+    await router.route(inbound({ text: 'hi bot' }))
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    await router.__testing!.flushDebounce(KEY)
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+  })
+
+  test('forwards thread id when the inbound is on a thread', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const calls: Array<{ chat: string; thread: string | null | undefined }> = []
+    router.registerTyping('discord-bot', async (target) => {
+      calls.push({ chat: target.chat, thread: target.thread })
+    })
+    await router.route(inbound({ thread: 'thread-7', text: 'hi bot' }))
+    expect(calls[0]).toEqual({ chat: 'c1', thread: 'thread-7' })
+  })
+
+  test('typing-callback rejection does not crash route', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerTyping('discord-bot', async () => {
+      throw new Error('discord 503')
+    })
+    await router.route(inbound({ text: 'hi bot' }))
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    await router.__testing!.flushDebounce(KEY)
+  })
+
+  test('fires nothing when no typing callback is registered', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    await router.route(inbound({ text: 'hi bot' }))
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    await router.__testing!.flushDebounce(KEY)
+  })
+
+  test('unregisterTyping prevents further heartbeats', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const calls: number[] = []
+    const cb = async () => {
+      calls.push(1)
+    }
+    router.registerTyping('discord-bot', cb)
+    await router.route(inbound({ text: 'hi bot' }))
+    expect(calls).toHaveLength(1)
+    router.unregisterTyping('discord-bot', cb)
+    await router.__testing!.fireTypingHeartbeat(KEY)
+    expect(calls).toHaveLength(1)
+  })
 })

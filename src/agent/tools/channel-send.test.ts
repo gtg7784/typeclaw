@@ -11,6 +11,8 @@ function fakeRouter(handler: (msg: OutboundMessage) => Promise<SendResult>): Cha
     send: handler,
     registerOutbound: () => {},
     unregisterOutbound: () => {},
+    registerTyping: () => {},
+    unregisterTyping: () => {},
     stop: async () => {},
     liveCount: () => 0,
   }

@@ -13,7 +13,14 @@ import {
   type ChannelSessionRecord,
 } from './persistence'
 import type { ChannelAdapterConfig } from './schema'
-import type { ChannelKey, InboundMessage, OutboundCallback, OutboundMessage, SendResult } from './types'
+import type {
+  ChannelKey,
+  InboundMessage,
+  OutboundCallback,
+  OutboundMessage,
+  SendResult,
+  TypingCallback,
+} from './types'
 import { channelKeyId } from './types'
 
 export const INITIAL_DEBOUNCE_MS = 600
@@ -22,6 +29,9 @@ export const MAX_DEBOUNCE_MS = 4000
 export const HOT_THRESHOLD_MS = 3000
 export const MAX_CONSECUTIVE_ABORTS = 3
 export const CONTEXT_BUFFER_SIZE = 20
+// Discord's typing indicator expires after ~10s; an 8s heartbeat keeps it
+// continuously visible while we debounce + generate without spamming the API.
+export const TYPING_HEARTBEAT_MS = 8000
 
 export type RouterLogger = {
   info: (msg: string) => void
@@ -73,6 +83,7 @@ type LiveSession = {
   contextBuffer: ObservedInbound[]
   draining: boolean
   debounceTimer: ReturnType<typeof setTimeout> | null
+  typingTimer: ReturnType<typeof setInterval> | null
   lastInboundAt: number
   firstUnprocessedAt: number
   currentTurnAuthorId: string | null
@@ -87,10 +98,14 @@ export type ChannelRouter = {
   send: (msg: OutboundMessage) => Promise<SendResult>
   registerOutbound: (adapter: ChannelKey['adapter'], cb: OutboundCallback) => void
   unregisterOutbound: (adapter: ChannelKey['adapter'], cb: OutboundCallback) => void
+  registerTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
+  unregisterTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   stop: () => Promise<void>
   liveCount: () => number
   __testing?: {
     flushDebounce: (key: ChannelKey) => Promise<void>
+    fireTypingHeartbeat: (key: ChannelKey) => Promise<void>
+    isTypingActive: (key: ChannelKey) => boolean
   }
 }
 
@@ -110,6 +125,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
+  const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
   const stickyLedger = new StickyLedger()
 
   let mappings: ChannelSessionRecord[] | null = null
@@ -214,6 +230,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         contextBuffer: [],
         draining: false,
         debounceTimer: null,
+        typingTimer: null,
         lastInboundAt: 0,
         firstUnprocessedAt: 0,
         currentTurnAuthorId: null,
@@ -259,11 +276,56 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     participants: live.participants,
   })
 
+  const fireTyping = async (live: LiveSession): Promise<void> => {
+    const callbacks = typingCallbacks.get(live.key.adapter)
+    if (!callbacks || callbacks.size === 0) return
+    // Snapshot before iterating: a callback could unregister mid-call.
+    const snapshot = Array.from(callbacks)
+    const target = {
+      adapter: live.key.adapter,
+      workspace: live.key.workspace,
+      chat: live.key.chat,
+      thread: live.key.thread,
+    }
+    await Promise.all(
+      snapshot.map((cb) =>
+        cb(target).catch((err) => {
+          logger.warn(`[channels] typing callback threw for ${live.keyId}: ${describe(err)}`)
+        }),
+      ),
+    )
+  }
+
+  const startTypingHeartbeat = (live: LiveSession): void => {
+    if (live.typingTimer || live.destroyed) return
+    // Fire immediately so the indicator appears on the very first inbound,
+    // not 8 seconds later.
+    void fireTyping(live)
+    live.typingTimer = setInterval(() => {
+      if (live.destroyed) {
+        stopTypingHeartbeat(live)
+        return
+      }
+      void fireTyping(live)
+    }, TYPING_HEARTBEAT_MS)
+  }
+
+  const stopTypingHeartbeat = (live: LiveSession): void => {
+    if (!live.typingTimer) return
+    clearInterval(live.typingTimer)
+    live.typingTimer = null
+  }
+
   const drain = async (live: LiveSession): Promise<void> => {
     if (live.draining || live.destroyed) return
     live.draining = true
     try {
       while (live.promptQueue.length > 0 && !live.destroyed) {
+        // Heartbeat must run during generation as well as during debounce.
+        // Because new inbounds during a turn just push into promptQueue
+        // without re-entering route(), the route() call site alone wouldn't
+        // keep the indicator alive across multiple drain iterations.
+        startTypingHeartbeat(live)
         const batch = live.promptQueue.splice(0, live.promptQueue.length)
         const observed = live.contextBuffer.splice(0, live.contextBuffer.length)
         const text = composeTurnPrompt(observed, batch)
@@ -297,6 +359,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.draining = false
       live.currentTurnAuthorId = null
       live.currentTurnAuthorIds = new Set()
+      stopTypingHeartbeat(live)
     }
   }
 
@@ -347,6 +410,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     enqueue(live, event)
 
+    // Start showing "typing..." the moment we know we're going to engage,
+    // so users see the indicator during the debounce window — not just
+    // during LLM generation. drain() will keep it alive across iterations
+    // and the finally-block will stop it when the queue empties.
+    startTypingHeartbeat(live)
+
     if (live.draining) {
       // In-flight turn; let coalesce-on-drain pick it up. Same-author abort
       // is a v0.2 enhancement once we have safe abort semantics through
@@ -392,6 +461,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const unregisterOutbound = (adapter: ChannelKey['adapter'], cb: OutboundCallback): void => {
     outboundCallbacks.get(adapter)?.delete(cb)
+  }
+
+  const registerTyping = (adapter: ChannelKey['adapter'], cb: TypingCallback): void => {
+    let set = typingCallbacks.get(adapter)
+    if (!set) {
+      set = new Set()
+      typingCallbacks.set(adapter, set)
+    }
+    set.add(cb)
+  }
+
+  const unregisterTyping = (adapter: ChannelKey['adapter'], cb: TypingCallback): void => {
+    typingCallbacks.get(adapter)?.delete(cb)
   }
 
   const send = async (msg: OutboundMessage): Promise<SendResult> => {
@@ -448,6 +530,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.destroyed = true
       if (live.debounceTimer) clearTimeout(live.debounceTimer)
       live.debounceTimer = null
+      stopTypingHeartbeat(live)
       try {
         await live.session.abort()
       } catch (err) {
@@ -466,6 +549,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     send,
     registerOutbound,
     unregisterOutbound,
+    registerTyping,
+    unregisterTyping,
     stop,
     liveCount: () => liveSessions.size,
     __testing: {
@@ -478,6 +563,15 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         }
         live.firstUnprocessedAt = 0
         await drain(live)
+      },
+      fireTypingHeartbeat: async (key: ChannelKey) => {
+        const live = liveSessions.get(channelKeyId(key))
+        if (!live) return
+        await fireTyping(live)
+      },
+      isTypingActive: (key: ChannelKey) => {
+        const live = liveSessions.get(channelKeyId(key))
+        return live?.typingTimer !== null && live?.typingTimer !== undefined
       },
     },
   }

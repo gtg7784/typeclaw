@@ -33,6 +33,15 @@ export type SendResult = { ok: true } | { ok: false; error: string }
 
 export type OutboundCallback = (msg: OutboundMessage) => Promise<SendResult>
 
+export type TypingTarget = {
+  adapter: AdapterId
+  workspace: string
+  chat: string
+  thread?: string | null
+}
+
+export type TypingCallback = (target: TypingTarget) => Promise<void>
+
 export function channelKeyId(key: ChannelKey): string {
   return `${key.adapter}:${key.workspace}:${key.chat}:${key.thread ?? ''}`
 }
