@@ -130,6 +130,30 @@ describe('createResourceLoader', () => {
     expect(browserSkill).toBeDefined()
     expect(browserSkill?.description.length).toBeGreaterThan(0)
   })
+
+  test('exposes user-installed skills under <agentDir>/.agents/skills/ to the agent', async () => {
+    // given
+    await mkdir(join(agentDir, '.agents', 'skills', 'user-tool'), { recursive: true })
+    await writeFile(
+      join(agentDir, '.agents', 'skills', 'user-tool', 'SKILL.md'),
+      '---\nname: user-tool\ndescription: A user-installed skill\n---\n\nbody',
+    )
+
+    // when
+    const loader = await createResourceLoader({ agentDir })
+
+    // then
+    const { skills } = loader.getSkills()
+    const userSkill = skills.find((s) => s.name === 'user-tool')
+    expect(userSkill).toBeDefined()
+    expect(userSkill?.description).toBe('A user-installed skill')
+  })
+
+  test('does not throw when <agentDir>/.agents/skills/ does not exist', async () => {
+    // when / then
+    const loader = await createResourceLoader({ agentDir })
+    expect(loader.getSkills().skills).toBeDefined()
+  })
 })
 
 describe('createOverrideResourceLoader', () => {

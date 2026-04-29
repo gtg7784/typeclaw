@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -196,6 +197,14 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   }
 
   const additionalSkillPaths = [getBundledSkillsDir()]
+  // pi-coding-agent's DefaultResourceLoader auto-discovers <agentDir>/skills/
+  // but not <agentDir>/.agents/skills/, even though the system prompt advertises
+  // both. Add the user-installed location explicitly so a fresh SKILL.md drop
+  // is picked up the next time a session is created.
+  const userInstalledSkillsDir = join(agentDir, '.agents', 'skills')
+  if (existsSync(userInstalledSkillsDir)) {
+    additionalSkillPaths.push(userInstalledSkillsDir)
+  }
   if (options.plugins) {
     for (const dir of options.plugins.registry.skillsDirs) {
       additionalSkillPaths.push(dir.path)
