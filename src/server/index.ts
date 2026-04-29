@@ -7,7 +7,7 @@ import {
   type CreateSessionResult,
 } from '@/agent'
 import { createIdleDetector, type IdleDetector } from '@/memory'
-import type { HookBus, PluginRegistry } from '@/plugin'
+import type { PluginRuntime, PluginRuntimeState } from '@/run/plugin-runtime'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { SessionFactory } from '@/sessions'
 import type { ClientMessage, PromptDelivery, QueueStateItem, ReloadResultPayload, ServerMessage } from '@/shared'
@@ -25,8 +25,7 @@ export type ServerOptions = {
   stream?: Stream
   memoryIdleMs?: number
   agentDir?: string
-  pluginRegistry?: PluginRegistry
-  pluginHooks?: HookBus
+  pluginRuntime?: PluginRuntime
 }
 
 export type Server = ReturnType<typeof createServer>
@@ -50,6 +49,10 @@ type SessionState = {
   unsubBroadcast: Unsubscribe | null
   unsubPrompts: Unsubscribe | null
   idleDetector: IdleDetector | null
+  // Captured at session open so close-time hooks fire against the same
+  // generation that ran session.start. A plugin reload mid-connection does
+  // not re-target this session's lifecycle hooks.
+  runtimeSnapshot: PluginRuntimeState | null
   dispose: () => Promise<void>
 }
 
@@ -66,8 +69,7 @@ export function createServer({
   stream,
   memoryIdleMs,
   agentDir,
-  pluginRegistry,
-  pluginHooks,
+  pluginRuntime,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
 
@@ -83,9 +85,19 @@ export function createServer({
         async open(ws) {
           const sessionManager = sessionFactory?.createPersisted()
           const sessionFileId = sessionManager?.getSessionId() ?? ws.data.sessionId
+          // Snapshot the runtime once so the entire session lifecycle for this
+          // ws connection sees one consistent generation of registry+hooks. A
+          // reload landing mid-connection swaps the live pointer; this session
+          // keeps using the snapshot it was created with until close.
+          const runtimeSnapshot = pluginRuntime?.get()
           const pluginsWiring =
-            pluginRegistry !== undefined && pluginHooks !== undefined && agentDir !== undefined
-              ? { registry: pluginRegistry, hooks: pluginHooks, sessionId: sessionFileId, agentDir }
+            runtimeSnapshot !== undefined && agentDir !== undefined
+              ? {
+                  registry: runtimeSnapshot.registry,
+                  hooks: runtimeSnapshot.hooks,
+                  sessionId: sessionFileId,
+                  agentDir,
+                }
               : undefined
           const result = await createSession({
             reloadRegistry,
@@ -105,20 +117,21 @@ export function createServer({
             unsubBroadcast: null,
             unsubPrompts: null,
             idleDetector: null,
+            runtimeSnapshot: runtimeSnapshot ?? null,
             dispose,
           }
           sessionStates.set(ws, state)
 
-          if (pluginHooks !== undefined && agentDir !== undefined) {
-            await pluginHooks.runSessionStart({ sessionId: sessionFileId, agentDir })
+          if (runtimeSnapshot !== undefined && agentDir !== undefined) {
+            await runtimeSnapshot.hooks.runSessionStart({ sessionId: sessionFileId, agentDir })
           }
 
           if (stream !== undefined && memoryIdleMs !== undefined && agentDir !== undefined) {
             state.idleDetector = createIdleDetector({
               idleMs: memoryIdleMs,
               onIdle: async () => {
-                if (pluginHooks !== undefined) {
-                  await pluginHooks.runSessionIdle({
+                if (runtimeSnapshot !== undefined) {
+                  await runtimeSnapshot.hooks.runSessionIdle({
                     sessionId: state.sessionFileId,
                     parentTranscriptPath: state.sessionManager?.getSessionFile(),
                     idleMs: memoryIdleMs,
@@ -202,8 +215,8 @@ export function createServer({
             if (stream !== undefined && agentDir !== undefined) {
               publishMemoryLoggerSpawn(state, stream, agentDir)
             }
-            if (pluginHooks !== undefined) {
-              await pluginHooks.runSessionEnd({ sessionId: state.sessionFileId })
+            if (state.runtimeSnapshot !== null) {
+              await state.runtimeSnapshot.hooks.runSessionEnd({ sessionId: state.sessionFileId })
             }
             state.session.dispose()
             await state.dispose()

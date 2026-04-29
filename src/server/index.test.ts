@@ -3,11 +3,25 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession, CreateSessionOptions } from '@/agent'
+import type { HookBus, PluginRegistry } from '@/plugin'
+import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 import type { SessionFactory } from '@/sessions'
 import type { ServerMessage } from '@/shared'
 import { createStream } from '@/stream'
 
 import { createServer } from './index'
+
+function makeRuntime(opts: { registry: PluginRegistry; hooks: HookBus }): PluginRuntime {
+  return createPluginRuntime({
+    registry: opts.registry,
+    hooks: opts.hooks,
+    subagents: {},
+    pluginSubagentByShim: new WeakMap(),
+    hasAnyPluginContent: false,
+    loadedPlugins: [],
+    materializedSkills: null,
+  })
+}
 
 type SessionEvent =
   | { type: 'message_update'; assistantMessageEvent: { type: 'text_delta'; delta: string } }
@@ -70,10 +84,14 @@ async function startWithSession(
     sessionFactory?: SessionFactory
     memoryIdleMs?: number
     agentDir?: string
-    pluginRegistry?: import('@/plugin').PluginRegistry
-    pluginHooks?: import('@/plugin').HookBus
+    pluginRegistry?: PluginRegistry
+    pluginHooks?: HookBus
   } = {},
 ): Promise<{ url: string }> {
+  const pluginRuntime =
+    extra.pluginRegistry !== undefined && extra.pluginHooks !== undefined
+      ? makeRuntime({ registry: extra.pluginRegistry, hooks: extra.pluginHooks })
+      : undefined
   const built = createServer({
     port: 0,
     createSession: async () => session,
@@ -81,8 +99,7 @@ async function startWithSession(
     ...(extra.sessionFactory ? { sessionFactory: extra.sessionFactory } : {}),
     ...(extra.memoryIdleMs !== undefined ? { memoryIdleMs: extra.memoryIdleMs } : {}),
     ...(extra.agentDir !== undefined ? { agentDir: extra.agentDir } : {}),
-    ...(extra.pluginRegistry ? { pluginRegistry: extra.pluginRegistry } : {}),
-    ...(extra.pluginHooks ? { pluginHooks: extra.pluginHooks } : {}),
+    ...(pluginRuntime ? { pluginRuntime } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }

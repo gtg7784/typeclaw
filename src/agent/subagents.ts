@@ -117,7 +117,9 @@ export type SubagentInFlightKey = (subagent: string, payload: unknown) => string
 
 export type CreateSubagentConsumerOptions = {
   stream: Stream
-  registry: SubagentRegistry
+  // Resolved per incoming stream message so plugin reload can swap the merged
+  // registry without rebuilding the consumer.
+  getRegistry: () => SubagentRegistry
   agentDir: string
   createSessionForSubagent?: CreateSessionForSubagent
   // Coalescing key. Default uses the subagent name alone, so the same subagent
@@ -142,7 +144,7 @@ const consoleLogger: SubagentConsumerLogger = {
 
 export function createSubagentConsumer({
   stream,
-  registry,
+  getRegistry,
   agentDir,
   createSessionForSubagent,
   inFlightKey = (name) => name,
@@ -157,6 +159,7 @@ export function createSubagentConsumer({
       unsubscribe = stream.subscribe({ target: { kind: 'new-session' } }, async (msg) => {
         const target = msg.target as { kind: 'new-session'; subagent: string }
         const name = target.subagent
+        const registry = getRegistry()
         if (registry[name] === undefined) {
           logger.warn(`[subagent] no registered subagent "${name}", ignoring ${msg.id}`)
           return

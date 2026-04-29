@@ -11,19 +11,21 @@ export type CreateCronReloadableOptions = {
   // Internal jobs (e.g. dreaming) survive cron.json reloads. The reloadable
   // recomputes them on every reload so config-driven changes propagate too.
   internalJobs?: () => CronJob[]
-  subagents?: SubagentRegistry
+  // Resolved per reload so plugin reloads (registered earlier) are visible
+  // when cron re-validates job.subagent references.
+  getSubagents?: () => SubagentRegistry
 }
 
 export function createCronReloadable({
   cwd,
   scheduler,
   internalJobs,
-  subagents,
+  getSubagents,
 }: CreateCronReloadableOptions): Reloadable {
   return {
     scope: 'cron',
     description: 'cron jobs from cron.json',
-    reload: async () => doReload({ cwd, scheduler, internalJobs, subagents }),
+    reload: async () => doReload({ cwd, scheduler, internalJobs, getSubagents }),
   }
 }
 
@@ -31,8 +33,9 @@ async function doReload({
   cwd,
   scheduler,
   internalJobs,
-  subagents,
+  getSubagents,
 }: CreateCronReloadableOptions): Promise<ReloadResult> {
+  const subagents = getSubagents?.()
   const loaded = await loadCron(cwd, subagents !== undefined ? { subagents } : {})
   if (!loaded.ok) {
     return { scope: 'cron', ok: false, reason: loaded.reason }

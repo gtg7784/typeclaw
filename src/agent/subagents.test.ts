@@ -267,7 +267,7 @@ describe('createSubagentConsumer', () => {
     }
     const consumer = createSubagentConsumer({
       stream,
-      registry,
+      getRegistry: () => registry,
       agentDir: '/agent',
       createSessionForSubagent: async () => fakeAgentSession([]),
       logger: silent,
@@ -290,7 +290,7 @@ describe('createSubagentConsumer', () => {
     const warnings: string[] = []
     const consumer = createSubagentConsumer({
       stream,
-      registry: {},
+      getRegistry: () => ({}),
       agentDir: '/agent',
       logger: { ...silent, warn: (m) => warnings.push(m) },
     })
@@ -326,7 +326,7 @@ describe('createSubagentConsumer', () => {
     const warnings: string[] = []
     const consumer = createSubagentConsumer({
       stream,
-      registry,
+      getRegistry: () => registry,
       agentDir: '/agent',
       createSessionForSubagent: async () => fakeAgentSession([]),
       inFlightKey: (name) => name,
@@ -370,7 +370,7 @@ describe('createSubagentConsumer', () => {
     }
     const consumer = createSubagentConsumer({
       stream,
-      registry,
+      getRegistry: () => registry,
       agentDir: '/agent',
       createSessionForSubagent: async () => fakeAgentSession([]),
       inFlightKey: (name, payload) => `${name}:${(payload as { id: string }).id}`,
@@ -405,7 +405,7 @@ describe('createSubagentConsumer', () => {
     }
     const consumer = createSubagentConsumer({
       stream,
-      registry,
+      getRegistry: () => registry,
       agentDir: '/agent',
       createSessionForSubagent: async () => fakeAgentSession([]),
       logger: { ...silent, error: (m) => errors.push(m) },

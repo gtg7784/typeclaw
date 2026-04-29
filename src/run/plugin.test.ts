@@ -51,7 +51,7 @@ describe('startAgent + plugin loading', () => {
 
     running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
 
-    const ids = running.pluginRegistry.cronJobs.map((j) => j.globalId)
+    const ids = running.pluginRuntime.get().registry.cronJobs.map((j) => j.globalId)
     expect(ids).toEqual(['__plugin_plugin_weekly-digest'])
     expect(running.loadedPlugins.map((p) => p.name)).toEqual(['plugin'])
   })
@@ -149,7 +149,7 @@ export default {
     )
 
     running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
-    expect(running.pluginRegistry.skills.map((s) => s.localName)).toEqual(['how-to-x'])
+    expect(running.pluginRuntime.get().registry.skills.map((s) => s.localName)).toEqual(['how-to-x'])
   })
 
   test('plugin subagent is registered and its tools are forwarded to the spawned session', async () => {
@@ -176,7 +176,7 @@ export default {
     )
 
     running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
-    const subagent = running.pluginRegistry.subagents.find((s) => s.subagentName === 'worker')
+    const subagent = running.pluginRuntime.get().registry.subagents.find((s) => s.subagentName === 'worker')
     expect(subagent).toBeDefined()
     expect(subagent?.subagent.tools).toEqual([{ __builtinTool: 'read' }])
   })
@@ -207,7 +207,7 @@ export default {
 
     running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
 
-    const job = running.pluginRegistry.cronJobs[0]?.job
+    const job = running.pluginRuntime.get().registry.cronJobs[0]?.job
     expect(job?.kind).toBe('prompt')
     expect(job?.schedule).toBe('7 * * * *')
   })
