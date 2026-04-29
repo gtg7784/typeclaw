@@ -37,7 +37,7 @@ export const init = defineCommand({
 
     intro('Initializing TypeClaw...')
 
-    // TODO: provider/model selection. For now we assume Fireworks + Kimi K2.6 Turbo
+    // TODO: provider/model selection. For now we assume Fireworks + Kimi K2.5 Turbo
     // because that's the only provider wired up in src/agent/auth.ts and src/config.
     // Expand to a provider picker (OpenAI, Anthropic, Fireworks, ...) once the
     // provider abstraction lands (see TypeClaw.md Phase 4).

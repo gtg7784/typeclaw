@@ -27,7 +27,7 @@ There is no file watcher. **Editing `typeclaw.json` while the container runs doe
 | --------- | -------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `$schema` | no       | string           | Path to `typeclaw.schema.json` for editor autocompletion. Scaffolded as `./node_modules/typeclaw/typeclaw.schema.json`. Leave it alone unless the user moves it.   |
 | `port`    | no       | integer          | 1–65535. Defaults to `8973` (T9 spelling of "TYPE"). Change only if the default collides with something on the user's host.                                        |
-| `model`   | no       | string           | Must be one of the values listed in the **Allowed models** section below. Defaults to `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`.                      |
+| `model`   | no       | string           | Must be one of the values listed in the **Allowed models** section below. Defaults to `fireworks/accounts/fireworks/routers/kimi-k2p5-turbo`.                      |
 | `mounts`  | no       | array of objects | Host directories bind-mounted into your container. Defaults to `[]` (no host paths exposed). `typeclaw init` writes `[]` explicitly. See **Mounts** section below. |
 
 The runtime parses this file with a strict schema (`zod`). **Unknown fields are tolerated but ignored** — they do nothing. Do not invent fields like `provider`, `apiKey`, `temperature`, `maxTokens`, `systemPrompt`, `tools`, `timeout`, etc. They will be silently dropped. If the user asks for one of those, say it is not yet supported and (if it makes sense) suggest they file a request.
@@ -37,7 +37,7 @@ A scaffolded `typeclaw.json` looks like:
 ```json
 {
   "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
-  "model": "fireworks/accounts/fireworks/routers/kimi-k2p6-turbo",
+  "model": "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo",
   "mounts": []
 }
 ```
@@ -60,7 +60,7 @@ Example with mounts:
 ```json
 {
   "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
-  "model": "fireworks/accounts/fireworks/routers/kimi-k2p6-turbo",
+  "model": "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo",
   "mounts": [
     { "name": "typeclaw", "path": "~/workspace/typeclaw", "description": "the typeclaw source repo" },
     { "name": "notes", "path": "~/notes", "readOnly": true, "description": "personal notes (read-only)" }
@@ -99,11 +99,11 @@ Today, the model registry contains exactly **one** entry:
 
 | `model` value                                          | Display name    | Provider  | Notes                                                                  |
 | ------------------------------------------------------ | --------------- | --------- | ---------------------------------------------------------------------- |
-| `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.6 Turbo | Fireworks | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context. |
+| `fireworks/accounts/fireworks/routers/kimi-k2p5-turbo` | Kimi K2.5 Turbo | Fireworks | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context. |
 
 **Do not write any other value into `model`.** The schema enum will reject the file at load, and the runtime will refuse to boot the agent process. If the user names a model that isn't in this table — "switch me to GPT-5", "use Claude" — be honest:
 
-> "Right now my registry only has Kimi K2.6 Turbo on Fireworks. More providers are planned but not wired up yet. If you want a different model, that needs a typeclaw release, not a config edit."
+> "Right now my registry only has Kimi K2.5 Turbo on Fireworks. More providers are planned but not wired up yet. If you want a different model, that needs a typeclaw release, not a config edit."
 
 Do **not** edit `typeclaw.json` to a model the registry doesn't know, even if the user insists. That bricks the agent on next restart.
 
@@ -157,7 +157,7 @@ Never echo, log, or commit values from `.env`. `.env` is gitignored by default �
 
 1. **Read `typeclaw.json`.** Don't guess from prior conversation — the user may have changed it since you last looked.
 2. Report the `model` field verbatim, plus the human-readable name from the **Allowed models** table.
-3. If `model` is missing from the file, say so and report the default (`fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` → Kimi K2.6 Turbo).
+3. If `model` is missing from the file, say so and report the default (`fireworks/accounts/fireworks/routers/kimi-k2p5-turbo` → Kimi K2.5 Turbo).
 
 ## When the user says "switch to <model>"
 

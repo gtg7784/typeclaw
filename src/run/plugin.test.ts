@@ -34,7 +34,7 @@ describe('startAgent + plugin loading', () => {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -62,7 +62,7 @@ describe('startAgent + plugin loading', () => {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -86,7 +86,7 @@ describe('startAgent + plugin loading', () => {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -134,7 +134,7 @@ export default {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -158,7 +158,7 @@ export default {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -189,7 +189,7 @@ export default {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -269,7 +269,7 @@ export default {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
         plugins: ['./plugin.ts'],
         plugin: { magicNumber: 7 },
       }),

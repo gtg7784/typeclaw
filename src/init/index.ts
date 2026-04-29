@@ -184,7 +184,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   // and provider registry exist (TypeClaw.md Phase 1 + Phase 4).
   const config: Record<string, unknown> = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
-    model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+    model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
     mounts: [],
     memory: {
       idleMs: 30_000,

@@ -16,9 +16,9 @@ export const KNOWN_PROVIDERS = {
     baseUrl: 'https://api.fireworks.ai/inference/v1',
     apiKeyEnv: 'FIREWORKS_API_KEY',
     models: {
-      'accounts/fireworks/routers/kimi-k2p6-turbo': {
-        id: 'accounts/fireworks/routers/kimi-k2p6-turbo',
-        name: 'Kimi K2.6 Turbo',
+      'accounts/fireworks/routers/kimi-k2p5-turbo': {
+        id: 'accounts/fireworks/routers/kimi-k2p5-turbo',
+        name: 'Kimi K2.5 Turbo',
         api: 'openai-completions',
         provider: 'fireworks',
         baseUrl: 'https://api.fireworks.ai/inference/v1',

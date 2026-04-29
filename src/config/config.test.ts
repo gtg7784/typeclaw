@@ -12,7 +12,7 @@ import {
   validateConfig,
 } from './config'
 
-const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
+const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo'
 
 describe('configSchema', () => {
   test('defaults mounts to [] when omitted (predating the field is fine)', () => {
