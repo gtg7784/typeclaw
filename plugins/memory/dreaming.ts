@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { z } from 'zod'
 
 import { type Subagent, readTool, writeTool } from '@/plugin'
+import { formatLocalDate, formatLocalDateTime } from '@/shared'
 
 import {
   DREAMING_STATE_FILE,
@@ -14,7 +15,6 @@ import {
   saveDreamingState,
   setDreamedLines,
 } from './dreaming-state'
-import { formatLocalDate, formatLocalDateTime } from './local-time'
 
 const STREAM_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.md$/
 

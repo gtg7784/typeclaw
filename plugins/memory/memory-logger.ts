@@ -3,9 +3,9 @@ import { join } from 'node:path'
 import { z } from 'zod'
 
 import { type Subagent, readTool } from '@/plugin'
+import { formatLocalDate } from '@/shared'
 
 import { appendTool } from './append-tool'
-import { formatLocalDate } from './local-time'
 import { readWatermark } from './watermark'
 
 export const memoryLoggerPayloadSchema = z.object({

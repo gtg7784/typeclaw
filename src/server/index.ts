@@ -198,15 +198,18 @@ export function createServer({
           const state = sessionStates.get(ws)
           state?.unsubBroadcast?.()
           state?.unsubPrompts?.()
-          if (state) {
-            if (state.runtimeSnapshot !== null) {
+          try {
+            if (state && state.runtimeSnapshot !== null) {
               await state.runtimeSnapshot.hooks.runSessionEnd({ sessionId: state.sessionFileId })
             }
-            state.session.dispose()
-            await state.dispose()
+          } finally {
+            if (state) {
+              state.session.dispose()
+              await state.dispose()
+            }
+            sessionStates.delete(ws)
+            console.log(`session ${state?.sessionFileId ?? ws.data.sessionId}: close`)
           }
-          sessionStates.delete(ws)
-          console.log(`session ${state?.sessionFileId ?? ws.data.sessionId}: close`)
         },
       },
     })

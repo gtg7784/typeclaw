@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { RunSession, SubagentContext } from '@/plugin'
+import { formatLocalDate } from '@/shared'
 
-import { formatLocalDate } from './local-time'
 import {
   isMemoryLoggerPayload,
   MEMORY_LOGGER_SYSTEM_PROMPT,

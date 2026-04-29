@@ -208,6 +208,7 @@ export async function startAgent({
   pluginsLoaded.setSpawnSubagent(async (name, payload) => {
     await invokeSubagent(name, {
       registry: pluginRuntime.get().subagents,
+      createSessionForSubagent,
       agentDir: cwd,
       userPrompt: '',
       payload,
