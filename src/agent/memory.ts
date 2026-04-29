@@ -6,6 +6,7 @@ import { getDreamedLines, loadDreamingState } from '@/memory/dreaming-state'
 const MAX_FILE_BYTES = 12 * 1024
 const STREAM_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}\.md$/
 const STREAM_DATE_FROM_FILENAME = /^(\d{4}-\d{2}-\d{2})\.md$/
+const WATERMARK_LINE = /^<!--\s*watermark\s+source=\S+\s+entry=\S+(?:\s+\S+=\S+)*\s*-->\s*$/
 const MEMORY_FRAMING =
   'Long-term memory below survives across sessions. Daily streams below capture undreamed observations from recent sessions; the newest day is closest to the current task. Read both before answering anything that plausibly connects to past context.'
 
@@ -49,7 +50,8 @@ async function readStreamEntries(agentDir: string): Promise<FileEntry[]> {
       const date = STREAM_DATE_FROM_FILENAME.exec(name)?.[1] ?? ''
       const dreamedLines = getDreamedLines(state, date)
       const entry = await readEntry(memoryDir, name)
-      return sliceUndreamedTail({ ...entry, name: `memory/${name}` }, dreamedLines)
+      const tail = sliceUndreamedTail({ ...entry, name: `memory/${name}` }, dreamedLines)
+      return stripWatermarks(tail)
     }),
   )
   return entries.filter((e) => !e.fullyDreamed)
@@ -68,6 +70,18 @@ function sliceUndreamedTail(entry: FileEntry, dreamedLines: number): FileEntry {
   const tail = lines.slice(dreamedLines).join('\n').trimStart()
   if (tail.trim() === '') return { ...entry, fullyDreamed: true }
   return { ...entry, name: `${entry.name} (undreamed tail)`, content: tail }
+}
+
+// Bare `<!-- watermark ... -->` lines are bookkeeping for the memory-logger's
+// cursor; they carry no signal for the main agent reading the prompt. Strip
+// them and collapse any blank-line runs they leave behind so the injected
+// stream stays compact. If nothing but watermarks remained, drop the entry.
+function stripWatermarks(entry: FileEntry): FileEntry {
+  if (entry.fullyDreamed || entry.content === null) return entry
+  const kept = entry.content.split('\n').filter((line) => !WATERMARK_LINE.test(line))
+  const collapsed = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  if (collapsed === '') return { ...entry, fullyDreamed: true }
+  return { ...entry, content: collapsed }
 }
 
 function renderSection(longTerm: FileEntry, streams: FileEntry[]): string {

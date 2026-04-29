@@ -254,3 +254,116 @@ describe('loadMemory undreamed-tail filtering', () => {
     expect(section).not.toContain('## memory/2026-04-27.md')
   })
 })
+
+describe('loadMemory watermark stripping', () => {
+  test('strips bare watermark comments from injected stream content', async () => {
+    // given
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      [
+        '<!-- watermark source=ses_a entry=e1 -->',
+        '<!-- fragment source=ses_a entry=e2 -->',
+        '## A real fragment',
+        'body',
+        '',
+        '<!-- watermark source=ses_a entry=e3 -->',
+        '<!-- watermark source=ses_a entry=e4 -->',
+      ].join('\n'),
+    )
+
+    // when
+    const section = await loadMemory(agentDir)
+
+    // then
+    expect(section).not.toContain('<!-- watermark')
+    expect(section).toContain('<!-- fragment source=ses_a entry=e2 -->')
+    expect(section).toContain('## A real fragment')
+    expect(section).toContain('body')
+  })
+
+  test('omits a stream subsection when only watermarks remain after stripping', async () => {
+    // given: an undreamed tail composed entirely of bare watermarks is no signal
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      ['<!-- watermark source=ses_a entry=e1 -->', '<!-- watermark source=ses_a entry=e2 -->'].join('\n'),
+    )
+
+    // when
+    const section = await loadMemory(agentDir)
+
+    // then
+    expect(section).not.toContain('## memory/2026-04-27.md')
+  })
+
+  test('collapses blank lines left behind after stripping consecutive watermarks', async () => {
+    // given
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      [
+        '<!-- fragment source=ses_a entry=e1 -->',
+        '## First',
+        'body 1',
+        '',
+        '<!-- watermark source=ses_a entry=e2 -->',
+        '<!-- watermark source=ses_a entry=e3 -->',
+        '<!-- watermark source=ses_a entry=e4 -->',
+        '<!-- fragment source=ses_a entry=e5 -->',
+        '## Second',
+        'body 2',
+      ].join('\n'),
+    )
+
+    // when
+    const section = await loadMemory(agentDir)
+
+    // then: no run of 3+ consecutive newlines (which would mean stale blank lines)
+    expect(section).not.toMatch(/\n\n\n+/)
+    expect(section).toContain('## First')
+    expect(section).toContain('## Second')
+  })
+
+  test('keeps fragment markers intact (only watermark markers are stripped)', async () => {
+    // given
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      ['<!-- fragment source=ses_a entry=e1 -->', '## Topic', 'body'].join('\n'),
+    )
+
+    // when
+    const section = await loadMemory(agentDir)
+
+    // then
+    expect(section).toContain('<!-- fragment source=ses_a entry=e1 -->')
+  })
+
+  test('strips watermarks from the undreamed tail (post-slicing)', async () => {
+    // given: dreamed lines cover the first fragment; tail starts at line 4
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      [
+        '<!-- fragment source=ses_a entry=e1 -->', // line 1 — dreamed
+        '## Old',                                  // line 2 — dreamed
+        'old body',                                // line 3 — dreamed
+        '<!-- watermark source=ses_a entry=e2 -->',// line 4 — undreamed, should be stripped
+        '<!-- fragment source=ses_a entry=e3 -->', // line 5 — undreamed, kept
+        '## New',                                  // line 6
+        'new body',                                // line 7
+      ].join('\n'),
+    )
+    await writeDreamingState(agentDir, { '2026-04-27': { lines: 3, ts: 'past' } })
+
+    // when
+    const section = await loadMemory(agentDir)
+
+    // then
+    expect(section).toContain('## memory/2026-04-27.md (undreamed tail)')
+    expect(section).not.toContain('<!-- watermark')
+    expect(section).toContain('## New')
+    expect(section).not.toContain('## Old')
+  })
+})
