@@ -2,9 +2,29 @@ import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { OutboundCallback, OutboundMessage, SendResult } from '@/channels/types'
 
-import { DiscordBotClient, DiscordBotListener, type DiscordGatewayMessageCreateEvent } from './agent-messenger-shim'
+import {
+  DiscordBotClient,
+  DiscordBotListener,
+  DiscordIntent,
+  type DiscordGatewayMessageCreateEvent,
+} from './agent-messenger-shim'
 
 const TYPING_INTERVAL_MS = 8000
+
+// agent-messenger's DEFAULT_INTENTS omits MessageContent (privileged), so the
+// bot's gateway IDENTIFY never asks for it and Discord delivers every message
+// with content: ''. We mirror the SDK's defaults here and add MessageContent
+// so inbound messages actually carry text. The portal toggle is necessary but
+// not sufficient — the bitmask must include this bit too.
+export const DISCORD_BOT_INTENTS =
+  DiscordIntent.Guilds |
+  DiscordIntent.GuildMessages |
+  DiscordIntent.GuildMessageReactions |
+  DiscordIntent.GuildMessageTyping |
+  DiscordIntent.DirectMessages |
+  DiscordIntent.DirectMessageReactions |
+  DiscordIntent.DirectMessageTyping |
+  DiscordIntent.MessageContent
 
 export type DiscordBotAdapterLogger = {
   info: (msg: string) => void
@@ -119,7 +139,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         throw err
       }
 
-      listener = new DiscordBotListener(client)
+      listener = new DiscordBotListener(client, { intents: DISCORD_BOT_INTENTS })
       listener.on('connected', (info) => {
         botUserId = info.user.id
         logger.info(`[discord-bot] connected as ${info.user.username} (${info.user.id})`)

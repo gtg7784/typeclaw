@@ -2,6 +2,9 @@ import { describe, expect, test } from 'bun:test'
 
 import { isAllowed } from '@/channels/schema'
 
+import { DISCORD_BOT_INTENTS } from './discord-bot'
+import { DiscordIntent } from './agent-messenger-shim'
+
 describe('discord-bot adapter (unit-level pure helpers)', () => {
   test('isAllowed denies a guild channel not in the allow list', () => {
     expect(isAllowed(['guild:1/2'], '1', '99')).toBe(false)
@@ -16,5 +19,19 @@ describe('discord-bot adapter (unit-level pure helpers)', () => {
     expect(isAllowed(['guild:*'], '@dm', 'd1')).toBe(false)
     expect(isAllowed(['dm:*'], '@dm', 'd1')).toBe(true)
     expect(isAllowed(['*'], '@dm', 'd1')).toBe(true)
+  })
+})
+
+describe('discord-bot gateway intents', () => {
+  test('includes MessageContent (privileged) so inbound messages carry text', () => {
+    expect(DISCORD_BOT_INTENTS & DiscordIntent.MessageContent).toBe(DiscordIntent.MessageContent)
+  })
+
+  test('includes DirectMessages so DMs are delivered to the gateway', () => {
+    expect(DISCORD_BOT_INTENTS & DiscordIntent.DirectMessages).toBe(DiscordIntent.DirectMessages)
+  })
+
+  test('includes GuildMessages so guild channel messages are delivered', () => {
+    expect(DISCORD_BOT_INTENTS & DiscordIntent.GuildMessages).toBe(DiscordIntent.GuildMessages)
   })
 })
