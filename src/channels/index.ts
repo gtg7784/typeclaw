@@ -1,5 +1,10 @@
 export { createChannelManager, type ChannelManager, type ChannelManagerOptions } from './manager'
-export { createChannelRouter, type ChannelRouter, type CreateChannelRouterOptions } from './router'
+export {
+  createChannelRouter,
+  type ChannelRouter,
+  type CreateChannelRouterOptions,
+  type CreateSessionForChannel,
+} from './router'
 export { createChannelsReloadable } from './reloadable'
 export {
   channelsSchema,
