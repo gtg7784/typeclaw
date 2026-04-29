@@ -64,44 +64,17 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('SOUL.md')
   })
 
-  test('injects MEMORY.md content into the system prompt', async () => {
-    // given
+  test('does NOT inject MEMORY.md or memory/ stream contents (owned by the bundled memory plugin via session.prompt hook)', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), 'Neo prefers terse replies.')
-
-    // when
-    const loader = await createResourceLoader({ agentDir })
-
-    // then
-    const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).toContain('# Memory')
-    expect(prompt).toContain('Neo prefers terse replies.')
-  })
-
-  test('injects undreamed memory stream files into the system prompt', async () => {
-    // given
     await mkdir(join(agentDir, 'memory'))
-    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'fragment from tuesday')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'tuesday-fragment-marker')
 
-    // when
     const loader = await createResourceLoader({ agentDir })
 
-    // then
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).toContain('## memory/2026-04-27.md')
-    expect(prompt).toContain('fragment from tuesday')
-  })
-
-  test('places identity before memory so SOUL framing is read first', async () => {
-    // given
-    await writeFile(join(agentDir, 'IDENTITY.md'), 'I am Tester.')
-    await writeFile(join(agentDir, 'MEMORY.md'), 'remembered fact')
-
-    // when
-    const loader = await createResourceLoader({ agentDir })
-
-    // then
-    const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt.indexOf('# Identity')).toBeLessThan(prompt.indexOf('# Memory'))
+    expect(prompt).not.toContain('Neo prefers terse replies.')
+    expect(prompt).not.toContain('tuesday-fragment-marker')
+    expect(prompt).not.toContain('## memory/2026-04-27.md')
   })
 
   test('exposes the typeclaw-cron bundled skill to the agent', async () => {

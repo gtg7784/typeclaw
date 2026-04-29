@@ -9,7 +9,7 @@ import {
   type SubagentConsumer,
   type SubagentRegistry,
 } from '@/agent/subagents'
-import { config, type Config, createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync } from '@/config'
+import { createConfigReloadable, loadConfigSync, loadPluginConfigsSync } from '@/config'
 import {
   type CronConsumer,
   type CronJob,
@@ -21,12 +21,12 @@ import {
   loadCron as loadCronDefault,
   type Scheduler,
 } from '@/cron'
-import { dreamingSubagent, isDreamingPayload, isMemoryLoggerPayload, memoryLoggerSubagent } from '@/memory'
 import {
   loadPlugins,
   type LoadPluginsResult,
   pluginCronJobs,
   type PluginRegistry,
+  type ResolvedPlugin,
   summarizeLoaded,
 } from '@/plugin'
 import { ReloadRegistry } from '@/reload'
@@ -35,9 +35,13 @@ import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
 
+import memoryPlugin from '../../plugins/memory'
+
 import { createPluginRuntime, type PluginRuntime, type PluginSubagentEntry } from './plugin-runtime'
 
-const DREAMING_JOB_ID = '__internal_dreaming'
+const BUNDLED_PLUGINS: ResolvedPlugin[] = [
+  { name: 'memory', version: undefined, source: '<bundled>', defined: memoryPlugin },
+]
 
 type BunServer = ReturnType<Server['start']>
 
@@ -91,11 +95,12 @@ export async function startAgent({
     entries: cwdConfig.plugins,
     agentDir: cwd,
     configsByName: pluginConfigsByName,
+    bundled: BUNDLED_PLUGINS,
   })
   const pluginRegistry = pluginsLoaded.registry
   const pluginHooks = pluginsLoaded.hooks
 
-  const { registry: subagents, pluginSubagentByShim } = mergeSubagents(pluginRegistry)
+  const { registry: subagents, pluginSubagentByShim, pluginSubagentByName } = mergeSubagents(pluginRegistry)
 
   const hasAnyPluginContent =
     pluginRegistry.tools.length > 0 ||
@@ -145,11 +150,14 @@ export async function startAgent({
     agentDir: cwd,
     createSessionForSubagent,
     inFlightKey: (name, payload) => {
-      if (name === 'memory-logger' && isMemoryLoggerPayload(payload)) {
-        return `${name}:${payload.parentSessionId}`
-      }
-      if (name === 'dreaming' && isDreamingPayload(payload)) {
-        return `${name}:${payload.agentDir}`
+      const entry = pluginSubagentByName.get(name)
+      const fn = entry?.pluginSubagent.inFlightKey
+      if (fn !== undefined) {
+        try {
+          return `${name}:${fn(payload)}`
+        } catch {
+          return name
+        }
       }
       return name
     },
@@ -179,7 +187,7 @@ export async function startAgent({
     },
   })
 
-  const internalJobs = () => [...buildInternalJobs(cwd, getConfig()), ...pluginCronJobs(pluginRuntime.get().registry)]
+  const internalJobs = () => pluginCronJobs(pluginRuntime.get().registry)
   const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(internalJobs)
   const scheduler = await startScheduler({
     cwd,
@@ -200,6 +208,7 @@ export async function startAgent({
   pluginsLoaded.setSpawnSubagent(async (name, payload) => {
     await invokeSubagent(name, {
       registry: pluginRuntime.get().subagents,
+      createSessionForSubagent,
       agentDir: cwd,
       userPrompt: '',
       payload,
@@ -217,7 +226,6 @@ export async function startAgent({
     reloadRegistry,
     sessionFactory,
     stream,
-    memoryIdleMs: config.memory.idleMs,
     agentDir: cwd,
     pluginRuntime,
   }).start()
@@ -317,27 +325,28 @@ function makeDefaultSchedulerFactory(internalJobs: () => CronJob[]): SchedulerFa
 function mergeSubagents(pluginRegistry: PluginRegistry): {
   registry: SubagentRegistry
   pluginSubagentByShim: WeakMap<InternalSubagent<any>, PluginSubagentEntry>
+  pluginSubagentByName: Map<string, PluginSubagentEntry>
 } {
-  const merged: Record<string, InternalSubagent<any>> = {
-    'memory-logger': memoryLoggerSubagent,
-    dreaming: dreamingSubagent,
-  }
+  const merged: Record<string, InternalSubagent<any>> = {}
   const pluginSubagentByShim = new WeakMap<InternalSubagent<any>, PluginSubagentEntry>()
+  const pluginSubagentByName = new Map<string, PluginSubagentEntry>()
   for (const reg of pluginRegistry.subagents) {
     if (merged[reg.subagentName] !== undefined) {
       throw new Error(
-        `plugin ${reg.pluginName}: subagent name "${reg.subagentName}" conflicts with a built-in subagent`,
+        `plugin ${reg.pluginName}: subagent name "${reg.subagentName}" already registered (across plugins)`,
       )
     }
     const shim = pluginSubagentShim(reg.subagent)
     merged[reg.subagentName] = shim
-    pluginSubagentByShim.set(shim, {
+    const entry: PluginSubagentEntry = {
       pluginName: reg.pluginName,
       subagentName: reg.subagentName,
       pluginSubagent: reg.subagent,
-    })
+    }
+    pluginSubagentByShim.set(shim, entry)
+    pluginSubagentByName.set(reg.subagentName, entry)
   }
-  return { registry: merged, pluginSubagentByShim }
+  return { registry: merged, pluginSubagentByShim, pluginSubagentByName }
 }
 
 function pluginSubagentShim(subagent: import('@/plugin').Subagent<any>): InternalSubagent<any> {
@@ -346,21 +355,4 @@ function pluginSubagentShim(subagent: import('@/plugin').Subagent<any>): Interna
     ...(subagent.payloadSchema ? { payloadSchema: subagent.payloadSchema } : {}),
     ...(subagent.handler ? { handler: subagent.handler as InternalSubagent<any>['handler'] } : {}),
   }
-}
-
-function buildInternalJobs(cwd: string, cfg: Config): CronJob[] {
-  const jobs: CronJob[] = []
-  const dreaming = cfg.memory.dreaming
-  if (dreaming) {
-    jobs.push({
-      id: DREAMING_JOB_ID,
-      schedule: dreaming.schedule,
-      enabled: true,
-      kind: 'prompt',
-      prompt: '(internal: dreaming consolidation; user prompt is built by the dreaming subagent handler)',
-      subagent: 'dreaming',
-      payload: { agentDir: cwd },
-    })
-  }
-  return jobs
 }

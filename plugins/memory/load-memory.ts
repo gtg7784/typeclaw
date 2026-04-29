@@ -1,7 +1,7 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { getDreamedLines, loadDreamingState } from '@/memory/dreaming-state'
+import { getDreamedLines, loadDreamingState } from './dreaming-state'
 
 const MAX_FILE_BYTES = 12 * 1024
 const STREAM_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}\.md$/

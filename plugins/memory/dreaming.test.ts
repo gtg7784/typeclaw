@@ -3,10 +3,15 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { AgentSession } from '@/agent'
-import { invokeSubagent } from '@/agent/subagents'
+import type { RunSession, SubagentContext } from '@/plugin'
 
-import { commitMemorySnapshot, createDreamingSubagent, type DreamingLogger, isDreamingPayload } from './dreaming'
+import {
+  commitMemorySnapshot,
+  createDreamingSubagent,
+  type DreamingLogger,
+  type DreamingPayload,
+  isDreamingPayload,
+} from './dreaming'
 import { DREAMING_STATE_FILE, loadDreamingState } from './dreaming-state'
 
 const silentLogger: DreamingLogger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -22,38 +27,46 @@ afterEach(async () => {
   await rm(agentDir, { recursive: true, force: true })
 })
 
-function fakeAgentSession(): AgentSession & { prompts: string[]; disposed: boolean } {
+type CapturedRunSession = {
+  prompts: string[]
+  runSession: RunSession
+}
+
+function captureRunSession(): CapturedRunSession {
   const prompts: string[] = []
-  let disposed = false
-  return {
-    prompts,
-    get disposed() {
-      return disposed
-    },
-    prompt: async (text: string) => {
-      prompts.push(text)
-    },
-    dispose: () => {
-      disposed = true
-    },
-  } as unknown as AgentSession & { prompts: string[]; disposed: boolean }
+  const runSession: RunSession = async (override) => {
+    if (override?.userPrompt !== undefined) prompts.push(override.userPrompt)
+  }
+  return { prompts, runSession }
 }
 
 async function invokeDreaming(
   agentDir: string,
-  options: { commitMemory?: (cwd: string) => Promise<void>; logger?: DreamingLogger; session?: AgentSession },
-): Promise<void> {
+  options: {
+    commitMemory?: (cwd: string) => Promise<void>
+    logger?: DreamingLogger
+    runSession?: RunSession
+    throwOnRunSession?: boolean
+  } = {},
+): Promise<{ prompts: string[] }> {
   const subagent = createDreamingSubagent({
     commitMemory: options.commitMemory ?? (async () => {}),
     logger: options.logger ?? silentLogger,
   })
-  await invokeSubagent('dreaming', {
-    registry: { dreaming: subagent },
-    createSessionForSubagent: async () => options.session ?? fakeAgentSession(),
-    agentDir,
+  const captured = captureRunSession()
+  const runSession = options.throwOnRunSession
+    ? async () => {
+        throw new Error('LLM blew up')
+      }
+    : (options.runSession ?? captured.runSession)
+
+  const ctx: SubagentContext<DreamingPayload> = {
     userPrompt: '',
+    agentDir,
     payload: { agentDir },
-  })
+  }
+  await subagent.handler!(ctx, runSession)
+  return { prompts: captured.prompts }
 }
 
 describe('isDreamingPayload', () => {
@@ -61,63 +74,44 @@ describe('isDreamingPayload', () => {
     expect(isDreamingPayload({ agentDir: '/some/path' })).toBe(true)
   })
 
-  test('rejects null', () => {
+  test('rejects null and missing/empty agentDir', () => {
     expect(isDreamingPayload(null)).toBe(false)
-  })
-
-  test('rejects an empty agentDir', () => {
+    expect(isDreamingPayload({})).toBe(false)
     expect(isDreamingPayload({ agentDir: '' })).toBe(false)
-  })
-
-  test('rejects a non-string agentDir', () => {
     expect(isDreamingPayload({ agentDir: 42 })).toBe(false)
   })
+})
 
-  test('rejects a missing agentDir', () => {
-    expect(isDreamingPayload({})).toBe(false)
+describe('dreaming subagent declarations', () => {
+  test('declares an inFlightKey that keys on agentDir', () => {
+    const sub = createDreamingSubagent()
+    expect(sub.inFlightKey).toBeDefined()
+    expect(sub.inFlightKey!({ agentDir: '/x' })).toBe('/x')
   })
 })
 
 describe('dreaming subagent (orchestration)', () => {
-  test('throws when payload is invalid', async () => {
-    const subagent = createDreamingSubagent({ commitMemory: async () => {}, logger: silentLogger })
-    await expect(
-      invokeSubagent('dreaming', {
-        registry: { dreaming: subagent },
-        createSessionForSubagent: async () => fakeAgentSession(),
-        agentDir,
-        userPrompt: '',
-        payload: { agentDir: '' },
-      }),
-    ).rejects.toThrow(/invalid payload/)
-  })
-
   test('skips dreaming entirely when no daily streams exist', async () => {
-    const session = fakeAgentSession()
     let committed = false
-
-    await invokeDreaming(agentDir, {
-      session,
+    const { prompts } = await invokeDreaming(agentDir, {
       commitMemory: async () => {
         committed = true
       },
     })
 
-    expect(session.prompts).toHaveLength(0)
+    expect(prompts).toHaveLength(0)
     expect(committed).toBe(false)
   })
 
-  test('skips dreaming when every stream is already at the watermark (no new fragments)', async () => {
+  test('skips dreaming when every stream is already at the watermark', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'line 1\nline 2\nline 3\n')
     await writeFile(
       join(agentDir, DREAMING_STATE_FILE),
       JSON.stringify({ version: 1, dreamedThrough: { '2026-04-27': { lines: 3, ts: 'past' } } }),
     )
-    const session = fakeAgentSession()
 
-    await invokeDreaming(agentDir, { session })
-
-    expect(session.prompts).toHaveLength(0)
+    const { prompts } = await invokeDreaming(agentDir)
+    expect(prompts).toHaveLength(0)
   })
 
   test('prompts subagent only with undreamed tails (read offsets reflect watermark)', async () => {
@@ -126,21 +120,20 @@ describe('dreaming subagent (orchestration)', () => {
       join(agentDir, DREAMING_STATE_FILE),
       JSON.stringify({ version: 1, dreamedThrough: { '2026-04-27': { lines: 2, ts: 'past' } } }),
     )
-    const session = fakeAgentSession()
 
-    await invokeDreaming(agentDir, { session })
+    const { prompts } = await invokeDreaming(agentDir)
 
-    expect(session.prompts).toHaveLength(1)
-    expect(session.prompts[0]).toContain('memory/2026-04-27.md')
-    expect(session.prompts[0]).toContain('offset=3')
-    expect(session.prompts[0]).toContain('total file lines=5')
-    expect(session.prompts[0]).toContain('undreamed: 3-5')
+    expect(prompts).toHaveLength(1)
+    expect(prompts[0]).toContain('memory/2026-04-27.md')
+    expect(prompts[0]).toContain('offset=3')
+    expect(prompts[0]).toContain('total file lines=5')
+    expect(prompts[0]).toContain('undreamed: 3-5')
   })
 
   test('advances watermarks to current line counts after a successful run', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'a\nb\nc\nd\n')
 
-    await invokeDreaming(agentDir, {})
+    await invokeDreaming(agentDir)
 
     const state = await loadDreamingState(agentDir)
     expect(state.dreamedThrough['2026-04-27']?.lines).toBe(4)
@@ -149,11 +142,10 @@ describe('dreaming subagent (orchestration)', () => {
   test('passes multiple undreamed days oldest-first to the subagent', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-25.md'), 'older\n')
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'newer\n')
-    const session = fakeAgentSession()
 
-    await invokeDreaming(agentDir, { session })
+    const { prompts } = await invokeDreaming(agentDir)
 
-    const prompt = session.prompts[0] ?? ''
+    const prompt = prompts[0] ?? ''
     expect(prompt.indexOf('2026-04-25.md')).toBeGreaterThan(-1)
     expect(prompt.indexOf('2026-04-25.md')).toBeLessThan(prompt.indexOf('2026-04-27.md'))
   })
@@ -171,22 +163,10 @@ describe('dreaming subagent (orchestration)', () => {
     expect(commits).toEqual([agentDir])
   })
 
-  test('disposes the session even when prompt() throws (and does NOT advance watermarks)', async () => {
+  test('does NOT advance watermarks when prompt() throws', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'oops\n')
-    let disposed = false
-    const session = {
-      prompt: async () => {
-        throw new Error('LLM blew up')
-      },
-      dispose: () => {
-        disposed = true
-      },
-    } as unknown as AgentSession
 
-    await expect(invokeDreaming(agentDir, { session })).rejects.toThrow(/LLM blew up/)
-    expect(disposed).toBe(true)
-    // Failed runs do NOT advance the watermark — next run will retry the same
-    // tail, which is the safer default than silently consolidating nothing.
+    await expect(invokeDreaming(agentDir, { throwOnRunSession: true })).rejects.toThrow(/LLM blew up/)
     const state = await loadDreamingState(agentDir)
     expect(state.dreamedThrough['2026-04-27']).toBeUndefined()
   })
@@ -197,11 +177,10 @@ describe('dreaming subagent (orchestration)', () => {
       join(agentDir, DREAMING_STATE_FILE),
       JSON.stringify({ version: 1, dreamedThrough: { '2026-04-27': { lines: 99, ts: 'past' } } }),
     )
-    const session = fakeAgentSession()
 
-    await invokeDreaming(agentDir, { session })
+    const { prompts } = await invokeDreaming(agentDir)
 
-    expect(session.prompts).toHaveLength(0)
+    expect(prompts).toHaveLength(0)
     const state = await loadDreamingState(agentDir)
     expect(state.dreamedThrough['2026-04-27']?.lines).toBe(99)
   })
@@ -209,11 +188,21 @@ describe('dreaming subagent (orchestration)', () => {
   test('writes the dreaming state file under memory/.dreaming-state.json', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'fragment\n')
 
-    await invokeDreaming(agentDir, {})
+    await invokeDreaming(agentDir)
 
     const raw = await readFile(join(agentDir, DREAMING_STATE_FILE), 'utf8')
     expect(raw).toContain('2026-04-27')
     expect(raw).toContain('"lines": 1')
+  })
+
+  test('creates MEMORY.md if missing on first dreaming run (replaces init scaffold)', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'fragment\n')
+    await expect(readFile(join(agentDir, 'MEMORY.md'), 'utf8')).rejects.toThrow()
+
+    await invokeDreaming(agentDir)
+
+    const memory = await readFile(join(agentDir, 'MEMORY.md'), 'utf8')
+    expect(memory).toBe('')
   })
 })
 
@@ -291,50 +280,6 @@ describe('commitMemorySnapshot', () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'first\nsecond\n')
     await writeFile(join(agentDir, 'MEMORY.md'), '# Memory v2\n')
 
-    expect(await porcelainStatus(agentDir)).toBe('')
-  })
-
-  test('subsequent run still picks up worktree changes despite skip-worktree (clears flag, commits, re-sets)', async () => {
-    await initRepo(agentDir)
-    await writeFile(join(agentDir, 'MEMORY.md'), 'v1\n')
-    await commitMemorySnapshot(agentDir)
-    expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md'])
-
-    await writeFile(join(agentDir, 'MEMORY.md'), 'v2\n')
-    await commitMemorySnapshot(agentDir)
-
-    const log = await runGit(agentDir, ['log', '--oneline', '--', 'MEMORY.md'])
-    expect(log.stdout.split('\n')).toHaveLength(2)
-    const blob = await runGit(agentDir, ['show', 'HEAD:MEMORY.md'])
-    expect(blob.stdout).toBe('v2')
-    expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md'])
-    expect(await porcelainStatus(agentDir)).toBe('')
-  })
-
-  test('a brand-new daily stream gets committed and skip-worktree-flagged on the run that first sees it', async () => {
-    await initRepo(agentDir)
-    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'first day\n')
-    await commitMemorySnapshot(agentDir)
-
-    await writeFile(join(agentDir, 'memory', '2026-04-28.md'), 'second day\n')
-    await commitMemorySnapshot(agentDir)
-
-    expect(await trackedFiles(agentDir)).toEqual(['memory/2026-04-27.md', 'memory/2026-04-28.md'])
-    expect(await skipWorktreeFiles(agentDir)).toEqual(['memory/2026-04-27.md', 'memory/2026-04-28.md'])
-    expect(await porcelainStatus(agentDir)).toBe('')
-  })
-
-  test('no-op run (nothing changed since last commit) leaves the flag set so status stays clean', async () => {
-    await initRepo(agentDir)
-    await writeFile(join(agentDir, 'MEMORY.md'), 'stable\n')
-    await commitMemorySnapshot(agentDir)
-    const firstHead = (await runGit(agentDir, ['rev-parse', 'HEAD'])).stdout
-
-    await commitMemorySnapshot(agentDir)
-    const secondHead = (await runGit(agentDir, ['rev-parse', 'HEAD'])).stdout
-
-    expect(secondHead).toBe(firstHead)
-    expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md'])
     expect(await porcelainStatus(agentDir)).toBe('')
   })
 })

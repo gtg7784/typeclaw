@@ -4,7 +4,7 @@ import type { CronJob } from '@/cron'
 
 import { createPluginContext, createPluginLogger, type SpawnSubagentFn } from './context'
 import { createHookBus, type HookBus } from './hooks'
-import { loadPluginEntry, type LoadPluginEntryFn } from './loader'
+import { loadPluginEntry, type LoadPluginEntryFn, type ResolvedPlugin } from './loader'
 import { discardRegistrationsBy, emptyRegistry, type PluginRegistry, registerContributions } from './registry'
 import type { PluginExports } from './types'
 
@@ -13,6 +13,11 @@ export type LoadPluginsOptions = {
   agentDir: string
   configsByName: Record<string, unknown>
   loadEntry?: LoadPluginEntryFn
+  // Bundled plugins resolved by the runtime (not from typeclaw.json). Loaded
+  // before user-declared `entries` so a config block named after a bundled
+  // plugin (e.g. "memory") is consumed by the bundled plugin, and so plugin-
+  // name conflicts with a user-declared entry surface as a clear error.
+  bundled?: ResolvedPlugin[]
 }
 
 export type LoadPluginsResult = {
@@ -34,9 +39,14 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
     throw new Error('plugin: spawnSubagent is not yet wired')
   }
 
-  for (const entry of opts.entries) {
-    const resolved = await loadEntry(entry, opts.agentDir)
+  const allPlugins: { entry: string; resolved: ResolvedPlugin }[] = [
+    ...(opts.bundled?.map((resolved) => ({ entry: `<bundled:${resolved.name}>`, resolved })) ?? []),
+    ...(await Promise.all(
+      opts.entries.map(async (entry) => ({ entry, resolved: await loadEntry(entry, opts.agentDir) })),
+    )),
+  ]
 
+  for (const { entry, resolved } of allPlugins) {
     if (loaded.find((l) => l.name === resolved.name)) {
       throw new Error(`plugin name conflict: ${resolved.name} (entry ${entry}) already loaded`)
     }

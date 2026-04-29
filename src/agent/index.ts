@@ -19,7 +19,6 @@ import type { ReloadRegistry } from '@/reload'
 import type { Stream } from '@/stream'
 
 import { getAuth } from './auth'
-import { loadMemory } from './memory'
 import { resolveBuiltinToolRefs, wrapPluginTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
@@ -187,8 +186,8 @@ export type CreateResourceLoaderOptions = {
 
 export async function createResourceLoader(options: CreateResourceLoaderOptions = {}): Promise<DefaultResourceLoader> {
   const agentDir = options.agentDir ?? process.cwd()
-  const [self, memory] = await Promise.all([loadSelf(agentDir), loadMemory(agentDir)])
-  let systemPrompt = `${DEFAULT_SYSTEM_PROMPT}\n\n${self}\n\n${memory}`
+  const self = await loadSelf(agentDir)
+  let systemPrompt = `${DEFAULT_SYSTEM_PROMPT}\n\n${self}`
 
   if (options.plugins) {
     const event = { prompt: systemPrompt, sessionId: options.plugins.sessionId, agentDir }

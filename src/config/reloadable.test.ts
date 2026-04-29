@@ -41,10 +41,7 @@ describe('createConfigReloadable', () => {
     const reloadable = createConfigReloadable({ cwd })
     await reloadable.reload()
 
-    await writeFile(
-      join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL_A, memory: { dreaming: { schedule: 'not-a-cron' } } }),
-    )
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'not-a-known-model', port: 9999 }))
     const result = await reloadable.reload()
 
     expect(result.ok).toBe(false)
@@ -97,28 +94,10 @@ describe('createConfigReloadable', () => {
     expect(diff.ignored.map((c) => c.path)).toEqual(['$schema'])
   })
 
-  test('field fence: memory.dreaming change lands in `applied`', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A }))
-    const reloadable = createConfigReloadable({ cwd })
-    await reloadable.reload()
-
-    await writeFile(
-      join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL_A, memory: { dreaming: { schedule: '0 5 * * *' } } }),
-    )
-    const result = await reloadable.reload()
-
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    const diff = result.details as { applied: { path: string }[] }
-    expect(diff.applied.map((c) => c.path)).toContain('memory.dreaming')
-    expect(getConfig().memory.dreaming?.schedule).toBe('0 5 * * *')
-  })
-
   test('summary string reports counts in each bucket', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL_A, port: 9001, $schema: './a.json' }),
+      JSON.stringify({ model: VALID_MODEL_A, port: 9001, $schema: './a.json', mounts: [] }),
     )
     const reloadable = createConfigReloadable({ cwd })
     await reloadable.reload()
@@ -129,14 +108,15 @@ describe('createConfigReloadable', () => {
         model: VALID_MODEL_A,
         port: 9002,
         $schema: './b.json',
-        memory: { dreaming: { schedule: '0 5 * * *' } },
+        mounts: [{ name: 'data', path: '/x' }],
       }),
     )
     const result = await reloadable.reload()
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
-    expect(result.summary).toBe('1 applied, 1 restart-required, 1 ignored')
+    // mounts and port both restart-required; $schema ignored. No `applied` change since model unchanged.
+    expect(result.summary).toBe('0 applied, 2 restart-required, 1 ignored')
   })
 })
 
@@ -150,7 +130,7 @@ describe('FIELD_EFFECTS coverage', () => {
   })
 
   test('every FIELD_EFFECTS entry is reachable from a parsed default config or is a known optional path', () => {
-    const parsed = configSchema.parse({ $schema: './x.json', memory: { dreaming: {} } }) as Record<string, unknown>
+    const parsed = configSchema.parse({ $schema: './x.json' }) as Record<string, unknown>
     const schemaPaths = new Set(enumeratePaths(parsed))
     const stale = Object.keys(FIELD_EFFECTS).filter((p) => !schemaPaths.has(p))
     expect(stale).toEqual([])
@@ -171,6 +151,6 @@ function enumeratePaths(obj: Record<string, unknown>, prefix = ''): string[] {
   return out
 }
 
-function shouldRecurse(path: string): boolean {
-  return path === 'memory'
+function shouldRecurse(_path: string): boolean {
+  return false
 }

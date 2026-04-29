@@ -31,8 +31,7 @@ export function emptyState(): DreamingState {
 // Missing or unreadable file → empty state. Malformed JSON or wrong shape is
 // also treated as empty: the cost is one redundant re-consolidation, which is
 // strictly safer than crashing the dreaming pipeline because of a bad state
-// file. Future: surface this through the broadcast stream so the agent can
-// notice.
+// file.
 export async function loadDreamingState(agentDir: string): Promise<DreamingState> {
   const path = join(agentDir, DREAMING_STATE_FILE)
   if (!existsSync(path)) return emptyState()

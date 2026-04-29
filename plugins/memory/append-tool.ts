@@ -1,21 +1,20 @@
 import { appendFile, mkdir, open, stat } from 'node:fs/promises'
 import { dirname } from 'node:path'
 
-import { Type } from '@mariozechner/pi-ai'
-import { defineTool } from '@mariozechner/pi-coding-agent'
+import { z } from 'zod'
+
+import { defineTool } from '@/plugin'
 
 const NEWLINE_BYTE = 0x0a
 
 export const appendTool = defineTool({
-  name: 'append',
-  label: 'Append',
   description:
     'Append content to a file. Creates the file (and any missing parent directories) if needed. Never truncates or overwrites existing content. If the file is non-empty and does not already end in a newline, a single newline is inserted before the appended content so consecutive appends do not run together.',
-  parameters: Type.Object({
-    path: Type.String({ description: 'Path to the file to append to (relative or absolute).' }),
-    content: Type.String({ description: 'Content to append, exactly as given.' }),
+  parameters: z.object({
+    path: z.string().describe('Path to the file to append to (relative or absolute).'),
+    content: z.string().describe('Content to append, exactly as given.'),
   }),
-  async execute(_toolCallId, { path, content }) {
+  async execute({ path, content }) {
     await mkdir(dirname(path), { recursive: true })
     const prefix = (await needsLeadingNewline(path)) ? '\n' : ''
     await appendFile(path, prefix + content, 'utf-8')

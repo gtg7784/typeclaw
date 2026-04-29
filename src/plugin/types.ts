@@ -42,6 +42,12 @@ export type Subagent<P = unknown> = {
   customTools?: Tool<any>[]
   payloadSchema?: z.ZodType<P>
   handler?: (ctx: SubagentContext<P>, runSession: RunSession) => Promise<void>
+  // Coalescing key for the SubagentConsumer's in-flight set. Default is the
+  // subagent name alone (only one instance of the subagent runs at a time).
+  // Override to allow per-payload concurrency, e.g. memory-logger keyed by
+  // parentSessionId so different parent sessions run in parallel while
+  // duplicate runs against the same session deduplicate.
+  inFlightKey?: (payload: P) => string
 }
 
 // Cron job map keys are local; the runtime prefixes with `__plugin_<plugin-name>_`

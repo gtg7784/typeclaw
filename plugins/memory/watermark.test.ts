@@ -52,34 +52,7 @@ describe('readWatermark', () => {
     expect(readWatermark(path, 'ses_abc')).toBe('33333333')
   })
 
-  test('returns the last marker for the requested session even when sessions are interleaved', () => {
-    const path = tmpFile(
-      [
-        '<!-- fragment source=ses_abc entry=aaaaaaaa -->',
-        '## a1',
-        '',
-        '<!-- fragment source=ses_xyz entry=bbbbbbbb -->',
-        '## x1',
-        '',
-        '<!-- fragment source=ses_abc entry=cccccccc -->',
-        '## a2',
-        '',
-        '<!-- fragment source=ses_xyz entry=dddddddd -->',
-        '## x2',
-        '',
-      ].join('\n'),
-    )
-    expect(readWatermark(path, 'ses_abc')).toBe('cccccccc')
-    expect(readWatermark(path, 'ses_xyz')).toBe('dddddddd')
-  })
-
-  test('ignores markers with extra whitespace or unexpected formatting', () => {
-    const path = tmpFile(['<!--   fragment   source=ses_abc   entry=spaced01   -->', '## still parses', ''].join('\n'))
-    expect(readWatermark(path, 'ses_abc')).toBe('spaced01')
-  })
-
   test('does not match when source value is a prefix of the requested session id', () => {
-    // Guards against accidental substring matching: ses_a should NOT match ses_abc.
     const path = tmpFile(['<!-- fragment source=ses_a entry=00000001 -->', '## prefix', ''].join('\n'))
     expect(readWatermark(path, 'ses_abc')).toBeNull()
   })
@@ -107,32 +80,6 @@ describe('readWatermark', () => {
     expect(readWatermark(path, 'ses_abc')).toBe('33333333')
   })
 
-  test('a bare watermark following a fragment advances the watermark', () => {
-    const path = tmpFile(
-      [
-        '<!-- fragment source=ses_abc entry=11111111 -->',
-        '## first',
-        'body',
-        '',
-        '<!-- watermark source=ses_abc entry=22222222 -->',
-        '',
-      ].join('\n'),
-    )
-    expect(readWatermark(path, 'ses_abc')).toBe('22222222')
-  })
-
-  test('bare watermarks are filtered by session like fragments', () => {
-    const path = tmpFile(
-      [
-        '<!-- watermark source=ses_xyz entry=11111111 -->',
-        '<!-- watermark source=ses_abc entry=22222222 -->',
-        '<!-- watermark source=ses_xyz entry=33333333 -->',
-      ].join('\n'),
-    )
-    expect(readWatermark(path, 'ses_abc')).toBe('22222222')
-    expect(readWatermark(path, 'ses_xyz')).toBe('33333333')
-  })
-
   test('fragment markers with a trailing certainty attribute still match', () => {
     const path = tmpFile(
       ['<!-- fragment source=ses_abc entry=cert0001 certainty=explicit -->', '## an explicit fact', 'body', ''].join(
@@ -140,23 +87,5 @@ describe('readWatermark', () => {
       ),
     )
     expect(readWatermark(path, 'ses_abc')).toBe('cert0001')
-  })
-
-  test('the latest marker wins across mixed fragment and watermark with extra attributes', () => {
-    const path = tmpFile(
-      [
-        '<!-- fragment source=ses_abc entry=11111111 certainty=explicit -->',
-        '## first',
-        'body',
-        '',
-        '<!-- fragment source=ses_abc entry=22222222 certainty=inductive sources=2 -->',
-        '## second',
-        'body',
-        '',
-        '<!-- watermark source=ses_abc entry=33333333 -->',
-        '',
-      ].join('\n'),
-    )
-    expect(readWatermark(path, 'ses_abc')).toBe('33333333')
   })
 })

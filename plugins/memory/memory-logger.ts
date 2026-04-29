@@ -1,9 +1,8 @@
 import { join } from 'node:path'
 
-import { readTool } from '@mariozechner/pi-coding-agent'
 import { z } from 'zod'
 
-import type { Subagent } from '@/agent/subagents'
+import { type Subagent, readTool } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
 import { appendTool } from './append-tool'
@@ -112,6 +111,7 @@ export const memoryLoggerSubagent: Subagent<MemoryLoggerPayload> = {
   tools: [readTool],
   customTools: [appendTool],
   payloadSchema: memoryLoggerPayloadSchema,
+  inFlightKey: (payload) => payload.parentSessionId,
   handler: async (ctx, runSession) => {
     const today = formatLocalDate()
     const streamFile = join(ctx.payload.agentDir, 'memory', `${today}.md`)

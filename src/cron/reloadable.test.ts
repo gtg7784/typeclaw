@@ -167,7 +167,7 @@ describe('createCronReloadable', () => {
       }),
     )
     const internal: CronJob = {
-      id: '__internal_dreaming',
+      id: '__internal_test_job',
       schedule: '0 4 * * *',
       enabled: true,
       kind: 'prompt',
@@ -184,13 +184,13 @@ describe('createCronReloadable', () => {
     await asSuccess(reloadable.reload())
 
     expect(scheduler.replacements).toHaveLength(1)
-    expect(scheduler.replacements[0]?.map((j) => j.id)).toEqual(['user-job', '__internal_dreaming'])
+    expect(scheduler.replacements[0]?.map((j) => j.id)).toEqual(['user-job', '__internal_test_job'])
   })
 
   test('absent cron.json with internalJobs() still hands the internal jobs to the scheduler', async () => {
     const scheduler = recordingScheduler()
     const internal: CronJob = {
-      id: '__internal_dreaming',
+      id: '__internal_test_job',
       schedule: '0 4 * * *',
       enabled: true,
       kind: 'prompt',
@@ -207,7 +207,7 @@ describe('createCronReloadable', () => {
     const result = await asSuccess(reloadable.reload())
 
     expect(scheduler.replacements).toHaveLength(1)
-    expect(scheduler.replacements[0]?.map((j) => j.id)).toEqual(['__internal_dreaming'])
+    expect(scheduler.replacements[0]?.map((j) => j.id)).toEqual(['__internal_test_job'])
     expect(result.summary).toMatch(/added 1/)
   })
 

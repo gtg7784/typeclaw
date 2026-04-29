@@ -3,14 +3,23 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { ToolContext } from '@/plugin'
+
 import { appendTool } from './append-tool'
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), 'memory-append-'))
 }
 
+const ctx: ToolContext = {
+  signal: undefined,
+  sessionId: 'test',
+  agentDir: '/tmp',
+  logger: { info: () => {}, warn: () => {}, error: () => {} },
+}
+
 async function call(path: string, content: string): Promise<void> {
-  await appendTool.execute('test-call', { path, content }, undefined, undefined, undefined as never)
+  await appendTool.execute({ path, content }, ctx)
 }
 
 describe('appendTool', () => {

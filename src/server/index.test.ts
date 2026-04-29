@@ -41,9 +41,11 @@ function createFakeSession(): AgentSession & {
   promptCalls: string[]
   disposeCalls: number
   resolvePrompt: () => void
+  rejectPrompt: (err: Error) => void
 } {
   const subscribers = new Set<(event: SessionEvent) => void>()
   let pendingPromptResolve: (() => void) | null = null
+  let pendingPromptReject: ((err: Error) => void) | null = null
   const fake = {
     subscribe: (fn: (event: SessionEvent) => void) => {
       subscribers.add(fn)
@@ -51,14 +53,16 @@ function createFakeSession(): AgentSession & {
     },
     prompt: async (text: string) => {
       fake.promptCalls.push(text)
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
         pendingPromptResolve = resolve
+        pendingPromptReject = reject
       })
     },
     abort: async () => {
       fake.abortCalls++
       pendingPromptResolve?.()
       pendingPromptResolve = null
+      pendingPromptReject = null
     },
     dispose: () => {
       fake.disposeCalls++
@@ -69,6 +73,12 @@ function createFakeSession(): AgentSession & {
     resolvePrompt: () => {
       pendingPromptResolve?.()
       pendingPromptResolve = null
+      pendingPromptReject = null
+    },
+    rejectPrompt: (err: Error) => {
+      pendingPromptReject?.(err)
+      pendingPromptResolve = null
+      pendingPromptReject = null
     },
     abortCalls: 0,
     disposeCalls: 0,
@@ -82,7 +92,6 @@ async function startWithSession(
   extra: {
     stream?: ReturnType<typeof createStream>
     sessionFactory?: SessionFactory
-    memoryIdleMs?: number
     agentDir?: string
     pluginRegistry?: PluginRegistry
     pluginHooks?: HookBus
@@ -97,7 +106,6 @@ async function startWithSession(
     createSession: async () => session,
     ...(extra.stream ? { stream: extra.stream } : {}),
     ...(extra.sessionFactory ? { sessionFactory: extra.sessionFactory } : {}),
-    ...(extra.memoryIdleMs !== undefined ? { memoryIdleMs: extra.memoryIdleMs } : {}),
     ...(extra.agentDir !== undefined ? { agentDir: extra.agentDir } : {}),
     ...(pluginRuntime ? { pluginRuntime } : {}),
   }).start()
@@ -549,7 +557,7 @@ describe('createServer with stream — input queueing bugfix', () => {
   })
 })
 
-describe('createServer memory idle detector', () => {
+describe('createServer fires session.idle hook after every prompt completion', () => {
   function stubSessionFactory(opts: { transcriptPath?: string }): SessionFactory {
     return {
       sessionDir: () => '/tmp/test-sessions',
@@ -561,34 +569,35 @@ describe('createServer memory idle detector', () => {
     }
   }
 
-  function recordNewSessionMessages(stream: ReturnType<typeof createStream>): Array<{
-    subagent: string
-    payload: unknown
-  }> {
-    const messages: Array<{ subagent: string; payload: unknown }> = []
-    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => {
-      const target = msg.target as { kind: 'new-session'; subagent: string }
-      messages.push({ subagent: target.subagent, payload: msg.payload })
-    })
-    return messages
-  }
+  test('runSessionIdle is called once per successful prompt completion (with transcript path)', async () => {
+    const { createHookBus } = await import('@/plugin')
+    const { emptyRegistry } = await import('@/plugin/registry')
+    const idleEvents: { sessionId: string; parentTranscriptPath: string | undefined }[] = []
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'p',
+      '/agent',
+      { info: () => {}, warn: () => {}, error: () => {} },
+      {
+        'session.idle': (event) => {
+          idleEvents.push({ sessionId: event.sessionId, parentTranscriptPath: event.parentTranscriptPath })
+        },
+      },
+    )
 
-  test('publishes a new-session memory-logger message after the idle window when transcript exists', async () => {
-    // given
     const session = createFakeSession()
     const stream = createStream()
-    const messages = recordNewSessionMessages(stream)
 
     const { url } = await startWithSession(session, {
       stream,
       sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/test-sessions/ses_fake.jsonl' }),
-      memoryIdleMs: 30,
-      agentDir: '/tmp/agent-dir',
+      agentDir: '/agent',
+      pluginRegistry: emptyRegistry(),
+      pluginHooks: hooks,
     })
     const { ws, waitFor } = await connect(url)
     await waitFor((m) => m.type === 'connected')
 
-    // when: send a prompt and let it complete
     stream.publish({
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
@@ -596,34 +605,63 @@ describe('createServer memory idle detector', () => {
     await new Promise((r) => setTimeout(r, 10))
     session.resolvePrompt()
     await waitFor((m) => m.type === 'done')
+    await new Promise((r) => setTimeout(r, 10))
 
-    // then: after the idle window, the memory-logger publish fires
-    await new Promise((r) => setTimeout(r, 60))
+    expect(idleEvents).toHaveLength(1)
+    expect(idleEvents[0]?.sessionId).toBe('ses_fake')
+    expect(idleEvents[0]?.parentTranscriptPath).toBe('/tmp/test-sessions/ses_fake.jsonl')
+    ws.close()
+  })
 
-    expect(messages).toEqual([
+  test('runSessionIdle is called even when the prompt throws', async () => {
+    const { createHookBus } = await import('@/plugin')
+    const { emptyRegistry } = await import('@/plugin/registry')
+    const idleEvents: string[] = []
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'p',
+      '/agent',
+      { info: () => {}, warn: () => {}, error: () => {} },
       {
-        subagent: 'memory-logger',
-        payload: {
-          parentSessionId: 'ses_fake',
-          parentTranscriptPath: '/tmp/test-sessions/ses_fake.jsonl',
-          agentDir: '/tmp/agent-dir',
+        'session.idle': (event) => {
+          idleEvents.push(event.sessionId)
         },
       },
-    ])
-    ws.close()
-  })
+    )
 
-  test('skips publishing when the session has no persisted transcript yet', async () => {
-    // given
     const session = createFakeSession()
     const stream = createStream()
-    const messages = recordNewSessionMessages(stream)
 
     const { url } = await startWithSession(session, {
       stream,
-      sessionFactory: stubSessionFactory({ transcriptPath: undefined }),
-      memoryIdleMs: 30,
-      agentDir: '/tmp/agent-dir',
+      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
+      agentDir: '/agent',
+      pluginRegistry: emptyRegistry(),
+      pluginHooks: hooks,
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    stream.publish({
+      target: { kind: 'session', sessionId: 'ses_fake' },
+      payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    session.rejectPrompt(new Error('llm boom'))
+    await waitFor((m) => m.type === 'error')
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(idleEvents).toHaveLength(1)
+    ws.close()
+  })
+
+  test('completes a prompt cleanly when no plugin hooks are attached (no idle hook to fire)', async () => {
+    const session = createFakeSession()
+    const stream = createStream()
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
     })
     const { ws, waitFor } = await connect(url)
     await waitFor((m) => m.type === 'connected')
@@ -634,80 +672,9 @@ describe('createServer memory idle detector', () => {
     })
     await new Promise((r) => setTimeout(r, 10))
     session.resolvePrompt()
-    await waitFor((m) => m.type === 'done')
+    const done = await waitFor((m) => m.type === 'done')
 
-    await new Promise((r) => setTimeout(r, 60))
-
-    expect(messages).toEqual([])
-    ws.close()
-  })
-
-  test('does not install an idle detector when memoryIdleMs is omitted', async () => {
-    // given
-    const session = createFakeSession()
-    const stream = createStream()
-    const messages = recordNewSessionMessages(stream)
-
-    const { url } = await startWithSession(session, {
-      stream,
-      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
-      agentDir: '/tmp/agent-dir',
-    })
-    const { ws, waitFor } = await connect(url)
-    await waitFor((m) => m.type === 'connected')
-
-    stream.publish({
-      target: { kind: 'session', sessionId: 'ses_fake' },
-      payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
-    })
-    await new Promise((r) => setTimeout(r, 10))
-    session.resolvePrompt()
-    await waitFor((m) => m.type === 'done')
-
-    await new Promise((r) => setTimeout(r, 60))
-
-    expect(messages).toEqual([])
-    ws.close()
-  })
-
-  test('a new prompt arriving during the idle window cancels the pending publish', async () => {
-    // given
-    const session = createFakeSession()
-    const stream = createStream()
-    const messages = recordNewSessionMessages(stream)
-
-    const { url } = await startWithSession(session, {
-      stream,
-      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
-      memoryIdleMs: 50,
-      agentDir: '/tmp/agent-dir',
-    })
-    const { ws, waitFor } = await connect(url)
-    await waitFor((m) => m.type === 'connected')
-
-    stream.publish({
-      target: { kind: 'session', sessionId: 'ses_fake' },
-      payload: { kind: 'prompt', text: 'first', delivery: 'queue' },
-    })
-    await new Promise((r) => setTimeout(r, 10))
-    session.resolvePrompt()
-    await waitFor((m) => m.type === 'done')
-
-    await new Promise((r) => setTimeout(r, 20))
-    expect(messages).toHaveLength(0)
-    stream.publish({
-      target: { kind: 'session', sessionId: 'ses_fake' },
-      payload: { kind: 'prompt', text: 'second', delivery: 'queue' },
-    })
-    await new Promise((r) => setTimeout(r, 10))
-    session.resolvePrompt()
-    await new Promise((r) => setTimeout(r, 5))
-
-    await new Promise((r) => setTimeout(r, 30))
-    expect(messages).toHaveLength(0)
-
-    await new Promise((r) => setTimeout(r, 50))
-    expect(messages).toHaveLength(1)
+    expect(done.type).toBe('done')
     ws.close()
   })
 })
@@ -740,61 +707,6 @@ describe('createServer plugin hooks', () => {
 
     expect(fired).toHaveLength(1)
     expect(fired[0]?.agentDir).toBe('/agent')
-    ws.close()
-  })
-
-  test('fires session.idle BEFORE the memory-logger spawn (deterministic order)', async () => {
-    const { createHookBus } = await import('@/plugin')
-    const { emptyRegistry } = await import('@/plugin/registry')
-    const ordering: string[] = []
-    const hooks = createHookBus()
-    hooks.registerAll(
-      'p',
-      '/agent',
-      { info: () => {}, warn: () => {}, error: () => {} },
-      {
-        'session.idle': () => {
-          ordering.push('idle')
-        },
-      },
-    )
-
-    const session = createFakeSession()
-    const stream = createStream()
-    stream.subscribe({ target: { kind: 'new-session' } }, () => {
-      ordering.push('memory-logger')
-    })
-
-    const stubFactory: SessionFactory = {
-      sessionDir: () => '/tmp/test-sessions',
-      createPersisted: () =>
-        ({
-          getSessionId: () => 'ses_idle',
-          getSessionFile: () => '/tmp/test-sessions/ses_idle.jsonl',
-        }) as unknown as SessionManager,
-    }
-
-    const { url } = await startWithSession(session, {
-      stream,
-      sessionFactory: stubFactory,
-      memoryIdleMs: 30,
-      agentDir: '/agent',
-      pluginRegistry: emptyRegistry(),
-      pluginHooks: hooks,
-    })
-    const { ws, waitFor } = await connect(url)
-    await waitFor((m) => m.type === 'connected')
-
-    stream.publish({
-      target: { kind: 'session', sessionId: 'ses_idle' },
-      payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
-    })
-    await new Promise((r) => setTimeout(r, 10))
-    session.resolvePrompt()
-    await waitFor((m) => m.type === 'done')
-
-    await new Promise((r) => setTimeout(r, 80))
-    expect(ordering).toEqual(['idle', 'memory-logger'])
     ws.close()
   })
 
@@ -837,148 +749,16 @@ describe('createServer plugin hooks', () => {
   })
 })
 
-describe('createServer session-end memory-logger trigger', () => {
-  function stubSessionFactory(opts: { transcriptPath?: string }): SessionFactory {
-    return {
-      sessionDir: () => '/tmp/test-sessions',
-      createPersisted: () =>
-        ({
-          getSessionId: () => 'ses_fake',
-          getSessionFile: () => opts.transcriptPath,
-        }) as unknown as SessionManager,
-    }
-  }
-
-  function recordNewSessionMessages(stream: ReturnType<typeof createStream>): Array<{
-    subagent: string
-    payload: unknown
-  }> {
-    const messages: Array<{ subagent: string; payload: unknown }> = []
-    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => {
-      const target = msg.target as { kind: 'new-session'; subagent: string }
-      messages.push({ subagent: target.subagent, payload: msg.payload })
-    })
-    return messages
-  }
-
-  test('publishes a new-session memory-logger message immediately on websocket close when transcript exists', async () => {
-    // given
-    const session = createFakeSession()
-    const stream = createStream()
-    const messages = recordNewSessionMessages(stream)
-
-    const { url } = await startWithSession(session, {
-      stream,
-      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/test-sessions/ses_fake.jsonl' }),
-      agentDir: '/tmp/agent-dir',
-    })
-    const { ws, waitFor } = await connect(url)
-    await waitFor((m) => m.type === 'connected')
-
-    // when
-    ws.close()
-    await new Promise((r) => setTimeout(r, 20))
-
-    // then
-    expect(messages).toEqual([
-      {
-        subagent: 'memory-logger',
-        payload: {
-          parentSessionId: 'ses_fake',
-          parentTranscriptPath: '/tmp/test-sessions/ses_fake.jsonl',
-          agentDir: '/tmp/agent-dir',
-        },
-      },
-    ])
-  })
-
-  test('skips the close-time publish when the session has no persisted transcript', async () => {
-    // given
-    const session = createFakeSession()
-    const stream = createStream()
-    const messages = recordNewSessionMessages(stream)
-
-    const { url } = await startWithSession(session, {
-      stream,
-      sessionFactory: stubSessionFactory({ transcriptPath: undefined }),
-      agentDir: '/tmp/agent-dir',
-    })
-    const { ws, waitFor } = await connect(url)
-    await waitFor((m) => m.type === 'connected')
-
-    // when
-    ws.close()
-    await new Promise((r) => setTimeout(r, 20))
-
-    // then
-    expect(messages).toEqual([])
-  })
-
-  test('skips the close-time publish when no agentDir is configured', async () => {
-    // given
-    const session = createFakeSession()
-    const stream = createStream()
-    const messages = recordNewSessionMessages(stream)
-
-    const { url } = await startWithSession(session, {
-      stream,
-      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
-    })
-    const { ws, waitFor } = await connect(url)
-    await waitFor((m) => m.type === 'connected')
-
-    // when
-    ws.close()
-    await new Promise((r) => setTimeout(r, 20))
-
-    // then
-    expect(messages).toEqual([])
-  })
-
-  test('does not double-publish when both idle and close fire — close cancels the idle timer first', async () => {
-    // given: idle window is set, but we close before it elapses
-    const session = createFakeSession()
-    const stream = createStream()
-    const messages = recordNewSessionMessages(stream)
-
-    const { url } = await startWithSession(session, {
-      stream,
-      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
-      memoryIdleMs: 50,
-      agentDir: '/tmp/agent-dir',
-    })
-    const { ws, waitFor } = await connect(url)
-    await waitFor((m) => m.type === 'connected')
-
-    // when: prompt runs and arms the idle timer, then we close before it elapses
-    stream.publish({
-      target: { kind: 'session', sessionId: 'ses_fake' },
-      payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
-    })
-    await new Promise((r) => setTimeout(r, 10))
-    session.resolvePrompt()
-    await waitFor((m) => m.type === 'done')
-
-    ws.close()
-    await new Promise((r) => setTimeout(r, 80))
-
-    // then: exactly one publish — close fired, idle timer was disposed
-    expect(messages).toHaveLength(1)
-    expect(messages[0]?.subagent).toBe('memory-logger')
-  })
-
+describe('createServer session lifecycle', () => {
   test('disposes the underlying AgentSession on websocket close', async () => {
-    // given
     const session = createFakeSession()
     const { url } = await startWithSession(session)
     const { ws, waitFor } = await connect(url)
     await waitFor((m) => m.type === 'connected')
 
-    // when
     ws.close()
     await new Promise((r) => setTimeout(r, 20))
 
-    // then
     expect(session.disposeCalls).toBe(1)
   })
 })

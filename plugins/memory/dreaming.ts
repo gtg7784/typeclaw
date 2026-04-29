@@ -1,11 +1,10 @@
 import { existsSync } from 'node:fs'
-import { readdir, readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 
-import { readTool, writeTool } from '@mariozechner/pi-coding-agent'
 import { z } from 'zod'
 
-import type { Subagent } from '@/agent/subagents'
+import { type Subagent, readTool, writeTool } from '@/plugin'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
 
 import {
@@ -104,11 +103,31 @@ function advanceWatermarks(state: DreamingState, snapshots: StreamSnapshot[]): D
 
 const SNAPSHOT_PATHS = ['MEMORY.md', 'memory/'] as const
 
+// MEMORY.md scaffolding is no longer in `typeclaw init`; the dreaming subagent
+// owns its existence. First run of dreaming creates an empty MEMORY.md (and
+// the memory/ directory) so the file exists for the subagent to read and for
+// the snapshot commit to track. Subsequent runs see them already present.
+async function ensureMemoryFiles(agentDir: string): Promise<void> {
+  const memoryFile = join(agentDir, 'MEMORY.md')
+  if (!existsSync(memoryFile)) {
+    await mkdir(dirname(memoryFile), { recursive: true })
+    await writeFile(memoryFile, '', { flag: 'wx' }).catch(ignoreExists)
+  }
+  const memoryDir = join(agentDir, 'memory')
+  if (!existsSync(memoryDir)) {
+    await mkdir(memoryDir, { recursive: true })
+  }
+}
+
+function ignoreExists(error: NodeJS.ErrnoException): void {
+  if (error.code !== 'EEXIST') throw error
+}
+
 // Force-add gitignored memory artifacts (memory/*.md, memory/.dreaming-state.json)
 // alongside MEMORY.md so the agent folder's git history captures the
 // consolidation as a single recoverable snapshot. Skips silently when the
-// folder is not a git repo or bun is unavailable, matching commitSystemFile in
-// src/container/start.ts. Uses the user's global git config for authorship.
+// folder is not a git repo or bun is unavailable. Uses the user's global git
+// config for authorship.
 //
 // After committing, the tracked memory artifacts get the `skip-worktree` index
 // flag set so manual `git status` / `git diff` ignore future runtime edits.
@@ -121,17 +140,10 @@ export async function commitMemorySnapshot(cwd: string): Promise<void> {
   if (!bun) return
   if (!existsSync(join(cwd, '.git'))) return
 
-  // Clear skip-worktree on whatever is currently tracked under the snapshot
-  // paths so the upcoming `git add` can update the index. ls-files returns
-  // only files actually in the index, so passing them to update-index is
-  // always safe — a directory path would be silently ignored by update-index.
   await clearSkipWorktree(bun, cwd)
 
   // `git add -- foo bar/` fails with exit 128 if any pathspec matches no
-  // path on disk. On early runs MEMORY.md may not exist yet (no dream has
-  // ever rewritten it), so filter to paths that actually exist before
-  // passing them in. If nothing in SNAPSHOT_PATHS exists, there is nothing
-  // to commit — restore the flag and bail.
+  // path on disk. Filter to existing paths before passing them in.
   const presentPaths = SNAPSHOT_PATHS.filter((p) => existsSync(join(cwd, p)))
   if (presentPaths.length === 0) {
     await applySkipWorktree(bun, cwd)
@@ -145,9 +157,6 @@ export async function commitMemorySnapshot(cwd: string): Promise<void> {
     stderr: 'pipe',
   })
   if ((await add.exited) !== 0) {
-    // Even on add-failure, restore the flag on whatever is still tracked so we
-    // do not leave the worktree in a state where every memory file shows up
-    // as "modified" on the next manual git status.
     await applySkipWorktree(bun, cwd)
     return
   }
@@ -182,9 +191,6 @@ export async function commitMemorySnapshot(cwd: string): Promise<void> {
   })
   await commit.exited
 
-  // Re-set the flag after the commit lands. We re-enumerate via ls-files
-  // because this run may have first-time-tracked a brand-new daily stream
-  // file that did not exist in the index when we cleared the flag above.
   await applySkipWorktree(bun, cwd)
 }
 
@@ -329,7 +335,9 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
     systemPrompt: DREAMING_SYSTEM_PROMPT,
     tools: [readTool, writeTool],
     payloadSchema: dreamingPayloadSchema,
+    inFlightKey: (payload) => payload.agentDir,
     handler: async (ctx, runSession) => {
+      await ensureMemoryFiles(ctx.payload.agentDir)
       const state = await loadDreamingState(ctx.payload.agentDir)
       const snapshots = await collectStreamSnapshots(ctx.payload.agentDir, state)
 

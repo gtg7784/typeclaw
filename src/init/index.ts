@@ -16,9 +16,9 @@ const CRON_FILE = 'cron.json'
 const SECRETS_FILE = '.env'
 const PACKAGE_FILE = 'package.json'
 
-const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'MEMORY.md'] as const
+const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'] as const
 
-const DIRECTORIES = ['workspace', 'sessions', 'memory', 'skills', '.agents/skills', 'mounts'] as const
+const DIRECTORIES = ['workspace', 'sessions', 'skills', '.agents/skills', 'mounts'] as const
 
 export type InstallResult = { ok: true } | { ok: false; reason: string }
 export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason: string }
@@ -182,6 +182,10 @@ export async function scaffold(root: string): Promise<void> {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
     mounts: [],
+    memory: {
+      idleMs: 30_000,
+      dreaming: { schedule: '0 4 * * *' },
+    },
   }
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 
