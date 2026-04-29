@@ -79,7 +79,10 @@ function sliceUndreamedTail(entry: FileEntry, dreamedLines: number): FileEntry {
 function stripWatermarks(entry: FileEntry): FileEntry {
   if (entry.fullyDreamed || entry.content === null) return entry
   const kept = entry.content.split('\n').filter((line) => !WATERMARK_LINE.test(line))
-  const collapsed = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
+  const collapsed = kept
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
   if (collapsed === '') return { ...entry, fullyDreamed: true }
   return { ...entry, content: collapsed }
 }

@@ -347,12 +347,12 @@ describe('loadMemory watermark stripping', () => {
       join(agentDir, 'memory', '2026-04-27.md'),
       [
         '<!-- fragment source=ses_a entry=e1 -->', // line 1 — dreamed
-        '## Old',                                  // line 2 — dreamed
-        'old body',                                // line 3 — dreamed
-        '<!-- watermark source=ses_a entry=e2 -->',// line 4 — undreamed, should be stripped
+        '## Old', // line 2 — dreamed
+        'old body', // line 3 — dreamed
+        '<!-- watermark source=ses_a entry=e2 -->', // line 4 — undreamed, should be stripped
         '<!-- fragment source=ses_a entry=e3 -->', // line 5 — undreamed, kept
-        '## New',                                  // line 6
-        'new body',                                // line 7
+        '## New', // line 6
+        'new body', // line 7
       ].join('\n'),
     )
     await writeDreamingState(agentDir, { '2026-04-27': { lines: 3, ts: 'past' } })
