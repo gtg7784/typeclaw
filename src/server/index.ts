@@ -168,7 +168,7 @@ export function createServer({
           const state = sessionStates.get(ws)
 
           if (msg.type === 'reload') {
-            await handleReload(ws, reloadAll)
+            await handleReload(ws, reloadAll, reloadRegistry, msg.scope)
             return
           }
 
@@ -336,7 +336,32 @@ function pushQueueState(ws: Ws, state: SessionState): void {
   send(ws, { type: 'queue_state', pending })
 }
 
-async function handleReload(ws: Ws, reloadAll: ReloadAllFn | undefined): Promise<void> {
+async function handleReload(
+  ws: Ws,
+  reloadAll: ReloadAllFn | undefined,
+  reloadRegistry: ReloadRegistry | undefined,
+  scope: string | undefined,
+): Promise<void> {
+  if (scope !== undefined && scope.length > 0) {
+    if (!reloadRegistry) {
+      send(ws, {
+        type: 'reload_result',
+        results: [{ scope, ok: false, reason: 'no reload registry configured' }],
+      })
+      return
+    }
+    try {
+      const result = await reloadRegistry.reloadOne(scope)
+      send(ws, { type: 'reload_result', results: [result] })
+    } catch (err) {
+      send(ws, {
+        type: 'reload_result',
+        results: [{ scope, ok: false, reason: err instanceof Error ? err.message : String(err) }],
+      })
+    }
+    return
+  }
+
   if (!reloadAll) {
     const empty: ReloadResultPayload[] = []
     send(ws, { type: 'reload_result', results: empty })

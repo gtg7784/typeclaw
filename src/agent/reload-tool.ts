@@ -12,20 +12,39 @@ export function createReloadTool({ registry }: CreateReloadToolOptions) {
     name: 'reload',
     label: 'Reload',
     description:
-      'Reload all reloadable typeclaw subsystems (currently: typeclaw.json runtime config, then ' +
-      'cron jobs from cron.json — runs serially in registration order so cron observes the ' +
-      'freshly-swapped config). Validates each on-disk file first; if validation fails for one, ' +
-      "its live state is left unchanged and the failure reason is reported in that scope's " +
-      'result. Boot-only fields (port, mounts, memory.idleMs) are reported as restart-required. ' +
-      'Use this after editing typeclaw.json or cron.json so the change takes effect without ' +
-      'restarting the container. Safe to call any time.',
-    parameters: Type.Object({}),
-    execute: async () => {
+      'Reload typeclaw subsystems whose on-disk source has changed. Each reloadable is ' +
+      'all-or-nothing: invalid input leaves its live state unchanged and the failure reason is ' +
+      'reported in that scope\'s result. Boot-only config fields (port, mounts, memory.idleMs) ' +
+      'are reported as restart-required. Safe to call any time. ' +
+      'Without a scope arg, runs every registered reloadable in registration order so later ' +
+      'scopes observe earlier swaps (e.g. cron sees a freshly-loaded plugins registry). ' +
+      'With a scope arg, runs only that one reloadable.',
+    parameters: Type.Object({
+      scope: Type.Optional(
+        Type.String({
+          description:
+            'Optional reload scope name. Common scopes: "config" (typeclaw.json), ' +
+            '"plugins" (re-resolve and re-run plugin factories), "skills" (read-only diagnostic ' +
+            'reporting which skills are visible to a new session), "cron" (cron.json). ' +
+            'Omit to reload all scopes.',
+        }),
+      ),
+    }),
+    execute: async (_id, args) => {
       const items = registry.list()
       if (items.length === 0) {
         return {
           content: [{ type: 'text', text: 'nothing to reload (no reloadable subsystems registered)' }],
           details: { results: [] },
+        }
+      }
+
+      const scope = (args as { scope?: string }).scope
+      if (scope !== undefined && scope.length > 0) {
+        const result = await registry.reloadOne(scope)
+        return {
+          content: [{ type: 'text', text: formatResults([result]) }],
+          details: { results: [result] },
         }
       }
 

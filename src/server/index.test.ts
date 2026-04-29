@@ -982,3 +982,123 @@ describe('createServer session-end memory-logger trigger', () => {
     expect(session.disposeCalls).toBe(1)
   })
 })
+
+describe('createServer scoped reload', () => {
+  test('reload without scope runs reloadAll and returns every scope result', async () => {
+    // given
+    const { ReloadRegistry } = await import('@/reload')
+    const reloadRegistry = new ReloadRegistry()
+    reloadRegistry.register({
+      scope: 'config',
+      description: 'config',
+      reload: async () => ({ scope: 'config', ok: true, summary: 'cfg ok' }),
+    })
+    reloadRegistry.register({
+      scope: 'cron',
+      description: 'cron',
+      reload: async () => ({ scope: 'cron', ok: true, summary: 'cron ok' }),
+    })
+
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      reloadAll: () => reloadRegistry.reloadAll(),
+      reloadRegistry,
+      createSession: async () => session,
+    }).start()
+    server = built
+
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.send(JSON.stringify({ type: 'reload' }))
+    const result = await waitFor((m) => m.type === 'reload_result')
+
+    // then
+    if (result.type !== 'reload_result') throw new Error('unreachable')
+    expect(result.results.map((r) => r.scope)).toEqual(['config', 'cron'])
+    ws.close()
+  })
+
+  test('reload with scope runs only that reloadable and returns a single result', async () => {
+    // given
+    const { ReloadRegistry } = await import('@/reload')
+    const calls: string[] = []
+    const reloadRegistry = new ReloadRegistry()
+    reloadRegistry.register({
+      scope: 'config',
+      description: 'config',
+      reload: async () => {
+        calls.push('config')
+        return { scope: 'config', ok: true, summary: 'cfg ok' }
+      },
+    })
+    reloadRegistry.register({
+      scope: 'cron',
+      description: 'cron',
+      reload: async () => {
+        calls.push('cron')
+        return { scope: 'cron', ok: true, summary: 'cron ok' }
+      },
+    })
+
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      reloadAll: () => reloadRegistry.reloadAll(),
+      reloadRegistry,
+      createSession: async () => session,
+    }).start()
+    server = built
+
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.send(JSON.stringify({ type: 'reload', scope: 'cron' }))
+    const result = await waitFor((m) => m.type === 'reload_result')
+
+    // then
+    if (result.type !== 'reload_result') throw new Error('unreachable')
+    expect(result.results).toHaveLength(1)
+    expect(result.results[0]?.scope).toBe('cron')
+    expect(calls).toEqual(['cron'])
+    ws.close()
+  })
+
+  test('reload with unknown scope returns a single failure result', async () => {
+    // given
+    const { ReloadRegistry } = await import('@/reload')
+    const reloadRegistry = new ReloadRegistry()
+    reloadRegistry.register({
+      scope: 'config',
+      description: 'config',
+      reload: async () => ({ scope: 'config', ok: true, summary: 'cfg ok' }),
+    })
+
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      reloadAll: () => reloadRegistry.reloadAll(),
+      reloadRegistry,
+      createSession: async () => session,
+    }).start()
+    server = built
+
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.send(JSON.stringify({ type: 'reload', scope: 'no-such-scope' }))
+    const result = await waitFor((m) => m.type === 'reload_result')
+
+    // then
+    if (result.type !== 'reload_result') throw new Error('unreachable')
+    expect(result.results).toHaveLength(1)
+    const first = result.results[0]
+    expect(first?.scope).toBe('no-such-scope')
+    expect(first?.ok).toBe(false)
+    ws.close()
+  })
+})

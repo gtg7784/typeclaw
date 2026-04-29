@@ -16,8 +16,8 @@ function regWith(...results: ReloadResult[]): ReloadRegistry {
   return reg
 }
 
-async function execute(tool: ReturnType<typeof createReloadTool>) {
-  return await tool.execute('test-call', {}, undefined, undefined, {} as never)
+async function execute(tool: ReturnType<typeof createReloadTool>, args: { scope?: string } = {}) {
+  return await tool.execute('test-call', args, undefined, undefined, {} as never)
 }
 
 describe('createReloadTool', () => {
@@ -75,5 +75,91 @@ describe('createReloadTool', () => {
 
     const text = result.content.map((c) => (c.type === 'text' ? c.text : '')).join('\n')
     expect(text).toMatch(/nothing|no.*reloadable|empty/i)
+  })
+
+  test('with scope arg, runs only the named reloadable', async () => {
+    // given
+    const calls: string[] = []
+    const reg = new ReloadRegistry()
+    reg.register({
+      scope: 'config',
+      description: 'config',
+      reload: async () => {
+        calls.push('config')
+        return { scope: 'config', ok: true, summary: 'cfg ok' }
+      },
+    })
+    reg.register({
+      scope: 'cron',
+      description: 'cron',
+      reload: async () => {
+        calls.push('cron')
+        return { scope: 'cron', ok: true, summary: 'cron ok' }
+      },
+    })
+    const tool = createReloadTool({ registry: reg })
+
+    // when
+    const result = await execute(tool, { scope: 'cron' })
+
+    // then
+    expect(calls).toEqual(['cron'])
+    const details = result.details as { results: { scope: string }[] }
+    expect(details.results).toHaveLength(1)
+    expect(details.results[0]?.scope).toBe('cron')
+  })
+
+  test('with unknown scope, returns a single failure result without invoking any reloadable', async () => {
+    // given
+    const calls: string[] = []
+    const reg = new ReloadRegistry()
+    reg.register({
+      scope: 'config',
+      description: 'config',
+      reload: async () => {
+        calls.push('config')
+        return { scope: 'config', ok: true, summary: 'cfg ok' }
+      },
+    })
+    const tool = createReloadTool({ registry: reg })
+
+    // when
+    const result = await execute(tool, { scope: 'no-such' })
+
+    // then
+    expect(calls).toEqual([])
+    const details = result.details as { results: { scope: string; ok: boolean }[] }
+    expect(details.results).toHaveLength(1)
+    expect(details.results[0]?.scope).toBe('no-such')
+    expect(details.results[0]?.ok).toBe(false)
+  })
+
+  test('without scope arg, runs all reloadables in registration order', async () => {
+    // given
+    const calls: string[] = []
+    const reg = new ReloadRegistry()
+    reg.register({
+      scope: 'config',
+      description: 'config',
+      reload: async () => {
+        calls.push('config')
+        return { scope: 'config', ok: true, summary: 'cfg ok' }
+      },
+    })
+    reg.register({
+      scope: 'cron',
+      description: 'cron',
+      reload: async () => {
+        calls.push('cron')
+        return { scope: 'cron', ok: true, summary: 'cron ok' }
+      },
+    })
+    const tool = createReloadTool({ registry: reg })
+
+    // when
+    await execute(tool)
+
+    // then
+    expect(calls).toEqual(['config', 'cron'])
   })
 })
