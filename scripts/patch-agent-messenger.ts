@@ -1,0 +1,57 @@
+#!/usr/bin/env bun
+
+import { readFile, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const repoRoot = join(__dirname, '..')
+
+type Patch = { file: string; find: string; replace: string }
+
+const PATCHES: Patch[] = [
+  {
+    file: 'node_modules/agent-messenger/src/platforms/discordbot/client.ts',
+    find: `    if (!message.attachments || message.attachments.length === 0) {
+      throw new DiscordBotError('Upload succeeded but no attachments returned', 'no_attachments')
+    }
+
+    return message.attachments[0]
+  }`,
+    replace: `    const first = message.attachments?.[0]
+    if (!first) {
+      throw new DiscordBotError('Upload succeeded but no attachments returned', 'no_attachments')
+    }
+
+    return first
+  }`,
+  },
+]
+
+let applied = 0
+let skipped = 0
+
+for (const patch of PATCHES) {
+  const path = join(repoRoot, patch.file)
+  let content: string
+  try {
+    content = await readFile(path, 'utf8')
+  } catch {
+    console.warn(`[patch-agent-messenger] ${patch.file} not found; skipping`)
+    skipped++
+    continue
+  }
+  if (content.includes(patch.replace)) {
+    skipped++
+    continue
+  }
+  if (!content.includes(patch.find)) {
+    console.warn(`[patch-agent-messenger] ${patch.file} did not match expected source; skipping`)
+    skipped++
+    continue
+  }
+  await writeFile(path, content.replace(patch.find, patch.replace), 'utf8')
+  applied++
+}
+
+console.log(`[patch-agent-messenger] applied=${applied} skipped=${skipped}`)

@@ -9,7 +9,8 @@ import {
   type SubagentConsumer,
   type SubagentRegistry,
 } from '@/agent/subagents'
-import { createConfigReloadable, loadConfigSync, loadPluginConfigsSync } from '@/config'
+import { createChannelManager, createChannelsReloadable, type ChannelManager } from '@/channels'
+import { createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync } from '@/config'
 import {
   type CronConsumer,
   type CronJob,
@@ -72,7 +73,8 @@ export type StartAgentResult = {
   stream: Stream
   pluginRuntime: PluginRuntime
   loadedPlugins: LoadPluginsResult['loadedPlugins']
-  stop: () => void
+  channelManager: ChannelManager
+  stop: () => void | Promise<void>
 }
 
 export async function startAgent({
@@ -88,6 +90,11 @@ export async function startAgent({
 }: StartAgentOptions): Promise<StartAgentResult> {
   const reloadRegistry = new ReloadRegistry()
   reloadRegistry.register(createConfigReloadable({ cwd }))
+
+  const channelManager = createChannelManager({
+    agentDir: cwd,
+    channelsConfigRef: () => getConfig().channels,
+  })
 
   const pluginConfigsByName = loadPluginConfigsSync(cwd)
   const cwdConfig = loadConfigSync(cwd)
@@ -130,6 +137,7 @@ export async function startAgent({
       const sessionId = `subagent-${entry.pluginName}-${crypto.randomUUID()}`
       return createSessionWithDispose({
         systemPromptOverride: entry.pluginSubagent.systemPrompt,
+        channelRouter: channelManager.router,
         origin: {
           kind: 'subagent',
           subagent: subagentOptions?.name ?? entry.subagentName,
@@ -181,6 +189,7 @@ export async function startAgent({
         reloadRegistry,
         sessionManager: SessionManager.create(cwd, sessionFactory.sessionDir()),
         stream,
+        channelRouter: channelManager.router,
         origin: { kind: 'cron', jobId: job.id, jobKind: 'prompt' },
         ...(snap.hasAnyPluginContent
           ? {
@@ -214,6 +223,9 @@ export async function startAgent({
     )
   }
 
+  reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
+  await channelManager.start()
+
   pluginsLoaded.setSpawnSubagent(async (name, payload) => {
     await invokeSubagent(name, {
       registry: pluginRuntime.get().subagents,
@@ -235,12 +247,13 @@ export async function startAgent({
     reloadRegistry,
     sessionFactory,
     stream,
+    channelRouter: channelManager.router,
     agentDir: cwd,
     pluginRuntime,
   }).start()
 
   let stopped = false
-  const stop = () => {
+  const stop = async () => {
     if (stopped) return
     stopped = true
     scheduler?.stop()
@@ -248,6 +261,7 @@ export async function startAgent({
     subagentConsumer.stop()
     server.stop(true)
     void disposeMaterializedSkills(pluginRuntime)
+    await channelManager.stop()
   }
 
   if (!attachTui) {
@@ -261,6 +275,7 @@ export async function startAgent({
       stream,
       pluginRuntime,
       loadedPlugins: pluginsLoaded.loadedPlugins,
+      channelManager,
       stop,
     }
   }
@@ -278,6 +293,7 @@ export async function startAgent({
     stream,
     pluginRuntime,
     loadedPlugins: pluginsLoaded.loadedPlugins,
+    channelManager,
     stop,
   }
 }

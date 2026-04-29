@@ -6,6 +6,7 @@ import {
   type CreateSessionOptions,
   type CreateSessionResult,
 } from '@/agent'
+import type { ChannelRouter } from '@/channels/router'
 import type { HookBus } from '@/plugin'
 import type { PluginRuntime, PluginRuntimeState } from '@/run/plugin-runtime'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
@@ -23,6 +24,7 @@ export type ServerOptions = {
   createSession?: CreateSessionFn
   sessionFactory?: SessionFactory
   stream?: Stream
+  channelRouter?: ChannelRouter
   agentDir?: string
   pluginRuntime?: PluginRuntime
 }
@@ -65,6 +67,7 @@ export function createServer({
   createSession = defaultCreateSessionWithDispose,
   sessionFactory,
   stream,
+  channelRouter,
   agentDir,
   pluginRuntime,
 }: ServerOptions) {
@@ -101,6 +104,7 @@ export function createServer({
             sessionManager,
             origin: { kind: 'tui', sessionId: sessionFileId },
             ...(stream ? { stream } : {}),
+            ...(channelRouter ? { channelRouter } : {}),
             ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
           })
           const session = 'session' in result ? result.session : result

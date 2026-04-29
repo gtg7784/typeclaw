@@ -23,9 +23,9 @@
     "noPropertyAccessFromIndexSignature": false,
 
     "paths": {
-      "@/*": ["./src/*"],
-      "agent-messenger/discordbot": ["./src/channels/adapters/agent-messenger-shim.d.ts"]
+      "@/*": ["./src/*"]
     }
   },
-  "include": ["src", "scripts", "plugins"]
+  "include": ["src", "scripts", "plugins"],
+  "exclude": ["node_modules/agent-messenger"]
 }

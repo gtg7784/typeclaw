@@ -2,7 +2,7 @@ import {
   DiscordBotClient,
   DiscordBotListener,
   type DiscordGatewayMessageCreateEvent,
-} from 'agent-messenger/discordbot'
+} from './agent-messenger-shim'
 
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'

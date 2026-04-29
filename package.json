@@ -18,7 +18,8 @@
     "format:check": "oxfmt .",
     "test": "bun test",
     "generate:schema": "bun run scripts/generate-schema.ts",
-    "postinstall": "bun run scripts/generate-schema.ts"
+    "patch:agent-messenger": "bun run scripts/patch-agent-messenger.ts",
+    "postinstall": "bun run scripts/patch-agent-messenger.ts && bun run scripts/generate-schema.ts"
   },
   "dependencies": {
     "@clack/prompts": "^1.2.0",
@@ -37,6 +38,7 @@
     "@types/bun": "latest",
     "@types/jsdom": "^28.0.1",
     "@types/turndown": "^5.0.6",
+    "@types/ws": "^8.18.1",
     "@typescript/native-preview": "^7.0.0-dev.20260416.1",
     "oxfmt": "^0.45.0",
     "oxlint": "^1.60.0"
