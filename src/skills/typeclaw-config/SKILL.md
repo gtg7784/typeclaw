@@ -178,9 +178,11 @@ The schema validates each rule string at load. **Bad rule = config load fails**,
   - `perReply` means: after the agent replies to a user, follow-up messages from that same user in that same channel within the window also wake the loop, even without a mention. The window is bounded server-side (`1` to `86_400_000` ms — 1 ms to 24 hours).
   - `"off"` disables stickiness — the agent only wakes on explicit triggers.
 
+There is also a **solo-human fallback** built into the runtime that is **not configurable** through `engagement`: in any allow-listed channel where the participants cache currently holds at most one distinct human author, every admitted inbound wakes the loop, regardless of `trigger` or `stickiness`. The fallback turns off the moment a second distinct human posts in that channel. This makes "private dev channel with one human and the bot" work without forcing an `@mention` on every message; clearing `trigger` to `[]` does **not** override it. If a user wants strict mention-only behavior in a one-human channel today, the answer is "wait for the post-v0.3 engagement-config work" — not a config edit.
+
 **Engagement does not gate posting.** It gates whether you wake up. If you decide to call `channel_send` to a channel that isn't in `allow`, the tool returns `{ ok: false, error }` regardless of engagement.
 
-To make the agent silent in a channel without removing it from `allow`, the right move is usually `engagement: { trigger: [], stickiness: "off" }`, **not** removing the allow rule — removing the allow rule cuts off both inbound visibility and outbound posting, which is rarely what the user means by "stop replying".
+To make the agent silent in a channel without removing it from `allow`, the right move is usually `engagement: { trigger: [], stickiness: "off" }`, **not** removing the allow rule — removing the allow rule cuts off both inbound visibility and outbound posting, which is rarely what the user means by "stop replying". Caveat: in a one-human channel the solo-human fallback overrides `trigger: []` and the agent will still wake; the only way to silence the bot in that case is to remove the allow rule (or add a second human to the channel).
 
 ### Example
 
@@ -221,7 +223,7 @@ This says: only one specific channel in one specific guild plus all DMs are visi
 Two interpretations — ask if unclear:
 
 - **"Stop everything"** — remove the matching allow rule. The agent loses both inbound visibility and outbound `channel_send` permission for that channel.
-- **"Just stop auto-replying"** — leave the allow rule, but adjust `engagement` (set `trigger: []` and/or `stickiness: "off"`). The agent can still see the channel and can still post if you tell it to.
+- **"Just stop auto-replying"** — leave the allow rule, but adjust `engagement` (set `trigger: []` and/or `stickiness: "off"`). The agent can still see the channel and can still post if you tell it to. Caveat: this approach does NOT silence the agent in a channel that currently has only one human posting — the solo-human fallback (see Engagement) overrides `trigger: []`. In that case the only way to go silent today is to remove the allow rule.
 
 The second is usually what people mean by "be quieter".
 

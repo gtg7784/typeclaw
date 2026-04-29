@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import type { ChannelParticipant } from '@/agent/session-origin'
+
 import { decideEngagement, grantStickyForReplyTargets, StickyLedger } from './engagement'
 import type { EngagementConfig } from './schema'
 import type { InboundMessage } from './types'
@@ -10,6 +12,18 @@ const baseConfig: EngagementConfig = {
   trigger: ['mention', 'reply', 'dm'],
   stickiness: { perReply: { window: 5 * 60 * 1000 } },
 }
+
+function participant(authorId: string, lastMessageAt = 0): ChannelParticipant {
+  return {
+    authorId,
+    authorName: authorId,
+    firstMessageAt: lastMessageAt,
+    lastMessageAt,
+    messageCount: 1,
+  }
+}
+
+const crowded: readonly ChannelParticipant[] = [participant('alice'), participant('bob')]
 
 function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
   return {
@@ -37,6 +51,7 @@ describe('decideEngagement (explicit triggers)', () => {
       key: KEY,
       ledger,
       now: 0,
+      participants: crowded,
     })
     expect(decision).toBe('engage')
   })
@@ -49,6 +64,7 @@ describe('decideEngagement (explicit triggers)', () => {
       key: KEY,
       ledger,
       now: 0,
+      participants: crowded,
     })
     expect(decision).toBe('observe')
   })
@@ -61,6 +77,7 @@ describe('decideEngagement (explicit triggers)', () => {
       key: KEY,
       ledger,
       now: 0,
+      participants: crowded,
     })
     expect(decision).toBe('engage')
   })
@@ -73,11 +90,12 @@ describe('decideEngagement (explicit triggers)', () => {
       key: 'discord-bot:@dm:d1:',
       ledger,
       now: 0,
+      participants: crowded,
     })
     expect(decision).toBe('engage')
   })
 
-  test('plain message with no triggers and no sticky observes', () => {
+  test('plain message in crowded channel observes', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({
       message: inbound(),
@@ -85,6 +103,7 @@ describe('decideEngagement (explicit triggers)', () => {
       key: KEY,
       ledger,
       now: 0,
+      participants: crowded,
     })
     expect(decision).toBe('observe')
   })
@@ -100,6 +119,7 @@ describe('decideEngagement (sticky)', () => {
       key: KEY,
       ledger,
       now: 500,
+      participants: crowded,
     })
     expect(decision).toBe('engage')
   })
@@ -107,8 +127,15 @@ describe('decideEngagement (sticky)', () => {
   test('sticky credit is consumed (single message)', () => {
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 1000)
-    decideEngagement({ message: inbound(), config: baseConfig, key: KEY, ledger, now: 100 })
-    const second = decideEngagement({ message: inbound(), config: baseConfig, key: KEY, ledger, now: 200 })
+    decideEngagement({ message: inbound(), config: baseConfig, key: KEY, ledger, now: 100, participants: crowded })
+    const second = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 200,
+      participants: crowded,
+    })
     expect(second).toBe('observe')
   })
 
@@ -121,6 +148,7 @@ describe('decideEngagement (sticky)', () => {
       key: KEY,
       ledger,
       now: 5000,
+      participants: crowded,
     })
     expect(decision).toBe('observe')
     expect(ledger.has(KEY, 'alice', 5000)).toBe(false)
@@ -135,6 +163,7 @@ describe('decideEngagement (sticky)', () => {
       key: KEY,
       ledger,
       now: 100,
+      participants: crowded,
     })
     expect(decision).toBe('observe')
   })
@@ -149,8 +178,63 @@ describe('decideEngagement (sticky)', () => {
         key: KEY,
         ledger,
         now: 100,
+        participants: crowded,
       }),
     ).toBe('observe')
+  })
+})
+
+describe('decideEngagement (solo-human fallback)', () => {
+  test('engages on plain message when channel has only the current sender', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('engages even when triggers exclude mention/reply/dm (allow-only setup)', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound(),
+      config: { trigger: [], stickiness: 'off' },
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('engages on first-ever message before participants is updated', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('does NOT engage on plain message once a second human posts', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice'), participant('bob')],
+    })
+    expect(decision).toBe('observe')
   })
 })
 

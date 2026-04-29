@@ -144,6 +144,11 @@ describe('ChannelRouter engagement and prompt composition', () => {
   test('non-engaging inbound goes to context buffer, not session.prompt', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
+    // Prime participants with a second human so we exercise the strict gate
+    // rather than the solo-human fallback (which would engage on any message).
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol', text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.prompts.length = 0
     await router.route(inbound({ isBotMention: false, text: 'unrelated chatter' }))
     await router.__testing!.flushDebounce(KEY)
     expect(sessions).toHaveLength(1)
@@ -166,6 +171,12 @@ describe('ChannelRouter engagement and prompt composition', () => {
   test('drains observed messages as "Recent context" before engaged messages', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
+    // Prime participants with carol so bob's later non-mention message
+    // doesn't trigger the solo-human fallback. We need bob's message to
+    // observe so we can verify the Recent context prefix.
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol', text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.prompts.length = 0
     await router.route(inbound({ isBotMention: false, authorId: 'bob', authorName: 'bob', text: 'unrelated' }))
     await router.route(inbound({ text: 'hey bot' }))
     await router.__testing!.flushDebounce(KEY)
@@ -186,9 +197,40 @@ describe('ChannelRouter engagement and prompt composition', () => {
         enabled: true,
       },
     })
+    // Prime participants with carol so the next non-mention message hits the
+    // strict gate (which observes) rather than the solo-human fallback.
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol' }))
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.prompts.length = 0
     await router.route(inbound({ isBotMention: false }))
     await router.__testing!.flushDebounce(KEY)
     expect(sessions[0]!.prompts).toHaveLength(0)
+  })
+
+  test('solo-human channel: plain message engages without mention/reply/dm', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound({ isBotMention: false, text: 'hello there' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sessions[0]!.prompts[0]).toContain('<@alice> (alice): hello there')
+  })
+
+  test('solo-human fallback turns off once a second human posts', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    // Alice (solo) → engages on plain message.
+    await router.route(inbound({ isBotMention: false, text: 'first' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    // Bob arrives mentioning the bot → engages via strict gate.
+    await router.route(inbound({ authorId: 'bob', authorName: 'bob', isBotMention: true, text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    // Alice's next plain message must now observe (2 humans in cache).
+    await router.route(inbound({ isBotMention: false, text: 'follow up' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(2)
   })
 })
 

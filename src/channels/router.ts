@@ -337,6 +337,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       key: live.keyId,
       ledger: stickyLedger,
       now: now(),
+      participants: live.participants,
     })
 
     if (decision === 'observe') {

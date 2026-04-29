@@ -1,3 +1,5 @@
+import type { ChannelParticipant } from '@/agent/session-origin'
+
 import type { EngagementConfig } from './schema'
 import type { InboundMessage } from './types'
 
@@ -45,10 +47,15 @@ export type EngagementInput = {
   key: string
   ledger: StickyLedger
   now: number
+  // Router updates this cache with the current sender BEFORE calling here,
+  // so a fresh channel's first human message arrives with length 1. Bots
+  // never enter the cache (filtered at adapter), so 1 human + N bots is
+  // length 1.
+  participants: readonly ChannelParticipant[]
 }
 
 export function decideEngagement(input: EngagementInput): EngagementDecision {
-  const { message, config, key, ledger, now } = input
+  const { message, config, key, ledger, now, participants } = input
 
   if (config.trigger.includes('dm') && message.isDm) return 'engage'
   if (config.trigger.includes('mention') && message.isBotMention) return 'engage'
@@ -57,6 +64,12 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (config.stickiness !== 'off' && ledger.consume(key, message.authorId, now)) {
     return 'engage'
   }
+
+  // Solo-human fallback: the strict mention/reply/dm gate exists to keep
+  // the bot quiet in multi-human conversations. In a 1-human channel that
+  // protection makes the agent silent on messages obviously meant for it.
+  // Reverts to strict the moment a second human posts.
+  if (participants.length <= 1) return 'engage'
 
   return 'observe'
 }
