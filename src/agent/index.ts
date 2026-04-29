@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { createAgentSession, DefaultResourceLoader, SessionManager } from '@mariozechner/pi-coding-agent'
 import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent'
 
+import type { ChannelRouter } from '@/channels/router'
 import { getConfig, resolveModel } from '@/config'
 import type {
   BuiltinToolRef,
@@ -22,10 +23,14 @@ import { getAuth } from './auth'
 import { resolveBuiltinToolRefs, wrapPluginTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
+import { renderSessionOrigin, type SessionOrigin } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
+import { createChannelSendTool } from './tools/channel-send'
 import { createStreamSnapshotTool } from './tools/stream-snapshot'
 import { webfetchTool } from './tools/webfetch'
 import { websearchTool } from './tools/websearch'
+
+export type { SessionOrigin } from './session-origin'
 
 export type { AgentSession }
 
@@ -49,9 +54,14 @@ export type CreateSessionOptions = {
   reloadRegistry?: ReloadRegistry
   sessionManager?: SessionManager
   stream?: Stream
+  channelRouter?: ChannelRouter
   // Bypass the file-based resource loader (IDENTITY.md, SOUL.md, MEMORY.md,
   // memory/, bundled skills) and use this string verbatim as the system prompt.
   systemPromptOverride?: string
+  // Identifies the kind of session and (for channels) its addressing fields.
+  // Rendered into the system prompt so the agent knows who's listening, where
+  // its output goes, and what to pass to channel_send.
+  origin?: SessionOrigin
   tools?: AgentSessionTools
   customTools?: ToolDefinition[]
   plugins?: PluginSessionWiring
@@ -87,8 +97,11 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 
   const resourceLoader =
     options.systemPromptOverride !== undefined
-      ? await createOverrideResourceLoader(options.systemPromptOverride)
-      : await createResourceLoader(options.plugins ? { plugins: options.plugins, materializedSkills } : {})
+      ? await createOverrideResourceLoader(options.systemPromptOverride, options.origin)
+      : await createResourceLoader({
+          ...(options.plugins ? { plugins: options.plugins, materializedSkills } : {}),
+          ...(options.origin ? { origin: options.origin } : {}),
+        })
 
   const subagentBuiltinTools = options.pluginSubagent?.toolRefs
     ? resolveBuiltinToolRefs(options.pluginSubagent.toolRefs)
@@ -109,6 +122,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             webfetchTool,
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
+            ...(options.channelRouter ? [createChannelSendTool({ router: options.channelRouter })] : []),
             ...pluginCustomTools,
           ]
 
@@ -169,9 +183,12 @@ function makePluginLogger(pluginName: string) {
   }
 }
 
-export async function createOverrideResourceLoader(systemPrompt: string): Promise<DefaultResourceLoader> {
+export async function createOverrideResourceLoader(
+  systemPrompt: string,
+  origin?: SessionOrigin,
+): Promise<DefaultResourceLoader> {
   const loader = new DefaultResourceLoader({
-    systemPromptOverride: () => systemPrompt,
+    systemPromptOverride: () => withOrigin(systemPrompt, origin),
     appendSystemPromptOverride: () => [],
   })
   await loader.reload()
@@ -182,6 +199,7 @@ export type CreateResourceLoaderOptions = {
   agentDir?: string
   plugins?: PluginSessionWiring
   materializedSkills?: MaterializedSkills | null
+  origin?: SessionOrigin
 }
 
 export async function createResourceLoader(options: CreateResourceLoaderOptions = {}): Promise<DefaultResourceLoader> {
@@ -214,12 +232,17 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   }
 
   const loader = new DefaultResourceLoader({
-    systemPromptOverride: () => systemPrompt,
+    systemPromptOverride: () => withOrigin(systemPrompt, options.origin),
     appendSystemPromptOverride: () => [],
     additionalSkillPaths,
   })
   await loader.reload()
   return loader
+}
+
+function withOrigin(systemPrompt: string, origin: SessionOrigin | undefined): string {
+  if (!origin) return systemPrompt
+  return `${systemPrompt}\n\n${renderSessionOrigin(origin)}`
 }
 
 export function getBundledSkillsDir(): string {

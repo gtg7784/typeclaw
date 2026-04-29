@@ -50,6 +50,37 @@ export const init = defineCommand({
       process.exit(0)
     }
 
+    const wantDiscord = await confirm({
+      message: 'Wire a Discord bot? (You can add this later by editing typeclaw.json + .env.)',
+      initialValue: false,
+    })
+    if (isCancel(wantDiscord)) {
+      cancel('Aborted.')
+      process.exit(0)
+    }
+    let discordBotToken: string | undefined
+    if (wantDiscord) {
+      const token = await password({
+        message: 'Discord bot token',
+        validate: (value) => (value && value.length > 0 ? undefined : 'Token is required'),
+      })
+      if (isCancel(token)) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+      discordBotToken = token
+      const allowAll = await confirm({
+        message:
+          'Set channels.discord-bot.allow = ["*"]? This admits every channel in every guild the bot is in, plus all DMs. You can narrow it later by editing typeclaw.json.',
+        initialValue: true,
+      })
+      if (isCancel(allowAll) || !allowAll) {
+        console.log(
+          'OK. The discord-bot adapter will be wired but `allow` will be empty; the adapter will run but not deliver any inbound or outbound until you edit typeclaw.json.',
+        )
+      }
+    }
+
     // TODO: add remaining wizard steps from TypeClaw.md once their runtime lands:
     //   - git backup (url + PAT) — Phase 10
     //   - cron.json scaffolding — Phase 9
@@ -59,6 +90,7 @@ export const init = defineCommand({
       await runInit({
         cwd,
         apiKey,
+        ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         onProgress: reportProgress((ok) => {
           hatchingOk = ok
         }),

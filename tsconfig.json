@@ -26,5 +26,6 @@
       "@/*": ["./src/*"]
     }
   },
-  "include": ["src", "scripts", "plugins"]
+  "include": ["src", "scripts", "plugins"],
+  "exclude": ["node_modules/agent-messenger"]
 }

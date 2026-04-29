@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import type { Model } from '@mariozechner/pi-ai'
 import { z } from 'zod'
 
+import { channelsSchema } from '@/channels/schema'
+
 import { KNOWN_PROVIDERS, listKnownModelRefs, type KnownModelRef, type KnownProviderId } from './providers'
 
 const CONFIG_FILE = 'typeclaw.json'
@@ -38,6 +40,7 @@ export const configSchema = z
     // way (no host paths exposed) rather than failing the whole config load.
     mounts: z.array(mountSchema).default([]),
     plugins: z.array(z.string().min(1)).default([]),
+    channels: channelsSchema,
   })
   .catchall(z.unknown())
 
@@ -112,6 +115,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   port: 'restart-required',
   mounts: 'restart-required',
   plugins: 'restart-required',
+  channels: 'applied',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -165,7 +169,7 @@ function readPath(obj: unknown, path: string): unknown {
 // each block against its plugin's `configSchema`.
 export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'object' || raw === null) return {}
-  const known = new Set(['$schema', 'port', 'model', 'mounts', 'plugins'])
+  const known = new Set(['$schema', 'port', 'model', 'mounts', 'plugins', 'channels'])
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!known.has(key)) result[key] = value
