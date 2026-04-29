@@ -279,9 +279,15 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         // per-prompt regeneration of system prompts is a v0.2 work.
         void regenerateOrigin
 
+        // Bracketing logs around the LLM call so a hung prompt() is
+        // diagnosable from logs alone (we see prompting without prompted).
+        // text length is a proxy for "did we send something at all".
+        logger.info(`[channels] ${live.keyId} prompting batch=${batch.length} text_len=${text.length}`)
+        const promptStart = now()
         try {
           await live.session.prompt(text)
           live.consecutiveAborts = 0
+          logger.info(`[channels] ${live.keyId} prompted elapsed_ms=${now() - promptStart}`)
         } catch (err) {
           logger.warn(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
         }

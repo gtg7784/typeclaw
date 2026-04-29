@@ -8,6 +8,7 @@ import {
   DiscordIntent,
   type DiscordGatewayMessageCreateEvent,
 } from './agent-messenger-shim'
+import { classifyInbound, type InboundDropReason } from './discord-bot-classify'
 
 const TYPING_INTERVAL_MS = 8000
 
@@ -69,8 +70,15 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       logger.warn(`[discord-bot] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
       return { ok: false, error: 'denied by allow rules' }
     }
+    // Logged before the API call so we can tell from logs whether the agent
+    // even tried to reply, vs. tried-and-failed. Mirrors the inbound log
+    // contract on the receive side.
+    logger.info(
+      `[discord-bot] outbound workspace=${msg.workspace} chat=${msg.chat} text_len=${msg.text.length}`,
+    )
     try {
-      await client.sendMessage(msg.chat, msg.text, msg.thread ? { thread_id: msg.thread } : undefined)
+      const sent = await client.sendMessage(msg.chat, msg.text, msg.thread ? { thread_id: msg.thread } : undefined)
+      logger.info(`[discord-bot] sent id=${sent.id} chat=${msg.chat}`)
       return { ok: true }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -82,39 +90,24 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
   const handleMessageCreate = async (event: DiscordGatewayMessageCreateEvent): Promise<void> => {
     inflightInbounds++
     try {
-      // Bot-authored messages are dropped at the source to prevent echo loops.
-      if (event.author.bot === true) return
-      // Privileged MessageContent intent is required to receive content; without
-      // it the SDK delivers events with content: ''.
-      if (event.content === '') return
+      // One log line per gateway event is non-negotiable: it's the only way to
+      // tell from logs whether the gateway is delivering at all. content_len=0
+      // is the smoking gun for a missing MessageContent privileged intent.
+      const where = event.guild_id !== undefined ? `guild=${event.guild_id}` : 'dm'
+      logger.info(
+        `[discord-bot] inbound id=${event.id} author=${event.author.username}(${event.author.id}) ${where} channel=${event.channel_id} content_len=${event.content.length}`,
+      )
 
-      const config = options.configRef()
-      const isDm = event.guild_id === undefined
-      const workspace = isDm ? '@dm' : event.guild_id!
-      if (!isAllowed(config.allow, workspace, event.channel_id)) return
+      const verdict = classifyInbound(event, options.configRef(), botUserId)
+      if (verdict.kind === 'drop') {
+        logger.info(`[discord-bot] dropped id=${event.id} reason=${verdict.reason}${dropHint(verdict.reason)}`)
+        return
+      }
 
-      const isBotMention =
-        botUserId !== null
-          ? event.content.includes(`<@${botUserId}>`) || event.content.includes(`<@!${botUserId}>`)
-          : true
-      const replyToBotMessageId =
-        event.message_reference?.message_id !== undefined && botUserId !== null
-          ? event.message_reference.message_id
-          : null
-
-      await options.router.route({
-        adapter: 'discord-bot',
-        workspace,
-        chat: event.channel_id,
-        thread: null,
-        text: event.content,
-        externalMessageId: event.id,
-        authorId: event.author.id,
-        authorName: event.author.username,
-        isBotMention,
-        replyToBotMessageId,
-        isDm,
-      })
+      logger.info(
+        `[discord-bot] routed id=${event.id} workspace=${verdict.payload.workspace} mention=${verdict.payload.isBotMention} reply=${verdict.payload.replyToBotMessageId !== null}`,
+      )
+      await options.router.route(verdict.payload)
     } catch (err) {
       logger.error(`[discord-bot] handleInbound failed: ${describe(err)}`)
     } finally {
@@ -188,4 +181,18 @@ export const TYPING_HEARTBEAT_MS = TYPING_INTERVAL_MS
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+// Operator hints appended to drop logs. Kept short — full guidance lives in
+// docs. The empty_content hint is the highest-leverage one because that
+// failure mode is invisible from Discord's side (bot stays green).
+function dropHint(reason: InboundDropReason): string {
+  switch (reason) {
+    case 'empty_content':
+      return ' (enable MESSAGE CONTENT INTENT in Discord Developer Portal and restart)'
+    case 'not_in_allow_list':
+      return ' (extend channels.discord-bot.allow in typeclaw.json to admit this workspace/channel)'
+    case 'bot_author':
+      return ''
+  }
 }
