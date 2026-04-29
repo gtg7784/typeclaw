@@ -1,6 +1,10 @@
 export {
   config,
+  configSchema,
+  extractPluginConfigs,
   getConfig,
+  loadConfigSync,
+  loadPluginConfigsSync,
   mountSchema,
   reloadConfig,
   resolveModel,
