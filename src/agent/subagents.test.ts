@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+
 import { z } from 'zod'
 
 import { createStream } from '@/stream'
@@ -310,7 +311,7 @@ describe('createSubagentConsumer', () => {
     // concurrent messages collapse into one execution.
     const stream = createStream()
     const handlerCalls: number[] = []
-    let resolveFirst: (() => void) = () => {}
+    let resolveFirst: () => void = () => {}
     const registry = {
       slow: {
         systemPrompt: 'X',
@@ -352,7 +353,7 @@ describe('createSubagentConsumer', () => {
     // given
     const stream = createStream()
     const concurrent: string[] = []
-    let releaseGate: (() => void) = () => {}
+    let releaseGate: () => void = () => {}
     const gate = new Promise<void>((r) => {
       releaseGate = r
     })

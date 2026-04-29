@@ -1,11 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession } from '@/agent'
-import {
-  createSubagentConsumer,
-  defaultCreateSessionForSubagent,
-  type SubagentConsumer,
-} from '@/agent/subagents'
+import { createSubagentConsumer, defaultCreateSessionForSubagent, type SubagentConsumer } from '@/agent/subagents'
 import { config, type Config, createConfigReloadable, getConfig } from '@/config'
 import {
   type CronConsumer,
