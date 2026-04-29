@@ -37,6 +37,7 @@ import { createStream, type Stream } from '@/stream'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
 
 import memoryPlugin from '../../plugins/memory'
+import { buildChannelSessionFactory } from './channel-session-factory'
 import { createPluginRuntime, type PluginRuntime, type PluginSubagentEntry } from './plugin-runtime'
 
 const BUNDLED_PLUGINS: ResolvedPlugin[] = [
@@ -90,11 +91,6 @@ export async function startAgent({
   const reloadRegistry = new ReloadRegistry()
   reloadRegistry.register(createConfigReloadable({ cwd }))
 
-  const channelManager = createChannelManager({
-    agentDir: cwd,
-    channelsConfigRef: () => getConfig().channels,
-  })
-
   const pluginConfigsByName = loadPluginConfigsSync(cwd)
   const cwdConfig = loadConfigSync(cwd)
   const pluginsLoaded = await loadPlugins({
@@ -124,6 +120,19 @@ export async function startAgent({
     hasAnyPluginContent,
     loadedPlugins: pluginsLoaded.loadedPlugins,
     materializedSkills: null,
+  })
+
+  const channelManager = createChannelManager({
+    agentDir: cwd,
+    channelsConfigRef: () => getConfig().channels,
+    createSessionForChannel: buildChannelSessionFactory({
+      cwd,
+      sessionFactory,
+      stream,
+      reloadRegistry,
+      pluginRuntime,
+      getChannelRouter: () => channelManager.router,
+    }),
   })
 
   const createSessionForSubagent: import('@/agent/subagents').CreateSessionForSubagent = async (

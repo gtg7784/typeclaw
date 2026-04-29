@@ -1,5 +1,5 @@
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
-import { createChannelRouter, type ChannelRouter } from './router'
+import { createChannelRouter, type ChannelRouter, type CreateSessionForChannel } from './router'
 import type { ChannelAdapterConfig, ChannelsConfig } from './schema'
 
 export type ChannelManagerLogger = {
@@ -19,6 +19,13 @@ export type ChannelManagerOptions = {
   channelsConfigRef: () => ChannelsConfig
   logger?: ChannelManagerLogger
   env?: NodeJS.ProcessEnv
+  // Production wiring passes a factory that builds sessions with the full
+  // runtime plumbing (channelRouter, stream, plugins, reloadRegistry). When
+  // omitted, the router falls back to a hollow factory that creates sessions
+  // without a channelRouter — the agent then has no `channel_send` tool and
+  // cannot reply, which is fine for tests but a bug in production. See
+  // src/run/index.ts where this is wired.
+  createSessionForChannel?: CreateSessionForChannel
   // Test seam: lets a fake adapter replace the real Discord adapter wiring.
   createDiscordAdapter?: typeof createDiscordBotAdapter
 }
@@ -37,6 +44,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     agentDir: options.agentDir,
     configForAdapter: (adapter) => options.channelsConfigRef()[adapter],
     logger,
+    ...(options.createSessionForChannel ? { createSessionForChannel: options.createSessionForChannel } : {}),
   })
   const createAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
 
