@@ -255,10 +255,7 @@ export async function commitMemorySnapshot(cwd: string): Promise<void> {
   await applySkipWorktree(bun, cwd)
 }
 
-async function listTrackedSnapshotFiles(
-  bun: { spawn: typeof Bun.spawn },
-  cwd: string,
-): Promise<string[]> {
+async function listTrackedSnapshotFiles(bun: { spawn: typeof Bun.spawn }, cwd: string): Promise<string[]> {
   const ls = bun.spawn({
     cmd: ['git', 'ls-files', '-z', '--', ...SNAPSHOT_PATHS],
     cwd,
