@@ -1,5 +1,3 @@
-import type { AgentSession } from '@/agent'
-import { invokeSubagent, type Subagent, type SubagentRegistry } from '@/agent/subagents'
 import type { Stream, Unsubscribe } from '@/stream'
 
 import type { CronJob, ExecJob, PromptJob } from './schema'
@@ -16,8 +14,6 @@ export type CreateCronConsumerOptions = {
   stream: Stream
   cwd: string
   createSessionForCron: (job: PromptJob) => Promise<CronSession>
-  subagents?: SubagentRegistry
-  createSessionForSubagent?: (subagent: Subagent<any>) => Promise<AgentSession>
   logger?: CronConsumerLogger
 }
 
@@ -37,8 +33,6 @@ export function createCronConsumer({
   stream,
   cwd,
   createSessionForCron,
-  subagents = {},
-  createSessionForSubagent,
   logger = consoleLogger,
 }: CreateCronConsumerOptions): CronConsumer {
   const inFlight = new Set<string>()
@@ -60,7 +54,7 @@ export function createCronConsumer({
         inFlight.add(job.id)
         try {
           if (job.kind === 'prompt') {
-            await runPrompt(job, { createSessionForCron, subagents, createSessionForSubagent, cwd })
+            await runPrompt(job, createSessionForCron, stream)
           } else {
             await runExec(job, cwd)
           }
@@ -82,28 +76,19 @@ export function createCronConsumer({
   }
 }
 
-type RunPromptDeps = {
-  createSessionForCron: (job: PromptJob) => Promise<CronSession>
-  subagents: SubagentRegistry
-  createSessionForSubagent?: (subagent: Subagent<any>) => Promise<AgentSession>
-  cwd: string
-}
-
-async function runPrompt(job: PromptJob, deps: RunPromptDeps): Promise<void> {
+async function runPrompt(
+  job: PromptJob,
+  createSessionForCron: (job: PromptJob) => Promise<CronSession>,
+  stream: Stream,
+): Promise<void> {
   if (job.subagent !== undefined) {
-    if (deps.createSessionForSubagent === undefined) {
-      throw new Error(`prompt job ${job.id}: subagent "${job.subagent}" requested but no subagent runtime is wired`)
-    }
-    await invokeSubagent(job.subagent, {
-      registry: deps.subagents,
-      createSessionForSubagent: deps.createSessionForSubagent,
-      agentDir: deps.cwd,
-      userPrompt: job.prompt,
+    stream.publish({
+      target: { kind: 'new-session', subagent: job.subagent },
       payload: job.payload,
     })
     return
   }
-  const session = await deps.createSessionForCron(job)
+  const session = await createSessionForCron(job)
   try {
     await session.prompt(job.prompt)
   } finally {

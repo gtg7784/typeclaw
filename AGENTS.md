@@ -121,17 +121,18 @@ Domain logic lives in `src/<domain>/`. Examples: `src/init/`, `src/config/`, `sr
 
 ### Targets
 
-A `StreamMessage` carries a `target` discriminating three kinds, each with documented semantics:
+A `StreamMessage` carries a `target` discriminating four kinds, each with documented semantics:
 
 - **`broadcast`** — fan-out to every matching subscriber. Used for live notifications (mood, status, presence). The WS server forwards these to connected TUIs as `notification` messages.
 - **`session: { sessionId }`** — addressed to a specific live `AgentSession`. Used for TUI input queueing — the WS server publishes here, the per-session drain loop subscribes. Exactly one logical consumer per session.
-- **`cron: { jobId }`** — emitted by the cron scheduler when a job fires. Consumed by the `CronConsumer` in `src/cron/consumer.ts`, which dispatches to the prompt or exec runner and handles per-jobId coalescing. A `prompt` job may carry a `subagent` field; the consumer looks the name up in the in-process subagent registry (`src/agent/subagents.ts`) and invokes the registered `Subagent` directly — no second stream hop.
+- **`new-session: { subagent }`** — spawn a fresh subagent session. Published by the cron consumer (when a `prompt` job carries a `subagent` field) and by the WS server (when a session goes idle and the memory-logger should run). Consumed by the `SubagentConsumer` in `src/agent/subagents.ts`, which looks `subagent` up in the in-process registry, validates the payload against the registered `payloadSchema`, and invokes the `Subagent`'s `handler`. Coalescing is per `inFlightKey(name, payload)` — production wiring keys memory-logger by `parentSessionId` (so different parent sessions run in parallel) and dreaming by `agentDir`.
+- **`cron: { jobId }`** — emitted by the cron scheduler when a job fires. Consumed by the `CronConsumer` in `src/cron/consumer.ts`, which dispatches to the prompt or exec runner and handles per-jobId coalescing. When a `prompt` job carries a `subagent` field, the consumer republishes to `new-session` instead of running the prompt itself.
 
-Targets are typed unions, not stringly-typed topics. Adding a fourth kind is a deliberate design choice; we do not have a generic `handler` extension point.
+Targets are typed unions, not stringly-typed topics. Adding a fifth kind is a deliberate design choice; we do not have a generic `handler` extension point.
 
 ### Subagents
 
-`src/agent/subagents.ts` defines the `Subagent` shape: `{ systemPrompt, tools?, customTools?, payloadSchema?, handler? }`. Subagents are invoked synchronously through `invokeSubagent(name, options)` — there is no pub/sub indirection. Production wiring lives in `src/run/index.ts`, which builds the registry with `memoryLoggerSubagent` and `dreamingSubagent` and threads it into both the cron consumer (`runPrompt` looks up `job.subagent`) and the WS server (idle-detector invokes memory-logger directly). When a `Subagent` declares a `payloadSchema`, the cron loader validates `cron.json`'s `payload` field against it at parse time and at every `reloadAll()` — bad configs fail fast on disk, not 6 hours later when the job fires.
+`src/agent/subagents.ts` defines the `Subagent` shape: `{ systemPrompt, tools?, customTools?, payloadSchema?, handler? }` and the `SubagentConsumer` that subscribes to `new-session` stream messages. Subagents are never called directly from the cron consumer or the server — both go through the stream so any future caller (a tool, a plugin, an event handler) can fire a subagent by publishing to `new-session` without importing the registry. Production wiring in `src/run/index.ts` builds the registry with `memoryLoggerSubagent` and `dreamingSubagent`, configures per-subagent `inFlightKey` coalescing, and starts the consumer at boot. When a `Subagent` declares a `payloadSchema`, the cron loader validates `cron.json`'s `payload` field against it at parse time and at every `reloadAll()` — bad configs fail fast on disk, not 6 hours later when the job fires.
 
 ### Wire protocol contract
 

@@ -1,7 +1,11 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession } from '@/agent'
-import { defaultCreateSessionForSubagent } from '@/agent/subagents'
+import {
+  createSubagentConsumer,
+  defaultCreateSessionForSubagent,
+  type SubagentConsumer,
+} from '@/agent/subagents'
 import { config, type Config, createConfigReloadable, getConfig } from '@/config'
 import {
   type CronConsumer,
@@ -14,7 +18,7 @@ import {
   loadCron as loadCronDefault,
   type Scheduler,
 } from '@/cron'
-import { dreamingSubagent, memoryLoggerSubagent } from '@/memory'
+import { dreamingSubagent, isDreamingPayload, isMemoryLoggerPayload, memoryLoggerSubagent } from '@/memory'
 import { ReloadRegistry } from '@/reload'
 import { createServer, type Server } from '@/server'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
@@ -50,6 +54,7 @@ export type StartAgentResult = {
   tuiPromise: Promise<void> | null
   scheduler: Scheduler | null
   cronConsumer: CronConsumer | null
+  subagentConsumer: SubagentConsumer
   reloadRegistry: ReloadRegistry
   stream: Stream
   stop: () => void
@@ -74,6 +79,23 @@ export async function startAgent({
     dreaming: dreamingSubagent,
   }
 
+  const subagentConsumer = createSubagentConsumer({
+    stream,
+    registry: subagents,
+    agentDir: cwd,
+    createSessionForSubagent: defaultCreateSessionForSubagent,
+    inFlightKey: (name, payload) => {
+      if (name === 'memory-logger' && isMemoryLoggerPayload(payload)) {
+        return `${name}:${payload.parentSessionId}`
+      }
+      if (name === 'dreaming' && isDreamingPayload(payload)) {
+        return `${name}:${payload.agentDir}`
+      }
+      return name
+    },
+  })
+  subagentConsumer.start()
+
   const cronConsumer = createCronConsumer({
     stream,
     cwd,
@@ -83,8 +105,6 @@ export async function startAgent({
         sessionManager: SessionManager.create(cwd, sessionFactory.sessionDir()),
         stream,
       }),
-    subagents,
-    createSessionForSubagent: defaultCreateSessionForSubagent,
   })
 
   const internalJobs = () => buildInternalJobs(cwd, getConfig())
@@ -111,8 +131,6 @@ export async function startAgent({
     stream,
     memoryIdleMs: config.memory.idleMs,
     agentDir: cwd,
-    subagents,
-    createSessionForSubagent: defaultCreateSessionForSubagent,
   }).start()
 
   let stopped = false
@@ -121,6 +139,7 @@ export async function startAgent({
     stopped = true
     scheduler?.stop()
     cronConsumer.stop()
+    subagentConsumer.stop()
     server.stop(true)
   }
 
@@ -130,6 +149,7 @@ export async function startAgent({
       tuiPromise: null,
       scheduler,
       cronConsumer: scheduler ? cronConsumer : null,
+      subagentConsumer,
       reloadRegistry,
       stream,
       stop,
@@ -144,6 +164,7 @@ export async function startAgent({
     tuiPromise,
     scheduler,
     cronConsumer: scheduler ? cronConsumer : null,
+    subagentConsumer,
     reloadRegistry,
     stream,
     stop,

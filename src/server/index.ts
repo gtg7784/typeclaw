@@ -1,7 +1,6 @@
 import type { Server as BunServer, ServerWebSocket } from 'bun'
 
 import { createSession as defaultCreateSession, type AgentSession, type CreateSessionOptions } from '@/agent'
-import { invokeSubagent, type Subagent, type SubagentRegistry } from '@/agent/subagents'
 import { createIdleDetector, type IdleDetector } from '@/memory'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { SessionFactory } from '@/sessions'
@@ -10,7 +9,6 @@ import type { Stream, StreamMessage, StreamMessageId, Unsubscribe } from '@/stre
 
 export type ReloadAllFn = () => Promise<ReloadAllResult>
 export type CreateSessionFn = (options?: CreateSessionOptions) => Promise<AgentSession>
-export type CreateSessionForSubagentFn = (subagent: Subagent<any>) => Promise<AgentSession>
 
 export type ServerOptions = {
   port: number
@@ -21,8 +19,6 @@ export type ServerOptions = {
   stream?: Stream
   memoryIdleMs?: number
   agentDir?: string
-  subagents?: SubagentRegistry
-  createSessionForSubagent?: CreateSessionForSubagentFn
 }
 
 export type Server = ReturnType<typeof createServer>
@@ -61,8 +57,6 @@ export function createServer({
   stream,
   memoryIdleMs,
   agentDir,
-  subagents,
-  createSessionForSubagent,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
 
@@ -92,17 +86,10 @@ export function createServer({
           }
           sessionStates.set(ws, state)
 
-          if (
-            memoryIdleMs !== undefined &&
-            agentDir !== undefined &&
-            subagents !== undefined &&
-            createSessionForSubagent !== undefined
-          ) {
+          if (stream !== undefined && memoryIdleMs !== undefined && agentDir !== undefined) {
             state.idleDetector = createIdleDetector({
               idleMs: memoryIdleMs,
-              onIdle: () => {
-                void runMemoryLoggerOnIdle(state, agentDir, subagents, createSessionForSubagent)
-              },
+              onIdle: () => publishMemoryLoggerSpawn(state, stream, agentDir),
             })
           }
 
@@ -268,36 +255,17 @@ async function drain(ws: Ws, state: SessionState): Promise<void> {
   }
 }
 
-const idleInFlight = new Set<string>()
-
-async function runMemoryLoggerOnIdle(
-  state: SessionState,
-  agentDir: string,
-  subagents: SubagentRegistry,
-  createSessionForSubagent: CreateSessionForSubagentFn,
-): Promise<void> {
+function publishMemoryLoggerSpawn(state: SessionState, stream: Stream, agentDir: string): void {
   const transcriptPath = state.sessionManager?.getSessionFile()
   if (transcriptPath === undefined) return
-  const key = `memory-logger:${state.sessionFileId}`
-  if (idleInFlight.has(key)) return
-  idleInFlight.add(key)
-  try {
-    await invokeSubagent('memory-logger', {
-      registry: subagents,
-      createSessionForSubagent,
+  stream.publish({
+    target: { kind: 'new-session', subagent: 'memory-logger' },
+    payload: {
+      parentSessionId: state.sessionFileId,
+      parentTranscriptPath: transcriptPath,
       agentDir,
-      userPrompt: '',
-      payload: {
-        parentSessionId: state.sessionFileId,
-        parentTranscriptPath: transcriptPath,
-        agentDir,
-      },
-    })
-  } catch (err) {
-    console.error(`[server] memory-logger spawn failed:`, err instanceof Error ? err.message : err)
-  } finally {
-    idleInFlight.delete(key)
-  }
+    },
+  })
 }
 
 function pushQueueState(ws: Ws, state: SessionState): void {
