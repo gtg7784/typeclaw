@@ -80,13 +80,7 @@ describe('readWatermark', () => {
 
   test('does not match when source value is a prefix of the requested session id', () => {
     // Guards against accidental substring matching: ses_a should NOT match ses_abc.
-    const path = tmpFile(
-      [
-        '<!-- fragment source=ses_a entry=00000001 -->',
-        '## prefix',
-        '',
-      ].join('\n'),
-    )
+    const path = tmpFile(['<!-- fragment source=ses_a entry=00000001 -->', '## prefix', ''].join('\n'))
     expect(readWatermark(path, 'ses_abc')).toBeNull()
   })
 
@@ -141,12 +135,9 @@ describe('readWatermark', () => {
 
   test('fragment markers with a trailing certainty attribute still match', () => {
     const path = tmpFile(
-      [
-        '<!-- fragment source=ses_abc entry=cert0001 certainty=explicit -->',
-        '## an explicit fact',
-        'body',
-        '',
-      ].join('\n'),
+      ['<!-- fragment source=ses_abc entry=cert0001 certainty=explicit -->', '## an explicit fact', 'body', ''].join(
+        '\n',
+      ),
     )
     expect(readWatermark(path, 'ses_abc')).toBe('cert0001')
   })

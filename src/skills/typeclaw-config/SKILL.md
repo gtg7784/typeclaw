@@ -23,11 +23,11 @@ There is no file watcher. **Editing `typeclaw.json` while the container runs doe
 
 `typeclaw.json` is a single JSON object with these fields:
 
-| Field     | Required | Type             | Notes                                                                                                                                                            |
-| --------- | -------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `$schema` | no       | string           | Path to `typeclaw.schema.json` for editor autocompletion. Scaffolded as `./node_modules/typeclaw/typeclaw.schema.json`. Leave it alone unless the user moves it. |
-| `port`    | no       | integer          | 1–65535. Defaults to `8973` (T9 spelling of "TYPE"). Change only if the default collides with something on the user's host.                                      |
-| `model`   | no       | string           | Must be one of the values listed in the **Allowed models** section below. Defaults to `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`.                    |
+| Field     | Required | Type             | Notes                                                                                                                                                              |
+| --------- | -------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `$schema` | no       | string           | Path to `typeclaw.schema.json` for editor autocompletion. Scaffolded as `./node_modules/typeclaw/typeclaw.schema.json`. Leave it alone unless the user moves it.   |
+| `port`    | no       | integer          | 1–65535. Defaults to `8973` (T9 spelling of "TYPE"). Change only if the default collides with something on the user's host.                                        |
+| `model`   | no       | string           | Must be one of the values listed in the **Allowed models** section below. Defaults to `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`.                      |
 | `mounts`  | no       | array of objects | Host directories bind-mounted into your container. Defaults to `[]` (no host paths exposed). `typeclaw init` writes `[]` explicitly. See **Mounts** section below. |
 
 The runtime parses this file with a strict schema (`zod`). **Unknown fields are tolerated but ignored** — they do nothing. Do not invent fields like `provider`, `apiKey`, `temperature`, `maxTokens`, `systemPrompt`, `tools`, `timeout`, etc. They will be silently dropped. If the user asks for one of those, say it is not yet supported and (if it makes sense) suggest they file a request.

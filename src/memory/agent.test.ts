@@ -149,7 +149,9 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
   })
 
   test('requires two or more sources for inductive fragments', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/two or more separate occurrences|≥2.*sources|two.*sources/)
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(
+      /two or more separate occurrences|≥2.*sources|two.*sources/,
+    )
   })
 
   test('bans speculation language explicitly by listing the forbidden words', () => {

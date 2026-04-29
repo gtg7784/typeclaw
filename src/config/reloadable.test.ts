@@ -116,7 +116,10 @@ describe('createConfigReloadable', () => {
   })
 
   test('summary string reports counts in each bucket', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, port: 9001, $schema: './a.json' }))
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL_A, port: 9001, $schema: './a.json' }),
+    )
     const reloadable = createConfigReloadable({ cwd })
     await reloadable.reload()
 
@@ -159,12 +162,7 @@ function enumeratePaths(obj: Record<string, unknown>, prefix = ''): string[] {
   for (const key of Object.keys(obj)) {
     const path = prefix ? `${prefix}.${key}` : key
     const value = obj[key]
-    if (
-      value !== null &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      shouldRecurse(path)
-    ) {
+    if (value !== null && typeof value === 'object' && !Array.isArray(value) && shouldRecurse(path)) {
       out.push(...enumeratePaths(value as Record<string, unknown>, path))
     } else {
       out.push(path)
@@ -176,4 +174,3 @@ function enumeratePaths(obj: Record<string, unknown>, prefix = ''): string[] {
 function shouldRecurse(path: string): boolean {
   return path === 'memory'
 }
-
