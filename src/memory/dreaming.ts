@@ -169,41 +169,129 @@ async function defaultCreateDreamingSession(): Promise<DreamingSession> {
   return session
 }
 
+const SNAPSHOT_PATHS = ['MEMORY.md', 'memory/'] as const
+
 // Force-add gitignored memory artifacts (memory/*.md, memory/.dreaming-state.json)
 // alongside MEMORY.md so the agent folder's git history captures the
 // consolidation as a single recoverable snapshot. Skips silently when the
 // folder is not a git repo or bun is unavailable, matching commitSystemFile in
 // src/container/start.ts. Uses the user's global git config for authorship.
-async function commitMemorySnapshot(cwd: string): Promise<void> {
+//
+// After committing, the tracked memory artifacts get the `skip-worktree` index
+// flag set so manual `git status` / `git diff` ignore future runtime edits.
+// The runtime still owns these files; the flag just hides them from the human-
+// facing diff surface. Subsequent runs clear the flag before `git add`, because
+// `git add` fails with "outside of your sparse-checkout definition" on a
+// skip-worktree path.
+export async function commitMemorySnapshot(cwd: string): Promise<void> {
   const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
   if (!bun) return
   if (!existsSync(join(cwd, '.git'))) return
 
-  const add = bun.spawn({
-    cmd: ['git', 'add', '-f', '--', 'MEMORY.md', 'memory/'],
-    cwd,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-  if ((await add.exited) !== 0) return
+  // Clear skip-worktree on whatever is currently tracked under the snapshot
+  // paths so the upcoming `git add` can update the index. ls-files returns
+  // only files actually in the index, so passing them to update-index is
+  // always safe — a directory path would be silently ignored by update-index.
+  await clearSkipWorktree(bun, cwd)
 
-  const diff = bun.spawn({
-    cmd: ['git', 'diff', '--cached', '--quiet', '--', 'MEMORY.md', 'memory/'],
+  // `git add -- foo bar/` fails with exit 128 if any pathspec matches no
+  // path on disk. On early runs MEMORY.md may not exist yet (no dream has
+  // ever rewritten it), so filter to paths that actually exist before
+  // passing them in. If nothing in SNAPSHOT_PATHS exists, there is nothing
+  // to commit — restore the flag and bail.
+  const presentPaths = SNAPSHOT_PATHS.filter((p) => existsSync(join(cwd, p)))
+  if (presentPaths.length === 0) {
+    await applySkipWorktree(bun, cwd)
+    return
+  }
+
+  const add = bun.spawn({
+    cmd: ['git', 'add', '-f', '--', ...presentPaths],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
   })
-  // diff --cached --quiet exits 0 when no staged changes, 1 when there are.
-  // We only commit on 1 (something to commit); 0 means a no-op write.
-  if ((await diff.exited) === 0) return
+  if ((await add.exited) !== 0) {
+    // Even on add-failure, restore the flag on whatever is still tracked so we
+    // do not leave the worktree in a state where every memory file shows up
+    // as "modified" on the next manual git status.
+    await applySkipWorktree(bun, cwd)
+    return
+  }
+
+  // Enumerate exactly the files staged under our snapshot paths so the commit
+  // pathspec only references files git knows about. `git commit -- foo bar/`
+  // fails outright when `bar/` matches no tracked file, even if `foo` is
+  // staged. That's the case on early runs where MEMORY.md exists but the
+  // memory/ directory is empty (or vice versa).
+  const stagedNames = bun.spawn({
+    cmd: ['git', 'diff', '--cached', '--name-only', '-z', '--', ...SNAPSHOT_PATHS],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const stagedRaw = await new Response(stagedNames.stdout).text()
+  if ((await stagedNames.exited) !== 0) {
+    await applySkipWorktree(bun, cwd)
+    return
+  }
+  const staged = stagedRaw.split('\0').filter((p) => p.length > 0)
+  if (staged.length === 0) {
+    await applySkipWorktree(bun, cwd)
+    return
+  }
 
   const commit = bun.spawn({
-    cmd: ['git', 'commit', '-m', 'Dream', '--only', '--', 'MEMORY.md', 'memory/'],
+    cmd: ['git', 'commit', '-m', 'Dream', '--only', '--', ...staged],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
   })
   await commit.exited
+
+  // Re-set the flag after the commit lands. We re-enumerate via ls-files
+  // because this run may have first-time-tracked a brand-new daily stream
+  // file that did not exist in the index when we cleared the flag above.
+  await applySkipWorktree(bun, cwd)
+}
+
+async function listTrackedSnapshotFiles(
+  bun: { spawn: typeof Bun.spawn },
+  cwd: string,
+): Promise<string[]> {
+  const ls = bun.spawn({
+    cmd: ['git', 'ls-files', '-z', '--', ...SNAPSHOT_PATHS],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  if ((await ls.exited) !== 0) return []
+  const raw = await new Response(ls.stdout).text()
+  return raw.split('\0').filter((p) => p.length > 0)
+}
+
+async function clearSkipWorktree(bun: { spawn: typeof Bun.spawn }, cwd: string): Promise<void> {
+  const files = await listTrackedSnapshotFiles(bun, cwd)
+  if (files.length === 0) return
+  const proc = bun.spawn({
+    cmd: ['git', 'update-index', '--no-skip-worktree', '--', ...files],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  await proc.exited
+}
+
+async function applySkipWorktree(bun: { spawn: typeof Bun.spawn }, cwd: string): Promise<void> {
+  const files = await listTrackedSnapshotFiles(bun, cwd)
+  if (files.length === 0) return
+  const proc = bun.spawn({
+    cmd: ['git', 'update-index', '--skip-worktree', '--', ...files],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  await proc.exited
 }
 
 export const DREAMING_SYSTEM_PROMPT = `You are typeclaw's dreaming subagent.

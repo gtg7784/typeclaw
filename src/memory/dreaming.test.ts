@@ -3,7 +3,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createDreamingSpawner, type DreamingLogger, type DreamingSession, isDreamingPayload } from './dreaming'
+import {
+  commitMemorySnapshot,
+  createDreamingSpawner,
+  type DreamingLogger,
+  type DreamingSession,
+  isDreamingPayload,
+} from './dreaming'
 import { DREAMING_STATE_FILE, loadDreamingState } from './dreaming-state'
 
 const silentLogger: DreamingLogger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -232,5 +238,127 @@ describe('createDreamingSpawner', () => {
     const raw = await readFile(join(agentDir, DREAMING_STATE_FILE), 'utf8')
     expect(raw).toContain('2026-04-27')
     expect(raw).toContain('"lines": 1')
+  })
+})
+
+async function runGit(cwd: string, args: string[]): Promise<{ stdout: string; exitCode: number }> {
+  const proc = Bun.spawn({
+    cmd: ['git', ...args],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'test',
+      GIT_AUTHOR_EMAIL: 't@t',
+      GIT_COMMITTER_NAME: 'test',
+      GIT_COMMITTER_EMAIL: 't@t',
+    },
+  })
+  const stdout = (await new Response(proc.stdout).text()).trim()
+  const exitCode = await proc.exited
+  return { stdout, exitCode }
+}
+
+async function initRepo(cwd: string): Promise<void> {
+  await runGit(cwd, ['init', '-q', '-b', 'main'])
+  await writeFile(join(cwd, '.gitignore'), 'memory/\n')
+  await runGit(cwd, ['add', '.gitignore'])
+  await runGit(cwd, ['commit', '-qm', 'init'])
+}
+
+async function trackedFiles(cwd: string): Promise<string[]> {
+  const result = await runGit(cwd, ['ls-files', '--', 'MEMORY.md', 'memory/'])
+  return result.stdout.length === 0 ? [] : result.stdout.split('\n').sort()
+}
+
+async function porcelainStatus(cwd: string): Promise<string> {
+  const result = await runGit(cwd, ['status', '--porcelain', '--', 'MEMORY.md', 'memory/'])
+  return result.stdout
+}
+
+async function skipWorktreeFiles(cwd: string): Promise<string[]> {
+  const result = await runGit(cwd, ['ls-files', '-v', '--', 'MEMORY.md', 'memory/'])
+  if (result.stdout.length === 0) return []
+  return result.stdout
+    .split('\n')
+    .filter((line) => line.startsWith('S '))
+    .map((line) => line.slice(2))
+    .sort()
+}
+
+describe('commitMemorySnapshot', () => {
+  test('is a no-op when the directory is not a git repo', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'fragment\n')
+    await commitMemorySnapshot(agentDir)
+    expect(await trackedFiles(agentDir)).toEqual([])
+  })
+
+  test('first run: force-adds memory artifacts, commits, and sets skip-worktree on tracked files', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), '# Memory\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'fragment\n')
+
+    await commitMemorySnapshot(agentDir)
+
+    expect(await trackedFiles(agentDir)).toEqual(['MEMORY.md', 'memory/2026-04-27.md'])
+    expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md', 'memory/2026-04-27.md'])
+    expect(await porcelainStatus(agentDir)).toBe('')
+  })
+
+  test('subsequent edits to tracked memory files do not appear in git status', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), '# Memory\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'first\n')
+    await commitMemorySnapshot(agentDir)
+
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'first\nsecond\n')
+    await writeFile(join(agentDir, 'MEMORY.md'), '# Memory v2\n')
+
+    expect(await porcelainStatus(agentDir)).toBe('')
+  })
+
+  test('subsequent run still picks up worktree changes despite skip-worktree (clears flag, commits, re-sets)', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), 'v1\n')
+    await commitMemorySnapshot(agentDir)
+    expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md'])
+
+    await writeFile(join(agentDir, 'MEMORY.md'), 'v2\n')
+    await commitMemorySnapshot(agentDir)
+
+    const log = await runGit(agentDir, ['log', '--oneline', '--', 'MEMORY.md'])
+    expect(log.stdout.split('\n')).toHaveLength(2)
+    const blob = await runGit(agentDir, ['show', 'HEAD:MEMORY.md'])
+    expect(blob.stdout).toBe('v2')
+    expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md'])
+    expect(await porcelainStatus(agentDir)).toBe('')
+  })
+
+  test('a brand-new daily stream gets committed and skip-worktree-flagged on the run that first sees it', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'first day\n')
+    await commitMemorySnapshot(agentDir)
+
+    await writeFile(join(agentDir, 'memory', '2026-04-28.md'), 'second day\n')
+    await commitMemorySnapshot(agentDir)
+
+    expect(await trackedFiles(agentDir)).toEqual(['memory/2026-04-27.md', 'memory/2026-04-28.md'])
+    expect(await skipWorktreeFiles(agentDir)).toEqual(['memory/2026-04-27.md', 'memory/2026-04-28.md'])
+    expect(await porcelainStatus(agentDir)).toBe('')
+  })
+
+  test('no-op run (nothing changed since last commit) leaves the flag set so status stays clean', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), 'stable\n')
+    await commitMemorySnapshot(agentDir)
+    const firstHead = (await runGit(agentDir, ['rev-parse', 'HEAD'])).stdout
+
+    await commitMemorySnapshot(agentDir)
+    const secondHead = (await runGit(agentDir, ['rev-parse', 'HEAD'])).stdout
+
+    expect(secondHead).toBe(firstHead)
+    expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md'])
+    expect(await porcelainStatus(agentDir)).toBe('')
   })
 })
