@@ -7,7 +7,9 @@ export type AdapterId = (typeof ADAPTER_IDS)[number]
 const allowRuleSchema = z
   .string()
   .min(1)
-  .refine(isValidAllowRule, { message: 'allow rule must be one of: *, guild:*, guild:<id>, guild:<id>/<channel>, channel:<id>, dm:*, dm:<id>' })
+  .refine(isValidAllowRule, {
+    message: 'allow rule must be one of: *, guild:*, guild:<id>, guild:<id>/<channel>, channel:<id>, dm:*, dm:<id>',
+  })
 
 const engagementTriggerSchema = z.enum(['mention', 'reply', 'dm'])
 
@@ -15,7 +17,11 @@ const stickinessSchema = z.union([
   z.literal('off'),
   z.object({
     perReply: z.object({
-      window: z.number().int().min(1).max(24 * 60 * 60_000),
+      window: z
+        .number()
+        .int()
+        .min(1)
+        .max(24 * 60 * 60_000),
     }),
   }),
 ])

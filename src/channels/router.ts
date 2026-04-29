@@ -3,12 +3,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 import { createSession, type AgentSession } from '@/agent'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 
-import {
-  decideEngagement,
-  grantStickyForReplyTargets,
-  StickyLedger,
-  type EngagementDecision,
-} from './engagement'
+import { decideEngagement, grantStickyForReplyTargets, StickyLedger, type EngagementDecision } from './engagement'
 import { updateParticipants } from './participants'
 import {
   channelsSessionsPath,
@@ -17,7 +12,7 @@ import {
   saveChannelSessions,
   type ChannelSessionRecord,
 } from './persistence'
-import type { ChannelAdapterConfig, ChannelsConfig } from './schema'
+import type { ChannelAdapterConfig } from './schema'
 import type { ChannelKey, InboundMessage, OutboundCallback, OutboundMessage, SendResult } from './types'
 import { channelKeyId } from './types'
 
@@ -398,9 +393,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return { ok: false, error: `no adapter registered for "${msg.adapter}"` }
     }
 
+    // Snapshot the callbacks before iterating so a callback that mutates the
+    // set (e.g. unregisters mid-send) does not cause the iterator to skip
+    // siblings or trip into surprising behavior.
+    const snapshot = Array.from(callbacks)
     let lastError: string | undefined
     let delivered = false
-    for (const cb of [...callbacks]) {
+    for (const cb of snapshot) {
       const result = await cb(msg)
       if (result.ok) {
         delivered = true

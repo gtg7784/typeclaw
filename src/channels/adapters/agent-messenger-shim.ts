@@ -6,10 +6,7 @@
 // index.d.ts`. Drop this file and import directly from
 // 'agent-messenger/discordbot' in adapters/discord-bot.ts.
 
-import {
-  DiscordBotClient as RawClient,
-  DiscordBotListener as RawListener,
-} from 'agent-messenger/discordbot'
+import { DiscordBotClient as RawClient, DiscordBotListener as RawListener } from 'agent-messenger/discordbot'
 
 export type DiscordMessage = {
   id: string
@@ -52,11 +49,7 @@ export type DiscordBotListenerEventMap = {
 
 export interface DiscordBotClient {
   login(credentials?: { token: string }): Promise<this>
-  sendMessage(
-    channelId: string,
-    content: string,
-    options?: { thread_id?: string },
-  ): Promise<DiscordMessage>
+  sendMessage(channelId: string, content: string, options?: { thread_id?: string }): Promise<DiscordMessage>
 }
 
 export interface DiscordBotListener {

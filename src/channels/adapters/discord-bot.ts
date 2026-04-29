@@ -1,12 +1,8 @@
-import {
-  DiscordBotClient,
-  DiscordBotListener,
-  type DiscordGatewayMessageCreateEvent,
-} from './agent-messenger-shim'
-
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { OutboundCallback, OutboundMessage, SendResult } from '@/channels/types'
+
+import { DiscordBotClient, DiscordBotListener, type DiscordGatewayMessageCreateEvent } from './agent-messenger-shim'
 
 const TYPING_INTERVAL_MS = 8000
 

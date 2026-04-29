@@ -52,9 +52,7 @@ export function createChannelSendTool({ router }: CreateChannelSendToolOptions) 
         text: params.text,
       })
 
-      const details: { ok: boolean; error?: string } = result.ok
-        ? { ok: true }
-        : { ok: false, error: result.error }
+      const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
       const text = result.ok
         ? `posted to ${params.adapter}:${params.workspace}/${params.chat}`
         : `channel_send denied: ${result.error}`

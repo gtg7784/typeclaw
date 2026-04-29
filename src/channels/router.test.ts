@@ -1,14 +1,13 @@
+import { describe, expect, test } from 'bun:test'
 import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, test } from 'bun:test'
-
 import type { AgentSession } from '@/agent'
 
+import { loadChannelSessions } from './persistence'
 import { createChannelRouter, type ChannelRouter } from './router'
 import type { ChannelAdapterConfig } from './schema'
-import { loadChannelSessions } from './persistence'
 import type { ChannelKey, InboundMessage } from './types'
 
 class FakeSession {

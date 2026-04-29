@@ -15,5 +15,6 @@ mounts/
 # memory/ via the dreaming subagent). Treat them as runtime-owned, not agent-owned.
 sessions/
 memory/
+channels/
 `
 }

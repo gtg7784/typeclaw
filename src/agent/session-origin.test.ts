@@ -78,7 +78,13 @@ describe('renderSessionOrigin', () => {
   test('channel origin sorts participants by recency descending', () => {
     const now = Date.now()
     const participants: ChannelParticipant[] = [
-      { authorId: '1', authorName: 'older', firstMessageAt: now - 100_000, lastMessageAt: now - 100_000, messageCount: 1 },
+      {
+        authorId: '1',
+        authorName: 'older',
+        firstMessageAt: now - 100_000,
+        lastMessageAt: now - 100_000,
+        messageCount: 1,
+      },
       { authorId: '2', authorName: 'newer', firstMessageAt: now - 1000, lastMessageAt: now - 1000, messageCount: 1 },
     ]
     const out = renderSessionOrigin(

@@ -135,7 +135,7 @@ function renderParticipants(participants: readonly ChannelParticipant[], now: nu
     'of everyone who ever spoke here.',
     '',
     "If a sender in the current turn isn't in the list, you can still",
-    'address them — `<@authorId>` works for any author you\'ve seen, even',
+    "address them — `<@authorId>` works for any author you've seen, even",
     'once. The list is a convenience for "who\'s been around lately,"',
     'not an exhaustive directory.',
   )

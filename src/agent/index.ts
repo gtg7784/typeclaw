@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { createAgentSession, DefaultResourceLoader, SessionManager } from '@mariozechner/pi-coding-agent'
 import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent'
 
+import type { ChannelRouter } from '@/channels/router'
 import { getConfig, resolveModel } from '@/config'
 import type {
   BuiltinToolRef,
@@ -17,8 +18,6 @@ import type {
 import { materializeSkills } from '@/plugin'
 import type { ReloadRegistry } from '@/reload'
 import type { Stream } from '@/stream'
-
-import type { ChannelRouter } from '@/channels/router'
 
 import { getAuth } from './auth'
 import { resolveBuiltinToolRefs, wrapPluginTool } from './plugin-tools'

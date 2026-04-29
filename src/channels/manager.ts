@@ -46,10 +46,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   }
   const live = new Map<keyof ChannelsConfig, AdapterEntry>()
 
-  const startAdapter = async (
-    name: 'discord-bot',
-    cfg: ChannelAdapterConfig,
-  ): Promise<boolean> => {
+  const startAdapter = async (name: 'discord-bot', cfg: ChannelAdapterConfig): Promise<boolean> => {
     if (cfg.enabled === false) {
       logger.info(`[channels] adapter "${name}" is disabled; skipping`)
       return false

@@ -164,22 +164,16 @@ describe('grantStickyForReplyTargets', () => {
 
   test('does not grant when stickiness is off', () => {
     const ledger = new StickyLedger()
-    grantStickyForReplyTargets(
-      ledger,
-      KEY,
-      ['alice'],
-      { trigger: ['mention'], stickiness: 'off' },
-      1000,
-    )
+    grantStickyForReplyTargets(ledger, KEY, ['alice'], { trigger: ['mention'], stickiness: 'off' }, 1000)
     expect(ledger.has(KEY, 'alice', 1000)).toBe(false)
   })
 
   test('granted credit expires after the configured window', () => {
     const ledger = new StickyLedger()
     grantStickyForReplyTargets(ledger, KEY, ['alice'], baseConfig, 0)
-    expect(ledger.has(KEY, 'alice', baseConfig.stickiness === 'off' ? 0 : baseConfig.stickiness.perReply.window - 1)).toBe(
-      true,
-    )
+    expect(
+      ledger.has(KEY, 'alice', baseConfig.stickiness === 'off' ? 0 : baseConfig.stickiness.perReply.window - 1),
+    ).toBe(true)
     expect(
       ledger.has(KEY, 'alice', baseConfig.stickiness === 'off' ? 0 : baseConfig.stickiness.perReply.window + 1),
     ).toBe(false)

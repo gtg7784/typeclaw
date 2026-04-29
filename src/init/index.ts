@@ -44,6 +44,7 @@ export type HatchRunner = (options: { cwd: string; port: number }) => Promise<Ha
 export type InitOptions = {
   cwd: string
   apiKey: string
+  discordBotToken?: string
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
 }
@@ -51,14 +52,15 @@ export type InitOptions = {
 export async function runInit({
   cwd,
   apiKey,
+  discordBotToken,
   onProgress,
   runHatching = defaultRunHatching,
 }: InitOptions): Promise<void> {
   const emit = onProgress ?? (() => {})
 
   emit({ step: 'scaffold', phase: 'start' })
-  await scaffold(cwd)
-  await writeSecrets(cwd, { fireworksApiKey: apiKey })
+  await scaffold(cwd, { withChannels: discordBotToken !== undefined && discordBotToken !== '' })
+  await writeSecrets(cwd, { fireworksApiKey: apiKey, discordBotToken })
   emit({ step: 'scaffold', phase: 'done' })
 
   emit({ step: 'install', phase: 'start' })
@@ -173,12 +175,14 @@ export async function isHatched(dir: string): Promise<boolean> {
   }
 }
 
-export async function scaffold(root: string): Promise<void> {
+export type ScaffoldOptions = { withChannels?: boolean }
+
+export async function scaffold(root: string, options: ScaffoldOptions = {}): Promise<void> {
   await Promise.all(DIRECTORIES.map((dir) => mkdir(join(root, dir), { recursive: true })))
 
   // TODO: hardcoded model. Mirror src/config/index.ts until the config loader
   // and provider registry exist (TypeClaw.md Phase 1 + Phase 4).
-  const config = {
+  const config: Record<string, unknown> = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
     mounts: [],
@@ -186,6 +190,11 @@ export async function scaffold(root: string): Promise<void> {
       idleMs: 30_000,
       dreaming: { schedule: '0 4 * * *' },
     },
+  }
+  if (options.withChannels) {
+    config.channels = {
+      'discord-bot': { allow: ['*'] },
+    }
   }
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 
@@ -339,10 +348,17 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
 
 // TODO: generalize to arbitrary provider secrets and switch to secrets.json
 // (per TypeClaw.md spec) once the provider registry exists. Currently hardcoded
-// to FIREWORKS_API_KEY in .env to match src/agent/auth.ts.
-export async function writeSecrets(root: string, { fireworksApiKey }: { fireworksApiKey: string }): Promise<void> {
-  const content = `FIREWORKS_API_KEY=${fireworksApiKey}\n`
-  await writeFile(join(root, SECRETS_FILE), content)
+// to FIREWORKS_API_KEY in .env to match src/agent/auth.ts. Optional channel
+// adapter tokens (DISCORD_BOT_TOKEN) are appended when provided.
+export async function writeSecrets(
+  root: string,
+  { fireworksApiKey, discordBotToken }: { fireworksApiKey: string; discordBotToken?: string },
+): Promise<void> {
+  const lines = [`FIREWORKS_API_KEY=${fireworksApiKey}`]
+  if (discordBotToken !== undefined && discordBotToken !== '') {
+    lines.push(`DISCORD_BOT_TOKEN=${discordBotToken}`)
+  }
+  await writeFile(join(root, SECRETS_FILE), `${lines.join('\n')}\n`)
 }
 
 function ignoreExists(error: NodeJS.ErrnoException): void {

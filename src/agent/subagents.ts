@@ -61,7 +61,11 @@ export type CreateSessionForSubagent = (
 export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subagent, options) =>
   createSession({
     systemPromptOverride: subagent.systemPrompt,
-    origin: { kind: 'subagent', subagent: options?.name ?? '<unknown>', parentSessionId: options?.parentSessionId ?? '<unknown>' },
+    origin: {
+      kind: 'subagent',
+      subagent: options?.name ?? '<unknown>',
+      parentSessionId: options?.parentSessionId ?? '<unknown>',
+    },
     ...(subagent.tools ? { tools: subagent.tools } : {}),
     customTools: subagent.customTools ?? [],
   })
@@ -97,9 +101,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
   }
 
   const runSession: RunSession = async (override) => {
-    const { session, dispose } = normalizeSubagentSession(
-      await createSessionForSubagent(subagent, sessionOptions),
-    )
+    const { session, dispose } = normalizeSubagentSession(await createSessionForSubagent(subagent, sessionOptions))
     try {
       await session.prompt(override?.userPrompt ?? options.userPrompt)
     } finally {

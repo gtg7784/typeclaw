@@ -40,3 +40,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Sisyphus working files (plans, scratchpads)
 .sisyphus
 
+# Local agent state created by tests / dev runs
+sessions/
+memory/
+channels/
+

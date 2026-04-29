@@ -1,8 +1,7 @@
+import { describe, expect, test } from 'bun:test'
 import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-
-import { describe, expect, test } from 'bun:test'
 
 import {
   channelsSessionsPath,
@@ -98,9 +97,7 @@ describe('saveChannelSessions', () => {
         chat: 'c1',
         thread: null,
         sessionId: 'ses_abc',
-        participants: [
-          { authorId: 'u1', authorName: 'alice', firstMessageAt: 1, lastMessageAt: 2, messageCount: 3 },
-        ],
+        participants: [{ authorId: 'u1', authorName: 'alice', firstMessageAt: 1, lastMessageAt: 2, messageCount: 3 }],
       },
     ]
     await saveChannelSessions(dir, records, silentLogger)
