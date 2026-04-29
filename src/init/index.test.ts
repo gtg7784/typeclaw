@@ -10,6 +10,7 @@ import * as z from 'zod'
 import { configSchema } from '@/config/config'
 
 import {
+  findAgentDir,
   type HatchingResult,
   type HatchRunner,
   initGitRepo,
@@ -274,6 +275,49 @@ describe('isInitialized', () => {
   test('returns true when typeclaw.json exists', async () => {
     await writeFile(join(root, 'typeclaw.json'), '{}')
     expect(isInitialized(root)).toBe(true)
+  })
+})
+
+describe('findAgentDir', () => {
+  test('returns the dir itself when it contains typeclaw.json', async () => {
+    await writeFile(join(root, 'typeclaw.json'), '{}')
+    expect(findAgentDir(root)).toBe(root)
+  })
+
+  test('walks up to a parent that contains typeclaw.json', async () => {
+    await writeFile(join(root, 'typeclaw.json'), '{}')
+    const sub = join(root, 'workspace', 'sub')
+    await mkdir(sub, { recursive: true })
+
+    expect(findAgentDir(sub)).toBe(root)
+  })
+
+  test('resolves to the agent root even when the agent root has .git (since typeclaw.json is checked first at each level)', async () => {
+    await writeFile(join(root, 'typeclaw.json'), '{}')
+    await mkdir(join(root, '.git'))
+    const sub = join(root, 'workspace')
+    await mkdir(sub)
+
+    expect(findAgentDir(sub)).toBe(root)
+  })
+
+  test('returns null when a .git boundary is hit before any typeclaw.json', async () => {
+    // given: an outer parent has typeclaw.json, but an inner project introduces .git first.
+    await writeFile(join(root, 'typeclaw.json'), '{}')
+    const inner = join(root, 'unrelated-project')
+    await mkdir(join(inner, '.git'), { recursive: true })
+    const sub = join(inner, 'src')
+    await mkdir(sub, { recursive: true })
+
+    expect(findAgentDir(sub)).toBeNull()
+  })
+
+  test('returns null when no typeclaw.json exists up to the filesystem root', () => {
+    expect(findAgentDir(root)).toBeNull()
+  })
+
+  test('returns null for a nonexistent start directory', () => {
+    expect(findAgentDir(join(root, 'does-not-exist'))).toBeNull()
   })
 })
 
