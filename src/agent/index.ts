@@ -2,7 +2,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { createAgentSession, DefaultResourceLoader, SessionManager } from '@mariozechner/pi-coding-agent'
-import type { AgentSession } from '@mariozechner/pi-coding-agent'
+import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent'
 
 import { getConfig, resolveModel } from '@/config'
 import type { ReloadRegistry } from '@/reload'
@@ -19,16 +19,26 @@ import { websearchTool } from './tools/websearch'
 
 export type { AgentSession }
 
+type AgentSessionTools = NonNullable<Parameters<typeof createAgentSession>[0]>['tools']
+
 export type CreateSessionOptions = {
   reloadRegistry?: ReloadRegistry
   sessionManager?: SessionManager
   stream?: Stream
+  // Bypass the file-based resource loader (IDENTITY.md, SOUL.md, MEMORY.md,
+  // memory/, bundled skills) and use this string verbatim as the system prompt.
+  systemPromptOverride?: string
+  tools?: AgentSessionTools
+  customTools?: ToolDefinition[]
 }
 
 export async function createSession(options: CreateSessionOptions = {}): Promise<AgentSession> {
   const { authStorage, modelRegistry } = getAuth()
-  const resourceLoader = await createResourceLoader()
-  const customTools = [
+  const resourceLoader =
+    options.systemPromptOverride !== undefined
+      ? await createOverrideResourceLoader(options.systemPromptOverride)
+      : await createResourceLoader()
+  const customTools = options.customTools ?? [
     websearchTool,
     webfetchTool,
     ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
@@ -41,9 +51,19 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
     authStorage,
     modelRegistry,
     resourceLoader,
+    ...(options.tools ? { tools: options.tools } : {}),
     customTools,
   })
   return session
+}
+
+export async function createOverrideResourceLoader(systemPrompt: string): Promise<DefaultResourceLoader> {
+  const loader = new DefaultResourceLoader({
+    systemPromptOverride: () => systemPrompt,
+    appendSystemPromptOverride: () => [],
+  })
+  await loader.reload()
+  return loader
 }
 
 export async function createResourceLoader(options: { agentDir?: string } = {}): Promise<DefaultResourceLoader> {

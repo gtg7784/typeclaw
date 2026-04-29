@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createResourceLoader, getBundledSkillsDir } from './index'
+import { createOverrideResourceLoader, createResourceLoader, getBundledSkillsDir } from './index'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
 
 let agentDir: string
@@ -129,6 +129,33 @@ describe('createResourceLoader', () => {
     const browserSkill = skills.find((s) => s.name === 'agent-browser')
     expect(browserSkill).toBeDefined()
     expect(browserSkill?.description.length).toBeGreaterThan(0)
+  })
+})
+
+describe('createOverrideResourceLoader', () => {
+  test('uses the override string verbatim as the system prompt', async () => {
+    // when
+    const loader = await createOverrideResourceLoader('SUBAGENT PROMPT')
+
+    // then
+    expect(loader.getSystemPrompt()).toBe('SUBAGENT PROMPT')
+  })
+
+  test('does not include the typeclaw default system prompt', async () => {
+    // when
+    const loader = await createOverrideResourceLoader('SUBAGENT PROMPT')
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain(DEFAULT_SYSTEM_PROMPT)
+  })
+
+  test('does not append SYSTEM.md files discovered by pi defaults', async () => {
+    // when
+    const loader = await createOverrideResourceLoader('SUBAGENT PROMPT')
+
+    // then
+    expect(loader.getAppendSystemPrompt()).toEqual([])
   })
 })
 
