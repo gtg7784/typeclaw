@@ -1,6 +1,8 @@
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import type { z } from 'zod'
 
+import type { Stream, Unsubscribe } from '@/stream'
+
 import { type AgentSession, createSession } from './index'
 
 type AgentSessionTools = NonNullable<Parameters<typeof createSession>[0]>['tools']
@@ -88,5 +90,91 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
     await subagent.handler(ctx, runSession)
   } else {
     await runSession()
+  }
+}
+
+export type SubagentConsumerLogger = {
+  info: (msg: string) => void
+  warn: (msg: string) => void
+  error: (msg: string) => void
+}
+
+export type SubagentInFlightKey = (subagent: string, payload: unknown) => string
+
+export type CreateSubagentConsumerOptions = {
+  stream: Stream
+  registry: SubagentRegistry
+  agentDir: string
+  createSessionForSubagent?: CreateSessionForSubagent
+  // Coalescing key. Default uses the subagent name alone, so the same subagent
+  // cannot run concurrently. Override to allow per-payload concurrency (e.g.
+  // memory-logger keyed by parentSessionId so different sessions run in parallel
+  // while the same session deduplicates).
+  inFlightKey?: SubagentInFlightKey
+  logger?: SubagentConsumerLogger
+}
+
+export type SubagentConsumer = {
+  start: () => void
+  stop: () => void
+  inFlightCount: () => number
+}
+
+const consoleLogger: SubagentConsumerLogger = {
+  info: (m) => console.log(m),
+  warn: (m) => console.warn(m),
+  error: (m) => console.error(m),
+}
+
+export function createSubagentConsumer({
+  stream,
+  registry,
+  agentDir,
+  createSessionForSubagent,
+  inFlightKey = (name) => name,
+  logger = consoleLogger,
+}: CreateSubagentConsumerOptions): SubagentConsumer {
+  const inFlight = new Set<string>()
+  let unsubscribe: Unsubscribe | null = null
+
+  return {
+    start() {
+      if (unsubscribe !== null) return
+      unsubscribe = stream.subscribe({ target: { kind: 'new-session' } }, async (msg) => {
+        const target = msg.target as { kind: 'new-session'; subagent: string }
+        const name = target.subagent
+        if (registry[name] === undefined) {
+          logger.warn(`[subagent] no registered subagent "${name}", ignoring ${msg.id}`)
+          return
+        }
+        const key = inFlightKey(name, msg.payload)
+        if (inFlight.has(key)) {
+          logger.warn(`[subagent] ${key}: previous run still in progress, skipping`)
+          return
+        }
+        inFlight.add(key)
+        try {
+          await invokeSubagent(name, {
+            registry,
+            ...(createSessionForSubagent !== undefined ? { createSessionForSubagent } : {}),
+            agentDir,
+            userPrompt: '',
+            payload: msg.payload,
+          })
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err)
+          logger.error(`[subagent] ${key} failed: ${message}`)
+        } finally {
+          inFlight.delete(key)
+        }
+      })
+    },
+    stop() {
+      unsubscribe?.()
+      unsubscribe = null
+    },
+    inFlightCount() {
+      return inFlight.size
+    },
   }
 }

@@ -1,9 +1,10 @@
 import { describe, expect, test } from 'bun:test'
-
 import { z } from 'zod'
 
+import { createStream } from '@/stream'
+
 import type { AgentSession } from './index'
-import { invokeSubagent, type Subagent, validateSubagentPayload } from './subagents'
+import { createSubagentConsumer, invokeSubagent, type Subagent, validateSubagentPayload } from './subagents'
 
 function fakeSession(): { session: AgentSession; calls: { prompt: string[]; disposed: number } } {
   const calls = { prompt: [] as string[], disposed: 0 }
@@ -235,5 +236,189 @@ describe('invokeSubagent', () => {
       }),
     ).rejects.toThrow(/boom/)
     expect(calls.disposed).toBe(1)
+  })
+})
+
+describe('createSubagentConsumer', () => {
+  const silent = { info: () => {}, warn: () => {}, error: () => {} }
+
+  function fakeAgentSession(prompts: string[]): AgentSession {
+    return {
+      prompt: async (text: string) => {
+        prompts.push(text)
+      },
+      dispose: () => {},
+    } as unknown as AgentSession
+  }
+
+  test('dispatches a new-session message to the registered subagent handler', async () => {
+    // given
+    const stream = createStream()
+    const handlerCalls: { payload: unknown }[] = []
+    const registry = {
+      greeter: {
+        systemPrompt: 'X',
+        payloadSchema: z.object({ who: z.string() }),
+        handler: async (ctx) => {
+          handlerCalls.push({ payload: ctx.payload })
+        },
+      } satisfies Subagent<{ who: string }>,
+    }
+    const consumer = createSubagentConsumer({
+      stream,
+      registry,
+      agentDir: '/agent',
+      createSessionForSubagent: async () => fakeAgentSession([]),
+      logger: silent,
+    })
+    consumer.start()
+
+    // when
+    stream.publish({ target: { kind: 'new-session', subagent: 'greeter' }, payload: { who: 'neo' } })
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(handlerCalls).toEqual([{ payload: { who: 'neo' } }])
+
+    consumer.stop()
+  })
+
+  test('warns and ignores messages for unregistered subagent names', async () => {
+    // given
+    const stream = createStream()
+    const warnings: string[] = []
+    const consumer = createSubagentConsumer({
+      stream,
+      registry: {},
+      agentDir: '/agent',
+      logger: { ...silent, warn: (m) => warnings.push(m) },
+    })
+    consumer.start()
+
+    // when
+    stream.publish({ target: { kind: 'new-session', subagent: 'no-such-thing' }, payload: null })
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(warnings.some((w) => /no registered subagent/.test(w))).toBe(true)
+
+    consumer.stop()
+  })
+
+  test('coalesces concurrent invocations using inFlightKey', async () => {
+    // given: a slow subagent and an inFlightKey that ignores payload, so two
+    // concurrent messages collapse into one execution.
+    const stream = createStream()
+    const handlerCalls: number[] = []
+    let resolveFirst: (() => void) = () => {}
+    const registry = {
+      slow: {
+        systemPrompt: 'X',
+        handler: async () => {
+          handlerCalls.push(1)
+          await new Promise<void>((r) => {
+            resolveFirst = r
+          })
+        },
+      } satisfies Subagent,
+    }
+    const warnings: string[] = []
+    const consumer = createSubagentConsumer({
+      stream,
+      registry,
+      agentDir: '/agent',
+      createSessionForSubagent: async () => fakeAgentSession([]),
+      inFlightKey: (name) => name,
+      logger: { ...silent, warn: (m) => warnings.push(m) },
+    })
+    consumer.start()
+
+    // when: two messages fire while the first is still running
+    stream.publish({ target: { kind: 'new-session', subagent: 'slow' }, payload: undefined })
+    await new Promise((r) => setImmediate(r))
+    stream.publish({ target: { kind: 'new-session', subagent: 'slow' }, payload: undefined })
+    await new Promise((r) => setImmediate(r))
+
+    // then: only one handler call so far; the second was coalesced
+    expect(handlerCalls).toEqual([1])
+    expect(warnings.some((w) => /previous run still in progress/.test(w))).toBe(true)
+
+    resolveFirst()
+    await new Promise((r) => setImmediate(r))
+    consumer.stop()
+  })
+
+  test('different inFlightKey buckets allow concurrent execution', async () => {
+    // given
+    const stream = createStream()
+    const concurrent: string[] = []
+    let releaseGate: (() => void) = () => {}
+    const gate = new Promise<void>((r) => {
+      releaseGate = r
+    })
+    const registry = {
+      bucketed: {
+        systemPrompt: 'X',
+        payloadSchema: z.object({ id: z.string() }),
+        handler: async (ctx) => {
+          concurrent.push(`start:${ctx.payload.id}`)
+          await gate
+          concurrent.push(`end:${ctx.payload.id}`)
+        },
+      } satisfies Subagent<{ id: string }>,
+    }
+    const consumer = createSubagentConsumer({
+      stream,
+      registry,
+      agentDir: '/agent',
+      createSessionForSubagent: async () => fakeAgentSession([]),
+      inFlightKey: (name, payload) => `${name}:${(payload as { id: string }).id}`,
+      logger: silent,
+    })
+    consumer.start()
+
+    // when: two messages with different IDs fire while the first is gated
+    stream.publish({ target: { kind: 'new-session', subagent: 'bucketed' }, payload: { id: 'a' } })
+    stream.publish({ target: { kind: 'new-session', subagent: 'bucketed' }, payload: { id: 'b' } })
+    await new Promise((r) => setImmediate(r))
+
+    // then: both handlers started before either finished
+    expect(concurrent.filter((s) => s.startsWith('start:'))).toEqual(['start:a', 'start:b'])
+
+    releaseGate()
+    await new Promise((r) => setImmediate(r))
+    consumer.stop()
+  })
+
+  test('removes inFlight entry when handler throws', async () => {
+    // given
+    const stream = createStream()
+    const errors: string[] = []
+    const registry = {
+      explodes: {
+        systemPrompt: 'X',
+        handler: async () => {
+          throw new Error('boom')
+        },
+      } satisfies Subagent,
+    }
+    const consumer = createSubagentConsumer({
+      stream,
+      registry,
+      agentDir: '/agent',
+      createSessionForSubagent: async () => fakeAgentSession([]),
+      logger: { ...silent, error: (m) => errors.push(m) },
+    })
+    consumer.start()
+
+    // when
+    stream.publish({ target: { kind: 'new-session', subagent: 'explodes' }, payload: undefined })
+    await new Promise((r) => setImmediate(r))
+
+    // then: the error was logged and inFlight is now empty
+    expect(errors.some((e) => /boom/.test(e))).toBe(true)
+    expect(consumer.inFlightCount()).toBe(0)
+
+    consumer.stop()
   })
 })
