@@ -37,7 +37,6 @@ import { createStream, type Stream } from '@/stream'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
 
 import memoryPlugin from '../../plugins/memory'
-
 import { createPluginRuntime, type PluginRuntime, type PluginSubagentEntry } from './plugin-runtime'
 
 const BUNDLED_PLUGINS: ResolvedPlugin[] = [

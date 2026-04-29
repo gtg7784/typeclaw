@@ -14,7 +14,7 @@ export function createReloadTool({ registry }: CreateReloadToolOptions) {
     description:
       'Reload typeclaw subsystems whose on-disk source has changed. Each reloadable is ' +
       'all-or-nothing: invalid input leaves its live state unchanged and the failure reason is ' +
-      'reported in that scope\'s result. Boot-only config fields (port, mounts, memory.idleMs) ' +
+      "reported in that scope's result. Boot-only config fields (port, mounts, memory.idleMs) " +
       'are reported as restart-required. Safe to call any time. ' +
       'Without a scope arg, runs every registered reloadable in registration order so later ' +
       'scopes observe earlier swaps (e.g. cron sees a freshly-loaded plugins registry). ' +
