@@ -18,12 +18,15 @@ import { materializeSkills } from '@/plugin'
 import type { ReloadRegistry } from '@/reload'
 import type { Stream } from '@/stream'
 
+import type { ChannelRouter } from '@/channels/router'
+
 import { getAuth } from './auth'
 import { resolveBuiltinToolRefs, wrapPluginTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { renderSessionOrigin, type SessionOrigin } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
+import { createChannelSendTool } from './tools/channel-send'
 import { createStreamSnapshotTool } from './tools/stream-snapshot'
 import { webfetchTool } from './tools/webfetch'
 import { websearchTool } from './tools/websearch'
@@ -52,6 +55,7 @@ export type CreateSessionOptions = {
   reloadRegistry?: ReloadRegistry
   sessionManager?: SessionManager
   stream?: Stream
+  channelRouter?: ChannelRouter
   // Bypass the file-based resource loader (IDENTITY.md, SOUL.md, MEMORY.md,
   // memory/, bundled skills) and use this string verbatim as the system prompt.
   systemPromptOverride?: string
@@ -119,6 +123,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             webfetchTool,
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
+            ...(options.channelRouter ? [createChannelSendTool({ router: options.channelRouter })] : []),
             ...pluginCustomTools,
           ]
 
