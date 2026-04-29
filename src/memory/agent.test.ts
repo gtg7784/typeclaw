@@ -57,35 +57,47 @@ describe('memory module', () => {
 })
 
 describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
-  test('defines the three certainty levels', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('certainty=explicit')
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('certainty=deductive')
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('certainty=inductive')
+  test('declares the fragment marker format with source and entry attributes', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/<!-- fragment source=.+ entry=.+ -->/)
   })
 
-  test('requires verbatim quotes for explicit fragments', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('verbatim quote')
+  test('requires the Claim / Evidence / Implication body structure', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('**Claim:**')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('**Evidence:**')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('**Implication:**')
   })
 
-  test('requires two or more sources for inductive fragments', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(
-      /two or more separate occurrences|≥2.*sources|two.*sources/,
-    )
+  test('makes Implication a hard gate (no Implication, no fragment)', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/implication.*drop it|no implication|behavior-changing/)
   })
 
-  test('bans speculation language explicitly by listing the forbidden words', () => {
-    const banned = ['likely', 'probably', 'enjoys', 'loves', 'tends to', 'is interested in']
-    for (const word of banned) {
-      expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain(word)
-    }
+  test('instructs the writer to read existing memory before writing', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/read.*MEMORY\.md/i)
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('dedupe')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('strengthen')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('contradict')
   })
 
-  test('states the default-skip stance', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/default is to write nothing|bar is high/)
+  test('frames both over-writing and under-writing as failure modes', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('over-writing')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('under-writing')
   })
 
-  test('states that the marker format requires a certainty attribute', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/fragment source=.+ entry=.+ certainty=/)
+  test('requires that evidence accompanies every claim', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/evidence is mandatory|no claim without evidence/)
+  })
+
+  test('forbids promoting session behavior to stable preference without explicit evidence', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/behavior to preference|session-level behavior/)
+  })
+
+  test('forbids speculation about emotions and motives', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/speculate.*emotion|emotions or motives/)
+  })
+
+  test('declares a watermark contract that handles the zero-fragment case', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('watermark')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/zero fragments|even when you write zero/)
   })
 })
 
@@ -197,6 +209,33 @@ describe('memoryLoggerSubagent', () => {
 
     // then
     expect(promptCalls[0]!.toLowerCase()).toMatch(/bare watermark|advance the watermark/)
+  })
+
+  test('handler points the subagent at MEMORY.md so it can read existing memory first', async () => {
+    // given
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+    const promptCalls: string[] = []
+    const session = {
+      prompt: async (text: string) => {
+        promptCalls.push(text)
+      },
+      dispose: () => {},
+    } as unknown as AgentSession
+
+    // when
+    await invokeSubagent('memory-logger', {
+      registry: { 'memory-logger': memoryLoggerSubagent },
+      createSessionForSubagent: async () => session,
+      agentDir,
+      userPrompt: 'unused',
+      payload: { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+    })
+
+    // then
+    expect(promptCalls[0]!).toContain(join(agentDir, 'MEMORY.md'))
+    expect(promptCalls[0]!).toMatch(/read MEMORY\.md/i)
   })
 
   test('handler indicates "no prior watermark" when none exists', async () => {
