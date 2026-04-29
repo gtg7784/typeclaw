@@ -43,7 +43,6 @@ export const init = defineCommand({
     }
 
     // TODO: add remaining wizard steps from TypeClaw.md once their runtime lands:
-    //   - run method (Docker / launchctl) — Phase 3
     //   - git backup (url + PAT) — Phase 10
     //   - cron.json scaffolding — Phase 9
     //   - compose.yml registration in $HOME/.typeclaw — Phase 12

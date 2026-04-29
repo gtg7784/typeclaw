@@ -176,4 +176,4 @@ Never echo, log, or commit values from `.env`. `.env` is gitignored by default �
 - **Cron jobs** (`cron.json`) — see the `typeclaw-cron` skill.
 - **Identity, soul, persona** (`IDENTITY.md`, `SOUL.md`, `USER.md`, `MEMORY.md`, `AGENTS.md`) — these are not runtime config; they are _you_. Edit them directly when relevant; no skill needed.
 - **Skills themselves** (`.agents/skills/`, `skills/`) — these are loaded from disk by the runtime; they are not driven by `typeclaw.json`.
-- **Docker / launchctl wiring** — that is host-stage, controlled by `Dockerfile` and the `typeclaw start` launcher, not by `typeclaw.json`.
+- **Docker wiring** — that is host-stage, controlled by `Dockerfile` and the `typeclaw start` launcher, not by `typeclaw.json`.

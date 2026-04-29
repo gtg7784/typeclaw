@@ -65,7 +65,6 @@ export async function runInit({
   const install = await runBunInstall(cwd)
   emit({ step: 'install', phase: 'done', result: install })
 
-  // TODO: supports Docker/launchctl/...
   emit({ step: 'dockerfile', phase: 'start' })
   const docker = await writeDockerAssets(cwd)
   emit({ step: 'dockerfile', phase: 'done', result: docker })

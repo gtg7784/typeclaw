@@ -12,7 +12,7 @@ Where you are when you run `bun test` or `bun run typecheck` on the typeclaw sou
 
 Where an end user lives once they run `typeclaw init`. Their cwd is an agent folder (e.g. `~/coder/`), which holds `typeclaw.json`, `.env`, `package.json` with `typeclaw` as a dependency, markdown files, a truly-ignored `workspace/` (the agent's free-write zone), and `sessions/` + `memory/` — both gitignored at the agent's level but force-committed by TypeClaw itself (auto-backup for sessions, dreaming subagent for memory). Commands that run here are **launchers**, not the agent itself:
 
-- `typeclaw start` — spawn the container (`docker run`) or load the service (`launchctl load`) configured in `typeclaw.json`.
+- `typeclaw start` — spawn the container (`docker run`) configured in `typeclaw.json`.
 - `typeclaw stop` — stop it.
 - `typeclaw restart` — `stop` then `start` with the same flags as `start`.
 - `typeclaw tui` — attach a TUI client over a websocket to a running agent.
@@ -20,11 +20,11 @@ Where an end user lives once they run `typeclaw init`. Their cwd is an agent fol
 
 Nothing in the host stage loads the agent runtime itself. Filesystem access is native (no mounts). Secrets live plainly in `.env` for later injection.
 
-### container stage — inside Docker or under launchctl
+### container stage — inside Docker
 
-Where the actual agent process lives. The host stage bind-mounts the agent folder at a well-known path (`/agent` inside Docker; the folder itself under launchctl) and starts a single process that foregrounds the agent loop:
+Where the actual agent process lives. The host stage bind-mounts the agent folder at `/agent` inside the container and starts a single process that foregrounds the agent loop:
 
-- `typeclaw run` — the foreground process the container/service is configured to execute. Starts the websocket server (`src/server/`), creates an `AgentSession` (`src/agent/`), and speaks to the TUI or channels.
+- `typeclaw run` — the foreground process the container is configured to execute. Starts the websocket server (`src/server/`), creates an `AgentSession` (`src/agent/`), and speaks to the TUI or channels.
 
 Inside the container, `FIREWORKS_API_KEY` and friends arrive through `--env-file .env`; the `typeclaw` binary itself is resolved through `node_modules/typeclaw` (which in dev-stage scaffolding is a symlink into the dev-stage repo — the host-stage launcher must mount that source at the same path the symlink expects).
 

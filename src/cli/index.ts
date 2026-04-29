@@ -15,8 +15,6 @@ const main = defineCommand({
     name: 'typeclaw',
     description: 'TypeClaw agent runtime',
   },
-  // TODO: `start` currently launches a Docker container. Add launchctl support
-  // for macOS services per TypeClaw.md Phase 3.
   subCommands: { init, run, tui, start: startCommand, stop: stopCommand, restart: restartCommand, reload },
 })
 
