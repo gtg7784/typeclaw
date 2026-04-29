@@ -1,6 +1,7 @@
 import { defineCommand } from 'citty'
 
 import { stop } from '@/container'
+import { findAgentDir } from '@/init'
 
 export const stopCommand = defineCommand({
   meta: {
@@ -8,7 +9,7 @@ export const stopCommand = defineCommand({
     description: 'stop the agent container (host stage)',
   },
   async run() {
-    const cwd = process.cwd()
+    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
     const result = await stop({ cwd })
 
     if (!result.ok) {

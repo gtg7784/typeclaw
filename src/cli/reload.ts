@@ -1,6 +1,7 @@
 import { defineCommand } from 'citty'
 
-import { config } from '@/config'
+import { loadConfigSync } from '@/config'
+import { findAgentDir } from '@/init'
 import { requestReload, type ReloadResult } from '@/reload'
 
 export const reload = defineCommand({
@@ -11,8 +12,7 @@ export const reload = defineCommand({
   args: {
     url: {
       type: 'string',
-      description: 'agent websocket url',
-      default: `ws://localhost:${config.port}`,
+      description: 'agent websocket url (defaults to ws://localhost:<port> from the resolved agent folder)',
     },
     timeout: {
       type: 'string',
@@ -21,9 +21,10 @@ export const reload = defineCommand({
     },
   },
   async run({ args }) {
+    const url = args.url ?? defaultUrl()
     let results: ReloadResult[]
     try {
-      results = await requestReload({ url: args.url, timeoutMs: Number(args.timeout) })
+      results = await requestReload({ url, timeoutMs: Number(args.timeout) })
     } catch (err) {
       console.error(`reload failed: ${err instanceof Error ? err.message : String(err)}`)
       process.exit(1)
@@ -49,3 +50,8 @@ export const reload = defineCommand({
     }
   },
 })
+
+function defaultUrl(): string {
+  const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+  return `ws://localhost:${loadConfigSync(cwd).port}`
+}

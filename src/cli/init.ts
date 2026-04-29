@@ -1,7 +1,7 @@
 import { cancel, confirm, intro, isCancel, password, spinner } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
-import { isDirectoryNonEmpty, isHatched, runInit, type InitStep, type InitStepEvent } from '@/init'
+import { findAgentDir, isDirectoryNonEmpty, isHatched, runInit, type InitStep, type InitStepEvent } from '@/init'
 
 export const init = defineCommand({
   meta: {
@@ -10,6 +10,14 @@ export const init = defineCommand({
   },
   async run() {
     const cwd = process.cwd()
+
+    const existingAgent = findAgentDir(cwd)
+    if (existingAgent !== null && existingAgent !== cwd) {
+      console.error(
+        `Refusing to init: a TypeClaw agent already exists at ${existingAgent}. Nested agents are not supported.`,
+      )
+      process.exit(1)
+    }
 
     if (await isHatched(cwd)) {
       console.error(`TypeClaw has already hatched in ${cwd}.`)

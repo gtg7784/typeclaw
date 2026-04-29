@@ -2,7 +2,7 @@ import { defineCommand } from 'citty'
 
 import { config } from '@/config'
 import { start } from '@/container'
-import { isInitialized } from '@/init'
+import { findAgentDir, isInitialized } from '@/init'
 
 export const startCommand = defineCommand({
   meta: {
@@ -22,7 +22,7 @@ export const startCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const cwd = process.cwd()
+    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
 
     if (!isInitialized(cwd)) {
       console.error('TypeClaw config file not found. Run `typeclaw init` first.')

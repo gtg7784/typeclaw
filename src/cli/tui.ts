@@ -1,6 +1,7 @@
 import { defineCommand } from 'citty'
 
-import { config } from '@/config'
+import { loadConfigSync } from '@/config'
+import { findAgentDir } from '@/init'
 import { createTui } from '@/tui'
 
 export const tui = defineCommand({
@@ -16,12 +17,17 @@ export const tui = defineCommand({
     },
     url: {
       type: 'string',
-      description: 'agent websocket url',
-      default: `ws://localhost:${config.port}`,
+      description: 'agent websocket url (defaults to ws://localhost:<port> from the resolved agent folder)',
     },
   },
   async run({ args }) {
-    const tui = createTui({ url: args.url, initialPrompt: args.prompt })
+    const url = args.url ?? defaultUrl()
+    const tui = createTui({ url, initialPrompt: args.prompt })
     await tui.run()
   },
 })
+
+function defaultUrl(): string {
+  const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+  return `ws://localhost:${loadConfigSync(cwd).port}`
+}
