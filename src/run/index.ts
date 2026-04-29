@@ -120,13 +120,21 @@ export async function startAgent({
     materializedSkills: null,
   })
 
-  const createSessionForSubagent: import('@/agent/subagents').CreateSessionForSubagent = async (subagent) => {
+  const createSessionForSubagent: import('@/agent/subagents').CreateSessionForSubagent = async (
+    subagent,
+    subagentOptions,
+  ) => {
     const snap = pluginRuntime.get()
     const entry = snap.pluginSubagentByShim.get(subagent)
     if (entry) {
       const sessionId = `subagent-${entry.pluginName}-${crypto.randomUUID()}`
       return createSessionWithDispose({
         systemPromptOverride: entry.pluginSubagent.systemPrompt,
+        origin: {
+          kind: 'subagent',
+          subagent: subagentOptions?.name ?? entry.subagentName,
+          parentSessionId: subagentOptions?.parentSessionId ?? '<unknown>',
+        },
         plugins: {
           registry: snap.registry,
           hooks: snap.hooks,
@@ -141,7 +149,7 @@ export async function startAgent({
         },
       })
     }
-    return defaultCreateSessionForSubagent(subagent)
+    return defaultCreateSessionForSubagent(subagent, subagentOptions)
   }
 
   const subagentConsumer = createSubagentConsumer({
@@ -167,12 +175,13 @@ export async function startAgent({
   const cronConsumer = createCronConsumer({
     stream,
     cwd,
-    createSessionForCron: () => {
+    createSessionForCron: (job) => {
       const snap = pluginRuntime.get()
       return createSession({
         reloadRegistry,
         sessionManager: SessionManager.create(cwd, sessionFactory.sessionDir()),
         stream,
+        origin: { kind: 'cron', jobId: job.id, jobKind: 'prompt' },
         ...(snap.hasAnyPluginContent
           ? {
               plugins: {

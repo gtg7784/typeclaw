@@ -49,13 +49,19 @@ function describePayload(payload: unknown): string {
 }
 
 export type CreateSessionForSubagentResult = { session: AgentSession; dispose?: () => Promise<void> }
+export type CreateSessionForSubagentOptions = {
+  name?: string
+  parentSessionId?: string
+}
 export type CreateSessionForSubagent = (
   subagent: Subagent<any>,
+  options?: CreateSessionForSubagentOptions,
 ) => Promise<AgentSession | CreateSessionForSubagentResult>
 
-export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subagent) =>
+export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subagent, options) =>
   createSession({
     systemPromptOverride: subagent.systemPrompt,
+    origin: { kind: 'subagent', subagent: options?.name ?? '<unknown>', parentSessionId: options?.parentSessionId ?? '<unknown>' },
     ...(subagent.tools ? { tools: subagent.tools } : {}),
     customTools: subagent.customTools ?? [],
   })
@@ -76,6 +82,7 @@ export type InvokeSubagentOptions = {
   agentDir: string
   userPrompt: string
   payload?: unknown
+  parentSessionId?: string
 }
 
 export async function invokeSubagent(name: string, options: InvokeSubagentOptions): Promise<void> {
@@ -84,9 +91,15 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
 
   const validatedPayload = validateSubagentPayload(name, subagent, options.payload)
   const createSessionForSubagent = options.createSessionForSubagent ?? defaultCreateSessionForSubagent
+  const sessionOptions: CreateSessionForSubagentOptions = {
+    name,
+    ...(options.parentSessionId !== undefined ? { parentSessionId: options.parentSessionId } : {}),
+  }
 
   const runSession: RunSession = async (override) => {
-    const { session, dispose } = normalizeSubagentSession(await createSessionForSubagent(subagent))
+    const { session, dispose } = normalizeSubagentSession(
+      await createSessionForSubagent(subagent, sessionOptions),
+    )
     try {
       await session.prompt(override?.userPrompt ?? options.userPrompt)
     } finally {
@@ -157,7 +170,11 @@ export function createSubagentConsumer({
     start() {
       if (unsubscribe !== null) return
       unsubscribe = stream.subscribe({ target: { kind: 'new-session' } }, async (msg) => {
-        const target = msg.target as { kind: 'new-session'; subagent: string }
+        const target = msg.target as {
+          kind: 'new-session'
+          subagent: string
+          parentSessionId?: string
+        }
         const name = target.subagent
         const registry = getRegistry()
         if (registry[name] === undefined) {
@@ -177,6 +194,7 @@ export function createSubagentConsumer({
             agentDir,
             userPrompt: '',
             payload: msg.payload,
+            ...(target.parentSessionId !== undefined ? { parentSessionId: target.parentSessionId } : {}),
           })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)

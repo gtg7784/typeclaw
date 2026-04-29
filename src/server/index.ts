@@ -99,6 +99,7 @@ export function createServer({
           const result = await createSession({
             reloadRegistry,
             sessionManager,
+            origin: { kind: 'tui', sessionId: sessionFileId },
             ...(stream ? { stream } : {}),
             ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
           })
