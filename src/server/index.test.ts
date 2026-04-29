@@ -65,6 +65,8 @@ async function startWithSession(
     sessionFactory?: SessionFactory
     memoryIdleMs?: number
     agentDir?: string
+    pluginRegistry?: import('@/plugin').PluginRegistry
+    pluginHooks?: import('@/plugin').HookBus
   } = {},
 ): Promise<{ url: string }> {
   const built = createServer({
@@ -74,6 +76,8 @@ async function startWithSession(
     ...(extra.sessionFactory ? { sessionFactory: extra.sessionFactory } : {}),
     ...(extra.memoryIdleMs !== undefined ? { memoryIdleMs: extra.memoryIdleMs } : {}),
     ...(extra.agentDir !== undefined ? { agentDir: extra.agentDir } : {}),
+    ...(extra.pluginRegistry ? { pluginRegistry: extra.pluginRegistry } : {}),
+    ...(extra.pluginHooks ? { pluginHooks: extra.pluginHooks } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
@@ -683,5 +687,130 @@ describe('createServer memory idle detector', () => {
     await new Promise((r) => setTimeout(r, 50))
     expect(messages).toHaveLength(1)
     ws.close()
+  })
+})
+
+describe('createServer plugin hooks', () => {
+  test('fires session.start with the session id and agentDir on websocket open', async () => {
+    const { createHookBus } = await import('@/plugin')
+    const { emptyRegistry } = await import('@/plugin/registry')
+    const fired: { sessionId: string; agentDir: string }[] = []
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'p',
+      '/agent',
+      { info: () => {}, warn: () => {}, error: () => {} },
+      {
+        'session.start': (event) => {
+          fired.push({ sessionId: event.sessionId, agentDir: event.agentDir })
+        },
+      },
+    )
+
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, {
+      pluginRegistry: emptyRegistry(),
+      pluginHooks: hooks,
+      agentDir: '/agent',
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    expect(fired).toHaveLength(1)
+    expect(fired[0]?.agentDir).toBe('/agent')
+    ws.close()
+  })
+
+  test('fires session.idle BEFORE the memory-logger spawn (deterministic order)', async () => {
+    const { createHookBus } = await import('@/plugin')
+    const { emptyRegistry } = await import('@/plugin/registry')
+    const ordering: string[] = []
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'p',
+      '/agent',
+      { info: () => {}, warn: () => {}, error: () => {} },
+      {
+        'session.idle': () => {
+          ordering.push('idle')
+        },
+      },
+    )
+
+    const session = createFakeSession()
+    const stream = createStream()
+    stream.subscribe({ target: { kind: 'new-session' } }, () => {
+      ordering.push('memory-logger')
+    })
+
+    const stubFactory: SessionFactory = {
+      sessionDir: () => '/tmp/test-sessions',
+      createPersisted: () =>
+        ({
+          getSessionId: () => 'ses_idle',
+          getSessionFile: () => '/tmp/test-sessions/ses_idle.jsonl',
+        }) as unknown as SessionManager,
+    }
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubFactory,
+      memoryIdleMs: 30,
+      agentDir: '/agent',
+      pluginRegistry: emptyRegistry(),
+      pluginHooks: hooks,
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    stream.publish({
+      target: { kind: 'session', sessionId: 'ses_idle' },
+      payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    await new Promise((r) => setTimeout(r, 80))
+    expect(ordering).toEqual(['idle', 'memory-logger'])
+    ws.close()
+  })
+
+  test('awaits session.end before resolving the close handler', async () => {
+    const { createHookBus } = await import('@/plugin')
+    const { emptyRegistry } = await import('@/plugin/registry')
+    const endResolve: { fn: (() => void) | null } = { fn: null }
+    let ended = false
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'p',
+      '/agent',
+      { info: () => {}, warn: () => {}, error: () => {} },
+      {
+        'session.end': () =>
+          new Promise<void>((resolve) => {
+            endResolve.fn = () => {
+              ended = true
+              resolve()
+            }
+          }),
+      },
+    )
+
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, {
+      pluginRegistry: emptyRegistry(),
+      pluginHooks: hooks,
+      agentDir: '/agent',
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.close()
+    await new Promise((r) => setTimeout(r, 30))
+    expect(ended).toBe(false)
+    endResolve.fn?.()
+    await new Promise((r) => setTimeout(r, 30))
+    expect(ended).toBe(true)
   })
 })

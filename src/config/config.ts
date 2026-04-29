@@ -43,21 +43,24 @@ const dreamingSchema = z
   })
   .default({ schedule: DEFAULT_DREAMING_SCHEDULE })
 
-export const configSchema = z.object({
-  $schema: z.string().optional(),
-  port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
-  model: z.enum(knownModelRefs).default('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'), // FIXME: TEMP default
-  memory: z
-    .object({
-      idleMs: z.number().int().min(1000).default(DEFAULT_MEMORY_IDLE_MS),
-      dreaming: dreamingSchema.optional(),
-    })
-    .default({ idleMs: DEFAULT_MEMORY_IDLE_MS }),
-  // Defaults to `[]` so configs predating the field still load. `typeclaw init`
-  // writes `"mounts": []` explicitly, but a missing field is treated the same
-  // way (no host paths exposed) rather than failing the whole config load.
-  mounts: z.array(mountSchema).default([]),
-})
+export const configSchema = z
+  .object({
+    $schema: z.string().optional(),
+    port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
+    model: z.enum(knownModelRefs).default('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'), // FIXME: TEMP default
+    memory: z
+      .object({
+        idleMs: z.number().int().min(1000).default(DEFAULT_MEMORY_IDLE_MS),
+        dreaming: dreamingSchema.optional(),
+      })
+      .default({ idleMs: DEFAULT_MEMORY_IDLE_MS }),
+    // Defaults to `[]` so configs predating the field still load. `typeclaw init`
+    // writes `"mounts": []` explicitly, but a missing field is treated the same
+    // way (no host paths exposed) rather than failing the whole config load.
+    mounts: z.array(mountSchema).default([]),
+    plugins: z.array(z.string().min(1)).default([]),
+  })
+  .catchall(z.unknown())
 
 function isValidCronExpression(schedule: string): boolean {
   try {
@@ -140,6 +143,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   mounts: 'restart-required',
   'memory.idleMs': 'restart-required',
   'memory.dreaming': 'applied',
+  plugins: 'restart-required',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -160,7 +164,7 @@ function stableStringify(value: unknown): string {
 
 function diffConfig(before: Config, after: Config): ConfigReloadDiff {
   const diff: ConfigReloadDiff = { applied: [], restartRequired: [], ignored: [] }
-  const keys = new Set<string>([...Object.keys(FIELD_EFFECTS)])
+  const keys = new Set<string>(Object.keys(FIELD_EFFECTS))
 
   for (const path of keys) {
     const b = readPath(before, path)
@@ -184,6 +188,37 @@ function readPath(obj: unknown, path: string): unknown {
     cur = (cur as Record<string, unknown>)[part]
   }
   return cur
+}
+
+// Plugin configs live at the top level of typeclaw.json keyed by plugin name
+// (e.g. "standup-log": { ... }). They are preserved by configSchema.catchall(z.unknown())
+// because the schema does not predeclare these keys. This helper returns the
+// raw map of unknown values keyed by plugin name; the plugin loader re-validates
+// each block against its plugin's `configSchema`.
+export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
+  if (typeof raw !== 'object' || raw === null) return {}
+  const known = new Set(['$schema', 'port', 'model', 'memory', 'mounts', 'plugins'])
+  const result: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (!known.has(key)) result[key] = value
+  }
+  return result
+}
+
+export function loadPluginConfigsSync(cwd: string): Record<string, unknown> {
+  let raw: string
+  try {
+    raw = readFileSync(join(cwd, CONFIG_FILE), 'utf8')
+  } catch {
+    return {}
+  }
+  let json: unknown
+  try {
+    json = JSON.parse(raw)
+  } catch {
+    return {}
+  }
+  return extractPluginConfigs(json)
 }
 
 export function loadConfigSync(cwd: string): Config {

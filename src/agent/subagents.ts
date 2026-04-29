@@ -48,7 +48,10 @@ function describePayload(payload: unknown): string {
   return typeof payload
 }
 
-export type CreateSessionForSubagent = (subagent: Subagent<any>) => Promise<AgentSession>
+export type CreateSessionForSubagentResult = { session: AgentSession; dispose?: () => Promise<void> }
+export type CreateSessionForSubagent = (
+  subagent: Subagent<any>,
+) => Promise<AgentSession | CreateSessionForSubagentResult>
 
 export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subagent) =>
   createSession({
@@ -56,6 +59,16 @@ export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subage
     ...(subagent.tools ? { tools: subagent.tools } : {}),
     customTools: subagent.customTools ?? [],
   })
+
+function normalizeSubagentSession(result: AgentSession | CreateSessionForSubagentResult): {
+  session: AgentSession
+  dispose: () => Promise<void>
+} {
+  if ('session' in result) {
+    return { session: result.session, dispose: result.dispose ?? (async () => {}) }
+  }
+  return { session: result, dispose: async () => {} }
+}
 
 export type InvokeSubagentOptions = {
   registry: SubagentRegistry
@@ -73,11 +86,12 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
   const createSessionForSubagent = options.createSessionForSubagent ?? defaultCreateSessionForSubagent
 
   const runSession: RunSession = async (override) => {
-    const session = await createSessionForSubagent(subagent)
+    const { session, dispose } = normalizeSubagentSession(await createSessionForSubagent(subagent))
     try {
       await session.prompt(override?.userPrompt ?? options.userPrompt)
     } finally {
       session.dispose()
+      await dispose()
     }
   }
 

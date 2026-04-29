@@ -3,7 +3,14 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { configSchema, loadConfigSync, mountSchema, validateConfig } from './config'
+import {
+  configSchema,
+  extractPluginConfigs,
+  loadConfigSync,
+  loadPluginConfigsSync,
+  mountSchema,
+  validateConfig,
+} from './config'
 
 const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
 
@@ -240,5 +247,64 @@ describe('loadConfigSync', () => {
       }),
     )
     expect(() => loadConfigSync(cwd)).toThrow(/typeclaw\.json is invalid/)
+  })
+})
+
+describe('plugin config layout', () => {
+  test('plugins defaults to [] when omitted', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.plugins).toEqual([])
+  })
+
+  test('plugins accepts an array of strings', () => {
+    const parsed = configSchema.parse({
+      model: VALID_MODEL,
+      plugins: ['typeclaw-plugin-foo', './plugins/local'],
+    })
+    expect(parsed.plugins).toEqual(['typeclaw-plugin-foo', './plugins/local'])
+  })
+
+  test('catchall preserves unknown top-level keys (per-plugin config blocks)', () => {
+    const parsed = configSchema.parse({
+      model: VALID_MODEL,
+      plugins: ['typeclaw-plugin-standup-log'],
+      'standup-log': { schedule: '0 17 * * 5' },
+    }) as Record<string, unknown>
+    expect(parsed['standup-log']).toEqual({ schedule: '0 17 * * 5' })
+  })
+
+  test('extractPluginConfigs filters known top-level keys and returns the rest', () => {
+    const result = extractPluginConfigs({
+      $schema: 'x',
+      port: 1,
+      model: 'm',
+      memory: {},
+      mounts: [],
+      plugins: [],
+      'standup-log': { schedule: '0 17 * * 5' },
+      memory_keeper: { idleMs: 5000 },
+    })
+    expect(result).toEqual({
+      'standup-log': { schedule: '0 17 * * 5' },
+      memory_keeper: { idleMs: 5000 },
+    })
+  })
+
+  test('loadPluginConfigsSync reads per-plugin blocks from disk', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-cfg-'))
+    try {
+      await writeFile(
+        join(cwd, 'typeclaw.json'),
+        JSON.stringify({
+          model: VALID_MODEL,
+          plugins: ['typeclaw-plugin-foo'],
+          foo: { bar: 1 },
+        }),
+      )
+      const result = loadPluginConfigsSync(cwd)
+      expect(result).toEqual({ foo: { bar: 1 } })
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
   })
 })

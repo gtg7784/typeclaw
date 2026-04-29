@@ -1,14 +1,20 @@
 import type { Server as BunServer, ServerWebSocket } from 'bun'
 
-import { createSession as defaultCreateSession, type AgentSession, type CreateSessionOptions } from '@/agent'
+import {
+  createSessionWithDispose as defaultCreateSessionWithDispose,
+  type AgentSession,
+  type CreateSessionOptions,
+  type CreateSessionResult,
+} from '@/agent'
 import { createIdleDetector, type IdleDetector } from '@/memory'
+import type { HookBus, PluginRegistry } from '@/plugin'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { SessionFactory } from '@/sessions'
 import type { ClientMessage, PromptDelivery, QueueStateItem, ReloadResultPayload, ServerMessage } from '@/shared'
 import type { Stream, StreamMessage, StreamMessageId, Unsubscribe } from '@/stream'
 
 export type ReloadAllFn = () => Promise<ReloadAllResult>
-export type CreateSessionFn = (options?: CreateSessionOptions) => Promise<AgentSession>
+export type CreateSessionFn = (options?: CreateSessionOptions) => Promise<AgentSession | CreateSessionResult>
 
 export type ServerOptions = {
   port: number
@@ -19,6 +25,8 @@ export type ServerOptions = {
   stream?: Stream
   memoryIdleMs?: number
   agentDir?: string
+  pluginRegistry?: PluginRegistry
+  pluginHooks?: HookBus
 }
 
 export type Server = ReturnType<typeof createServer>
@@ -42,6 +50,7 @@ type SessionState = {
   unsubBroadcast: Unsubscribe | null
   unsubPrompts: Unsubscribe | null
   idleDetector: IdleDetector | null
+  dispose: () => Promise<void>
 }
 
 function send(ws: Ws, msg: ServerMessage) {
@@ -52,11 +61,13 @@ export function createServer({
   port,
   reloadAll,
   reloadRegistry,
-  createSession = defaultCreateSession,
+  createSession = defaultCreateSessionWithDispose,
   sessionFactory,
   stream,
   memoryIdleMs,
   agentDir,
+  pluginRegistry,
+  pluginHooks,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
 
@@ -71,8 +82,19 @@ export function createServer({
       websocket: {
         async open(ws) {
           const sessionManager = sessionFactory?.createPersisted()
-          const session = await createSession({ reloadRegistry, sessionManager, ...(stream ? { stream } : {}) })
           const sessionFileId = sessionManager?.getSessionId() ?? ws.data.sessionId
+          const pluginsWiring =
+            pluginRegistry !== undefined && pluginHooks !== undefined && agentDir !== undefined
+              ? { registry: pluginRegistry, hooks: pluginHooks, sessionId: sessionFileId, agentDir }
+              : undefined
+          const result = await createSession({
+            reloadRegistry,
+            sessionManager,
+            ...(stream ? { stream } : {}),
+            ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
+          })
+          const session = 'session' in result ? result.session : result
+          const dispose = 'session' in result && result.dispose ? result.dispose : async () => {}
 
           const state: SessionState = {
             session,
@@ -83,13 +105,27 @@ export function createServer({
             unsubBroadcast: null,
             unsubPrompts: null,
             idleDetector: null,
+            dispose,
           }
           sessionStates.set(ws, state)
+
+          if (pluginHooks !== undefined && agentDir !== undefined) {
+            await pluginHooks.runSessionStart({ sessionId: sessionFileId, agentDir })
+          }
 
           if (stream !== undefined && memoryIdleMs !== undefined && agentDir !== undefined) {
             state.idleDetector = createIdleDetector({
               idleMs: memoryIdleMs,
-              onIdle: () => publishMemoryLoggerSpawn(state, stream, agentDir),
+              onIdle: async () => {
+                if (pluginHooks !== undefined) {
+                  await pluginHooks.runSessionIdle({
+                    sessionId: state.sessionFileId,
+                    parentTranscriptPath: state.sessionManager?.getSessionFile(),
+                    idleMs: memoryIdleMs,
+                  })
+                }
+                publishMemoryLoggerSpawn(state, stream, agentDir)
+              },
             })
           }
 
@@ -157,13 +193,19 @@ export function createServer({
             return
           }
         },
-        close(ws) {
+        async close(ws) {
           const state = sessionStates.get(ws)
           state?.unsubBroadcast?.()
           state?.unsubPrompts?.()
           state?.idleDetector?.dispose()
+          if (state) {
+            if (pluginHooks !== undefined) {
+              await pluginHooks.runSessionEnd({ sessionId: state.sessionFileId })
+            }
+            await state.dispose()
+          }
           sessionStates.delete(ws)
-          console.log(`session ${ws.data.sessionId}: close`)
+          console.log(`session ${state?.sessionFileId ?? ws.data.sessionId}: close`)
         },
       },
     })

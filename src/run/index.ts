@@ -1,8 +1,15 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
-import { createSession } from '@/agent'
-import { createSubagentConsumer, defaultCreateSessionForSubagent, type SubagentConsumer } from '@/agent/subagents'
-import { config, type Config, createConfigReloadable, getConfig } from '@/config'
+import { createSession, createSessionWithDispose } from '@/agent'
+import {
+  createSubagentConsumer,
+  defaultCreateSessionForSubagent,
+  invokeSubagent,
+  type Subagent as InternalSubagent,
+  type SubagentConsumer,
+  type SubagentRegistry,
+} from '@/agent/subagents'
+import { config, type Config, createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync } from '@/config'
 import {
   type CronConsumer,
   type CronJob,
@@ -15,6 +22,14 @@ import {
   type Scheduler,
 } from '@/cron'
 import { dreamingSubagent, isDreamingPayload, isMemoryLoggerPayload, memoryLoggerSubagent } from '@/memory'
+import {
+  type HookBus,
+  loadPlugins,
+  type LoadPluginsResult,
+  pluginCronJobs,
+  type PluginRegistry,
+  summarizeLoaded,
+} from '@/plugin'
 import { ReloadRegistry } from '@/reload'
 import { createServer, type Server } from '@/server'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
@@ -27,10 +42,7 @@ type BunServer = ReturnType<Server['start']>
 
 export type TuiFactory = (options: TuiOptions) => { run: () => Promise<void> }
 
-export type LoadCronFn = (
-  agentDir: string,
-  options?: { subagents?: import('@/agent/subagents').SubagentRegistry },
-) => Promise<LoadCronResult>
+export type LoadCronFn = (agentDir: string, options?: { subagents?: SubagentRegistry }) => Promise<LoadCronResult>
 export type SchedulerFactory = (options: { cwd: string; file: CronFile; onFire: (job: CronJob) => void }) => Scheduler
 
 export type StartAgentOptions = {
@@ -53,6 +65,9 @@ export type StartAgentResult = {
   subagentConsumer: SubagentConsumer
   reloadRegistry: ReloadRegistry
   stream: Stream
+  pluginRegistry: PluginRegistry
+  pluginHooks: HookBus
+  loadedPlugins: LoadPluginsResult['loadedPlugins']
   stop: () => void
 }
 
@@ -70,16 +85,46 @@ export async function startAgent({
   const reloadRegistry = new ReloadRegistry()
   reloadRegistry.register(createConfigReloadable({ cwd }))
 
-  const subagents = {
-    'memory-logger': memoryLoggerSubagent,
-    dreaming: dreamingSubagent,
+  const pluginConfigsByName = loadPluginConfigsSync(cwd)
+  const cwdConfig = loadConfigSync(cwd)
+  const pluginsLoaded = await loadPlugins({
+    entries: cwdConfig.plugins,
+    agentDir: cwd,
+    configsByName: pluginConfigsByName,
+  })
+  const pluginRegistry = pluginsLoaded.registry
+  const pluginHooks = pluginsLoaded.hooks
+
+  const { registry: subagents, pluginSubagentByShim } = mergeSubagents(pluginRegistry)
+
+  const createSessionForSubagent: import('@/agent/subagents').CreateSessionForSubagent = async (subagent) => {
+    const entry = pluginSubagentByShim.get(subagent)
+    if (entry) {
+      const sessionId = `subagent-${entry.pluginName}-${crypto.randomUUID()}`
+      return createSessionWithDispose({
+        systemPromptOverride: entry.pluginSubagent.systemPrompt,
+        plugins: {
+          registry: pluginRegistry,
+          hooks: pluginHooks,
+          sessionId,
+          agentDir: cwd,
+        },
+        pluginSubagent: {
+          pluginName: entry.pluginName,
+          ...(entry.pluginSubagent.tools ? { toolRefs: entry.pluginSubagent.tools } : {}),
+          ...(entry.pluginSubagent.customTools ? { customTools: entry.pluginSubagent.customTools } : {}),
+          toolNamePrefix: `__plugin_${entry.pluginName}_${entry.subagentName}`,
+        },
+      })
+    }
+    return defaultCreateSessionForSubagent(subagent)
   }
 
   const subagentConsumer = createSubagentConsumer({
     stream,
     registry: subagents,
     agentDir: cwd,
-    createSessionForSubagent: defaultCreateSessionForSubagent,
+    createSessionForSubagent,
     inFlightKey: (name, payload) => {
       if (name === 'memory-logger' && isMemoryLoggerPayload(payload)) {
         return `${name}:${payload.parentSessionId}`
@@ -92,6 +137,14 @@ export async function startAgent({
   })
   subagentConsumer.start()
 
+  const hasAnyPluginContent =
+    pluginRegistry.tools.length > 0 ||
+    pluginRegistry.subagents.length > 0 ||
+    pluginRegistry.cronJobs.length > 0 ||
+    pluginRegistry.skills.length > 0 ||
+    pluginRegistry.skillsDirs.length > 0 ||
+    pluginsLoaded.loadedPlugins.length > 0
+
   const cronConsumer = createCronConsumer({
     stream,
     cwd,
@@ -100,10 +153,20 @@ export async function startAgent({
         reloadRegistry,
         sessionManager: SessionManager.create(cwd, sessionFactory.sessionDir()),
         stream,
+        ...(hasAnyPluginContent
+          ? {
+              plugins: {
+                registry: pluginRegistry,
+                hooks: pluginHooks,
+                sessionId: `cron-${crypto.randomUUID()}`,
+                agentDir: cwd,
+              },
+            }
+          : {}),
       }),
   })
 
-  const internalJobs = () => buildInternalJobs(cwd, getConfig())
+  const internalJobs = () => [...buildInternalJobs(cwd, getConfig()), ...pluginCronJobs(pluginRegistry)]
   const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(internalJobs)
   const scheduler = await startScheduler({
     cwd,
@@ -119,6 +182,20 @@ export async function startAgent({
     reloadRegistry.register(createCronReloadable({ cwd, scheduler, internalJobs, subagents }))
   }
 
+  pluginsLoaded.setSpawnSubagent(async (name, payload) => {
+    await invokeSubagent(name, {
+      registry: subagents,
+      agentDir: cwd,
+      userPrompt: '',
+      payload,
+    })
+  })
+  pluginsLoaded.markBooted()
+
+  if (pluginsLoaded.loadedPlugins.length > 0) {
+    console.log(`[plugin] loaded ${summarizeLoaded(pluginsLoaded.loadedPlugins, pluginRegistry)}`)
+  }
+
   const server = createServer({
     port,
     reloadAll: () => reloadRegistry.reloadAll(),
@@ -127,6 +204,8 @@ export async function startAgent({
     stream,
     memoryIdleMs: config.memory.idleMs,
     agentDir: cwd,
+    pluginRegistry,
+    pluginHooks,
   }).start()
 
   let stopped = false
@@ -148,6 +227,9 @@ export async function startAgent({
       subagentConsumer,
       reloadRegistry,
       stream,
+      pluginRegistry,
+      pluginHooks,
+      loadedPlugins: pluginsLoaded.loadedPlugins,
       stop,
     }
   }
@@ -163,6 +245,9 @@ export async function startAgent({
     subagentConsumer,
     reloadRegistry,
     stream,
+    pluginRegistry,
+    pluginHooks,
+    loadedPlugins: pluginsLoaded.loadedPlugins,
     stop,
   }
 }
@@ -180,7 +265,7 @@ async function startScheduler({
   createSchedulerFor: SchedulerFactory
   stream: Stream
   hasInternalJobs: boolean
-  subagents?: import('@/agent/subagents').SubagentRegistry
+  subagents?: SubagentRegistry
 }): Promise<Scheduler | null> {
   let result: LoadCronResult
   try {
@@ -193,8 +278,6 @@ async function startScheduler({
     console.error(`[cron] failed to load cron.json: ${result.reason}`)
     return null
   }
-  // Without cron.json, the scheduler still needs to run if internal jobs
-  // (like dreaming) are configured. Construct an empty file in that case.
   const file: CronFile = result.file ?? { jobs: [] }
   if (!result.file && !hasInternalJobs) return null
 
@@ -208,6 +291,46 @@ async function startScheduler({
 
 function makeDefaultSchedulerFactory(internalJobs: () => CronJob[]): SchedulerFactory {
   return ({ file, onFire }) => createScheduler({ jobs: [...file.jobs, ...internalJobs()], onFire })
+}
+
+type PluginSubagentEntry = {
+  pluginName: string
+  subagentName: string
+  pluginSubagent: import('@/plugin').Subagent<any>
+}
+
+function mergeSubagents(pluginRegistry: PluginRegistry): {
+  registry: SubagentRegistry
+  pluginSubagentByShim: WeakMap<InternalSubagent<any>, PluginSubagentEntry>
+} {
+  const merged: Record<string, InternalSubagent<any>> = {
+    'memory-logger': memoryLoggerSubagent,
+    dreaming: dreamingSubagent,
+  }
+  const pluginSubagentByShim = new WeakMap<InternalSubagent<any>, PluginSubagentEntry>()
+  for (const reg of pluginRegistry.subagents) {
+    if (merged[reg.subagentName] !== undefined) {
+      throw new Error(
+        `plugin ${reg.pluginName}: subagent name "${reg.subagentName}" conflicts with a built-in subagent`,
+      )
+    }
+    const shim = pluginSubagentShim(reg.subagent)
+    merged[reg.subagentName] = shim
+    pluginSubagentByShim.set(shim, {
+      pluginName: reg.pluginName,
+      subagentName: reg.subagentName,
+      pluginSubagent: reg.subagent,
+    })
+  }
+  return { registry: merged, pluginSubagentByShim }
+}
+
+function pluginSubagentShim(subagent: import('@/plugin').Subagent<any>): InternalSubagent<any> {
+  return {
+    systemPrompt: subagent.systemPrompt,
+    ...(subagent.payloadSchema ? { payloadSchema: subagent.payloadSchema } : {}),
+    ...(subagent.handler ? { handler: subagent.handler as InternalSubagent<any>['handler'] } : {}),
+  }
 }
 
 function buildInternalJobs(cwd: string, cfg: Config): CronJob[] {
