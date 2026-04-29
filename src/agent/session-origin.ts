@@ -89,23 +89,48 @@ function renderChannelOrigin(
   },
   now: number,
 ): string {
+  // The OBLIGATION-not-permission framing here exists because Kimi K2.5 Turbo
+  // (and likely other models) will otherwise treat short / casual messages as
+  // "ambient observation" and emit no tool call. Plain-text output from the
+  // agent in a channel session is dead text — there is no human attached to
+  // a stdout to read it. The only way to talk to the user is the tool. Making
+  // that obligation crisp and pre-filling the addressing fields removed a
+  // class of "model finishes silently, no reply ever lands" failures that we
+  // could only see in the logs as `prompted` followed by no `outbound`.
   const lines = [
     '## Session origin',
     '',
-    'You are running in a Discord channel session.',
+    'You are responding inside a Discord channel session. There is no human',
+    'attached to a console here — your only way to communicate with the user',
+    'is the `channel_send` tool. Plain-text output is invisible.',
     '',
-    `- Adapter:   ${origin.adapter}`,
-    `- Workspace: ${origin.workspace}`,
-    `- Chat:      ${origin.chat}`,
-    `- Thread:    ${origin.thread ?? 'null'}`,
+    '**For every user message in this session, you MUST call `channel_send`',
+    'at least once before ending your turn**, unless the user explicitly told',
+    'you to stay silent. If you have nothing substantive to say, send a brief',
+    'acknowledgement. Never end a turn with a silent observation.',
     '',
-    'To reply to this conversation, call `channel_send` with these same',
-    'fields. To post elsewhere, call `channel_send` with different fields —',
-    "but only chats matching the channel's `allow` rules will be accepted;",
-    'the tool returns `{ ok: false }` otherwise.',
+    'Reply to this conversation by calling `channel_send` with exactly these',
+    'fields (copy verbatim):',
+    '',
+    '```json',
+    '{',
+    `  "adapter": ${JSON.stringify(origin.adapter)},`,
+    `  "workspace": ${JSON.stringify(origin.workspace)},`,
+    `  "chat": ${JSON.stringify(origin.chat)},`,
+    origin.thread !== null ? `  "thread": ${JSON.stringify(origin.thread)},` : null,
+    '  "text": "<your reply here>"',
+    '}',
+    '```',
+  ].filter((l): l is string => l !== null)
+
+  lines.push(
+    '',
+    'To post somewhere else, change the addressing fields — but only chats',
+    "matching the channel's `allow` rules are accepted (the tool returns",
+    '`{ ok: false }` otherwise).',
     '',
     'To mention someone in your reply, use Discord syntax `<@USER_ID>`.',
-  ]
+  )
 
   const participantsBlock = renderParticipants(origin.participants ?? [], now)
   if (participantsBlock) lines.push('', participantsBlock)

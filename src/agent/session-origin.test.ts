@@ -29,7 +29,7 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('Stay narrowly within')
   })
 
-  test('channel origin emits the addressing 4-tuple and channel_send guidance', () => {
+  test('channel origin emits the addressing fields verbatim and channel_send guidance', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
       adapter: 'discord-bot',
@@ -38,13 +38,46 @@ describe('renderSessionOrigin', () => {
       thread: null,
     })
     expect(out).toContain('Discord channel session')
-    expect(out).toContain('Adapter:   discord-bot')
-    expect(out).toContain('Workspace: 111')
-    expect(out).toContain('Chat:      222')
-    expect(out).toContain('Thread:    null')
+    expect(out).toContain('"adapter": "discord-bot"')
+    expect(out).toContain('"workspace": "111"')
+    expect(out).toContain('"chat": "222"')
     expect(out).toContain('channel_send')
     expect(out).toContain('<@USER_ID>')
     expect(out).toContain('Be concise')
+  })
+
+  test('channel origin omits thread field when origin.thread is null (matches channel_send schema)', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: '@dm',
+      chat: '999',
+      thread: null,
+    })
+    expect(out).not.toContain('"thread"')
+  })
+
+  test('channel origin includes thread field when origin.thread is set', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: '111',
+      chat: '222',
+      thread: 't-1',
+    })
+    expect(out).toContain('"thread": "t-1"')
+  })
+
+  test('channel origin obligates a channel_send call so the model never finishes silently', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: '@dm',
+      chat: '999',
+      thread: null,
+    })
+    expect(out).toMatch(/MUST call `channel_send`/)
+    expect(out).toContain('Plain-text output is invisible')
   })
 
   test('channel origin renders @dm sentinel verbatim', () => {
@@ -55,7 +88,7 @@ describe('renderSessionOrigin', () => {
       chat: '999',
       thread: null,
     })
-    expect(out).toContain('Workspace: @dm')
+    expect(out).toContain('"workspace": "@dm"')
   })
 
   test('channel origin includes participants block when participants are fresh', () => {
