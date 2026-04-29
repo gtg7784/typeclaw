@@ -148,8 +148,6 @@ function matchesTarget(filter: TargetFilter, msg: StreamMessage): boolean {
       return true
     case 'session':
       return filter.sessionId === undefined || filter.sessionId === (msg.target as { sessionId: string }).sessionId
-    case 'new-session':
-      return filter.subagent === undefined || filter.subagent === (msg.target as { subagent?: string }).subagent
     case 'cron':
       return filter.jobId === undefined || filter.jobId === (msg.target as { jobId: string }).jobId
   }

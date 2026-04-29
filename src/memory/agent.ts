@@ -1,82 +1,24 @@
 import { join } from 'node:path'
 
-import { createAgentSession, DefaultResourceLoader, readTool, SessionManager } from '@mariozechner/pi-coding-agent'
+import { readTool } from '@mariozechner/pi-coding-agent'
+import { z } from 'zod'
 
-import { getAuth } from '@/agent/auth'
-import { getConfig, resolveModel } from '@/config'
+import type { Subagent } from '@/agent/subagents'
 import { formatLocalDate } from '@/shared'
-import type { SubagentSpawner } from '@/subagent'
 
 import { appendTool } from './append-tool'
 import { readWatermark } from './watermark'
 
-export type MemoryLoggerPayload = {
-  parentSessionId: string
-  parentTranscriptPath: string
-  agentDir: string
-}
+export const memoryLoggerPayloadSchema = z.object({
+  parentSessionId: z.string().min(1),
+  parentTranscriptPath: z.string().min(1),
+  agentDir: z.string().min(1),
+})
+
+export type MemoryLoggerPayload = z.infer<typeof memoryLoggerPayloadSchema>
 
 export function isMemoryLoggerPayload(value: unknown): value is MemoryLoggerPayload {
-  if (typeof value !== 'object' || value === null) return false
-  const v = value as Record<string, unknown>
-  return (
-    typeof v.parentSessionId === 'string' &&
-    v.parentSessionId.length > 0 &&
-    typeof v.parentTranscriptPath === 'string' &&
-    v.parentTranscriptPath.length > 0 &&
-    typeof v.agentDir === 'string' &&
-    v.agentDir.length > 0
-  )
-}
-
-export type MemoryLoggerSession = {
-  prompt: (text: string) => Promise<void>
-  dispose: () => void
-}
-
-export type CreateMemoryLoggerSpawnerOptions = {
-  createMemoryLoggerSession?: () => Promise<MemoryLoggerSession>
-}
-
-export function createMemoryLoggerSpawner(options: CreateMemoryLoggerSpawnerOptions = {}): SubagentSpawner {
-  const factory = options.createMemoryLoggerSession ?? defaultCreateMemoryLoggerSession
-
-  return async (payload) => {
-    if (!isMemoryLoggerPayload(payload)) {
-      throw new Error('memory-logger: invalid payload shape')
-    }
-
-    const today = formatLocalDate()
-    const streamFile = join(payload.agentDir, 'memory', `${today}.md`)
-    const watermark = readWatermark(streamFile, payload.parentSessionId)
-
-    const session = await factory()
-
-    try {
-      await session.prompt(buildInitialPrompt(payload, streamFile, watermark))
-    } finally {
-      session.dispose()
-    }
-  }
-}
-
-async function defaultCreateMemoryLoggerSession(): Promise<MemoryLoggerSession> {
-  const { authStorage, modelRegistry } = getAuth()
-  const loader = new DefaultResourceLoader({
-    systemPromptOverride: () => MEMORY_LOGGER_SYSTEM_PROMPT,
-    appendSystemPromptOverride: () => [],
-  })
-  await loader.reload()
-  const { session } = await createAgentSession({
-    model: resolveModel(getConfig().model),
-    sessionManager: SessionManager.inMemory(),
-    authStorage,
-    modelRegistry,
-    resourceLoader: loader,
-    tools: [readTool],
-    customTools: [appendTool],
-  })
-  return session
+  return memoryLoggerPayloadSchema.safeParse(value).success
 }
 
 export const MEMORY_LOGGER_SYSTEM_PROMPT = `You are typeclaw's memory-reasoning subagent.
@@ -193,4 +135,17 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
     'Read the transcript. Reason about content past the watermark. Apply the rules: a fragment requires explicit evidence (verbatim quote for `explicit`, named premise for `deductive`, ≥2 enumerated sources for `inductive`); no speculation words; no behavior-as-preference; nothing trivially re-derivable. The default is to write a bare watermark. Either way, advance the watermark before you stop.',
   )
   return lines.join('\n')
+}
+
+export const memoryLoggerSubagent: Subagent<MemoryLoggerPayload> = {
+  systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
+  tools: [readTool],
+  customTools: [appendTool],
+  payloadSchema: memoryLoggerPayloadSchema,
+  handler: async (ctx, runSession) => {
+    const today = formatLocalDate()
+    const streamFile = join(ctx.payload.agentDir, 'memory', `${today}.md`)
+    const watermark = readWatermark(streamFile, ctx.payload.parentSessionId)
+    await runSession({ userPrompt: buildInitialPrompt(ctx.payload, streamFile, watermark) })
+  },
 }

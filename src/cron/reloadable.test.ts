@@ -170,7 +170,8 @@ describe('createCronReloadable', () => {
       id: '__internal_dreaming',
       schedule: '0 4 * * *',
       enabled: true,
-      kind: 'subagent',
+      kind: 'prompt',
+      prompt: '(internal)',
       subagent: 'dreaming',
       payload: { agentDir: '/x' },
     }
@@ -192,7 +193,8 @@ describe('createCronReloadable', () => {
       id: '__internal_dreaming',
       schedule: '0 4 * * *',
       enabled: true,
-      kind: 'subagent',
+      kind: 'prompt',
+      prompt: '(internal)',
       subagent: 'dreaming',
       payload: { agentDir: '/x' },
     }

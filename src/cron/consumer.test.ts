@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { createStream } from '@/stream'
 
 import { createCronConsumer, type CronConsumerLogger, type CronSession } from './consumer'
-import type { CronJob, ExecJob, PromptJob, SubagentJob } from './schema'
+import type { CronJob, ExecJob, PromptJob } from './schema'
 
 const silentLogger: CronConsumerLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
@@ -312,37 +312,142 @@ describe('createCronConsumer', () => {
     consumer.stop()
   })
 
-  test('dispatches a subagent job by publishing a new-session message to the stream', async () => {
+  test('a prompt job with a subagent field invokes the subagent registry, not createSessionForCron', async () => {
+    // given
     const stream = createStream()
     const factory = makeFakeSessionFactory()
+    const handlerCalls: { userPrompt: string; payload: unknown }[] = []
+    const fakeAgentSession = { prompt: async () => {}, dispose: () => {} }
     const consumer = createCronConsumer({
       stream,
       cwd: root,
       createSessionForCron: factory.createSessionForCron,
+      subagents: {
+        greeter: {
+          systemPrompt: 'X',
+          handler: async (ctx, runSession) => {
+            handlerCalls.push({ userPrompt: ctx.userPrompt, payload: ctx.payload })
+            await runSession()
+          },
+        },
+      },
+      createSessionForSubagent: async () => fakeAgentSession as never,
       logger: silentLogger,
     })
     consumer.start()
 
-    const newSessionMessages: Array<{ subagent?: string; payload: unknown }> = []
-    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => {
-      const target = msg.target as { kind: 'new-session'; subagent?: string }
-      newSessionMessages.push({ subagent: target.subagent, payload: msg.payload })
-    })
-
-    const job: SubagentJob = {
-      id: 'dream',
-      schedule: '0 4 * * *',
+    // when
+    publishCron(stream, {
+      id: 'sub-job',
+      schedule: '* * * * *',
       enabled: true,
-      kind: 'subagent',
-      subagent: 'dreaming',
-      payload: { agentDir: '/some/path' },
-    }
-    publishCron(stream, job)
+      kind: 'prompt',
+      prompt: 'fallback user prompt',
+      subagent: 'greeter',
+    })
     await new Promise((r) => setImmediate(r))
 
-    expect(newSessionMessages).toHaveLength(1)
-    expect(newSessionMessages[0]?.subagent).toBe('dreaming')
-    expect(newSessionMessages[0]?.payload).toEqual({ agentDir: '/some/path' })
+    // then
+    expect(handlerCalls).toEqual([{ userPrompt: 'fallback user prompt', payload: undefined }])
+    expect(factory.callsByJob.size).toBe(0)
+
+    consumer.stop()
+  })
+
+  test('a prompt job without a subagent uses createSessionForCron unchanged', async () => {
+    // given
+    const stream = createStream()
+    const factory = makeFakeSessionFactory()
+    let subagentInvoked = false
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: factory.createSessionForCron,
+      subagents: {
+        anything: {
+          systemPrompt: 'X',
+          handler: async () => {
+            subagentInvoked = true
+          },
+        },
+      },
+      createSessionForSubagent: async () => ({}) as never,
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    // when
+    publishCron(stream, promptJob('plain', 'hello'))
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(factory.callsByJob.get('plain')).toEqual(['hello'])
+    expect(subagentInvoked).toBe(false)
+
+    consumer.stop()
+  })
+
+  test('a prompt job referencing an unknown subagent surfaces an error in logs', async () => {
+    // given
+    const stream = createStream()
+    const factory = makeFakeSessionFactory()
+    const errors: string[] = []
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: factory.createSessionForCron,
+      subagents: {},
+      createSessionForSubagent: async () => ({}) as never,
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    consumer.start()
+
+    // when
+    publishCron(stream, {
+      id: 'bogus-sub',
+      schedule: '* * * * *',
+      enabled: true,
+      kind: 'prompt',
+      prompt: 'x',
+      subagent: 'no-such-subagent',
+    })
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(errors.some((e) => /unknown subagent/.test(e))).toBe(true)
+
+    consumer.stop()
+  })
+
+  test('a prompt job with a subagent surfaces an error when no subagent runtime is wired', async () => {
+    // given: consumer is created without `createSessionForSubagent`
+    const stream = createStream()
+    const factory = makeFakeSessionFactory()
+    const errors: string[] = []
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: factory.createSessionForCron,
+      subagents: {
+        'memory-logger': { systemPrompt: 'X' },
+      },
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    consumer.start()
+
+    // when: a subagent-bearing prompt job arrives
+    publishCron(stream, {
+      id: 'orphan',
+      schedule: '* * * * *',
+      enabled: true,
+      kind: 'prompt',
+      prompt: 'x',
+      subagent: 'memory-logger',
+    })
+    await new Promise((r) => setImmediate(r))
+
+    // then: the consumer logs a clear error and never invokes createSessionForCron
+    expect(errors.some((e) => /no subagent runtime is wired/.test(e))).toBe(true)
     expect(factory.callsByJob.size).toBe(0)
 
     consumer.stop()

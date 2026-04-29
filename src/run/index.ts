@@ -1,6 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession } from '@/agent'
+import { defaultCreateSessionForSubagent } from '@/agent/subagents'
 import { config, type Config, createConfigReloadable, getConfig } from '@/config'
 import {
   type CronConsumer,
@@ -12,14 +13,12 @@ import {
   type LoadCronResult,
   loadCron as loadCronDefault,
   type Scheduler,
-  type SubagentJob,
 } from '@/cron'
-import { createDreamingSpawner, createMemoryLoggerSpawner, isDreamingPayload, isMemoryLoggerPayload } from '@/memory'
+import { dreamingSubagent, memoryLoggerSubagent } from '@/memory'
 import { ReloadRegistry } from '@/reload'
 import { createServer, type Server } from '@/server'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
-import { createSubagentConsumer, type SubagentConsumer } from '@/subagent'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
 
 const DREAMING_JOB_ID = '__internal_dreaming'
@@ -28,7 +27,10 @@ type BunServer = ReturnType<Server['start']>
 
 export type TuiFactory = (options: TuiOptions) => { run: () => Promise<void> }
 
-export type LoadCronFn = (agentDir: string) => Promise<LoadCronResult>
+export type LoadCronFn = (
+  agentDir: string,
+  options?: { subagents?: import('@/agent/subagents').SubagentRegistry },
+) => Promise<LoadCronResult>
 export type SchedulerFactory = (options: { cwd: string; file: CronFile; onFire: (job: CronJob) => void }) => Scheduler
 
 export type StartAgentOptions = {
@@ -48,7 +50,6 @@ export type StartAgentResult = {
   tuiPromise: Promise<void> | null
   scheduler: Scheduler | null
   cronConsumer: CronConsumer | null
-  subagentConsumer: SubagentConsumer
   reloadRegistry: ReloadRegistry
   stream: Stream
   stop: () => void
@@ -68,6 +69,11 @@ export async function startAgent({
   const reloadRegistry = new ReloadRegistry()
   reloadRegistry.register(createConfigReloadable({ cwd }))
 
+  const subagents = {
+    'memory-logger': memoryLoggerSubagent,
+    dreaming: dreamingSubagent,
+  }
+
   const cronConsumer = createCronConsumer({
     stream,
     cwd,
@@ -77,25 +83,9 @@ export async function startAgent({
         sessionManager: SessionManager.create(cwd, sessionFactory.sessionDir()),
         stream,
       }),
+    subagents,
+    createSessionForSubagent: defaultCreateSessionForSubagent,
   })
-
-  const subagentConsumer = createSubagentConsumer({
-    stream,
-    spawners: {
-      'memory-logger': createMemoryLoggerSpawner(),
-      dreaming: createDreamingSpawner(),
-    },
-    inFlightKey: (subagent, payload) => {
-      if (subagent === 'memory-logger' && isMemoryLoggerPayload(payload)) {
-        return `${subagent}:${payload.parentSessionId}`
-      }
-      if (subagent === 'dreaming' && isDreamingPayload(payload)) {
-        return `${subagent}:${payload.agentDir}`
-      }
-      return subagent
-    },
-  })
-  subagentConsumer.start()
 
   const internalJobs = () => buildInternalJobs(cwd, getConfig())
   const factory = createSchedulerFor ?? makeDefaultSchedulerFactory(internalJobs)
@@ -105,11 +95,12 @@ export async function startAgent({
     createSchedulerFor: factory,
     stream,
     hasInternalJobs: internalJobs().length > 0,
+    subagents,
   })
 
   if (scheduler) {
     cronConsumer.start()
-    reloadRegistry.register(createCronReloadable({ cwd, scheduler, internalJobs }))
+    reloadRegistry.register(createCronReloadable({ cwd, scheduler, internalJobs, subagents }))
   }
 
   const server = createServer({
@@ -120,6 +111,8 @@ export async function startAgent({
     stream,
     memoryIdleMs: config.memory.idleMs,
     agentDir: cwd,
+    subagents,
+    createSessionForSubagent: defaultCreateSessionForSubagent,
   }).start()
 
   let stopped = false
@@ -128,7 +121,6 @@ export async function startAgent({
     stopped = true
     scheduler?.stop()
     cronConsumer.stop()
-    subagentConsumer.stop()
     server.stop(true)
   }
 
@@ -138,7 +130,6 @@ export async function startAgent({
       tuiPromise: null,
       scheduler,
       cronConsumer: scheduler ? cronConsumer : null,
-      subagentConsumer,
       reloadRegistry,
       stream,
       stop,
@@ -153,7 +144,6 @@ export async function startAgent({
     tuiPromise,
     scheduler,
     cronConsumer: scheduler ? cronConsumer : null,
-    subagentConsumer,
     reloadRegistry,
     stream,
     stop,
@@ -166,16 +156,18 @@ async function startScheduler({
   createSchedulerFor,
   stream,
   hasInternalJobs,
+  subagents,
 }: {
   cwd: string
   loadCron: LoadCronFn
   createSchedulerFor: SchedulerFactory
   stream: Stream
   hasInternalJobs: boolean
+  subagents?: import('@/agent/subagents').SubagentRegistry
 }): Promise<Scheduler | null> {
   let result: LoadCronResult
   try {
-    result = await loadCron(cwd)
+    result = await loadCron(cwd, subagents !== undefined ? { subagents } : {})
   } catch (err) {
     console.error(`[cron] load failed: ${err instanceof Error ? err.message : err}`)
     return null
@@ -205,15 +197,15 @@ function buildInternalJobs(cwd: string, cfg: Config): CronJob[] {
   const jobs: CronJob[] = []
   const dreaming = cfg.memory.dreaming
   if (dreaming) {
-    const job: SubagentJob = {
+    jobs.push({
       id: DREAMING_JOB_ID,
       schedule: dreaming.schedule,
       enabled: true,
-      kind: 'subagent',
+      kind: 'prompt',
+      prompt: '(internal: dreaming consolidation; user prompt is built by the dreaming subagent handler)',
       subagent: 'dreaming',
       payload: { agentDir: cwd },
-    }
-    jobs.push(job)
+    })
   }
   return jobs
 }

@@ -1,8 +1,10 @@
+import type { AgentSession } from '@/agent'
+import { invokeSubagent, type Subagent, type SubagentRegistry } from '@/agent/subagents'
 import type { Stream, Unsubscribe } from '@/stream'
 
-import type { CronJob, ExecJob, PromptJob, SubagentJob } from './schema'
+import type { CronJob, ExecJob, PromptJob } from './schema'
 
-export type CronSession = { prompt: (text: string) => Promise<void> }
+export type CronSession = { prompt: (text: string) => Promise<void>; dispose?: () => void }
 
 export type CronConsumerLogger = {
   info: (msg: string) => void
@@ -14,6 +16,8 @@ export type CreateCronConsumerOptions = {
   stream: Stream
   cwd: string
   createSessionForCron: (job: PromptJob) => Promise<CronSession>
+  subagents?: SubagentRegistry
+  createSessionForSubagent?: (subagent: Subagent<any>) => Promise<AgentSession>
   logger?: CronConsumerLogger
 }
 
@@ -33,6 +37,8 @@ export function createCronConsumer({
   stream,
   cwd,
   createSessionForCron,
+  subagents = {},
+  createSessionForSubagent,
   logger = consoleLogger,
 }: CreateCronConsumerOptions): CronConsumer {
   const inFlight = new Set<string>()
@@ -54,11 +60,9 @@ export function createCronConsumer({
         inFlight.add(job.id)
         try {
           if (job.kind === 'prompt') {
-            await runPrompt(job, createSessionForCron)
-          } else if (job.kind === 'exec') {
-            await runExec(job, cwd)
+            await runPrompt(job, { createSessionForCron, subagents, createSessionForSubagent, cwd })
           } else {
-            await runSubagent(job, stream)
+            await runExec(job, cwd)
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
@@ -78,12 +82,33 @@ export function createCronConsumer({
   }
 }
 
-async function runPrompt(
-  job: PromptJob,
-  createSessionForCron: (job: PromptJob) => Promise<CronSession>,
-): Promise<void> {
-  const session = await createSessionForCron(job)
-  await session.prompt(job.prompt)
+type RunPromptDeps = {
+  createSessionForCron: (job: PromptJob) => Promise<CronSession>
+  subagents: SubagentRegistry
+  createSessionForSubagent?: (subagent: Subagent<any>) => Promise<AgentSession>
+  cwd: string
+}
+
+async function runPrompt(job: PromptJob, deps: RunPromptDeps): Promise<void> {
+  if (job.subagent !== undefined) {
+    if (deps.createSessionForSubagent === undefined) {
+      throw new Error(`prompt job ${job.id}: subagent "${job.subagent}" requested but no subagent runtime is wired`)
+    }
+    await invokeSubagent(job.subagent, {
+      registry: deps.subagents,
+      createSessionForSubagent: deps.createSessionForSubagent,
+      agentDir: deps.cwd,
+      userPrompt: job.prompt,
+      payload: job.payload,
+    })
+    return
+  }
+  const session = await deps.createSessionForCron(job)
+  try {
+    await session.prompt(job.prompt)
+  } finally {
+    session.dispose?.()
+  }
 }
 
 async function runExec(job: ExecJob, cwd: string): Promise<void> {
@@ -97,17 +122,9 @@ async function runExec(job: ExecJob, cwd: string): Promise<void> {
   }
 }
 
-async function runSubagent(job: SubagentJob, stream: Stream): Promise<void> {
-  stream.publish({
-    target: { kind: 'new-session', subagent: job.subagent },
-    payload: job.payload,
-  })
-}
-
 function isCronJob(value: unknown): value is CronJob {
   if (typeof value !== 'object' || value === null) return false
-  const v = value as { id?: unknown; kind?: unknown; subagent?: unknown }
+  const v = value as { id?: unknown; kind?: unknown }
   if (typeof v.id !== 'string') return false
-  if (v.kind === 'prompt' || v.kind === 'exec') return true
-  return v.kind === 'subagent' && typeof v.subagent === 'string'
+  return v.kind === 'prompt' || v.kind === 'exec'
 }

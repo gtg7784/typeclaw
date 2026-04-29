@@ -8,7 +8,7 @@ const DEFAULT_LIMIT = 50
 const MAX_LIMIT = 100
 const MAX_PAYLOAD_SUMMARY_CHARS = 200
 
-const TARGET_KINDS = ['broadcast', 'session', 'new-session', 'cron'] as const
+const TARGET_KINDS = ['broadcast', 'session', 'cron'] as const
 type TargetKind = (typeof TARGET_KINDS)[number]
 
 export type CreateStreamSnapshotToolOptions = {
@@ -34,7 +34,7 @@ export function createStreamSnapshotTool({ stream }: CreateStreamSnapshotToolOpt
       target_id: Type.Optional(
         Type.String({
           description:
-            'Pin to a specific session id (when target_kind=session), job id (cron), or subagent (new-session). Ignored for broadcast.',
+            'Pin to a specific session id (when target_kind=session) or job id (cron). Ignored for broadcast.',
         }),
       ),
       since_ms_ago: Type.Optional(
@@ -84,8 +84,6 @@ function buildTargetFilter(kind: TargetKind, id: string | undefined): TargetFilt
       return { kind }
     case 'session':
       return id !== undefined ? { kind, sessionId: id } : { kind }
-    case 'new-session':
-      return id !== undefined ? { kind, subagent: id } : { kind }
     case 'cron':
       return id !== undefined ? { kind, jobId: id } : { kind }
   }
@@ -160,8 +158,6 @@ function describeTarget(target: StreamMessage['target']): string {
       return 'broadcast'
     case 'session':
       return `session:${target.sessionId}`
-    case 'new-session':
-      return target.subagent !== undefined ? `new-session:${target.subagent}` : 'new-session'
     case 'cron':
       return `cron:${target.jobId}`
   }

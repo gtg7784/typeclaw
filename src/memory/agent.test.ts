@@ -3,41 +3,17 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { AgentSession } from '@/agent'
+import { invokeSubagent } from '@/agent/subagents'
 import { formatLocalDate } from '@/shared'
 
 import {
-  createMemoryLoggerSpawner,
   isMemoryLoggerPayload,
   MEMORY_LOGGER_SYSTEM_PROMPT,
+  memoryLoggerSubagent,
   type MemoryLoggerPayload,
-  type MemoryLoggerSession,
 } from './agent'
 import { appendTool } from './append-tool'
-
-type SpawnRecord = {
-  promptText: string
-  disposed: boolean
-}
-
-function makeFakeSessionFactory(): {
-  factory: () => Promise<MemoryLoggerSession>
-  records: SpawnRecord[]
-} {
-  const records: SpawnRecord[] = []
-  const factory = async (): Promise<MemoryLoggerSession> => {
-    const record: SpawnRecord = { promptText: '', disposed: false }
-    records.push(record)
-    return {
-      prompt: async (text: string) => {
-        record.promptText = text
-      },
-      dispose: () => {
-        record.disposed = true
-      },
-    }
-  }
-  return { factory, records }
-}
 
 function makeAgentDir(): string {
   const root = mkdtempSync(join(tmpdir(), 'memory-agent-'))
@@ -74,66 +50,9 @@ describe('isMemoryLoggerPayload', () => {
   })
 })
 
-describe('createMemoryLoggerSpawner', () => {
-  test('the memory module exposes an `append` tool (not a `write` tool)', () => {
+describe('memory module', () => {
+  test('exposes an `append` tool (not a `write` tool)', () => {
     expect(appendTool.name).toBe('append')
-  })
-
-  test('the initial prompt mentions parent transcript path, session id, and target stream file', async () => {
-    const { factory, records } = makeFakeSessionFactory()
-    const agentDir = makeAgentDir()
-    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
-    writeFileSync(transcript, '')
-
-    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
-    await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
-
-    const prompt = records[0]!.promptText
-    expect(prompt).toContain(transcript)
-    expect(prompt).toContain('ses_abc')
-    expect(prompt).toMatch(/memory\/\d{4}-\d{2}-\d{2}\.md/)
-  })
-
-  test('the initial prompt includes the watermark when one exists', async () => {
-    const { factory, records } = makeFakeSessionFactory()
-    const agentDir = makeAgentDir()
-    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
-    writeFileSync(transcript, '')
-    const today = formatLocalDate()
-    const streamFile = join(agentDir, 'memory', `${today}.md`)
-    writeFileSync(streamFile, ['<!-- fragment source=ses_abc entry=watermrk -->', '## prior', 'body', ''].join('\n'))
-
-    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
-    await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
-
-    expect(records[0]!.promptText).toContain('watermrk')
-  })
-
-  test('the initial prompt instructs to advance the watermark even when nothing is worth remembering', async () => {
-    const { factory, records } = makeFakeSessionFactory()
-    const agentDir = makeAgentDir()
-    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
-    writeFileSync(transcript, '')
-
-    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
-    await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
-
-    const prompt = records[0]!.promptText
-    expect(prompt.toLowerCase()).toMatch(/bare watermark|advance the watermark/)
-  })
-
-  test('the initial prompt mentions the certainty discipline at a summary level', async () => {
-    const { factory, records } = makeFakeSessionFactory()
-    const agentDir = makeAgentDir()
-    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
-    writeFileSync(transcript, '')
-
-    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
-    await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
-
-    const prompt = records[0]!.promptText
-    expect(prompt).toMatch(/explicit/i)
-    expect(prompt).toMatch(/inductive/i)
   })
 })
 
@@ -168,52 +87,169 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
   test('states that the marker format requires a certainty attribute', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/fragment source=.+ entry=.+ certainty=/)
   })
+})
 
-  test('the initial prompt indicates "no prior watermark" when none exists', async () => {
-    const { factory, records } = makeFakeSessionFactory()
-    const agentDir = makeAgentDir()
-    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
-    writeFileSync(transcript, '')
-
-    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
-    await spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger')
-
-    const prompt = records[0]!.promptText
-    expect(prompt.toLowerCase()).toMatch(/no.*watermark|no prior|first time|begin/)
+describe('memoryLoggerSubagent', () => {
+  test('declares the memory-logger system prompt', () => {
+    expect(memoryLoggerSubagent.systemPrompt).toBe(MEMORY_LOGGER_SYSTEM_PROMPT)
   })
 
-  test('throws on invalid payload', async () => {
-    const { factory } = makeFakeSessionFactory()
-    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
-
-    await expect(spawner({ wrong: 'shape' }, 'memory-logger')).rejects.toThrow()
-    await expect(spawner(null, 'memory-logger')).rejects.toThrow()
+  test('declares the read tool and the append custom tool', () => {
+    expect(memoryLoggerSubagent.customTools).toEqual([appendTool])
+    expect(memoryLoggerSubagent.tools).toBeDefined()
+    expect(memoryLoggerSubagent.tools!.length).toBe(1)
   })
 
-  test('disposes the session even when prompt throws', async () => {
-    const records: SpawnRecord[] = []
-    const factory = async (): Promise<MemoryLoggerSession> => {
-      const record: SpawnRecord = { promptText: '', disposed: false }
-      records.push(record)
-      return {
-        prompt: async () => {
-          throw new Error('llm exploded')
-        },
-        dispose: () => {
-          record.disposed = true
-        },
-      }
-    }
-    const agentDir = makeAgentDir()
-    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
-    writeFileSync(transcript, '')
-
-    const spawner = createMemoryLoggerSpawner({ createMemoryLoggerSession: factory })
-
+  test('rejects an invalid payload via payloadSchema', async () => {
+    // when / then
     await expect(
-      spawner({ parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir }, 'memory-logger'),
-    ).rejects.toThrow('llm exploded')
+      invokeSubagent('memory-logger', {
+        registry: { 'memory-logger': memoryLoggerSubagent },
+        createSessionForSubagent: async () => ({}) as AgentSession,
+        agentDir: '/tmp',
+        userPrompt: '',
+        payload: { wrong: 'shape' },
+      }),
+    ).rejects.toThrow(/invalid payload/)
+  })
 
-    expect(records[0]!.disposed).toBe(true)
+  test('handler builds an initial prompt mentioning transcript, session id, and stream file', async () => {
+    // given
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+    const promptCalls: string[] = []
+    const session = {
+      prompt: async (text: string) => {
+        promptCalls.push(text)
+      },
+      dispose: () => {},
+    } as unknown as AgentSession
+
+    // when
+    await invokeSubagent('memory-logger', {
+      registry: { 'memory-logger': memoryLoggerSubagent },
+      createSessionForSubagent: async () => session,
+      agentDir,
+      userPrompt: 'unused',
+      payload: { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+    })
+
+    // then
+    expect(promptCalls).toHaveLength(1)
+    expect(promptCalls[0]!).toContain(transcript)
+    expect(promptCalls[0]!).toContain('ses_abc')
+    expect(promptCalls[0]!).toMatch(/memory\/\d{4}-\d{2}-\d{2}\.md/)
+  })
+
+  test('handler includes the watermark when one exists in the daily stream', async () => {
+    // given
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+    const today = formatLocalDate()
+    writeFileSync(
+      join(agentDir, 'memory', `${today}.md`),
+      ['<!-- fragment source=ses_abc entry=watermrk -->', '## prior', 'body', ''].join('\n'),
+    )
+    const promptCalls: string[] = []
+    const session = {
+      prompt: async (text: string) => {
+        promptCalls.push(text)
+      },
+      dispose: () => {},
+    } as unknown as AgentSession
+
+    // when
+    await invokeSubagent('memory-logger', {
+      registry: { 'memory-logger': memoryLoggerSubagent },
+      createSessionForSubagent: async () => session,
+      agentDir,
+      userPrompt: 'unused',
+      payload: { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+    })
+
+    // then
+    expect(promptCalls[0]!).toContain('watermrk')
+  })
+
+  test('handler instructs to advance the watermark even when nothing is worth remembering', async () => {
+    // given
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+    const promptCalls: string[] = []
+    const session = {
+      prompt: async (text: string) => {
+        promptCalls.push(text)
+      },
+      dispose: () => {},
+    } as unknown as AgentSession
+
+    // when
+    await invokeSubagent('memory-logger', {
+      registry: { 'memory-logger': memoryLoggerSubagent },
+      createSessionForSubagent: async () => session,
+      agentDir,
+      userPrompt: '',
+      payload: { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+    })
+
+    // then
+    expect(promptCalls[0]!.toLowerCase()).toMatch(/bare watermark|advance the watermark/)
+  })
+
+  test('handler indicates "no prior watermark" when none exists', async () => {
+    // given
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+    const promptCalls: string[] = []
+    const session = {
+      prompt: async (text: string) => {
+        promptCalls.push(text)
+      },
+      dispose: () => {},
+    } as unknown as AgentSession
+
+    // when
+    await invokeSubagent('memory-logger', {
+      registry: { 'memory-logger': memoryLoggerSubagent },
+      createSessionForSubagent: async () => session,
+      agentDir,
+      userPrompt: '',
+      payload: { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+    })
+
+    // then
+    expect(promptCalls[0]!.toLowerCase()).toMatch(/no.*watermark|no prior|first time|begin/)
+  })
+
+  test('disposes the session even when the underlying prompt throws', async () => {
+    // given
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+    let disposed = false
+    const session = {
+      prompt: async () => {
+        throw new Error('llm exploded')
+      },
+      dispose: () => {
+        disposed = true
+      },
+    } as unknown as AgentSession
+
+    // when / then
+    await expect(
+      invokeSubagent('memory-logger', {
+        registry: { 'memory-logger': memoryLoggerSubagent },
+        createSessionForSubagent: async () => session,
+        agentDir,
+        userPrompt: '',
+        payload: { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+      }),
+    ).rejects.toThrow('llm exploded')
+    expect(disposed).toBe(true)
   })
 })

@@ -213,42 +213,6 @@ describe('startAgent', () => {
 
     expect(running.cronConsumer).toBeNull()
   })
-
-  test('subagentConsumer is started and exposed (does not depend on cron)', async () => {
-    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
-
-    expect(running.subagentConsumer).not.toBeNull()
-    expect(running.subagentConsumer.inFlightCount()).toBe(0)
-  })
-
-  test('publishing new-session with an unknown subagent is dropped without crashing', async () => {
-    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
-
-    expect(() =>
-      running!.stream.publish({
-        target: { kind: 'new-session', subagent: 'no-such-subagent' },
-        payload: null,
-      }),
-    ).not.toThrow()
-    expect(running.subagentConsumer.inFlightCount()).toBe(0)
-  })
-
-  test('subagentConsumer.stop is called when startAgent.stop() runs', async () => {
-    running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
-
-    const subConsumer = running.subagentConsumer
-    running.stop()
-
-    let gotIt = 0
-    running.stream.publish({
-      target: { kind: 'new-session', subagent: 'memory-logger' },
-      payload: { parentSessionId: 'x', parentTranscriptPath: '/x', agentDir: '/x' },
-    })
-    await new Promise((r) => setTimeout(r, 5))
-
-    expect(subConsumer.inFlightCount()).toBe(0)
-    expect(gotIt).toBe(0)
-  })
 })
 
 describe('startAgent dreaming wiring', () => {
@@ -394,7 +358,7 @@ describe('startAgent dreaming wiring', () => {
     }
   })
 
-  test('firing the dreaming cron job publishes a new-session message for the dreaming subagent', async () => {
+  test('firing the dreaming cron job emits a prompt cron event that targets the dreaming subagent', async () => {
     const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-dream-fire-'))
     try {
       await Bun.write(
@@ -420,19 +384,17 @@ describe('startAgent dreaming wiring', () => {
           createSchedulerFor,
         })
 
-        const newSessionMessages: Array<{ subagent?: string; payload: unknown }> = []
-        running.stream.subscribe({ target: { kind: 'new-session' } }, (msg) => {
-          const target = msg.target as { kind: 'new-session'; subagent?: string }
-          newSessionMessages.push({ subagent: target.subagent, payload: msg.payload })
+        const cronMessages: CronJob[] = []
+        running.stream.subscribe({ target: { kind: 'cron' } }, (msg) => {
+          cronMessages.push(msg.payload as CronJob)
         })
 
-        // when: the scheduler fires the dreaming job (onFire publishes to target:cron;
-        // the consumer is expected to translate kind:'subagent' into a new-session publish)
         const dreamJob: CronJob = {
           id: '__internal_dreaming',
           schedule: '0 4 * * *',
           enabled: true,
-          kind: 'subagent',
+          kind: 'prompt',
+          prompt: '(internal)',
           subagent: 'dreaming',
           payload: { agentDir },
         }
@@ -440,9 +402,11 @@ describe('startAgent dreaming wiring', () => {
         captured!(dreamJob)
         await new Promise((r) => setImmediate(r))
 
-        const dreamingMsg = newSessionMessages.find((m) => m.subagent === 'dreaming')
+        const dreamingMsg = cronMessages.find((j) => j.kind === 'prompt' && j.subagent === 'dreaming')
         expect(dreamingMsg).toBeDefined()
-        expect(dreamingMsg?.payload).toEqual({ agentDir })
+        if (dreamingMsg && dreamingMsg.kind === 'prompt') {
+          expect(dreamingMsg.payload).toEqual({ agentDir })
+        }
       } finally {
         restore()
       }

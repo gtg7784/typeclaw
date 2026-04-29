@@ -1,19 +1,19 @@
 export {
-  createMemoryLoggerSpawner,
   isMemoryLoggerPayload,
-  type CreateMemoryLoggerSpawnerOptions,
+  memoryLoggerPayloadSchema,
+  memoryLoggerSubagent,
   type MemoryLoggerPayload,
-  type MemoryLoggerSession,
 } from './agent'
 export { appendTool } from './append-tool'
 export {
-  createDreamingSpawner,
+  createDreamingSubagent,
   DREAMING_SYSTEM_PROMPT,
+  dreamingPayloadSchema,
+  dreamingSubagent,
   isDreamingPayload,
-  type CreateDreamingSpawnerOptions,
+  type CreateDreamingSubagentOptions,
   type DreamingLogger,
   type DreamingPayload,
-  type DreamingSession,
 } from './dreaming'
 export {
   DREAMING_STATE_FILE,

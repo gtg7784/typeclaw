@@ -69,7 +69,13 @@ function createFireRecorder(): {
   }
 }
 
-type PromptOverrides = { enabled?: boolean; timezone?: string; prompt?: string }
+type PromptOverrides = {
+  enabled?: boolean
+  timezone?: string
+  prompt?: string
+  subagent?: string
+  payload?: unknown
+}
 type ExecOverrides = { enabled?: boolean; timezone?: string; command?: string[] }
 
 const promptJob = (id: string, schedule: string, overrides: PromptOverrides = {}): CronJob => ({
@@ -79,6 +85,8 @@ const promptJob = (id: string, schedule: string, overrides: PromptOverrides = {}
   prompt: overrides.prompt ?? `run ${id}`,
   enabled: overrides.enabled ?? true,
   ...(overrides.timezone !== undefined && { timezone: overrides.timezone }),
+  ...(overrides.subagent !== undefined && { subagent: overrides.subagent }),
+  ...(overrides.payload !== undefined && { payload: overrides.payload }),
 })
 
 const execJob = (id: string, schedule: string, overrides: ExecOverrides = {}): CronJob => ({
@@ -344,6 +352,35 @@ describe('Scheduler.replaceJobs', () => {
     ])
 
     expect(diff.updated.map((j) => j.id).sort()).toEqual(['e1', 'p1', 'p2'])
+
+    scheduler.stop()
+  })
+
+  test('treats subagent and payload changes on a prompt job as updates', () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const scheduler = createScheduler({
+      jobs: [
+        promptJob('plain-to-subagent', '* * * * *'),
+        promptJob('subagent-rename', '* * * * *', { subagent: 'old-name' }),
+        promptJob('payload-change', '* * * * *', { subagent: 'dreaming', payload: { agentDir: '/old' } }),
+        promptJob('untouched', '* * * * *', { subagent: 'memory-logger' }),
+      ],
+      onFire: recorder.onFire,
+      clock,
+      logger: silentLogger,
+    })
+    scheduler.start()
+
+    const diff = scheduler.replaceJobs([
+      promptJob('plain-to-subagent', '* * * * *', { subagent: 'dreaming' }),
+      promptJob('subagent-rename', '* * * * *', { subagent: 'new-name' }),
+      promptJob('payload-change', '* * * * *', { subagent: 'dreaming', payload: { agentDir: '/new' } }),
+      promptJob('untouched', '* * * * *', { subagent: 'memory-logger' }),
+    ])
+
+    expect(diff.updated.map((j) => j.id).sort()).toEqual(['payload-change', 'plain-to-subagent', 'subagent-rename'])
+    expect(diff.unchanged.map((j) => j.id)).toEqual(['untouched'])
 
     scheduler.stop()
   })

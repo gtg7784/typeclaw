@@ -3,13 +3,10 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import {
-  commitMemorySnapshot,
-  createDreamingSpawner,
-  type DreamingLogger,
-  type DreamingSession,
-  isDreamingPayload,
-} from './dreaming'
+import type { AgentSession } from '@/agent'
+import { invokeSubagent } from '@/agent/subagents'
+
+import { commitMemorySnapshot, createDreamingSubagent, type DreamingLogger, isDreamingPayload } from './dreaming'
 import { DREAMING_STATE_FILE, loadDreamingState } from './dreaming-state'
 
 const silentLogger: DreamingLogger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -25,7 +22,7 @@ afterEach(async () => {
   await rm(agentDir, { recursive: true, force: true })
 })
 
-function fakeSession(): DreamingSession & { prompts: string[]; disposed: boolean } {
+function fakeAgentSession(): AgentSession & { prompts: string[]; disposed: boolean } {
   const prompts: string[] = []
   let disposed = false
   return {
@@ -33,13 +30,30 @@ function fakeSession(): DreamingSession & { prompts: string[]; disposed: boolean
     get disposed() {
       return disposed
     },
-    prompt: async (text) => {
+    prompt: async (text: string) => {
       prompts.push(text)
     },
     dispose: () => {
       disposed = true
     },
-  }
+  } as unknown as AgentSession & { prompts: string[]; disposed: boolean }
+}
+
+async function invokeDreaming(
+  agentDir: string,
+  options: { commitMemory?: (cwd: string) => Promise<void>; logger?: DreamingLogger; session?: AgentSession },
+): Promise<void> {
+  const subagent = createDreamingSubagent({
+    commitMemory: options.commitMemory ?? (async () => {}),
+    logger: options.logger ?? silentLogger,
+  })
+  await invokeSubagent('dreaming', {
+    registry: { dreaming: subagent },
+    createSessionForSubagent: async () => options.session ?? fakeAgentSession(),
+    agentDir,
+    userPrompt: '',
+    payload: { agentDir },
+  })
 }
 
 describe('isDreamingPayload', () => {
@@ -64,31 +78,32 @@ describe('isDreamingPayload', () => {
   })
 })
 
-describe('createDreamingSpawner', () => {
+describe('dreaming subagent (orchestration)', () => {
   test('throws when payload is invalid', async () => {
-    const spawner = createDreamingSpawner({
-      createDreamingSession: async () => fakeSession(),
-      commitMemory: async () => {},
-      logger: silentLogger,
-    })
-    await expect(spawner({ agentDir: '' }, 'dreaming')).rejects.toThrow(/invalid payload/)
+    const subagent = createDreamingSubagent({ commitMemory: async () => {}, logger: silentLogger })
+    await expect(
+      invokeSubagent('dreaming', {
+        registry: { dreaming: subagent },
+        createSessionForSubagent: async () => fakeAgentSession(),
+        agentDir,
+        userPrompt: '',
+        payload: { agentDir: '' },
+      }),
+    ).rejects.toThrow(/invalid payload/)
   })
 
   test('skips dreaming entirely when no daily streams exist', async () => {
-    const session = fakeSession()
+    const session = fakeAgentSession()
     let committed = false
-    const spawner = createDreamingSpawner({
-      createDreamingSession: async () => session,
+
+    await invokeDreaming(agentDir, {
+      session,
       commitMemory: async () => {
         committed = true
       },
-      logger: silentLogger,
     })
 
-    await spawner({ agentDir }, 'dreaming')
-
     expect(session.prompts).toHaveLength(0)
-    expect(session.disposed).toBe(false)
     expect(committed).toBe(false)
   })
 
@@ -98,14 +113,9 @@ describe('createDreamingSpawner', () => {
       join(agentDir, DREAMING_STATE_FILE),
       JSON.stringify({ version: 1, dreamedThrough: { '2026-04-27': { lines: 3, ts: 'past' } } }),
     )
-    const session = fakeSession()
-    const spawner = createDreamingSpawner({
-      createDreamingSession: async () => session,
-      commitMemory: async () => {},
-      logger: silentLogger,
-    })
+    const session = fakeAgentSession()
 
-    await spawner({ agentDir }, 'dreaming')
+    await invokeDreaming(agentDir, { session })
 
     expect(session.prompts).toHaveLength(0)
   })
@@ -116,14 +126,9 @@ describe('createDreamingSpawner', () => {
       join(agentDir, DREAMING_STATE_FILE),
       JSON.stringify({ version: 1, dreamedThrough: { '2026-04-27': { lines: 2, ts: 'past' } } }),
     )
-    const session = fakeSession()
-    const spawner = createDreamingSpawner({
-      createDreamingSession: async () => session,
-      commitMemory: async () => {},
-      logger: silentLogger,
-    })
+    const session = fakeAgentSession()
 
-    await spawner({ agentDir }, 'dreaming')
+    await invokeDreaming(agentDir, { session })
 
     expect(session.prompts).toHaveLength(1)
     expect(session.prompts[0]).toContain('memory/2026-04-27.md')
@@ -134,14 +139,8 @@ describe('createDreamingSpawner', () => {
 
   test('advances watermarks to current line counts after a successful run', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'a\nb\nc\nd\n')
-    const session = fakeSession()
-    const spawner = createDreamingSpawner({
-      createDreamingSession: async () => session,
-      commitMemory: async () => {},
-      logger: silentLogger,
-    })
 
-    await spawner({ agentDir }, 'dreaming')
+    await invokeDreaming(agentDir, {})
 
     const state = await loadDreamingState(agentDir)
     expect(state.dreamedThrough['2026-04-27']?.lines).toBe(4)
@@ -150,14 +149,9 @@ describe('createDreamingSpawner', () => {
   test('passes multiple undreamed days oldest-first to the subagent', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-25.md'), 'older\n')
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'newer\n')
-    const session = fakeSession()
-    const spawner = createDreamingSpawner({
-      createDreamingSession: async () => session,
-      commitMemory: async () => {},
-      logger: silentLogger,
-    })
+    const session = fakeAgentSession()
 
-    await spawner({ agentDir }, 'dreaming')
+    await invokeDreaming(agentDir, { session })
 
     const prompt = session.prompts[0] ?? ''
     expect(prompt.indexOf('2026-04-25.md')).toBeGreaterThan(-1)
@@ -167,37 +161,29 @@ describe('createDreamingSpawner', () => {
   test('calls commitMemory after the subagent finishes', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'fragment\n')
     const commits: string[] = []
-    const spawner = createDreamingSpawner({
-      createDreamingSession: async () => fakeSession(),
+
+    await invokeDreaming(agentDir, {
       commitMemory: async (cwd) => {
         commits.push(cwd)
       },
-      logger: silentLogger,
     })
-
-    await spawner({ agentDir }, 'dreaming')
 
     expect(commits).toEqual([agentDir])
   })
 
-  test('disposes the session even when prompt() throws (and still advances watermarks)', async () => {
+  test('disposes the session even when prompt() throws (and does NOT advance watermarks)', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'oops\n')
     let disposed = false
-    const session: DreamingSession = {
+    const session = {
       prompt: async () => {
         throw new Error('LLM blew up')
       },
       dispose: () => {
         disposed = true
       },
-    }
-    const spawner = createDreamingSpawner({
-      createDreamingSession: async () => session,
-      commitMemory: async () => {},
-      logger: silentLogger,
-    })
+    } as unknown as AgentSession
 
-    await expect(spawner({ agentDir }, 'dreaming')).rejects.toThrow(/LLM blew up/)
+    await expect(invokeDreaming(agentDir, { session })).rejects.toThrow(/LLM blew up/)
     expect(disposed).toBe(true)
     // Failed runs do NOT advance the watermark — next run will retry the same
     // tail, which is the safer default than silently consolidating nothing.
@@ -211,14 +197,9 @@ describe('createDreamingSpawner', () => {
       join(agentDir, DREAMING_STATE_FILE),
       JSON.stringify({ version: 1, dreamedThrough: { '2026-04-27': { lines: 99, ts: 'past' } } }),
     )
-    const session = fakeSession()
-    const spawner = createDreamingSpawner({
-      createDreamingSession: async () => session,
-      commitMemory: async () => {},
-      logger: silentLogger,
-    })
+    const session = fakeAgentSession()
 
-    await spawner({ agentDir }, 'dreaming')
+    await invokeDreaming(agentDir, { session })
 
     expect(session.prompts).toHaveLength(0)
     const state = await loadDreamingState(agentDir)
@@ -227,13 +208,8 @@ describe('createDreamingSpawner', () => {
 
   test('writes the dreaming state file under memory/.dreaming-state.json', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'fragment\n')
-    const spawner = createDreamingSpawner({
-      createDreamingSession: async () => fakeSession(),
-      commitMemory: async () => {},
-      logger: silentLogger,
-    })
 
-    await spawner({ agentDir }, 'dreaming')
+    await invokeDreaming(agentDir, {})
 
     const raw = await readFile(join(agentDir, DREAMING_STATE_FILE), 'utf8')
     expect(raw).toContain('2026-04-27')

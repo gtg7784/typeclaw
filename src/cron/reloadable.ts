@@ -1,3 +1,4 @@
+import type { SubagentRegistry } from '@/agent/subagents'
 import type { Reloadable, ReloadResult } from '@/reload'
 
 import { loadCron } from './index'
@@ -10,18 +11,29 @@ export type CreateCronReloadableOptions = {
   // Internal jobs (e.g. dreaming) survive cron.json reloads. The reloadable
   // recomputes them on every reload so config-driven changes propagate too.
   internalJobs?: () => CronJob[]
+  subagents?: SubagentRegistry
 }
 
-export function createCronReloadable({ cwd, scheduler, internalJobs }: CreateCronReloadableOptions): Reloadable {
+export function createCronReloadable({
+  cwd,
+  scheduler,
+  internalJobs,
+  subagents,
+}: CreateCronReloadableOptions): Reloadable {
   return {
     scope: 'cron',
     description: 'cron jobs from cron.json',
-    reload: async () => doReload({ cwd, scheduler, internalJobs }),
+    reload: async () => doReload({ cwd, scheduler, internalJobs, subagents }),
   }
 }
 
-async function doReload({ cwd, scheduler, internalJobs }: CreateCronReloadableOptions): Promise<ReloadResult> {
-  const loaded = await loadCron(cwd)
+async function doReload({
+  cwd,
+  scheduler,
+  internalJobs,
+  subagents,
+}: CreateCronReloadableOptions): Promise<ReloadResult> {
+  const loaded = await loadCron(cwd, subagents !== undefined ? { subagents } : {})
   if (!loaded.ok) {
     return { scope: 'cron', ok: false, reason: loaded.reason }
   }

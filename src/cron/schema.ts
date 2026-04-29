@@ -1,6 +1,9 @@
 import { CronExpressionParser } from 'cron-parser'
 import { z } from 'zod'
 
+import type { SubagentRegistry } from '@/agent/subagents'
+import { validateSubagentPayload } from '@/agent/subagents'
+
 const idPattern = /^[a-zA-Z0-9_-]+$/
 
 const baseJob = z.object({
@@ -13,6 +16,8 @@ const baseJob = z.object({
 const promptJob = baseJob.extend({
   kind: z.literal('prompt'),
   prompt: z.string().min(1),
+  subagent: z.string().min(1).optional(),
+  payload: z.unknown().optional(),
 })
 
 const execJob = baseJob.extend({
@@ -27,32 +32,21 @@ export const cronFileSchema = z.object({
   jobs: z.array(cronJobSchema).default([]),
 })
 
-export type UserCronJob = z.infer<typeof cronJobSchema>
-export type PromptJob = Extract<UserCronJob, { kind: 'prompt' }>
-export type ExecJob = Extract<UserCronJob, { kind: 'exec' }>
+export type CronJob = z.infer<typeof cronJobSchema>
+export type PromptJob = Extract<CronJob, { kind: 'prompt' }>
+export type ExecJob = Extract<CronJob, { kind: 'exec' }>
 export type CronFile = z.infer<typeof cronFileSchema>
-
-// Internal cron jobs. Constructed only from code (e.g., from typeclaw.json's
-// `memory.dreaming` config), never accepted from cron.json. They share the
-// scheduler's clock and the consumer's coalescing, but dispatch by handing
-// the payload to a registered subagent.
-export type SubagentJob = {
-  id: string
-  schedule: string
-  enabled: boolean
-  timezone?: string
-  kind: 'subagent'
-  subagent: string
-  payload: unknown
-}
-
-// The runtime job union. The scheduler and consumer accept `CronJob`; only
-// `cronJobSchema` is parsed from disk.
-export type CronJob = UserCronJob | SubagentJob
 
 export type ParseCronResult = { ok: true; file: CronFile } | { ok: false; reason: string }
 
-export function parseCronFile(raw: unknown): ParseCronResult {
+export type ParseCronOptions = {
+  // When provided, prompt jobs with a `subagent` field are validated against
+  // the registry: the name must exist, and the optional `payload` must match
+  // the registered subagent's payloadSchema (or be absent if no schema).
+  subagents?: SubagentRegistry
+}
+
+export function parseCronFile(raw: unknown, options: ParseCronOptions = {}): ParseCronResult {
   const parsed = cronFileSchema.safeParse(raw)
   if (!parsed.success) {
     return { ok: false, reason: parsed.error.issues.map(formatIssue).join('; ') }
@@ -77,6 +71,19 @@ export function parseCronFile(raw: unknown): ParseCronResult {
         return { ok: false, reason: `job ${job.id}: invalid timezone "${job.timezone}": ${message}` }
       }
       return { ok: false, reason: `job ${job.id}: invalid schedule "${job.schedule}": ${message}` }
+    }
+
+    if (job.kind === 'prompt' && job.subagent !== undefined && options.subagents !== undefined) {
+      const subagent = options.subagents[job.subagent]
+      if (!subagent) {
+        return { ok: false, reason: `job ${job.id}: unknown subagent "${job.subagent}"` }
+      }
+      try {
+        validateSubagentPayload(job.subagent, subagent, job.payload)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        return { ok: false, reason: `job ${job.id}: ${message}` }
+      }
     }
   }
 

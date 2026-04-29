@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
 import { SessionManager } from '@mariozechner/pi-coding-agent'
+import { z } from 'zod'
 
 import type { AgentSession, CreateSessionOptions } from '@/agent'
 import type { SessionFactory } from '@/sessions'
@@ -65,6 +66,8 @@ async function startWithSession(
     sessionFactory?: SessionFactory
     memoryIdleMs?: number
     agentDir?: string
+    subagents?: import('@/agent/subagents').SubagentRegistry
+    createSessionForSubagent?: (sub: import('@/agent/subagents').Subagent<unknown>) => Promise<AgentSession>
   } = {},
 ): Promise<{ url: string }> {
   const built = createServer({
@@ -74,6 +77,10 @@ async function startWithSession(
     ...(extra.sessionFactory ? { sessionFactory: extra.sessionFactory } : {}),
     ...(extra.memoryIdleMs !== undefined ? { memoryIdleMs: extra.memoryIdleMs } : {}),
     ...(extra.agentDir !== undefined ? { agentDir: extra.agentDir } : {}),
+    ...(extra.subagents !== undefined ? { subagents: extra.subagents } : {}),
+    ...(extra.createSessionForSubagent !== undefined
+      ? { createSessionForSubagent: extra.createSessionForSubagent }
+      : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
@@ -535,21 +542,42 @@ describe('createServer memory idle detector', () => {
     }
   }
 
-  test('publishes a new-session memory-logger message after idle window when transcript exists', async () => {
+  function recordingMemoryLogger(): {
+    subagents: import('@/agent/subagents').SubagentRegistry
+    createSessionForSubagent: () => Promise<AgentSession>
+    invocations: Array<{ payload: unknown }>
+  } {
+    const invocations: Array<{ payload: unknown }> = []
+    const subagents = {
+      'memory-logger': {
+        systemPrompt: 'X',
+        payloadSchema: z.object({
+          parentSessionId: z.string(),
+          parentTranscriptPath: z.string(),
+          agentDir: z.string(),
+        }),
+        handler: async (ctx: { payload: unknown }) => {
+          invocations.push({ payload: ctx.payload })
+        },
+      },
+    } satisfies import('@/agent/subagents').SubagentRegistry
+    const fakeSession = { prompt: async () => {}, dispose: () => {} } as unknown as AgentSession
+    return { subagents, createSessionForSubagent: async () => fakeSession, invocations }
+  }
+
+  test('invokes the memory-logger subagent after the idle window when transcript exists', async () => {
     // given
     const session = createFakeSession()
     const stream = createStream()
-    const newSessionMessages: Array<{ subagent?: string; payload: unknown }> = []
-    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => {
-      const target = msg.target as { kind: 'new-session'; subagent?: string }
-      newSessionMessages.push({ subagent: target.subagent, payload: msg.payload })
-    })
+    const recorder = recordingMemoryLogger()
 
     const { url } = await startWithSession(session, {
       stream,
       sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/test-sessions/ses_fake.jsonl' }),
       memoryIdleMs: 30,
       agentDir: '/tmp/agent-dir',
+      subagents: recorder.subagents,
+      createSessionForSubagent: recorder.createSessionForSubagent,
     })
     const { ws, waitFor } = await connect(url)
     await waitFor((m) => m.type === 'connected')
@@ -563,12 +591,11 @@ describe('createServer memory idle detector', () => {
     session.resolvePrompt()
     await waitFor((m) => m.type === 'done')
 
-    // then: after the idle window, the memory-logger publish fires
+    // then: after the idle window, the memory-logger handler fires
     await new Promise((r) => setTimeout(r, 60))
 
-    expect(newSessionMessages).toHaveLength(1)
-    expect(newSessionMessages[0]?.subagent).toBe('memory-logger')
-    expect(newSessionMessages[0]?.payload).toEqual({
+    expect(recorder.invocations).toHaveLength(1)
+    expect(recorder.invocations[0]?.payload).toEqual({
       parentSessionId: 'ses_fake',
       parentTranscriptPath: '/tmp/test-sessions/ses_fake.jsonl',
       agentDir: '/tmp/agent-dir',
@@ -576,23 +603,23 @@ describe('createServer memory idle detector', () => {
     ws.close()
   })
 
-  test('skips publishing when the session has no persisted transcript yet', async () => {
+  test('skips invocation when the session has no persisted transcript yet', async () => {
     // given
     const session = createFakeSession()
     const stream = createStream()
-    const newSessionMessages: unknown[] = []
-    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => newSessionMessages.push(msg))
+    const recorder = recordingMemoryLogger()
 
     const { url } = await startWithSession(session, {
       stream,
       sessionFactory: stubSessionFactory({ transcriptPath: undefined }),
       memoryIdleMs: 30,
       agentDir: '/tmp/agent-dir',
+      subagents: recorder.subagents,
+      createSessionForSubagent: recorder.createSessionForSubagent,
     })
     const { ws, waitFor } = await connect(url)
     await waitFor((m) => m.type === 'connected')
 
-    // when: prompt completes but no transcript is persisted
     stream.publish({
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
@@ -601,10 +628,9 @@ describe('createServer memory idle detector', () => {
     session.resolvePrompt()
     await waitFor((m) => m.type === 'done')
 
-    // then: idle fires but publish is suppressed
     await new Promise((r) => setTimeout(r, 60))
 
-    expect(newSessionMessages).toHaveLength(0)
+    expect(recorder.invocations).toHaveLength(0)
     ws.close()
   })
 
@@ -612,14 +638,14 @@ describe('createServer memory idle detector', () => {
     // given
     const session = createFakeSession()
     const stream = createStream()
-    const newSessionMessages: unknown[] = []
-    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => newSessionMessages.push(msg))
+    const recorder = recordingMemoryLogger()
 
     const { url } = await startWithSession(session, {
       stream,
       sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
-      // memoryIdleMs intentionally omitted
       agentDir: '/tmp/agent-dir',
+      subagents: recorder.subagents,
+      createSessionForSubagent: recorder.createSessionForSubagent,
     })
     const { ws, waitFor } = await connect(url)
     await waitFor((m) => m.type === 'connected')
@@ -634,27 +660,27 @@ describe('createServer memory idle detector', () => {
 
     await new Promise((r) => setTimeout(r, 60))
 
-    expect(newSessionMessages).toHaveLength(0)
+    expect(recorder.invocations).toHaveLength(0)
     ws.close()
   })
 
-  test('a new prompt arriving during the idle window cancels the pending publish', async () => {
+  test('a new prompt arriving during the idle window cancels the pending invocation', async () => {
     // given
     const session = createFakeSession()
     const stream = createStream()
-    const newSessionMessages: unknown[] = []
-    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => newSessionMessages.push(msg))
+    const recorder = recordingMemoryLogger()
 
     const { url } = await startWithSession(session, {
       stream,
       sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
       memoryIdleMs: 50,
       agentDir: '/tmp/agent-dir',
+      subagents: recorder.subagents,
+      createSessionForSubagent: recorder.createSessionForSubagent,
     })
     const { ws, waitFor } = await connect(url)
     await waitFor((m) => m.type === 'connected')
 
-    // first prompt completes
     stream.publish({
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'first', delivery: 'queue' },
@@ -663,9 +689,8 @@ describe('createServer memory idle detector', () => {
     session.resolvePrompt()
     await waitFor((m) => m.type === 'done')
 
-    // second prompt arrives within the idle window (20ms < 50ms)
     await new Promise((r) => setTimeout(r, 20))
-    expect(newSessionMessages).toHaveLength(0)
+    expect(recorder.invocations).toHaveLength(0)
     stream.publish({
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'second', delivery: 'queue' },
@@ -674,14 +699,11 @@ describe('createServer memory idle detector', () => {
     session.resolvePrompt()
     await new Promise((r) => setTimeout(r, 5))
 
-    // the original 50ms idle window from the first prompt would now have elapsed.
-    // if cancel() worked, no publish has fired yet.
     await new Promise((r) => setTimeout(r, 30))
-    expect(newSessionMessages).toHaveLength(0)
+    expect(recorder.invocations).toHaveLength(0)
 
-    // after the second idle window also elapses, exactly one publish has fired
     await new Promise((r) => setTimeout(r, 50))
-    expect(newSessionMessages).toHaveLength(1)
+    expect(recorder.invocations).toHaveLength(1)
     ws.close()
   })
 })

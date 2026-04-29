@@ -121,14 +121,17 @@ Domain logic lives in `src/<domain>/`. Examples: `src/init/`, `src/config/`, `sr
 
 ### Targets
 
-A `StreamMessage` carries a `target` discriminating four kinds, each with documented semantics:
+A `StreamMessage` carries a `target` discriminating three kinds, each with documented semantics:
 
 - **`broadcast`** — fan-out to every matching subscriber. Used for live notifications (mood, status, presence). The WS server forwards these to connected TUIs as `notification` messages.
 - **`session: { sessionId }`** — addressed to a specific live `AgentSession`. Used for TUI input queueing — the WS server publishes here, the per-session drain loop subscribes. Exactly one logical consumer per session.
-- **`new-session: { role? }`** — spawn a fresh session and deliver the initial message. Reserved for subagent delegation. Not wired to a consumer yet.
-- **`cron: { jobId }`** — emitted by the cron scheduler when a job fires. Consumed by the `CronConsumer` in `src/cron/consumer.ts`, which dispatches to the prompt or exec runner and handles per-jobId coalescing.
+- **`cron: { jobId }`** — emitted by the cron scheduler when a job fires. Consumed by the `CronConsumer` in `src/cron/consumer.ts`, which dispatches to the prompt or exec runner and handles per-jobId coalescing. A `prompt` job may carry a `subagent` field; the consumer looks the name up in the in-process subagent registry (`src/agent/subagents.ts`) and invokes the registered `Subagent` directly — no second stream hop.
 
-Targets are typed unions, not stringly-typed topics. Adding a fifth kind is a deliberate design choice; we do not have a generic `handler` extension point.
+Targets are typed unions, not stringly-typed topics. Adding a fourth kind is a deliberate design choice; we do not have a generic `handler` extension point.
+
+### Subagents
+
+`src/agent/subagents.ts` defines the `Subagent` shape: `{ systemPrompt, tools?, customTools?, payloadSchema?, handler? }`. Subagents are invoked synchronously through `invokeSubagent(name, options)` — there is no pub/sub indirection. Production wiring lives in `src/run/index.ts`, which builds the registry with `memoryLoggerSubagent` and `dreamingSubagent` and threads it into both the cron consumer (`runPrompt` looks up `job.subagent`) and the WS server (idle-detector invokes memory-logger directly). When a `Subagent` declares a `payloadSchema`, the cron loader validates `cron.json`'s `payload` field against it at parse time and at every `reloadAll()` — bad configs fail fast on disk, not 6 hours later when the job fires.
 
 ### Wire protocol contract
 

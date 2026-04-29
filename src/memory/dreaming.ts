@@ -2,18 +2,11 @@ import { existsSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import {
-  createAgentSession,
-  DefaultResourceLoader,
-  readTool,
-  SessionManager,
-  writeTool,
-} from '@mariozechner/pi-coding-agent'
+import { readTool, writeTool } from '@mariozechner/pi-coding-agent'
+import { z } from 'zod'
 
-import { getAuth } from '@/agent/auth'
-import { getConfig, resolveModel } from '@/config'
+import type { Subagent } from '@/agent/subagents'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
-import type { SubagentSpawner } from '@/subagent'
 
 import {
   DREAMING_STATE_FILE,
@@ -26,19 +19,14 @@ import {
 
 const STREAM_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.md$/
 
-export type DreamingPayload = {
-  agentDir: string
-}
+export const dreamingPayloadSchema = z.object({
+  agentDir: z.string().min(1),
+})
+
+export type DreamingPayload = z.infer<typeof dreamingPayloadSchema>
 
 export function isDreamingPayload(value: unknown): value is DreamingPayload {
-  if (typeof value !== 'object' || value === null) return false
-  const v = value as Record<string, unknown>
-  return typeof v.agentDir === 'string' && v.agentDir.length > 0
-}
-
-export type DreamingSession = {
-  prompt: (text: string) => Promise<void>
-  dispose: () => void
+  return dreamingPayloadSchema.safeParse(value).success
 }
 
 export type DreamingSnapshot = { date: string; lines: number }
@@ -49,47 +37,10 @@ export type DreamingLogger = {
   error: (msg: string) => void
 }
 
-export type CreateDreamingSpawnerOptions = {
-  createDreamingSession?: () => Promise<DreamingSession>
-  commitMemory?: (cwd: string) => Promise<void>
-  logger?: DreamingLogger
-}
-
 const consoleLogger: DreamingLogger = {
   info: (m) => console.log(m),
   warn: (m) => console.warn(m),
   error: (m) => console.error(m),
-}
-
-export function createDreamingSpawner(options: CreateDreamingSpawnerOptions = {}): SubagentSpawner {
-  const factory = options.createDreamingSession ?? defaultCreateDreamingSession
-  const commit = options.commitMemory ?? commitMemorySnapshot
-  const logger = options.logger ?? consoleLogger
-
-  return async (payload) => {
-    if (!isDreamingPayload(payload)) {
-      throw new Error('dreaming: invalid payload shape')
-    }
-
-    const state = await loadDreamingState(payload.agentDir)
-    const snapshots = await collectStreamSnapshots(payload.agentDir, state)
-
-    if (snapshots.undreamed.length === 0) {
-      logger.info('[dreaming] no undreamed fragments since last run; skipping')
-      return
-    }
-
-    const session = await factory()
-    try {
-      await session.prompt(buildInitialPrompt(payload, snapshots.undreamed))
-    } finally {
-      session.dispose()
-    }
-
-    const advanced = advanceWatermarks(state, snapshots.undreamed)
-    await saveDreamingState(payload.agentDir, advanced)
-    await commit(payload.agentDir)
-  }
 }
 
 type StreamSnapshot = {
@@ -149,24 +100,6 @@ function advanceWatermarks(state: DreamingState, snapshots: StreamSnapshot[]): D
     next = setDreamedLines(next, snap.date, snap.totalLines, ts)
   }
   return next
-}
-
-async function defaultCreateDreamingSession(): Promise<DreamingSession> {
-  const { authStorage, modelRegistry } = getAuth()
-  const loader = new DefaultResourceLoader({
-    systemPromptOverride: () => DREAMING_SYSTEM_PROMPT,
-    appendSystemPromptOverride: () => [],
-  })
-  await loader.reload()
-  const { session } = await createAgentSession({
-    model: resolveModel(getConfig().model),
-    sessionManager: SessionManager.inMemory(),
-    authStorage,
-    modelRegistry,
-    resourceLoader: loader,
-    tools: [readTool, writeTool],
-  })
-  return session
 }
 
 const SNAPSHOT_PATHS = ['MEMORY.md', 'memory/'] as const
@@ -382,3 +315,36 @@ function buildInitialPrompt(payload: DreamingPayload, snapshots: StreamSnapshot[
   )
   return lines.join('\n')
 }
+
+export type CreateDreamingSubagentOptions = {
+  commitMemory?: (cwd: string) => Promise<void>
+  logger?: DreamingLogger
+}
+
+export function createDreamingSubagent(options: CreateDreamingSubagentOptions = {}): Subagent<DreamingPayload> {
+  const commit = options.commitMemory ?? commitMemorySnapshot
+  const logger = options.logger ?? consoleLogger
+
+  return {
+    systemPrompt: DREAMING_SYSTEM_PROMPT,
+    tools: [readTool, writeTool],
+    payloadSchema: dreamingPayloadSchema,
+    handler: async (ctx, runSession) => {
+      const state = await loadDreamingState(ctx.payload.agentDir)
+      const snapshots = await collectStreamSnapshots(ctx.payload.agentDir, state)
+
+      if (snapshots.undreamed.length === 0) {
+        logger.info('[dreaming] no undreamed fragments since last run; skipping')
+        return
+      }
+
+      await runSession({ userPrompt: buildInitialPrompt(ctx.payload, snapshots.undreamed) })
+
+      const advanced = advanceWatermarks(state, snapshots.undreamed)
+      await saveDreamingState(ctx.payload.agentDir, advanced)
+      await commit(ctx.payload.agentDir)
+    },
+  }
+}
+
+export const dreamingSubagent: Subagent<DreamingPayload> = createDreamingSubagent()

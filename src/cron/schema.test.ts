@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 
+import { z } from 'zod'
+
+import type { Subagent, SubagentRegistry } from '@/agent/subagents'
+
 import { cronFileSchema, parseCronFile } from './schema'
 
 describe('cronFileSchema', () => {
@@ -75,6 +79,33 @@ describe('cronFileSchema', () => {
       cronFileSchema.parse({ jobs: [{ id: 'j', schedule: '* * * * *', kind: 'exec', command: [] }] }),
     ).toThrow()
   })
+
+  test('accepts a prompt job with subagent and payload fields', () => {
+    const parsed = cronFileSchema.parse({
+      jobs: [
+        {
+          id: 'consolidate',
+          schedule: '30 23 * * *',
+          kind: 'prompt',
+          prompt: 'unused',
+          subagent: 'dreaming',
+          payload: { agentDir: '/agent' },
+        },
+      ],
+    })
+    const job = parsed.jobs[0]
+    if (!job || job.kind !== 'prompt') throw new Error('expected a prompt job')
+    expect(job.subagent).toBe('dreaming')
+    expect(job.payload).toEqual({ agentDir: '/agent' })
+  })
+
+  test('rejects empty-string subagent name', () => {
+    expect(() =>
+      cronFileSchema.parse({
+        jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', subagent: '' }],
+      }),
+    ).toThrow()
+  })
 })
 
 describe('parseCronFile', () => {
@@ -121,5 +152,71 @@ describe('parseCronFile', () => {
     })
     if (!result.ok) throw new Error(`expected ok, got: ${result.reason}`)
     expect(result.file.jobs).toHaveLength(2)
+  })
+})
+
+describe('parseCronFile with subagents registry', () => {
+  const greeter: Subagent = { systemPrompt: 'X' }
+  const memoryLogger: Subagent<{ id: string }> = {
+    systemPrompt: 'X',
+    payloadSchema: z.object({ id: z.string() }),
+  }
+  const registry: SubagentRegistry = { greeter, 'memory-logger': memoryLogger }
+
+  test('accepts a prompt job referencing a registered subagent with no payload', () => {
+    const result = parseCronFile(
+      { jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', subagent: 'greeter' }] },
+      { subagents: registry },
+    )
+    expect(result.ok).toBe(true)
+  })
+
+  test('rejects a prompt job referencing an unknown subagent', () => {
+    const result = parseCronFile(
+      { jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', subagent: 'no-such-thing' }] },
+      { subagents: registry },
+    )
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/unknown subagent/)
+  })
+
+  test('rejects a prompt job whose payload does not match the subagent payloadSchema', () => {
+    const result = parseCronFile(
+      {
+        jobs: [
+          {
+            id: 'j',
+            schedule: '* * * * *',
+            kind: 'prompt',
+            prompt: 'x',
+            subagent: 'memory-logger',
+            payload: { id: 42 },
+          },
+        ],
+      },
+      { subagents: registry },
+    )
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/invalid payload/)
+  })
+
+  test('rejects a prompt job that supplies a payload to a subagent without a schema', () => {
+    const result = parseCronFile(
+      {
+        jobs: [
+          { id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', subagent: 'greeter', payload: { extra: 1 } },
+        ],
+      },
+      { subagents: registry },
+    )
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/does not accept a payload/)
+  })
+
+  test('skips registry validation when no subagents option is provided (raw parse path)', () => {
+    const result = parseCronFile({
+      jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', subagent: 'no-such-thing' }],
+    })
+    expect(result.ok).toBe(true)
   })
 })
