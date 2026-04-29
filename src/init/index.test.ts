@@ -349,14 +349,20 @@ describe('scaffold', () => {
   test('creates expected directories', async () => {
     await scaffold(root)
 
-    for (const dir of ['workspace', 'sessions', 'memory', 'skills', '.agents/skills', 'mounts']) {
+    for (const dir of ['workspace', 'sessions', 'skills', '.agents/skills', 'mounts']) {
       const path = join(root, dir)
       expect(existsSync(path)).toBe(true)
       expect(statSync(path).isDirectory()).toBe(true)
     }
   })
 
-  test('writes typeclaw.json with $schema reference, model, and empty mounts array', async () => {
+  test('does NOT scaffold MEMORY.md or memory/ (owned by the bundled memory plugin)', async () => {
+    await scaffold(root)
+    expect(existsSync(join(root, 'MEMORY.md'))).toBe(false)
+    expect(existsSync(join(root, 'memory'))).toBe(false)
+  })
+
+  test('writes typeclaw.json with $schema, model, mounts, and a memory config block for the bundled plugin', async () => {
     await scaffold(root)
 
     const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
@@ -365,6 +371,10 @@ describe('scaffold', () => {
       $schema: './node_modules/typeclaw/typeclaw.schema.json',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
       mounts: [],
+      memory: {
+        idleMs: 30_000,
+        dreaming: { schedule: '0 4 * * *' },
+      },
     })
   })
 
@@ -418,7 +428,7 @@ describe('scaffold', () => {
   test('creates empty markdown files', async () => {
     await scaffold(root)
 
-    for (const file of ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md', 'MEMORY.md']) {
+    for (const file of ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md']) {
       expect(await readFile(join(root, file), 'utf8')).toBe('')
     }
   })

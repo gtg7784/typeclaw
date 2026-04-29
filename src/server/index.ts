@@ -6,7 +6,7 @@ import {
   type CreateSessionOptions,
   type CreateSessionResult,
 } from '@/agent'
-import { createIdleDetector, type IdleDetector } from '@/memory'
+import type { HookBus } from '@/plugin'
 import type { PluginRuntime, PluginRuntimeState } from '@/run/plugin-runtime'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { SessionFactory } from '@/sessions'
@@ -23,7 +23,6 @@ export type ServerOptions = {
   createSession?: CreateSessionFn
   sessionFactory?: SessionFactory
   stream?: Stream
-  memoryIdleMs?: number
   agentDir?: string
   pluginRuntime?: PluginRuntime
 }
@@ -48,7 +47,6 @@ type SessionState = {
   draining: boolean
   unsubBroadcast: Unsubscribe | null
   unsubPrompts: Unsubscribe | null
-  idleDetector: IdleDetector | null
   // Captured at session open so close-time hooks fire against the same
   // generation that ran session.start. A plugin reload mid-connection does
   // not re-target this session's lifecycle hooks.
@@ -67,7 +65,6 @@ export function createServer({
   createSession = defaultCreateSessionWithDispose,
   sessionFactory,
   stream,
-  memoryIdleMs,
   agentDir,
   pluginRuntime,
 }: ServerOptions) {
@@ -116,7 +113,6 @@ export function createServer({
             draining: false,
             unsubBroadcast: null,
             unsubPrompts: null,
-            idleDetector: null,
             runtimeSnapshot: runtimeSnapshot ?? null,
             dispose,
           }
@@ -124,22 +120,6 @@ export function createServer({
 
           if (runtimeSnapshot !== undefined && agentDir !== undefined) {
             await runtimeSnapshot.hooks.runSessionStart({ sessionId: sessionFileId, agentDir })
-          }
-
-          if (stream !== undefined && memoryIdleMs !== undefined && agentDir !== undefined) {
-            state.idleDetector = createIdleDetector({
-              idleMs: memoryIdleMs,
-              onIdle: async () => {
-                if (runtimeSnapshot !== undefined) {
-                  await runtimeSnapshot.hooks.runSessionIdle({
-                    sessionId: state.sessionFileId,
-                    parentTranscriptPath: state.sessionManager?.getSessionFile(),
-                    idleMs: memoryIdleMs,
-                  })
-                }
-                publishMemoryLoggerSpawn(state, stream, agentDir)
-              },
-            })
           }
 
           forwardSessionEvents(ws, session)
@@ -203,6 +183,14 @@ export function createServer({
             } catch (err) {
               send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
             }
+            const fallbackHooks = state.runtimeSnapshot?.hooks
+            if (fallbackHooks !== undefined) {
+              await fallbackHooks.runSessionIdle({
+                sessionId: state.sessionFileId,
+                parentTranscriptPath: state.sessionManager?.getSessionFile(),
+                idleMs: 0,
+              })
+            }
             return
           }
         },
@@ -210,11 +198,7 @@ export function createServer({
           const state = sessionStates.get(ws)
           state?.unsubBroadcast?.()
           state?.unsubPrompts?.()
-          state?.idleDetector?.dispose()
           if (state) {
-            if (stream !== undefined && agentDir !== undefined) {
-              publishMemoryLoggerSpawn(state, stream, agentDir)
-            }
             if (state.runtimeSnapshot !== null) {
               await state.runtimeSnapshot.hooks.runSessionEnd({ sessionId: state.sessionFileId })
             }
@@ -290,9 +274,27 @@ function enqueuePrompt(ws: Ws, state: SessionState, msg: StreamMessage): void {
   void drain(ws, state)
 }
 
+// `session.idle` semantically means "the agent finished a prompt and is now
+// awaiting next input". Plugins (notably the bundled memory plugin) own any
+// debouncing on top of this signal. Core fires the hook synchronously after
+// every `prompt()` completion (success or error), passing the current
+// transcript path so plugins can spawn subagents that read it.
+function makeIdleHookCaller(state: SessionState): () => Promise<void> {
+  const hooks: HookBus | undefined = state.runtimeSnapshot?.hooks
+  if (hooks === undefined) return async () => {}
+  return async () => {
+    await hooks.runSessionIdle({
+      sessionId: state.sessionFileId,
+      parentTranscriptPath: state.sessionManager?.getSessionFile(),
+      idleMs: 0,
+    })
+  }
+}
+
 async function drain(ws: Ws, state: SessionState): Promise<void> {
   if (state.draining) return
   state.draining = true
+  const fireIdle = makeIdleHookCaller(state)
   try {
     while (state.drainQueue.length > 0) {
       const item = state.drainQueue.shift()
@@ -300,31 +302,17 @@ async function drain(ws: Ws, state: SessionState): Promise<void> {
       pushQueueState(ws, state)
       send(ws, { type: 'prompt_started', messageId: item.streamMessageId, text: item.text })
 
-      state.idleDetector?.cancel()
       try {
         await state.session.prompt(item.text)
         send(ws, { type: 'done' })
       } catch (err) {
         send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
       }
-      state.idleDetector?.arm()
+      await fireIdle()
     }
   } finally {
     state.draining = false
   }
-}
-
-function publishMemoryLoggerSpawn(state: SessionState, stream: Stream, agentDir: string): void {
-  const transcriptPath = state.sessionManager?.getSessionFile()
-  if (transcriptPath === undefined) return
-  stream.publish({
-    target: { kind: 'new-session', subagent: 'memory-logger' },
-    payload: {
-      parentSessionId: state.sessionFileId,
-      parentTranscriptPath: transcriptPath,
-      agentDir,
-    },
-  })
 }
 
 function pushQueueState(ws: Ws, state: SessionState): void {

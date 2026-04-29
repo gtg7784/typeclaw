@@ -52,8 +52,9 @@ describe('startAgent + plugin loading', () => {
     running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
 
     const ids = running.pluginRuntime.get().registry.cronJobs.map((j) => j.globalId)
-    expect(ids).toEqual(['__plugin_plugin_weekly-digest'])
-    expect(running.loadedPlugins.map((p) => p.name)).toEqual(['plugin'])
+    expect(ids).toContain('__plugin_plugin_weekly-digest')
+    expect(running.loadedPlugins.map((p) => p.name)).toContain('plugin')
+    expect(running.loadedPlugins.map((p) => p.name)).toContain('memory')
   })
 
   test('plugin factory exception aborts startAgent and does not leak partial registrations', async () => {

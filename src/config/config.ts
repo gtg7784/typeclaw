@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import type { Model } from '@mariozechner/pi-ai'
-import { CronExpressionParser } from 'cron-parser'
 import { z } from 'zod'
 
 import { KNOWN_PROVIDERS, listKnownModelRefs, type KnownModelRef, type KnownProviderId } from './providers'
@@ -13,10 +12,6 @@ const knownModelRefs = listKnownModelRefs() as [KnownModelRef, ...KnownModelRef[
 
 // T9 keypad: T=8, Y=9, P=7, E=3
 const DEFAULT_PORT = 8973
-const DEFAULT_MEMORY_IDLE_MS = 30_000
-// 4 AM: late enough that the previous day's session activity has settled,
-// early enough that the consolidation is ready before the user's morning.
-const DEFAULT_DREAMING_SCHEDULE = '0 4 * * *'
 
 // Mount names land on disk as `mounts/<name>` inside the agent folder, so they
 // share a namespace with regular filenames. Restricting to lowercase
@@ -33,27 +28,11 @@ export const mountSchema = z.object({
 
 export type Mount = z.infer<typeof mountSchema>
 
-const dreamingSchema = z
-  .object({
-    schedule: z
-      .string()
-      .min(1)
-      .default(DEFAULT_DREAMING_SCHEDULE)
-      .refine(isValidCronExpression, { message: 'memory.dreaming.schedule must be a valid cron expression' }),
-  })
-  .default({ schedule: DEFAULT_DREAMING_SCHEDULE })
-
 export const configSchema = z
   .object({
     $schema: z.string().optional(),
     port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
     model: z.enum(knownModelRefs).default('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'), // FIXME: TEMP default
-    memory: z
-      .object({
-        idleMs: z.number().int().min(1000).default(DEFAULT_MEMORY_IDLE_MS),
-        dreaming: dreamingSchema.optional(),
-      })
-      .default({ idleMs: DEFAULT_MEMORY_IDLE_MS }),
     // Defaults to `[]` so configs predating the field still load. `typeclaw init`
     // writes `"mounts": []` explicitly, but a missing field is treated the same
     // way (no host paths exposed) rather than failing the whole config load.
@@ -61,15 +40,6 @@ export const configSchema = z
     plugins: z.array(z.string().min(1)).default([]),
   })
   .catchall(z.unknown())
-
-function isValidCronExpression(schedule: string): boolean {
-  try {
-    CronExpressionParser.parse(schedule).next()
-    return true
-  } catch {
-    return false
-  }
-}
 
 export type Config = z.infer<typeof configSchema>
 
@@ -141,8 +111,6 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   model: 'applied',
   port: 'restart-required',
   mounts: 'restart-required',
-  'memory.idleMs': 'restart-required',
-  'memory.dreaming': 'applied',
   plugins: 'restart-required',
 }
 
@@ -197,7 +165,7 @@ function readPath(obj: unknown, path: string): unknown {
 // each block against its plugin's `configSchema`.
 export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'object' || raw === null) return {}
-  const known = new Set(['$schema', 'port', 'model', 'memory', 'mounts', 'plugins'])
+  const known = new Set(['$schema', 'port', 'model', 'mounts', 'plugins'])
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!known.has(key)) result[key] = value

@@ -50,41 +50,13 @@ describe('configSchema', () => {
   })
 })
 
-describe('configSchema memory.dreaming', () => {
-  test('omits dreaming by default (memory.dreaming is undefined)', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
-    expect(parsed.memory.dreaming).toBeUndefined()
-  })
-
-  test('fills in default schedule when memory.dreaming is present but empty', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, memory: { dreaming: {} } })
-    expect(parsed.memory.dreaming?.schedule).toBe('0 4 * * *')
-  })
-
-  test('respects an explicit schedule', () => {
+describe('configSchema preserves unknown top-level keys (plugin config blocks)', () => {
+  test('a top-level "memory" block survives the schema as unknown (consumed by the bundled memory plugin)', () => {
     const parsed = configSchema.parse({
       model: VALID_MODEL,
-      memory: { dreaming: { schedule: '30 3 * * *' } },
+      memory: { idleMs: 60_000, dreaming: { schedule: '30 3 * * *' } },
     })
-    expect(parsed.memory.dreaming?.schedule).toBe('30 3 * * *')
-  })
-
-  test('rejects an invalid cron expression in memory.dreaming.schedule', () => {
-    expect(() =>
-      configSchema.parse({
-        model: VALID_MODEL,
-        memory: { dreaming: { schedule: 'not-a-cron' } },
-      }),
-    ).toThrow()
-  })
-
-  test('rejects an empty schedule string', () => {
-    expect(() =>
-      configSchema.parse({
-        model: VALID_MODEL,
-        memory: { dreaming: { schedule: '' } },
-      }),
-    ).toThrow()
+    expect(parsed['memory']).toEqual({ idleMs: 60_000, dreaming: { schedule: '30 3 * * *' } })
   })
 })
 
@@ -210,21 +182,7 @@ describe('loadConfigSync', () => {
   test('returns schema defaults when typeclaw.json is missing (fresh agent / dev tree)', () => {
     const cfg = loadConfigSync(cwd)
     expect(cfg.port).toBe(8973)
-    expect(cfg.memory.idleMs).toBe(30000)
-    expect(cfg.memory.dreaming).toBeUndefined()
     expect(cfg.mounts).toEqual([])
-  })
-
-  test('reads memory.dreaming.schedule from disk so dreaming actually picks up user config', async () => {
-    await writeFile(
-      join(cwd, 'typeclaw.json'),
-      JSON.stringify({
-        model: VALID_MODEL,
-        memory: { dreaming: { schedule: '9 16 * * *' } },
-      }),
-    )
-    const cfg = loadConfigSync(cwd)
-    expect(cfg.memory.dreaming?.schedule).toBe('9 16 * * *')
   })
 
   test('reads port from disk', async () => {
@@ -238,12 +196,11 @@ describe('loadConfigSync', () => {
     expect(() => loadConfigSync(cwd)).toThrow(/not valid JSON/)
   })
 
-  test('throws on schema-invalid config (e.g. invalid dreaming schedule)', async () => {
+  test('throws on schema-invalid config (e.g. invalid model name)', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
       JSON.stringify({
-        model: VALID_MODEL,
-        memory: { dreaming: { schedule: 'not-a-cron' } },
+        model: 'not-a-known-model',
       }),
     )
     expect(() => loadConfigSync(cwd)).toThrow(/typeclaw\.json is invalid/)
@@ -273,20 +230,19 @@ describe('plugin config layout', () => {
     expect(parsed['standup-log']).toEqual({ schedule: '0 17 * * 5' })
   })
 
-  test('extractPluginConfigs filters known top-level keys and returns the rest', () => {
+  test('extractPluginConfigs filters known top-level keys and returns the rest (memory now goes to the bundled memory plugin)', () => {
     const result = extractPluginConfigs({
       $schema: 'x',
       port: 1,
       model: 'm',
-      memory: {},
       mounts: [],
       plugins: [],
+      memory: { idleMs: 5000 },
       'standup-log': { schedule: '0 17 * * 5' },
-      memory_keeper: { idleMs: 5000 },
     })
     expect(result).toEqual({
+      memory: { idleMs: 5000 },
       'standup-log': { schedule: '0 17 * * 5' },
-      memory_keeper: { idleMs: 5000 },
     })
   })
 
