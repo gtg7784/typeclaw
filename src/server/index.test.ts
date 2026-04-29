@@ -25,6 +25,7 @@ function createFakeSession(): AgentSession & {
   emit: (event: SessionEvent) => void
   abortCalls: number
   promptCalls: string[]
+  disposeCalls: number
   resolvePrompt: () => void
 } {
   const subscribers = new Set<(event: SessionEvent) => void>()
@@ -45,6 +46,9 @@ function createFakeSession(): AgentSession & {
       pendingPromptResolve?.()
       pendingPromptResolve = null
     },
+    dispose: () => {
+      fake.disposeCalls++
+    },
     emit: (event: SessionEvent) => {
       for (const fn of subscribers) fn(event)
     },
@@ -53,6 +57,7 @@ function createFakeSession(): AgentSession & {
       pendingPromptResolve = null
     },
     abortCalls: 0,
+    disposeCalls: 0,
     promptCalls: [] as string[],
   }
   return fake as unknown as ReturnType<typeof createFakeSession>
@@ -812,5 +817,151 @@ describe('createServer plugin hooks', () => {
     endResolve.fn?.()
     await new Promise((r) => setTimeout(r, 30))
     expect(ended).toBe(true)
+  })
+})
+
+describe('createServer session-end memory-logger trigger', () => {
+  function stubSessionFactory(opts: { transcriptPath?: string }): SessionFactory {
+    return {
+      sessionDir: () => '/tmp/test-sessions',
+      createPersisted: () =>
+        ({
+          getSessionId: () => 'ses_fake',
+          getSessionFile: () => opts.transcriptPath,
+        }) as unknown as SessionManager,
+    }
+  }
+
+  function recordNewSessionMessages(stream: ReturnType<typeof createStream>): Array<{
+    subagent: string
+    payload: unknown
+  }> {
+    const messages: Array<{ subagent: string; payload: unknown }> = []
+    stream.subscribe({ target: { kind: 'new-session' } }, (msg) => {
+      const target = msg.target as { kind: 'new-session'; subagent: string }
+      messages.push({ subagent: target.subagent, payload: msg.payload })
+    })
+    return messages
+  }
+
+  test('publishes a new-session memory-logger message immediately on websocket close when transcript exists', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const messages = recordNewSessionMessages(stream)
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/test-sessions/ses_fake.jsonl' }),
+      agentDir: '/tmp/agent-dir',
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.close()
+    await new Promise((r) => setTimeout(r, 20))
+
+    // then
+    expect(messages).toEqual([
+      {
+        subagent: 'memory-logger',
+        payload: {
+          parentSessionId: 'ses_fake',
+          parentTranscriptPath: '/tmp/test-sessions/ses_fake.jsonl',
+          agentDir: '/tmp/agent-dir',
+        },
+      },
+    ])
+  })
+
+  test('skips the close-time publish when the session has no persisted transcript', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const messages = recordNewSessionMessages(stream)
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubSessionFactory({ transcriptPath: undefined }),
+      agentDir: '/tmp/agent-dir',
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.close()
+    await new Promise((r) => setTimeout(r, 20))
+
+    // then
+    expect(messages).toEqual([])
+  })
+
+  test('skips the close-time publish when no agentDir is configured', async () => {
+    // given
+    const session = createFakeSession()
+    const stream = createStream()
+    const messages = recordNewSessionMessages(stream)
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.close()
+    await new Promise((r) => setTimeout(r, 20))
+
+    // then
+    expect(messages).toEqual([])
+  })
+
+  test('does not double-publish when both idle and close fire — close cancels the idle timer first', async () => {
+    // given: idle window is set, but we close before it elapses
+    const session = createFakeSession()
+    const stream = createStream()
+    const messages = recordNewSessionMessages(stream)
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubSessionFactory({ transcriptPath: '/tmp/x.jsonl' }),
+      memoryIdleMs: 50,
+      agentDir: '/tmp/agent-dir',
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when: prompt runs and arms the idle timer, then we close before it elapses
+    stream.publish({
+      target: { kind: 'session', sessionId: 'ses_fake' },
+      payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    session.resolvePrompt()
+    await waitFor((m) => m.type === 'done')
+
+    ws.close()
+    await new Promise((r) => setTimeout(r, 80))
+
+    // then: exactly one publish — close fired, idle timer was disposed
+    expect(messages).toHaveLength(1)
+    expect(messages[0]?.subagent).toBe('memory-logger')
+  })
+
+  test('disposes the underlying AgentSession on websocket close', async () => {
+    // given
+    const session = createFakeSession()
+    const { url } = await startWithSession(session)
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.close()
+    await new Promise((r) => setTimeout(r, 20))
+
+    // then
+    expect(session.disposeCalls).toBe(1)
   })
 })

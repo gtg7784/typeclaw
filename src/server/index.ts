@@ -199,9 +199,13 @@ export function createServer({
           state?.unsubPrompts?.()
           state?.idleDetector?.dispose()
           if (state) {
+            if (stream !== undefined && agentDir !== undefined) {
+              publishMemoryLoggerSpawn(state, stream, agentDir)
+            }
             if (pluginHooks !== undefined) {
               await pluginHooks.runSessionEnd({ sessionId: state.sessionFileId })
             }
+            state.session.dispose()
             await state.dispose()
           }
           sessionStates.delete(ws)

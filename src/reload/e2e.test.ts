@@ -26,6 +26,7 @@ afterEach(async () => {
 const stubSession: AgentSession = {
   subscribe: () => () => {},
   prompt: async () => {},
+  dispose: () => {},
 } as unknown as AgentSession
 
 async function startTestAgent(scheduler: Scheduler): Promise<{ url: string }> {
