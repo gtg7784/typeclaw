@@ -266,4 +266,51 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
 
     expect(capturedSm).not.toBeNull()
   })
+
+  test('returns hooks and getTranscriptPath so the channel router can fire session.idle/session.end', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'channel-session-factory-'))
+    const runtime = makeRuntimeWithPlugin()
+
+    const factory = buildChannelSessionFactory({
+      cwd: tmp,
+      sessionFactory: makeFakeSessionFactory(join(tmp, 'sessions')),
+      stream: makeFakeStream(),
+      reloadRegistry: makeFakeReloadRegistry(),
+      pluginRuntime: runtime,
+      getChannelRouter: makeFakeRouter,
+      createSession: async () => STUB_SESSION,
+    })
+
+    const result = await factory({
+      key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
+      participants: [],
+      origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+    })
+
+    expect(result.hooks).toBe(runtime.get().hooks)
+    expect(typeof result.getTranscriptPath).toBe('function')
+    expect(result.getTranscriptPath?.()).toMatch(/sessions\//)
+  })
+
+  test('omits hooks when no plugin runtime content (matches existing plugin-omission policy)', async () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'channel-session-factory-'))
+
+    const factory = buildChannelSessionFactory({
+      cwd: tmp,
+      sessionFactory: makeFakeSessionFactory(join(tmp, 'sessions')),
+      stream: makeFakeStream(),
+      reloadRegistry: makeFakeReloadRegistry(),
+      pluginRuntime: makeEmptyRuntime(),
+      getChannelRouter: makeFakeRouter,
+      createSession: async () => STUB_SESSION,
+    })
+
+    const result = await factory({
+      key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
+      participants: [],
+      origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+    })
+
+    expect(result.hooks).toBeUndefined()
+  })
 })

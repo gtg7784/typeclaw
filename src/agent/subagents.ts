@@ -1,6 +1,7 @@
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import type { z } from 'zod'
 
+import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
 import { type AgentSession, createSession } from './index'
@@ -48,7 +49,13 @@ function describePayload(payload: unknown): string {
   return typeof payload
 }
 
-export type CreateSessionForSubagentResult = { session: AgentSession; dispose?: () => Promise<void> }
+export type CreateSessionForSubagentResult = {
+  session: AgentSession
+  dispose?: () => Promise<void>
+  hooks?: HookBus
+  sessionId?: string
+  getTranscriptPath?: () => string | undefined
+}
 export type CreateSessionForSubagentOptions = {
   name?: string
   parentSessionId?: string
@@ -70,14 +77,31 @@ export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subage
     customTools: subagent.customTools ?? [],
   })
 
-function normalizeSubagentSession(result: AgentSession | CreateSessionForSubagentResult): {
+type NormalizedSubagentSession = {
   session: AgentSession
   dispose: () => Promise<void>
-} {
+  hooks: HookBus | undefined
+  sessionId: string | undefined
+  getTranscriptPath: (() => string | undefined) | undefined
+}
+
+function normalizeSubagentSession(result: AgentSession | CreateSessionForSubagentResult): NormalizedSubagentSession {
   if ('session' in result) {
-    return { session: result.session, dispose: result.dispose ?? (async () => {}) }
+    return {
+      session: result.session,
+      dispose: result.dispose ?? (async () => {}),
+      hooks: result.hooks,
+      sessionId: result.sessionId,
+      getTranscriptPath: result.getTranscriptPath,
+    }
   }
-  return { session: result, dispose: async () => {} }
+  return {
+    session: result,
+    dispose: async () => {},
+    hooks: undefined,
+    sessionId: undefined,
+    getTranscriptPath: undefined,
+  }
 }
 
 export type InvokeSubagentOptions = {
@@ -101,10 +125,22 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
   }
 
   const runSession: RunSession = async (override) => {
-    const { session, dispose } = normalizeSubagentSession(await createSessionForSubagent(subagent, sessionOptions))
+    const { session, dispose, hooks, sessionId, getTranscriptPath } = normalizeSubagentSession(
+      await createSessionForSubagent(subagent, sessionOptions),
+    )
     try {
       await session.prompt(override?.userPrompt ?? options.userPrompt)
+      if (hooks && sessionId !== undefined) {
+        await hooks.runSessionIdle({
+          sessionId,
+          parentTranscriptPath: getTranscriptPath?.(),
+          idleMs: 0,
+        })
+      }
     } finally {
+      if (hooks && sessionId !== undefined) {
+        await hooks.runSessionEnd({ sessionId })
+      }
       session.dispose()
       await dispose()
     }

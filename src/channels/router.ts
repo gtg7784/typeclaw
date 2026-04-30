@@ -2,6 +2,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, type AgentSession } from '@/agent'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
+import type { HookBus } from '@/plugin'
 
 import { decideEngagement, grantStickyForReplyTargets, StickyLedger, type EngagementDecision } from './engagement'
 import { updateParticipants } from './participants'
@@ -43,7 +44,13 @@ export type CreateSessionForChannel = (params: {
   existingSessionId?: string
   participants: readonly ChannelParticipant[]
   origin: SessionOrigin
-}) => Promise<{ session: AgentSession; sessionId: string; dispose: () => Promise<void> }>
+}) => Promise<{
+  session: AgentSession
+  sessionId: string
+  dispose: () => Promise<void>
+  hooks?: HookBus
+  getTranscriptPath?: () => string | undefined
+}>
 
 export type ConfigForAdapter = (adapter: ChannelKey['adapter']) => ChannelAdapterConfig | undefined
 
@@ -71,6 +78,8 @@ type LiveSession = {
   session: AgentSession
   sessionId: string
   dispose: () => Promise<void>
+  hooks: HookBus | undefined
+  getTranscriptPath: (() => string | undefined) | undefined
   participants: ChannelParticipant[]
   promptQueue: QueuedInbound[]
   contextBuffer: ObservedInbound[]
@@ -231,6 +240,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         session: created.session,
         sessionId: created.sessionId,
         dispose: created.dispose,
+        hooks: created.hooks,
+        getTranscriptPath: created.getTranscriptPath,
         participants,
         promptQueue: [],
         contextBuffer: [],
@@ -323,6 +334,28 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.typingTimer = null
   }
 
+  const fireSessionIdle = async (live: LiveSession): Promise<void> => {
+    if (!live.hooks) return
+    try {
+      await live.hooks.runSessionIdle({
+        sessionId: live.sessionId,
+        parentTranscriptPath: live.getTranscriptPath?.(),
+        idleMs: 0,
+      })
+    } catch (err) {
+      logger.warn(`[channels] session.idle hook threw for ${live.keyId}: ${describe(err)}`)
+    }
+  }
+
+  const fireSessionEnd = async (live: LiveSession): Promise<void> => {
+    if (!live.hooks) return
+    try {
+      await live.hooks.runSessionEnd({ sessionId: live.sessionId })
+    } catch (err) {
+      logger.warn(`[channels] session.end hook threw for ${live.keyId}: ${describe(err)}`)
+    }
+  }
+
   const drain = async (live: LiveSession): Promise<void> => {
     if (live.draining || live.destroyed) return
     live.draining = true
@@ -362,6 +395,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           logger.warn(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
           live.consecutiveSends.clear()
         }
+        await fireSessionIdle(live)
         live.lastTurnAuthorIds = new Set(live.currentTurnAuthorIds)
       }
     } finally {
@@ -564,6 +598,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       } catch (err) {
         logger.warn(`[channels] abort failed for ${live.keyId}: ${describe(err)}`)
       }
+      await fireSessionEnd(live)
       try {
         await live.dispose()
       } catch (err) {

@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { AgentSession } from '@/agent'
+import type { HookBus } from '@/plugin'
 
 import { loadChannelSessions } from './persistence'
 import { createChannelRouter, type ChannelRouter } from './router'
@@ -519,5 +520,126 @@ describe('ChannelRouter typing indicator', () => {
     router.unregisterTyping('discord-bot', cb)
     await router.__testing!.fireTypingHeartbeat(KEY)
     expect(calls).toHaveLength(1)
+  })
+})
+
+describe('ChannelRouter plugin lifecycle hooks', () => {
+  function makeRouterWithHooks(
+    agentDir: string,
+    events: string[],
+    options: { transcriptPath?: string } = {},
+  ): { router: ChannelRouter; sessions: FakeSession[] } {
+    const sessions: FakeSession[] = []
+    const hooks: HookBus = {
+      registerAll: () => {},
+      unregisterAll: () => {},
+      runSessionStart: async () => {},
+      runSessionEnd: async (e) => {
+        events.push(`end:${e.sessionId}`)
+      },
+      runSessionIdle: async (e) => {
+        events.push(`idle:${e.sessionId}:${e.parentTranscriptPath ?? '-'}`)
+      },
+      runSessionPrompt: async () => {},
+      runToolBefore: async () => undefined,
+      runToolAfter: async () => {},
+      count: () => 0,
+    }
+    const router = createChannelRouter({
+      agentDir,
+      configForAdapter: () => baseConfig,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        sessions.push(fake)
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: `ses_fake_${sessions.length}`,
+          dispose: async () => {
+            fake.dispose()
+          },
+          hooks,
+          getTranscriptPath: () => options.transcriptPath,
+        }
+      },
+    })
+    return { router, sessions }
+  }
+
+  test('fires session.idle after each prompt completion with the transcript path', async () => {
+    // given
+    const dir = await tempDir()
+    const events: string[] = []
+    const { router, sessions } = makeRouterWithHooks(dir, events, { transcriptPath: '/tmp/t.jsonl' })
+
+    // when
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(events).toEqual(['idle:ses_fake_1:/tmp/t.jsonl'])
+  })
+
+  test('fires session.idle even when prompt throws so plugins still wake up', async () => {
+    // given
+    const dir = await tempDir()
+    const events: string[] = []
+    const hooks: HookBus = {
+      registerAll: () => {},
+      unregisterAll: () => {},
+      runSessionStart: async () => {},
+      runSessionEnd: async (e) => {
+        events.push(`end:${e.sessionId}`)
+      },
+      runSessionIdle: async (e) => {
+        events.push(`idle:${e.sessionId}`)
+      },
+      runSessionPrompt: async () => {},
+      runToolBefore: async () => undefined,
+      runToolAfter: async () => {},
+      count: () => 0,
+    }
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        fake.prompt = async () => {
+          throw new Error('llm down')
+        }
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_fake_throws',
+          dispose: async () => {},
+          hooks,
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+
+    // when
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(events).toEqual(['idle:ses_fake_throws'])
+  })
+
+  test('fires session.end on stop() before disposing each live session', async () => {
+    // given
+    const dir = await tempDir()
+    const events: string[] = []
+    const { router, sessions } = makeRouterWithHooks(dir, events)
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when
+    await router.stop()
+
+    // then
+    expect(events).toEqual(['idle:ses_fake_1:-', 'end:ses_fake_1'])
+    expect(sessions[0]!.disposed).toBe(1)
   })
 })
