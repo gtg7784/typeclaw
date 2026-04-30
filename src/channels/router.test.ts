@@ -309,6 +309,92 @@ describe('ChannelRouter outbound', () => {
   })
 })
 
+describe('ChannelRouter consecutive-send accounting', () => {
+  test('starts at 0 with no active session for the target', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toBe(0)
+  })
+
+  test('increments per successful send to the session origin', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toBe(0)
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'first' })
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toBe(1)
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'second' })
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'third' })
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toBe(3)
+  })
+
+  test('does not increment on failed delivery', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: false, error: 'nope' }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'fail' })
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toBe(0)
+  })
+
+  test('does not increment for cross-post (no live session at target keyId)', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c-other', text: 'cross-post' })
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c-other' })).toBe(0)
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toBe(0)
+  })
+
+  test('resets on the next user batch being drained into the model', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'a' })
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'b' })
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toBe(2)
+
+    await router.route(inbound({ externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toBe(0)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'c' })
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toBe(1)
+  })
+
+  test('keys per (chat:thread): different threads in the same chat count independently', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ thread: 't-A', externalMessageId: 'mA' }))
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' })
+    await router.route(inbound({ thread: 't-B', externalMessageId: 'mB' }))
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-B' })
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A', text: 'a1' })
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A', text: 'a2' })
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-B', text: 'b1' })
+
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' })).toBe(
+      2,
+    )
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-B' })).toBe(
+      1,
+    )
+  })
+})
+
 describe('ChannelRouter stop', () => {
   test('aborts in-flight session and disposes', async () => {
     const dir = await tempDir()

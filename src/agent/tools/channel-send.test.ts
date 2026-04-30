@@ -5,10 +5,14 @@ import type { OutboundMessage, SendResult } from '@/channels/types'
 
 import { createChannelSendTool } from './channel-send'
 
-function fakeRouter(handler: (msg: OutboundMessage) => Promise<SendResult>): ChannelRouter {
+function fakeRouter(
+  handler: (msg: OutboundMessage) => Promise<SendResult>,
+  options: { consecutiveCount?: number } = {},
+): ChannelRouter {
   return {
     route: async () => {},
     send: handler,
+    getConsecutiveSendCount: () => options.consecutiveCount ?? 0,
     registerOutbound: () => {},
     unregisterOutbound: () => {},
     registerTyping: () => {},
@@ -83,5 +87,67 @@ describe('createChannelSendTool', () => {
     expect(result.details).toEqual({ ok: false, error: 'denied by allow rules' })
     expect(result.content[0]?.type).toBe('text')
     expect((result.content[0] as { text: string }).text).toContain('denied')
+  })
+
+  test('first send (count=1) returns the bare delivery confirmation', async () => {
+    const tool = createChannelSendTool({
+      router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 1 }),
+    })
+    const result = await runTool(tool, {
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      text: 'first reply',
+    })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toBe('posted to slack-bot:T0/C0')
+  })
+
+  test('second consecutive send appends a soft yield hint', async () => {
+    const tool = createChannelSendTool({
+      router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 2 }),
+    })
+    const result = await runTool(tool, {
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      text: 'continuing',
+    })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('posted to slack-bot:T0/C0')
+    expect(text).toContain('2nd consecutive message')
+    expect(text).toContain('continue only if')
+  })
+
+  test('third+ consecutive send appends a firm yield hint with the count', async () => {
+    const tool = createChannelSendTool({
+      router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 5 }),
+    })
+    const result = await runTool(tool, {
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      text: 'still going',
+    })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('5th consecutive message')
+    expect(text).toContain('end your turn now')
+  })
+
+  test('denied sends never carry the hint suffix', async () => {
+    const tool = createChannelSendTool({
+      router: fakeRouter(async () => ({ ok: false, error: 'denied by allow rules' }), {
+        consecutiveCount: 7,
+      }),
+    })
+    const result = await runTool(tool, {
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C-blocked',
+      text: 'no',
+    })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('denied')
+    expect(text).not.toContain('consecutive')
   })
 })

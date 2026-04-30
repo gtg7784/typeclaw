@@ -83,12 +83,25 @@ type LiveSession = {
   currentTurnAuthorIds: Set<string>
   lastTurnAuthorIds: Set<string>
   consecutiveAborts: number
+  // Per-(chat:thread) count of bot messages sent without intervening user
+  // input being rendered into the model's context. Reset at the top of each
+  // drain() iteration that picks up a non-empty batch (= a new user turn is
+  // about to be shown to the model). channel_send reads this BEFORE calling
+  // router.send so the hint reflects the position of the about-to-happen send
+  // (n-th in a row), nudging the model to yield without forcing it to.
+  consecutiveSends: Map<string, number>
   destroyed: boolean
 }
 
 export type ChannelRouter = {
   route: (event: InboundMessage) => Promise<void>
   send: (msg: OutboundMessage) => Promise<SendResult>
+  getConsecutiveSendCount: (target: {
+    adapter: ChannelKey['adapter']
+    workspace: string
+    chat: string
+    thread?: string | null
+  }) => number
   registerOutbound: (adapter: ChannelKey['adapter'], cb: OutboundCallback) => void
   unregisterOutbound: (adapter: ChannelKey['adapter'], cb: OutboundCallback) => void
   registerTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
@@ -230,6 +243,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnAuthorIds: new Set(),
         lastTurnAuthorIds: new Set(),
         consecutiveAborts: 0,
+        consecutiveSends: new Map(),
         destroyed: false,
       }
       liveSessions.set(keyId, live)
@@ -325,6 +339,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
         live.currentTurnAuthorId = batch.length > 0 ? batch[batch.length - 1]!.authorId : null
         live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
+        if (batch.length > 0) live.consecutiveSends.clear()
 
         // The agent's view of the channel should reflect the current
         // participants + last inbound author. We update the in-memory
@@ -345,6 +360,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           logger.info(`[channels] ${live.keyId} prompted elapsed_ms=${now() - promptStart}`)
         } catch (err) {
           logger.warn(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
+          live.consecutiveSends.clear()
         }
         live.lastTurnAuthorIds = new Set(live.currentTurnAuthorIds)
       }
@@ -511,9 +527,28 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           grantStickyForReplyTargets(stickyLedger, keyId, targetIds, adapterConfig.engagement, now())
         }
       }
+      const sendKey = consecutiveSendKey(msg.chat, msg.thread)
+      live.consecutiveSends.set(sendKey, (live.consecutiveSends.get(sendKey) ?? 0) + 1)
     }
 
     return { ok: true }
+  }
+
+  const getConsecutiveSendCount = (target: {
+    adapter: ChannelKey['adapter']
+    workspace: string
+    chat: string
+    thread?: string | null
+  }): number => {
+    const keyId = channelKeyId({
+      adapter: target.adapter,
+      workspace: target.workspace,
+      chat: target.chat,
+      thread: target.thread ?? null,
+    })
+    const live = liveSessions.get(keyId)
+    if (!live) return 0
+    return live.consecutiveSends.get(consecutiveSendKey(target.chat, target.thread)) ?? 0
   }
 
   const stop = async (): Promise<void> => {
@@ -540,6 +575,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   return {
     route,
     send,
+    getConsecutiveSendCount,
     registerOutbound,
     unregisterOutbound,
     registerTyping,
@@ -599,6 +635,10 @@ function tryOpenSessionManager(
     logger.warn(`[channels] could not rehydrate session ${existingSessionId}: ${describe(err)}; creating new`)
     return SessionManager.create(agentDir, sessionDir)
   }
+}
+
+function consecutiveSendKey(chat: string, thread: string | null | undefined): string {
+  return `${chat}:${thread ?? ''}`
 }
 
 function describe(err: unknown): string {

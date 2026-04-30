@@ -49,8 +49,9 @@ export function createChannelSendTool({ router }: CreateChannelSendToolOptions) 
     }),
 
     async execute(_toolCallId, params) {
+      const adapter = params.adapter as AdapterId
       const result = await router.send({
-        adapter: params.adapter as AdapterId,
+        adapter,
         workspace: params.workspace,
         chat: params.chat,
         ...(params.thread !== undefined ? { thread: params.thread } : {}),
@@ -58,13 +59,37 @@ export function createChannelSendTool({ router }: CreateChannelSendToolOptions) 
       })
 
       const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
-      const text = result.ok
+      const baseText = result.ok
         ? `posted to ${params.adapter}:${params.workspace}/${params.chat}`
         : `channel_send denied: ${result.error}`
+      const hint = result.ok
+        ? consecutiveSendHint(
+            router.getConsecutiveSendCount({
+              adapter,
+              workspace: params.workspace,
+              chat: params.chat,
+              thread: params.thread ?? null,
+            }),
+          )
+        : ''
       return {
-        content: [{ type: 'text' as const, text }],
+        content: [{ type: 'text' as const, text: hint ? `${baseText} — ${hint}` : baseText }],
         details,
       }
     },
   })
+}
+
+// Returns a behavioral hint to nudge the model toward yielding when it has
+// been the only voice in the conversation for several messages. The router
+// increments its counter AFTER router.send returns, so a count of 1 means
+// "this is the second consecutive bot message in this chat:thread" — which
+// is the first count where a hint is warranted. Empty string at count <= 1
+// preserves the original tool-result text for the common single-reply case.
+function consecutiveSendHint(countAfterSend: number): string {
+  if (countAfterSend <= 1) return ''
+  if (countAfterSend === 2) {
+    return 'this is your 2nd consecutive message in this conversation; continue only if the reply genuinely needs splitting.'
+  }
+  return `${countAfterSend}th consecutive message with no user reply; end your turn now unless the user explicitly asked for a multi-step response.`
 }
