@@ -73,8 +73,23 @@ export async function start({
       forceBuild,
     })
 
-    if (await containerExists(exec, plan.containerName)) {
+    const state = await inspectContainer(exec, plan.containerName)
+    if (state.exists && state.running) {
       return { ok: false, reason: `Container ${plan.containerName} is already running. Run \`typeclaw stop\` first.` }
+    }
+    if (state.exists) {
+      // Container is stopped/exited/being-removed but still holds the name.
+      // This typically means a previous `--rm` cleanup hasn't finished, or a
+      // prior crash left a corpse. Force-remove so `docker run --name <same>`
+      // doesn't fail with a name conflict. Tolerate "no such container" since
+      // the daemon may finish auto-removal between inspect and rm.
+      const rm = await exec(['rm', '-f', plan.containerName])
+      if (rm.exitCode !== 0 && !rm.stderr.toLowerCase().includes('no such container')) {
+        return {
+          ok: false,
+          reason: `Container ${plan.containerName} exists but is not running, and could not be removed: ${rm.stderr.trim() || 'no stderr'}`,
+        }
+      }
     }
 
     let built = false
@@ -206,10 +221,12 @@ async function imageExists(exec: DockerExec, tag: string): Promise<boolean> {
   return result.exitCode === 0
 }
 
-async function containerExists(exec: DockerExec, name: string): Promise<boolean> {
-  const result = await exec(['ps', '-a', '--filter', `name=^${name}$`, '--format', '{{.Names}}'])
-  if (result.exitCode !== 0) return false
-  return result.stdout.trim().split('\n').includes(name)
+type InspectedState = { exists: false } | { exists: true; running: boolean }
+
+async function inspectContainer(exec: DockerExec, name: string): Promise<InspectedState> {
+  const result = await exec(['inspect', '--format', '{{.State.Running}}', name])
+  if (result.exitCode !== 0) return { exists: false }
+  return { exists: true, running: result.stdout.trim() === 'true' }
 }
 
 // Mirror the canonical labels `docker compose up` sets so Docker Desktop groups

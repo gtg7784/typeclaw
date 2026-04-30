@@ -522,11 +522,14 @@ describe('commitSystemFile', () => {
 
 type RecordedCall = { args: string[]; dockerfileSnapshot: string | null }
 
-function fakeDockerExec(scenario: { imageExists: boolean; containerExists: boolean }): {
+type ContainerScenario = { exists: false } | { exists: true; running: boolean; rmFails?: boolean; rmStderr?: string }
+
+function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerScenario }): {
   exec: DockerExec
   calls: RecordedCall[]
 } {
   const calls: RecordedCall[] = []
+  let containerState = scenario.container
   const exec: DockerExec = async (args, options) => {
     let dockerfileSnapshot: string | null = null
     if (options?.cwd) {
@@ -541,10 +544,19 @@ function fakeDockerExec(scenario: { imageExists: boolean; containerExists: boole
     if (args[0] === 'image' && args[1] === 'inspect') {
       return { exitCode: scenario.imageExists ? 0 : 1, stdout: '', stderr: '' }
     }
-    if (args[0] === 'ps') {
-      const filter = args[3] ?? ''
-      const name = filter.replace(/^name=\^/, '').replace(/\$$/, '')
-      return { exitCode: 0, stdout: scenario.containerExists ? `${name}\n` : '', stderr: '' }
+    if (args[0] === 'inspect') {
+      if (!containerState.exists) return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      return { exitCode: 0, stdout: `${containerState.running}\n`, stderr: '' }
+    }
+    if (args[0] === 'rm') {
+      if (!containerState.exists) {
+        return { exitCode: 1, stdout: '', stderr: 'Error: No such container: x' }
+      }
+      if (containerState.rmFails) {
+        return { exitCode: 1, stdout: '', stderr: containerState.rmStderr ?? 'rm failed' }
+      }
+      containerState = { exists: false }
+      return { exitCode: 0, stdout: '', stderr: '' }
     }
     if (args[0] === 'build') {
       return { exitCode: 0, stdout: '', stderr: '' }
@@ -562,7 +574,7 @@ describe('start (composition)', () => {
     // given: a stale Dockerfile and an existing image (no rebuild needed)
     await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when: up runs WITHOUT --build
     const result = await start({ cwd: root, port: 8973, exec })
@@ -579,7 +591,7 @@ describe('start (composition)', () => {
     await writeFile(join(root, '.gitignore'), '# stale\nold-entry\n')
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when
     const result = await start({ cwd: root, port: 8973, exec })
@@ -594,7 +606,7 @@ describe('start (composition)', () => {
   test('forceBuild=true also refreshes the Dockerfile so docker build sees the fresh template', async () => {
     await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    const { exec, calls } = fakeDockerExec({ imageExists: true, containerExists: false })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     const result = await start({ cwd: root, port: 8973, forceBuild: true, exec })
 
@@ -614,7 +626,7 @@ describe('start (composition)', () => {
     await runGit(root, ['add', '.gitignore', 'package.json'])
     await runGit(root, ['commit', '-m', 'initial'])
     const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
-    const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when: start runs (refresh will rewrite .gitignore, commit should land it)
     const result = await start({ cwd: root, port: 8973, exec })
@@ -637,7 +649,7 @@ describe('start (composition)', () => {
     await runGit(root, ['add', '.gitignore', 'package.json'])
     await runGit(root, ['commit', '-m', 'initial'])
     const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
-    const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when: start runs (Dockerfile is rewritten on disk, .gitignore is unchanged)
     const result = await start({ cwd: root, port: 8973, exec })
@@ -659,7 +671,7 @@ describe('start (composition)', () => {
     await runGit(root, ['add', '.gitignore', 'package.json'])
     await runGit(root, ['commit', '-m', 'initial'])
     const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
-    const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when
     const result = await start({ cwd: root, port: 8973, exec })
@@ -673,7 +685,7 @@ describe('start (composition)', () => {
   test('forceBuild=false skips build entirely when image already exists', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    const { exec, calls } = fakeDockerExec({ imageExists: true, containerExists: false })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     const result = await start({ cwd: root, port: 8973, exec })
 
@@ -685,12 +697,65 @@ describe('start (composition)', () => {
   test('refuses to start when a container with the same name is already running', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    const { exec, calls } = fakeDockerExec({ imageExists: true, containerExists: true })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      container: { exists: true, running: true },
+    })
 
     const result = await start({ cwd: root, port: 8973, exec })
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toMatch(/already running/)
+    expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
+    expect(calls.find((c) => c.args[0] === 'rm')).toBeUndefined()
+  })
+
+  test('force-removes a stale stopped container with the same name and proceeds to docker run', async () => {
+    // given: a previous --rm cleanup left a stopped container holding the name
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      container: { exists: true, running: false },
+    })
+
+    // when
+    const result = await start({ cwd: root, port: 8973, exec })
+
+    // then: rm was issued before run, and run proceeded
+    expect(result.ok).toBe(true)
+    const rmIdx = calls.findIndex((c) => c.args[0] === 'rm' && c.args[1] === '-f')
+    const runIdx = calls.findIndex((c) => c.args[0] === 'run')
+    expect(rmIdx).toBeGreaterThanOrEqual(0)
+    expect(runIdx).toBeGreaterThan(rmIdx)
+  })
+
+  test('tolerates "no such container" from docker rm (auto-removal finished between inspect and rm)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      container: { exists: true, running: false, rmFails: true, rmStderr: 'Error: No such container: x' },
+    })
+
+    const result = await start({ cwd: root, port: 8973, exec })
+
+    expect(result.ok).toBe(true)
+    expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
+  })
+
+  test('reports a clear error when docker rm fails for a non-recoverable reason', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      container: { exists: true, running: false, rmFails: true, rmStderr: 'permission denied' },
+    })
+
+    const result = await start({ cwd: root, port: 8973, exec })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toMatch(/exists but is not running/)
     expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
   })
 })

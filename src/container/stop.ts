@@ -1,4 +1,4 @@
-import { containerExists, containerNameFromCwd, getBun } from './shared'
+import { containerExists, containerNameFromCwd, getBun, waitForRemoval } from './shared'
 
 export type StopPlan = {
   containerName: string
@@ -22,7 +22,17 @@ export async function stop({ cwd }: { cwd: string }): Promise<StopResult> {
       const stderr = await new Response(dockerStop.stderr).text()
       return { ok: false, reason: `docker stop failed: ${stderr.trim() || 'no stderr'}` }
     }
-    // `docker run --rm` auto-removes on stop, so no explicit `docker rm` needed.
+
+    // `docker stop` returns when the container's main process exits, but with
+    // `--rm` the daemon then removes the container asynchronously. Block until
+    // removal completes so a subsequent `docker run --name <same>` (e.g. from
+    // `typeclaw restart`) does not race the auto-removal and fail.
+    if (!(await waitForRemoval(containerName))) {
+      return {
+        ok: false,
+        reason: `Stopped ${containerName}, but Docker did not remove it within 10s. Try again or run \`docker rm -f ${containerName}\`.`,
+      }
+    }
 
     return { ok: true, containerName, running: true }
   } catch (error) {
