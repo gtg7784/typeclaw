@@ -4,6 +4,7 @@ import { defineCommand, runMain } from 'citty'
 
 import { init } from './init'
 import { logCommand } from './log'
+import { portbrokerdCommand } from './portbrokerd'
 import { reload } from './reload'
 import { restartCommand } from './restart'
 import { run } from './run'
@@ -25,6 +26,7 @@ const main = defineCommand({
     restart: restartCommand,
     reload,
     log: logCommand,
+    _portbrokerd: portbrokerdCommand,
   },
 })
 

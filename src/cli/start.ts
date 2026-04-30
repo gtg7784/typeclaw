@@ -1,6 +1,6 @@
 import { defineCommand } from 'citty'
 
-import { config } from '@/config'
+import { config, loadConfigSync } from '@/config'
 import { start } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
@@ -30,7 +30,14 @@ export const startCommand = defineCommand({
       process.exit(1)
     }
 
-    const result = await start({ cwd, preferredHostPort: Number(args.port), forceBuild: args.build })
+    const cfg = loadConfigSync(cwd)
+    const result = await start({
+      cwd,
+      preferredHostPort: Number(args.port),
+      forceBuild: args.build,
+      autoForward: cfg.autoForward,
+      autoForwardExclude: cfg.autoForwardExclude,
+    })
     if (!result.ok) {
       console.error(result.reason)
       process.exit(1)
@@ -42,6 +49,11 @@ export const startCommand = defineCommand({
     console.log(
       `Container ${result.plan.containerName} started on host port ${result.hostPort} (${result.containerId.slice(0, 12)}).`,
     )
+    if (result.broker.state === 'registered') {
+      console.log(`Port broker active; any port the agent binds is reachable on localhost.`)
+    } else if (result.broker.state === 'unavailable') {
+      console.warn(`Port broker unavailable: ${result.broker.reason}`)
+    }
     console.log(`Follow logs:  typeclaw log -f`)
     console.log(`Attach TUI:   typeclaw tui`)
     console.log(`Stop:         typeclaw stop`)

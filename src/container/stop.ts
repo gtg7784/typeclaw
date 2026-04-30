@@ -1,3 +1,5 @@
+import { isDaemonReachable, send as sendToDaemon } from '@/portbroker/client'
+
 import { containerExists, containerNameFromCwd, getBun, waitForRemoval } from './shared'
 
 export type StopPlan = {
@@ -11,6 +13,10 @@ export async function stop({ cwd }: { cwd: string }): Promise<StopResult> {
   if (!bun) return { ok: false, reason: 'bun runtime not available' }
 
   const { containerName } = planStop(cwd)
+
+  if (await isDaemonReachable()) {
+    await sendToDaemon({ kind: 'deregister', containerName })
+  }
 
   try {
     if (!(await containerExists(containerName))) {
