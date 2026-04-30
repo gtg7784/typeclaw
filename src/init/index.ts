@@ -97,13 +97,18 @@ export async function runInit({
 
 async function defaultRunHatching({ cwd, port }: { cwd: string; port: number }): Promise<HatchingResult> {
   try {
-    const launch = await start({ cwd, port })
+    const launch = await start({ cwd, preferredHostPort: port })
     if (!launch.ok) return { ok: false, reason: launch.reason }
 
-    await waitForAgent(`http://localhost:${port}`, { timeoutMs: 30_000 })
+    // start() may have allocated a different host port (the preferred one was
+    // bound). Use the actually-published port for the TUI handshake instead of
+    // the preferred port, otherwise we'd connect to the wrong service.
+    const hostPort = launch.hostPort
+
+    await waitForAgent(`http://localhost:${hostPort}`, { timeoutMs: 30_000 })
 
     const tui = createTui({
-      url: `ws://localhost:${port}`,
+      url: `ws://localhost:${hostPort}`,
       initialPrompt: HATCHING_PROMPT,
     })
     await tui.run()

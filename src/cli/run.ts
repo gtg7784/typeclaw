@@ -1,6 +1,6 @@
 import { defineCommand } from 'citty'
 
-import { config } from '@/config'
+import { CONTAINER_PORT } from '@/container'
 import { isInitialized } from '@/init'
 import { startAgent } from '@/run'
 
@@ -12,8 +12,8 @@ export const run = defineCommand({
   args: {
     port: {
       type: 'string',
-      description: 'port to listen on',
-      default: String(config.port),
+      description: 'port to listen on (defaults to the fixed container-internal port)',
+      default: String(CONTAINER_PORT),
     },
     prompt: {
       type: 'positional',

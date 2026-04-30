@@ -7,7 +7,8 @@ import { basename, join } from 'node:path'
 import { buildDockerfile } from '@/init/dockerfile'
 import { buildGitignore } from '@/init/gitignore'
 
-import { commitSystemFile, type DockerExec, planStart, refreshDockerfile, refreshGitignore, start } from './start'
+import type { DockerExec } from './shared'
+import { commitSystemFile, planStart, refreshDockerfile, refreshGitignore, start } from './start'
 
 let root: string
 
@@ -41,6 +42,10 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
   await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
 }
 
+// Returns the preferred port unchanged. Lets `start` tests verify their own
+// behavior without going through the real kernel via `findFreePort`.
+const deterministicAllocator = async (preferred: number): Promise<number> => (preferred > 0 ? preferred : 8973)
+
 function labelValue(runArgs: string[], key: string): string | undefined {
   for (let i = 0; i < runArgs.length - 1; i++) {
     if (runArgs[i] === '--label' && runArgs[i + 1]?.startsWith(`${key}=`)) {
@@ -56,7 +61,7 @@ describe('planStart', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeFile(join(root, '.env'), 'FIREWORKS_API_KEY=fw_test\n')
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.runArgs[0]).toBe('run')
     expect(plan.runArgs).toContain('-d')
@@ -75,7 +80,7 @@ describe('planStart', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(labelValue(plan.runArgs, 'com.docker.compose.project')).toBe('typeclaw')
   })
@@ -84,7 +89,7 @@ describe('planStart', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(labelValue(plan.runArgs, 'com.docker.compose.service')).toBe(basename(root))
   })
@@ -93,7 +98,7 @@ describe('planStart', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(labelValue(plan.runArgs, 'com.docker.compose.project.working_dir')).toBe(root)
     expect(labelValue(plan.runArgs, 'com.docker.compose.oneoff')).toBe('False')
@@ -105,7 +110,7 @@ describe('planStart', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.runArgs).not.toContain('--env-file')
   })
@@ -117,7 +122,7 @@ describe('planStart', () => {
       await writeDockerfile(root)
       await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
       const tzIdx = plan.runArgs.findIndex((a, i) => a === '-e' && plan.runArgs[i + 1] === 'TZ=Asia/Seoul')
       expect(tzIdx).toBeGreaterThanOrEqual(0)
@@ -137,7 +142,7 @@ describe('planStart', () => {
       await writeDockerfile(root)
       await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
       const eIdx = plan.runArgs.findIndex((a, i) => a === '-e' && plan.runArgs[i + 1]?.startsWith('TZ='))
       expect(eIdx).toBeGreaterThanOrEqual(0)
@@ -154,7 +159,7 @@ describe('planStart', () => {
       await writeDockerfile(root)
       await writePackageJson(root, { typeclaw: `file:${typeclawRepo}` })
 
-      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
       expect(plan.runArgs).toContain(`${typeclawRepo}:${typeclawRepo}:ro`)
     } finally {
@@ -167,7 +172,7 @@ describe('planStart', () => {
     await mkdir(join(root, 'vendor', 'typeclaw'), { recursive: true })
     await writePackageJson(root, { typeclaw: 'file:./vendor/typeclaw' })
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     const mirrorMounts = plan.runArgs.filter((a) => a.endsWith(':ro'))
     expect(mirrorMounts).toHaveLength(0)
@@ -177,7 +182,7 @@ describe('planStart', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.runArgs.filter((a) => a.endsWith(':ro'))).toHaveLength(0)
   })
@@ -186,8 +191,8 @@ describe('planStart', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const missing = await planStart({ cwd: root, port: 8973, imageExists: false })
-    const present = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const missing = await planStart({ cwd: root, hostPort: 8973, imageExists: false })
+    const present = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(missing.needsBuild).toBe(true)
     expect(present.needsBuild).toBe(false)
@@ -197,8 +202,8 @@ describe('planStart', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const forced = await planStart({ cwd: root, port: 8973, imageExists: true, forceBuild: true })
-    const notForced = await planStart({ cwd: root, port: 8973, imageExists: true, forceBuild: false })
+    const forced = await planStart({ cwd: root, hostPort: 8973, imageExists: true, forceBuild: true })
+    const notForced = await planStart({ cwd: root, hostPort: 8973, imageExists: true, forceBuild: false })
 
     expect(forced.needsBuild).toBe(true)
     expect(notForced.needsBuild).toBe(false)
@@ -208,7 +213,7 @@ describe('planStart', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.containerName).toBe(basename(root))
     expect(plan.imageTag).toBe(`typeclaw-${basename(root)}`)
@@ -220,7 +225,7 @@ describe('planStart mounts', () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
   })
@@ -230,7 +235,7 @@ describe('planStart mounts', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeTypeclawConfig(root, { mounts: [] })
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
   })
@@ -242,7 +247,7 @@ describe('planStart mounts', () => {
       await writePackageJson(root, { typeclaw: '^0.1.0' })
       await writeTypeclawConfig(root, { mounts: [{ name: 'projects', path: projectDir }] })
 
-      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
       expect(plan.runArgs).toContain('-v')
       expect(plan.runArgs).toContain(`${projectDir}:/agent/mounts/projects`)
@@ -258,7 +263,7 @@ describe('planStart mounts', () => {
       await writePackageJson(root, { typeclaw: '^0.1.0' })
       await writeTypeclawConfig(root, { mounts: [{ name: 'notes', path: notesDir, readOnly: true }] })
 
-      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
       expect(plan.runArgs).toContain(`${notesDir}:/agent/mounts/notes:ro`)
     } finally {
@@ -271,7 +276,7 @@ describe('planStart mounts', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeTypeclawConfig(root, { mounts: [{ name: 'home-thing', path: '~/some-dir' }] })
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     const home = process.env.HOME ?? ''
     expect(plan.runArgs).toContain(`${home}/some-dir:/agent/mounts/home-thing`)
@@ -290,7 +295,7 @@ describe('planStart mounts', () => {
         ],
       })
 
-      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
       const mountFlags = plan.runArgs.filter((arg) => arg.includes(':/agent/mounts/'))
       expect(mountFlags).toEqual([`${a}:/agent/mounts/first`, `${b}:/agent/mounts/second`])
@@ -307,7 +312,7 @@ describe('planStart mounts', () => {
       await writePackageJson(root, { typeclaw: '^0.1.0' })
       await writeTypeclawConfig(root, { mounts: [{ name: 'projects', path: projectDir }] })
 
-      const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+      const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
       expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
       const mountIdx = plan.runArgs.indexOf(`${projectDir}:/agent/mounts/projects`)
@@ -323,7 +328,7 @@ describe('planStart mounts', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeFile(join(root, 'typeclaw.json'), '{ not valid json')
 
-    await expect(planStart({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow()
+    await expect(planStart({ cwd: root, hostPort: 8973, imageExists: true })).rejects.toThrow()
   })
 
   test('treats a typeclaw.json without a mounts field as no mounts', async () => {
@@ -334,7 +339,7 @@ describe('planStart mounts', () => {
       `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo' })}\n`,
     )
 
-    const plan = await planStart({ cwd: root, port: 8973, imageExists: true })
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
     expect(plan.runArgs.filter((a) => a.includes(':/agent/mounts/'))).toHaveLength(0)
   })
@@ -344,7 +349,7 @@ describe('planStart mounts', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeTypeclawConfig(root, { mounts: [{ name: 'BadName', path: '/x' }] })
 
-    await expect(planStart({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow()
+    await expect(planStart({ cwd: root, hostPort: 8973, imageExists: true })).rejects.toThrow()
   })
 })
 
@@ -577,7 +582,7 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when: up runs WITHOUT --build
-    const result = await start({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     // then: the Dockerfile on disk was refreshed even though docker build never ran
     expect(result.ok).toBe(true)
@@ -594,7 +599,7 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when
-    const result = await start({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     // then
     expect(result.ok).toBe(true)
@@ -608,7 +613,13 @@ describe('start (composition)', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
-    const result = await start({ cwd: root, port: 8973, forceBuild: true, exec })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      exec,
+      allocatePort: deterministicAllocator,
+    })
 
     expect(result.ok).toBe(true)
     const buildCall = calls.find((c) => c.args[0] === 'build')
@@ -629,7 +640,7 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when: start runs (refresh will rewrite .gitignore, commit should land it)
-    const result = await start({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     // then: HEAD advanced and the new commit exists with the expected subject
     expect(result.ok).toBe(true)
@@ -652,7 +663,7 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when: start runs (Dockerfile is rewritten on disk, .gitignore is unchanged)
-    const result = await start({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     // then: HEAD did not move (no Dockerfile commit, no .gitignore commit)
     expect(result.ok).toBe(true)
@@ -674,7 +685,7 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when
-    const result = await start({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     // then: no new commits were created
     expect(result.ok).toBe(true)
@@ -687,7 +698,7 @@ describe('start (composition)', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
-    const result = await start({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     expect(result.ok).toBe(true)
     expect(calls.find((c) => c.args[0] === 'build')).toBeUndefined()
@@ -702,7 +713,7 @@ describe('start (composition)', () => {
       container: { exists: true, running: true },
     })
 
-    const result = await start({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toMatch(/already running/)
@@ -720,7 +731,7 @@ describe('start (composition)', () => {
     })
 
     // when
-    const result = await start({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     // then: rm was issued before run, and run proceeded
     expect(result.ok).toBe(true)
@@ -738,7 +749,7 @@ describe('start (composition)', () => {
       container: { exists: true, running: false, rmFails: true, rmStderr: 'Error: No such container: x' },
     })
 
-    const result = await start({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     expect(result.ok).toBe(true)
     expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
@@ -752,10 +763,123 @@ describe('start (composition)', () => {
       container: { exists: true, running: false, rmFails: true, rmStderr: 'permission denied' },
     })
 
-    const result = await start({ cwd: root, port: 8973, exec })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toMatch(/exists but is not running/)
     expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
+  })
+})
+
+describe('start (port allocation)', () => {
+  test('publishes the allocated host port mapped to the fixed container port (8973)', async () => {
+    // given: the kernel says the preferred 8973 is taken, so the allocator
+    // returns an ephemeral port instead
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+    const allocatePort = async () => 51234
+
+    // when
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort })
+
+    // then: docker run gets `-p <hostPort>:8973`, NOT `-p 8973:8973`
+    expect(result.ok).toBe(true)
+    const runCall = calls.find((c) => c.args[0] === 'run')
+    expect(runCall).toBeDefined()
+    expect(runCall!.args).toContain('51234:8973')
+    expect(runCall!.args).not.toContain('51234:51234')
+    if (result.ok) expect(result.hostPort).toBe(51234)
+  })
+
+  test('still uses 8973:8973 mapping when the preferred host port is free (default case)', async () => {
+    // given: 8973 is free, allocator returns the preferred port unchanged
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+
+    // then
+    expect(result.ok).toBe(true)
+    const runCall = calls.find((c) => c.args[0] === 'run')
+    expect(runCall!.args).toContain('8973:8973')
+    if (result.ok) expect(result.hostPort).toBe(8973)
+  })
+
+  test('retries with a fresh ephemeral port when docker reports a bind conflict (TOCTOU)', async () => {
+    // given: a docker that fails the first run with the canonical
+    // "port is already allocated" error, and succeeds on the second
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    let runAttempts = 0
+    const calls: { args: string[] }[] = []
+    const exec: DockerExec = async (args) => {
+      calls.push({ args })
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'No such container' }
+      if (args[0] === 'run') {
+        runAttempts++
+        if (runAttempts === 1) {
+          return {
+            exitCode: 1,
+            stdout: '',
+            stderr: 'docker: Bind for :::8973 failed: port is already allocated',
+          }
+        }
+        return { exitCode: 0, stdout: 'fake-id\n', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const ports = [8973, 49160]
+    const allocatePort = async (): Promise<number> => ports.shift() ?? 0
+
+    // when
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort })
+
+    // then: the second run got a different host port and succeeded
+    expect(result.ok).toBe(true)
+    expect(runAttempts).toBe(2)
+    const runCalls = calls.filter((c) => c.args[0] === 'run')
+    expect(runCalls).toHaveLength(2)
+    expect(runCalls[0]!.args).toContain('8973:8973')
+    expect(runCalls[1]!.args).toContain('49160:8973')
+    if (result.ok) expect(result.hostPort).toBe(49160)
+  })
+
+  test('does NOT retry when docker fails for a non-port reason (e.g. permission denied)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    let runAttempts = 0
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'No such container' }
+      if (args[0] === 'run') {
+        runAttempts++
+        return { exitCode: 125, stdout: '', stderr: 'permission denied' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+
+    expect(result.ok).toBe(false)
+    expect(runAttempts).toBe(1)
+    if (!result.ok) expect(result.reason).toMatch(/permission denied/)
+  })
+})
+
+describe('planStart port mapping', () => {
+  test('always uses CONTAINER_PORT (8973) on the container side regardless of host port', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 49160, imageExists: true })
+
+    expect(plan.runArgs).toContain('-p')
+    expect(plan.runArgs).toContain('49160:8973')
+    expect(plan.hostPort).toBe(49160)
   })
 })

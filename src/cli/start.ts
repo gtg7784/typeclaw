@@ -12,7 +12,8 @@ export const startCommand = defineCommand({
   args: {
     port: {
       type: 'string',
-      description: 'port to publish on the host',
+      description:
+        'preferred host port; if it is already bound, typeclaw allocates a free ephemeral port and reports it',
       default: String(config.port),
     },
     build: {
@@ -29,7 +30,7 @@ export const startCommand = defineCommand({
       process.exit(1)
     }
 
-    const result = await start({ cwd, port: Number(args.port), forceBuild: args.build })
+    const result = await start({ cwd, preferredHostPort: Number(args.port), forceBuild: args.build })
     if (!result.ok) {
       console.error(result.reason)
       process.exit(1)
@@ -38,7 +39,9 @@ export const startCommand = defineCommand({
     if (result.built) {
       console.log(`Built image ${result.plan.imageTag}.`)
     }
-    console.log(`Container ${result.plan.containerName} started (${result.containerId.slice(0, 12)}).`)
+    console.log(
+      `Container ${result.plan.containerName} started on host port ${result.hostPort} (${result.containerId.slice(0, 12)}).`,
+    )
     console.log(`Follow logs:  typeclaw log -f`)
     console.log(`Attach TUI:   typeclaw tui`)
     console.log(`Stop:         typeclaw stop`)

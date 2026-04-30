@@ -7,7 +7,8 @@ import { configSchema, type Mount } from '@/config/config'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 
-import { containerNameFromCwd, getBun, imageTagFromCwd } from './shared'
+import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
+import { containerNameFromCwd, defaultDockerExec, type DockerExec, getBun, imageTagFromCwd } from './shared'
 
 const PACKAGE_FILE = 'package.json'
 const CONFIG_FILE = 'typeclaw.json'
@@ -23,38 +24,36 @@ export type StartPlan = {
   dockerfile: string
   runArgs: string[]
   needsBuild: boolean
+  hostPort: number
 }
 
 export type PlanStartOptions = {
   cwd: string
-  port: number
+  hostPort: number
   imageExists: boolean
   forceBuild?: boolean
 }
 
-export type DockerExecResult = { exitCode: number; stdout: string; stderr: string }
-
-export type DockerExec = (
-  args: string[],
-  options?: { cwd?: string; inheritStdio?: boolean },
-) => Promise<DockerExecResult>
-
 export type StartOptions = {
   cwd: string
-  port: number
+  preferredHostPort: number
   forceBuild?: boolean
   exec?: DockerExec
+  // Test seam: allows tests to inject a deterministic port allocator. In
+  // production we go through the real kernel via `findFreePort`.
+  allocatePort?: (preferred: number) => Promise<number>
 }
 
 export type StartResult =
-  | { ok: true; plan: StartPlan; containerId: string; built: boolean }
+  | { ok: true; plan: StartPlan; containerId: string; built: boolean; hostPort: number }
   | { ok: false; reason: string }
 
 export async function start({
   cwd,
-  port,
+  preferredHostPort,
   forceBuild = false,
   exec = defaultDockerExec,
+  allocatePort = findFreePort,
 }: StartOptions): Promise<StartResult> {
   try {
     // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
@@ -66,16 +65,12 @@ export async function start({
     await refreshGitignore(cwd)
     await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
 
-    const plan = await planStart({
-      cwd,
-      port,
-      imageExists: await imageExists(exec, imageTagFromCwd(cwd)),
-      forceBuild,
-    })
+    const containerName = containerNameFromCwd(cwd)
+    const imageTagValue = imageTagFromCwd(cwd)
 
-    const state = await inspectContainer(exec, plan.containerName)
+    const state = await inspectContainer(exec, containerName)
     if (state.exists && state.running) {
-      return { ok: false, reason: `Container ${plan.containerName} is already running. Run \`typeclaw stop\` first.` }
+      return { ok: false, reason: `Container ${containerName} is already running. Run \`typeclaw stop\` first.` }
     }
     if (state.exists) {
       // Container is stopped/exited/being-removed but still holds the name.
@@ -83,14 +78,23 @@ export async function start({
       // prior crash left a corpse. Force-remove so `docker run --name <same>`
       // doesn't fail with a name conflict. Tolerate "no such container" since
       // the daemon may finish auto-removal between inspect and rm.
-      const rm = await exec(['rm', '-f', plan.containerName])
+      const rm = await exec(['rm', '-f', containerName])
       if (rm.exitCode !== 0 && !rm.stderr.toLowerCase().includes('no such container')) {
         return {
           ok: false,
-          reason: `Container ${plan.containerName} exists but is not running, and could not be removed: ${rm.stderr.trim() || 'no stderr'}`,
+          reason: `Container ${containerName} exists but is not running, and could not be removed: ${rm.stderr.trim() || 'no stderr'}`,
         }
       }
     }
+
+    const imageExisted = await imageExists(exec, imageTagValue)
+
+    // First attempt uses the user's preferred host port (8973 by default, or
+    // whatever they passed via --port / typeclaw.json). If it's already bound
+    // we fall through to a kernel-assigned ephemeral port. The container's
+    // internal port stays fixed at CONTAINER_PORT regardless.
+    let hostPort = await allocatePort(preferredHostPort)
+    let plan = await planStart({ cwd, hostPort, imageExists: imageExisted, forceBuild })
 
     let built = false
     if (plan.needsBuild) {
@@ -99,25 +103,41 @@ export async function start({
       built = true
     }
 
-    const run = await exec(plan.runArgs, { cwd })
+    let run = await exec(plan.runArgs, { cwd })
+
+    // TOCTOU: another process may have grabbed the port between our probe and
+    // `docker run`, or the kernel-assigned port may itself have been claimed.
+    // Treat docker as the authority and retry once with a fresh ephemeral port.
+    // Skip rebuild on retry: the image is already on disk from the first attempt.
+    if (run.exitCode !== 0 && isPortAllocatedError(run.stderr)) {
+      hostPort = await allocatePort(0)
+      plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false })
+      run = await exec(plan.runArgs, { cwd })
+    }
+
     if (run.exitCode !== 0) {
       return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
     }
 
-    return { ok: true, plan, containerId: run.stdout.trim(), built }
+    return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
 }
 
-export async function planStart({ cwd, port, imageExists, forceBuild = false }: PlanStartOptions): Promise<StartPlan> {
+export async function planStart({
+  cwd,
+  hostPort,
+  imageExists,
+  forceBuild = false,
+}: PlanStartOptions): Promise<StartPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
 
   const devSourcePath = await detectDevSource(cwd)
   const mounts = await loadMounts(cwd)
 
-  const runArgs = ['run', '-d', '--name', containerName, '--rm', '-p', `${port}:${port}`]
+  const runArgs = ['run', '-d', '--name', containerName, '--rm', '-p', `${hostPort}:${CONTAINER_PORT}`]
 
   for (const [key, value] of Object.entries(composeLabels(cwd, containerName))) {
     runArgs.push('--label', `${key}=${value}`)
@@ -159,6 +179,7 @@ export async function planStart({ cwd, port, imageExists, forceBuild = false }: 
     dockerfile: join(cwd, DOCKERFILE),
     runArgs,
     needsBuild: forceBuild || !imageExists,
+    hostPort,
   }
 }
 
@@ -199,21 +220,6 @@ export async function commitSystemFile(cwd: string, file: string, message: strin
     stderr: 'pipe',
   })
   await commit.exited
-}
-
-export const defaultDockerExec: DockerExec = async (args, options) => {
-  const bun = getBun()
-  if (!bun) return { exitCode: -1, stdout: '', stderr: 'bun runtime not available' }
-  const proc = bun.spawn({
-    cmd: ['docker', ...args],
-    cwd: options?.cwd,
-    stdout: options?.inheritStdio ? 'inherit' : 'pipe',
-    stderr: options?.inheritStdio ? 'inherit' : 'pipe',
-  })
-  const exitCode = await proc.exited
-  const stdout = options?.inheritStdio ? '' : await new Response(proc.stdout).text()
-  const stderr = options?.inheritStdio ? '' : await new Response(proc.stderr).text()
-  return { exitCode, stdout, stderr }
 }
 
 async function imageExists(exec: DockerExec, tag: string): Promise<boolean> {
