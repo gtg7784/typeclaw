@@ -174,8 +174,16 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
           const ok = await startAdapter(name, desired)
           if (ok) started.push(name)
         } else {
-          const { signature } = buildTokenSignature(name)
-          if (signature !== current.tokenSignature) {
+          const { signature, missing } = buildTokenSignature(name)
+          if (missing.length > 0) {
+            // Required token envs disappeared from .env. Continuing to use the
+            // in-memory token would silently honor a credential the operator
+            // explicitly removed, so stop the adapter instead of waiting for
+            // a manual restart.
+            logger.warn(`[channels] adapter "${name}" missing ${missing.join(', ')} after reload; stopping`)
+            await stopAdapter(name)
+            stopped.push(name)
+          } else if (signature !== current.tokenSignature) {
             restartRequired.push(`${name} (token rotation)`)
           }
         }
