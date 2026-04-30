@@ -59,11 +59,11 @@ export async function start({
   try {
     // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
     // CLI templates on every start (not just --build) so version drift between
-    // the agent folder and the CLI is corrected automatically. If the file
-    // is dirty in git afterwards, commit it so the change is tracked.
+    // the agent folder and the CLI is corrected automatically. The Dockerfile
+    // is gitignored (regenerated on every start, never tracked), so only the
+    // .gitignore needs an auto-commit if its content changed.
     await refreshDockerfile(cwd)
     await refreshGitignore(cwd)
-    await commitSystemFile(cwd, DOCKERFILE, 'Update Dockerfile')
     await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
 
     const plan = await planStart({
@@ -98,10 +98,6 @@ export async function start({
 export async function planStart({ cwd, port, imageExists, forceBuild = false }: PlanStartOptions): Promise<StartPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
-
-  if (!existsSync(join(cwd, DOCKERFILE))) {
-    throw new Error('Dockerfile not found. Run `typeclaw init` first.')
-  }
 
   const devSourcePath = await detectDevSource(cwd)
   const mounts = await loadMounts(cwd)

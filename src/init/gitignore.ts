@@ -1,13 +1,19 @@
 export const GITIGNORE_FILE = '.gitignore'
 
 export function buildGitignore(): string {
-  return `# Truly ignored: secrets, runtime junk, and the agent's free-write zone.
-# Never enter git history under any circumstance.
+  return `# Truly ignored: secrets, runtime junk, the agent's free-write zone, and
+# regenerated-on-every-start system files. Never enter git history.
+#
+# Dockerfile is rewritten from the typeclaw CLI template on every \`typeclaw
+# start\` (see src/init/dockerfile.ts), so tracking it would only produce
+# noisy "Update Dockerfile" commits whenever the template changes. Treat it
+# like node_modules/ — reproducible from source, not part of agent state.
 .env
 .env.local
 node_modules/
 workspace/
 mounts/
+Dockerfile
 .DS_Store
 
 # System-managed: gitignored by default so the agent never stages them by hand,

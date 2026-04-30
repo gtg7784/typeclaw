@@ -131,7 +131,10 @@ describe('runInit', () => {
     expect(tracked).toContain('package.json')
     expect(tracked).toContain('.gitignore')
     expect(tracked).toContain('AGENTS.md')
-    expect(tracked).toContain('Dockerfile')
+    // Dockerfile is gitignored (regenerated on every `typeclaw start`),
+    // so it must NOT appear in the initial commit even though it exists on disk.
+    expect(tracked).not.toContain('Dockerfile')
+    expect(existsSync(join(root, 'Dockerfile'))).toBe(true)
   })
 
   test('dockerfile step writes Dockerfile and reports devMode via event', async () => {
@@ -486,6 +489,7 @@ describe('scaffold', () => {
     expect(gitignore).toContain('memory/')
     expect(gitignore).toMatch(/^workspace\/$/m)
     expect(gitignore).toContain('mounts/')
+    expect(gitignore).toMatch(/^Dockerfile$/m)
   })
 
   test('preserves existing markdown files instead of overwriting', async () => {

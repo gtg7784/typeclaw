@@ -51,10 +51,6 @@ function labelValue(runArgs: string[], key: string): string | undefined {
 }
 
 describe('planStart', () => {
-  test('throws a helpful error when Dockerfile is missing', async () => {
-    await expect(planStart({ cwd: root, port: 8973, imageExists: true })).rejects.toThrow(/Dockerfile not found/)
-  })
-
   test('produces a docker run command with name, port publish, env-file, and agent mount', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
@@ -609,36 +605,58 @@ describe('start (composition)', () => {
     expect(buildCall!.dockerfileSnapshot).not.toContain('FROM stale')
   })
 
-  test('commits the refreshed Dockerfile and .gitignore when the agent folder is a git repo', async () => {
-    // given: an agent folder that is a git repo with a stale committed Dockerfile and .gitignore
+  test('commits the refreshed .gitignore when the agent folder is a git repo', async () => {
+    // given: an agent folder that is a git repo with a stale committed .gitignore
     await gitInit(root)
-    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
     await writeFile(join(root, '.gitignore'), '# stale\n')
+    await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await runGit(root, ['add', '.'])
+    await runGit(root, ['add', '.gitignore', 'package.json'])
     await runGit(root, ['commit', '-m', 'initial'])
     const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
     const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
 
-    // when: up runs (refresh will mutate both files, commit should land them)
+    // when: start runs (refresh will rewrite .gitignore, commit should land it)
     const result = await start({ cwd: root, port: 8973, exec })
 
-    // then: HEAD advanced and the new commits exist with the expected subjects
+    // then: HEAD advanced and the new commit exists with the expected subject
     expect(result.ok).toBe(true)
     const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
     expect(headAfter).not.toBe(headBefore)
     const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
-    expect(subjects).toContain('Update Dockerfile')
     expect(subjects).toContain('Update .gitignore')
   })
 
-  test('does not commit when the refresh produces no change (clean working tree)', async () => {
-    // given: an agent folder where Dockerfile and .gitignore are already at the latest template
+  test('does not auto-commit Dockerfile changes (Dockerfile is gitignored, regenerated on every start)', async () => {
+    // given: an agent folder following the realistic post-init shape — Dockerfile
+    // is on disk but gitignored, so it was never tracked.
     await gitInit(root)
-    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
     await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
     await writePackageJson(root, { typeclaw: '^0.1.0' })
-    await runGit(root, ['add', '.'])
+    await runGit(root, ['add', '.gitignore', 'package.json'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
+    const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
+
+    // when: start runs (Dockerfile is rewritten on disk, .gitignore is unchanged)
+    const result = await start({ cwd: root, port: 8973, exec })
+
+    // then: HEAD did not move (no Dockerfile commit, no .gitignore commit)
+    expect(result.ok).toBe(true)
+    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfter).toBe(headBefore)
+    // and: the Dockerfile on disk is the fresh template
+    expect(await readFile(join(root, 'Dockerfile'), 'utf8')).toBe(buildDockerfile())
+  })
+
+  test('does not commit when the refresh produces no change (clean working tree)', async () => {
+    // given: an agent folder where .gitignore is already at the latest template
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await runGit(root, ['add', '.gitignore', 'package.json'])
     await runGit(root, ['commit', '-m', 'initial'])
     const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
     const { exec } = fakeDockerExec({ imageExists: true, containerExists: false })
