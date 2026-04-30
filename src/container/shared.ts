@@ -1,5 +1,27 @@
 import { basename, resolve } from 'node:path'
 
+export type DockerExecResult = { exitCode: number; stdout: string; stderr: string }
+
+export type DockerExec = (
+  args: string[],
+  options?: { cwd?: string; inheritStdio?: boolean },
+) => Promise<DockerExecResult>
+
+export const defaultDockerExec: DockerExec = async (args, options) => {
+  const bun = getBun()
+  if (!bun) return { exitCode: -1, stdout: '', stderr: 'bun runtime not available' }
+  const proc = bun.spawn({
+    cmd: ['docker', ...args],
+    cwd: options?.cwd,
+    stdout: options?.inheritStdio ? 'inherit' : 'pipe',
+    stderr: options?.inheritStdio ? 'inherit' : 'pipe',
+  })
+  const exitCode = await proc.exited
+  const stdout = options?.inheritStdio ? '' : await new Response(proc.stdout).text()
+  const stderr = options?.inheritStdio ? '' : await new Response(proc.stderr).text()
+  return { exitCode, stdout, stderr }
+}
+
 export function containerNameFromCwd(cwd: string): string {
   return sanitizeContainerName(basename(resolve(cwd)))
 }
