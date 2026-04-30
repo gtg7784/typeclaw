@@ -1,5 +1,17 @@
 # Agent Guidelines
 
+## Pre-commit checks
+
+Before every commit, run all three of these and ensure they pass:
+
+```sh
+bun run typecheck
+bun run lint
+bun run format
+```
+
+No exceptions. If any of them fail, fix the cause before committing — do not `--no-verify`, do not stage partial fixes.
+
 ## Stages
 
 TypeClaw runs code in three distinct stages. Each stage has a different filesystem, a different process owner, and a different invocation path. Confusing them is the single most common source of bugs in this codebase, so always name the stage explicitly when discussing any command, path, or mount.
