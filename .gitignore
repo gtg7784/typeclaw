@@ -40,8 +40,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Sisyphus working files (plans, scratchpads)
 .sisyphus
 
-# Local agent state created by tests / dev runs
-sessions/
-memory/
-channels/
+# Local agent state created by tests / dev runs.
+# Anchored with a leading slash so they only match the dev-stage repo root,
+# never nested directories that share these names (`plugins/memory/`,
+# `src/channels/`, etc. would otherwise be silently ignored).
+/sessions/
+/memory/
+/channels/
 
