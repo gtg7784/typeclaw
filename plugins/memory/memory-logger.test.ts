@@ -7,11 +7,16 @@ import type { RunSession, SubagentContext } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
 import {
+  createMemoryLoggerSubagent,
   isMemoryLoggerPayload,
   MEMORY_LOGGER_SYSTEM_PROMPT,
+  type MemoryLoggerLogger,
   memoryLoggerSubagent,
   type MemoryLoggerPayload,
 } from './memory-logger'
+
+const silentLogger: MemoryLoggerLogger = { info: () => {}, warn: () => {}, error: () => {} }
+const silentSubagent = createMemoryLoggerSubagent({ logger: silentLogger })
 
 function makeAgentDir(): string {
   const root = mkdtempSync(join(tmpdir(), 'memory-agent-'))
@@ -33,7 +38,7 @@ async function invokeWith(
     agentDir,
     payload,
   }
-  await memoryLoggerSubagent.handler!(ctx, runSession)
+  await silentSubagent.handler!(ctx, runSession)
   return { runSessionCalls: calls }
 }
 
@@ -170,5 +175,53 @@ describe('memoryLoggerSubagent', () => {
     )
 
     expect(runSessionCalls[0]!.userPrompt!.toLowerCase()).toMatch(/no.*watermark|no prior|first time|begin/)
+  })
+
+  test('handler emits a [memory-logger] start log line with parentSessionId and watermark on every run', async () => {
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+
+    const logs: string[] = []
+    const subagent = createMemoryLoggerSubagent({
+      logger: { info: (m) => logs.push(m), warn: () => {}, error: () => {} },
+    })
+    const runSession: RunSession = async () => {}
+    const ctx: SubagentContext<MemoryLoggerPayload> = {
+      userPrompt: '',
+      agentDir,
+      payload: { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+    }
+    await subagent.handler!(ctx, runSession)
+
+    const startLog = logs.find((l) => l.startsWith('[memory-logger] ses_abc start'))
+    expect(startLog).toBeDefined()
+    expect(startLog!).toContain('watermark=none')
+    expect(logs.some((l) => l.startsWith('[memory-logger] ses_abc done'))).toBe(true)
+  })
+
+  test('handler emits a [memory-logger] warn log line and rethrows when runSession fails', async () => {
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+
+    const warnings: string[] = []
+    const subagent = createMemoryLoggerSubagent({
+      logger: { info: () => {}, warn: (m) => warnings.push(m), error: () => {} },
+    })
+    const runSession: RunSession = async () => {
+      throw new Error('LLM blew up')
+    }
+    const ctx: SubagentContext<MemoryLoggerPayload> = {
+      userPrompt: '',
+      agentDir,
+      payload: { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+    }
+    await expect(subagent.handler!(ctx, runSession)).rejects.toThrow('LLM blew up')
+    expect(warnings.some((m) => m.includes('[memory-logger] ses_abc') && m.includes('LLM blew up'))).toBe(true)
+  })
+
+  test('the default exported memoryLoggerSubagent still has a handler (back-compat)', () => {
+    expect(memoryLoggerSubagent.handler).toBeDefined()
   })
 })

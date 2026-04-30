@@ -218,6 +218,44 @@ describe('dreaming subagent (orchestration)', () => {
     const memory = await readFile(join(agentDir, 'MEMORY.md'), 'utf8')
     expect(memory).toBe('')
   })
+
+  test('emits [dreaming] start, watermark-advanced, and done log lines on a successful run', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'one\ntwo\nthree\n')
+    const infos: string[] = []
+    const logger: DreamingLogger = { info: (m) => infos.push(m), warn: () => {}, error: () => {} }
+
+    await invokeDreaming(agentDir, { commitMemory: async () => {}, logger })
+
+    expect(
+      infos.some((m) => m.startsWith('[dreaming] start') && m.includes('days=1') && m.includes('undreamed_lines=3')),
+    ).toBe(true)
+    expect(infos.some((m) => m.startsWith('[dreaming] watermarks advanced'))).toBe(true)
+    expect(infos.some((m) => m.startsWith('[dreaming] done'))).toBe(true)
+  })
+
+  test('emits a [dreaming] commit-failed warning when commitMemory throws but does not rethrow', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'frag\n')
+    const warnings: string[] = []
+    const logger: DreamingLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
+
+    await invokeDreaming(agentDir, {
+      logger,
+      commitMemory: async () => {
+        throw new Error('git is angry')
+      },
+    })
+
+    expect(warnings.some((m) => m.startsWith('[dreaming] commit failed') && m.includes('git is angry'))).toBe(true)
+  })
+
+  test('emits a [dreaming] run-threw warning and rethrows when runSession fails', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'frag\n')
+    const warnings: string[] = []
+    const logger: DreamingLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
+
+    await expect(invokeDreaming(agentDir, { throwOnRunSession: true, logger })).rejects.toThrow(/LLM blew up/)
+    expect(warnings.some((m) => m.startsWith('[dreaming] run threw') && m.includes('LLM blew up'))).toBe(true)
+  })
 })
 
 async function runGit(cwd: string, args: string[]): Promise<{ stdout: string; exitCode: number }> {

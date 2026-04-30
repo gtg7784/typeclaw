@@ -106,16 +106,52 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
   return lines.join('\n')
 }
 
-export const memoryLoggerSubagent: Subagent<MemoryLoggerPayload> = {
-  systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
-  tools: [readTool],
-  customTools: [appendTool],
-  payloadSchema: memoryLoggerPayloadSchema,
-  inFlightKey: (payload) => payload.parentSessionId,
-  handler: async (ctx, runSession) => {
-    const today = formatLocalDate()
-    const streamFile = join(ctx.payload.agentDir, 'memory', `${today}.md`)
-    const watermark = readWatermark(streamFile, ctx.payload.parentSessionId)
-    await runSession({ userPrompt: buildInitialPrompt(ctx.payload, streamFile, watermark) })
-  },
+export type MemoryLoggerLogger = {
+  info: (msg: string) => void
+  warn: (msg: string) => void
+  error: (msg: string) => void
 }
+
+const consoleLogger: MemoryLoggerLogger = {
+  info: (m) => console.log(m),
+  warn: (m) => console.warn(m),
+  error: (m) => console.error(m),
+}
+
+export type CreateMemoryLoggerSubagentOptions = {
+  logger?: MemoryLoggerLogger
+}
+
+export function createMemoryLoggerSubagent(
+  options: CreateMemoryLoggerSubagentOptions = {},
+): Subagent<MemoryLoggerPayload> {
+  const logger = options.logger ?? consoleLogger
+  return {
+    systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
+    tools: [readTool],
+    customTools: [appendTool],
+    payloadSchema: memoryLoggerPayloadSchema,
+    inFlightKey: (payload) => payload.parentSessionId,
+    handler: async (ctx, runSession) => {
+      const today = formatLocalDate()
+      const streamFile = join(ctx.payload.agentDir, 'memory', `${today}.md`)
+      const watermark = readWatermark(streamFile, ctx.payload.parentSessionId)
+      const start = Date.now()
+      logger.info(
+        `[memory-logger] ${ctx.payload.parentSessionId} start stream=${today}.md watermark=${watermark ?? 'none'}`,
+      )
+      try {
+        await runSession({ userPrompt: buildInitialPrompt(ctx.payload, streamFile, watermark) })
+        logger.info(`[memory-logger] ${ctx.payload.parentSessionId} done elapsed_ms=${Date.now() - start}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        logger.warn(
+          `[memory-logger] ${ctx.payload.parentSessionId}: run threw: ${message} elapsed_ms=${Date.now() - start}`,
+        )
+        throw err
+      }
+    },
+  }
+}
+
+export const memoryLoggerSubagent: Subagent<MemoryLoggerPayload> = createMemoryLoggerSubagent()

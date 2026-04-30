@@ -5,9 +5,9 @@ import { z } from 'zod'
 
 import { definePlugin } from '@/plugin'
 
-import { dreamingSubagent, type DreamingPayload } from './dreaming'
+import { createDreamingSubagent, type DreamingPayload } from './dreaming'
 import { loadMemory } from './load-memory'
-import { memoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
+import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 
 const DEFAULT_IDLE_MS = 10_000
 const DEFAULT_BUFFER_BYTES = 100_000
@@ -63,7 +63,10 @@ export default definePlugin({
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined }>()
     const bytesAtLastRun = new Map<string, number>()
 
-    const fireMemoryLogger = async (sessionId: string): Promise<void> => {
+    const fireMemoryLogger = async (
+      sessionId: string,
+      reason: 'idle' | 'buffer-trip' | 'session-end',
+    ): Promise<void> => {
       const last = lastIdleEvent.get(sessionId)
       if (!last || last.parentTranscriptPath === undefined) return
       const payload: MemoryLoggerPayload = {
@@ -73,6 +76,7 @@ export default definePlugin({
       }
       const currentSize = await readSize(last.parentTranscriptPath)
       bytesAtLastRun.set(sessionId, currentSize)
+      ctx.logger.info(`memory-logger spawn ${sessionId} reason=${reason} transcript_bytes=${currentSize}`)
       try {
         await ctx.spawnSubagent('memory-logger', payload)
       } catch (err) {
@@ -99,10 +103,20 @@ export default definePlugin({
       return currentSize - baseline >= bufferBytes
     }
 
+    // Subagents are constructed at boot here (rather than imported as constants)
+    // so their lifecycle logs route through the plugin logger and pick up the
+    // `[plugin:memory]` prefix. Without this, they would write directly to
+    // console and bypass the plugin namespace.
+    const subagentLogger = {
+      info: (m: string) => ctx.logger.info(m),
+      warn: (m: string) => ctx.logger.warn(m),
+      error: (m: string) => ctx.logger.error(m),
+    }
+
     return {
       subagents: {
-        'memory-logger': memoryLoggerSubagent,
-        dreaming: dreamingSubagent,
+        'memory-logger': createMemoryLoggerSubagent({ logger: subagentLogger }),
+        dreaming: createDreamingSubagent({ logger: subagentLogger }),
       },
       ...(dreamingSchedule !== undefined
         ? {
@@ -135,20 +149,21 @@ export default definePlugin({
           const sessionId = event.sessionId
           const timer = setTimeout(() => {
             idleTimers.delete(sessionId)
-            void fireMemoryLogger(sessionId)
+            void fireMemoryLogger(sessionId, 'idle')
           }, idleMs)
           idleTimers.set(sessionId, timer)
           if (
             event.parentTranscriptPath !== undefined &&
             (await shouldTripBufferCeiling(sessionId, event.parentTranscriptPath))
           ) {
+            ctx.logger.info(`buffer-ceiling trip ${sessionId} bufferBytes=${bufferBytes}`)
             cancelTimer(sessionId)
-            await fireMemoryLogger(sessionId)
+            await fireMemoryLogger(sessionId, 'buffer-trip')
           }
         },
         'session.end': async (event) => {
           cancelTimer(event.sessionId)
-          await fireMemoryLogger(event.sessionId)
+          await fireMemoryLogger(event.sessionId, 'session-end')
           lastIdleEvent.delete(event.sessionId)
           bytesAtLastRun.delete(event.sessionId)
         },

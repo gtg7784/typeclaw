@@ -387,11 +387,31 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         return
       }
 
-      await runSession({ userPrompt: buildInitialPrompt(ctx.payload, snapshots.undreamed) })
+      const undreamedLines = snapshots.undreamed.reduce((sum, s) => sum + (s.totalLines - s.dreamedLines), 0)
+      const start = Date.now()
+      logger.info(
+        `[dreaming] start days=${snapshots.undreamed.length} undreamed_lines=${undreamedLines} agent_dir=${ctx.payload.agentDir}`,
+      )
+
+      try {
+        await runSession({ userPrompt: buildInitialPrompt(ctx.payload, snapshots.undreamed) })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        logger.warn(`[dreaming] run threw: ${message} elapsed_ms=${Date.now() - start}`)
+        throw err
+      }
 
       const advanced = advanceWatermarks(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)
-      await commit(ctx.payload.agentDir)
+      logger.info(`[dreaming] watermarks advanced days=${snapshots.undreamed.length}`)
+
+      try {
+        await commit(ctx.payload.agentDir)
+        logger.info(`[dreaming] done elapsed_ms=${Date.now() - start}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        logger.warn(`[dreaming] commit failed: ${message} elapsed_ms=${Date.now() - start}`)
+      }
     },
   }
 }

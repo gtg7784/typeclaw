@@ -3,16 +3,36 @@ import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import type { PluginContext, PluginExports, SessionEndEvent, SessionIdleEvent, SessionPromptEvent } from '@/plugin'
+import type {
+  PluginContext,
+  PluginExports,
+  PluginLogger,
+  SessionEndEvent,
+  SessionIdleEvent,
+  SessionPromptEvent,
+} from '@/plugin'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
 import memoryPlugin from './index'
 
 type SpawnCall = { name: string; payload: unknown }
 
+type CapturedLogs = { info: string[]; warn: string[]; error: string[] }
+
+function makeCapturingLogger(): { logger: PluginLogger; logs: CapturedLogs } {
+  const logs: CapturedLogs = { info: [], warn: [], error: [] }
+  const logger: PluginLogger = {
+    info: (m) => logs.info.push(m),
+    warn: (m) => logs.warn.push(m),
+    error: (m) => logs.error.push(m),
+  }
+  return { logger, logs }
+}
+
 async function bootMemoryPlugin(
   agentDir: string,
   rawConfig: unknown,
+  options: { logger?: PluginLogger } = {},
 ): Promise<{
   exports: PluginExports
   spawned: SpawnCall[]
@@ -26,7 +46,7 @@ async function bootMemoryPlugin(
     version: undefined,
     agentDir,
     config: parsed.data,
-    logger: createPluginLogger('memory'),
+    logger: options.logger ?? createPluginLogger('memory'),
     spawnSubagent: async (name, payload) => {
       spawned.push({ name, payload })
     },
@@ -356,5 +376,50 @@ describe('session.idle hook (buffer-bytes ceiling)', () => {
     // then: only A's session triggered a spawn
     expect(spawned).toHaveLength(1)
     expect((spawned[0]!.payload as { parentSessionId: string }).parentSessionId).toBe('ses_a')
+  })
+})
+
+describe('lifecycle logging', () => {
+  test('logs `memory-logger spawn` with reason=idle when the debounce timer fires', async () => {
+    const { logger, logs } = makeCapturingLogger()
+    const { exports } = await bootMemoryPlugin(agentDir, { idleMs: 1000 }, { logger })
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }
+
+    await exports.hooks!['session.idle']!(event, { agentDir, pluginName: 'memory', logger })
+    await new Promise((r) => setTimeout(r, 1100))
+
+    expect(logs.info.some((m) => m.includes('memory-logger spawn ses_a') && m.includes('reason=idle'))).toBe(true)
+  })
+
+  test('logs `memory-logger spawn` with reason=session-end when the session closes', async () => {
+    const { logger, logs } = makeCapturingLogger()
+    const { exports } = await bootMemoryPlugin(agentDir, { idleMs: 60_000 }, { logger })
+    const ctx = { agentDir, pluginName: 'memory', logger }
+
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }, ctx)
+    await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
+
+    expect(logs.info.some((m) => m.includes('memory-logger spawn ses_a') && m.includes('reason=session-end'))).toBe(
+      true,
+    )
+  })
+
+  test('logs `buffer-ceiling trip` and `memory-logger spawn reason=buffer-trip` when the size ceiling fires', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, '')
+
+    const { logger, logs } = makeCapturingLogger()
+    const { exports } = await bootMemoryPlugin(agentDir, { idleMs: 60_000, bufferBytes: 10_000 }, { logger })
+    const ctx = { agentDir, pluginName: 'memory', logger }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    await exports.hooks!['session.idle']!(event, ctx)
+    await appendFile(transcript, 'x'.repeat(10_000))
+    await exports.hooks!['session.idle']!(event, ctx)
+
+    expect(logs.info.some((m) => m.includes('buffer-ceiling trip ses_a') && m.includes('bufferBytes=10000'))).toBe(true)
+    expect(logs.info.some((m) => m.includes('memory-logger spawn ses_a') && m.includes('reason=buffer-trip'))).toBe(
+      true,
+    )
   })
 })
