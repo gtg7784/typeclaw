@@ -45,7 +45,12 @@ export const restartCommand = defineCommand({
       console.log(`Stopped ${stopped.containerName}.`)
     }
 
-    const started = await start({ cwd, preferredHostPort: Number(args.port), forceBuild: args.build })
+    const started = await start({
+      cwd,
+      preferredHostPort: Number(args.port),
+      forceBuild: args.build,
+      autoForward: config.autoForward,
+    })
     if (!started.ok) {
       console.error(started.reason)
       process.exit(1)
@@ -57,6 +62,9 @@ export const restartCommand = defineCommand({
     console.log(
       `Container ${started.plan.containerName} started on host port ${started.hostPort} (${started.containerId.slice(0, 12)}).`,
     )
+    if (started.brokerPid !== null) {
+      console.log(`Port broker active (pid ${started.brokerPid}); any port the agent binds is reachable on localhost.`)
+    }
     console.log(`Follow logs:  typeclaw log -f`)
     console.log(`Attach TUI:   typeclaw tui`)
     console.log(`Stop:         typeclaw stop`)

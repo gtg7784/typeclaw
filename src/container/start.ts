@@ -6,6 +6,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { configSchema, type Mount } from '@/config/config'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
+import { spawnBrokerDetached } from '@/portbroker/spawn'
 
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import { containerNameFromCwd, defaultDockerExec, type DockerExec, getBun, imageTagFromCwd } from './shared'
@@ -42,10 +43,19 @@ export type StartOptions = {
   // Test seam: allows tests to inject a deterministic port allocator. In
   // production we go through the real kernel via `findFreePort`.
   allocatePort?: (preferred: number) => Promise<number>
+  autoForward?: boolean
+  brokerEntry?: string
 }
 
 export type StartResult =
-  | { ok: true; plan: StartPlan; containerId: string; built: boolean; hostPort: number }
+  | {
+      ok: true
+      plan: StartPlan
+      containerId: string
+      built: boolean
+      hostPort: number
+      brokerPid: number | null
+    }
   | { ok: false; reason: string }
 
 export async function start({
@@ -54,6 +64,8 @@ export async function start({
   forceBuild = false,
   exec = defaultDockerExec,
   allocatePort = findFreePort,
+  autoForward = false,
+  brokerEntry = process.argv[1],
 }: StartOptions): Promise<StartResult> {
   try {
     // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
@@ -119,7 +131,13 @@ export async function start({
       return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
     }
 
-    return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort }
+    let brokerPid: number | null = null
+    if (autoForward && brokerEntry) {
+      const spawned = await spawnBrokerDetached({ cwd, containerName: plan.containerName, brokerEntry })
+      brokerPid = spawned.ok ? spawned.pid : null
+    }
+
+    return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, brokerPid }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }

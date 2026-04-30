@@ -30,8 +30,11 @@ Where an end user lives once they run `typeclaw init`. Their cwd is an agent fol
 - `typeclaw log [-f]` — show (or follow) the container's stdout/stderr via `docker logs`.
 - `typeclaw tui` — attach a TUI client over a websocket to a running agent.
 - `typeclaw compose …` — orchestrate multiple agents across multiple agent folders.
+- `typeclaw _portbroker --container <name> --cwd <agent-folder>` — internal foreground process spawned detached by `typeclaw start`. Polls `/proc/net/tcp[6]` inside the container via `docker exec` and userland-proxies every new LISTEN port to the same port on `127.0.0.1`. Reaped by `typeclaw stop` via PID file. Underscore-prefixed because end users never invoke it directly. See `src/portbroker/`.
 
 Nothing in the host stage loads the agent runtime itself. Filesystem access is native (no mounts). Secrets live plainly in `.env` for later injection.
+
+The host stage owns one persistent state directory: `~/.typeclaw/` (override with `TYPECLAW_HOME` for tests). It contains `run/<container>-portbroker.pid` (live broker PID, removed on `typeclaw stop`) and `log/<container>-portbroker.log` (broker stdout/stderr, append-only, no rotation). `src/portbroker/pidfile.ts` is the only writer; nothing else in the host stage persists between CLI invocations.
 
 ### container stage — inside Docker
 
@@ -129,6 +132,41 @@ Domain logic lives in `src/<domain>/`. Examples: `src/init/`, `src/config/`, `sr
 - `src/cli/` is **UI only** — citty commands, clack prompts, spinners, `process.exit`. Delegate to `src/<domain>/` for anything testable.
 - Tests live next to code as `<file>.test.ts`.
 - Domain entry points are `src/<domain>/index.ts`. Split into multiple files only when a single file gets complex.
+
+## Port broker
+
+`src/portbroker/` is a **host-stage** subsystem that makes any TCP port the agent binds inside its container reachable on `localhost` from the user's machine, with no `typeclaw.json` edits and no container restart. Default-on (`autoForward: true` in the schema). Architecturally: it's the only host-stage daemon in the codebase, and the only persistent host-stage state (`~/.typeclaw/`).
+
+### Why it exists
+
+Docker fundamentally cannot publish new ports on a running container — `HostConfig.PortBindings` is create-time-only, and `docker update` does not cover networking. Without the broker, a process that binds `:5173` inside the container is invisible from the host unless `:5173` was passed to `docker run -p` up front. Pre-declaring every port the agent might ever bind is hostile UX. The broker closes the gap by polling the container's `/proc/net/tcp[6]` via `docker exec` and userland-proxying each LISTEN port through a host-side `Bun.listen` + `Bun.connect` pair to the container's bridge IP.
+
+### Process topology
+
+`typeclaw start` (host stage, short-lived) calls `start()` in `src/container/start.ts`. After the `docker run` succeeds, when `autoForward` is true it invokes `spawnBrokerDetached()` from `src/portbroker/spawn.ts`, which spawns a separate Bun process executing `typeclaw _portbroker --container <name> --cwd <agent-folder>`, redirects its stdio to `~/.typeclaw/log/<name>-portbroker.log`, calls `proc.unref()`, and writes `~/.typeclaw/run/<name>-portbroker.pid`. The CLI then exits; the broker survives because (a) stdio is piped to a file (not inherited), (b) the parent process did not await the child, (c) `unref()` removed the child handle from the parent's event loop. **This is the only place in the codebase that uses detached spawning** — keep it that way.
+
+`typeclaw stop` calls `stopBrokerDetached()` (in `src/container/stop.ts`, before `docker stop`) which reads the pidfile, sends SIGTERM, and removes the pidfile. The broker traps SIGTERM/SIGINT in `src/cli/portbroker.ts`, calls `broker.stop()` to release every host listener and detach from the detector loop, then exits 0.
+
+### Components and ownership
+
+- `src/portbroker/forwarder.ts` — one TCP forward (`hostPort` → `upstreamHost:upstreamPort`). Pure: knows nothing about Docker. Tested end-to-end with two real Bun sockets on loopback.
+- `src/portbroker/detector.ts` — polls `docker exec <name> sh -c "cat /proc/net/tcp /proc/net/tcp6"` every 750ms, parses LISTEN entries, emits `open`/`close` events on diff. Tolerates transient `docker exec` failures up to `maxConsecutiveFailures` (default 5). `parseListeningPorts()` is a pure function over the proc text and gets golden-file unit tests.
+- `src/portbroker/index.ts` — composition: container-IP resolver + detector + forwarder map. Excludes `cfg.port` (the WS server) and any user entries in `cfg.autoForwardExclude` automatically.
+- `src/portbroker/spawn.ts` — detached lifecycle (spawn, pidfile, SIGTERM). The only caller of `Bun.spawn` with `unref()`.
+- `src/portbroker/pidfile.ts` — `~/.typeclaw/run/<name>-portbroker.pid` r/w/rm with stale-PID detection via `process.kill(pid, 0)`. Honors `TYPECLAW_HOME` for test isolation.
+- `src/cli/portbroker.ts` — internal foreground entry. Underscore-prefixed (`_portbroker`) so users don't see it in `--help`. Re-validates `autoForward` on startup so a config flip + container restart cleanly disables forwarding.
+
+### Why a poll loop and not a stream-target hook
+
+Streams (`src/stream/`) are container-stage only. The host-stage broker has no access to in-container events except via WebSocket reload or `docker exec`. Adding a host↔container IPC channel just to push port-open events is more code, more failure modes, and would require teaching the agent itself about port lifecycles. Polling `/proc/net/tcp` via `docker exec` is one bounded shell-out per 750ms, parses ~few KB of text, and works for any process that binds a TCP socket regardless of whether it cooperates with TypeClaw.
+
+### Rules of thumb
+
+- **`autoForward` defaults to `true` at the user-facing schema layer (`configSchema`), but the `start()` function default is `false`.** This is intentional. Tests and programmatic callers of `start()` get a deterministic, side-effect-free default; the `true` default lives in the user contract (`typeclaw.json`) and the CLI plumbs it through explicitly. Adding a daemon spawn as an implicit default of a function call breaks unit-test isolation.
+- **Both `autoForward` and `autoForwardExclude` are `restart-required` in `FIELD_EFFECTS`.** The broker reads its config once at spawn time; reload won't re-evaluate it.
+- **Host port equals container port.** Always, no exceptions. There is no random-port fallback because predictable URLs are the whole point. Port collisions are logged (`skip-eaddrinuse`) and the affected port is just not forwarded.
+- **The broker's pidfile is the source of truth for "is a broker running for this agent?"** `typeclaw start` checks it before spawning. Stale PIDs (no live process) are treated as no-broker — the next `start` will spawn a fresh one.
+- **`Dockerfile` does not need changes.** The broker lives entirely on the host. Container images stay untouched. This keeps the broker decoupled from image rebuilds.
 
 ## Message Stream
 
