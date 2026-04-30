@@ -5,19 +5,29 @@ import { fileURLToPath } from 'node:url'
 
 import { z } from 'zod'
 
-import { configSchema } from '@/config/config'
+import { configSchema as coreConfigSchema } from '@/config/config'
 import { cronFileSchema } from '@/cron/schema'
+import { buildConfigSchemaWithBundledPlugins } from '@/run/schema-with-plugins'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 describe('typeclaw.schema.json', () => {
-  test('checked-in typeclaw.schema.json matches the current configSchema (drift guard)', async () => {
-    // If this test fails, someone edited `configSchema` without regenerating
-    // typeclaw.schema.json. Run `bun run generate:schema` and commit the result.
+  test('checked-in typeclaw.schema.json matches the merged (core + bundled plugin) schema (drift guard)', async () => {
     const checkedIn = JSON.parse(await readFile(join(repoRoot, 'typeclaw.schema.json'), 'utf8'))
-    const generated = z.toJSONSchema(configSchema, { io: 'input', reused: 'inline' })
+    const generated = z.toJSONSchema(buildConfigSchemaWithBundledPlugins(coreConfigSchema), {
+      io: 'input',
+      reused: 'inline',
+    })
 
     expect(checkedIn).toEqual(generated)
+  })
+
+  test('bundled memory plugin contributes a `memory` block with idleMs and dreaming.schedule', async () => {
+    const checkedIn = JSON.parse(await readFile(join(repoRoot, 'typeclaw.schema.json'), 'utf8'))
+
+    expect(checkedIn.properties.memory).toBeDefined()
+    expect(checkedIn.properties.memory.properties.idleMs).toBeDefined()
+    expect(checkedIn.properties.memory.properties.dreaming.properties.schedule).toBeDefined()
   })
 })
 

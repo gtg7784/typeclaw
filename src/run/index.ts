@@ -22,27 +22,16 @@ import {
   loadCron as loadCronDefault,
   type Scheduler,
 } from '@/cron'
-import {
-  loadPlugins,
-  type LoadPluginsResult,
-  pluginCronJobs,
-  type PluginRegistry,
-  type ResolvedPlugin,
-  summarizeLoaded,
-} from '@/plugin'
+import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
 import { ReloadRegistry } from '@/reload'
 import { createServer, type Server } from '@/server'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
 
-import memoryPlugin from '../../plugins/memory'
+import { BUNDLED_PLUGINS } from './bundled-plugins'
 import { buildChannelSessionFactory } from './channel-session-factory'
 import { createPluginRuntime, type PluginRuntime, type PluginSubagentEntry } from './plugin-runtime'
-
-const BUNDLED_PLUGINS: ResolvedPlugin[] = [
-  { name: 'memory', version: undefined, source: '<bundled>', defined: memoryPlugin },
-]
 
 type BunServer = ReturnType<Server['start']>
 
