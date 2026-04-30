@@ -167,6 +167,7 @@ describe('startDaemon', () => {
       exec: fakeExec(routes),
       forwarderFactory: noopForwarderFactory,
       gcIntervalMs: 30,
+      gcMissesToDeregister: 1,
     })
     await send({ kind: 'register', containerName: 'coder', cwd: '/x' })
     routes.delete('alive:coder')
@@ -178,5 +179,130 @@ describe('startDaemon', () => {
       await new Promise((resolve) => setTimeout(resolve, 30))
     }
     throw new Error('GC did not remove dead container in time')
+  })
+
+  test('GC requires gcMissesToDeregister consecutive absences before tearing a broker down', async () => {
+    const routes = new Map([
+      ['inspect:coder', { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }],
+      ['proc:coder', { exitCode: 0, stdout: procWithPorts([]), stderr: '' }],
+      ['alive:coder', { exitCode: 0, stdout: 'coder\n', stderr: '' }],
+    ])
+    daemon = await startDaemon({
+      exec: fakeExec(routes),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 20,
+      gcMissesToDeregister: 3,
+    })
+    await send({ kind: 'register', containerName: 'coder', cwd: '/x' })
+
+    routes.delete('alive:coder')
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    routes.set('alive:coder', { exitCode: 0, stdout: 'coder\n', stderr: '' })
+    await new Promise((resolve) => setTimeout(resolve, 100))
+
+    const list = await send({ kind: 'list' })
+    expect(list.ok).toBe(true)
+    if (!list.ok) return
+    expect((list.result as ListResult).brokers.map((b) => b.containerName)).toContain('coder')
+  })
+
+  test('GC tolerates docker exec failures (status=unknown does not count as gone)', async () => {
+    let psFails = 0
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') {
+        return { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }
+      }
+      if (args[0] === 'ps') {
+        psFails += 1
+        return { exitCode: 1, stdout: '', stderr: 'docker daemon hiccup' }
+      }
+      if (args[0] === 'exec') {
+        return { exitCode: 0, stdout: procWithPorts([]), stderr: '' }
+      }
+      return { exitCode: 1, stdout: '', stderr: 'unknown' }
+    }
+    daemon = await startDaemon({
+      exec,
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 20,
+      gcMissesToDeregister: 1,
+    })
+    await send({ kind: 'register', containerName: 'coder', cwd: '/x' })
+
+    await new Promise((resolve) => setTimeout(resolve, 200))
+
+    expect(psFails).toBeGreaterThan(0)
+    const list = await send({ kind: 'list' })
+    expect(list.ok).toBe(true)
+    if (!list.ok) return
+    expect((list.result as ListResult).brokers.map((b) => b.containerName)).toContain('coder')
+  })
+
+  test('register passes excludePorts to the broker (skip-excluded log emitted)', async () => {
+    const routes = new Map([
+      ['inspect:coder', { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }],
+      ['proc:coder', { exitCode: 0, stdout: procWithPorts([3000, 8973]), stderr: '' }],
+      ['alive:coder', { exitCode: 0, stdout: 'coder\n', stderr: '' }],
+    ])
+    const events: Array<string> = []
+    daemon = await startDaemon({
+      exec: fakeExec(routes),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+      onLog: (e) => {
+        if (e.kind === 'skip-excluded') events.push(`skip:${e.port}`)
+        if (e.kind === 'open') events.push(`open:${e.hostPort}`)
+      },
+    })
+    await send({ kind: 'register', containerName: 'coder', cwd: '/x', excludePorts: [8973] })
+
+    const start = Date.now()
+    while (Date.now() - start < 1500) {
+      if (events.includes('skip:8973') && events.includes('open:3000')) return
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    throw new Error(`exclude not honored; saw events: ${events.join(',')}`)
+  })
+
+  test('register concurrent with deregister is serialized: no broker remains', async () => {
+    const routes = new Map([
+      ['inspect:coder', { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }],
+      ['proc:coder', { exitCode: 0, stdout: procWithPorts([]), stderr: '' }],
+      ['alive:coder', { exitCode: 0, stdout: 'coder\n', stderr: '' }],
+    ])
+    daemon = await startDaemon({
+      exec: fakeExec(routes),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+    })
+
+    const [reg, dereg] = await Promise.all([
+      send({ kind: 'register', containerName: 'coder', cwd: '/x' }),
+      send({ kind: 'deregister', containerName: 'coder' }),
+    ])
+    expect(reg.ok).toBe(true)
+    expect(dereg.ok).toBe(true)
+
+    const list = await send({ kind: 'list' })
+    expect(list.ok).toBe(true)
+    if (!list.ok) return
+    expect((list.result as ListResult).brokers).toHaveLength(0)
+  })
+
+  test('startDaemon refuses to bind when an existing daemon is reachable', async () => {
+    const routes = new Map<string, { exitCode: number; stdout: string; stderr: string }>()
+    daemon = await startDaemon({
+      exec: fakeExec(routes),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+    })
+
+    await expect(
+      startDaemon({
+        exec: fakeExec(routes),
+        forwarderFactory: noopForwarderFactory,
+        gcIntervalMs: 1_000_000,
+      }),
+    ).rejects.toThrow(/already listening/)
   })
 })

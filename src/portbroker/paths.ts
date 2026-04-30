@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises'
+import { chmod, mkdir } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -35,4 +35,6 @@ export function logfilePath(): string {
 export async function ensureDirs(): Promise<void> {
   await mkdir(runDir(), { recursive: true })
   await mkdir(logDir(), { recursive: true })
+  await chmod(runDir(), 0o700).catch(() => {})
+  await chmod(logDir(), 0o700).catch(() => {})
 }

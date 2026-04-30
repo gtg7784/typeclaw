@@ -19,8 +19,21 @@ export async function ensureDaemon(opts: EnsureDaemonOptions): Promise<EnsureDae
   }
 
   await ensureDirs()
+  return ensureDaemonWithRetry(opts, 1)
+}
+
+async function ensureDaemonWithRetry(opts: EnsureDaemonOptions, retriesLeft: number): Promise<EnsureDaemonResult> {
   const lock = await acquireLockOrWait(opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS)
-  if (!lock.ok) return { ok: false, reason: lock.reason }
+  if (lock.kind === 'daemon-reachable') {
+    return { ok: true, pid: await readPidQuiet(), spawned: false }
+  }
+  if (lock.kind === 'stale-lock-cleared') {
+    if (retriesLeft > 0) return ensureDaemonWithRetry(opts, retriesLeft - 1)
+    return { ok: false, reason: 'stale lockfile cleared but retry budget exhausted' }
+  }
+  if (lock.kind === 'timeout') {
+    return { ok: false, reason: lock.reason }
+  }
 
   try {
     if (await isDaemonReachable()) {
@@ -33,11 +46,13 @@ export async function ensureDaemon(opts: EnsureDaemonOptions): Promise<EnsureDae
 }
 
 async function spawnDaemonDetached(opts: EnsureDaemonOptions): Promise<EnsureDaemonResult> {
-  let logFd: number
+  // Bun.spawn() with `stdout: <number>` consumes the file descriptor by
+  // dup()-ing it into the child; the parent's handle remains valid until we
+  // close it. Closing too early would race the dup. We hold the FileHandle
+  // open across spawn() and close it only after the child has been launched.
+  let handle: Awaited<ReturnType<typeof open>>
   try {
-    const handle = await open(logfilePath(), 'a')
-    logFd = handle.fd
-    handle.close().catch(() => {})
+    handle = await open(logfilePath(), 'a')
   } catch (error) {
     return { ok: false, reason: `failed to open daemon log: ${stringify(error)}` }
   }
@@ -47,14 +62,16 @@ async function spawnDaemonDetached(opts: EnsureDaemonOptions): Promise<EnsureDae
     proc = Bun.spawn({
       cmd: [process.execPath, opts.brokerEntry, '_portbrokerd'],
       stdin: 'ignore',
-      stdout: logFd,
-      stderr: logFd,
+      stdout: handle.fd,
+      stderr: handle.fd,
       env: { ...process.env },
     })
   } catch (error) {
+    handle.close().catch(() => {})
     return { ok: false, reason: `failed to spawn daemon: ${stringify(error)}` }
   }
   proc.unref()
+  handle.close().catch(() => {})
 
   try {
     await writeFile(pidfilePath(), `${proc.pid}\n`)
@@ -70,14 +87,28 @@ async function spawnDaemonDetached(opts: EnsureDaemonOptions): Promise<EnsureDae
     if (await isDaemonReachable()) return { ok: true, pid: proc.pid, spawned: true }
     await sleep(POLL_INTERVAL_MS)
   }
+
+  // Daemon failed to come up. Reap the orphan and clean the pidfile so the
+  // next ensureDaemon() doesn't observe a dangling pidfile pointing at our
+  // dead child.
+  try {
+    proc.kill('SIGTERM')
+  } catch {}
+  try {
+    const raw = await readFile(pidfilePath(), 'utf8').catch(() => '')
+    if (raw.trim() === String(proc.pid)) await unlink(pidfilePath())
+  } catch {}
   return { ok: false, reason: 'daemon spawned but did not become reachable' }
 }
 
 type LockToken = { path: string }
+type LockResult =
+  | { kind: 'acquired'; token: LockToken }
+  | { kind: 'daemon-reachable' }
+  | { kind: 'stale-lock-cleared' }
+  | { kind: 'timeout'; reason: string }
 
-async function acquireLockOrWait(
-  timeoutMs: number,
-): Promise<{ ok: true; token: LockToken } | { ok: false; reason: string }> {
+async function acquireLockOrWait(timeoutMs: number): Promise<LockResult> {
   const path = lockfilePath()
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -85,18 +116,19 @@ async function acquireLockOrWait(
       const handle = await open(path, 'wx')
       await handle.write(`${process.pid}\n`)
       await handle.close()
-      return { ok: true, token: { path } }
+      return { kind: 'acquired', token: { path } }
     } catch {
-      if (await isDaemonReachable()) {
-        return { ok: false, reason: 'another caller already started the daemon' }
-      }
+      if (await isDaemonReachable()) return { kind: 'daemon-reachable' }
       await sleep(POLL_INTERVAL_MS)
     }
   }
+  // Lock held by something that never finished. Clear it so the caller can
+  // retry once. Rare in practice (only happens if a previous ensureDaemon
+  // process was killed mid-spawn).
   try {
     await unlink(path)
   } catch {}
-  return { ok: false, reason: 'lockfile contention timeout' }
+  return { kind: 'stale-lock-cleared' }
 }
 
 async function releaseLock(token: LockToken): Promise<void> {

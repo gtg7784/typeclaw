@@ -284,4 +284,77 @@ describe('startBroker', () => {
       await result.broker.stop()
     }
   })
+
+  test('broker.containerIp() reflects current IP, not initial IP', async () => {
+    const { factory } = fakeForwarderFactory()
+    let inspectCalls = 0
+    let procCalls = 0
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') {
+        inspectCalls += 1
+        const ip = inspectCalls === 1 ? '10.0.0.5' : '10.0.0.99'
+        return { exitCode: 0, stdout: `{"bridge":{"IPAddress":"${ip}"}}`, stderr: '' }
+      }
+      procCalls += 1
+      return procCalls === 2
+        ? { exitCode: 1, stdout: '', stderr: 'transient blip' }
+        : { exitCode: 0, stdout: procWithPorts([3000]), stderr: '' }
+    }
+
+    const result = await startBroker({
+      containerName: 'coder',
+      excludePorts: new Set(),
+      exec,
+      intervalMs: 20,
+      maxConsecutiveFailures: 5,
+      forwarderFactory: factory,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    try {
+      expect(result.broker.containerIp()).toBe('10.0.0.5')
+      await waitFor(() => result.broker.containerIp() === '10.0.0.99', 2000)
+      expect(result.broker.containerIp()).toBe('10.0.0.99')
+    } finally {
+      await result.broker.stop()
+    }
+  })
+
+  test('IP change tears down old forwarders and reinstalls against the new IP', async () => {
+    const { factory, active, history } = fakeForwarderFactory()
+    let inspectCalls = 0
+    let procCalls = 0
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') {
+        inspectCalls += 1
+        const ip = inspectCalls === 1 ? '10.0.0.5' : '10.0.0.99'
+        return { exitCode: 0, stdout: `{"bridge":{"IPAddress":"${ip}"}}`, stderr: '' }
+      }
+      procCalls += 1
+      return procCalls === 2
+        ? { exitCode: 1, stdout: '', stderr: 'transient blip' }
+        : { exitCode: 0, stdout: procWithPorts([3000]), stderr: '' }
+    }
+
+    const result = await startBroker({
+      containerName: 'coder',
+      excludePorts: new Set(),
+      exec,
+      intervalMs: 20,
+      maxConsecutiveFailures: 5,
+      forwarderFactory: factory,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    try {
+      await waitFor(() => active().get(3000)?.upstreamHost === '10.0.0.5')
+      await waitFor(() => active().get(3000)?.upstreamHost === '10.0.0.99', 2000)
+      const histForPort = history().filter((h) => h.hostPort === 3000)
+      expect(histForPort.length).toBeGreaterThanOrEqual(2)
+      expect(histForPort[0]?.upstreamHost).toBe('10.0.0.5')
+      expect(histForPort[histForPort.length - 1]?.upstreamHost).toBe('10.0.0.99')
+    } finally {
+      await result.broker.stop()
+    }
+  })
 })

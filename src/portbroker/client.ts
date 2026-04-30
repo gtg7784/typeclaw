@@ -66,8 +66,16 @@ export async function send(req: Request, opts: SendOptions = {}): Promise<Respon
   sock.data = state
   sock.write(`${JSON.stringify(req)}\n`)
 
-  const timer = new Promise<Response>((resolve) =>
-    setTimeout(() => resolve({ ok: false, reason: `daemon ack timeout after ${timeoutMs}ms` }), timeoutMs),
-  )
-  return Promise.race([replyPromise, timer])
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeoutPromise = new Promise<Response>((resolve) => {
+    timer = setTimeout(() => resolve({ ok: false, reason: `daemon ack timeout after ${timeoutMs}ms` }), timeoutMs)
+  })
+  try {
+    return await Promise.race([replyPromise, timeoutPromise])
+  } finally {
+    if (timer) clearTimeout(timer)
+    try {
+      sock.end()
+    } catch {}
+  }
 }

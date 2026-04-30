@@ -45,6 +45,7 @@ export type StartOptions = {
   // production we go through the real kernel via `findFreePort`.
   allocatePort?: (preferred: number) => Promise<number>
   autoForward?: boolean
+  autoForwardExclude?: number[]
   brokerEntry?: string
 }
 
@@ -68,6 +69,7 @@ export async function start({
   exec = defaultDockerExec,
   allocatePort = findFreePort,
   autoForward = false,
+  autoForwardExclude = [],
   brokerEntry = process.argv[1],
 }: StartOptions): Promise<StartResult> {
   try {
@@ -136,7 +138,7 @@ export async function start({
 
     const broker =
       autoForward && brokerEntry
-        ? await registerWithDaemon(cwd, plan.containerName, brokerEntry)
+        ? await registerWithDaemon(cwd, plan.containerName, brokerEntry, [CONTAINER_PORT, ...autoForwardExclude])
         : { state: 'disabled' as const }
 
     return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, broker }
@@ -304,10 +306,15 @@ function expandMountPath(input: string, cwd: string): string {
   return isAbsolute(input) ? input : resolve(cwd, input)
 }
 
-async function registerWithDaemon(cwd: string, containerName: string, brokerEntry: string): Promise<BrokerStatus> {
+async function registerWithDaemon(
+  cwd: string,
+  containerName: string,
+  brokerEntry: string,
+  excludePorts: number[],
+): Promise<BrokerStatus> {
   const ensured = await ensureDaemon({ brokerEntry })
   if (!ensured.ok) return { state: 'unavailable', reason: ensured.reason }
-  const reply = await sendToDaemon({ kind: 'register', containerName, cwd })
+  const reply = await sendToDaemon({ kind: 'register', containerName, cwd, excludePorts })
   if (!reply.ok) return { state: 'unavailable', reason: reply.reason }
   return { state: 'registered' }
 }

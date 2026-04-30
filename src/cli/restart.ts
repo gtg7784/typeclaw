@@ -51,6 +51,7 @@ export const restartCommand = defineCommand({
       preferredHostPort: Number(args.port),
       forceBuild: args.build,
       autoForward: cfg.autoForward,
+      autoForwardExclude: cfg.autoForwardExclude,
     })
     if (!started.ok) {
       console.error(started.reason)

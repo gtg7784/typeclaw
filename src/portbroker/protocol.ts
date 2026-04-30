@@ -1,5 +1,10 @@
 export type Request =
-  | { kind: 'register'; containerName: string; cwd: string }
+  | {
+      kind: 'register'
+      containerName: string
+      cwd: string
+      excludePorts?: number[]
+    }
   | { kind: 'deregister'; containerName: string }
   | { kind: 'list' }
   | { kind: 'status'; containerName: string }

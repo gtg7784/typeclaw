@@ -23,7 +23,6 @@ const DEFAULT_UPSTREAM_CONNECT_TIMEOUT_MS = 5_000
 type Direction = {
   pending: Uint8Array[]
   pendingBytes: number
-  ended: boolean
 }
 
 type ProxyState = {
@@ -69,8 +68,8 @@ function onClientOpen(client: Socket<ProxyState>, opts: ForwarderOptions): void 
     upstream: null,
     client,
     closed: false,
-    toUpstream: { pending: [], pendingBytes: 0, ended: false },
-    toClient: { pending: [], pendingBytes: 0, ended: false },
+    toUpstream: { pending: [], pendingBytes: 0 },
+    toClient: { pending: [], pendingBytes: 0 },
     pendingByteLimit: opts.pendingByteLimit ?? DEFAULT_PENDING_BYTE_LIMIT,
   }
   client.data = state

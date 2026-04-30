@@ -36,6 +36,7 @@ export const startCommand = defineCommand({
       preferredHostPort: Number(args.port),
       forceBuild: args.build,
       autoForward: cfg.autoForward,
+      autoForwardExclude: cfg.autoForwardExclude,
     })
     if (!result.ok) {
       console.error(result.reason)

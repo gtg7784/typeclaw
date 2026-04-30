@@ -22,6 +22,7 @@ export type BrokerOptions = {
   excludePorts: Set<number>
   exec?: DockerExec
   intervalMs?: number
+  maxConsecutiveFailures?: number
   resolveIp?: ContainerIpResolver
   forwarderFactory?: ForwarderFactory
   onLog?: (event: BrokerLogEvent) => void
@@ -30,7 +31,7 @@ export type BrokerOptions = {
 
 export type Broker = {
   containerName: string
-  containerIp: string
+  containerIp: () => string
   forwardedPorts: () => number[]
   stop: () => Promise<void>
 }
@@ -86,7 +87,13 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
   let serial: Promise<void> = Promise.resolve()
 
   const enqueue = (op: () => Promise<void>): void => {
-    serial = serial.then(op).catch(() => {})
+    serial = serial.then(op).catch((err: unknown) => {
+      log({
+        kind: 'detector-error',
+        containerName: opts.containerName,
+        message: `serialized op failed: ${err instanceof Error ? err.message : String(err)}`,
+      })
+    })
   }
 
   const installForwarder = async (port: number): Promise<void> => {
@@ -142,6 +149,7 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
     containerName: opts.containerName,
     exec,
     intervalMs: opts.intervalMs,
+    maxConsecutiveFailures: opts.maxConsecutiveFailures,
     onChange: (change: PortChange) => {
       enqueue(() => (change.kind === 'open' ? installForwarder(change.port) : removeForwarder(change.port)))
     },
@@ -162,7 +170,7 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
 
   const broker: Broker = {
     containerName: opts.containerName,
-    containerIp: initialIp,
+    containerIp: () => containerIp,
     forwardedPorts: () => Array.from(forwarders.keys()),
     stop: async () => {
       stopped = true
