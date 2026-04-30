@@ -6,7 +6,8 @@ import { isAbsolute, join, resolve } from 'node:path'
 import { configSchema, type Mount } from '@/config/config'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
-import { spawnBrokerDetached } from '@/portbroker/spawn'
+import { send as sendToDaemon } from '@/portbroker/client'
+import { ensureDaemon } from '@/portbroker/spawn'
 
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import { containerNameFromCwd, defaultDockerExec, type DockerExec, getBun, imageTagFromCwd } from './shared'
@@ -47,6 +48,8 @@ export type StartOptions = {
   brokerEntry?: string
 }
 
+export type BrokerStatus = { state: 'registered' } | { state: 'unavailable'; reason: string } | { state: 'disabled' }
+
 export type StartResult =
   | {
       ok: true
@@ -54,7 +57,7 @@ export type StartResult =
       containerId: string
       built: boolean
       hostPort: number
-      brokerPid: number | null
+      broker: BrokerStatus
     }
   | { ok: false; reason: string }
 
@@ -131,13 +134,12 @@ export async function start({
       return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
     }
 
-    let brokerPid: number | null = null
-    if (autoForward && brokerEntry) {
-      const spawned = await spawnBrokerDetached({ cwd, containerName: plan.containerName, brokerEntry })
-      brokerPid = spawned.ok ? spawned.pid : null
-    }
+    const broker =
+      autoForward && brokerEntry
+        ? await registerWithDaemon(cwd, plan.containerName, brokerEntry)
+        : { state: 'disabled' as const }
 
-    return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, brokerPid }
+    return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, broker }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -300,6 +302,14 @@ function expandMountPath(input: string, cwd: string): string {
     return join(homedir(), input.slice(1))
   }
   return isAbsolute(input) ? input : resolve(cwd, input)
+}
+
+async function registerWithDaemon(cwd: string, containerName: string, brokerEntry: string): Promise<BrokerStatus> {
+  const ensured = await ensureDaemon({ brokerEntry })
+  if (!ensured.ok) return { state: 'unavailable', reason: ensured.reason }
+  const reply = await sendToDaemon({ kind: 'register', containerName, cwd })
+  if (!reply.ok) return { state: 'unavailable', reason: reply.reason }
+  return { state: 'registered' }
 }
 
 // process.env.TZ is honored first because users who explicitly set it (e.g.

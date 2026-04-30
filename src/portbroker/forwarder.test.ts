@@ -159,4 +159,108 @@ describe('startForwarder', () => {
     expect(forwarder.upstreamHost).toBe('127.0.0.1')
     expect(forwarder.upstreamPort).toBe(echo.port)
   })
+
+  test('roundtrips multiple sequential medium payloads byte-perfect', async () => {
+    const hostPort = await pickFreePort()
+    const result = await startForwarder({
+      hostPort,
+      upstreamHost: '127.0.0.1',
+      upstreamPort: echo.port,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    forwarder = result.forwarder
+
+    for (const size of [4 * 1024, 32 * 1024, 64 * 1024]) {
+      const payload = new Uint8Array(size)
+      for (let i = 0; i < size; i++) payload[i] = (i * 31) & 0xff
+      const echoed = await new Promise<Uint8Array>((resolve, reject) => {
+        const chunks: Uint8Array[] = []
+        let total = 0
+        Bun.connect({
+          hostname: '127.0.0.1',
+          port: hostPort,
+          socket: {
+            open(s) {
+              s.write(payload)
+            },
+            data(s, chunk) {
+              chunks.push(new Uint8Array(chunk))
+              total += chunk.byteLength
+              if (total >= size) {
+                const merged = new Uint8Array(total)
+                let off = 0
+                for (const c of chunks) {
+                  merged.set(c, off)
+                  off += c.byteLength
+                }
+                s.end()
+                resolve(merged)
+              }
+            },
+            close() {},
+            error: (_s, err) => reject(err),
+          },
+        }).catch(reject)
+        setTimeout(() => reject(new Error(`size=${size} timeout`)), 5000)
+      })
+      expect(echoed.byteLength).toBe(size)
+      for (let i = 0; i < size; i++) {
+        if (echoed[i] !== payload[i]) throw new Error(`byte mismatch at ${i} (size=${size})`)
+      }
+    }
+  })
+
+  test('closes connection when pendingByteLimit is exceeded before upstream connects', async () => {
+    const hostPort = await pickFreePort()
+    const result = await startForwarder({
+      hostPort,
+      upstreamHost: '203.0.113.1',
+      upstreamPort: 65000,
+      pendingByteLimit: 1024,
+      upstreamConnectTimeoutMs: 60_000,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    forwarder = result.forwarder
+
+    const closed = await new Promise<boolean>((resolve) => {
+      let resolved = false
+      Bun.connect({
+        hostname: '127.0.0.1',
+        port: hostPort,
+        socket: {
+          open(s) {
+            const big = new Uint8Array(2048)
+            s.write(big)
+          },
+          data() {},
+          close() {
+            if (!resolved) {
+              resolved = true
+              resolve(true)
+            }
+          },
+          error() {
+            if (!resolved) {
+              resolved = true
+              resolve(true)
+            }
+          },
+        },
+      }).catch(() => {
+        if (!resolved) {
+          resolved = true
+          resolve(true)
+        }
+      })
+      setTimeout(() => {
+        if (!resolved) {
+          resolved = true
+          resolve(false)
+        }
+      }, 2000)
+    })
+    expect(closed).toBe(true)
+  })
 })

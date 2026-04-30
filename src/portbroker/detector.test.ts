@@ -128,9 +128,10 @@ describe('startDetector', () => {
     expect(closes).toHaveLength(0)
   })
 
-  test('tolerates a transient exec failure and resumes on the next tick', async () => {
+  test('reports transient exec failures via onError but keeps polling', async () => {
     const events: PortChange[] = []
     const errors: Error[] = []
+    const fatals: Error[] = []
     const { exec } = fakeExec([
       { exitCode: 1, stdout: '', stderr: 'transient' },
       { exitCode: 0, stdout: PROC_TCP_ONE_LISTEN, stderr: '' },
@@ -142,16 +143,36 @@ describe('startDetector', () => {
       maxConsecutiveFailures: 5,
       onChange: (c) => events.push(c),
       onError: (e) => errors.push(e),
+      onFatal: (e) => fatals.push(e),
     })
     await waitFor(() => events.length >= 1)
     await detector.stop()
 
     expect(events).toEqual([{ kind: 'open', port: 8080 }])
-    expect(errors).toHaveLength(0)
+    expect(errors[0]!.message).toContain('transient')
+    expect(fatals).toHaveLength(0)
   })
 
-  test('surfaces persistent exec failure via onError', async () => {
+  test('thrown exec errors are reported via onError, not propagated', async () => {
     const errors: Error[] = []
+    const { exec } = fakeExec([new Error('connection reset')])
+    const detector = startDetector({
+      containerName: 'coder',
+      exec,
+      intervalMs: 30,
+      maxConsecutiveFailures: 5,
+      onChange: () => {},
+      onError: (e) => errors.push(e),
+    })
+    await waitFor(() => errors.length >= 1)
+    await detector.stop()
+
+    expect(errors[0]!.message).toContain('connection reset')
+  })
+
+  test('escalates to onFatal after maxConsecutiveFailures', async () => {
+    const errors: Error[] = []
+    const fatals: Error[] = []
     const { exec } = fakeExec([
       { exitCode: 1, stdout: '', stderr: 'down' },
       { exitCode: 1, stdout: '', stderr: 'down' },
@@ -164,11 +185,13 @@ describe('startDetector', () => {
       maxConsecutiveFailures: 3,
       onChange: () => {},
       onError: (e) => errors.push(e),
+      onFatal: (e) => fatals.push(e),
     })
-    await waitFor(() => errors.length >= 1)
+    await waitFor(() => fatals.length >= 1)
     await detector.stop()
 
-    expect(errors[0]!.message).toContain('docker exec failed')
+    expect(fatals[0]!.message).toContain('docker exec failed')
+    expect(fatals[0]!.message).toContain('3 times')
   })
 
   test('stop() halts further ticks', async () => {

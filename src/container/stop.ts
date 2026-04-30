@@ -1,4 +1,4 @@
-import { stopBrokerDetached } from '@/portbroker/spawn'
+import { isDaemonReachable, send as sendToDaemon } from '@/portbroker/client'
 
 import { containerExists, containerNameFromCwd, getBun, waitForRemoval } from './shared'
 
@@ -14,7 +14,9 @@ export async function stop({ cwd }: { cwd: string }): Promise<StopResult> {
 
   const { containerName } = planStop(cwd)
 
-  await stopBrokerDetached({ containerName })
+  if (await isDaemonReachable()) {
+    await sendToDaemon({ kind: 'deregister', containerName })
+  }
 
   try {
     if (!(await containerExists(containerName))) {

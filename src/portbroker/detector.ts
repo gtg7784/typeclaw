@@ -9,6 +9,7 @@ export type DetectorOptions = {
   maxConsecutiveFailures?: number
   onChange: (change: PortChange) => void
   onError?: (err: Error) => void
+  onFatal?: (err: Error) => void
 }
 
 export type Detector = {
@@ -51,18 +52,31 @@ export function startDetector(opts: DetectorOptions): Detector {
   let timer: ReturnType<typeof setTimeout> | null = null
   let inflight: Promise<void> | null = null
 
+  const recordFailure = (reason: string): void => {
+    consecutiveFailures += 1
+    if (consecutiveFailures >= maxFailures) {
+      stopped = true
+      opts.onFatal?.(new Error(`docker exec failed ${consecutiveFailures} times: ${reason}`))
+      return
+    }
+    opts.onError?.(new Error(reason))
+  }
+
   const tick = async (): Promise<void> => {
     if (stopped) return
     const cmd = PROC_NET_CMD.map((arg) => (arg === '__name__' ? opts.containerName : arg))
-    const result = await opts.exec(cmd)
+    let result: Awaited<ReturnType<DockerExec>>
+    try {
+      result = await opts.exec(cmd)
+    } catch (error) {
+      if (stopped) return
+      recordFailure(error instanceof Error ? error.message : String(error))
+      return
+    }
     if (stopped) return
 
     if (result.exitCode !== 0) {
-      consecutiveFailures += 1
-      if (consecutiveFailures >= maxFailures) {
-        opts.onError?.(new Error(`docker exec failed ${consecutiveFailures} times: ${result.stderr.trim()}`))
-        stopped = true
-      }
+      recordFailure(result.stderr.trim() || `exit ${result.exitCode}`)
       return
     }
     consecutiveFailures = 0
@@ -96,7 +110,7 @@ export function startDetector(opts: DetectorOptions): Detector {
     stop: async () => {
       stopped = true
       if (timer) clearTimeout(timer)
-      if (inflight) await inflight
+      if (inflight) await inflight.catch(() => {})
     },
   }
 }
