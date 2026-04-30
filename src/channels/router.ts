@@ -13,14 +13,7 @@ import {
   type ChannelSessionRecord,
 } from './persistence'
 import type { ChannelAdapterConfig } from './schema'
-import type {
-  ChannelKey,
-  InboundMessage,
-  OutboundCallback,
-  OutboundMessage,
-  SendResult,
-  TypingCallback,
-} from './types'
+import type { ChannelKey, InboundMessage, OutboundCallback, OutboundMessage, SendResult, TypingCallback } from './types'
 import { channelKeyId } from './types'
 
 export const INITIAL_DEBOUNCE_MS = 600

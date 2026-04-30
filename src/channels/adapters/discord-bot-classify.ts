@@ -8,7 +8,9 @@ export type InboundDropReason =
   | 'empty_content' // SDK delivered content: '' — usually missing MessageContent intent
   | 'not_in_allow_list' // workspace/channel not admitted by typeclaw.json `channels.discord-bot.allow`
 
-export type InboundClassification = { kind: 'drop'; reason: InboundDropReason } | { kind: 'route'; payload: InboundMessage }
+export type InboundClassification =
+  | { kind: 'drop'; reason: InboundDropReason }
+  | { kind: 'route'; payload: InboundMessage }
 
 // All decision logic for "should this gateway event be routed to the agent?"
 // lives here so it can be unit-tested in isolation. The adapter is left as a
@@ -34,13 +36,9 @@ export function classifyInbound(
   // an event as a mention in that race window prevents the very first message
   // after start-up from being misclassified as ambient chatter.
   const isBotMention =
-    botUserId !== null
-      ? event.content.includes(`<@${botUserId}>`) || event.content.includes(`<@!${botUserId}>`)
-      : true
+    botUserId !== null ? event.content.includes(`<@${botUserId}>`) || event.content.includes(`<@!${botUserId}>`) : true
   const replyToBotMessageId =
-    event.message_reference?.message_id !== undefined && botUserId !== null
-      ? event.message_reference.message_id
-      : null
+    event.message_reference?.message_id !== undefined && botUserId !== null ? event.message_reference.message_id : null
 
   return {
     kind: 'route',

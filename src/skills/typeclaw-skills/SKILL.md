@@ -26,7 +26,7 @@ Skills live in three places. The runtime loads them in this order, **first wins 
      - **User-downloaded**: the skill was fetched by the upstream `skills` CLI (vercel-labs/skills) from a remote source.
    - **Ownership**: depends on the sub-category. **Get it wrong and you destroy work.**
 
-3. **Memory skills** — *muscle memory*. Skills the dreaming subagent distilled from procedures it kept seeing in your daily memory streams.
+3. **Memory skills** — _muscle memory_. Skills the dreaming subagent distilled from procedures it kept seeing in your daily memory streams.
    - **Path**: `memory/skills/<name>/SKILL.md`.
    - **Author**: the dreaming subagent, every time it consolidates a daily stream. Bar for promoting a fragment-pattern into a skill: multi-step, recurred across at least two distinct fragments, and the trigger conditions are statable as a "Use when..." description.
    - **Loading**: `src/agent/index.ts` adds `<agentDir>/memory/skills/` to `additionalSkillPaths` (existence-gated), so the resource loader auto-discovers every `SKILL.md` there on session start, identical to `.agents/skills/`.
@@ -206,6 +206,7 @@ When the user says "write me a skill for X" or you decide a recurring procedure 
 1. **Pick a name that does not collide.** Check both `<typeclaw-package>/src/skills/` (system) and `.agents/skills/` (user). Prefer specific names (`postgres-backups`, not `db`). Do not prefix with `typeclaw-` — that prefix is reserved for system skills shipped by typeclaw.
 2. **Create the directory**: `mkdir -p .agents/skills/<name>`.
 3. **Write `SKILL.md`** with YAML frontmatter:
+
    ```markdown
    ---
    name: <name>
@@ -216,6 +217,7 @@ When the user says "write me a skill for X" or you decide a recurring procedure 
 
    (body — purpose, workflow steps, examples, things-you-must-not-do)
    ```
+
 4. **Match the bundled-skill voice.** Read one of the `typeclaw-*` skills first. Decision-grounded, evidence-pinned, present-tense, "Things you must not do" section near the bottom.
 5. **Do not add `version` or `metadata` fields.** They are ignored by the runtime and would only confuse the lockfile heuristic for future you.
 6. **Commit** with `typeclaw-git`'s rule: `skills: author <name>` subject, body explains why the procedure deserved to be a skill.

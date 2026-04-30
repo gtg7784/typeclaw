@@ -4,12 +4,9 @@ export const ADAPTER_IDS = ['discord-bot'] as const
 
 export type AdapterId = (typeof ADAPTER_IDS)[number]
 
-const allowRuleSchema = z
-  .string()
-  .min(1)
-  .refine(isValidAllowRule, {
-    message: 'allow rule must be one of: *, guild:*, guild:<id>, guild:<id>/<channel>, channel:<id>, dm:*, dm:<id>',
-  })
+const allowRuleSchema = z.string().min(1).refine(isValidAllowRule, {
+  message: 'allow rule must be one of: *, guild:*, guild:<id>, guild:<id>/<channel>, channel:<id>, dm:*, dm:<id>',
+})
 
 const engagementTriggerSchema = z.enum(['mention', 'reply', 'dm'])
 

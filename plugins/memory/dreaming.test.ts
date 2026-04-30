@@ -308,14 +308,8 @@ describe('commitMemorySnapshot', () => {
 
     await commitMemorySnapshot(agentDir)
 
-    expect(await trackedFiles(agentDir)).toEqual([
-      'MEMORY.md',
-      'memory/skills/release-checklist/SKILL.md',
-    ])
-    expect(await skipWorktreeFiles(agentDir)).toEqual([
-      'MEMORY.md',
-      'memory/skills/release-checklist/SKILL.md',
-    ])
+    expect(await trackedFiles(agentDir)).toEqual(['MEMORY.md', 'memory/skills/release-checklist/SKILL.md'])
+    expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md', 'memory/skills/release-checklist/SKILL.md'])
     expect(await porcelainStatus(agentDir)).toBe('')
   })
 })

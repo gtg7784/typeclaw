@@ -108,9 +108,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
     // Logged before the API call so we can tell from logs whether the agent
     // even tried to reply, vs. tried-and-failed. Mirrors the inbound log
     // contract on the receive side.
-    logger.info(
-      `[discord-bot] outbound workspace=${msg.workspace} chat=${msg.chat} text_len=${msg.text.length}`,
-    )
+    logger.info(`[discord-bot] outbound workspace=${msg.workspace} chat=${msg.chat} text_len=${msg.text.length}`)
     try {
       const sent = await client.sendMessage(msg.chat, msg.text, msg.thread ? { thread_id: msg.thread } : undefined)
       logger.info(`[discord-bot] sent id=${sent.id} chat=${msg.chat}`)

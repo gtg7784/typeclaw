@@ -2,8 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { isAllowed } from '@/channels/schema'
 
-import { createTypingCallback, DISCORD_BOT_INTENTS } from './discord-bot'
 import { DiscordIntent } from './agent-messenger-shim'
+import { createTypingCallback, DISCORD_BOT_INTENTS } from './discord-bot'
 
 describe('discord-bot adapter (unit-level pure helpers)', () => {
   test('isAllowed denies a guild channel not in the allow list', () => {
@@ -81,7 +81,11 @@ describe('createTypingCallback', () => {
   test('skips disallowed channels (does not call fetch)', async () => {
     const cb = createTypingCallback({
       token: 'tok',
-      configRef: () => ({ allow: ['guild:other'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      configRef: () => ({
+        allow: ['guild:other'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
