@@ -81,6 +81,57 @@ export const init = defineCommand({
       }
     }
 
+    const wantSlack = await confirm({
+      message: 'Wire a Slack bot? (You can add this later by editing typeclaw.json + .env.)',
+      initialValue: false,
+    })
+    if (isCancel(wantSlack)) {
+      cancel('Aborted.')
+      process.exit(0)
+    }
+    let slackBotToken: string | undefined
+    let slackAppToken: string | undefined
+    if (wantSlack) {
+      const botToken = await password({
+        message: 'Slack bot token (xoxb-...)',
+        validate: (value) =>
+          value && value.length > 0
+            ? value.startsWith('xoxb-')
+              ? undefined
+              : 'Bot token must start with "xoxb-"'
+            : 'Token is required',
+      })
+      if (isCancel(botToken)) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+      slackBotToken = botToken
+      const appToken = await password({
+        message: 'Slack app-level token (xapp-...) — Socket Mode requires this',
+        validate: (value) =>
+          value && value.length > 0
+            ? value.startsWith('xapp-')
+              ? undefined
+              : 'App-level token must start with "xapp-"'
+            : 'Token is required',
+      })
+      if (isCancel(appToken)) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+      slackAppToken = appToken
+      const allowAll = await confirm({
+        message:
+          'Set channels.slack-bot.allow = ["*"]? This admits every channel in every team the bot is in, plus all DMs. You can narrow it later by editing typeclaw.json.',
+        initialValue: true,
+      })
+      if (isCancel(allowAll) || !allowAll) {
+        console.log(
+          'OK. The slack-bot adapter will be wired but `allow` will be empty; the adapter will run but not deliver any inbound or outbound until you edit typeclaw.json.',
+        )
+      }
+    }
+
     // TODO: add remaining wizard steps from TypeClaw.md once their runtime lands:
     //   - git backup (url + PAT) — Phase 10
     //   - cron.json scaffolding — Phase 9
@@ -91,6 +142,8 @@ export const init = defineCommand({
         cwd,
         apiKey,
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
+        ...(slackBotToken !== undefined ? { slackBotToken } : {}),
+        ...(slackAppToken !== undefined ? { slackAppToken } : {}),
         onProgress: reportProgress((ok) => {
           hatchingOk = ok
         }),

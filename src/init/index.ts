@@ -45,6 +45,8 @@ export type InitOptions = {
   cwd: string
   apiKey: string
   discordBotToken?: string
+  slackBotToken?: string
+  slackAppToken?: string
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
 }
@@ -53,14 +55,18 @@ export async function runInit({
   cwd,
   apiKey,
   discordBotToken,
+  slackBotToken,
+  slackAppToken,
   onProgress,
   runHatching = defaultRunHatching,
 }: InitOptions): Promise<void> {
   const emit = onProgress ?? (() => {})
 
+  const wantsDiscord = discordBotToken !== undefined && discordBotToken !== ''
+  const wantsSlack = slackBotToken !== undefined && slackBotToken !== ''
   emit({ step: 'scaffold', phase: 'start' })
-  await scaffold(cwd, { withChannels: discordBotToken !== undefined && discordBotToken !== '' })
-  await writeSecrets(cwd, { fireworksApiKey: apiKey, discordBotToken })
+  await scaffold(cwd, { withDiscord: wantsDiscord, withSlack: wantsSlack })
+  await writeSecrets(cwd, { fireworksApiKey: apiKey, discordBotToken, slackBotToken, slackAppToken })
   emit({ step: 'scaffold', phase: 'done' })
 
   emit({ step: 'install', phase: 'start' })
@@ -175,7 +181,7 @@ export async function isHatched(dir: string): Promise<boolean> {
   }
 }
 
-export type ScaffoldOptions = { withChannels?: boolean }
+export type ScaffoldOptions = { withDiscord?: boolean; withSlack?: boolean }
 
 export async function scaffold(root: string, options: ScaffoldOptions = {}): Promise<void> {
   await Promise.all(DIRECTORIES.map((dir) => mkdir(join(root, dir), { recursive: true })))
@@ -191,11 +197,10 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
       dreaming: { schedule: '0 4 * * *' },
     },
   }
-  if (options.withChannels) {
-    config.channels = {
-      'discord-bot': { allow: ['*'] },
-    }
-  }
+  const channels: Record<string, { allow: string[] }> = {}
+  if (options.withDiscord) channels['discord-bot'] = { allow: ['*'] }
+  if (options.withSlack) channels['slack-bot'] = { allow: ['*'] }
+  if (Object.keys(channels).length > 0) config.channels = channels
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 
   const cron = {
@@ -349,14 +354,31 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
 // TODO: generalize to arbitrary provider secrets and switch to secrets.json
 // (per TypeClaw.md spec) once the provider registry exists. Currently hardcoded
 // to FIREWORKS_API_KEY in .env to match src/agent/auth.ts. Optional channel
-// adapter tokens (DISCORD_BOT_TOKEN) are appended when provided.
+// adapter tokens (DISCORD_BOT_TOKEN, SLACK_BOT_TOKEN, SLACK_APP_TOKEN) are
+// appended when provided.
 export async function writeSecrets(
   root: string,
-  { fireworksApiKey, discordBotToken }: { fireworksApiKey: string; discordBotToken?: string },
+  {
+    fireworksApiKey,
+    discordBotToken,
+    slackBotToken,
+    slackAppToken,
+  }: {
+    fireworksApiKey: string
+    discordBotToken?: string
+    slackBotToken?: string
+    slackAppToken?: string
+  },
 ): Promise<void> {
   const lines = [`FIREWORKS_API_KEY=${fireworksApiKey}`]
   if (discordBotToken !== undefined && discordBotToken !== '') {
     lines.push(`DISCORD_BOT_TOKEN=${discordBotToken}`)
+  }
+  if (slackBotToken !== undefined && slackBotToken !== '') {
+    lines.push(`SLACK_BOT_TOKEN=${slackBotToken}`)
+  }
+  if (slackAppToken !== undefined && slackAppToken !== '') {
+    lines.push(`SLACK_APP_TOKEN=${slackAppToken}`)
   }
   await writeFile(join(root, SECRETS_FILE), `${lines.join('\n')}\n`)
 }
