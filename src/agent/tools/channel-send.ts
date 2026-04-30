@@ -14,31 +14,36 @@ export function createChannelSendTool({ router }: CreateChannelSendToolOptions) 
     label: 'Channel Send',
     description:
       'Post a message to an external messenger channel. Specify adapter, workspace, chat, and text. ' +
-      'For Discord guild channels, workspace is the guild id; for DMs, use the literal "@dm". ' +
+      'For Discord guild channels, workspace is the guild id; for Slack team channels, workspace is ' +
+      'the team id (e.g. "T0ACME"). For DMs on either platform, workspace is the literal "@dm". ' +
       'The runtime checks the channel allow rules before delivering — if the target chat is not in ' +
       'the configured allow list, the call fails with { ok: false, error }. There is no auto-reply: ' +
       'the only way for an agent to post is via this tool.',
     parameters: Type.Object({
       adapter: Type.Union(
         ADAPTER_IDS.map((a) => Type.Literal(a)),
-        { description: 'Adapter id. v0.1 supports only "discord-bot".' },
+        { description: 'Adapter id. Supported: "discord-bot", "slack-bot".' },
       ),
       workspace: Type.String({
-        description: 'Discord guild id, or the literal "@dm" for direct-message channels.',
+        description:
+          'Discord guild id or Slack team id (e.g. "T0ACME"); use "@dm" for direct-message channels on either platform.',
         minLength: 1,
       }),
       chat: Type.String({
-        description: 'Discord channel id (or thread channel id; threads are channels in Discord).',
+        description:
+          'Channel id. Discord channel id (numeric snowflake) or Slack channel id (e.g. "C0CHANNEL", "D0DMID").',
         minLength: 1,
       }),
       thread: Type.Optional(
         Type.String({
-          description: 'Optional thread id for posting into a thread inside a channel.',
+          description:
+            'Optional thread id. For Discord, the thread channel id. For Slack, the parent message thread_ts.',
           minLength: 1,
         }),
       ),
       text: Type.String({
-        description: 'The message body. Use Discord mention syntax `<@USER_ID>` to mention people.',
+        description:
+          'The message body. Use Discord syntax `<@USER_ID>` for Discord mentions or Slack syntax `<@USER_ID>` for Slack mentions (Slack user ids start with "U").',
         minLength: 1,
       }),
     }),

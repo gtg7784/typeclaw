@@ -59,6 +59,7 @@ export const init = defineCommand({
       process.exit(0)
     }
     let discordBotToken: string | undefined
+    let discordAllowAll = true
     if (wantDiscord) {
       const token = await password({
         message: 'Discord bot token',
@@ -75,8 +76,62 @@ export const init = defineCommand({
         initialValue: true,
       })
       if (isCancel(allowAll) || !allowAll) {
+        discordAllowAll = false
         console.log(
           'OK. The discord-bot adapter will be wired but `allow` will be empty; the adapter will run but not deliver any inbound or outbound until you edit typeclaw.json.',
+        )
+      }
+    }
+
+    const wantSlack = await confirm({
+      message: 'Wire a Slack bot? (You can add this later by editing typeclaw.json + .env.)',
+      initialValue: false,
+    })
+    if (isCancel(wantSlack)) {
+      cancel('Aborted.')
+      process.exit(0)
+    }
+    let slackBotToken: string | undefined
+    let slackAppToken: string | undefined
+    let slackAllowAll = true
+    if (wantSlack) {
+      const botToken = await password({
+        message: 'Slack bot token (xoxb-...)',
+        validate: (value) =>
+          value && value.length > 0
+            ? value.startsWith('xoxb-')
+              ? undefined
+              : 'Bot token must start with "xoxb-"'
+            : 'Token is required',
+      })
+      if (isCancel(botToken)) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+      slackBotToken = botToken
+      const appToken = await password({
+        message: 'Slack app-level token (xapp-...) — Socket Mode requires this',
+        validate: (value) =>
+          value && value.length > 0
+            ? value.startsWith('xapp-')
+              ? undefined
+              : 'App-level token must start with "xapp-"'
+            : 'Token is required',
+      })
+      if (isCancel(appToken)) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+      slackAppToken = appToken
+      const allowAll = await confirm({
+        message:
+          'Set channels.slack-bot.allow = ["*"]? This admits every channel in every team the bot is in, plus all DMs. You can narrow it later by editing typeclaw.json.',
+        initialValue: true,
+      })
+      if (isCancel(allowAll) || !allowAll) {
+        slackAllowAll = false
+        console.log(
+          'OK. The slack-bot adapter will be wired but `allow` will be empty; the adapter will run but not deliver any inbound or outbound until you edit typeclaw.json.',
         )
       }
     }
@@ -90,7 +145,8 @@ export const init = defineCommand({
       await runInit({
         cwd,
         apiKey,
-        ...(discordBotToken !== undefined ? { discordBotToken } : {}),
+        ...(discordBotToken !== undefined ? { discordBotToken, discordAllowAll } : {}),
+        ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken, slackAllowAll } : {}),
         onProgress: reportProgress((ok) => {
           hatchingOk = ok
         }),

@@ -97,10 +97,11 @@ function renderChannelOrigin(
   // that obligation crisp and pre-filling the addressing fields removed a
   // class of "model finishes silently, no reply ever lands" failures that we
   // could only see in the logs as `prompted` followed by no `outbound`.
+  const platform = origin.adapter === 'slack-bot' ? 'Slack' : 'Discord'
   const lines = [
     '## Session origin',
     '',
-    'You are responding inside a Discord channel session. There is no human',
+    `You are responding inside a ${platform} channel session. There is no human`,
     'attached to a console here — your only way to communicate with the user',
     'is the `channel_send` tool. Plain-text output is invisible.',
     '',
@@ -129,7 +130,7 @@ function renderChannelOrigin(
     "matching the channel's `allow` rules are accepted (the tool returns",
     '`{ ok: false }` otherwise).',
     '',
-    'To mention someone in your reply, use Discord syntax `<@USER_ID>`.',
+    `To mention someone in your reply, use ${platform} syntax \`<@USER_ID>\`.`,
   )
 
   const participantsBlock = renderParticipants(origin.participants ?? [], now)

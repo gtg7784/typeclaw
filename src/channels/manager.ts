@@ -1,6 +1,7 @@
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
+import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
 import { createChannelRouter, type ChannelRouter, type CreateSessionForChannel } from './router'
-import type { ChannelAdapterConfig, ChannelsConfig } from './schema'
+import { ADAPTER_IDS, type AdapterId, type ChannelAdapterConfig, type ChannelsConfig } from './schema'
 
 export type ChannelManagerLogger = {
   info: (msg: string) => void
@@ -26,8 +27,9 @@ export type ChannelManagerOptions = {
   // cannot reply, which is fine for tests but a bug in production. See
   // src/run/index.ts where this is wired.
   createSessionForChannel?: CreateSessionForChannel
-  // Test seam: lets a fake adapter replace the real Discord adapter wiring.
+  // Test seams: let fake adapters replace the real adapter wiring per id.
   createDiscordAdapter?: typeof createDiscordBotAdapter
+  createSlackAdapter?: typeof createSlackBotAdapter
 }
 
 export type ChannelManager = {
@@ -35,6 +37,16 @@ export type ChannelManager = {
   start: () => Promise<void>
   stop: () => Promise<void>
   reload: () => Promise<{ started: string[]; stopped: string[]; restartRequired: string[] }>
+}
+
+type AnyAdapter = DiscordBotAdapter | SlackBotAdapter
+
+// Token signature is the comparison key for token-rotation detection on
+// reload. Discord uses a single bot token; Slack needs both a bot token and
+// an app-level token (Socket Mode), so the signature concatenates both.
+type AdapterEntry = {
+  adapter: AnyAdapter
+  tokenSignature: string
 }
 
 export function createChannelManager(options: ChannelManagerOptions): ChannelManager {
@@ -46,34 +58,68 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     logger,
     ...(options.createSessionForChannel ? { createSessionForChannel: options.createSessionForChannel } : {}),
   })
-  const createAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
+  const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
+  const createSlackAdapter = options.createSlackAdapter ?? createSlackBotAdapter
 
-  type AdapterEntry = {
-    adapter: DiscordBotAdapter
-    token: string
+  const live = new Map<AdapterId, AdapterEntry>()
+
+  const buildTokenSignature = (name: AdapterId): { signature: string; missing: string[] } => {
+    const requiredEnvs = TOKEN_ENV[name]
+    const parts: string[] = []
+    const missing: string[] = []
+    for (const key of requiredEnvs) {
+      const value = env[key]
+      if (value === undefined || value.trim() === '') missing.push(key)
+      else parts.push(`${key}=${value}`)
+    }
+    return { signature: parts.join('|'), missing }
   }
-  const live = new Map<keyof ChannelsConfig, AdapterEntry>()
 
-  const startAdapter = async (name: 'discord-bot', cfg: ChannelAdapterConfig): Promise<boolean> => {
+  const buildAdapter = (name: AdapterId, cfg: ChannelAdapterConfig): AnyAdapter | null => {
+    if (name === 'discord-bot') {
+      const token = env.DISCORD_BOT_TOKEN
+      if (token === undefined || token.trim() === '') return null
+      return createDiscordAdapter({
+        router,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
+        token,
+        logger,
+      })
+    }
+    if (name === 'slack-bot') {
+      const token = env.SLACK_BOT_TOKEN
+      const appToken = env.SLACK_APP_TOKEN
+      if (token === undefined || token.trim() === '') return null
+      if (appToken === undefined || appToken.trim() === '') return null
+      return createSlackAdapter({
+        router,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
+        token,
+        appToken,
+        logger,
+      })
+    }
+    return null
+  }
+
+  const startAdapter = async (name: AdapterId, cfg: ChannelAdapterConfig): Promise<boolean> => {
     if (cfg.enabled === false) {
       logger.info(`[channels] adapter "${name}" is disabled; skipping`)
       return false
     }
-    const tokenEnv = TOKEN_ENV[name]
-    const token = env[tokenEnv]
-    if (!token || token.trim() === '') {
-      logger.error(`[channels] adapter "${name}" requires ${tokenEnv} in .env; skipping`)
+    const { signature, missing } = buildTokenSignature(name)
+    if (missing.length > 0) {
+      logger.error(`[channels] adapter "${name}" requires ${missing.join(', ')} in .env; skipping`)
       return false
     }
-    const adapter = createAdapter({
-      router,
-      configRef: () => options.channelsConfigRef()[name] ?? cfg,
-      token,
-      logger,
-    })
+    const adapter = buildAdapter(name, cfg)
+    if (adapter === null) {
+      logger.error(`[channels] adapter "${name}" could not be constructed; skipping`)
+      return false
+    }
     try {
       await adapter.start()
-      live.set(name, { adapter, token })
+      live.set(name, { adapter, tokenSignature: signature })
       logger.info(`[channels] adapter "${name}" started`)
       return true
     } catch (err) {
@@ -82,7 +128,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     }
   }
 
-  const stopAdapter = async (name: 'discord-bot'): Promise<void> => {
+  const stopAdapter = async (name: AdapterId): Promise<void> => {
     const entry = live.get(name)
     if (!entry) return
     live.delete(name)
@@ -99,7 +145,10 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
 
     async start(): Promise<void> {
       const cfg = options.channelsConfigRef()
-      if (cfg['discord-bot']) await startAdapter('discord-bot', cfg['discord-bot'])
+      for (const name of ADAPTER_IDS) {
+        const adapterCfg = cfg[name]
+        if (adapterCfg !== undefined) await startAdapter(name, adapterCfg)
+      }
     },
 
     async stop(): Promise<void> {
@@ -113,21 +162,30 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       const stopped: string[] = []
       const restartRequired: string[] = []
 
-      const desired = cfg['discord-bot']
-      const current = live.get('discord-bot')
-      if (desired === undefined || desired.enabled === false) {
-        if (current) {
-          await stopAdapter('discord-bot')
-          stopped.push('discord-bot')
-        }
-      } else if (!current) {
-        const ok = await startAdapter('discord-bot', desired)
-        if (ok) started.push('discord-bot')
-      } else {
-        const tokenEnv = TOKEN_ENV['discord-bot']
-        const newToken = env[tokenEnv] ?? ''
-        if (newToken !== current.token) {
-          restartRequired.push('discord-bot (token rotation)')
+      for (const name of ADAPTER_IDS) {
+        const desired = cfg[name]
+        const current = live.get(name)
+        if (desired === undefined || desired.enabled === false) {
+          if (current) {
+            await stopAdapter(name)
+            stopped.push(name)
+          }
+        } else if (!current) {
+          const ok = await startAdapter(name, desired)
+          if (ok) started.push(name)
+        } else {
+          const { signature, missing } = buildTokenSignature(name)
+          if (missing.length > 0) {
+            // Required token envs disappeared from .env. Continuing to use the
+            // in-memory token would silently honor a credential the operator
+            // explicitly removed, so stop the adapter instead of waiting for
+            // a manual restart.
+            logger.warn(`[channels] adapter "${name}" missing ${missing.join(', ')} after reload; stopping`)
+            await stopAdapter(name)
+            stopped.push(name)
+          } else if (signature !== current.tokenSignature) {
+            restartRequired.push(`${name} (token rotation)`)
+          }
         }
       }
 
@@ -136,9 +194,10 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   }
 }
 
-const TOKEN_ENV = {
-  'discord-bot': 'DISCORD_BOT_TOKEN',
-} as const
+const TOKEN_ENV: Record<AdapterId, readonly string[]> = {
+  'discord-bot': ['DISCORD_BOT_TOKEN'],
+  'slack-bot': ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
+}
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)

@@ -6,6 +6,33 @@ describe('channelsSchema', () => {
   test('parses an empty channels record', () => {
     const parsed = channelsSchema.parse({})
     expect(parsed['discord-bot']).toBeUndefined()
+    expect(parsed['slack-bot']).toBeUndefined()
+  })
+
+  test('parses a slack-bot config alongside discord-bot', () => {
+    const parsed = channelsSchema.parse({
+      'discord-bot': { allow: ['guild:1/2'] },
+      'slack-bot': { allow: ['team:T0ACME/C0DEPLOY'] },
+    })
+    expect(parsed['discord-bot']?.allow).toEqual(['guild:1/2'])
+    expect(parsed['slack-bot']?.allow).toEqual(['team:T0ACME/C0DEPLOY'])
+    expect(parsed['slack-bot']?.enabled).toBe(true)
+    expect(parsed['slack-bot']?.engagement.trigger).toEqual(['mention', 'reply', 'dm'])
+  })
+
+  test('rejects malformed slack allow rules', () => {
+    expect(() => channelsSchema.parse({ 'slack-bot': { allow: ['team:'] } })).toThrow()
+    expect(() => channelsSchema.parse({ 'slack-bot': { allow: ['im:'] } })).toThrow()
+    expect(() => channelsSchema.parse({ 'slack-bot': { allow: ['team:lowercase'] } })).toThrow()
+  })
+
+  test('accepts every documented slack allow rule shape', () => {
+    const parsed = channelsSchema.parse({
+      'slack-bot': {
+        allow: ['*', 'team:*', 'team:T0ACME', 'team:T0ACME/C0DEPLOY', 'channel:C0DEPLOY', 'im:*', 'im:D0DM'],
+      },
+    })
+    expect(parsed['slack-bot']?.allow).toHaveLength(7)
   })
 
   test('applies engagement and enabled defaults when omitted', () => {
@@ -101,5 +128,38 @@ describe('isAllowed', () => {
   test('empty rules list admits nothing', () => {
     expect(isAllowed([], 'g1', 'c1')).toBe(false)
     expect(isAllowed([], '@dm', 'd1')).toBe(false)
+  })
+
+  test('"team:*" matches any Slack team channel but no DMs', () => {
+    expect(isAllowed(['team:*'], 'T0ACME', 'C0CHANNEL')).toBe(true)
+    expect(isAllowed(['team:*'], 'T0WIDGET', 'C0CHANNEL')).toBe(true)
+    expect(isAllowed(['team:*'], '@dm', 'D0DMID')).toBe(false)
+  })
+
+  test('"team:T" scopes to that team', () => {
+    expect(isAllowed(['team:T0ACME'], 'T0ACME', 'C0ANY')).toBe(true)
+    expect(isAllowed(['team:T0ACME'], 'T0WIDGET', 'C0ANY')).toBe(false)
+  })
+
+  test('"team:T/C" requires both team and channel match', () => {
+    expect(isAllowed(['team:T0ACME/C0DEPLOY'], 'T0ACME', 'C0DEPLOY')).toBe(true)
+    expect(isAllowed(['team:T0ACME/C0DEPLOY'], 'T0ACME', 'C0OTHER')).toBe(false)
+    expect(isAllowed(['team:T0ACME/C0DEPLOY'], 'T0WIDGET', 'C0DEPLOY')).toBe(false)
+  })
+
+  test('"im:*" matches every Slack DM but no team channels', () => {
+    expect(isAllowed(['im:*'], '@dm', 'D0DMID')).toBe(true)
+    expect(isAllowed(['im:*'], 'T0ACME', 'C0CHANNEL')).toBe(false)
+  })
+
+  test('"im:D" matches that Slack DM channel only', () => {
+    expect(isAllowed(['im:D0DMID'], '@dm', 'D0DMID')).toBe(true)
+    expect(isAllowed(['im:D0DMID'], '@dm', 'D0OTHER')).toBe(false)
+  })
+
+  test('"channel:C" matches a Slack channel id in any team', () => {
+    expect(isAllowed(['channel:C0DEPLOY'], 'T0ACME', 'C0DEPLOY')).toBe(true)
+    expect(isAllowed(['channel:C0DEPLOY'], 'T0WIDGET', 'C0DEPLOY')).toBe(true)
+    expect(isAllowed(['channel:C0DEPLOY'], 'T0ACME', 'C0OTHER')).toBe(false)
   })
 })

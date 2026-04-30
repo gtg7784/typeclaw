@@ -118,14 +118,13 @@ describe('createTypingCallback', () => {
     expect(warns.some((m) => m.includes('network down'))).toBe(true)
   })
 
-  test('rejects unknown adapter without calling fetch', async () => {
+  test('rejects non-discord adapter without calling fetch', async () => {
     const cb = createTypingCallback({
       token: 'tok',
       configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
-    // @ts-expect-error testing the runtime guard
-    await cb({ adapter: 'slack-bot', workspace: 'g1', chat: 'c1', thread: null })
+    await cb({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })
     expect(calls).toHaveLength(0)
   })
 })
