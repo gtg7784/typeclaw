@@ -69,7 +69,7 @@ export const restartCommand = defineCommand({
     } else if (started.broker.state === 'unavailable') {
       console.warn(`Port broker unavailable: ${started.broker.reason}`)
     }
-    console.log(`Follow logs:  typeclaw log -f`)
+    console.log(`Follow logs:  typeclaw logs -f`)
     console.log(`Attach TUI:   typeclaw tui`)
     console.log(`Stop:         typeclaw stop`)
   },

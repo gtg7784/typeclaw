@@ -3,9 +3,9 @@ import { defineCommand } from 'citty'
 import { logs } from '@/container'
 import { findAgentDir } from '@/init'
 
-export const logCommand = defineCommand({
+export const logsCommand = defineCommand({
   meta: {
-    name: 'log',
+    name: 'logs',
     description: 'show the agent container logs (host stage)',
   },
   args: {
