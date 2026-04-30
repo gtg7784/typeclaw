@@ -15,7 +15,7 @@
     "typecheck": "tsgo --noEmit",
     "lint": "oxlint",
     "format": "oxfmt --write .",
-    "format:check": "oxfmt .",
+    "format:check": "oxfmt --check .",
     "test": "bun test",
     "generate:schema": "bun run scripts/generate-schema.ts",
     "patch:agent-messenger": "bun run scripts/patch-agent-messenger.ts",
