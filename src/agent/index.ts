@@ -222,6 +222,14 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   if (existsSync(userInstalledSkillsDir)) {
     additionalSkillPaths.push(userInstalledSkillsDir)
   }
+  // Muscle-memory skills written by the dreaming subagent. Same auto-discover
+  // story as `.agents/skills/` — the loader doesn't walk arbitrary subtrees of
+  // the agent dir, so we wire this in explicitly. Existence-gated so a session
+  // that has never dreamed doesn't pay for an empty path.
+  const muscleMemorySkillsDir = join(agentDir, 'memory', 'skills')
+  if (existsSync(muscleMemorySkillsDir)) {
+    additionalSkillPaths.push(muscleMemorySkillsDir)
+  }
   if (options.plugins) {
     for (const dir of options.plugins.registry.skillsDirs) {
       additionalSkillPaths.push(dir.path)

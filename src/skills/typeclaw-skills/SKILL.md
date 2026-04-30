@@ -26,11 +26,12 @@ Skills live in three places. The runtime loads them in this order, **first wins 
      - **User-downloaded**: the skill was fetched by the upstream `skills` CLI (vercel-labs/skills) from a remote source.
    - **Ownership**: depends on the sub-category. **Get it wrong and you destroy work.**
 
-3. **Memory skills** — *reserved, not yet active.*
-   - **Planned path**: `memory/skills/<name>/SKILL.md`.
-   - **Planned author**: the dreaming subagent, which promotes recurring patterns it observed in the memory stream into committed skills automatically.
-   - **Status today**: the dreaming subagent ships, but it does not yet write skills. The `memory/skills/` path is conceptually reserved for it.
-   - **You must not write to `memory/skills/` manually.** When the layer goes live, anything you put there will be treated as a dream artifact and may be rewritten or pruned by the dreaming subagent. If you need a hand-authored skill, put it in `.agents/skills/`.
+3. **Memory skills** — *muscle memory*. Skills the dreaming subagent distilled from procedures it kept seeing in your daily memory streams.
+   - **Path**: `memory/skills/<name>/SKILL.md`.
+   - **Author**: the dreaming subagent, every time it consolidates a daily stream. Bar for promoting a fragment-pattern into a skill: multi-step, recurred across at least two distinct fragments, and the trigger conditions are statable as a "Use when..." description.
+   - **Loading**: `src/agent/index.ts` adds `<agentDir>/memory/skills/` to `additionalSkillPaths` (existence-gated), so the resource loader auto-discovers every `SKILL.md` there on session start, identical to `.agents/skills/`.
+   - **Persistence**: `memory/` is gitignored at the agent level, but the dreaming subagent force-commits its outputs (`MEMORY.md` plus everything under `memory/`, including `memory/skills/`) and applies `skip-worktree` so the human's `git status` stays clean.
+   - **You must not write to `memory/skills/` manually.** It is owned by the dreaming subagent. Hand-authored content there will be ignored by the part of the system that dreaming reads (it consolidates from `memory/yyyy-MM-dd.md`, not from existing skill files), and the dreaming subagent may overwrite the same path on a future run. If you want a hand-authored skill, put it in `.agents/skills/`.
 
 The collision rule (first wins) means: if a downloaded skill happens to share a name with a bundled one, the bundled one still wins and the downloaded copy is silently dropped with a collision diagnostic. Useful as a safety net, but do not rely on it — pick non-colliding names.
 
@@ -224,7 +225,7 @@ When the user says "write me a skill for X" or you decide a recurring procedure 
 
 - **Do not edit a skill listed in `skills-lock.json` or `~/.agents/.skill-lock.json`.** It is managed by `bunx skills` and your edit will be silently overwritten by `bunx skills update`. If the user wants to change a downloaded skill, the right answer is one of: fork it locally under a new name, propose the change upstream, or remove it from the lockfile first.
 - **Do not edit anything under `<typeclaw-package>/src/skills/`** (system skills). They live inside `node_modules/` (or the dev symlink target) and edits do not survive `bun install`. If a system skill is wrong, escalate to a typeclaw PR.
-- **Do not write to `memory/skills/`** manually. The path is reserved for the dreaming subagent's future muscle-memory output. Hand-authored skills go in `.agents/skills/`.
+- **Do not write to `memory/skills/`** manually. That directory is owned by the dreaming subagent (the muscle-memory layer). Hand-authored skills go in `.agents/skills/`. If you need to remove a stale muscle-memory skill, `rm -rf memory/skills/<name>/` is the user's call — surface the request to the user, do not delete on their behalf.
 - **Do not run `skills` without `bunx`.** A bare `skills add ...` call relies on a global install that may not be present in the container; `bunx` resolves and caches it on demand without polluting global state.
 - **Do not omit `-y` from `bunx skills` calls.** Without it, `@clack/prompts` blocks waiting for TTY input that never arrives, and the call hangs forever.
 - **Do not run `bunx skills add/remove/update` without `--agent universal`.** The CLI's auto-detection is unreliable in the container; without the flag the skill may land in a directory typeclaw does not load, and the user sees nothing happen even though the install reported success.
@@ -239,5 +240,5 @@ When the user says "write me a skill for X" or you decide a recurring procedure 
 
 - **Plugin authoring** (`definePlugin`, contributing tools/subagents/cron jobs, plugin-owned config blocks) — see `typeclaw-plugins`. Plugins are code; skills are markdown.
 - **Cron-driven skill installation** — if the user wants `bunx skills update` to run on a schedule, that's an `exec` cron job; see `typeclaw-cron`.
-- **Memory-driven skills (the muscle-memory layer)** — not yet active. The dreaming subagent's plan is documented in TypeClaw's design notes; this skill will be updated when the layer ships.
+- **Authoring muscle-memory skills directly** — that is the dreaming subagent's job, not yours. The layer is documented under "Memory skills" above so you know where the files come from and that you must not edit them; how dreaming decides what to promote lives in the dreaming subagent's own system prompt (`plugins/memory/dreaming.ts`).
 - **The `skills` CLI's own internals** — schema details, alternate install modes, registry implementation. Defer to `bunx skills --help` and the upstream README at https://github.com/vercel-labs/skills.

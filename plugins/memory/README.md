@@ -28,7 +28,7 @@ Both fields are **restart-required** — the plugin reads them once at boot.
 | Kind     | Name                       | Notes                                                                                                                                                                      |
 | -------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Subagent | `memory-logger`            | Reads a parent transcript past a watermark and appends fragments to `memory/<today>.md`. Coalesced per `parentSessionId`.                                                  |
-| Subagent | `dreaming`                 | Reads `MEMORY.md` plus undreamed daily-stream tails, rewrites `MEMORY.md`, advances the per-day watermark, and `git commit -m Dream` the result. Coalesced per `agentDir`. |
+| Subagent | `dreaming`                 | Reads `MEMORY.md` plus undreamed daily-stream tails, rewrites `MEMORY.md`, optionally writes muscle-memory skills under `memory/skills/<name>/SKILL.md`, advances the per-day watermark, and `git commit -m Dream` the result. Coalesced per `agentDir`. |
 | Cron job | `__plugin_memory_dreaming` | `kind: 'prompt'`, `subagent: 'dreaming'`, scheduled per `memory.dreaming.schedule`.                                                                                        |
 | Hook     | `session.prompt`           | Appends the rendered memory section (`# Memory`, `MEMORY.md`, undreamed stream tails) to `event.prompt`.                                                                   |
 | Hook     | `session.idle`             | Per-session debouncer. Resets a `setTimeout(idleMs)` on every event; on fire, calls `ctx.spawnSubagent('memory-logger', ...)`.                                             |
@@ -38,6 +38,7 @@ Both fields are **restart-required** — the plugin reads them once at boot.
 
 - **`MEMORY.md`** — long-term memory. Created by the dreaming subagent on first run if absent. Force-committed by the runtime; `skip-worktree` flag is set so the human's `git status` stays clean.
 - **`memory/yyyy-MM-dd.md`** — daily fragment streams. Appended to by `memory-logger`. Created on demand. Gitignored at the agent's level but force-committed alongside `MEMORY.md` after each dreaming run.
+- **`memory/skills/<name>/SKILL.md`** — *muscle memory*. Skills the dreaming subagent distills from repeated procedures it sees in daily streams. Auto-discovered as first-class skills by `createResourceLoader`, and force-committed under the same `memory/` snapshot path as the daily streams. Written via the dreaming subagent's `skill_write` tool; pruned via `skill_delete`. Sandboxed to single-segment kebab/snake-case names, so the agent cannot escape this directory.
 - **`memory/.dreaming-state.json`** — per-day watermarks (line counts already consolidated into `MEMORY.md`). Plain JSON; on malformed input the plugin fails open with empty state.
 
 `typeclaw init` does **not** scaffold these files. They appear when needed.
@@ -58,8 +59,9 @@ If the user starts a new prompt before the timer fires, the next `session.idle` 
 
 - `index.test.ts` — composition tests (config schema, hook wiring, debounce semantics, MEMORY.md auto-create).
 - `memory-logger.test.ts` — system prompt invariants, watermark handling.
-- `dreaming.test.ts` — orchestration, watermark advancement, git snapshot.
+- `dreaming.test.ts` — orchestration, watermark advancement, git snapshot (including muscle-memory skill files), system prompt + tool-surface invariants.
 - `dreaming-state.test.ts` — fail-open semantics on malformed state.
 - `watermark.test.ts` — marker parsing.
 - `append-tool.test.ts` — append-only semantics.
+- `skill-tool.test.ts` — muscle-memory `skill_write` / `skill_delete`: path sandboxing, name validation, YAML frontmatter, overwrite vs delete semantics.
 - `load-memory.test.ts` — memory section rendering, undreamed-tail filtering, watermark stripping.

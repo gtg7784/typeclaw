@@ -88,6 +88,20 @@ describe('dreaming subagent declarations', () => {
     expect(sub.inFlightKey).toBeDefined()
     expect(sub.inFlightKey!({ agentDir: '/x' })).toBe('/x')
   })
+
+  test('does not register custom tools — dreaming uses only built-in read/write/ls', () => {
+    const sub = createDreamingSubagent()
+    expect(sub.customTools).toBeUndefined()
+  })
+
+  test('teaches the dreaming session about muscle memory in the system prompt', () => {
+    const sub = createDreamingSubagent()
+    expect(sub.systemPrompt).toContain('Muscle memory')
+    expect(sub.systemPrompt).toContain('memory/skills/<name>/SKILL.md')
+    expect(sub.systemPrompt).toMatch(/name:\s*<name>/)
+    expect(sub.systemPrompt).toMatch(/description:\s+/)
+    expect(sub.systemPrompt).toContain('source: muscle-memory')
+  })
 })
 
 describe('dreaming subagent (orchestration)', () => {
@@ -280,6 +294,28 @@ describe('commitMemorySnapshot', () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'first\nsecond\n')
     await writeFile(join(agentDir, 'MEMORY.md'), '# Memory v2\n')
 
+    expect(await porcelainStatus(agentDir)).toBe('')
+  })
+
+  test('captures muscle-memory skills under memory/skills/<name>/SKILL.md (recursively under memory/)', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), '# Memory\n')
+    await mkdir(join(agentDir, 'memory', 'skills', 'release-checklist'), { recursive: true })
+    await writeFile(
+      join(agentDir, 'memory', 'skills', 'release-checklist', 'SKILL.md'),
+      '---\nname: release-checklist\n---\n# Release\n',
+    )
+
+    await commitMemorySnapshot(agentDir)
+
+    expect(await trackedFiles(agentDir)).toEqual([
+      'MEMORY.md',
+      'memory/skills/release-checklist/SKILL.md',
+    ])
+    expect(await skipWorktreeFiles(agentDir)).toEqual([
+      'MEMORY.md',
+      'memory/skills/release-checklist/SKILL.md',
+    ])
     expect(await porcelainStatus(agentDir)).toBe('')
   })
 })

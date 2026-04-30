@@ -127,6 +127,30 @@ describe('createResourceLoader', () => {
     const loader = await createResourceLoader({ agentDir })
     expect(loader.getSkills().skills).toBeDefined()
   })
+
+  test('exposes muscle-memory skills under <agentDir>/memory/skills/ to the agent', async () => {
+    // given
+    await mkdir(join(agentDir, 'memory', 'skills', 'release-checklist'), { recursive: true })
+    await writeFile(
+      join(agentDir, 'memory', 'skills', 'release-checklist', 'SKILL.md'),
+      '---\nname: release-checklist\ndescription: Use when shipping a release.\nsource: muscle-memory\n---\n\nbody',
+    )
+
+    // when
+    const loader = await createResourceLoader({ agentDir })
+
+    // then
+    const { skills } = loader.getSkills()
+    const memorySkill = skills.find((s) => s.name === 'release-checklist')
+    expect(memorySkill).toBeDefined()
+    expect(memorySkill?.description).toBe('Use when shipping a release.')
+  })
+
+  test('does not throw when <agentDir>/memory/skills/ does not exist', async () => {
+    // when / then
+    const loader = await createResourceLoader({ agentDir })
+    expect(loader.getSkills().skills).toBeDefined()
+  })
 })
 
 describe('createOverrideResourceLoader', () => {
