@@ -2,8 +2,38 @@ import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { OutboundCallback, OutboundMessage, SendResult, TypingCallback, TypingTarget } from '@/channels/types'
 
-import { SlackBotClient, SlackBotListener, type SlackSocketMessageEvent } from './agent-messenger-slack-shim'
+import {
+  SlackBotClient,
+  SlackBotListener,
+  type SlackSocketAppMentionEvent,
+  type SlackSocketMessageEvent,
+} from './agent-messenger-slack-shim'
 import { classifyInbound, type InboundDropReason } from './slack-bot-classify'
+
+// Bound on the dedupe ring buffer. Slack's Events API may deliver the same
+// channel mention twice — once as `message` (when the bot has channel
+// history scope and is a member) and once as `app_mention` — and the two
+// envelopes share the same `ts`. The buffer only needs to cover the gap
+// between the two deliveries; a few hundred is generous.
+const SEEN_TS_CAPACITY = 256
+
+// app_mention payloads omit channel_type and never carry a subtype, so we
+// promote them to a message-shaped event for the shared classifier. The
+// promoted event is classified as a regular channel message; the
+// `<@BOT_USER_ID>` substring inside `text` is what makes the classifier
+// mark it as a mention.
+export function promoteAppMentionToMessage(event: SlackSocketAppMentionEvent): SlackSocketMessageEvent {
+  return {
+    type: 'message',
+    channel: event.channel,
+    channel_type: 'channel',
+    user: event.user,
+    text: event.text,
+    ts: event.ts,
+    ...(event.thread_ts !== undefined ? { thread_ts: event.thread_ts } : {}),
+    ...(event.event_ts !== undefined ? { event_ts: event.event_ts } : {}),
+  }
+}
 
 export type SlackBotAdapterLogger = {
   info: (msg: string) => void
@@ -88,17 +118,39 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     }
   }
 
-  const handleMessageEvent = async (event: SlackSocketMessageEvent): Promise<void> => {
+  // Bounded set of "channel:ts" keys we've already routed, used to dedupe
+  // the message/app_mention double-delivery. Insertion-ordered Set lets us
+  // evict the oldest entry when we hit the cap.
+  const seenTs = new Set<string>()
+  const markSeen = (key: string): void => {
+    if (seenTs.has(key)) return
+    if (seenTs.size >= SEEN_TS_CAPACITY) {
+      const oldest = seenTs.values().next().value
+      if (oldest !== undefined) seenTs.delete(oldest)
+    }
+    seenTs.add(key)
+  }
+
+  const handleMessageEvent = async (
+    event: SlackSocketMessageEvent,
+    source: 'message' | 'app_mention',
+  ): Promise<void> => {
     inflightInbounds++
     try {
       const where = event.channel_type === 'im' ? 'dm' : `team=${teamId ?? 'unknown'}`
       const text = event.text ?? ''
+      const dedupeKey = `${event.channel}:${event.ts}`
       logger.info(
-        `[slack-bot] inbound ts=${event.ts} user=${event.user ?? 'unknown'} ${where} channel=${event.channel} text_len=${text.length}`,
+        `[slack-bot] inbound source=${source} ts=${event.ts} user=${event.user ?? 'unknown'} ${where} channel=${event.channel} text_len=${text.length}`,
       )
 
       if (teamId === null) {
         logger.warn(`[slack-bot] dropped ts=${event.ts} reason=pre_connected (team_id unknown)`)
+        return
+      }
+
+      if (seenTs.has(dedupeKey)) {
+        logger.info(`[slack-bot] dropped ts=${event.ts} reason=duplicate_delivery (source=${source})`)
         return
       }
 
@@ -108,6 +160,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         return
       }
 
+      markSeen(dedupeKey)
       logger.info(
         `[slack-bot] routed ts=${event.ts} workspace=${verdict.payload.workspace} mention=${verdict.payload.isBotMention} reply=${verdict.payload.replyToBotMessageId !== null}`,
       )
@@ -165,16 +218,16 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         // Ack first so Slack stops retrying; failure to ack causes duplicate
         // deliveries within seconds. Then process asynchronously.
         ack()
-        void handleMessageEvent(event)
+        void handleMessageEvent(event, 'message')
       })
-      // app_mention is a separate event type from message; channel mentions
-      // arrive on both with overlapping payloads, so we route mentions
-      // through the same handler shape (synthesizing a message-shaped event
-      // would be brittle). The classifier already detects mentions inside
-      // text, so handling them via the `message` listener is sufficient for
-      // the route/drop verdict. We still ack the envelope to silence retries.
-      listener.on('app_mention', ({ ack }) => {
+      // app_mention is required for mentions in channels where the bot is
+      // NOT a member: in that case Slack does not fire a `message` event
+      // (it requires `*:history` scope + membership), only `app_mention`
+      // (which only requires `app_mentions:read`). The dedupe ring buffer
+      // collapses the in-channel double-delivery when both events fire.
+      listener.on('app_mention', ({ ack, event }) => {
         ack()
+        void handleMessageEvent(promoteAppMentionToMessage(event), 'app_mention')
       })
 
       options.router.registerOutbound('slack-bot', outboundCallback)
