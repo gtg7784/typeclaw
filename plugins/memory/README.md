@@ -10,29 +10,31 @@ This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` 
 {
   "memory": {
     "idleMs": 30000,
+    "bufferBytes": 100000,
     "dreaming": { "schedule": "0 4 * * *" }
   }
 }
 ```
 
-| Field                      | Default               | Effect                                                                                  |
-| -------------------------- | --------------------- | --------------------------------------------------------------------------------------- |
-| `memory.idleMs`            | `30000`               | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`. |
-| `memory.dreaming`          | omitted (no cron job) | When present, registers the dreaming cron job.                                          |
-| `memory.dreaming.schedule` | `"0 4 * * *"`         | Cron expression. Parsed via `cron-parser`.                                              |
+| Field                      | Default               | Effect                                                                                                                                                                                    |
+| -------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory.idleMs`            | `30000`               | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`.                                                                                                   |
+| `memory.bufferBytes`       | `100000`              | Size-based ceiling: spawns `memory-logger` when the transcript grows by this many bytes since the last run, even during continuous activity. `0` disables. Minimum `10000` when non-zero. |
+| `memory.dreaming`          | omitted (no cron job) | When present, registers the dreaming cron job.                                                                                                                                            |
+| `memory.dreaming.schedule` | `"0 4 * * *"`         | Cron expression. Parsed via `cron-parser`.                                                                                                                                                |
 
-Both fields are **restart-required** — the plugin reads them once at boot.
+All fields are **restart-required** — the plugin reads them once at boot.
 
 ## What it contributes
 
-| Kind     | Name                       | Notes                                                                                                                                                                                                                                                    |
-| -------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Subagent | `memory-logger`            | Reads a parent transcript past a watermark and appends fragments to `memory/<today>.md`. Coalesced per `parentSessionId`.                                                                                                                                |
-| Subagent | `dreaming`                 | Reads `MEMORY.md` plus undreamed daily-stream tails, rewrites `MEMORY.md`, optionally writes muscle-memory skills under `memory/skills/<name>/SKILL.md`, advances the per-day watermark, and `git commit -m Dream` the result. Coalesced per `agentDir`. |
-| Cron job | `__plugin_memory_dreaming` | `kind: 'prompt'`, `subagent: 'dreaming'`, scheduled per `memory.dreaming.schedule`.                                                                                                                                                                      |
-| Hook     | `session.prompt`           | Appends the rendered memory section (`# Memory`, `MEMORY.md`, undreamed stream tails) to `event.prompt`.                                                                                                                                                 |
-| Hook     | `session.idle`             | Per-session debouncer. Resets a `setTimeout(idleMs)` on every event; on fire, calls `ctx.spawnSubagent('memory-logger', ...)`.                                                                                                                           |
-| Hook     | `session.end`              | Cancels the debounce timer and immediately spawns `memory-logger` (so the final transcript is captured even when the user disconnects right away).                                                                                                       |
+| Kind     | Name                       | Notes                                                                                                                                                                                                                                                                             |
+| -------- | -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Subagent | `memory-logger`            | Reads a parent transcript past a watermark and appends fragments to `memory/<today>.md`. Coalesced per `parentSessionId`.                                                                                                                                                         |
+| Subagent | `dreaming`                 | Reads `MEMORY.md` plus undreamed daily-stream tails, rewrites `MEMORY.md`, optionally writes muscle-memory skills under `memory/skills/<name>/SKILL.md`, advances the per-day watermark, and `git commit -m Dream` the result. Coalesced per `agentDir`.                          |
+| Cron job | `__plugin_memory_dreaming` | `kind: 'prompt'`, `subagent: 'dreaming'`, scheduled per `memory.dreaming.schedule`.                                                                                                                                                                                               |
+| Hook     | `session.prompt`           | Appends the rendered memory section (`# Memory`, `MEMORY.md`, undreamed stream tails) to `event.prompt`.                                                                                                                                                                          |
+| Hook     | `session.idle`             | Per-session debouncer with size-based ceiling. Resets a `setTimeout(idleMs)` on every event; on fire, calls `ctx.spawnSubagent('memory-logger', ...)`. Also `fs.stat`s the transcript on every event and spawns immediately when growth since the last run reaches `bufferBytes`. |
+| Hook     | `session.end`              | Cancels the debounce timer and immediately spawns `memory-logger` (so the final transcript is captured even when the user disconnects right away).                                                                                                                                |
 
 ## Files on disk
 
@@ -48,6 +50,8 @@ Both fields are **restart-required** — the plugin reads them once at boot.
 Core fires `session.idle` immediately after every `session.prompt()` completion (success or error). The plugin owns the debounce: it keeps a `Map<sessionId, Timeout>` and resets the timer on every event. When the timer fires, the plugin spawns `memory-logger` for that session.
 
 If the user starts a new prompt before the timer fires, the next `session.idle` event resets the timer. If the user disconnects, `session.end` cancels the timer and fires `memory-logger` immediately so the final transcript is captured.
+
+In channel sessions, the agent rarely goes idle long enough to trip the timer because new participant messages keep arriving. The size-based ceiling handles this: on every `session.idle` the plugin `fs.stat`s the transcript and compares against the size at the last memory-logger run. Once growth reaches `memory.bufferBytes`, the timer is cancelled and `memory-logger` spawns immediately. The watermark on the output side absorbs any over-firing — if a buffer-trip arrives on a transcript chunk that's all tool noise, `memory-logger` reads it, decides nothing is worth logging, advances the watermark, and exits.
 
 ## Migration notes (from before the plugin existed)
 
