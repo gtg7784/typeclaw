@@ -29,7 +29,7 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('Stay narrowly within')
   })
 
-  test('channel origin emits the addressing fields verbatim and channel_send guidance', () => {
+  test('channel origin shows the addressing fields and points at channel_reply by default', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
       adapter: 'discord-bot',
@@ -41,12 +41,13 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('"adapter": "discord-bot"')
     expect(out).toContain('"workspace": "111"')
     expect(out).toContain('"chat": "222"')
+    expect(out).toContain('channel_reply')
     expect(out).toContain('channel_send')
     expect(out).toContain('<@USER_ID>')
     expect(out).toContain('Be concise')
   })
 
-  test('channel origin omits thread field when origin.thread is null (matches channel_send schema)', () => {
+  test('channel origin renders thread:null verbatim for channel-root sessions', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
       adapter: 'discord-bot',
@@ -54,10 +55,11 @@ describe('renderSessionOrigin', () => {
       chat: '999',
       thread: null,
     })
-    expect(out).not.toContain('"thread"')
+    expect(out).toContain('"thread": null')
+    expect(out).toContain('channel-root session')
   })
 
-  test('channel origin includes thread field when origin.thread is set', () => {
+  test('channel origin includes thread field with the actual id when origin.thread is set', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
       adapter: 'discord-bot',
@@ -68,7 +70,7 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('"thread": "t-1"')
   })
 
-  test('channel origin obligates a channel_send call so the model never finishes silently', () => {
+  test('channel origin obligates a tool call so the model never finishes silently', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
       adapter: 'discord-bot',
@@ -76,8 +78,25 @@ describe('renderSessionOrigin', () => {
       chat: '999',
       thread: null,
     })
-    expect(out).toMatch(/MUST call `channel_send`/)
+    expect(out).toMatch(/MUST call `channel_reply`/)
     expect(out).toContain('Plain-text output is invisible')
+  })
+
+  test('channel origin teaches channel_reply as the default and channel_send as the escape hatch', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: '1700000000.000100',
+    })
+    expect(out).toContain('channel_reply({ text })')
+    expect(out).toContain("don't")
+    expect(out).toMatch(/post somewhere else/i)
+    const replyIdx = out.indexOf('`channel_reply`')
+    const sendIdx = out.indexOf('`channel_send`')
+    expect(replyIdx).toBeGreaterThan(-1)
+    expect(sendIdx).toBeGreaterThan(-1)
   })
 
   test('channel origin renders @dm sentinel verbatim', () => {

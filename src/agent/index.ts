@@ -25,6 +25,7 @@ import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { renderSessionOrigin, type SessionOrigin } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
+import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
 import { createStreamSnapshotTool } from './tools/stream-snapshot'
 import { webfetchTool } from './tools/webfetch'
@@ -122,7 +123,36 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             webfetchTool,
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
-            ...(options.channelRouter ? [createChannelSendTool({ router: options.channelRouter })] : []),
+            ...(options.channelRouter
+              ? [
+                  ...(options.origin?.kind === 'channel'
+                    ? [
+                        createChannelReplyTool({
+                          router: options.channelRouter,
+                          origin: {
+                            adapter: options.origin.adapter,
+                            workspace: options.origin.workspace,
+                            chat: options.origin.chat,
+                            thread: options.origin.thread,
+                          },
+                        }),
+                      ]
+                    : []),
+                  createChannelSendTool({
+                    router: options.channelRouter,
+                    ...(options.origin?.kind === 'channel'
+                      ? {
+                          origin: {
+                            adapter: options.origin.adapter,
+                            workspace: options.origin.workspace,
+                            chat: options.origin.chat,
+                            thread: options.origin.thread,
+                          },
+                        }
+                      : {}),
+                  }),
+                ]
+              : []),
             ...pluginCustomTools,
           ]
 

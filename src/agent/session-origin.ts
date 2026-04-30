@@ -97,41 +97,49 @@ function renderChannelOrigin(
   // that obligation crisp and pre-filling the addressing fields removed a
   // class of "model finishes silently, no reply ever lands" failures that we
   // could only see in the logs as `prompted` followed by no `outbound`.
+  //
+  // The original wording told the model to call channel_send and copy
+  // adapter/workspace/chat/thread verbatim. Models still routinely dropped
+  // `thread`, so the same conversation got bisected into a fresh top-level
+  // thread on Slack. channel_reply now exists for that reason: it takes
+  // only `text` and pulls addressing from this origin. We point the model at
+  // it as the default, and keep channel_send as the escape hatch for posting
+  // elsewhere (different chat, breaking out of the thread on purpose, etc.).
   const platform = origin.adapter === 'slack-bot' ? 'Slack' : 'Discord'
-  const lines = [
+  const lines: string[] = [
     '## Session origin',
     '',
     `You are responding inside a ${platform} channel session. There is no human`,
     'attached to a console here — your only way to communicate with the user',
-    'is the `channel_send` tool. Plain-text output is invisible.',
+    'is a tool call. Plain-text output is invisible.',
     '',
-    '**For every user message in this session, you MUST call `channel_send`',
-    'at least once before ending your turn**, unless the user explicitly told',
-    'you to stay silent. If you have nothing substantive to say, send a brief',
-    'acknowledgement. Never end a turn with a silent observation.',
+    '**For every user message in this session, you MUST call `channel_reply`',
+    '(or `channel_send`) at least once before ending your turn**, unless the',
+    'user explicitly told you to stay silent. If you have nothing substantive',
+    'to say, send a brief acknowledgement. Never end a turn with a silent',
+    'observation.',
     '',
-    'Reply to this conversation by calling `channel_send` with exactly these',
-    'fields (copy verbatim):',
+    'To reply in this conversation, call `channel_reply({ text })`. Addressing',
+    `is filled in from this session, including the thread${origin.thread !== null ? '' : ' (none here — this is a channel-root session)'}, so you don't`,
+    'need to copy any of these fields:',
     '',
     '```json',
     '{',
     `  "adapter": ${JSON.stringify(origin.adapter)},`,
     `  "workspace": ${JSON.stringify(origin.workspace)},`,
     `  "chat": ${JSON.stringify(origin.chat)},`,
-    origin.thread !== null ? `  "thread": ${JSON.stringify(origin.thread)},` : null,
-    '  "text": "<your reply here>"',
+    origin.thread !== null ? `  "thread": ${JSON.stringify(origin.thread)}` : '  "thread": null',
     '}',
     '```',
-  ].filter((l): l is string => l !== null)
-
-  lines.push(
     '',
-    'To post somewhere else, change the addressing fields — but only chats',
+    'To post somewhere else (different chat, break out of the current',
+    'thread on purpose, send a DM from this channel session, etc.), use',
+    '`channel_send` and pass the addressing fields explicitly. Only chats',
     "matching the channel's `allow` rules are accepted (the tool returns",
     '`{ ok: false }` otherwise).',
     '',
     `To mention someone in your reply, use ${platform} syntax \`<@USER_ID>\`.`,
-  )
+  ]
 
   const participantsBlock = renderParticipants(origin.participants ?? [], now)
   if (participantsBlock) lines.push('', participantsBlock)

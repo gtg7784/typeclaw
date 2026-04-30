@@ -150,4 +150,112 @@ describe('createChannelSendTool', () => {
     expect(text).toContain('denied')
     expect(text).not.toContain('consecutive')
   })
+
+  describe('thread-mismatch hint', () => {
+    test('warns when posting to the same conversation as origin but dropping the thread', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: true })),
+        origin: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: '1700000000.000100' },
+      })
+      const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'oops' })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toContain('posted to slack-bot:T0/C0')
+      expect(text).toContain('origin thread is "1700000000.000100"')
+      expect(text).toContain('channel root')
+      expect(text).toContain('channel_reply')
+    })
+
+    test('does NOT warn when the model passes the matching thread explicitly', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: true })),
+        origin: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: '1700000000.000100' },
+      })
+      const result = await runTool(tool, {
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        thread: '1700000000.000100',
+        text: 'in thread',
+      })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toBe('posted to slack-bot:T0/C0')
+    })
+
+    test('does NOT warn when the model deliberately posts to a DIFFERENT chat', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: true })),
+        origin: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: '1700000000.000100' },
+      })
+      const result = await runTool(tool, {
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C-other',
+        text: 'cross-channel post',
+      })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toBe('posted to slack-bot:T0/C-other')
+    })
+
+    test('does NOT warn when the origin had no thread to begin with (channel-root origin)', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: true })),
+        origin: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: null },
+      })
+      const result = await runTool(tool, {
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        text: 'channel-root reply',
+      })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toBe('posted to slack-bot:T0/C0')
+    })
+
+    test('does NOT warn when no origin is supplied (cron / non-channel session)', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: true })),
+      })
+      const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'cron post' })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toBe('posted to slack-bot:T0/C0')
+    })
+
+    test('does NOT warn on adapter mismatch (cross-platform post)', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: true })),
+        origin: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: '1700000000.000100' },
+      })
+      const result = await runTool(tool, {
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'd1',
+        text: 'cross-platform',
+      })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toBe('posted to discord-bot:g1/d1')
+    })
+
+    test('combines with the consecutive-send hint when both fire', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 2 }),
+        origin: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: '1700000000.000100' },
+      })
+      const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'oops twice' })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toContain('posted to slack-bot:T0/C0')
+      expect(text).toContain('2nd consecutive message')
+      expect(text).toContain('origin thread is "1700000000.000100"')
+    })
+
+    test('does not fire on a denied send even when addressing matches', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: false, error: 'denied' })),
+        origin: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: '1700000000.000100' },
+      })
+      const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'no' })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toContain('denied')
+      expect(text).not.toContain('origin thread')
+    })
+  })
 })
