@@ -9,7 +9,7 @@ import { dreamingSubagent, type DreamingPayload } from './dreaming'
 import { loadMemory } from './load-memory'
 import { memoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 
-const DEFAULT_IDLE_MS = 30_000
+const DEFAULT_IDLE_MS = 10_000
 const DEFAULT_BUFFER_BYTES = 100_000
 const MIN_BUFFER_BYTES = 10_000
 const DEFAULT_DREAMING_SCHEDULE = '0 4 * * *'

@@ -9,7 +9,7 @@ This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` 
 ```json
 {
   "memory": {
-    "idleMs": 30000,
+    "idleMs": 10000,
     "bufferBytes": 100000,
     "dreaming": { "schedule": "0 4 * * *" }
   }
@@ -18,7 +18,7 @@ This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` 
 
 | Field                      | Default               | Effect                                                                                                                                                                                    |
 | -------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `memory.idleMs`            | `30000`               | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`.                                                                                                   |
+| `memory.idleMs`            | `10000`               | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`.                                                                                                   |
 | `memory.bufferBytes`       | `100000`              | Size-based ceiling: spawns `memory-logger` when the transcript grows by this many bytes since the last run, even during continuous activity. `0` disables. Minimum `10000` when non-zero. |
 | `memory.dreaming`          | omitted (no cron job) | When present, registers the dreaming cron job.                                                                                                                                            |
 | `memory.dreaming.schedule` | `"0 4 * * *"`         | Cron expression. Parsed via `cron-parser`.                                                                                                                                                |

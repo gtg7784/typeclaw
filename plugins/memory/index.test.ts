@@ -69,7 +69,7 @@ describe('memory plugin shape', () => {
     expect(exports.cronJobs?.dreaming).toBeUndefined()
   })
 
-  test('default config injects an idleMs of 30 seconds and a default dreaming schedule', async () => {
+  test('default config injects an idleMs of 10 seconds and a default dreaming schedule', async () => {
     // dreaming is optional in schema; with empty config it stays undefined.
     const { exports: noDream } = await bootMemoryPlugin(agentDir, {})
     expect(noDream.cronJobs?.dreaming).toBeUndefined()

@@ -56,7 +56,7 @@ A scaffolded `typeclaw.json` looks like:
   "model": "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo",
   "mounts": [],
   "memory": {
-    "idleMs": 30000,
+    "idleMs": 10000,
     "dreaming": { "schedule": "0 4 * * *" }
   }
 }

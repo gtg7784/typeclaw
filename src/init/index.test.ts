@@ -375,7 +375,7 @@ describe('scaffold', () => {
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
       mounts: [],
       memory: {
-        idleMs: 30_000,
+        idleMs: 10_000,
         dreaming: { schedule: '0 4 * * *' },
       },
     })

@@ -13,7 +13,7 @@ This skill exists so you can answer the user's questions about your own memory h
 
 ### Stage 1: memory-logger (online, per-session)
 
-After every prompt completes, the runtime fires the `session.idle` hook. The memory plugin starts a debounce timer (`memory.idleMs`, default `30_000` ms; minimum `1000`). Every subsequent prompt completion resets the timer. When the user has been quiet for `idleMs`, the plugin spawns the **memory-logger** subagent for the current session. It also fires immediately on `session.end` (websocket close) so the final transcript never gets lost.
+After every prompt completes, the runtime fires the `session.idle` hook. The memory plugin starts a debounce timer (`memory.idleMs`, default `10_000` ms; minimum `1000`). Every subsequent prompt completion resets the timer. When the user has been quiet for `idleMs`, the plugin spawns the **memory-logger** subagent for the current session. It also fires immediately on `session.end` (websocket close) so the final transcript never gets lost.
 
 The memory-logger reads:
 
@@ -138,7 +138,7 @@ These are the only two configurable knobs. They live in the `memory` block of `t
 ```json
 {
   "memory": {
-    "idleMs": 30000,
+    "idleMs": 10000,
     "dreaming": { "schedule": "0 4 * * *" }
   }
 }
@@ -146,7 +146,7 @@ These are the only two configurable knobs. They live in the `memory` block of `t
 
 | Field                      | Default               | Effect                                                                              | Reload class      |
 | -------------------------- | --------------------- | ----------------------------------------------------------------------------------- | ----------------- |
-| `memory.idleMs`            | `30000` (min `1000`)  | Debounce window before `memory-logger` spawns after a prompt completes.             | Restart-required. |
+| `memory.idleMs`            | `10000` (min `1000`)  | Debounce window before `memory-logger` spawns after a prompt completes.             | Restart-required. |
 | `memory.dreaming`          | omitted → no cron job | When present, registers the dreaming cron job.                                      | Restart-required. |
 | `memory.dreaming.schedule` | `"0 4 * * *"`         | Cron expression. Parsed via `cron-parser`; an invalid expression fails config load. | Restart-required. |
 
