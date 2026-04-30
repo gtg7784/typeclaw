@@ -1,4 +1,4 @@
-import { cancel, confirm, intro, isCancel, password, spinner } from '@clack/prompts'
+import { cancel, confirm, intro, isCancel, note, password, select, spinner } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { findAgentDir, isDirectoryNonEmpty, isHatched, runInit, type InitStep, type InitStepEvent } from '@/init'
@@ -50,17 +50,33 @@ export const init = defineCommand({
       process.exit(0)
     }
 
-    const wantDiscord = await confirm({
-      message: 'Wire a Discord bot? (You can add this later by editing typeclaw.json + .env.)',
-      initialValue: false,
+    const channelChoice = await select({
+      message: 'Pick a channel to wire (you can add more later by editing typeclaw.json + .env)',
+      options: [
+        { value: 'slack', label: 'Slack' },
+        { value: 'discord', label: 'Discord' },
+        { value: 'none', label: 'Skip — no channel right now' },
+      ],
+      initialValue: 'slack' as const,
     })
-    if (isCancel(wantDiscord)) {
+    if (isCancel(channelChoice)) {
       cancel('Aborted.')
       process.exit(0)
     }
+
     let discordBotToken: string | undefined
-    let discordAllowAll = true
-    if (wantDiscord) {
+    let slackBotToken: string | undefined
+    let slackAppToken: string | undefined
+
+    if (channelChoice === 'discord') {
+      note(
+        [
+          'https://discord.com/developers/applications',
+          'New Application → Bot tab → Reset Token.',
+          'Enable the MESSAGE CONTENT intent.',
+        ].join('\n'),
+        'Get a Discord bot token',
+      )
       const token = await password({
         message: 'Discord bot token',
         validate: (value) => (value && value.length > 0 ? undefined : 'Token is required'),
@@ -70,31 +86,19 @@ export const init = defineCommand({
         process.exit(0)
       }
       discordBotToken = token
-      const allowAll = await confirm({
-        message:
-          'Set channels.discord-bot.allow = ["*"]? This admits every channel in every guild the bot is in, plus all DMs. You can narrow it later by editing typeclaw.json.',
-        initialValue: true,
-      })
-      if (isCancel(allowAll) || !allowAll) {
-        discordAllowAll = false
-        console.log(
-          'OK. The discord-bot adapter will be wired but `allow` will be empty; the adapter will run but not deliver any inbound or outbound until you edit typeclaw.json.',
-        )
-      }
     }
 
-    const wantSlack = await confirm({
-      message: 'Wire a Slack bot? (You can add this later by editing typeclaw.json + .env.)',
-      initialValue: false,
-    })
-    if (isCancel(wantSlack)) {
-      cancel('Aborted.')
-      process.exit(0)
-    }
-    let slackBotToken: string | undefined
-    let slackAppToken: string | undefined
-    let slackAllowAll = true
-    if (wantSlack) {
+    if (channelChoice === 'slack') {
+      note(
+        [
+          'https://api.slack.com/apps → Create New App → From scratch.',
+          'OAuth & Permissions: install to workspace, copy the Bot User',
+          '  OAuth Token (xoxb-...).',
+          'Socket Mode: enable it, then create an App-Level Token with',
+          '  connections:write scope (xapp-...).',
+        ].join('\n'),
+        'Get a Slack bot',
+      )
       const botToken = await password({
         message: 'Slack bot token (xoxb-...)',
         validate: (value) =>
@@ -123,17 +127,6 @@ export const init = defineCommand({
         process.exit(0)
       }
       slackAppToken = appToken
-      const allowAll = await confirm({
-        message:
-          'Set channels.slack-bot.allow = ["*"]? This admits every channel in every team the bot is in, plus all DMs. You can narrow it later by editing typeclaw.json.',
-        initialValue: true,
-      })
-      if (isCancel(allowAll) || !allowAll) {
-        slackAllowAll = false
-        console.log(
-          'OK. The slack-bot adapter will be wired but `allow` will be empty; the adapter will run but not deliver any inbound or outbound until you edit typeclaw.json.',
-        )
-      }
     }
 
     // TODO: add remaining wizard steps from TypeClaw.md once their runtime lands:
@@ -145,8 +138,8 @@ export const init = defineCommand({
       await runInit({
         cwd,
         apiKey,
-        ...(discordBotToken !== undefined ? { discordBotToken, discordAllowAll } : {}),
-        ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken, slackAllowAll } : {}),
+        ...(discordBotToken !== undefined ? { discordBotToken } : {}),
+        ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
         onProgress: reportProgress((ok) => {
           hatchingOk = ok
         }),
