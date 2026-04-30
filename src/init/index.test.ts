@@ -509,6 +509,59 @@ describe('scaffold', () => {
 
     expect(await readFile(join(root, '.gitignore'), 'utf8')).toBe(original)
   })
+
+  test('omits channels block when no adapter is requested', async () => {
+    await scaffold(root)
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
+    expect(cfg.channels).toBeUndefined()
+  })
+
+  test('writes channels.discord-bot with allow=["*"] when withDiscord and discordAllowAll default', async () => {
+    await scaffold(root, { withDiscord: true })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, { allow: string[] }>
+    }
+    expect(cfg.channels?.['discord-bot']?.allow).toEqual(['*'])
+  })
+
+  test('writes channels.discord-bot with allow=[] when discordAllowAll=false (operator declined consent)', async () => {
+    await scaffold(root, { withDiscord: true, discordAllowAll: false })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, { allow: string[] }>
+    }
+    expect(cfg.channels?.['discord-bot']?.allow).toEqual([])
+  })
+
+  test('writes channels.slack-bot with allow=["*"] when withSlack and slackAllowAll default', async () => {
+    await scaffold(root, { withSlack: true })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, { allow: string[] }>
+    }
+    expect(cfg.channels?.['slack-bot']?.allow).toEqual(['*'])
+  })
+
+  test('writes channels.slack-bot with allow=[] when slackAllowAll=false (operator declined consent)', async () => {
+    await scaffold(root, { withSlack: true, slackAllowAll: false })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, { allow: string[] }>
+    }
+    expect(cfg.channels?.['slack-bot']?.allow).toEqual([])
+  })
+
+  test('honors per-adapter allow choices independently', async () => {
+    await scaffold(root, { withDiscord: true, discordAllowAll: true, withSlack: true, slackAllowAll: false })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, { allow: string[] }>
+    }
+    expect(cfg.channels?.['discord-bot']?.allow).toEqual(['*'])
+    expect(cfg.channels?.['slack-bot']?.allow).toEqual([])
+  })
 })
 
 describe('initGitRepo', () => {

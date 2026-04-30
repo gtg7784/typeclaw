@@ -59,6 +59,7 @@ export const init = defineCommand({
       process.exit(0)
     }
     let discordBotToken: string | undefined
+    let discordAllowAll = true
     if (wantDiscord) {
       const token = await password({
         message: 'Discord bot token',
@@ -75,6 +76,7 @@ export const init = defineCommand({
         initialValue: true,
       })
       if (isCancel(allowAll) || !allowAll) {
+        discordAllowAll = false
         console.log(
           'OK. The discord-bot adapter will be wired but `allow` will be empty; the adapter will run but not deliver any inbound or outbound until you edit typeclaw.json.',
         )
@@ -91,6 +93,7 @@ export const init = defineCommand({
     }
     let slackBotToken: string | undefined
     let slackAppToken: string | undefined
+    let slackAllowAll = true
     if (wantSlack) {
       const botToken = await password({
         message: 'Slack bot token (xoxb-...)',
@@ -126,6 +129,7 @@ export const init = defineCommand({
         initialValue: true,
       })
       if (isCancel(allowAll) || !allowAll) {
+        slackAllowAll = false
         console.log(
           'OK. The slack-bot adapter will be wired but `allow` will be empty; the adapter will run but not deliver any inbound or outbound until you edit typeclaw.json.',
         )
@@ -141,9 +145,8 @@ export const init = defineCommand({
       await runInit({
         cwd,
         apiKey,
-        ...(discordBotToken !== undefined ? { discordBotToken } : {}),
-        ...(slackBotToken !== undefined ? { slackBotToken } : {}),
-        ...(slackAppToken !== undefined ? { slackAppToken } : {}),
+        ...(discordBotToken !== undefined ? { discordBotToken, discordAllowAll } : {}),
+        ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken, slackAllowAll } : {}),
         onProgress: reportProgress((ok) => {
           hatchingOk = ok
         }),

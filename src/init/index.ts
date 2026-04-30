@@ -45,8 +45,10 @@ export type InitOptions = {
   cwd: string
   apiKey: string
   discordBotToken?: string
+  discordAllowAll?: boolean
   slackBotToken?: string
   slackAppToken?: string
+  slackAllowAll?: boolean
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
 }
@@ -55,8 +57,10 @@ export async function runInit({
   cwd,
   apiKey,
   discordBotToken,
+  discordAllowAll = true,
   slackBotToken,
   slackAppToken,
+  slackAllowAll = true,
   onProgress,
   runHatching = defaultRunHatching,
 }: InitOptions): Promise<void> {
@@ -65,7 +69,12 @@ export async function runInit({
   const wantsDiscord = discordBotToken !== undefined && discordBotToken !== ''
   const wantsSlack = slackBotToken !== undefined && slackBotToken !== ''
   emit({ step: 'scaffold', phase: 'start' })
-  await scaffold(cwd, { withDiscord: wantsDiscord, withSlack: wantsSlack })
+  await scaffold(cwd, {
+    withDiscord: wantsDiscord,
+    discordAllowAll,
+    withSlack: wantsSlack,
+    slackAllowAll,
+  })
   await writeSecrets(cwd, { fireworksApiKey: apiKey, discordBotToken, slackBotToken, slackAppToken })
   emit({ step: 'scaffold', phase: 'done' })
 
@@ -181,7 +190,12 @@ export async function isHatched(dir: string): Promise<boolean> {
   }
 }
 
-export type ScaffoldOptions = { withDiscord?: boolean; withSlack?: boolean }
+export type ScaffoldOptions = {
+  withDiscord?: boolean
+  discordAllowAll?: boolean
+  withSlack?: boolean
+  slackAllowAll?: boolean
+}
 
 export async function scaffold(root: string, options: ScaffoldOptions = {}): Promise<void> {
   await Promise.all(DIRECTORIES.map((dir) => mkdir(join(root, dir), { recursive: true })))
@@ -198,8 +212,8 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
     },
   }
   const channels: Record<string, { allow: string[] }> = {}
-  if (options.withDiscord) channels['discord-bot'] = { allow: ['*'] }
-  if (options.withSlack) channels['slack-bot'] = { allow: ['*'] }
+  if (options.withDiscord) channels['discord-bot'] = { allow: options.discordAllowAll === false ? [] : ['*'] }
+  if (options.withSlack) channels['slack-bot'] = { allow: options.slackAllowAll === false ? [] : ['*'] }
   if (Object.keys(channels).length > 0) config.channels = channels
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 
