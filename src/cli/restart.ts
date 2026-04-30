@@ -54,7 +54,7 @@ export const restartCommand = defineCommand({
       console.log(`Built image ${started.plan.imageTag}.`)
     }
     console.log(`Container ${started.plan.containerName} started (${started.containerId.slice(0, 12)}).`)
-    console.log(`Follow logs:  docker logs -f ${started.plan.containerName}`)
+    console.log(`Follow logs:  typeclaw log -f`)
     console.log(`Attach TUI:   typeclaw tui`)
     console.log(`Stop:         typeclaw stop`)
   },

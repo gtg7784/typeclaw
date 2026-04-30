@@ -39,7 +39,7 @@ export const startCommand = defineCommand({
       console.log(`Built image ${result.plan.imageTag}.`)
     }
     console.log(`Container ${result.plan.containerName} started (${result.containerId.slice(0, 12)}).`)
-    console.log(`Follow logs:  docker logs -f ${result.plan.containerName}`)
+    console.log(`Follow logs:  typeclaw log -f`)
     console.log(`Attach TUI:   typeclaw tui`)
     console.log(`Stop:         typeclaw stop`)
   },

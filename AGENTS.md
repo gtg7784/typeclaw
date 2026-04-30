@@ -27,6 +27,7 @@ Where an end user lives once they run `typeclaw init`. Their cwd is an agent fol
 - `typeclaw start` — spawn the container (`docker run`) configured in `typeclaw.json`.
 - `typeclaw stop` — stop it.
 - `typeclaw restart` — `stop` then `start` with the same flags as `start`.
+- `typeclaw log [-f]` — show (or follow) the container's stdout/stderr via `docker logs`.
 - `typeclaw tui` — attach a TUI client over a websocket to a running agent.
 - `typeclaw compose …` — orchestrate multiple agents across multiple agent folders.
 
@@ -42,7 +43,7 @@ Inside the container, `FIREWORKS_API_KEY` and friends arrive through `--env-file
 
 ### Rules of thumb
 
-- **CLI command names encode stage.** `init` is host-only (it _creates_ the host stage). `start` / `stop` / `restart` / `tui` / `compose` are host-only launchers. `run` is container-only. Anything that reads `process.cwd()` implicitly assumes host stage unless it's called from `run`.
+- **CLI command names encode stage.** `init` is host-only (it _creates_ the host stage). `start` / `stop` / `restart` / `log` / `tui` / `compose` are host-only launchers. `run` is container-only. Anything that reads `process.cwd()` implicitly assumes host stage unless it's called from `run`.
 - **When writing paths, annotate the stage.** `./typeclaw.json` means the host-stage agent folder; `/agent/typeclaw.json` means the container stage. Never ship a string that silently conflates them.
 - **The Dockerfile lives at the boundary.** `typeclaw init` (dev code running in host stage) writes a Dockerfile that `typeclaw start` (host stage) feeds to `docker run`, which then invokes `typeclaw run` (container stage) as the entrypoint.
 - **TypeClaw owns the Dockerfile and `.gitignore`, and rewrites them on every `start` — not just on `init`.** The agent folder is treated as a managed workspace, not a one-time scaffold. `start` calls `refreshDockerfile` / `refreshGitignore` unconditionally so version drift between the CLI and the agent folder is corrected automatically. The `.gitignore` is then auto-committed if it changed; the Dockerfile is not (see next bullet). **Consequence: to ship a Dockerfile template change, edit `src/init/dockerfile.ts` and run `typeclaw start --build` in any agent folder. Do not instruct users to delete their Dockerfile or re-run `init`.** The `wx` flag inside `writeDockerAssets` only governs the `init`-time write and is not the system's overwrite policy.
