@@ -13,6 +13,12 @@ accessibility-tree snapshots and compact `@eN` element refs.
 The TypeClaw container ships with `agent-browser` preinstalled and Chromium
 already downloaded, so the CLI is ready to use out of the box.
 
+**Headless only.** TypeClaw runs inside a Docker container with no X server
+or `$DISPLAY`, so never pass `--headed` to any `agent-browser` command. A
+headed launch will fail with `Missing X server or $DISPLAY / The platform
+failed to initialize.` Use the default headless mode for everything,
+including dogfooding and Electron flows.
+
 ## Start here
 
 This file is a discovery stub, not the usage guide. Before running any
