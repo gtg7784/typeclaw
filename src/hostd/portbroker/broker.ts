@@ -9,6 +9,7 @@ export type BrokerLogEvent =
   | { kind: 'open'; containerName: string; hostPort: number; upstreamPort: number; upstreamHost: string }
   | { kind: 'close'; containerName: string; hostPort: number }
   | { kind: 'skip-excluded'; containerName: string; port: number }
+  | { kind: 'skip-loopback'; containerName: string; port: number }
   | { kind: 'skip-eaddrinuse'; containerName: string; port: number; reason: string }
   | { kind: 'ip-resolved'; containerName: string; containerIp: string }
   | { kind: 'ip-changed'; containerName: string; from: string; to: string }
@@ -96,10 +97,14 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
     })
   }
 
-  const installForwarder = async (port: number): Promise<void> => {
+  const installForwarder = async (port: number, reachableFromBridge: boolean): Promise<void> => {
     if (stopped) return
     if (opts.excludePorts.has(port)) {
       log({ kind: 'skip-excluded', containerName: opts.containerName, port })
+      return
+    }
+    if (!reachableFromBridge) {
+      log({ kind: 'skip-loopback', containerName: opts.containerName, port })
       return
     }
     if (forwarders.has(port)) return
@@ -142,7 +147,9 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
     await Promise.all(old.map((f) => f.stop()))
     log({ kind: 'ip-changed', containerName: opts.containerName, from: containerIp, to: nextIp })
     containerIp = nextIp
-    for (const port of ports) await installForwarder(port)
+    // Ports in `forwarders` were already vetted as bridge-reachable when first
+    // installed; reinstall with the same assumption against the new IP.
+    for (const port of ports) await installForwarder(port, true)
   }
 
   detector = startDetector({
@@ -151,7 +158,11 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
     intervalMs: opts.intervalMs,
     maxConsecutiveFailures: opts.maxConsecutiveFailures,
     onChange: (change: PortChange) => {
-      enqueue(() => (change.kind === 'open' ? installForwarder(change.port) : removeForwarder(change.port)))
+      enqueue(() =>
+        change.kind === 'open'
+          ? installForwarder(change.port, change.reachableFromBridge)
+          : removeForwarder(change.port),
+      )
     },
     onError: (err) => {
       log({ kind: 'detector-error', containerName: opts.containerName, message: err.message })

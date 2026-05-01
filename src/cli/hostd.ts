@@ -68,6 +68,8 @@ function formatLog(event: BrokerLogEvent | DaemonLogEvent | SupervisorLogEvent):
       return `[${event.containerName}] released localhost:${event.hostPort}`
     case 'skip-excluded':
       return `[${event.containerName}] skipping :${event.port} (excluded)`
+    case 'skip-loopback':
+      return `[${event.containerName}] skipping :${event.port} (bound to 127.0.0.1 inside the container — bind to 0.0.0.0 to expose it)`
     case 'skip-eaddrinuse':
       return `[${event.containerName}] localhost:${event.port} unavailable: ${event.reason}`
     case 'ip-resolved':

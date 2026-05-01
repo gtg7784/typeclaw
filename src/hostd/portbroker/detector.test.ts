@@ -2,15 +2,25 @@ import { describe, expect, test } from 'bun:test'
 
 import type { DockerExec, DockerExecResult } from '@/container'
 
-import { parseListeningPorts, startDetector, type PortChange } from './detector'
+import { parseListeningPorts, parseListeningSockets, startDetector, type PortChange } from './detector'
 
 const PROC_TCP_TWO_LISTEN = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
-   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0
-   1: 0000000000000000FFFF00000100007F:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 200 1 0 200 0
+   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0
+   1: 00000000000000000000000000000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 200 1 0 200 0
    2: 0100007F:0BB8 0100007F:1234 06 00000000:00000000 00:00000000 00000000     0        0 300 1 0 300 0
 `
 const PROC_TCP_ONE_LISTEN = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
-   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0
+   0: 00000000:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0
+`
+const PROC_TCP_LOOPBACK_ONLY = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:12F0 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0
+`
+const PROC_TCP_IPV6_LOOPBACK = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000001000000:12F0 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0
+`
+const PROC_TCP_DUAL_LISTEN = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:12F0 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0
+   1: 00000000000000000000000000000000:12F0 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 200 1 0 200 0
 `
 const PROC_TCP_EMPTY = `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
 `
@@ -57,6 +67,34 @@ describe('parseListeningPorts', () => {
 
   test('malformed lines are skipped silently', () => {
     expect(parseListeningPorts('garbage\n   sl: nope\n')).toEqual(new Set())
+  })
+})
+
+describe('parseListeningSockets', () => {
+  test('marks IPv4 wildcard listeners as bridge-reachable', () => {
+    const sockets = parseListeningSockets(PROC_TCP_ONE_LISTEN)
+    expect(sockets.size).toBe(1)
+    expect(sockets.get(8080)).toEqual({ port: 8080, reachableFromBridge: true })
+  })
+
+  test('marks IPv4 127.0.0.1-only listeners as not bridge-reachable', () => {
+    const sockets = parseListeningSockets(PROC_TCP_LOOPBACK_ONLY)
+    expect(sockets.get(4848)).toEqual({ port: 4848, reachableFromBridge: false })
+  })
+
+  test('marks IPv6 ::1-only listeners as not bridge-reachable', () => {
+    const sockets = parseListeningSockets(PROC_TCP_IPV6_LOOPBACK)
+    expect(sockets.get(4848)).toEqual({ port: 4848, reachableFromBridge: false })
+  })
+
+  test('IPv6 wildcard listener counts as bridge-reachable', () => {
+    const sockets = parseListeningSockets(PROC_TCP_TWO_LISTEN)
+    expect(sockets.get(80)).toEqual({ port: 80, reachableFromBridge: true })
+  })
+
+  test('a port with both loopback and wildcard listeners is bridge-reachable', () => {
+    const sockets = parseListeningSockets(PROC_TCP_DUAL_LISTEN)
+    expect(sockets.get(4848)).toEqual({ port: 4848, reachableFromBridge: true })
   })
 })
 
@@ -148,7 +186,7 @@ describe('startDetector', () => {
     await waitFor(() => events.length >= 1)
     await detector.stop()
 
-    expect(events).toEqual([{ kind: 'open', port: 8080 }])
+    expect(events).toEqual([{ kind: 'open', port: 8080, reachableFromBridge: true }])
     expect(errors[0]!.message).toContain('transient')
     expect(fatals).toHaveLength(0)
   })
@@ -192,6 +230,43 @@ describe('startDetector', () => {
 
     expect(fatals[0]!.message).toContain('docker exec failed')
     expect(fatals[0]!.message).toContain('3 times')
+  })
+
+  test('emits open with reachableFromBridge=false for loopback-only listeners', async () => {
+    const events: PortChange[] = []
+    const { exec } = fakeExec([{ exitCode: 0, stdout: PROC_TCP_LOOPBACK_ONLY, stderr: '' }])
+    const detector = startDetector({
+      containerName: 'coder',
+      exec,
+      intervalMs: 50,
+      onChange: (c) => events.push(c),
+    })
+    await waitFor(() => events.length >= 1)
+    await detector.stop()
+
+    expect(events).toEqual([{ kind: 'open', port: 4848, reachableFromBridge: false }])
+  })
+
+  test('emits close+open when reachability changes (loopback gains a wildcard listener)', async () => {
+    const events: PortChange[] = []
+    const { exec } = fakeExec([
+      { exitCode: 0, stdout: PROC_TCP_LOOPBACK_ONLY, stderr: '' },
+      { exitCode: 0, stdout: PROC_TCP_DUAL_LISTEN, stderr: '' },
+    ])
+    const detector = startDetector({
+      containerName: 'coder',
+      exec,
+      intervalMs: 30,
+      onChange: (c) => events.push(c),
+    })
+    await waitFor(() => events.length >= 3)
+    await detector.stop()
+
+    expect(events.slice(0, 3)).toEqual([
+      { kind: 'open', port: 4848, reachableFromBridge: false },
+      { kind: 'close', port: 4848 },
+      { kind: 'open', port: 4848, reachableFromBridge: true },
+    ])
   })
 
   test('stop() halts further ticks', async () => {

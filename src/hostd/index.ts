@@ -22,7 +22,9 @@ export {
   type StartBrokerResult,
 } from './portbroker/broker'
 export {
+  type ListeningSocket,
   parseListeningPorts,
+  parseListeningSockets,
   startDetector,
   type Detector,
   type DetectorOptions,
