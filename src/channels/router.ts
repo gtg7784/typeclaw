@@ -15,7 +15,16 @@ import {
   type ChannelSessionRecord,
 } from './persistence'
 import type { ChannelAdapterConfig } from './schema'
-import type { ChannelKey, InboundMessage, OutboundCallback, OutboundMessage, SendResult, TypingCallback } from './types'
+import type {
+  ChannelKey,
+  ChannelNameResolver,
+  InboundMessage,
+  OutboundCallback,
+  OutboundMessage,
+  ResolvedChannelNames,
+  SendResult,
+  TypingCallback,
+} from './types'
 import { channelKeyId } from './types'
 
 export const INITIAL_DEBOUNCE_MS = 600
@@ -82,6 +91,7 @@ type LiveSession = {
   hooks: HookBus | undefined
   getTranscriptPath: (() => string | undefined) | undefined
   participants: ChannelParticipant[]
+  resolvedNames: ResolvedChannelNames
   promptQueue: QueuedInbound[]
   contextBuffer: ObservedInbound[]
   draining: boolean
@@ -117,6 +127,8 @@ export type ChannelRouter = {
   unregisterOutbound: (adapter: ChannelKey['adapter'], cb: OutboundCallback) => void
   registerTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   unregisterTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
+  registerChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
+  unregisterChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
   stop: () => Promise<void>
   liveCount: () => number
   __testing?: {
@@ -143,6 +155,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const creating = new Map<string, Promise<LiveSession>>()
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
+  const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
   const stickyLedger = new StickyLedger()
 
   let mappings: ChannelSessionRecord[] | null = null
@@ -185,6 +198,25 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       }
     })
 
+  const resolveChannelNames = async (key: ChannelKey): Promise<ResolvedChannelNames> => {
+    const resolvers = channelNameResolvers.get(key.adapter)
+    if (!resolvers || resolvers.size === 0) return {}
+    const snapshot = Array.from(resolvers)
+    const merged: ResolvedChannelNames = {}
+    for (const resolver of snapshot) {
+      try {
+        const result = await resolver(key)
+        if (result.chatName !== undefined && merged.chatName === undefined) merged.chatName = result.chatName
+        if (result.workspaceName !== undefined && merged.workspaceName === undefined) {
+          merged.workspaceName = result.workspaceName
+        }
+      } catch (err) {
+        logger.warn(`[channels] name resolver threw for ${channelKeyId(key)}: ${describe(err)}`)
+      }
+    }
+    return merged
+  }
+
   const ensureLive = async (key: ChannelKey): Promise<LiveSession> => {
     const keyId = channelKeyId(key)
     const existing = liveSessions.get(keyId)
@@ -197,11 +229,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       await ensureLoaded()
       const record = mappings ? findRecord(mappings, key) : undefined
       const participants = (record?.participants ?? []) as ChannelParticipant[]
+      const resolvedNames = await resolveChannelNames(key)
       const origin: SessionOrigin = {
         kind: 'channel',
         adapter: key.adapter,
         workspace: key.workspace,
+        ...(resolvedNames.workspaceName !== undefined ? { workspaceName: resolvedNames.workspaceName } : {}),
         chat: key.chat,
+        ...(resolvedNames.chatName !== undefined ? { chatName: resolvedNames.chatName } : {}),
         thread: key.thread,
         participants,
       }
@@ -245,6 +280,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         hooks: created.hooks,
         getTranscriptPath: created.getTranscriptPath,
         participants,
+        resolvedNames,
         promptQueue: [],
         contextBuffer: [],
         draining: false,
@@ -292,7 +328,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     kind: 'channel',
     adapter: live.key.adapter,
     workspace: live.key.workspace,
+    ...(live.resolvedNames.workspaceName !== undefined ? { workspaceName: live.resolvedNames.workspaceName } : {}),
     chat: live.key.chat,
+    ...(live.resolvedNames.chatName !== undefined ? { chatName: live.resolvedNames.chatName } : {}),
     thread: live.key.thread,
     participants: live.participants,
   })
@@ -524,6 +562,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     typingCallbacks.get(adapter)?.delete(cb)
   }
 
+  const registerChannelNameResolver = (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver): void => {
+    let set = channelNameResolvers.get(adapter)
+    if (!set) {
+      set = new Set()
+      channelNameResolvers.set(adapter, set)
+    }
+    set.add(resolver)
+  }
+
+  const unregisterChannelNameResolver = (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver): void => {
+    channelNameResolvers.get(adapter)?.delete(resolver)
+  }
+
   const send = async (msg: OutboundMessage): Promise<SendResult> => {
     const callbacks = outboundCallbacks.get(msg.adapter)
     if (!callbacks || callbacks.size === 0) {
@@ -637,6 +688,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     unregisterOutbound,
     registerTyping,
     unregisterTyping,
+    registerChannelNameResolver,
+    unregisterChannelNameResolver,
     stop,
     liveCount: () => liveSessions.size,
     __testing: {

@@ -198,4 +198,83 @@ describe('renderSessionOrigin', () => {
     expect(out).not.toContain('Recent participants')
     expect(out).toContain('Be concise')
   })
+
+  test('channel origin shows human-readable workspace and chat names alongside raw IDs', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0ACME',
+      workspaceName: 'Acme Corp',
+      chat: 'C0DEPLOY',
+      chatName: 'deploy',
+      thread: null,
+    })
+    expect(out).toContain('Acme Corp')
+    expect(out).toContain('T0ACME')
+    expect(out).toContain('#deploy')
+    expect(out).toContain('C0DEPLOY')
+    expect(out).toContain('"workspace": "T0ACME"')
+    expect(out).toContain('"chat": "C0DEPLOY"')
+  })
+
+  test('channel origin uses # prefix for Slack channels, bare name for Discord', () => {
+    const slackOut = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      workspaceName: 'Acme',
+      chat: 'C0',
+      chatName: 'general',
+      thread: null,
+    })
+    expect(slackOut).toContain('#general')
+
+    const discordOut = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: '111',
+      workspaceName: 'Acme Guild',
+      chat: '222',
+      chatName: 'general',
+      thread: null,
+    })
+    expect(discordOut).toContain('general')
+    expect(discordOut).not.toContain('#general')
+  })
+
+  test('channel origin renders even when chatName is missing (workspace name only)', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      workspaceName: 'Acme',
+      chat: 'C0',
+      thread: null,
+    })
+    expect(out).toContain('Acme')
+    expect(out).toContain('C0')
+  })
+
+  test('channel origin emits no malformed name prose when both names are absent', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: '@dm',
+      chat: '999',
+      thread: null,
+    })
+    expect(out).not.toMatch(/in \*\*\*\*/)
+    expect(out).not.toContain('undefined')
+  })
+
+  test('channel origin keeps the @dm workspace sentinel in the JSON block', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: '@dm',
+      chat: 'D0DMID',
+      thread: null,
+    })
+    expect(out).toContain('"workspace": "@dm"')
+  })
 })
