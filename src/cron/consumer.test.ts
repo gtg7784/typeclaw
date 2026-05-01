@@ -3,10 +3,29 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { HookBus } from '@/plugin'
 import { createStream } from '@/stream'
 
 import { createCronConsumer, type CronConsumerLogger, type CronSession } from './consumer'
 import type { CronJob, ExecJob, PromptJob } from './schema'
+
+function fakeHooks(events: string[]): HookBus {
+  return {
+    registerAll: () => {},
+    unregisterAll: () => {},
+    runSessionStart: async () => {},
+    runSessionEnd: async (e) => {
+      events.push(`end:${e.sessionId}`)
+    },
+    runSessionIdle: async (e) => {
+      events.push(`idle:${e.sessionId}:${e.parentTranscriptPath ?? '-'}`)
+    },
+    runSessionPrompt: async () => {},
+    runToolBefore: async () => undefined,
+    runToolAfter: async () => {},
+    count: () => 0,
+  }
+}
 
 const silentLogger: CronConsumerLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
@@ -392,6 +411,67 @@ describe('createCronConsumer', () => {
     await new Promise((r) => setImmediate(r))
 
     expect(factory.callsByJob.size).toBe(0)
+
+    consumer.stop()
+  })
+
+  test('fires session.idle and session.end on the supplied HookBus around each prompt run', async () => {
+    // given
+    const stream = createStream()
+    const events: string[] = []
+    const hooks = fakeHooks(events)
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: async () => ({
+        prompt: async (text: string) => {
+          events.push(`prompt:${text}`)
+        },
+        hooks,
+        sessionId: 'cron-sess-1',
+        getTranscriptPath: () => '/tmp/transcript-1.jsonl',
+      }),
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    // when
+    publishCron(stream, promptJob('hooked', 'do work'))
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(events).toEqual(['prompt:do work', 'idle:cron-sess-1:/tmp/transcript-1.jsonl', 'end:cron-sess-1'])
+
+    consumer.stop()
+  })
+
+  test('fires session.end even when prompt throws so plugins can react to abnormal termination', async () => {
+    // given
+    const stream = createStream()
+    const events: string[] = []
+    const hooks = fakeHooks(events)
+    const errors: string[] = []
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: async () => ({
+        prompt: async () => {
+          throw new Error('llm down')
+        },
+        hooks,
+        sessionId: 'cron-boom',
+      }),
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    consumer.start()
+
+    // when
+    publishCron(stream, promptJob('boom', 'go'))
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(events).toEqual(['end:cron-boom'])
+    expect(errors.some((e) => /llm down/.test(e))).toBe(true)
 
     consumer.stop()
   })

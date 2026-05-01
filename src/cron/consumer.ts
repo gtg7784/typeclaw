@@ -1,8 +1,21 @@
+import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
 import type { CronJob, ExecJob, PromptJob } from './schema'
 
-export type CronSession = { prompt: (text: string) => Promise<void>; dispose?: () => void }
+// `hooks`, `sessionId`, and `getTranscriptPath` are optional so test fakes can
+// stay one-liners. When present, the consumer fires `session.idle` after every
+// prompt completion and `session.end` on dispose, mirroring the lifecycle
+// signals the TUI server already emits in `src/server/index.ts`. Without this
+// the bundled memory plugin's debounced `memory-logger` never spawns for cron
+// prompt jobs because it only wakes on `session.idle`.
+export type CronSession = {
+  prompt: (text: string) => Promise<void>
+  dispose?: () => void
+  hooks?: HookBus
+  sessionId?: string
+  getTranscriptPath?: () => string | undefined
+}
 
 export type CronConsumerLogger = {
   info: (msg: string) => void
@@ -91,7 +104,17 @@ async function runPrompt(
   const session = await createSessionForCron(job)
   try {
     await session.prompt(job.prompt)
+    if (session.hooks && session.sessionId !== undefined) {
+      await session.hooks.runSessionIdle({
+        sessionId: session.sessionId,
+        parentTranscriptPath: session.getTranscriptPath?.(),
+        idleMs: 0,
+      })
+    }
   } finally {
+    if (session.hooks && session.sessionId !== undefined) {
+      await session.hooks.runSessionEnd({ sessionId: session.sessionId })
+    }
     session.dispose?.()
   }
 }

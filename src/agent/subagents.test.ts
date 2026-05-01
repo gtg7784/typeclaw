@@ -2,10 +2,29 @@ import { describe, expect, test } from 'bun:test'
 
 import { z } from 'zod'
 
+import type { HookBus } from '@/plugin'
 import { createStream } from '@/stream'
 
 import type { AgentSession } from './index'
 import { createSubagentConsumer, invokeSubagent, type Subagent, validateSubagentPayload } from './subagents'
+
+function makeFakeHookBus(events: string[]): HookBus {
+  return {
+    registerAll: () => {},
+    unregisterAll: () => {},
+    runSessionStart: async () => {},
+    runSessionEnd: async (e) => {
+      events.push(`end:${e.sessionId}`)
+    },
+    runSessionIdle: async (e) => {
+      events.push(`idle:${e.sessionId}:${e.parentTranscriptPath ?? '-'}`)
+    },
+    runSessionPrompt: async () => {},
+    runToolBefore: async () => undefined,
+    runToolAfter: async () => {},
+    count: () => 0,
+  }
+}
 
 function fakeSession(): { session: AgentSession; calls: { prompt: string[]; disposed: number } } {
   const calls = { prompt: [] as string[], disposed: 0 }
@@ -237,6 +256,54 @@ describe('invokeSubagent', () => {
       }),
     ).rejects.toThrow(/boom/)
     expect(calls.disposed).toBe(1)
+  })
+
+  test('fires session.idle and session.end on the supplied HookBus around runSession', async () => {
+    // given
+    const { session } = fakeSession()
+    const events: string[] = []
+    const hooks = makeFakeHookBus(events)
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    // when
+    await invokeSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => ({
+        session,
+        hooks,
+        sessionId: 'sub-sess-1',
+        getTranscriptPath: () => '/tmp/sub-transcript.jsonl',
+      }),
+      agentDir: '/agent',
+      userPrompt: 'hi',
+    })
+
+    // then
+    expect(events).toEqual(['idle:sub-sess-1:/tmp/sub-transcript.jsonl', 'end:sub-sess-1'])
+  })
+
+  test('fires session.end even when the prompt throws so plugins can react to abnormal subagent termination', async () => {
+    // given
+    const events: string[] = []
+    const hooks = makeFakeHookBus(events)
+    const session = {
+      prompt: async () => {
+        throw new Error('subagent boom')
+      },
+      dispose: () => {},
+    } as unknown as AgentSession
+    const registry = { fragile: { systemPrompt: 'X' } satisfies Subagent }
+
+    // when / then
+    await expect(
+      invokeSubagent('fragile', {
+        registry,
+        createSessionForSubagent: async () => ({ session, hooks, sessionId: 'sub-boom' }),
+        agentDir: '/agent',
+        userPrompt: 'crash',
+      }),
+    ).rejects.toThrow(/subagent boom/)
+    expect(events).toEqual(['end:sub-boom'])
   })
 })
 

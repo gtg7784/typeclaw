@@ -132,7 +132,7 @@ export async function startAgent({
     const entry = snap.pluginSubagentByShim.get(subagent)
     if (entry) {
       const sessionId = `subagent-${entry.pluginName}-${crypto.randomUUID()}`
-      return createSessionWithDispose({
+      const created = await createSessionWithDispose({
         systemPromptOverride: entry.pluginSubagent.systemPrompt,
         channelRouter: channelManager.router,
         origin: {
@@ -153,6 +153,11 @@ export async function startAgent({
           toolNamePrefix: `__plugin_${entry.pluginName}_${entry.subagentName}`,
         },
       })
+      return {
+        ...created,
+        hooks: snap.hooks,
+        sessionId,
+      }
     }
     return defaultCreateSessionForSubagent(subagent, subagentOptions)
   }
@@ -180,11 +185,13 @@ export async function startAgent({
   const cronConsumer = createCronConsumer({
     stream,
     cwd,
-    createSessionForCron: (job) => {
+    createSessionForCron: async (job) => {
       const snap = pluginRuntime.get()
-      return createSession({
+      const sessionManager = SessionManager.create(cwd, sessionFactory.sessionDir())
+      const sessionId = sessionManager.getSessionId()
+      const session = await createSession({
         reloadRegistry,
-        sessionManager: SessionManager.create(cwd, sessionFactory.sessionDir()),
+        sessionManager,
         stream,
         channelRouter: channelManager.router,
         origin: { kind: 'cron', jobId: job.id, jobKind: 'prompt' },
@@ -193,12 +200,19 @@ export async function startAgent({
               plugins: {
                 registry: snap.registry,
                 hooks: snap.hooks,
-                sessionId: `cron-${crypto.randomUUID()}`,
+                sessionId,
                 agentDir: cwd,
               },
             }
           : {}),
       })
+      return {
+        prompt: (text) => session.prompt(text),
+        dispose: () => session.dispose(),
+        sessionId,
+        ...(snap.hasAnyPluginContent ? { hooks: snap.hooks } : {}),
+        getTranscriptPath: () => sessionManager.getSessionFile(),
+      }
     },
   })
 

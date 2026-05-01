@@ -65,6 +65,8 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
       dispose: async () => {
         session.dispose()
       },
+      ...(snap.hasAnyPluginContent ? { hooks: snap.hooks } : {}),
+      getTranscriptPath: () => sessionManager.getSessionFile(),
     }
   }
 }
