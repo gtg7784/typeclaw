@@ -1,12 +1,12 @@
 import { defineCommand } from 'citty'
 
-import type { BrokerLogEvent } from '@/portbroker/broker'
-import { startDaemon, type DaemonLogEvent } from '@/portbroker/daemon'
+import type { BrokerLogEvent } from '@/hostd'
+import { startDaemon, type DaemonLogEvent } from '@/hostd/daemon'
 
-export const portbrokerdCommand = defineCommand({
+export const hostdCommand = defineCommand({
   meta: {
-    name: '_portbrokerd',
-    description: 'internal: host-side TCP port broker daemon (do not invoke directly)',
+    name: '_hostd',
+    description: 'internal: host-side typeclaw daemon (do not invoke directly)',
     hidden: true,
   },
   async run() {
@@ -27,13 +27,13 @@ export const portbrokerdCommand = defineCommand({
 function formatLog(event: BrokerLogEvent | DaemonLogEvent): string {
   switch (event.kind) {
     case 'daemon-listening':
-      return `[portbrokerd] listening on ${event.socket}`
+      return `[hostd] listening on ${event.socket}`
     case 'daemon-stopping':
-      return `[portbrokerd] stopping`
+      return `[hostd] stopping`
     case 'register':
-      return `[portbrokerd] registered ${event.containerName}`
+      return `[hostd] registered ${event.containerName}`
     case 'deregister':
-      return `[portbrokerd] deregistered ${event.containerName} (${event.reason})`
+      return `[hostd] deregistered ${event.containerName} (${event.reason})`
     case 'open':
       return `[${event.containerName}] forwarding localhost:${event.hostPort} -> ${event.upstreamHost}:${event.upstreamPort}`
     case 'close':

@@ -5,15 +5,15 @@ import type { Socket, UnixSocketListener } from 'bun'
 
 import { defaultDockerExec, type DockerExec } from '@/container'
 
+import { isDaemonReachable } from './client'
+import { ensureDirs, socketPath } from './paths'
 import {
   startBroker,
   type Broker,
   type BrokerLogEvent,
   type ContainerIpResolver,
   type ForwarderFactory,
-} from './broker'
-import { isDaemonReachable } from './client'
-import { ensureDirs, socketPath } from './paths'
+} from './portbroker/broker'
 import type { ListResult, Request, Response, StatusResult } from './protocol'
 
 export type DaemonOptions = {
@@ -49,7 +49,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
 
   if (existsSync(path)) {
     if (await isDaemonReachable(500)) {
-      throw new Error(`another portbroker daemon is already listening at ${path}`)
+      throw new Error(`another typeclaw host daemon is already listening at ${path}`)
     }
     try {
       await unlink(path)

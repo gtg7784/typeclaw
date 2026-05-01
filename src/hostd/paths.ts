@@ -17,19 +17,19 @@ export function logDir(): string {
 }
 
 export function socketPath(): string {
-  return join(runDir(), 'portbrokerd.sock')
+  return join(runDir(), 'hostd.sock')
 }
 
 export function pidfilePath(): string {
-  return join(runDir(), 'portbrokerd.pid')
+  return join(runDir(), 'hostd.pid')
 }
 
 export function lockfilePath(): string {
-  return join(runDir(), 'portbrokerd.lock')
+  return join(runDir(), 'hostd.lock')
 }
 
 export function logfilePath(): string {
-  return join(logDir(), 'portbrokerd.log')
+  return join(logDir(), 'hostd.log')
 }
 
 export async function ensureDirs(): Promise<void> {

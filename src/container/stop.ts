@@ -1,4 +1,4 @@
-import { isDaemonReachable, send as sendToDaemon } from '@/portbroker/client'
+import { isDaemonReachable, send as sendToDaemon } from '@/hostd/client'
 
 import { containerExists, containerNameFromCwd, getBun, waitForRemoval } from './shared'
 

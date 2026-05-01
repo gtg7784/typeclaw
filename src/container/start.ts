@@ -4,10 +4,10 @@ import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
 import { configSchema, type Mount } from '@/config/config'
+import { send as sendToDaemon } from '@/hostd/client'
+import { ensureDaemon } from '@/hostd/spawn'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
-import { send as sendToDaemon } from '@/portbroker/client'
-import { ensureDaemon } from '@/portbroker/spawn'
 
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import { containerNameFromCwd, defaultDockerExec, type DockerExec, getBun, imageTagFromCwd } from './shared'

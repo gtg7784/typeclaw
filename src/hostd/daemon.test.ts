@@ -7,7 +7,7 @@ import type { DockerExec } from '@/container'
 
 import { send } from './client'
 import { startDaemon, type Daemon } from './daemon'
-import type { Forwarder, ForwarderOptions, ForwarderStartResult } from './forwarder'
+import type { Forwarder, ForwarderOptions, ForwarderStartResult } from './portbroker/forwarder'
 import type { ListResult } from './protocol'
 
 const PROC_HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
