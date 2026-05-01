@@ -42,6 +42,13 @@ export type TypingTarget = {
 
 export type TypingCallback = (target: TypingTarget) => Promise<void>
 
+export type ResolvedChannelNames = {
+  chatName?: string
+  workspaceName?: string
+}
+
+export type ChannelNameResolver = (key: ChannelKey) => Promise<ResolvedChannelNames>
+
 export function channelKeyId(key: ChannelKey): string {
   return `${key.adapter}:${key.workspace}:${key.chat}:${key.thread ?? ''}`
 }

@@ -8,6 +8,8 @@ import {
   type SlackSocketAppMentionEvent,
   type SlackSocketMessageEvent,
 } from './agent-messenger-slack-shim'
+import { createSlackAuthorResolver } from './slack-bot-author-resolver'
+import { createSlackChannelResolver } from './slack-bot-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './slack-bot-classify'
 
 // Bound on the dedupe ring buffer. Slack's Events API may deliver the same
@@ -91,6 +93,9 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
   let inflightInbounds = 0
   let stopWaiters: Array<() => void> = []
 
+  const authorResolver = createSlackAuthorResolver({ token: options.token })
+  const channelResolver = createSlackChannelResolver({ token: options.token })
+
   const typingCallback = createTypingCallback({ configRef: options.configRef, logger })
 
   const outboundCallback: OutboundCallback = async (msg: OutboundMessage): Promise<SendResult> => {
@@ -161,10 +166,12 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       }
 
       markSeen(dedupeKey)
+      const resolvedAuthorName = await authorResolver.resolve(verdict.payload.authorId)
+      const enriched = { ...verdict.payload, authorName: resolvedAuthorName }
       logger.info(
-        `[slack-bot] routed ts=${event.ts} workspace=${verdict.payload.workspace} mention=${verdict.payload.isBotMention} reply=${verdict.payload.replyToBotMessageId !== null}`,
+        `[slack-bot] routed ts=${event.ts} workspace=${enriched.workspace} mention=${enriched.isBotMention} reply=${enriched.replyToBotMessageId !== null}`,
       )
-      await options.router.route(verdict.payload)
+      await options.router.route(enriched)
     } catch (err) {
       logger.error(`[slack-bot] handleInbound failed: ${describe(err)}`)
     } finally {
@@ -232,6 +239,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
 
       options.router.registerOutbound('slack-bot', outboundCallback)
       options.router.registerTyping('slack-bot', typingCallback)
+      options.router.registerChannelNameResolver('slack-bot', channelResolver)
 
       try {
         await listener.start()
@@ -247,6 +255,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       started = false
       options.router.unregisterOutbound('slack-bot', outboundCallback)
       options.router.unregisterTyping('slack-bot', typingCallback)
+      options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)

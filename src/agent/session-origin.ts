@@ -20,7 +20,9 @@ export type SessionOrigin =
       kind: 'channel'
       adapter: AdapterId
       workspace: string
+      workspaceName?: string
       chat: string
+      chatName?: string
       thread: string | null
       lastInboundAuthorId?: string
       participants?: readonly ChannelParticipant[]
@@ -83,7 +85,9 @@ function renderChannelOrigin(
   origin: {
     adapter: AdapterId
     workspace: string
+    workspaceName?: string
     chat: string
+    chatName?: string
     thread: string | null
     participants?: readonly ChannelParticipant[]
   },
@@ -112,6 +116,12 @@ function renderChannelOrigin(
     `You are responding inside a ${platform} channel session. There is no human`,
     'attached to a console here — your only way to communicate with the user',
     'is a tool call. Plain-text output is invisible.',
+  ]
+
+  const conversationLine = renderConversationLine(origin)
+  if (conversationLine !== null) lines.push('', conversationLine)
+
+  lines.push(
     '',
     '**For every user message in this session, you MUST call `channel_reply`',
     '(or `channel_send`) at least once before ending your turn**, unless the',
@@ -139,13 +149,31 @@ function renderChannelOrigin(
     '`{ ok: false }` otherwise).',
     '',
     `To mention someone in your reply, use ${platform} syntax \`<@USER_ID>\`.`,
-  ]
+  )
 
   const participantsBlock = renderParticipants(origin.participants ?? [], now)
   if (participantsBlock) lines.push('', participantsBlock)
 
   lines.push('', 'Be concise; chat clients punish multi-paragraph replies.')
   return lines.join('\n')
+}
+
+function renderConversationLine(origin: {
+  adapter: AdapterId
+  workspace: string
+  workspaceName?: string
+  chat: string
+  chatName?: string
+}): string | null {
+  const hasChat = origin.chatName !== undefined && origin.chatName !== ''
+  const hasWorkspace = origin.workspaceName !== undefined && origin.workspaceName !== ''
+  if (!hasChat && !hasWorkspace) return null
+
+  const chatPrefix = origin.adapter === 'slack-bot' ? '#' : ''
+  const chatLabel = hasChat ? `**${chatPrefix}${origin.chatName!}** (${origin.chat})` : `\`${origin.chat}\``
+  const workspaceLabel = hasWorkspace ? `**${origin.workspaceName!}** (${origin.workspace})` : `\`${origin.workspace}\``
+
+  return `Conversation: ${chatLabel} in ${workspaceLabel}.`
 }
 
 function renderParticipants(participants: readonly ChannelParticipant[], now: number): string {

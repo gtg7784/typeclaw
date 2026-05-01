@@ -7,6 +7,7 @@ import type { AssistantMessage } from '@mariozechner/pi-ai'
 import type { SessionEntry } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession } from '@/agent'
+import type { SessionOrigin } from '@/agent/session-origin'
 import type { HookBus } from '@/plugin'
 
 import { loadChannelSessions } from './persistence'
@@ -88,9 +89,11 @@ function makeRouter(
     sessions?: FakeSession[]
     nowRef?: { value: number }
     logs?: string[]
+    origins?: SessionOrigin[]
   } = {},
-): { router: ChannelRouter; sessions: FakeSession[] } {
+): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
+  const origins: SessionOrigin[] = options.origins ?? []
   const nowRef = options.nowRef ?? { value: 1000 }
   const router = createChannelRouter({
     agentDir,
@@ -101,7 +104,8 @@ function makeRouter(
       warn: (m) => options.logs?.push(`warn:${m}`),
       error: (m) => options.logs?.push(`error:${m}`),
     },
-    createSessionForChannel: async () => {
+    createSessionForChannel: async ({ origin }) => {
+      origins.push(origin)
       const fake = new FakeSession()
       sessions.push(fake)
       return {
@@ -113,7 +117,7 @@ function makeRouter(
       }
     },
   })
-  return { router, sessions }
+  return { router, sessions, origins }
 }
 
 function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
@@ -737,5 +741,93 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     // then
     expect(events).toEqual(['idle:ses_fake_1:-', 'end:ses_fake_1'])
     expect(sessions[0]!.disposed).toBe(1)
+  })
+})
+
+describe('ChannelRouter channel name resolver', () => {
+  test('calls the registered resolver and forwards resolved names into the session origin', async () => {
+    const dir = await tempDir()
+    const { router, origins } = makeRouter(dir)
+    const calls: ChannelKey[] = []
+    router.registerChannelNameResolver('discord-bot', async (key) => {
+      calls.push(key)
+      return { chatName: 'general', workspaceName: 'Acme Guild' }
+    })
+
+    await router.route(inbound())
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toEqual({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
+    expect(origins).toHaveLength(1)
+    const origin = origins[0]!
+    if (origin.kind !== 'channel') throw new Error('expected channel origin')
+    expect(origin.chatName).toBe('general')
+    expect(origin.workspaceName).toBe('Acme Guild')
+  })
+
+  test('falls back to undefined names when no resolver is registered', async () => {
+    const dir = await tempDir()
+    const { router, origins } = makeRouter(dir)
+
+    await router.route(inbound())
+
+    const origin = origins[0]!
+    if (origin.kind !== 'channel') throw new Error('expected channel origin')
+    expect(origin.chatName).toBeUndefined()
+    expect(origin.workspaceName).toBeUndefined()
+  })
+
+  test('routes through to undefined names when the resolver throws (does not break session creation)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, origins } = makeRouter(dir, { logs })
+    router.registerChannelNameResolver('discord-bot', async () => {
+      throw new Error('rate limited')
+    })
+
+    await router.route(inbound())
+
+    const origin = origins[0]!
+    if (origin.kind !== 'channel') throw new Error('expected channel origin')
+    expect(origin.chatName).toBeUndefined()
+    expect(origin.workspaceName).toBeUndefined()
+    expect(logs.some((l) => l.startsWith('warn:') && l.includes('name resolver'))).toBe(true)
+  })
+
+  test('only invokes the resolver matching the inbound adapter', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let discordCalls = 0
+    let slackCalls = 0
+    router.registerChannelNameResolver('discord-bot', async () => {
+      discordCalls++
+      return {}
+    })
+    router.registerChannelNameResolver('slack-bot', async () => {
+      slackCalls++
+      return {}
+    })
+
+    await router.route(inbound({ adapter: 'discord-bot' }))
+
+    expect(discordCalls).toBe(1)
+    expect(slackCalls).toBe(0)
+  })
+
+  test('does not re-call the resolver on a hot session (only at session creation)', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let calls = 0
+    router.registerChannelNameResolver('discord-bot', async () => {
+      calls++
+      return { chatName: 'general', workspaceName: 'Acme' }
+    })
+
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    await router.route(inbound({ externalMessageId: 'm2', text: 'second' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(calls).toBe(1)
   })
 })

@@ -17,6 +17,8 @@ function fakeRouter(
     unregisterOutbound: () => {},
     registerTyping: () => {},
     unregisterTyping: () => {},
+    registerChannelNameResolver: () => {},
+    unregisterChannelNameResolver: () => {},
     stop: async () => {},
     liveCount: () => 0,
   }
