@@ -4,8 +4,39 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { createHookBus, type PluginRegistry } from '@/plugin'
+
 import { createOverrideResourceLoader, createResourceLoader, getBundledSkillsDir } from './index'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
+
+async function runGit(cwd: string, args: string[]): Promise<void> {
+  const proc = Bun.spawn({
+    cmd: ['git', ...args],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: 'Test',
+      GIT_AUTHOR_EMAIL: 'test@example.com',
+      GIT_COMMITTER_NAME: 'Test',
+      GIT_COMMITTER_EMAIL: 'test@example.com',
+    },
+  })
+  const code = await proc.exited
+  if (code !== 0) {
+    const stderr = await new Response(proc.stderr).text()
+    throw new Error(`git ${args.join(' ')} failed: ${stderr}`)
+  }
+}
+
+async function initGitRepo(cwd: string): Promise<void> {
+  await runGit(cwd, ['init', '-q', '-b', 'main'])
+}
+
+function silentLogger() {
+  return { info: () => {}, warn: () => {}, error: () => {} }
+}
 
 let agentDir: string
 
@@ -150,6 +181,84 @@ describe('createResourceLoader', () => {
     // when / then
     const loader = await createResourceLoader({ agentDir })
     expect(loader.getSkills().skills).toBeDefined()
+  })
+
+  test('appends a dirty-files nudge to the system prompt when the agent folder has uncommitted changes', async () => {
+    // given
+    await initGitRepo(agentDir)
+    await writeFile(join(agentDir, 'IDENTITY.md'), 'tracked file')
+    await runGit(agentDir, ['add', 'IDENTITY.md'])
+    await runGit(agentDir, ['commit', '-m', 'init'])
+    await writeFile(join(agentDir, 'IDENTITY.md'), 'modified content')
+
+    // when
+    const loader = await createResourceLoader({ agentDir })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('## Uncommitted changes at session start')
+    expect(prompt).toContain('IDENTITY.md')
+  })
+
+  test('omits the dirty-files nudge entirely when the worktree is clean', async () => {
+    // given
+    await initGitRepo(agentDir)
+    await writeFile(join(agentDir, 'IDENTITY.md'), 'committed')
+    await runGit(agentDir, ['add', 'IDENTITY.md'])
+    await runGit(agentDir, ['commit', '-m', 'init'])
+
+    // when
+    const loader = await createResourceLoader({ agentDir })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('## Uncommitted changes at session start')
+  })
+
+  test('omits the dirty-files nudge when the agent folder is not a git repo', async () => {
+    // when (no .git in agentDir)
+    const loader = await createResourceLoader({ agentDir })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('## Uncommitted changes at session start')
+  })
+
+  test('places the nudge after the plugin session.prompt mutation so plugin-injected text remains in the cacheable prefix', async () => {
+    // given
+    await initGitRepo(agentDir)
+    await writeFile(join(agentDir, 'IDENTITY.md'), 'baseline')
+    await runGit(agentDir, ['add', 'IDENTITY.md'])
+    await runGit(agentDir, ['commit', '-m', 'init'])
+    await writeFile(join(agentDir, 'IDENTITY.md'), 'dirty edit')
+
+    const hooks = createHookBus()
+    hooks.registerAll('plugin-test', agentDir, silentLogger(), {
+      'session.prompt': async (event) => {
+        event.prompt = `${event.prompt}\n\nPLUGIN-INJECTED-MARKER`
+      },
+    })
+    const registry: PluginRegistry = {
+      tools: [],
+      subagents: [],
+      cronJobs: [],
+      skills: [],
+      skillsDirs: [],
+    }
+
+    // when
+    const loader = await createResourceLoader({
+      agentDir,
+      plugins: { registry, hooks, sessionId: 'test-session', agentDir },
+    })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    const pluginIdx = prompt.indexOf('PLUGIN-INJECTED-MARKER')
+    const nudgeIdx = prompt.indexOf('## Uncommitted changes at session start')
+    expect(pluginIdx).toBeGreaterThan(-1)
+    expect(nudgeIdx).toBeGreaterThan(-1)
+    expect(nudgeIdx).toBeGreaterThan(pluginIdx)
   })
 })
 
