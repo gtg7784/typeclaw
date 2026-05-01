@@ -7,10 +7,10 @@ import type { Forwarder, ForwarderOptions, ForwarderStartResult } from './forwar
 
 const PROC_HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
 
-function procWithPorts(ports: number[]): string {
+function procWithPorts(ports: number[], localAddrHex = '00000000'): string {
   const lines = ports.map(
     (port, i) =>
-      `   ${i}: 0100007F:${port.toString(16).toUpperCase().padStart(4, '0')} 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0`,
+      `   ${i}: ${localAddrHex}:${port.toString(16).toUpperCase().padStart(4, '0')} 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0`,
   )
   return PROC_HEADER + lines.join('\n') + '\n'
 }
@@ -315,6 +315,60 @@ describe('startBroker', () => {
       expect(result.broker.containerIp()).toBe('10.0.0.5')
       await waitFor(() => result.broker.containerIp() === '10.0.0.99', 2000)
       expect(result.broker.containerIp()).toBe('10.0.0.99')
+    } finally {
+      await result.broker.stop()
+    }
+  })
+
+  test('skips ports bound only to 127.0.0.1 inside the container with a skip-loopback log', async () => {
+    const { factory, active } = fakeForwarderFactory()
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') return { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }
+      return { exitCode: 0, stdout: procWithPorts([4848], '0100007F'), stderr: '' }
+    }
+
+    const result = await startBroker({
+      containerName: 'coder',
+      excludePorts: new Set(),
+      exec,
+      intervalMs: 30,
+      forwarderFactory: factory,
+      onLog: (e) => events.push(e),
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    try {
+      await waitFor(() => events.some((e) => e.kind === 'skip-loopback' && e.port === 4848))
+      expect(active().has(4848)).toBe(false)
+      expect(events.some((e) => e.kind === 'open' && e.hostPort === 4848)).toBe(false)
+    } finally {
+      await result.broker.stop()
+    }
+  })
+
+  test('forwards a port that has both a loopback and a wildcard listener', async () => {
+    const { factory, active } = fakeForwarderFactory()
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') return { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }
+      const PROC = `${PROC_HEADER}   0: 0100007F:12F0 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0
+   1: 00000000:12F0 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 200 1 0 200 0
+`
+      return { exitCode: 0, stdout: PROC, stderr: '' }
+    }
+
+    const result = await startBroker({
+      containerName: 'coder',
+      excludePorts: new Set(),
+      exec,
+      intervalMs: 30,
+      forwarderFactory: factory,
+      onLog: (e) => events.push(e),
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    try {
+      await waitFor(() => active().has(4848))
+      expect(events.some((e) => e.kind === 'skip-loopback')).toBe(false)
     } finally {
       await result.broker.stop()
     }

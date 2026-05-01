@@ -15,7 +15,7 @@ const PROC_HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr t
 function procWithPorts(ports: number[]): string {
   const lines = ports.map(
     (port, i) =>
-      `   ${i}: 0100007F:${port.toString(16).toUpperCase().padStart(4, '0')} 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0`,
+      `   ${i}: 00000000:${port.toString(16).toUpperCase().padStart(4, '0')} 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 100 0`,
   )
   return PROC_HEADER + lines.join('\n') + '\n'
 }
