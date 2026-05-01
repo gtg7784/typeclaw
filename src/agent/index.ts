@@ -20,6 +20,7 @@ import type { ReloadRegistry } from '@/reload'
 import type { Stream } from '@/stream'
 
 import { getAuth } from './auth'
+import { renderGitNudge } from './git-nudge'
 import { resolveBuiltinToolRefs, wrapPluginTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
@@ -247,6 +248,14 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
     const event = { prompt: systemPrompt, sessionId: options.plugins.sessionId, agentDir }
     await options.plugins.hooks.runSessionPrompt(event)
     systemPrompt = event.prompt
+  }
+
+  // Appended last so the dirty-files snapshot is the most-recent context the
+  // agent reads, and so its bytes sit in the cache-suffix region rather than
+  // splitting the cacheable prefix shared by clean-worktree sessions.
+  const gitNudge = await renderGitNudge(agentDir)
+  if (gitNudge !== '') {
+    systemPrompt = `${systemPrompt}\n\n${gitNudge}`
   }
 
   const additionalSkillPaths = [getBundledSkillsDir()]
