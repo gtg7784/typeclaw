@@ -13,7 +13,7 @@ import type { HookBus } from '@/plugin'
 import { loadChannelSessions } from './persistence'
 import { createChannelRouter, type ChannelRouter } from './router'
 import type { ChannelAdapterConfig } from './schema'
-import type { ChannelKey, InboundMessage } from './types'
+import type { ChannelKey, FetchHistoryArgs, HistoryCallback, InboundMessage } from './types'
 
 class FakeSession {
   public prompts: string[] = []
@@ -852,5 +852,103 @@ describe('ChannelRouter channel name resolver', () => {
     await router.__testing!.flushDebounce(KEY)
 
     expect(calls).toBe(1)
+  })
+})
+
+describe('ChannelRouter history dispatch', () => {
+  test('fetchHistory invokes the registered callback with the args verbatim', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const seen: FetchHistoryArgs[] = []
+    router.registerHistory('discord-bot', async (args) => {
+      seen.push(args)
+      return { ok: true, messages: [] }
+    })
+
+    const result = await router.fetchHistory('discord-bot', { chat: 'c1', thread: 't1', limit: 5, cursor: 'cur' })
+
+    expect(result).toEqual({ ok: true, messages: [] })
+    expect(seen).toEqual([{ chat: 'c1', thread: 't1', limit: 5, cursor: 'cur' }])
+  })
+
+  test('returns history-not-supported when no callback is registered for the adapter', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+
+    const result = await router.fetchHistory('discord-bot', { chat: 'c1', thread: null, limit: 1 })
+
+    expect(result).toEqual({ ok: false, error: 'history-not-supported' })
+  })
+
+  test('first ok callback wins; later callbacks are not invoked', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let secondCalled = false
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        {
+          externalMessageId: 'm1',
+          authorId: 'u1',
+          authorName: 'Alice',
+          text: 'hi',
+          ts: 1000,
+          isBot: false,
+          replyToBotMessageId: null,
+        },
+      ],
+    }))
+    router.registerHistory('discord-bot', async () => {
+      secondCalled = true
+      return { ok: false, error: 'second' }
+    })
+
+    const result = await router.fetchHistory('discord-bot', { chat: 'c1', thread: null, limit: 5 })
+
+    expect(result.ok).toBe(true)
+    expect(secondCalled).toBe(false)
+  })
+
+  test('surfaces the last error verbatim when every callback returns ok: false', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerHistory('discord-bot', async () => ({ ok: false, error: 'first-failed' }))
+    router.registerHistory('discord-bot', async () => ({ ok: false, error: 'second-failed' }))
+
+    const result = await router.fetchHistory('discord-bot', { chat: 'c1', thread: null, limit: 1 })
+
+    expect(result).toEqual({ ok: false, error: 'second-failed' })
+  })
+
+  test('unregisterHistory removes the callback so subsequent calls fall back to history-not-supported', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const cb: HistoryCallback = async () => ({ ok: true, messages: [] })
+    router.registerHistory('discord-bot', cb)
+    router.unregisterHistory('discord-bot', cb)
+
+    const result = await router.fetchHistory('discord-bot', { chat: 'c1', thread: null, limit: 1 })
+
+    expect(result).toEqual({ ok: false, error: 'history-not-supported' })
+  })
+
+  test('history registrations are isolated per adapter', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let discordCalls = 0
+    let slackCalls = 0
+    router.registerHistory('discord-bot', async () => {
+      discordCalls++
+      return { ok: true, messages: [] }
+    })
+    router.registerHistory('slack-bot', async () => {
+      slackCalls++
+      return { ok: true, messages: [] }
+    })
+
+    await router.fetchHistory('discord-bot', { chat: 'c1', thread: null, limit: 1 })
+
+    expect(discordCalls).toBe(1)
+    expect(slackCalls).toBe(0)
   })
 })
