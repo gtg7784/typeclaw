@@ -1,6 +1,10 @@
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type {
+  ChannelHistoryMessage,
+  FetchHistoryArgs,
+  FetchHistoryResult,
+  HistoryCallback,
   OutboundCallback,
   OutboundMessage,
   ResolvedChannelNames,
@@ -118,6 +122,158 @@ export function createTypingCallback(deps: {
   }
 }
 
+export const SLACK_HISTORY_LIMIT_MAX = 200
+
+const SLACK_API_BASE = 'https://slack.com/api'
+
+type SlackRawHistoryMessage = {
+  ts: string
+  type?: string
+  subtype?: string
+  user?: string
+  bot_id?: string
+  text?: string
+  thread_ts?: string
+  parent_user_id?: string
+}
+
+type SlackHistoryResponse = {
+  ok: boolean
+  error?: string
+  messages?: SlackRawHistoryMessage[]
+  response_metadata?: { next_cursor?: string }
+}
+
+// Direct fetch to Slack's Web API. The shim only exposes postMessage /
+// setAssistantStatus / testAuth, so history calls go through fetch using
+// the same pattern the Discord adapter uses for /typing. Slack uses
+// application/x-www-form-urlencoded for these endpoints; JSON works too
+// when paired with the right Content-Type but URL-encoded is what every
+// client library defaults to and is the most-tested wire format.
+export function createSlackHistoryCallback(deps: {
+  token: string
+  configRef: () => ChannelAdapterConfig
+  logger: SlackBotAdapterLogger
+  botUserIdRef: () => string | null
+  fetchImpl?: typeof fetch
+}): HistoryCallback {
+  const { token, configRef, logger, botUserIdRef } = deps
+  const fetchFn = deps.fetchImpl ?? fetch
+  return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
+    const config = configRef()
+    if (!isAllowed(config.allow, '@dm', args.chat) && !isAllowedAnyTeam(config.allow, args.chat)) {
+      // Same defense-in-depth as outbound: refuse to fetch history for a
+      // channel the operator hasn't admitted, even if the agent somehow
+      // resolved its id. Returning an error rather than empty so the
+      // agent doesn't think the channel is genuinely silent.
+      return { ok: false, error: 'denied by allow rules' }
+    }
+
+    const limit = clampLimit(args.limit, SLACK_HISTORY_LIMIT_MAX)
+    const endpoint = args.thread === null ? 'conversations.history' : 'conversations.replies'
+    const body = new URLSearchParams()
+    body.set('channel', args.chat)
+    body.set('limit', String(limit))
+    if (args.thread !== null) body.set('ts', args.thread)
+    if (args.cursor !== undefined && args.cursor !== '') body.set('cursor', args.cursor)
+
+    let raw: SlackHistoryResponse
+    try {
+      const response = await fetchFn(`${SLACK_API_BASE}/${endpoint}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
+        },
+        body: body.toString(),
+      })
+      raw = (await response.json()) as SlackHistoryResponse
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.warn(`[slack-bot] history fetch failed: ${message}`)
+      return { ok: false, error: message }
+    }
+
+    if (!raw.ok) {
+      return { ok: false, error: raw.error ?? 'unknown slack error' }
+    }
+
+    const botUserId = botUserIdRef()
+    const rawMessages = raw.messages ?? []
+    const mapped = rawMessages.map((m) => mapSlackMessage(m, botUserId))
+    // Slack's `conversations.history` returns newest-first; `replies`
+    // returns oldest-first. Normalize to oldest-first so the agent always
+    // reads chronological order regardless of scope.
+    if (args.thread === null) mapped.reverse()
+
+    const nextCursor = raw.response_metadata?.next_cursor
+    if (nextCursor !== undefined && nextCursor !== '') {
+      return { ok: true, messages: mapped, nextCursor }
+    }
+    return { ok: true, messages: mapped }
+  }
+}
+
+function mapSlackMessage(msg: SlackRawHistoryMessage, botUserId: string | null): ChannelHistoryMessage {
+  const isBot =
+    msg.subtype === 'bot_message' ||
+    (msg.user !== undefined && botUserId !== null && msg.user === botUserId) ||
+    (msg.bot_id !== undefined && (msg.user === undefined || msg.user === ''))
+  // Slack's parent_user_id is set on thread replies and points at the
+  // author of the parent message. When that parent author is our bot, we
+  // expose this as `replyToBotMessageId = thread_ts` so the agent can
+  // recognize threads it started — same convention as the inbound
+  // classifier uses for live messages.
+  const replyToBotMessageId =
+    msg.thread_ts !== undefined &&
+    msg.parent_user_id !== undefined &&
+    botUserId !== null &&
+    msg.parent_user_id === botUserId
+      ? msg.thread_ts
+      : null
+  return {
+    externalMessageId: msg.ts,
+    authorId: msg.user ?? msg.bot_id ?? 'unknown',
+    authorName: msg.user ?? msg.bot_id ?? 'unknown',
+    text: msg.text ?? '',
+    ts: slackTsToMillis(msg.ts),
+    isBot,
+    replyToBotMessageId,
+  }
+}
+
+function clampLimit(requested: number, max: number): number {
+  if (!Number.isFinite(requested) || requested <= 0) return max
+  return Math.min(Math.floor(requested), max)
+}
+
+// Slack timestamps are "<seconds>.<microseconds>" strings. Convert to ms
+// so callers can sort/render chronologically without re-parsing.
+function slackTsToMillis(ts: string): number {
+  const parsed = Number.parseFloat(ts)
+  if (!Number.isFinite(parsed)) return 0
+  return Math.round(parsed * 1000)
+}
+
+// Slack channel ids are globally unique on Slack's side, so a `channel:C…`
+// or `team:T/C` rule for any team admits this chat. We use this for the
+// history allow check because at fetch time we only know the channel id,
+// not the workspace (the tool resolves the chat from session origin and
+// the workspace doesn't always round-trip through cursor pagination).
+function isAllowedAnyTeam(rules: readonly string[], chat: string): boolean {
+  for (const rule of rules) {
+    if (rule === '*') return true
+    if (rule === 'team:*' || rule === 'guild:*') return true
+    if (rule.startsWith('channel:') && rule.slice(8) === chat) return true
+    if (rule.startsWith('team:')) {
+      const body = rule.slice(5)
+      const slash = body.indexOf('/')
+      if (slash !== -1 && body.slice(slash + 1) === chat) return true
+    }
+  }
+  return false
+}
+
 export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBotAdapter {
   const logger = options.logger ?? consoleLogger
   const client = new SlackBotClient()
@@ -141,6 +297,13 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
   }
 
   const typingCallback = createTypingCallback({ client, configRef: options.configRef, logger, formatChannelTag })
+
+  const historyCallback = createSlackHistoryCallback({
+    token: options.token,
+    configRef: options.configRef,
+    logger,
+    botUserIdRef: () => botUserId,
+  })
 
   const outboundCallback: OutboundCallback = async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'slack-bot') {
@@ -290,6 +453,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.registerOutbound('slack-bot', outboundCallback)
       options.router.registerTyping('slack-bot', typingCallback)
       options.router.registerChannelNameResolver('slack-bot', channelResolver)
+      options.router.registerHistory('slack-bot', historyCallback)
 
       try {
         await listener.start()
@@ -306,6 +470,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.unregisterOutbound('slack-bot', outboundCallback)
       options.router.unregisterTyping('slack-bot', typingCallback)
       options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
+      options.router.unregisterHistory('slack-bot', historyCallback)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)
