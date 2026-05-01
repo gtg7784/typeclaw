@@ -31,37 +31,105 @@ describe('slack-bot adapter (unit-level pure helpers)', () => {
 })
 
 describe('slack-bot createTypingCallback', () => {
-  test('is a no-op for matching slack-bot targets (Slack has no public typing endpoint)', async () => {
+  type SetStatusCall = { channel: string; threadTs: string; status: string }
+
+  function makeFakeClient(behavior: 'ok' | 'reject' = 'ok'): {
+    client: { setAssistantStatus: (channel: string, threadTs: string, status: string) => Promise<void> }
+    calls: SetStatusCall[]
+  } {
+    const calls: SetStatusCall[] = []
+    return {
+      calls,
+      client: {
+        setAssistantStatus: async (channel, threadTs, status) => {
+          calls.push({ channel, threadTs, status })
+          if (behavior === 'reject') throw new Error('channel_not_found')
+        },
+      },
+    }
+  }
+
+  test('calls setAssistantStatus with chat + thread when target is in a thread', async () => {
+    // given
+    const { client, calls } = makeFakeClient()
+    const cb = createTypingCallback({
+      client,
+      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    // when
+    await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: '1700000000.000100' })
+    // then
+    expect(calls).toEqual([{ channel: 'C0CHANNEL', threadTs: '1700000000.000100', status: 'is typing...' }])
+  })
+
+  test('is a no-op (logs info, no API call) for top-level chats without a thread', async () => {
+    // given
+    const { client, calls } = makeFakeClient()
     const infos: string[] = []
     const cb = createTypingCallback({
+      client,
       configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
       logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
     })
+    // when
     await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: null })
-    expect(infos.some((m) => m.includes('typing (no-op)'))).toBe(true)
+    // then
+    expect(calls).toHaveLength(0)
+    expect(infos.some((m) => m.includes('top-level chat'))).toBe(true)
   })
 
-  test('skips disallowed channels silently', async () => {
-    const infos: string[] = []
+  test('warns (does not throw) when Slack rejects the API call', async () => {
+    // given
+    const { client, calls } = makeFakeClient('reject')
+    const warns: string[] = []
     const cb = createTypingCallback({
+      client,
+      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+    })
+    // when
+    await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: '1700000000.000100' })
+    // then
+    expect(calls).toHaveLength(1)
+    expect(warns.some((m) => m.includes('typing') && m.includes('channel_not_found'))).toBe(true)
+  })
+
+  test('skips disallowed channels silently (no API call, no log)', async () => {
+    // given
+    const { client, calls } = makeFakeClient()
+    const infos: string[] = []
+    const warns: string[] = []
+    const cb = createTypingCallback({
+      client,
       configRef: () => ({
         allow: ['team:T0OTHER'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
       }),
-      logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
+      logger: { info: (m) => infos.push(m), warn: (m) => warns.push(m), error: () => {} },
     })
-    await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: null })
+    // when
+    await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: '1700000000.000100' })
+    // then
+    expect(calls).toHaveLength(0)
     expect(infos).toHaveLength(0)
+    expect(warns).toHaveLength(0)
   })
 
-  test('rejects non-slack adapter without logging', async () => {
+  test('rejects non-slack adapter without API call or logging', async () => {
+    // given
+    const { client, calls } = makeFakeClient()
     const infos: string[] = []
     const cb = createTypingCallback({
+      client,
       configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
       logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
     })
-    await cb({ adapter: 'discord-bot', workspace: '1', chat: '2', thread: null })
+    // when
+    await cb({ adapter: 'discord-bot', workspace: '1', chat: '2', thread: '3' })
+    // then
+    expect(calls).toHaveLength(0)
     expect(infos).toHaveLength(0)
   })
 })

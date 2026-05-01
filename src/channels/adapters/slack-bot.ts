@@ -79,19 +79,26 @@ export type SlackBotAdapter = {
   isConnected: () => boolean
 }
 
-// Slack typing indicators inside Socket Mode are advertised under the
-// `assistant.threads.setStatus` Web API, which only works for the AI Agents
-// & Assistants beta. For the general bot path there is no public typing
-// endpoint, so we make the typing callback a no-op rather than spamming
-// channel.history with placeholder messages. This is consistent with how
-// most production Slack bots behave (no visible typing dot) and keeps the
-// router's typing heartbeat from generating warning noise.
+// Slack's only bot-accessible typing-style signal is `assistant.threads.
+// setStatus`, which is scoped to AI Assistant threads and requires a
+// `thread_ts`. The classic `user_typing` is RTM-only and rejects bot
+// tokens, so there is nothing to send for top-level (non-threaded) chats —
+// we log and bail in that case. Slack auto-clears the status when the bot
+// posts its reply, so we only set; we never explicitly clear.
+//
+// The router fires this on a heartbeat (~every few seconds while
+// debouncing/generating). Slack rejects calls in non-Assistant channels
+// with `channel_not_found` / `not_in_channel`-style errors; we surface
+// those as a single warn line per heartbeat (matching the Discord
+// adapter's non-2xx handling) rather than escalating to error, because
+// the bot may simply be deployed in a regular channel.
 export function createTypingCallback(deps: {
+  client: Pick<SlackBotClient, 'setAssistantStatus'>
   configRef: () => ChannelAdapterConfig
   logger: SlackBotAdapterLogger
   formatChannelTag?: (workspace: string, chat: string) => Promise<string>
 }): TypingCallback {
-  const { configRef, logger, formatChannelTag } = deps
+  const { client, configRef, logger, formatChannelTag } = deps
   return async (target: TypingTarget): Promise<void> => {
     if (target.adapter !== 'slack-bot') return
     const config = configRef()
@@ -99,7 +106,15 @@ export function createTypingCallback(deps: {
     const tag = formatChannelTag
       ? await formatChannelTag(target.workspace, target.thread ?? target.chat)
       : `channel=${target.thread ?? target.chat}`
-    logger.info(`[slack-bot] typing (no-op) ${tag}`)
+    if (target.thread === undefined || target.thread === null || target.thread === '') {
+      logger.info(`[slack-bot] typing (no-op, top-level chat) ${tag}`)
+      return
+    }
+    try {
+      await client.setAssistantStatus(target.chat, target.thread, 'is typing...')
+    } catch (err) {
+      logger.warn(`[slack-bot] typing ${tag} failed: ${describe(err)}`)
+    }
   }
 }
 
@@ -125,7 +140,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     return `${workspacePart} ${chatPart}`
   }
 
-  const typingCallback = createTypingCallback({ configRef: options.configRef, logger, formatChannelTag })
+  const typingCallback = createTypingCallback({ client, configRef: options.configRef, logger, formatChannelTag })
 
   const outboundCallback: OutboundCallback = async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'slack-bot') {

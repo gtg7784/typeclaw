@@ -85,6 +85,7 @@ export interface SlackBotClient {
   login(credentials?: { token: string }): Promise<this>
   testAuth(): Promise<SlackTestAuth>
   postMessage(channel: string, text: string, options?: { thread_ts?: string }): Promise<SlackPostedMessage>
+  setAssistantStatus(channel: string, threadTs: string, status: string): Promise<void>
 }
 
 export interface SlackBotListener {
