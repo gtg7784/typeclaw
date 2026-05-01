@@ -4,11 +4,24 @@ import { defineTool } from '@mariozechner/pi-coding-agent'
 import type { ChannelRouter } from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 
-export type CreateChannelSendToolOptions = {
-  router: ChannelRouter
+export type ChannelSendOrigin = {
+  adapter: AdapterId
+  workspace: string
+  chat: string
+  thread: string | null
 }
 
-export function createChannelSendTool({ router }: CreateChannelSendToolOptions) {
+export type CreateChannelSendToolOptions = {
+  router: ChannelRouter
+  // Optional channel origin for the session this tool is wired into. When
+  // present, the tool can detect "you posted to the same conversation but
+  // dropped the thread" and surface that as a hint in the tool result, so
+  // the model can self-correct on its next turn. Absent for sessions whose
+  // origin isn't a channel (e.g. cron prompts that send to channels).
+  origin?: ChannelSendOrigin
+}
+
+export function createChannelSendTool({ router, origin }: CreateChannelSendToolOptions) {
   return defineTool({
     name: 'channel_send',
     label: 'Channel Send',
@@ -62,22 +75,59 @@ export function createChannelSendTool({ router }: CreateChannelSendToolOptions) 
       const baseText = result.ok
         ? `posted to ${params.adapter}:${params.workspace}/${params.chat}`
         : `channel_send denied: ${result.error}`
-      const hint = result.ok
-        ? consecutiveSendHint(
-            router.getConsecutiveSendCount({
-              adapter,
-              workspace: params.workspace,
-              chat: params.chat,
-              thread: params.thread ?? null,
-            }),
-          )
-        : ''
+      const hints: string[] = []
+      if (result.ok) {
+        const consecutive = consecutiveSendHint(
+          router.getConsecutiveSendCount({
+            adapter,
+            workspace: params.workspace,
+            chat: params.chat,
+            thread: params.thread ?? null,
+          }),
+        )
+        if (consecutive) hints.push(consecutive)
+
+        const threadMismatch = threadMismatchHint(origin, {
+          adapter,
+          workspace: params.workspace,
+          chat: params.chat,
+          thread: params.thread,
+        })
+        if (threadMismatch) hints.push(threadMismatch)
+      }
+      const text = hints.length > 0 ? `${baseText} — ${hints.join(' ')}` : baseText
       return {
-        content: [{ type: 'text' as const, text: hint ? `${baseText} — ${hint}` : baseText }],
+        content: [{ type: 'text' as const, text }],
         details,
       }
     },
   })
+}
+
+// Returns a behavioral hint when the model posted to the SAME conversation
+// as the session's origin (same adapter+workspace+chat) but DROPPED the
+// thread. This catches the "model forgot to copy thread verbatim" failure
+// mode without blocking legitimate intent — if leaving the thread was on
+// purpose ("새 스레드에서 시작하자"), the model can ignore this hint; if it
+// wasn't, the next channel_send (or channel_reply) can correct course.
+//
+// Only fires when the origin had a thread to begin with — channel-root
+// sessions can't have a "missing thread" problem.
+function threadMismatchHint(
+  origin: ChannelSendOrigin | undefined,
+  sent: { adapter: AdapterId; workspace: string; chat: string; thread: string | undefined },
+): string {
+  if (!origin) return ''
+  if (origin.thread === null) return ''
+  if (sent.thread !== undefined) return ''
+  if (origin.adapter !== sent.adapter) return ''
+  if (origin.workspace !== sent.workspace) return ''
+  if (origin.chat !== sent.chat) return ''
+  return (
+    `note: this session's origin thread is ${JSON.stringify(origin.thread)} but you posted to channel root. ` +
+    `if breaking out of the thread was intentional, ignore this; otherwise prefer \`channel_reply\` ` +
+    `or pass \`thread: ${JSON.stringify(origin.thread)}\` on your next channel_send.`
+  )
 }
 
 // Returns a behavioral hint to nudge the model toward yielding when it has
