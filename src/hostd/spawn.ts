@@ -1,28 +1,81 @@
+import { existsSync } from 'node:fs'
 import { open, readFile, unlink, writeFile } from 'node:fs/promises'
 
-import { isDaemonReachable } from './client'
-import { ensureDirs, lockfilePath, logfilePath, pidfilePath } from './paths'
+import { isDaemonReachable, send } from './client'
+import { ensureDirs, lockfilePath, logfilePath, pidfilePath, socketPath } from './paths'
+import type { VersionResult } from './protocol'
+import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from './version'
 
 export type EnsureDaemonOptions = {
   brokerEntry: string
   spawnTimeoutMs?: number
+  // Test seam: tests inject a deterministic version probe + respawn so the
+  // unit test can exercise the drift path without spawning a real daemon.
+  expectedVersion?: string
 }
 
-export type EnsureDaemonResult = { ok: true; pid: number; spawned: boolean } | { ok: false; reason: string }
+export type EnsureDaemonResult =
+  | { ok: true; pid: number; spawned: boolean; respawned: boolean }
+  | { ok: false; reason: string }
 
 const DEFAULT_SPAWN_TIMEOUT_MS = 5_000
+const SHUTDOWN_TIMEOUT_MS = 5_000
 const POLL_INTERVAL_MS = 50
 
 export async function ensureDaemon(opts: EnsureDaemonOptions): Promise<EnsureDaemonResult> {
   if (await isDaemonReachable()) {
-    return { ok: true, pid: await readPidQuiet(), spawned: false }
+    const expected = opts.expectedVersion ?? (await deriveExpectedVersion(opts.brokerEntry))
+    if (await daemonVersionMatches(expected)) {
+      return { ok: true, pid: await readPidQuiet(), spawned: false, respawned: false }
+    }
+    const shutdownOk = await requestShutdownAndWait()
+    if (!shutdownOk) {
+      return { ok: false, reason: 'daemon version drifted but shutdown request did not complete' }
+    }
+    await ensureDirs()
+    const respawn = await ensureDaemonWithRetry(opts, 1)
+    if (!respawn.ok) return respawn
+    return { ...respawn, respawned: true }
   }
 
   await ensureDirs()
-  return ensureDaemonWithRetry(opts, 1)
+  const result = await ensureDaemonWithRetry(opts, 1)
+  if (!result.ok) return result
+  return { ...result, respawned: false }
 }
 
-async function ensureDaemonWithRetry(opts: EnsureDaemonOptions, retriesLeft: number): Promise<EnsureDaemonResult> {
+async function deriveExpectedVersion(brokerEntry: string): Promise<string> {
+  const srcRoot = resolveSrcRoot(brokerEntry)
+  if (srcRoot === null) return UNVERSIONED_SENTINEL
+  return computeSourceVersion({ srcRoot })
+}
+
+// A `version` reply that doesn't deserialize cleanly (e.g. a pre-feature
+// daemon that doesn't recognize the kind) is treated as a mismatch. Same for
+// any non-ok response. Conservative: it's safer to over-respawn than to keep
+// running stale code.
+async function daemonVersionMatches(expected: string): Promise<boolean> {
+  const reply = await send({ kind: 'version' }, { timeoutMs: 1_000 })
+  if (!reply.ok) return false
+  const result = reply.result as VersionResult | undefined
+  if (!result || typeof result.version !== 'string') return false
+  return result.version === expected
+}
+
+async function requestShutdownAndWait(): Promise<boolean> {
+  const reply = await send({ kind: 'shutdown' }, { timeoutMs: 1_000 })
+  if (!reply.ok) return false
+  const deadline = Date.now() + SHUTDOWN_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (!existsSync(socketPath())) return true
+    await sleep(POLL_INTERVAL_MS)
+  }
+  return false
+}
+
+type SpawnAttemptResult = { ok: true; pid: number; spawned: boolean } | { ok: false; reason: string }
+
+async function ensureDaemonWithRetry(opts: EnsureDaemonOptions, retriesLeft: number): Promise<SpawnAttemptResult> {
   const lock = await acquireLockOrWait(opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS)
   if (lock.kind === 'daemon-reachable') {
     return { ok: true, pid: await readPidQuiet(), spawned: false }
@@ -45,7 +98,7 @@ async function ensureDaemonWithRetry(opts: EnsureDaemonOptions, retriesLeft: num
   }
 }
 
-async function spawnDaemonDetached(opts: EnsureDaemonOptions): Promise<EnsureDaemonResult> {
+async function spawnDaemonDetached(opts: EnsureDaemonOptions): Promise<SpawnAttemptResult> {
   // Bun.spawn() with `stdout: <number>` consumes the file descriptor by
   // dup()-ing it into the child; the parent's handle remains valid until we
   // close it. Closing too early would race the dup. We hold the FileHandle

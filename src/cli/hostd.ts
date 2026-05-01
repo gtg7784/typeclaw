@@ -5,6 +5,7 @@ import { start, stop } from '@/container'
 import type { BrokerLogEvent } from '@/hostd'
 import { startDaemon, type DaemonLogEvent } from '@/hostd/daemon'
 import type { SupervisorLogEvent } from '@/hostd/supervisor'
+import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from '@/hostd/version'
 
 export const hostdCommand = defineCommand({
   meta: {
@@ -13,8 +14,14 @@ export const hostdCommand = defineCommand({
     hidden: true,
   },
   async run() {
+    const brokerEntry = process.argv[1] ?? ''
+    const srcRoot = resolveSrcRoot(brokerEntry)
+    const version = srcRoot === null ? UNVERSIONED_SENTINEL : await computeSourceVersion({ srcRoot })
+
     const daemon = await startDaemon({
       onLog: (e) => console.log(formatLog(e)),
+      version,
+      onShutdown: () => process.exit(0),
       restart: async ({ containerName, cwd }) => {
         const validated = validateConfig(cwd)
         if (!validated.ok) {
@@ -29,7 +36,7 @@ export const hostdCommand = defineCommand({
           preferredHostPort: cfg.port,
           autoForward: cfg.autoForward,
           autoForwardExclude: cfg.autoForwardExclude,
-          brokerEntry: process.argv[1],
+          brokerEntry,
         })
         if (!startResult.ok) return { ok: false, reason: `start failed: ${startResult.reason}` }
         return { ok: true }
@@ -52,6 +59,8 @@ function formatLog(event: BrokerLogEvent | DaemonLogEvent | SupervisorLogEvent):
       return `[hostd] listening on ${event.socket}`
     case 'daemon-stopping':
       return `[hostd] stopping`
+    case 'shutdown-requested':
+      return `[hostd] shutdown requested (version drift); exiting so the next CLI call respawns`
     case 'register':
       return `[hostd] registered ${event.containerName}`
     case 'deregister':

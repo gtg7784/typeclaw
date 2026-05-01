@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,8 +8,9 @@ import type { DockerExec } from '@/container'
 
 import { send } from './client'
 import { startDaemon, type Daemon } from './daemon'
+import { socketPath } from './paths'
 import type { Forwarder, ForwarderOptions, ForwarderStartResult } from './portbroker/forwarder'
-import type { ListResult } from './protocol'
+import type { ListResult, VersionResult } from './protocol'
 
 const PROC_HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
 
@@ -386,5 +388,78 @@ describe('startDaemon', () => {
     expect(ack.ok).toBe(false)
     if (ack.ok) return
     expect(ack.reason).toContain('not enabled')
+  })
+
+  test('version RPC reports the captured version string', async () => {
+    daemon = await startDaemon({
+      exec: fakeExec(new Map()),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+      version: 'abcdef0123',
+    })
+    const reply = await send({ kind: 'version' })
+    expect(reply.ok).toBe(true)
+    if (!reply.ok) return
+    expect((reply.result as VersionResult).version).toBe('abcdef0123')
+  })
+
+  test('version RPC falls back to "unversioned" when no version was provided', async () => {
+    daemon = await startDaemon({
+      exec: fakeExec(new Map()),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+    })
+    const reply = await send({ kind: 'version' })
+    expect(reply.ok).toBe(true)
+    if (!reply.ok) return
+    expect((reply.result as VersionResult).version).toBe('unversioned')
+  })
+
+  test('shutdown RPC ACKs, calls onShutdown, removes the socket file', async () => {
+    let onShutdownCalls = 0
+    daemon = await startDaemon({
+      exec: fakeExec(new Map()),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+      onShutdown: () => {
+        onShutdownCalls += 1
+      },
+    })
+    expect(existsSync(socketPath())).toBe(true)
+
+    const ack = await send({ kind: 'shutdown' })
+    expect(ack.ok).toBe(true)
+
+    const start = Date.now()
+    while (Date.now() - start < 1500) {
+      if (!existsSync(socketPath()) && onShutdownCalls === 1) {
+        daemon = null
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    throw new Error(
+      `shutdown did not complete in time (socket exists=${existsSync(socketPath())}, onShutdown calls=${onShutdownCalls})`,
+    )
+  })
+
+  test('shutdown RPC is idempotent: a second shutdown after stop is still ok', async () => {
+    daemon = await startDaemon({
+      exec: fakeExec(new Map()),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+      onShutdown: () => {},
+    })
+    await send({ kind: 'shutdown' })
+
+    const start = Date.now()
+    while (Date.now() - start < 1500) {
+      if (!existsSync(socketPath())) {
+        daemon = null
+        return
+      }
+      await new Promise((resolve) => setTimeout(resolve, 30))
+    }
+    throw new Error('shutdown did not complete in time')
   })
 })
