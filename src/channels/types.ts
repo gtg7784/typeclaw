@@ -49,6 +49,38 @@ export type ResolvedChannelNames = {
 
 export type ChannelNameResolver = (key: ChannelKey) => Promise<ResolvedChannelNames>
 
+// History entries are intentionally distinct from InboundMessage:
+// `InboundMessage` carries router-classification fields (`isBotMention`,
+// `isDm`) that are turn-delivery concerns, not history concerns. History
+// entries instead need `isBot` so the agent can tell its own past replies
+// from user messages, and a sortable `ts` for chronological rendering.
+export type ChannelHistoryMessage = {
+  externalMessageId: string
+  authorId: string
+  authorName: string
+  text: string
+  ts: number
+  isBot: boolean
+  replyToBotMessageId: string | null
+}
+
+export type FetchHistoryArgs = {
+  chat: string
+  thread: string | null
+  limit: number
+  cursor?: string
+}
+
+export type FetchHistoryResult =
+  | { ok: true; messages: ChannelHistoryMessage[]; nextCursor?: string }
+  | { ok: false; error: string }
+
+// Registered per-adapter on the ChannelRouter alongside outbound/typing
+// callbacks. Adapters that cannot fetch history (e.g. webhook-only future
+// adapters) simply do not register one; the router answers
+// 'history-not-supported' for those.
+export type HistoryCallback = (args: FetchHistoryArgs) => Promise<FetchHistoryResult>
+
 export function channelKeyId(key: ChannelKey): string {
   return `${key.adapter}:${key.workspace}:${key.chat}:${key.thread ?? ''}`
 }
