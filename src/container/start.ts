@@ -49,7 +49,11 @@ export type StartOptions = {
   brokerEntry?: string
 }
 
-export type BrokerStatus = { state: 'registered' } | { state: 'unavailable'; reason: string } | { state: 'disabled' }
+export type BrokerStatus =
+  | { state: 'registered' }
+  | { state: 'supervisor-only' }
+  | { state: 'unavailable'; reason: string }
+  | { state: 'disabled' }
 
 export type StartResult =
   | {
@@ -70,7 +74,7 @@ export async function start({
   allocatePort = findFreePort,
   autoForward = false,
   autoForwardExclude = [],
-  brokerEntry = process.argv[1],
+  brokerEntry,
 }: StartOptions): Promise<StartResult> {
   try {
     // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
@@ -136,10 +140,15 @@ export async function start({
       return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
     }
 
-    const broker =
-      autoForward && brokerEntry
-        ? await registerWithDaemon(cwd, plan.containerName, brokerEntry, [CONTAINER_PORT, ...autoForwardExclude])
-        : { state: 'disabled' as const }
+    const broker = brokerEntry
+      ? await registerWithDaemon({
+          cwd,
+          containerName: plan.containerName,
+          brokerEntry,
+          excludePorts: [CONTAINER_PORT, ...autoForwardExclude],
+          disableForwarding: !autoForward,
+        })
+      : { state: 'disabled' as const }
 
     return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, broker }
   } catch (error) {
@@ -306,17 +315,30 @@ function expandMountPath(input: string, cwd: string): string {
   return isAbsolute(input) ? input : resolve(cwd, input)
 }
 
-async function registerWithDaemon(
-  cwd: string,
-  containerName: string,
-  brokerEntry: string,
-  excludePorts: number[],
-): Promise<BrokerStatus> {
+async function registerWithDaemon({
+  cwd,
+  containerName,
+  brokerEntry,
+  excludePorts,
+  disableForwarding,
+}: {
+  cwd: string
+  containerName: string
+  brokerEntry: string
+  excludePorts: number[]
+  disableForwarding: boolean
+}): Promise<BrokerStatus> {
   const ensured = await ensureDaemon({ brokerEntry })
   if (!ensured.ok) return { state: 'unavailable', reason: ensured.reason }
-  const reply = await sendToDaemon({ kind: 'register', containerName, cwd, excludePorts })
+  const reply = await sendToDaemon({
+    kind: 'register',
+    containerName,
+    cwd,
+    excludePorts,
+    disableForwarding,
+  })
   if (!reply.ok) return { state: 'unavailable', reason: reply.reason }
-  return { state: 'registered' }
+  return { state: disableForwarding ? 'supervisor-only' : 'registered' }
 }
 
 // process.env.TZ is honored first because users who explicitly set it (e.g.

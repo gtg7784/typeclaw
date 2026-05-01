@@ -61,6 +61,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const gcIntervalMs = opts.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS
   const gcMissesToDeregister = opts.gcMissesToDeregister ?? DEFAULT_GC_MISSES_TO_DEREGISTER
   const brokers = new Map<string, Broker>()
+  const cwds = new Map<string, string>()
   const perContainerSerial = new Map<string, Promise<unknown>>()
   const gcMisses = new Map<string, number>()
   let stopped = false
@@ -82,11 +83,20 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     containerName: string
     cwd: string
     excludePorts?: number[]
+    disableForwarding?: boolean
   }): Promise<Response> => {
     if (stopped) return { ok: false, reason: 'daemon stopping' }
     return runSerially(req.containerName, async () => {
       if (stopped) return { ok: false, reason: 'daemon stopping' }
-      if (brokers.has(req.containerName)) return { ok: true }
+      if (brokers.has(req.containerName) || cwds.has(req.containerName)) {
+        cwds.set(req.containerName, req.cwd)
+        return { ok: true }
+      }
+      if (req.disableForwarding === true) {
+        cwds.set(req.containerName, req.cwd)
+        log({ kind: 'register', containerName: req.containerName })
+        return { ok: true }
+      }
       const result = await startBroker({
         containerName: req.containerName,
         excludePorts: new Set<number>(req.excludePorts ?? []),
@@ -99,6 +109,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
             const broker = brokers.get(req.containerName)
             if (!broker) return { ok: true }
             brokers.delete(req.containerName)
+            cwds.delete(req.containerName)
             log({ kind: 'deregister', containerName: req.containerName, reason: 'fatal' })
             await broker.stop()
             return { ok: true }
@@ -107,6 +118,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       })
       if (!result.ok) return { ok: false, reason: result.reason }
       brokers.set(req.containerName, result.broker)
+      cwds.set(req.containerName, req.cwd)
       log({ kind: 'register', containerName: req.containerName })
       return { ok: true }
     })
@@ -115,9 +127,13 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const handleDeregister = async (req: { containerName: string }): Promise<Response> =>
     runSerially(req.containerName, async () => {
       const broker = brokers.get(req.containerName)
-      if (!broker) return { ok: true }
-      brokers.delete(req.containerName)
+      const hadCwd = cwds.delete(req.containerName)
       gcMisses.delete(req.containerName)
+      if (!broker) {
+        if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
+        return { ok: true }
+      }
+      brokers.delete(req.containerName)
       log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
       await broker.stop()
       return { ok: true }
@@ -225,7 +241,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   }
 
   const runGc = async (): Promise<void> => {
-    for (const name of Array.from(brokers.keys())) {
+    for (const name of Array.from(cwds.keys())) {
       const status = await probeContainerAlive(name)
       if (status === 'alive') {
         gcMisses.delete(name)
@@ -240,7 +256,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       gcMisses.delete(name)
       void runSerially(name, async () => {
         const broker = brokers.get(name)
-        if (!broker) return { ok: true }
+        const hadCwd = cwds.delete(name)
+        if (!broker) {
+          if (hadCwd) log({ kind: 'deregister', containerName: name, reason: 'gone' })
+          return { ok: true }
+        }
         brokers.delete(name)
         log({ kind: 'deregister', containerName: name, reason: 'gone' })
         await broker.stop()
@@ -250,7 +270,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   }
 
   const gcTimer = setInterval(() => {
-    if (stopped || brokers.size === 0) return
+    if (stopped || cwds.size === 0) return
     void runGc()
   }, gcIntervalMs)
 
@@ -266,6 +286,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       } catch {}
       const all = Array.from(brokers.values())
       brokers.clear()
+      cwds.clear()
       await Promise.all(all.map((b) => b.stop()))
       try {
         if (existsSync(path)) await unlink(path)
