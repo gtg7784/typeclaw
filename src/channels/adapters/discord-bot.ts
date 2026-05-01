@@ -8,6 +8,7 @@ import {
   DiscordIntent,
   type DiscordGatewayMessageCreateEvent,
 } from './agent-messenger-shim'
+import { createDiscordChannelResolver } from './discord-bot-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './discord-bot-classify'
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10'
@@ -95,6 +96,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
   let stopWaiters: Array<() => void> = []
 
   const typingCallback = createTypingCallback({ token: options.token, configRef: options.configRef, logger })
+  const channelResolver = createDiscordChannelResolver({ token: options.token })
 
   const outboundCallback: OutboundCallback = async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'discord-bot') {
@@ -182,6 +184,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
 
       options.router.registerOutbound('discord-bot', outboundCallback)
       options.router.registerTyping('discord-bot', typingCallback)
+      options.router.registerChannelNameResolver('discord-bot', channelResolver)
 
       try {
         await listener.start()
@@ -197,6 +200,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       started = false
       options.router.unregisterOutbound('discord-bot', outboundCallback)
       options.router.unregisterTyping('discord-bot', typingCallback)
+      options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)

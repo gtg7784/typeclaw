@@ -9,6 +9,7 @@ import {
   type SlackSocketMessageEvent,
 } from './agent-messenger-slack-shim'
 import { createSlackAuthorResolver } from './slack-bot-author-resolver'
+import { createSlackChannelResolver } from './slack-bot-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './slack-bot-classify'
 
 // Bound on the dedupe ring buffer. Slack's Events API may deliver the same
@@ -93,6 +94,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
   let stopWaiters: Array<() => void> = []
 
   const authorResolver = createSlackAuthorResolver({ token: options.token })
+  const channelResolver = createSlackChannelResolver({ token: options.token })
 
   const typingCallback = createTypingCallback({ configRef: options.configRef, logger })
 
@@ -237,6 +239,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
 
       options.router.registerOutbound('slack-bot', outboundCallback)
       options.router.registerTyping('slack-bot', typingCallback)
+      options.router.registerChannelNameResolver('slack-bot', channelResolver)
 
       try {
         await listener.start()
@@ -252,6 +255,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       started = false
       options.router.unregisterOutbound('slack-bot', outboundCallback)
       options.router.unregisterTyping('slack-bot', typingCallback)
+      options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)
