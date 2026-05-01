@@ -379,10 +379,15 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('blocked assistant_text_without_channel_tool'))).toBe(false)
   })
 
-  test('blocks visible assistant text when no channel tool sent a message', async () => {
+  test('recovers visible assistant text when no channel tool sent a message', async () => {
     const dir = await tempDir()
     const logs: string[] = []
     const { router, sessions } = makeRouter(dir, { logs })
+    const sent: Array<{ chat: string; thread: string | null | undefined; text: string }> = []
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ chat: msg.chat, thread: msg.thread, text: msg.text })
+      return { ok: true }
+    })
 
     await router.route(inbound({ text: 'say hi' }))
     sessions[0]!.onPrompt = () => {
@@ -390,7 +395,25 @@ describe('ChannelRouter channel-turn protocol', () => {
     }
     await router.__testing!.flushDebounce(KEY)
 
-    expect(logs.some((m) => m.includes('blocked assistant_text_without_channel_tool'))).toBe(true)
+    expect(sent).toEqual([{ chat: 'c1', thread: null, text: 'hi from invisible assistant text' }])
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
+    expect(logs.some((m) => m.includes('blocked assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('logs recovery send failures without crashing the drain loop', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async () => ({ ok: false, error: 'denied by adapter' }))
+
+    await router.route(inbound({ text: 'say hi' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('hi from invisible assistant text')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('recovery send failed: denied by adapter'))).toBe(true)
+    expect(logs.some((m) => m.includes('prompt threw'))).toBe(false)
   })
 
   test('does not block visible assistant text after a successful channel send', async () => {

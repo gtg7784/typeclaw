@@ -431,7 +431,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const successfulSendsBeforePrompt = live.successfulChannelSends
         try {
           await live.session.prompt(text)
-          validateChannelTurn(live, successfulSendsBeforePrompt)
+          await validateChannelTurn(live, successfulSendsBeforePrompt)
           live.consecutiveAborts = 0
           logger.info(`[channels] ${live.keyId} prompted elapsed_ms=${now() - promptStart}`)
         } catch (err) {
@@ -625,7 +625,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { ok: true }
   }
 
-  const validateChannelTurn = (live: LiveSession, successfulSendsBeforePrompt: number): void => {
+  const validateChannelTurn = async (live: LiveSession, successfulSendsBeforePrompt: number): Promise<void> => {
     if (live.successfulChannelSends > successfulSendsBeforePrompt) return
 
     const assistantText = latestAssistantText(live.session)
@@ -637,8 +637,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
 
     logger.warn(
-      `[channels] ${live.keyId}: blocked assistant_text_without_channel_tool text_len=${assistantText.length}`,
+      `[channels] ${live.keyId}: recovering assistant_text_without_channel_tool text_len=${assistantText.length}`,
     )
+    const result = await send({
+      adapter: live.key.adapter,
+      workspace: live.key.workspace,
+      chat: live.key.chat,
+      thread: live.key.thread,
+      text: assistantText,
+    })
+    if (!result.ok) {
+      logger.warn(`[channels] ${live.keyId}: recovery send failed: ${result.error}`)
+    }
   }
 
   const getConsecutiveSendCount = (target: {
