@@ -1,6 +1,16 @@
 export { isDaemonReachable, send } from './client'
 export { startDaemon, type Daemon, type DaemonLogEvent, type DaemonOptions } from './daemon'
-export { ensureDirs, homeRoot, lockfilePath, logDir, logfilePath, pidfilePath, runDir, socketPath } from './paths'
+export {
+  containerSocketPath,
+  ensureDirs,
+  homeRoot,
+  lockfilePath,
+  logDir,
+  logfilePath,
+  pidfilePath,
+  runDir,
+  socketPath,
+} from './paths'
 export {
   defaultResolveIp,
   startBroker,
@@ -24,5 +34,6 @@ export {
   type ForwarderOptions,
   type ForwarderStartResult,
 } from './portbroker/forwarder'
-export type { ListResult, Request, Response, StatusResult } from './protocol'
+export type { ListResult, Request, Response, RestartResult, StatusResult } from './protocol'
 export { ensureDaemon, type EnsureDaemonOptions, type EnsureDaemonResult } from './spawn'
+export type { SupervisorOptions } from './supervisor'

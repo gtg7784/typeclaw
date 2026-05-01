@@ -27,6 +27,7 @@ export type ServerOptions = {
   channelRouter?: ChannelRouter
   agentDir?: string
   pluginRuntime?: PluginRuntime
+  containerName?: string
 }
 
 export type Server = ReturnType<typeof createServer>
@@ -70,6 +71,7 @@ export function createServer({
   channelRouter,
   agentDir,
   pluginRuntime,
+  containerName,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
 
@@ -106,6 +108,7 @@ export function createServer({
             ...(stream ? { stream } : {}),
             ...(channelRouter ? { channelRouter } : {}),
             ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
+            ...(containerName !== undefined ? { containerName } : {}),
           })
           const session = 'session' in result ? result.session : result
           const dispose = 'session' in result && result.dispose ? result.dispose : async () => {}

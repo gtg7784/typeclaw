@@ -19,6 +19,7 @@ export type BuildChannelSessionFactoryDeps = {
   // cycle while still ensuring the factory's sessions get the same router
   // their inbound messages came from.
   getChannelRouter: () => ChannelRouter
+  containerName?: string
   // Test seam: lets a fake stand in for the agent session creator so tests
   // can assert exactly which CreateSessionOptions the factory builds without
   // needing a live LLM, plugin runtime, or session manager on disk.
@@ -57,6 +58,7 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
             },
           }
         : {}),
+      ...(deps.containerName !== undefined ? { containerName: deps.containerName } : {}),
     })
 
     return {

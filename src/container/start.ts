@@ -5,6 +5,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 
 import { configSchema, type Mount } from '@/config/config'
 import { send as sendToDaemon } from '@/hostd/client'
+import { containerHostRunDir, runDir } from '@/hostd/paths'
 import { ensureDaemon } from '@/hostd/spawn'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
@@ -187,7 +188,21 @@ export async function planStart({
     runArgs.push('-e', `TZ=${hostTz}`)
   }
 
+  // The agent's `restart` tool needs to identify itself to hostd. Inside the
+  // container, cwd is `/agent` and basename(cwd) loses the host folder name,
+  // so we cannot derive containerName from cwd at runtime. Inject it as an
+  // env var — same way TZ is plumbed.
+  runArgs.push('-e', `TYPECLAW_CONTAINER_NAME=${containerName}`)
+
   runArgs.push('-v', `${cwd}:/agent`)
+
+  // Bind-mount the host daemon's run dir into the container at a fixed path
+  // so the agent can talk to the singleton hostd over its Unix socket. This
+  // is what makes container-initiated operations (e.g. the `restart` tool)
+  // possible without giving the container access to the Docker socket.
+  // Read-write because the bun TCP/Unix client opens the socket file; the
+  // daemon enforces auth by scoping each RPC to the registered containerName.
+  runArgs.push('-v', `${runDir()}:${containerHostRunDir()}`)
 
   // Dev mode: node_modules/typeclaw is a symlink to an absolute host path
   // outside /agent. Mirror-mount that path so the symlink resolves in-container.

@@ -14,16 +14,21 @@ import {
   type ContainerIpResolver,
   type ForwarderFactory,
 } from './portbroker/broker'
-import type { ListResult, Request, Response, StatusResult } from './protocol'
+import type { ListResult, Request, Response, RestartResult, StatusResult } from './protocol'
+import { buildSupervisor, type SupervisorLogEvent, type SupervisorRestart } from './supervisor'
 
 export type DaemonOptions = {
   exec?: DockerExec
   resolveIp?: ContainerIpResolver
   forwarderFactory?: ForwarderFactory
-  onLog?: (event: BrokerLogEvent | DaemonLogEvent) => void
+  onLog?: (event: BrokerLogEvent | DaemonLogEvent | SupervisorLogEvent) => void
   gcIntervalMs?: number
   gcMissesToDeregister?: number
   socket?: string
+  // When provided, the daemon honors `restart` RPCs by invoking this with the
+  // (containerName, cwd) it captured at register time. Omit to disable the
+  // capability (e.g. in unit tests that only care about port forwarding).
+  restart?: SupervisorRestart
 }
 
 export type DaemonLogEvent =
@@ -65,6 +70,14 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const perContainerSerial = new Map<string, Promise<unknown>>()
   const gcMisses = new Map<string, number>()
   let stopped = false
+
+  const supervisor = opts.restart
+    ? buildSupervisor({
+        restart: opts.restart,
+        onLog: (event) => log(event),
+        isStopped: () => stopped,
+      })
+    : null
 
   // Per-container serialization: register/deregister/fatal-deregister chain
   // through the same promise per containerName, so a deregister arriving
@@ -161,6 +174,21 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     return { ok: true, result }
   }
 
+  // Auth: only restart containers that registered with this daemon. The
+  // socket is 0o600 + UID-bound, but inside a container any process that
+  // reaches the mounted socket could otherwise restart any peer container on
+  // the host. Scoping by registered name limits the blast radius to the set
+  // of containers this user already started.
+  const handleRestart = (req: { containerName: string }): Response => {
+    if (!supervisor) return { ok: false, reason: 'restart capability not enabled on this daemon' }
+    const cwd = cwds.get(req.containerName)
+    if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
+    const ack = supervisor.scheduleRestart({ containerName: req.containerName, cwd })
+    if (!ack.ok) return ack
+    const result: RestartResult = { containerName: req.containerName, scheduled: true }
+    return { ok: true, result }
+  }
+
   const dispatch = async (req: Request): Promise<Response> => {
     switch (req.kind) {
       case 'register':
@@ -171,6 +199,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         return handleList()
       case 'status':
         return handleStatus(req)
+      case 'restart':
+        return handleRestart(req)
     }
   }
 

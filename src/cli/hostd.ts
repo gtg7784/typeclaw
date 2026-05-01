@@ -1,7 +1,10 @@
 import { defineCommand } from 'citty'
 
+import { loadConfigSync, validateConfig } from '@/config'
+import { start, stop } from '@/container'
 import type { BrokerLogEvent } from '@/hostd'
 import { startDaemon, type DaemonLogEvent } from '@/hostd/daemon'
+import type { SupervisorLogEvent } from '@/hostd/supervisor'
 
 export const hostdCommand = defineCommand({
   meta: {
@@ -12,6 +15,25 @@ export const hostdCommand = defineCommand({
   async run() {
     const daemon = await startDaemon({
       onLog: (e) => console.log(formatLog(e)),
+      restart: async ({ containerName, cwd }) => {
+        const validated = validateConfig(cwd)
+        if (!validated.ok) {
+          return { ok: false, reason: `invalid config for ${containerName}: ${validated.reason}` }
+        }
+        const stopResult = await stop({ cwd })
+        if (!stopResult.ok) return { ok: false, reason: `stop failed: ${stopResult.reason}` }
+
+        const cfg = loadConfigSync(cwd)
+        const startResult = await start({
+          cwd,
+          preferredHostPort: cfg.port,
+          autoForward: cfg.autoForward,
+          autoForwardExclude: cfg.autoForwardExclude,
+          brokerEntry: process.argv[1],
+        })
+        if (!startResult.ok) return { ok: false, reason: `start failed: ${startResult.reason}` }
+        return { ok: true }
+      },
     })
 
     const shutdown = (): void => {
@@ -24,7 +46,7 @@ export const hostdCommand = defineCommand({
   },
 })
 
-function formatLog(event: BrokerLogEvent | DaemonLogEvent): string {
+function formatLog(event: BrokerLogEvent | DaemonLogEvent | SupervisorLogEvent): string {
   switch (event.kind) {
     case 'daemon-listening':
       return `[hostd] listening on ${event.socket}`
@@ -34,6 +56,12 @@ function formatLog(event: BrokerLogEvent | DaemonLogEvent): string {
       return `[hostd] registered ${event.containerName}`
     case 'deregister':
       return `[hostd] deregistered ${event.containerName} (${event.reason})`
+    case 'restart-scheduled':
+      return `[hostd] restart scheduled for ${event.containerName}`
+    case 'restart-completed':
+      return `[hostd] restart completed for ${event.containerName}`
+    case 'restart-failed':
+      return `[hostd] restart failed for ${event.containerName}: ${event.reason}`
     case 'open':
       return `[${event.containerName}] forwarding localhost:${event.hostPort} -> ${event.upstreamHost}:${event.upstreamPort}`
     case 'close':

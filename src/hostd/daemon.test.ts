@@ -305,4 +305,86 @@ describe('startDaemon', () => {
       }),
     ).rejects.toThrow(/already listening/)
   })
+
+  test('register with disableForwarding tracks cwd without starting a broker', async () => {
+    daemon = await startDaemon({
+      exec: fakeExec(new Map()),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+    })
+
+    const reg = await send({
+      kind: 'register',
+      containerName: 'sup-only',
+      cwd: '/agent/sup-only',
+      disableForwarding: true,
+    })
+    expect(reg.ok).toBe(true)
+
+    // No broker was started, so the broker list stays empty even though the
+    // cwd was tracked for the supervisor.
+    const list = await send({ kind: 'list' })
+    expect(list.ok).toBe(true)
+    if (!list.ok) return
+    expect((list.result as ListResult).brokers).toHaveLength(0)
+  })
+
+  test('restart RPC ACKs and invokes the supervisor with the registered cwd', async () => {
+    const routes = new Map([
+      ['inspect:coder', { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }],
+      ['proc:coder', { exitCode: 0, stdout: procWithPorts([]), stderr: '' }],
+      ['alive:coder', { exitCode: 0, stdout: 'coder\n', stderr: '' }],
+    ])
+    const restartCalls: Array<{ containerName: string; cwd: string }> = []
+    daemon = await startDaemon({
+      exec: fakeExec(routes),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+      restart: async ({ containerName, cwd }) => {
+        restartCalls.push({ containerName, cwd })
+        return { ok: true }
+      },
+    })
+
+    await send({ kind: 'register', containerName: 'coder', cwd: '/agent/coder' })
+    const ack = await send({ kind: 'restart', containerName: 'coder' })
+    expect(ack.ok).toBe(true)
+
+    // Supervisor runs asynchronously after ACK; give it a tick.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
+  })
+
+  test('restart RPC rejects unknown containerName (auth: scope by registered name)', async () => {
+    daemon = await startDaemon({
+      exec: fakeExec(new Map()),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+      restart: async () => ({ ok: true }),
+    })
+
+    const ack = await send({ kind: 'restart', containerName: 'never-registered' })
+    expect(ack.ok).toBe(false)
+    if (ack.ok) return
+    expect(ack.reason).toContain('not registered')
+  })
+
+  test('restart RPC rejects when the daemon was started without restart capability', async () => {
+    daemon = await startDaemon({
+      exec: fakeExec(new Map()),
+      forwarderFactory: noopForwarderFactory,
+      gcIntervalMs: 1_000_000,
+    })
+
+    await send({
+      kind: 'register',
+      containerName: 'sup-only',
+      cwd: '/agent/sup-only',
+      disableForwarding: true,
+    })
+    const ack = await send({ kind: 'restart', containerName: 'sup-only' })
+    expect(ack.ok).toBe(false)
+    if (ack.ok) return
+    expect(ack.reason).toContain('not enabled')
+  })
 })
