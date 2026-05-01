@@ -4,10 +4,11 @@ import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
 import { configSchema, type Mount } from '@/config/config'
+import { send as sendToDaemon } from '@/hostd/client'
+import { containerHostRunDir, runDir } from '@/hostd/paths'
+import { ensureDaemon } from '@/hostd/spawn'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
-import { send as sendToDaemon } from '@/portbroker/client'
-import { ensureDaemon } from '@/portbroker/spawn'
 
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import { containerNameFromCwd, defaultDockerExec, type DockerExec, getBun, imageTagFromCwd } from './shared'
@@ -49,7 +50,11 @@ export type StartOptions = {
   brokerEntry?: string
 }
 
-export type BrokerStatus = { state: 'registered' } | { state: 'unavailable'; reason: string } | { state: 'disabled' }
+export type BrokerStatus =
+  | { state: 'registered' }
+  | { state: 'supervisor-only' }
+  | { state: 'unavailable'; reason: string }
+  | { state: 'disabled' }
 
 export type StartResult =
   | {
@@ -70,7 +75,7 @@ export async function start({
   allocatePort = findFreePort,
   autoForward = false,
   autoForwardExclude = [],
-  brokerEntry = process.argv[1],
+  brokerEntry,
 }: StartOptions): Promise<StartResult> {
   try {
     // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
@@ -136,10 +141,15 @@ export async function start({
       return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
     }
 
-    const broker =
-      autoForward && brokerEntry
-        ? await registerWithDaemon(cwd, plan.containerName, brokerEntry, [CONTAINER_PORT, ...autoForwardExclude])
-        : { state: 'disabled' as const }
+    const broker = brokerEntry
+      ? await registerWithDaemon({
+          cwd,
+          containerName: plan.containerName,
+          brokerEntry,
+          excludePorts: [CONTAINER_PORT, ...autoForwardExclude],
+          disableForwarding: !autoForward,
+        })
+      : { state: 'disabled' as const }
 
     return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, broker }
   } catch (error) {
@@ -178,7 +188,21 @@ export async function planStart({
     runArgs.push('-e', `TZ=${hostTz}`)
   }
 
+  // The agent's `restart` tool needs to identify itself to hostd. Inside the
+  // container, cwd is `/agent` and basename(cwd) loses the host folder name,
+  // so we cannot derive containerName from cwd at runtime. Inject it as an
+  // env var — same way TZ is plumbed.
+  runArgs.push('-e', `TYPECLAW_CONTAINER_NAME=${containerName}`)
+
   runArgs.push('-v', `${cwd}:/agent`)
+
+  // Bind-mount the host daemon's run dir into the container at a fixed path
+  // so the agent can talk to the singleton hostd over its Unix socket. This
+  // is what makes container-initiated operations (e.g. the `restart` tool)
+  // possible without giving the container access to the Docker socket.
+  // Read-write because the bun TCP/Unix client opens the socket file; the
+  // daemon enforces auth by scoping each RPC to the registered containerName.
+  runArgs.push('-v', `${runDir()}:${containerHostRunDir()}`)
 
   // Dev mode: node_modules/typeclaw is a symlink to an absolute host path
   // outside /agent. Mirror-mount that path so the symlink resolves in-container.
@@ -306,17 +330,30 @@ function expandMountPath(input: string, cwd: string): string {
   return isAbsolute(input) ? input : resolve(cwd, input)
 }
 
-async function registerWithDaemon(
-  cwd: string,
-  containerName: string,
-  brokerEntry: string,
-  excludePorts: number[],
-): Promise<BrokerStatus> {
+async function registerWithDaemon({
+  cwd,
+  containerName,
+  brokerEntry,
+  excludePorts,
+  disableForwarding,
+}: {
+  cwd: string
+  containerName: string
+  brokerEntry: string
+  excludePorts: number[]
+  disableForwarding: boolean
+}): Promise<BrokerStatus> {
   const ensured = await ensureDaemon({ brokerEntry })
   if (!ensured.ok) return { state: 'unavailable', reason: ensured.reason }
-  const reply = await sendToDaemon({ kind: 'register', containerName, cwd, excludePorts })
+  const reply = await sendToDaemon({
+    kind: 'register',
+    containerName,
+    cwd,
+    excludePorts,
+    disableForwarding,
+  })
   if (!reply.ok) return { state: 'unavailable', reason: reply.reason }
-  return { state: 'registered' }
+  return { state: disableForwarding ? 'supervisor-only' : 'registered' }
 }
 
 // process.env.TZ is honored first because users who explicitly set it (e.g.

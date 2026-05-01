@@ -27,10 +27,10 @@ describe('paths', () => {
   })
 
   test('all daemon paths land under TYPECLAW_HOME', () => {
-    expect(socketPath()).toBe(join(home, 'run', 'portbrokerd.sock'))
-    expect(pidfilePath()).toBe(join(home, 'run', 'portbrokerd.pid'))
-    expect(lockfilePath()).toBe(join(home, 'run', 'portbrokerd.lock'))
-    expect(logfilePath()).toBe(join(home, 'log', 'portbrokerd.log'))
+    expect(socketPath()).toBe(join(home, 'run', 'hostd.sock'))
+    expect(pidfilePath()).toBe(join(home, 'run', 'hostd.pid'))
+    expect(lockfilePath()).toBe(join(home, 'run', 'hostd.lock'))
+    expect(logfilePath()).toBe(join(home, 'log', 'hostd.log'))
   })
 
   test('ensureDirs creates run/ and log/', async () => {

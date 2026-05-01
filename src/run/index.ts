@@ -78,6 +78,13 @@ export async function startAgent({
   stream = createStream(),
 }: StartAgentOptions): Promise<StartAgentResult> {
   const reloadRegistry = new ReloadRegistry()
+
+  // The host CLI sets TYPECLAW_CONTAINER_NAME when it `docker run`s us. When
+  // running outside a typeclaw container (tests, ad-hoc `bun run typeclaw run`
+  // outside docker), the env var is absent and the `restart` tool is omitted —
+  // which is what we want, since there is no host daemon to honor it anyway.
+  const containerName = process.env.TYPECLAW_CONTAINER_NAME
+  const containerNameOpt = containerName !== undefined ? { containerName } : {}
   reloadRegistry.register(createConfigReloadable({ cwd }))
 
   const pluginConfigsByName = loadPluginConfigsSync(cwd)
@@ -121,6 +128,7 @@ export async function startAgent({
       reloadRegistry,
       pluginRuntime,
       getChannelRouter: () => channelManager.router,
+      ...containerNameOpt,
     }),
   })
 
@@ -205,6 +213,7 @@ export async function startAgent({
               },
             }
           : {}),
+        ...containerNameOpt,
       })
       return {
         prompt: (text) => session.prompt(text),
@@ -261,6 +270,7 @@ export async function startAgent({
     channelRouter: channelManager.router,
     agentDir: cwd,
     pluginRuntime,
+    ...containerNameOpt,
   }).start()
 
   let stopped = false

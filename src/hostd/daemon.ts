@@ -5,25 +5,30 @@ import type { Socket, UnixSocketListener } from 'bun'
 
 import { defaultDockerExec, type DockerExec } from '@/container'
 
+import { isDaemonReachable } from './client'
+import { ensureDirs, socketPath } from './paths'
 import {
   startBroker,
   type Broker,
   type BrokerLogEvent,
   type ContainerIpResolver,
   type ForwarderFactory,
-} from './broker'
-import { isDaemonReachable } from './client'
-import { ensureDirs, socketPath } from './paths'
-import type { ListResult, Request, Response, StatusResult } from './protocol'
+} from './portbroker/broker'
+import type { ListResult, Request, Response, RestartResult, StatusResult } from './protocol'
+import { buildSupervisor, type SupervisorLogEvent, type SupervisorRestart } from './supervisor'
 
 export type DaemonOptions = {
   exec?: DockerExec
   resolveIp?: ContainerIpResolver
   forwarderFactory?: ForwarderFactory
-  onLog?: (event: BrokerLogEvent | DaemonLogEvent) => void
+  onLog?: (event: BrokerLogEvent | DaemonLogEvent | SupervisorLogEvent) => void
   gcIntervalMs?: number
   gcMissesToDeregister?: number
   socket?: string
+  // When provided, the daemon honors `restart` RPCs by invoking this with the
+  // (containerName, cwd) it captured at register time. Omit to disable the
+  // capability (e.g. in unit tests that only care about port forwarding).
+  restart?: SupervisorRestart
 }
 
 export type DaemonLogEvent =
@@ -49,7 +54,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
 
   if (existsSync(path)) {
     if (await isDaemonReachable(500)) {
-      throw new Error(`another portbroker daemon is already listening at ${path}`)
+      throw new Error(`another typeclaw host daemon is already listening at ${path}`)
     }
     try {
       await unlink(path)
@@ -61,9 +66,18 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const gcIntervalMs = opts.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS
   const gcMissesToDeregister = opts.gcMissesToDeregister ?? DEFAULT_GC_MISSES_TO_DEREGISTER
   const brokers = new Map<string, Broker>()
+  const cwds = new Map<string, string>()
   const perContainerSerial = new Map<string, Promise<unknown>>()
   const gcMisses = new Map<string, number>()
   let stopped = false
+
+  const supervisor = opts.restart
+    ? buildSupervisor({
+        restart: opts.restart,
+        onLog: (event) => log(event),
+        isStopped: () => stopped,
+      })
+    : null
 
   // Per-container serialization: register/deregister/fatal-deregister chain
   // through the same promise per containerName, so a deregister arriving
@@ -82,11 +96,20 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     containerName: string
     cwd: string
     excludePorts?: number[]
+    disableForwarding?: boolean
   }): Promise<Response> => {
     if (stopped) return { ok: false, reason: 'daemon stopping' }
     return runSerially(req.containerName, async () => {
       if (stopped) return { ok: false, reason: 'daemon stopping' }
-      if (brokers.has(req.containerName)) return { ok: true }
+      if (brokers.has(req.containerName) || cwds.has(req.containerName)) {
+        cwds.set(req.containerName, req.cwd)
+        return { ok: true }
+      }
+      if (req.disableForwarding === true) {
+        cwds.set(req.containerName, req.cwd)
+        log({ kind: 'register', containerName: req.containerName })
+        return { ok: true }
+      }
       const result = await startBroker({
         containerName: req.containerName,
         excludePorts: new Set<number>(req.excludePorts ?? []),
@@ -99,6 +122,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
             const broker = brokers.get(req.containerName)
             if (!broker) return { ok: true }
             brokers.delete(req.containerName)
+            cwds.delete(req.containerName)
             log({ kind: 'deregister', containerName: req.containerName, reason: 'fatal' })
             await broker.stop()
             return { ok: true }
@@ -107,6 +131,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       })
       if (!result.ok) return { ok: false, reason: result.reason }
       brokers.set(req.containerName, result.broker)
+      cwds.set(req.containerName, req.cwd)
       log({ kind: 'register', containerName: req.containerName })
       return { ok: true }
     })
@@ -115,9 +140,13 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const handleDeregister = async (req: { containerName: string }): Promise<Response> =>
     runSerially(req.containerName, async () => {
       const broker = brokers.get(req.containerName)
-      if (!broker) return { ok: true }
-      brokers.delete(req.containerName)
+      const hadCwd = cwds.delete(req.containerName)
       gcMisses.delete(req.containerName)
+      if (!broker) {
+        if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
+        return { ok: true }
+      }
+      brokers.delete(req.containerName)
       log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
       await broker.stop()
       return { ok: true }
@@ -145,6 +174,21 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     return { ok: true, result }
   }
 
+  // Auth: only restart containers that registered with this daemon. The
+  // socket is 0o600 + UID-bound, but inside a container any process that
+  // reaches the mounted socket could otherwise restart any peer container on
+  // the host. Scoping by registered name limits the blast radius to the set
+  // of containers this user already started.
+  const handleRestart = (req: { containerName: string }): Response => {
+    if (!supervisor) return { ok: false, reason: 'restart capability not enabled on this daemon' }
+    const cwd = cwds.get(req.containerName)
+    if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
+    const ack = supervisor.scheduleRestart({ containerName: req.containerName, cwd })
+    if (!ack.ok) return ack
+    const result: RestartResult = { containerName: req.containerName, scheduled: true }
+    return { ok: true, result }
+  }
+
   const dispatch = async (req: Request): Promise<Response> => {
     switch (req.kind) {
       case 'register':
@@ -155,6 +199,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         return handleList()
       case 'status':
         return handleStatus(req)
+      case 'restart':
+        return handleRestart(req)
     }
   }
 
@@ -225,7 +271,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   }
 
   const runGc = async (): Promise<void> => {
-    for (const name of Array.from(brokers.keys())) {
+    for (const name of Array.from(cwds.keys())) {
       const status = await probeContainerAlive(name)
       if (status === 'alive') {
         gcMisses.delete(name)
@@ -240,7 +286,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       gcMisses.delete(name)
       void runSerially(name, async () => {
         const broker = brokers.get(name)
-        if (!broker) return { ok: true }
+        const hadCwd = cwds.delete(name)
+        if (!broker) {
+          if (hadCwd) log({ kind: 'deregister', containerName: name, reason: 'gone' })
+          return { ok: true }
+        }
         brokers.delete(name)
         log({ kind: 'deregister', containerName: name, reason: 'gone' })
         await broker.stop()
@@ -250,7 +300,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   }
 
   const gcTimer = setInterval(() => {
-    if (stopped || brokers.size === 0) return
+    if (stopped || cwds.size === 0) return
     void runGc()
   }, gcIntervalMs)
 
@@ -266,6 +316,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       } catch {}
       const all = Array.from(brokers.values())
       brokers.clear()
+      cwds.clear()
       await Promise.all(all.map((b) => b.stop()))
       try {
         if (existsSync(path)) await unlink(path)

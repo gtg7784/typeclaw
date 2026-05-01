@@ -52,6 +52,7 @@ export const restartCommand = defineCommand({
       forceBuild: args.build,
       autoForward: cfg.autoForward,
       autoForwardExclude: cfg.autoForwardExclude,
+      brokerEntry: process.argv[1],
     })
     if (!started.ok) {
       console.error(started.reason)
@@ -65,9 +66,11 @@ export const restartCommand = defineCommand({
       `Container ${started.plan.containerName} started on host port ${started.hostPort} (${started.containerId.slice(0, 12)}).`,
     )
     if (started.broker.state === 'registered') {
-      console.log(`Port broker active; any port the agent binds is reachable on localhost.`)
+      console.log(`Host daemon active; any port the agent binds is reachable on localhost.`)
+    } else if (started.broker.state === 'supervisor-only') {
+      console.log(`Host daemon active (port forwarding disabled).`)
     } else if (started.broker.state === 'unavailable') {
-      console.warn(`Port broker unavailable: ${started.broker.reason}`)
+      console.warn(`Host daemon unavailable: ${started.broker.reason}`)
     }
     console.log(`Follow logs:  typeclaw logs -f`)
     console.log(`Attach TUI:   typeclaw tui`)

@@ -60,7 +60,7 @@ async function spawnDaemonDetached(opts: EnsureDaemonOptions): Promise<EnsureDae
   let proc: ReturnType<typeof Bun.spawn>
   try {
     proc = Bun.spawn({
-      cmd: [process.execPath, opts.brokerEntry, '_portbrokerd'],
+      cmd: [process.execPath, opts.brokerEntry, '_hostd'],
       stdin: 'ignore',
       stdout: handle.fd,
       stderr: handle.fd,

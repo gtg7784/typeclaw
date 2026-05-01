@@ -30,11 +30,11 @@ Where an end user lives once they run `typeclaw init`. Their cwd is an agent fol
 - `typeclaw logs [-f]` — show (or follow) the container's stdout/stderr via `docker logs`.
 - `typeclaw tui` — attach a TUI client over a websocket to a running agent.
 - `typeclaw compose …` — orchestrate multiple agents across multiple agent folders.
-- `typeclaw _portbrokerd` — internal foreground process spawned detached by the first `typeclaw start` on the host. Long-lived; serves every typeclaw agent on the machine. Underscore-prefixed and hidden from `--help`. See `src/portbroker/`.
+- `typeclaw _hostd` — internal foreground process spawned detached by the first `typeclaw start` on the host. Long-lived; serves every typeclaw agent on the machine. Underscore-prefixed and hidden from `--help`. See `src/hostd/`. Hosts two capabilities today: the **port broker** (forwards container ports to localhost) and the **supervisor** (honors `restart` RPCs from inside the container).
 
 Nothing in the host stage loads the agent runtime itself. Filesystem access is native (no mounts). Secrets live plainly in `.env` for later injection.
 
-The host stage owns one persistent state directory: `~/.typeclaw/` (override with `TYPECLAW_HOME` for tests). It contains `run/portbrokerd.{pid,sock,lock}` (singleton daemon coordination) and `log/portbrokerd.log` (broker stdout/stderr, append-only, no rotation). `src/portbroker/paths.ts` is the only writer; nothing else in the host stage persists between CLI invocations.
+The host stage owns one persistent state directory: `~/.typeclaw/` (override with `TYPECLAW_HOME` for tests). It contains `run/hostd.{pid,sock,lock}` (singleton daemon coordination) and `log/hostd.log` (daemon stdout/stderr, append-only, no rotation). `src/hostd/paths.ts` is the only writer; nothing else in the host stage persists between CLI invocations.
 
 ### container stage — inside Docker
 
@@ -133,13 +133,17 @@ Domain logic lives in `src/<domain>/`. Examples: `src/init/`, `src/config/`, `sr
 - Tests live next to code as `<file>.test.ts`.
 - Domain entry points are `src/<domain>/index.ts`. Split into multiple files only when a single file gets complex.
 
-## Port broker
+## Host daemon (hostd)
 
-`src/portbroker/` is a **host-stage** subsystem that makes any TCP port the agent binds inside its container reachable on `localhost` from the user's machine, with no `typeclaw.json` edits and no container restart. Default-on (`autoForward: true` in the schema). Architecturally: a **singleton daemon per host** (not per agent) — the only persistent host-side process in the codebase, and the only persistent host-stage state (`~/.typeclaw/`).
+`src/hostd/` is a **host-stage** subsystem that owns every host-side capability the running container needs — currently the **port broker** (`src/hostd/portbroker/`) and the **supervisor** (`src/hostd/supervisor.ts`, restart). Architecturally: a **singleton daemon per host** (not per agent) — the only persistent host-side process in the codebase, and the only persistent host-stage state (`~/.typeclaw/`). New host-side capabilities should plug in as additional `src/hostd/<capability>/` modules and additional RPC kinds, not as new daemons.
 
 ### Why it exists
 
-Docker fundamentally cannot publish new ports on a running container — `HostConfig.PortBindings` is create-time-only, and `docker update` does not cover networking. Without the broker, a process that binds `:5173` inside the container is invisible from the host unless `:5173` was passed to `docker run -p` up front. Pre-declaring every port the agent might ever bind is hostile UX. The broker closes the gap by polling the container's `/proc/net/tcp[6]` via `docker exec` and userland-proxying each LISTEN port through a host-side `Bun.listen` + `Bun.connect` pair to the container's bridge IP.
+Two distinct cross-stage problems converge on the same shape (a long-lived host process the container talks to over a Unix socket), so they share one daemon:
+
+1. **Port forwarding.** Docker fundamentally cannot publish new ports on a running container — `HostConfig.PortBindings` is create-time-only, and `docker update` does not cover networking. Without the broker, a process that binds `:5173` inside the container is invisible from the host unless `:5173` was passed to `docker run -p` up front. The broker polls the container's `/proc/net/tcp[6]` via `docker exec` and userland-proxies each LISTEN port through a host-side `Bun.listen` + `Bun.connect` pair to the container's bridge IP.
+
+2. **Container self-restart.** The container itself has no Docker access (no docker.sock mount, no `docker` CLI). When the agent updates the typeclaw CLI source or hits a `restart-required` config field, the only path back to a fresh container is through a host-stage process. The supervisor honors `restart` RPCs from inside the container (auth: scope by registered `containerName`) and runs `stop()` + `start()` from the daemon process.
 
 ### Process topology
 
@@ -148,56 +152,76 @@ host:
   typeclaw start (cwd=~/agentA)  ─┐  short-lived clients of the daemon.
   typeclaw start (cwd=~/agentB)   │  Each calls `ensureDaemon()` then
   typeclaw stop  (cwd=~/agentA)   │  `register`/`deregister` over
-                                  ┘  ~/.typeclaw/run/portbrokerd.sock.
+                                  ┘  ~/.typeclaw/run/hostd.sock.
 
-  typeclawd (singleton)  ── reads/writes ~/.typeclaw/run/portbrokerd.{pid,sock}
-    ├─ broker(agentA): detector + forwarders[5173, 8080, ...]
-    └─ broker(agentB): detector + forwarders[3000, ...]
+  typeclaw _hostd (singleton)  ── reads/writes ~/.typeclaw/run/hostd.{pid,sock}
+    ├─ broker(agentA): detector + forwarders[5173, 8080, ...]   ┐
+    ├─ broker(agentB): detector + forwarders[3000, ...]          │ portbroker
+    └─ cwds: { agentA → /Users/.../agentA, agentB → ... }         │ + supervisor
+                                                                  ┘ (shared registry)
+
+container (agentA):
+  agent's `restart` tool ── /run/typeclaw-host/hostd.sock ──► supervisor
+                            (bind-mounted from host's ~/.typeclaw/run)
 ```
 
-The daemon binary is `typeclaw _portbrokerd` — a hidden CLI subcommand that runs the daemon foreground. The first `typeclaw start` on the machine spawns it detached via `Bun.spawn` + `proc.unref()`, writes `~/.typeclaw/run/portbrokerd.pid`, then connects and registers. Subsequent `typeclaw start` calls just connect and register; they don't spawn anything. **This is the only place in the codebase that uses detached spawning** — keep it that way.
+The daemon binary is `typeclaw _hostd` — a hidden CLI subcommand that runs the daemon foreground. The first `typeclaw start` on the machine spawns it detached via `Bun.spawn` + `proc.unref()`, writes `~/.typeclaw/run/hostd.pid`, then connects and registers. Subsequent `typeclaw start` calls just connect and register; they don't spawn anything. **This is the only place in the codebase that uses detached spawning** — keep it that way.
+
+`typeclaw start` always registers with the daemon (passing `disableForwarding: !autoForward`), so the supervisor is available even when port forwarding is off. The two capabilities share the daemon's `cwds` map; the broker map is a subset (only entries with forwarding enabled).
 
 `typeclaw stop` connects to the daemon over the Unix socket and sends `deregister`. If the daemon isn't reachable, stop is a no-op for the broker side and just runs `docker stop`. **The CLI never sends signals based on PID** — pidfile content is a discovery hint, never a kill target. PID-reuse therefore cannot kill an unrelated user process.
 
 A periodic GC tick in the daemon (every 30s) calls `containerExists()` for each registered container; missing → silently deregister and tear down its forwarders. Handles `docker stop` from outside typeclaw, host reboot survivors that registered with stale state, etc.
 
+### Container ↔ host channel
+
+The host's run dir is bind-mounted into every container at the fixed path `/run/typeclaw-host/` (read-write; the daemon enforces auth at the protocol layer, not via FS permissions). The container reaches the daemon via `containerSocketPath()` in `src/hostd/paths.ts`. The bind mount is the only thing that makes container-initiated operations (e.g. the `restart` agent tool) possible without giving the container access to the Docker socket. **Adding a new container→host capability means a new RPC kind, not a new socket** — the mount stays one place.
+
+The agent's container name is plumbed through the `TYPECLAW_CONTAINER_NAME` env var, set by `src/container/start.ts` on `docker run`. Inside the container, cwd is `/agent` and the host folder name is otherwise unrecoverable.
+
 ### Control protocol
 
-Newline-delimited JSON over `~/.typeclaw/run/portbrokerd.sock`. Connection-per-request — each client opens, sends one line, reads one line, closes.
+Newline-delimited JSON over `~/.typeclaw/run/hostd.sock`. Connection-per-request — each client opens, sends one line, reads one line, closes.
 
 ```ts
 type Request =
-  | { kind: 'register'; containerName: string; cwd: string }
+  | { kind: 'register'; containerName: string; cwd: string; excludePorts?: number[]; disableForwarding?: boolean }
   | { kind: 'deregister'; containerName: string }
   | { kind: 'list' } // diagnostic
   | { kind: 'status'; containerName: string } // diagnostic
+  | { kind: 'restart'; containerName: string } // container-initiated
 type Response = { ok: true; result?: unknown } | { ok: false; reason: string }
 ```
 
-`register` synchronously waits for the broker's initial IP-resolve to succeed before ACKing — so `typeclaw start`'s "Port broker active" line is meaningful. `deregister` is idempotent. `list` is the cheap probe used by `isDaemonReachable()`.
+`register` waits for the broker's initial IP-resolve to succeed before ACKing (unless `disableForwarding: true`, in which case it just stores the cwd). `deregister` is idempotent. `list` is the cheap probe used by `isDaemonReachable()`. `restart` ACKs immediately and runs `stop()` + `start()` asynchronously — the synchronous ACK lets the calling container exit cleanly before the daemon issues `docker stop`.
 
-Adding a new request kind is a deliberate addition: extend both `Request` (in `src/portbroker/protocol.ts`) and the switch in `daemon.ts`'s `dispatch`. Don't sneak through the catchall.
+Adding a new request kind is a deliberate addition: extend both `Request` (in `src/hostd/protocol.ts`) and the switch in `daemon.ts`'s `dispatch`. Don't sneak through the catchall.
 
 ### Components and ownership
 
-- `src/portbroker/forwarder.ts` — one TCP forward (`hostPort` → `upstreamHost:upstreamPort`). Pure: knows nothing about Docker. Backpressure-aware: each direction maintains a queue, partial writes are stored, `drain` callbacks resume; per-connection cap enforces a teardown when buffered bytes exceed `pendingByteLimit` (default 4 MB). The Bun TCP `data` callback reuses its buffer, so `enqueueOnly` MUST allocate a fresh `Uint8Array` and copy bytes — see the comment in `enqueueOnly`.
-- `src/portbroker/detector.ts` — polls `docker exec <name> sh -c "cat /proc/net/tcp /proc/net/tcp6"` every 750ms, parses LISTEN entries, emits `open`/`close` events on diff. Distinguishes `onError` (transient — single tick failed, but try again) from `onFatal` (escalation — N consecutive failures, detector stops). `parseListeningPorts()` is a pure function over the proc text with golden-file tests. `tick` wraps `exec` in `try/catch`; thrown rejections become `recordFailure` calls, never unhandled rejections.
-- `src/portbroker/broker.ts` — composition: container-IP resolver + detector + forwarder map. Serializes change handling through a single promise chain, so concurrent open/close/IP-reset events for the same broker can never observe partial state. On IP change, all existing forwarders are torn down and reinstalled against the new IP. `defaultResolveIp` parses `docker inspect --format '{{json .NetworkSettings.Networks}}'` and selects deterministically (named bridges before the default `bridge`, then alphabetical) — the previous Go-template implementation depended on Docker's iteration order, which isn't a stable contract.
-- `src/portbroker/daemon.ts` — singleton process. Owns a `Map<containerName, Broker>` registry, the Unix socket server, and the GC tick. Replaces stale socket file on startup. SIGTERM/SIGINT triggers an orderly shutdown (stop all brokers, close socket, unlink socket file, exit 0).
-- `src/portbroker/client.ts` — `isDaemonReachable()` and `send(req)`. Each call opens a fresh connection. 3-second default timeout on ACKs.
-- `src/portbroker/spawn.ts` — `ensureDaemon()` only. Handles the spawn race via `lockfilePath()` — concurrent `typeclaw start`s converge: at most one wins the lock and spawns the daemon, others poll `isDaemonReachable` for up to 5s.
-- `src/portbroker/paths.ts` — single source of truth for `~/.typeclaw/` paths. Honors `TYPECLAW_HOME` for test isolation.
-- `src/portbroker/protocol.ts` — request/response types shared by client and daemon.
-- `src/cli/portbrokerd.ts` — internal foreground entry (`typeclaw _portbrokerd`). Hidden via citty `meta.hidden`.
+- `src/hostd/portbroker/forwarder.ts` — one TCP forward (`hostPort` → `upstreamHost:upstreamPort`). Pure: knows nothing about Docker. Backpressure-aware: each direction maintains a queue, partial writes are stored, `drain` callbacks resume; per-connection cap enforces a teardown when buffered bytes exceed `pendingByteLimit` (default 4 MB). The Bun TCP `data` callback reuses its buffer, so `enqueueOnly` MUST allocate a fresh `Uint8Array` and copy bytes — see the comment in `enqueueOnly`.
+- `src/hostd/portbroker/detector.ts` — polls `docker exec <name> sh -c "cat /proc/net/tcp /proc/net/tcp6"` every 750ms, parses LISTEN entries, emits `open`/`close` events on diff. Distinguishes `onError` (transient — single tick failed, but try again) from `onFatal` (escalation — N consecutive failures, detector stops). `parseListeningPorts()` is a pure function over the proc text with golden-file tests. `tick` wraps `exec` in `try/catch`; thrown rejections become `recordFailure` calls, never unhandled rejections.
+- `src/hostd/portbroker/broker.ts` — composition: container-IP resolver + detector + forwarder map. Serializes change handling through a single promise chain, so concurrent open/close/IP-reset events for the same broker can never observe partial state. On IP change, all existing forwarders are torn down and reinstalled against the new IP. `defaultResolveIp` parses `docker inspect --format '{{json .NetworkSettings.Networks}}'` and selects deterministically (named bridges before the default `bridge`, then alphabetical).
+- `src/hostd/supervisor.ts` — restart capability. ACK-then-execute: `scheduleRestart` returns synchronously so the requesting container can exit before `docker stop` runs against it. Errors surface only via the log channel because there is no connected client to receive them by then. The actual `stop()` + `start()` invocation is plumbed in by `src/cli/hostd.ts` via the `DaemonOptions.restart` callback so the daemon module itself stays free of `@/container` imports.
+- `src/hostd/daemon.ts` — singleton process. Owns `Map<containerName, Broker>` plus `Map<containerName, cwd>` registries, the Unix socket server, RPC dispatch, and the GC tick. Replaces stale socket file on startup. SIGTERM/SIGINT triggers an orderly shutdown (stop all brokers, close socket, unlink socket file, exit 0). `restart` RPCs are honored only when `DaemonOptions.restart` is set — unit tests of the broker omit it and get a clean "restart capability not enabled" rejection.
+- `src/hostd/client.ts` — `isDaemonReachable()` and `send(req)`. Each call opens a fresh connection. 3-second default timeout on ACKs. Used by both the host CLI (talking to the local socket) and the in-container agent tool (talking to the bind-mounted socket via an explicit `socket:` override).
+- `src/hostd/spawn.ts` — `ensureDaemon()` only. Handles the spawn race via `lockfilePath()` — concurrent `typeclaw start`s converge: at most one wins the lock and spawns the daemon, others poll `isDaemonReachable` for up to 5s.
+- `src/hostd/paths.ts` — single source of truth for `~/.typeclaw/` paths plus the in-container mount target (`containerSocketPath()`, `containerHostRunDir()`). Honors `TYPECLAW_HOME` for test isolation.
+- `src/hostd/protocol.ts` — request/response types shared by client and daemon.
+- `src/cli/hostd.ts` — internal foreground entry (`typeclaw _hostd`). Hidden via citty `meta.hidden`. Wires the daemon's `restart` callback to `@/container#start` and `@/container#stop`.
+- `src/agent/tools/restart.ts` — container-stage agent tool. Sends `{ kind: 'restart', containerName }` over the bind-mounted socket, awaits the ACK, then `process.exit(0)` after a short tick so the tool result reaches the model before the process dies.
 
 ### Rules of thumb
 
 - **`autoForward` defaults to `true` at the user-facing schema layer (`configSchema`), but the `start()` function default is `false`.** This is intentional. Tests and programmatic callers of `start()` get a deterministic, side-effect-free default; the `true` default lives in the user contract (`typeclaw.json`) and the CLI plumbs it through explicitly. Adding a daemon spawn as an implicit default of a function call breaks unit-test isolation.
+- **`brokerEntry` has no production default in `start()`.** It must be passed explicitly (the CLI passes `process.argv[1]`). Tests omit it to disable daemon spawn entirely. This is the seam that keeps `bun test` from accidentally launching a real `_hostd` process.
+- **The supervisor is on whenever the daemon is on.** `typeclaw start` registers with the daemon regardless of `autoForward`, passing `disableForwarding: true` when forwarding is off. This means `restart` is always available to the agent without a separate opt-in — the cwd-only registration is cheap (no broker, no detector) and exists purely so the supervisor knows where to point `start()`.
 - **Both `autoForward` and `autoForwardExclude` are `restart-required` in `FIELD_EFFECTS`.** Per-broker config is captured at register time; reload doesn't re-evaluate.
 - **Host port equals container port.** Always, no exceptions. There is no random-port fallback because predictable URLs are the whole point. Port collisions are logged (`skip-eaddrinuse`) and the affected port is just not forwarded.
 - **The CLI never SIGTERMs by PID.** `typeclaw stop` deregisters via the socket. The pidfile is a hint to find the daemon, never a kill target. This is what makes PID-reuse safe.
-- **`Dockerfile` does not need changes.** The broker lives entirely on the host. Container images stay untouched. This keeps the broker decoupled from image rebuilds.
-- **The daemon stays alive when its registry becomes empty.** Idle cost is ~10 MB RAM and zero CPU. The next `typeclaw start` reuses it. Killing the idle daemon is `pkill -f 'typeclaw _portbrokerd'` (out of scope for the CLI).
+- **The container does not have Docker access; the bind-mounted socket is the entire trust boundary.** `restart` RPCs are scoped to the registered `containerName` so a compromised container can only restart itself, not its peers. Anything that wants to extend this trust model (e.g. allow a container to query peer status) must go through new RPC kinds with explicit auth, not a wider mount.
+- **`Dockerfile` does not need changes for the daemon itself.** The container reaches the daemon over the bind-mounted socket; container images stay untouched. This keeps the daemon decoupled from image rebuilds.
+- **The daemon stays alive when its registry becomes empty.** Idle cost is ~10 MB RAM and zero CPU. The next `typeclaw start` reuses it. Killing the idle daemon is `pkill -f 'typeclaw _hostd'` (out of scope for the CLI).
 
 ## Message Stream
 
