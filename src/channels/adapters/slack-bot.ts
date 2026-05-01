@@ -1,6 +1,13 @@
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
-import type { OutboundCallback, OutboundMessage, SendResult, TypingCallback, TypingTarget } from '@/channels/types'
+import type {
+  OutboundCallback,
+  OutboundMessage,
+  ResolvedChannelNames,
+  SendResult,
+  TypingCallback,
+  TypingTarget,
+} from '@/channels/types'
 
 import {
   SlackBotClient,
@@ -18,6 +25,15 @@ import { classifyInbound, type InboundDropReason } from './slack-bot-classify'
 // envelopes share the same `ts`. The buffer only needs to cover the gap
 // between the two deliveries; a few hundred is generous.
 const SEEN_TS_CAPACITY = 256
+
+// Resolvers fall back to the raw id on failure, so a name equal to the id
+// means resolution failed; we render the bare id rather than `id(id)`. The
+// prefix is intentionally only applied to the named form so we never log
+// `#C0DEPLOY` when resolution fails.
+function formatLabel(name: string | undefined, id: string, prefix = ''): string {
+  if (name === undefined || name === '' || name === id) return id
+  return `${prefix}${name}(${id})`
+}
 
 // app_mention payloads omit channel_type and never carry a subtype, so we
 // promote them to a message-shaped event for the shared classifier. The
@@ -73,13 +89,17 @@ export type SlackBotAdapter = {
 export function createTypingCallback(deps: {
   configRef: () => ChannelAdapterConfig
   logger: SlackBotAdapterLogger
+  formatChannelTag?: (workspace: string, chat: string) => Promise<string>
 }): TypingCallback {
-  const { configRef, logger } = deps
+  const { configRef, logger, formatChannelTag } = deps
   return async (target: TypingTarget): Promise<void> => {
     if (target.adapter !== 'slack-bot') return
     const config = configRef()
     if (!isAllowed(config.allow, target.workspace, target.chat)) return
-    logger.info(`[slack-bot] typing (no-op) channel=${target.thread ?? target.chat}`)
+    const tag = formatChannelTag
+      ? await formatChannelTag(target.workspace, target.thread ?? target.chat)
+      : `channel=${target.thread ?? target.chat}`
+    logger.info(`[slack-bot] typing (no-op) ${tag}`)
   }
 }
 
@@ -96,7 +116,16 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
   const authorResolver = createSlackAuthorResolver({ token: options.token })
   const channelResolver = createSlackChannelResolver({ token: options.token })
 
-  const typingCallback = createTypingCallback({ configRef: options.configRef, logger })
+  const formatChannelTag = async (workspace: string, chat: string): Promise<string> => {
+    const names = await channelResolver({ adapter: 'slack-bot', workspace, chat, thread: null }).catch(
+      () => ({}) as ResolvedChannelNames,
+    )
+    const workspacePart = workspace === '@dm' ? 'dm' : `team=${formatLabel(names.workspaceName, workspace)}`
+    const chatPart = `channel=${formatLabel(names.chatName, chat, '#')}`
+    return `${workspacePart} ${chatPart}`
+  }
+
+  const typingCallback = createTypingCallback({ configRef: options.configRef, logger, formatChannelTag })
 
   const outboundCallback: OutboundCallback = async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'slack-bot') {
@@ -107,14 +136,15 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       logger.warn(`[slack-bot] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
       return { ok: false, error: 'denied by allow rules' }
     }
-    logger.info(`[slack-bot] outbound workspace=${msg.workspace} chat=${msg.chat} text_len=${msg.text.length}`)
+    const tag = await formatChannelTag(msg.workspace, msg.chat)
+    logger.info(`[slack-bot] outbound ${tag} text_len=${msg.text.length}`)
     try {
       const sent = await client.postMessage(
         msg.chat,
         msg.text,
         msg.thread !== undefined && msg.thread !== null ? { thread_ts: msg.thread } : undefined,
       )
-      logger.info(`[slack-bot] sent ts=${sent.ts} chat=${msg.chat}`)
+      logger.info(`[slack-bot] sent ts=${sent.ts} ${tag}`)
       return { ok: true }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -142,11 +172,16 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
   ): Promise<void> => {
     inflightInbounds++
     try {
-      const where = event.channel_type === 'im' ? 'dm' : `team=${teamId ?? 'unknown'}`
       const text = event.text ?? ''
       const dedupeKey = `${event.channel}:${event.ts}`
+      const userId = event.user ?? 'unknown'
+      const inboundWorkspace = event.channel_type === 'im' ? '@dm' : (teamId ?? 'unknown')
+      const [resolvedUserName, inboundTag] = await Promise.all([
+        event.user !== undefined && event.user !== '' ? authorResolver.resolve(event.user) : Promise.resolve(userId),
+        formatChannelTag(inboundWorkspace, event.channel),
+      ])
       logger.info(
-        `[slack-bot] inbound source=${source} ts=${event.ts} user=${event.user ?? 'unknown'} ${where} channel=${event.channel} text_len=${text.length}`,
+        `[slack-bot] inbound source=${source} ts=${event.ts} user=${formatLabel(resolvedUserName, userId)} ${inboundTag} text_len=${text.length}`,
       )
 
       if (teamId === null) {
@@ -166,10 +201,10 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       }
 
       markSeen(dedupeKey)
-      const resolvedAuthorName = await authorResolver.resolve(verdict.payload.authorId)
-      const enriched = { ...verdict.payload, authorName: resolvedAuthorName }
+      const enriched = { ...verdict.payload, authorName: resolvedUserName }
+      const routedTag = await formatChannelTag(enriched.workspace, enriched.chat)
       logger.info(
-        `[slack-bot] routed ts=${event.ts} workspace=${enriched.workspace} mention=${enriched.isBotMention} reply=${enriched.replyToBotMessageId !== null}`,
+        `[slack-bot] routed ts=${event.ts} ${routedTag} mention=${enriched.isBotMention} reply=${enriched.replyToBotMessageId !== null}`,
       )
       await options.router.route(enriched)
     } catch (err) {

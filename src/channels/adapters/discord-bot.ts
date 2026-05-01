@@ -1,6 +1,13 @@
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
-import type { OutboundCallback, OutboundMessage, SendResult, TypingCallback, TypingTarget } from '@/channels/types'
+import type {
+  OutboundCallback,
+  OutboundMessage,
+  ResolvedChannelNames,
+  SendResult,
+  TypingCallback,
+  TypingTarget,
+} from '@/channels/types'
 
 import {
   DiscordBotClient,
@@ -12,6 +19,11 @@ import { createDiscordChannelResolver } from './discord-bot-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './discord-bot-classify'
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10'
+
+function formatLabel(name: string | undefined, id: string, prefix = ''): string {
+  if (name === undefined || name === '' || name === id) return id
+  return `${prefix}${name}(${id})`
+}
 
 // agent-messenger's DEFAULT_INTENTS omits MessageContent (privileged), so the
 // bot's gateway IDENTIFY never asks for it and Discord delivers every message
@@ -63,8 +75,9 @@ export function createTypingCallback(deps: {
   token: string
   configRef: () => ChannelAdapterConfig
   logger: DiscordBotAdapterLogger
+  formatChannelTag?: (workspace: string, chat: string) => Promise<string>
 }): TypingCallback {
-  const { token, configRef, logger } = deps
+  const { token, configRef, logger, formatChannelTag } = deps
   return async (target: TypingTarget): Promise<void> => {
     if (target.adapter !== 'discord-bot') return
     const config = configRef()
@@ -72,16 +85,17 @@ export function createTypingCallback(deps: {
     // Threads are channels in Discord, so the typing endpoint takes the
     // thread id directly when present.
     const channelId = target.thread ?? target.chat
+    const tag = formatChannelTag ? await formatChannelTag(target.workspace, channelId) : `channel=${channelId}`
     try {
       const response = await fetch(`${DISCORD_API_BASE}/channels/${channelId}/typing`, {
         method: 'POST',
         headers: { Authorization: `Bot ${token}`, 'Content-Length': '0' },
       })
       if (!response.ok) {
-        logger.warn(`[discord-bot] typing channel=${channelId} status=${response.status}`)
+        logger.warn(`[discord-bot] typing ${tag} status=${response.status}`)
       }
     } catch (err) {
-      logger.warn(`[discord-bot] typing channel=${channelId} failed: ${describe(err)}`)
+      logger.warn(`[discord-bot] typing ${tag} failed: ${describe(err)}`)
     }
   }
 }
@@ -95,8 +109,23 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
   let inflightInbounds = 0
   let stopWaiters: Array<() => void> = []
 
-  const typingCallback = createTypingCallback({ token: options.token, configRef: options.configRef, logger })
   const channelResolver = createDiscordChannelResolver({ token: options.token })
+
+  const formatChannelTag = async (workspace: string, chat: string): Promise<string> => {
+    const names = await channelResolver({ adapter: 'discord-bot', workspace, chat, thread: null }).catch(
+      () => ({}) as ResolvedChannelNames,
+    )
+    const workspacePart = workspace === '@dm' ? 'dm' : `guild=${formatLabel(names.workspaceName, workspace)}`
+    const chatPart = `channel=${formatLabel(names.chatName, chat)}`
+    return `${workspacePart} ${chatPart}`
+  }
+
+  const typingCallback = createTypingCallback({
+    token: options.token,
+    configRef: options.configRef,
+    logger,
+    formatChannelTag,
+  })
 
   const outboundCallback: OutboundCallback = async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'discord-bot') {
@@ -107,13 +136,14 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       logger.warn(`[discord-bot] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
       return { ok: false, error: 'denied by allow rules' }
     }
+    const tag = await formatChannelTag(msg.workspace, msg.chat)
     // Logged before the API call so we can tell from logs whether the agent
     // even tried to reply, vs. tried-and-failed. Mirrors the inbound log
     // contract on the receive side.
-    logger.info(`[discord-bot] outbound workspace=${msg.workspace} chat=${msg.chat} text_len=${msg.text.length}`)
+    logger.info(`[discord-bot] outbound ${tag} text_len=${msg.text.length}`)
     try {
       const sent = await client.sendMessage(msg.chat, msg.text, msg.thread ? { thread_id: msg.thread } : undefined)
-      logger.info(`[discord-bot] sent id=${sent.id} chat=${msg.chat}`)
+      logger.info(`[discord-bot] sent id=${sent.id} ${tag}`)
       return { ok: true }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
@@ -128,9 +158,10 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       // One log line per gateway event is non-negotiable: it's the only way to
       // tell from logs whether the gateway is delivering at all. content_len=0
       // is the smoking gun for a missing MessageContent privileged intent.
-      const where = event.guild_id !== undefined ? `guild=${event.guild_id}` : 'dm'
+      const inboundWorkspace = event.guild_id ?? '@dm'
+      const inboundTag = await formatChannelTag(inboundWorkspace, event.channel_id)
       logger.info(
-        `[discord-bot] inbound id=${event.id} author=${event.author.username}(${event.author.id}) ${where} channel=${event.channel_id} content_len=${event.content.length}`,
+        `[discord-bot] inbound id=${event.id} author=${formatLabel(event.author.username, event.author.id)} ${inboundTag} content_len=${event.content.length}`,
       )
 
       const verdict = classifyInbound(event, options.configRef(), botUserId)
@@ -139,8 +170,9 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
         return
       }
 
+      const routedTag = await formatChannelTag(verdict.payload.workspace, verdict.payload.chat)
       logger.info(
-        `[discord-bot] routed id=${event.id} workspace=${verdict.payload.workspace} mention=${verdict.payload.isBotMention} reply=${verdict.payload.replyToBotMessageId !== null}`,
+        `[discord-bot] routed id=${event.id} ${routedTag} mention=${verdict.payload.isBotMention} reply=${verdict.payload.replyToBotMessageId !== null}`,
       )
       await options.router.route(verdict.payload)
     } catch (err) {
