@@ -8,8 +8,12 @@ on:
 
 jobs:
   ci:
-    name: typecheck / lint / format
+    name: typecheck / lint / format / test
     runs-on: ubuntu-latest
+    env:
+      # Tests don't hit Fireworks, but src/agent/auth.ts gates startup on this
+      # var being present (process.exit(1) otherwise). A dummy value is enough.
+      FIREWORKS_API_KEY: dummy
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,3 +34,6 @@ jobs:
 
       - name: Format check
         run: bun run format:check
+
+      - name: Test
+        run: bun test
