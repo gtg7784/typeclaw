@@ -1,6 +1,10 @@
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type {
+  ChannelHistoryMessage,
+  FetchHistoryArgs,
+  FetchHistoryResult,
+  HistoryCallback,
   OutboundCallback,
   OutboundMessage,
   ResolvedChannelNames,
@@ -100,6 +104,122 @@ export function createTypingCallback(deps: {
   }
 }
 
+export const DISCORD_HISTORY_LIMIT_MAX = 100
+
+type DiscordRawHistoryMessage = {
+  id: string
+  channel_id: string
+  author: { id: string; username?: string; global_name?: string | null; bot?: boolean }
+  content: string
+  timestamp: string
+  message_reference?: { message_id?: string }
+}
+
+// Discord treats threads as separate channels with their own snowflake ids,
+// and the gateway puts the thread's id in `event.channel_id`. The inbound
+// classifier therefore stores the thread channel id in `chat` and leaves
+// `thread` null. This callback uses `args.chat` as the channel id directly,
+// which works for both top-level channels and threads. When a future caller
+// passes a non-null `args.thread`, that wins (forward-compatible with a
+// design where `chat` is the parent and `thread` is the thread channel id).
+export function createDiscordHistoryCallback(deps: {
+  token: string
+  configRef: () => ChannelAdapterConfig
+  logger: DiscordBotAdapterLogger
+  botUserIdRef: () => string | null
+  fetchImpl?: typeof fetch
+}): HistoryCallback {
+  const { token, configRef, logger, botUserIdRef } = deps
+  const fetchFn = deps.fetchImpl ?? fetch
+  return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
+    const config = configRef()
+    if (!isAllowedAnyGuild(config.allow, args.chat)) {
+      return { ok: false, error: 'denied by allow rules' }
+    }
+
+    const channelId = args.thread ?? args.chat
+    const limit = clampLimit(args.limit, DISCORD_HISTORY_LIMIT_MAX)
+    const params = new URLSearchParams({ limit: String(limit) })
+    if (args.cursor !== undefined && args.cursor !== '') params.set('before', args.cursor)
+
+    let raw: DiscordRawHistoryMessage[]
+    let response: Response
+    try {
+      response = await fetchFn(`${DISCORD_API_BASE}/channels/${channelId}/messages?${params.toString()}`, {
+        method: 'GET',
+        headers: { Authorization: `Bot ${token}` },
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.warn(`[discord-bot] history fetch failed: ${message}`)
+      return { ok: false, error: message }
+    }
+    if (!response.ok) {
+      return { ok: false, error: `http ${response.status}` }
+    }
+    try {
+      raw = (await response.json()) as DiscordRawHistoryMessage[]
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      return { ok: false, error: `parse failed: ${message}` }
+    }
+
+    const botUserId = botUserIdRef()
+    // Discord returns newest-first; reverse for oldest-first chronological.
+    const mapped = raw.map((m) => mapDiscordMessage(m, botUserId)).reverse()
+
+    // Cursor for the next (older) page is the oldest message id we just
+    // received — Discord's `before=` is exclusive and content-addressed.
+    // Only present when this page was fully populated; otherwise the agent
+    // has reached the start of the channel.
+    const nextCursor = raw.length === limit && raw.length > 0 ? raw[raw.length - 1]!.id : undefined
+    if (nextCursor !== undefined) {
+      return { ok: true, messages: mapped, nextCursor }
+    }
+    return { ok: true, messages: mapped }
+  }
+}
+
+function mapDiscordMessage(msg: DiscordRawHistoryMessage, botUserId: string | null): ChannelHistoryMessage {
+  const isBot = msg.author.bot === true || (botUserId !== null && msg.author.id === botUserId)
+  const ts = Date.parse(msg.timestamp)
+  return {
+    externalMessageId: msg.id,
+    authorId: msg.author.id,
+    authorName: msg.author.global_name ?? msg.author.username ?? msg.author.id,
+    text: msg.content,
+    ts: Number.isFinite(ts) ? ts : 0,
+    isBot,
+    replyToBotMessageId: msg.message_reference?.message_id ?? null,
+  }
+}
+
+function clampLimit(requested: number, max: number): number {
+  if (!Number.isFinite(requested) || requested <= 0) return max
+  return Math.min(Math.floor(requested), max)
+}
+
+// Discord channel ids are globally unique snowflakes, so a `channel:<id>`
+// or `guild:<g>/<id>` rule for any guild admits this chat. We match this
+// way because at fetch time the tool has resolved the chat from session
+// origin but does not always re-supply the guild id (esp. across cursor
+// pagination), so the workspace-aware `isAllowed` is too narrow here.
+function isAllowedAnyGuild(rules: readonly string[], chat: string): boolean {
+  for (const rule of rules) {
+    if (rule === '*') return true
+    if (rule === 'guild:*' || rule === 'team:*') return true
+    if (rule === 'dm:*') return true
+    if (rule.startsWith('channel:') && rule.slice(8) === chat) return true
+    if (rule.startsWith('dm:') && rule.slice(3) === chat) return true
+    if (rule.startsWith('guild:')) {
+      const body = rule.slice(6)
+      const slash = body.indexOf('/')
+      if (slash !== -1 && body.slice(slash + 1) === chat) return true
+    }
+  }
+  return false
+}
+
 export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): DiscordBotAdapter {
   const logger = options.logger ?? consoleLogger
   const client = new DiscordBotClient()
@@ -125,6 +245,13 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
     configRef: options.configRef,
     logger,
     formatChannelTag,
+  })
+
+  const historyCallback = createDiscordHistoryCallback({
+    token: options.token,
+    configRef: options.configRef,
+    logger,
+    botUserIdRef: () => botUserId,
   })
 
   const outboundCallback: OutboundCallback = async (msg: OutboundMessage): Promise<SendResult> => {
@@ -217,6 +344,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.registerOutbound('discord-bot', outboundCallback)
       options.router.registerTyping('discord-bot', typingCallback)
       options.router.registerChannelNameResolver('discord-bot', channelResolver)
+      options.router.registerHistory('discord-bot', historyCallback)
 
       try {
         await listener.start()
@@ -233,6 +361,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.unregisterOutbound('discord-bot', outboundCallback)
       options.router.unregisterTyping('discord-bot', typingCallback)
       options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
+      options.router.unregisterHistory('discord-bot', historyCallback)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)
