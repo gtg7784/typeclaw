@@ -47,6 +47,7 @@ export function classifyInbound(
   // that race window, treat any inbound as a mention so the very first
   // message after start-up isn't misclassified as ambient chatter.
   const isBotMention = context.botUserId !== null ? text.includes(`<@${context.botUserId}>`) : true
+  const thread = event.thread_ts ?? (!isDm && isBotMention ? event.ts : null)
 
   // thread_ts identifies the parent message of a thread. We can only know it
   // is a reply to the bot if we recognize the bot's own user id and have a
@@ -61,7 +62,7 @@ export function classifyInbound(
       adapter: 'slack-bot',
       workspace,
       chat: event.channel,
-      thread: event.thread_ts ?? null,
+      thread,
       text,
       externalMessageId: event.ts,
       authorId: event.user,

@@ -99,7 +99,7 @@ describe('slack-bot classifyInbound — drop paths', () => {
 })
 
 describe('slack-bot classifyInbound — route path', () => {
-  test('routes a team channel message that contains a bot mention', () => {
+  test('routes a top-level team channel mention into a thread rooted at that message', () => {
     const event = buildEvent({ text: `hi <@${BOT_USER_ID}>` })
 
     const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
@@ -110,7 +110,7 @@ describe('slack-bot classifyInbound — route path', () => {
       adapter: 'slack-bot',
       workspace: TEAM_ID,
       chat: 'C0CHANNEL',
-      thread: null,
+      thread: '1700000000.000100',
       text: `hi <@${BOT_USER_ID}>`,
       externalMessageId: '1700000000.000100',
       authorId: 'UALICE',
@@ -129,6 +129,7 @@ describe('slack-bot classifyInbound — route path', () => {
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.isBotMention).toBe(false)
+    expect(verdict.payload.thread).toBeNull()
   })
 
   test('DMs (channel_type=im) route with workspace=@dm and isDm=true', () => {
