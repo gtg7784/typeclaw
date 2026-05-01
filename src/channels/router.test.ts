@@ -3,6 +3,9 @@ import { mkdtemp } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import type { AssistantMessage } from '@mariozechner/pi-ai'
+import type { SessionEntry } from '@mariozechner/pi-coding-agent'
+
 import type { AgentSession } from '@/agent'
 import type { HookBus } from '@/plugin'
 
@@ -15,9 +18,16 @@ class FakeSession {
   public prompts: string[] = []
   public aborted = 0
   public disposed = 0
+  public leafEntry: SessionEntry | undefined
+  public onPrompt: ((text: string) => void | Promise<void>) | undefined
+
+  public sessionManager = {
+    getLeafEntry: (): SessionEntry | undefined => this.leafEntry,
+  }
 
   prompt = async (text: string): Promise<void> => {
     this.prompts.push(text)
+    await this.onPrompt?.(text)
   }
   abort = async (): Promise<void> => {
     this.aborted++
@@ -25,10 +35,44 @@ class FakeSession {
   dispose = (): void => {
     this.disposed++
   }
+
+  setAssistantText(text: string): void {
+    this.leafEntry = messageEntry(assistantMessage(text))
+  }
 }
 
 async function tempDir(): Promise<string> {
   return await mkdtemp(join(tmpdir(), 'channels-router-'))
+}
+
+function assistantMessage(text: string): AssistantMessage {
+  return {
+    role: 'assistant',
+    content: [{ type: 'text', text }],
+    api: 'openai-completions',
+    provider: 'openai',
+    model: 'test-model',
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: 'stop',
+    timestamp: 1000,
+  }
+}
+
+function messageEntry(message: AssistantMessage): SessionEntry {
+  return {
+    type: 'message',
+    id: 'assistant-entry',
+    parentId: null,
+    timestamp: '2026-05-01T00:00:00.000Z',
+    message,
+  }
 }
 
 const baseConfig: ChannelAdapterConfig = {
@@ -43,6 +87,7 @@ function makeRouter(
     config?: ChannelAdapterConfig
     sessions?: FakeSession[]
     nowRef?: { value: number }
+    logs?: string[]
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -51,7 +96,11 @@ function makeRouter(
     agentDir,
     configForAdapter: () => options.config ?? baseConfig,
     now: () => nowRef.value,
-    logger: { info: () => {}, warn: () => {}, error: () => {} },
+    logger: {
+      info: (m) => options.logs?.push(`info:${m}`),
+      warn: (m) => options.logs?.push(`warn:${m}`),
+      error: (m) => options.logs?.push(`error:${m}`),
+    },
     createSessionForChannel: async () => {
       const fake = new FakeSession()
       sessions.push(fake)
@@ -307,6 +356,53 @@ describe('ChannelRouter outbound', () => {
     })
     expect(result.ok).toBe(false)
     expect(result.ok === false ? result.error : '').toContain('denied')
+  })
+})
+
+describe('ChannelRouter channel-turn protocol', () => {
+  test('allows NO_REPLY when no channel tool sent a message', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+
+    await router.route(inbound({ text: 'just FYI' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+    expect(logs.some((m) => m.includes('blocked assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('blocks visible assistant text when no channel tool sent a message', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+
+    await router.route(inbound({ text: 'say hi' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('hi from invisible assistant text')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('blocked assistant_text_without_channel_tool'))).toBe(true)
+  })
+
+  test('does not block visible assistant text after a successful channel send', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ text: 'say hi' }))
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantText('SENT')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'hi' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('blocked assistant_text_without_channel_tool'))).toBe(false)
   })
 })
 

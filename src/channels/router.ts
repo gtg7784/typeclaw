@@ -1,3 +1,4 @@
+import type { AssistantMessage } from '@mariozechner/pi-ai'
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, type AgentSession } from '@/agent'
@@ -99,6 +100,7 @@ type LiveSession = {
   // router.send so the hint reflects the position of the about-to-happen send
   // (n-th in a row), nudging the model to yield without forcing it to.
   consecutiveSends: Map<string, number>
+  successfulChannelSends: number
   destroyed: boolean
 }
 
@@ -255,6 +257,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         lastTurnAuthorIds: new Set(),
         consecutiveAborts: 0,
         consecutiveSends: new Map(),
+        successfulChannelSends: 0,
         destroyed: false,
       }
       liveSessions.set(keyId, live)
@@ -387,8 +390,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         // text length is a proxy for "did we send something at all".
         logger.info(`[channels] ${live.keyId} prompting batch=${batch.length} text_len=${text.length}`)
         const promptStart = now()
+        const successfulSendsBeforePrompt = live.successfulChannelSends
         try {
           await live.session.prompt(text)
+          validateChannelTurn(live, successfulSendsBeforePrompt)
           live.consecutiveAborts = 0
           logger.info(`[channels] ${live.keyId} prompted elapsed_ms=${now() - promptStart}`)
         } catch (err) {
@@ -552,6 +557,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     })
     const live = liveSessions.get(keyId)
     if (live) {
+      live.successfulChannelSends++
       const adapterConfig = options.configForAdapter(msg.adapter)
       if (adapterConfig) {
         const targetIds = Array.from(
@@ -566,6 +572,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
 
     return { ok: true }
+  }
+
+  const validateChannelTurn = (live: LiveSession, successfulSendsBeforePrompt: number): void => {
+    if (live.successfulChannelSends > successfulSendsBeforePrompt) return
+
+    const assistantText = latestAssistantText(live.session)
+    if (assistantText === null) return
+
+    if (assistantText.trim() === 'NO_REPLY') {
+      logger.info(`[channels] ${live.keyId} no_reply`)
+      return
+    }
+
+    logger.warn(
+      `[channels] ${live.keyId}: blocked assistant_text_without_channel_tool text_len=${assistantText.length}`,
+    )
   }
 
   const getConsecutiveSendCount = (target: {
@@ -674,6 +696,21 @@ function tryOpenSessionManager(
 
 function consecutiveSendKey(chat: string, thread: string | null | undefined): string {
   return `${chat}:${thread ?? ''}`
+}
+
+function latestAssistantText(session: AgentSession): string | null {
+  const entry = session.sessionManager.getLeafEntry()
+  if (entry?.type !== 'message') return null
+  if (entry.message.role !== 'assistant') return null
+  if (entry.message.stopReason !== 'stop') return null
+  return visibleAssistantText(entry.message)
+}
+
+function visibleAssistantText(message: AssistantMessage): string {
+  return message.content
+    .filter((block) => block.type === 'text')
+    .map((block) => block.text)
+    .join('')
 }
 
 function describe(err: unknown): string {
