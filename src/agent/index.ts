@@ -26,6 +26,7 @@ import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { renderSessionOrigin, type SessionOrigin } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
+import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
 import { createRestartTool } from './tools/restart'
@@ -129,36 +130,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             webfetchTool,
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
-            ...(options.channelRouter
-              ? [
-                  ...(options.origin?.kind === 'channel'
-                    ? [
-                        createChannelReplyTool({
-                          router: options.channelRouter,
-                          origin: {
-                            adapter: options.origin.adapter,
-                            workspace: options.origin.workspace,
-                            chat: options.origin.chat,
-                            thread: options.origin.thread,
-                          },
-                        }),
-                      ]
-                    : []),
-                  createChannelSendTool({
-                    router: options.channelRouter,
-                    ...(options.origin?.kind === 'channel'
-                      ? {
-                          origin: {
-                            adapter: options.origin.adapter,
-                            workspace: options.origin.workspace,
-                            chat: options.origin.chat,
-                            thread: options.origin.thread,
-                          },
-                        }
-                      : {}),
-                  }),
-                ]
-              : []),
+            ...buildChannelTools(options.channelRouter, options.origin),
             ...(options.containerName ? [createRestartTool({ containerName: options.containerName })] : []),
             ...pluginCustomTools,
           ]
@@ -177,6 +149,33 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     if (materializedSkills) await materializedSkills.dispose()
   }
   return { session, dispose }
+}
+
+// Builds the channel tool subset: channel_send (always when a router is
+// available), plus channel_reply + channel_history (only when the session
+// origin is a channel — those rely on origin-bound addressing). Extracted
+// from createSessionWithDispose so composition can be unit-tested without
+// going through createAgentSession / auth.
+export function buildChannelTools(
+  channelRouter: ChannelRouter | undefined,
+  origin: SessionOrigin | undefined,
+): ToolDefinition[] {
+  if (!channelRouter) return []
+  const tools: ToolDefinition[] = []
+  if (origin?.kind === 'channel') {
+    const channelOrigin = {
+      adapter: origin.adapter,
+      workspace: origin.workspace,
+      chat: origin.chat,
+      thread: origin.thread,
+    }
+    tools.push(createChannelReplyTool({ router: channelRouter, origin: channelOrigin }))
+    tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
+    tools.push(createChannelSendTool({ router: channelRouter, origin: channelOrigin }))
+  } else {
+    tools.push(createChannelSendTool({ router: channelRouter }))
+  }
+  return tools
 }
 
 function wrapRegistryTools(plugins: PluginSessionWiring | undefined): ToolDefinition[] {
