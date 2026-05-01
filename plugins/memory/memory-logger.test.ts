@@ -64,15 +64,31 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/<!-- fragment source=.+ entry=.+ -->/)
   })
 
-  test('requires the Claim / Evidence / Implication body structure', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('**Claim:**')
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('**Evidence:**')
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('**Implication:**')
+  test('requires every fragment to be evidence-anchored and self-contained', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('self-contained')
+    expect(lower).toMatch(/anchored to evidence|anchor.*evidence|evidence.*anchor/)
   })
 
   test('frames both over-writing and under-writing as failure modes', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('over-writing')
     expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('under-writing')
+  })
+
+  test('declares a "when in doubt, capture" capture philosophy (no behavior-change gate)', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('when in doubt')
+    expect(lower).toMatch(/lean toward capture|err on writing it|cheaper than a missed/)
+  })
+
+  test('does not require fragments to articulate a future behavior change', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(
+      /does(n't| not) need to articulate.*future agent|no.*Implication.*not required|implication is obvious/i,
+    )
+  })
+
+  test('names dreaming as the consolidation/filter step that runs after capture', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('dreaming')
   })
 
   test('declares a watermark contract that handles the zero-fragment case', () => {
