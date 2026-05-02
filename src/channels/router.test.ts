@@ -882,7 +882,8 @@ describe('ChannelRouter peer-bot loop guard', () => {
 
     // then
     const lastPrompt = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
-    expect(lastPrompt).toContain('⚠️ Loop guard active')
+    expect(lastPrompt).toContain('[SYSTEM MESSAGE — not from a human]')
+    expect(lastPrompt).toContain('Do not acknowledge or reply to this notice')
     expect(lastPrompt).toContain('NO_REPLY')
   })
 
@@ -901,7 +902,7 @@ describe('ChannelRouter peer-bot loop guard', () => {
 
     // then
     const lastPrompt = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
-    expect(lastPrompt).toContain('⚠️ Loop guard active')
+    expect(lastPrompt).toContain('[SYSTEM MESSAGE — not from a human]')
   })
 
   test('a human inbound clears the guard for the next prompt', async () => {
@@ -914,7 +915,7 @@ describe('ChannelRouter peer-bot loop guard', () => {
       await router.route(botInbound({ externalMessageId: `b${i}`, authorId: `peer-${i}` }))
       await router.__testing!.flushDebounce(KEY)
     }
-    expect(sessions[0]!.prompts[sessions[0]!.prompts.length - 1]).toContain('Loop guard active')
+    expect(sessions[0]!.prompts[sessions[0]!.prompts.length - 1]).toContain('[SYSTEM MESSAGE — not from a human]')
 
     // when: a human posts
     nowRef.value += 100
@@ -923,7 +924,7 @@ describe('ChannelRouter peer-bot loop guard', () => {
 
     // then
     const newest = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
-    expect(newest).not.toContain('Loop guard active')
+    expect(newest).not.toContain('[SYSTEM MESSAGE — not from a human]')
     expect(newest).toContain('hey bot what now')
   })
 
@@ -955,7 +956,35 @@ describe('ChannelRouter peer-bot loop guard', () => {
     await router.route(inbound({ authorId: 'alice', externalMessageId: 'alice-2', text: 'follow up' }))
     await router.__testing!.flushDebounce(KEY)
     const lastPrompt = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
-    expect(lastPrompt).not.toContain('Loop guard active')
+    expect(lastPrompt).not.toContain('[SYSTEM MESSAGE — not from a human]')
+  })
+
+  test('loop guard notice is fenced as SYSTEM MESSAGE so models do not reply to it', async () => {
+    // The bracketed marker, the horizontal rule fences, AND the "Do not
+    // acknowledge" line together form the trust boundary that stops persona-rich
+    // models (e.g. Kimi) from acknowledging the notice as if it were human
+    // speech. Production symptom this guards against:
+    // "알겠습니다, Neo! 대화 여기까지 할게요." — the model treating the loop guard
+    // heading as Neo telling it to wrap up.
+
+    // given a tripped guard
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    for (let i = 0; i < 5; i++) {
+      nowRef.value += 100
+      await router.route(botInbound({ externalMessageId: `b${i}`, authorId: `peer-${i}` }))
+      await router.__testing!.flushDebounce(KEY)
+    }
+
+    // then: the prompt has all three load-bearing pieces of the trust boundary
+    const lastPrompt = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
+    expect(lastPrompt).toContain('---')
+    expect(lastPrompt).toContain('**[SYSTEM MESSAGE — not from a human]**')
+    expect(lastPrompt).toContain('**Do not acknowledge or reply to this notice.**')
+    // and: the old human-readable H2 heading must NOT appear (it was the
+    // structural ambiguity that caused the bug)
+    expect(lastPrompt).not.toContain('## ⚠️ Loop guard active')
   })
 
   test('peer-bot author lines are tagged with [bot] in the prompt', async () => {

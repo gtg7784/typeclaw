@@ -839,21 +839,41 @@ function composeTurnPrompt(
   state: { loopGuardActive: boolean } = { loopGuardActive: false },
 ): string {
   const parts: string[] = []
-  // Warning lives in the user-turn text (recomposed every drain) rather
-  // than in the system prompt so it does not invalidate the prompt-prefix
-  // cache. The cached prefix covers system + tools + earlier turns; the
-  // current user-turn suffix is non-cacheable by design, so adding a
-  // section here is cache-neutral.
+  // Loop-guard notice lives in the user-turn text (recomposed every drain)
+  // rather than in the system prompt so it does not invalidate the
+  // prompt-prefix cache. The cached prefix covers system + tools + earlier
+  // turns; the current user-turn suffix is non-cacheable by design, so
+  // adding a section here is cache-neutral.
+  //
+  // SYSTEM MESSAGE convention: any runtime-injected block in the user turn
+  // that is NOT from a chat participant must use the
+  // `**[SYSTEM MESSAGE — not from a human]**` framing fenced by horizontal
+  // rules (`---`). This is structurally distinct from the H2 sections used
+  // for actual conversation content (`## Recent context`,
+  // `## Current message`). Without the fencing, models — especially
+  // persona-rich ones like Kimi — read the heading as a human-authored
+  // instruction and reply to it ("알겠습니다, 대화 여기까지 할게요"). The
+  // bracketed marker plus the explicit "Do not acknowledge or reply to this
+  // notice" line is the trust boundary that prevents this. New runtime
+  // notices (rate-limit, schema-mismatch, abort signals, etc.) MUST follow
+  // this same convention so models learn the pattern.
   if (state.loopGuardActive) {
     parts.push(
-      '## ⚠️ Loop guard active',
+      '---',
+      '**[SYSTEM MESSAGE — not from a human]**',
       '',
-      `You have been engaged by peer bots ${MAX_CONSECUTIVE_PEER_BOT_TURNS_SINCE_HUMAN}+ times in a row without any human input, or `,
-      `${MAX_PEER_BOT_TURNS_IN_WINDOW}+ peer-bot engagements in the last ${PEER_BOT_TURNS_WINDOW_MS / 1000}s. Consider:`,
-      '- Ending your turn now unless this message clearly requires a reply.',
-      '- Reply with `NO_REPLY` if continuing this thread would be noisy.',
+      `The TypeClaw runtime detected that peer bots have engaged you ${MAX_CONSECUTIVE_PEER_BOT_TURNS_SINCE_HUMAN}+ times in`,
+      `a row without any human input (or ${MAX_PEER_BOT_TURNS_IN_WINDOW}+ times in the last ${PEER_BOT_TURNS_WINDOW_MS / 1000}s). This message`,
+      'is an automated signal from the channel router, not a message from anyone',
+      'in the chat. **Do not acknowledge or reply to this notice.**',
       '',
-      'This warning will clear automatically once a human posts.',
+      'Guidance:',
+      '- If the current message clearly needs a reply, send one and ignore this notice.',
+      '- If continuing would add noise, reply with `NO_REPLY` to stay silent this turn.',
+      '',
+      'This notice clears automatically once a human posts again.',
+      '',
+      '---',
       '',
     )
   }
