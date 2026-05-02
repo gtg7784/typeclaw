@@ -30,28 +30,12 @@ function buildEvent(overrides: Partial<SlackSocketMessageEvent> = {}): SlackSock
 }
 
 describe('slack-bot classifyInbound — drop paths', () => {
-  test('drops messages with bot_id set with reason=bot_author', () => {
-    const event = buildEvent({ bot_id: 'B12345' })
-
-    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'bot_author' })
-  })
-
-  test('drops bot_message subtype with reason=bot_author', () => {
-    const event = buildEvent({ subtype: 'bot_message' })
-
-    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'bot_author' })
-  })
-
-  test('drops messages from the bot itself with reason=bot_author', () => {
+  test('drops self-authored messages (event.user === botUserId) with reason=self_author', () => {
     const event = buildEvent({ user: BOT_USER_ID })
 
     const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
 
-    expect(verdict).toEqual({ kind: 'drop', reason: 'bot_author' })
+    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
   })
 
   test('drops events with no user (e.g. system events) with reason=no_user', () => {
@@ -88,13 +72,62 @@ describe('slack-bot classifyInbound — drop paths', () => {
     expect(verdict).toEqual({ kind: 'drop', reason: 'not_in_allow_list' })
   })
 
-  test('bot_author wins over allow filtering (drop reasons checked first)', () => {
+  test('self_author wins over allow filtering (drop reasons checked first)', () => {
     const config: ChannelAdapterConfig = { ...baseConfig, allow: [] }
-    const event = buildEvent({ subtype: 'bot_message' })
+    const event = buildEvent({ user: BOT_USER_ID })
 
     const verdict = classifyInbound(event, config, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
 
-    expect(verdict).toEqual({ kind: 'drop', reason: 'bot_author' })
+    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
+  })
+})
+
+describe('slack-bot classifyInbound — peer-bot routing', () => {
+  test('routes a peer bot with bot_id set and authorIsBot=true', () => {
+    const event = buildEvent({ user: 'UPEERBOT', bot_id: 'B999', text: 'hello from peer' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.authorIsBot).toBe(true)
+    expect(verdict.payload.authorId).toBe('UPEERBOT')
+  })
+
+  test('routes a peer bot with subtype=bot_message and a user, with authorIsBot=true', () => {
+    const event = buildEvent({ user: 'UPEERBOT', subtype: 'bot_message', text: 'announcement' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.authorIsBot).toBe(true)
+  })
+
+  test('routes a human message with authorIsBot=false', () => {
+    const event = buildEvent({ user: 'UALICE', text: 'hello team' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.authorIsBot).toBe(false)
+  })
+
+  test('still drops self even when bot_id is also set (self check comes first)', () => {
+    const event = buildEvent({ user: BOT_USER_ID, bot_id: 'B-self' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
+  })
+
+  test('routes a bot_message subtype with NO user as no_user (still drops, but for the right reason)', () => {
+    const event = buildEvent({ user: undefined, subtype: 'bot_message', bot_id: 'B999' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict).toEqual({ kind: 'drop', reason: 'no_user' })
   })
 })
 
@@ -115,6 +148,7 @@ describe('slack-bot classifyInbound — route path', () => {
       externalMessageId: '1700000000.000100',
       authorId: 'UALICE',
       authorName: 'UALICE',
+      authorIsBot: false,
       isBotMention: true,
       replyToBotMessageId: null,
       isDm: false,

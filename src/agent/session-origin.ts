@@ -6,6 +6,12 @@ export type ChannelParticipant = {
   firstMessageAt: number
   lastMessageAt: number
   messageCount: number
+  // Optional with default false so persisted records from prior versions
+  // load cleanly. The solo-human engagement fallback in `decideEngagement`
+  // counts only `!isBot` participants, so a missing flag must read as
+  // human (current behavior) — never as bot (would silently disable the
+  // fallback for legacy channels).
+  isBot?: boolean
 }
 
 export type ChannelOriginContext = {

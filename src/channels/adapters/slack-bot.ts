@@ -501,7 +501,7 @@ function dropHint(reason: InboundDropReason): string {
       return ' (extend channels.slack-bot.allow in typeclaw.json to admit this team/channel)'
     case 'empty_text':
     case 'no_user':
-    case 'bot_author':
+    case 'self_author':
       return ''
   }
 }

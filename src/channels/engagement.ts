@@ -48,9 +48,10 @@ export type EngagementInput = {
   ledger: StickyLedger
   now: number
   // Router updates this cache with the current sender BEFORE calling here,
-  // so a fresh channel's first human message arrives with length 1. Bots
-  // never enter the cache (filtered at adapter), so 1 human + N bots is
-  // length 1.
+  // so a fresh channel's first human message arrives with length 1. Peer
+  // bots DO enter the cache now (they were dropped at adapter level
+  // before), so the solo-human fallback below filters them out explicitly
+  // — otherwise a 1-human + N-bot channel would silently exit solo mode.
   participants: readonly ChannelParticipant[]
 }
 
@@ -68,8 +69,11 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // Solo-human fallback: the strict mention/reply/dm gate exists to keep
   // the bot quiet in multi-human conversations. In a 1-human channel that
   // protection makes the agent silent on messages obviously meant for it.
-  // Reverts to strict the moment a second human posts.
-  if (participants.length <= 1) return 'engage'
+  // Reverts to strict the moment a second human posts. Peer bots are
+  // counted as participants for context tracking but excluded here so a
+  // 1-human channel stays solo even if 5 other bots also speak in it.
+  const humanParticipants = participants.filter((p) => p.isBot !== true)
+  if (humanParticipants.length <= 1) return 'engage'
 
   return 'observe'
 }

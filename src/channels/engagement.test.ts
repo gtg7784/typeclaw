@@ -35,6 +35,7 @@ function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
     externalMessageId: 'm1',
     authorId: 'alice',
     authorName: 'alice',
+    authorIsBot: false,
     isBotMention: false,
     replyToBotMessageId: null,
     isDm: false,
@@ -235,6 +236,52 @@ describe('decideEngagement (solo-human fallback)', () => {
       participants: [participant('alice'), participant('bob')],
     })
     expect(decision).toBe('observe')
+  })
+
+  test('keeps solo-human fallback even when peer bots are also participants', () => {
+    // given
+    const ledger = new StickyLedger()
+    const peerBots: ChannelParticipant[] = [
+      { ...participant('peer1'), isBot: true },
+      { ...participant('peer2'), isBot: true },
+      { ...participant('peer3'), isBot: true },
+    ]
+
+    // when
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice'), ...peerBots],
+    })
+
+    // then
+    expect(decision).toBe('engage')
+  })
+
+  test('exits solo-human fallback only when a SECOND human appears (bots do not count)', () => {
+    const ledger = new StickyLedger()
+    const oneBotPlusOneHuman = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice'), { ...participant('peer1'), isBot: true }],
+    })
+    expect(oneBotPlusOneHuman).toBe('engage')
+
+    const twoHumans = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice'), participant('bob'), { ...participant('peer1'), isBot: true }],
+    })
+    expect(twoHumans).toBe('observe')
   })
 })
 

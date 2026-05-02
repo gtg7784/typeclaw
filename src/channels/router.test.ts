@@ -130,6 +130,7 @@ function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
     externalMessageId: 'm1',
     authorId: 'alice',
     authorName: 'alice',
+    authorIsBot: false,
     isBotMention: true,
     replyToBotMessageId: null,
     isDm: false,
@@ -852,6 +853,160 @@ describe('ChannelRouter channel name resolver', () => {
     await router.__testing!.flushDebounce(KEY)
 
     expect(calls).toBe(1)
+  })
+})
+
+describe('ChannelRouter peer-bot loop guard', () => {
+  function botInbound(over: Partial<InboundMessage> = {}): InboundMessage {
+    return inbound({
+      authorIsBot: true,
+      authorId: 'peer-bot-1',
+      authorName: 'peer-bot-1',
+      isBotMention: true,
+      ...over,
+    })
+  }
+
+  test('5 consecutive engaged peer-bot turns trip the warning into the next prompt', async () => {
+    // given
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+
+    // when: 5 engaged peer-bot inbounds, each with its own drain
+    for (let i = 0; i < 5; i++) {
+      nowRef.value += 100
+      await router.route(botInbound({ externalMessageId: `b${i}`, authorId: `peer-${i}`, text: `bot ${i}` }))
+      await router.__testing!.flushDebounce(KEY)
+    }
+
+    // then
+    const lastPrompt = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
+    expect(lastPrompt).toContain('⚠️ Loop guard active')
+    expect(lastPrompt).toContain('NO_REPLY')
+  })
+
+  test('slow peer-bot ring (>60s gaps) still trips via since-human counter', async () => {
+    // given
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+
+    // when: 5 peer bots in a slow ring, each 90s apart so the 60s window stays empty
+    for (let i = 0; i < 5; i++) {
+      await router.route(botInbound({ externalMessageId: `b${i}`, authorId: `peer-${i}`, text: `bot ${i}` }))
+      await router.__testing!.flushDebounce(KEY)
+      nowRef.value += 90_000
+    }
+
+    // then
+    const lastPrompt = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
+    expect(lastPrompt).toContain('⚠️ Loop guard active')
+  })
+
+  test('a human inbound clears the guard for the next prompt', async () => {
+    // given a tripped guard
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    for (let i = 0; i < 5; i++) {
+      nowRef.value += 100
+      await router.route(botInbound({ externalMessageId: `b${i}`, authorId: `peer-${i}` }))
+      await router.__testing!.flushDebounce(KEY)
+    }
+    expect(sessions[0]!.prompts[sessions[0]!.prompts.length - 1]).toContain('Loop guard active')
+
+    // when: a human posts
+    nowRef.value += 100
+    await router.route(inbound({ externalMessageId: 'human-1', text: 'hey bot what now' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    const newest = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
+    expect(newest).not.toContain('Loop guard active')
+    expect(newest).toContain('hey bot what now')
+  })
+
+  test('observed peer-bot messages do not increment the guard', async () => {
+    // given a 2-human channel so peer bot messages without mentions OBSERVE
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ authorId: 'alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'bob-1' }))
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.prompts.length = 0
+
+    // when: 10 peer-bot messages with NO mention (must observe in 2-human channel)
+    for (let i = 0; i < 10; i++) {
+      nowRef.value += 100
+      await router.route(
+        botInbound({
+          externalMessageId: `b${i}`,
+          authorId: `peer-${i}`,
+          isBotMention: false,
+        }),
+      )
+    }
+
+    // then: a follow-up engaged message must NOT carry the warning
+    nowRef.value += 100
+    await router.route(inbound({ authorId: 'alice', externalMessageId: 'alice-2', text: 'follow up' }))
+    await router.__testing!.flushDebounce(KEY)
+    const lastPrompt = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
+    expect(lastPrompt).not.toContain('Loop guard active')
+  })
+
+  test('peer-bot author lines are tagged with [bot] in the prompt', async () => {
+    // given
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    // when
+    await router.route(botInbound({ authorId: 'peer1', authorName: 'PeerBot', text: 'hi from a bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(sessions[0]!.prompts[0]).toContain('<@peer1> (PeerBot) [bot]: hi from a bot')
+  })
+
+  test('human author lines are NOT tagged with [bot]', async () => {
+    // given
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    // when
+    await router.route(inbound({ text: 'hi from alice' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(sessions[0]!.prompts[0]).toContain('<@alice> (alice): hi from alice')
+    expect(sessions[0]!.prompts[0]).not.toContain('[bot]')
+  })
+
+  test('observed peer-bot messages also carry the [bot] tag in Recent context', async () => {
+    // given a 2-human channel where peer-bot messages will observe
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ authorId: 'alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'bob-1' }))
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.prompts.length = 0
+
+    // when: an observed peer bot, then an engaged human
+    nowRef.value += 100
+    await router.route(
+      botInbound({ externalMessageId: 'observed-bot', authorId: 'peer1', authorName: 'PeerBot', isBotMention: false }),
+    )
+    nowRef.value += 100
+    await router.route(inbound({ authorId: 'alice', externalMessageId: 'a2', text: 'ping' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(sessions[0]!.prompts[0]).toContain('<@peer1> (PeerBot) [bot]: ')
   })
 })
 

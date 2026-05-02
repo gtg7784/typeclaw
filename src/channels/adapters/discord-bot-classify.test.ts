@@ -30,12 +30,12 @@ function buildEvent(overrides: Partial<DiscordGatewayMessageCreateEvent> = {}): 
 }
 
 describe('classifyInbound — drop paths', () => {
-  test('drops bot-authored messages with reason=bot_author', () => {
-    const event = buildEvent({ author: { id: 'u1', username: 'bot', bot: true } })
+  test('drops self-authored messages (author.id === botUserId) with reason=self_author', () => {
+    const event = buildEvent({ author: { id: BOT_USER_ID, username: 'me', bot: true } })
 
     const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
 
-    expect(verdict).toEqual({ kind: 'drop', reason: 'bot_author' })
+    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
   })
 
   test('drops empty-content messages with reason=empty_content (missing MessageContent intent)', () => {
@@ -112,13 +112,47 @@ describe('classifyInbound — drop paths', () => {
     expect(verdict).toEqual({ kind: 'drop', reason: 'not_in_allow_list' })
   })
 
-  test('drop reasons are checked before allow list (bot_author wins over allow filtering)', () => {
+  test('drop reasons are checked before allow list (self_author wins over allow filtering)', () => {
     const config: ChannelAdapterConfig = { ...baseConfig, allow: [] }
-    const event = buildEvent({ author: { id: 'u1', username: 'bot', bot: true } })
+    const event = buildEvent({ author: { id: BOT_USER_ID, username: 'me', bot: true } })
 
     const verdict = classifyInbound(event, config, BOT_USER_ID)
 
-    expect(verdict).toEqual({ kind: 'drop', reason: 'bot_author' })
+    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
+  })
+})
+
+describe('classifyInbound — peer-bot routing', () => {
+  test('routes a peer bot message with authorIsBot=true', () => {
+    const event = buildEvent({
+      author: { id: 'peer-bot-id', username: 'peer-bot', bot: true },
+      content: 'I am another bot speaking',
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.authorIsBot).toBe(true)
+    expect(verdict.payload.authorId).toBe('peer-bot-id')
+  })
+
+  test('routes a human message with authorIsBot=false', () => {
+    const event = buildEvent({ author: { id: 'u1', username: 'alice', bot: false } })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.authorIsBot).toBe(false)
+  })
+
+  test('still drops self even when bot flag is set (self check comes first)', () => {
+    const event = buildEvent({ author: { id: BOT_USER_ID, username: 'me', bot: true } })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
   })
 })
 
@@ -139,6 +173,7 @@ describe('classifyInbound — route path', () => {
       externalMessageId: 'm1',
       authorId: 'u1',
       authorName: 'alice',
+      authorIsBot: false,
       isBotMention: true,
       replyToBotMessageId: null,
       isDm: false,

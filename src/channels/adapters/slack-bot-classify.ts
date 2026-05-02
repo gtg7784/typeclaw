@@ -4,7 +4,7 @@ import type { InboundMessage } from '@/channels/types'
 import type { SlackSocketMessageEvent } from './agent-messenger-slack-shim'
 
 export type InboundDropReason =
-  | 'bot_author' // event.bot_id set or subtype === 'bot_message'; dropping prevents echo loops
+  | 'self_author' // event.user === botUserId; we never route our own messages back to ourselves
   | 'no_user' // event has no `user` field (e.g. system messages: channel_join, message_changed)
   | 'empty_text' // event.text is empty or missing — nothing for the agent to act on
   | 'not_in_allow_list' // workspace/channel not admitted by typeclaw.json `channels.slack-bot.allow`
@@ -29,10 +29,22 @@ export function classifyInbound(
   config: ChannelAdapterConfig,
   context: SlackInboundContext,
 ): InboundClassification {
-  if (event.bot_id !== undefined && event.bot_id !== '') return { kind: 'drop', reason: 'bot_author' }
-  if (event.subtype === 'bot_message') return { kind: 'drop', reason: 'bot_author' }
-  if (event.user === undefined || event.user === '') return { kind: 'drop', reason: 'no_user' }
-  if (context.botUserId !== null && event.user === context.botUserId) return { kind: 'drop', reason: 'bot_author' }
+  // Self-drop is the hard floor: never route our own messages back to
+  // ourselves. The check requires `botUserId` (post-auth.test) — before
+  // that, slack-bot.ts already rejects with `pre_connected`, so reaching
+  // here without botUserId means a bot peer's message in the cold-start
+  // window. Let it through (loop guard in the router covers the worst case).
+  if (context.botUserId !== null && event.user === context.botUserId) {
+    return { kind: 'drop', reason: 'self_author' }
+  }
+  if (event.user === undefined || event.user === '') {
+    // System events (channel_join, message_changed, …) have no `user`;
+    // they were also the ONLY way previously to flag bot_message subtype
+    // events with no user. Now that we accept peer bots, a `bot_message`
+    // subtype WITH a user (rare, but happens for legacy integrations) is
+    // routed; subtype + no user still drops as `no_user`.
+    return { kind: 'drop', reason: 'no_user' }
+  }
 
   const text = event.text ?? ''
   if (text === '') return { kind: 'drop', reason: 'empty_text' }
@@ -56,6 +68,10 @@ export function classifyInbound(
   const replyToBotMessageId =
     event.thread_ts !== undefined && event.thread_ts !== event.ts && context.botUserId !== null ? event.thread_ts : null
 
+  // Slack signals "this message was authored by a bot" via either a non-empty
+  // bot_id or subtype === 'bot_message'. Either is sufficient.
+  const authorIsBot = (event.bot_id !== undefined && event.bot_id !== '') || event.subtype === 'bot_message'
+
   return {
     kind: 'route',
     payload: {
@@ -67,6 +83,7 @@ export function classifyInbound(
       externalMessageId: event.ts,
       authorId: event.user,
       authorName: event.user,
+      authorIsBot,
       isBotMention,
       replyToBotMessageId,
       isDm,

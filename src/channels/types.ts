@@ -16,6 +16,12 @@ export type InboundMessage = {
   externalMessageId: string
   authorId: string
   authorName: string
+  // Set true when the inbound is from another bot (NOT this typeclaw
+  // instance's own bot identity — the adapter still drops self-authored
+  // messages with `reason: 'self_author'`). The router treats peer bots
+  // identically to humans for engagement, but uses this flag to drive a
+  // bounded loop guard so two or more bots cannot ping-pong forever.
+  authorIsBot: boolean
   isBotMention: boolean
   replyToBotMessageId: string | null
   isDm: boolean

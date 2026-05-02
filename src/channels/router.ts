@@ -40,6 +40,27 @@ export const CONTEXT_BUFFER_SIZE = 20
 // continuously visible while we debounce + generate without spamming the API.
 export const TYPING_HEARTBEAT_MS = 8000
 
+// Two-axis loop guard for peer-bot conversation. Peer bots route into
+// engagement under the SAME rules as humans, so a small ring (A→B→C→A) or
+// a fast cascade can otherwise ping-pong without bound. The guard trips
+// when EITHER axis hits its limit and clears on the next human inbound.
+//
+// Why two axes:
+// - The since-human counter catches slow rings that would never fill a
+//   60s window (3 bots replying every 30s = 4 turns/min, never trips a
+//   60s sliding count).
+// - The 60s window catches fast bursts that would never accumulate enough
+//   total turns to pressure the since-human counter (a single bot reflex
+//   replying to its own mention 5x in 2s).
+//
+// The model receives a non-fatal warning prepended into composeTurnPrompt
+// when tripped; the LLM decides whether to keep replying. Hard interrupt
+// is intentionally not part of v1 (would require pi-coding-agent abort
+// semantics during in-flight tool calls).
+export const PEER_BOT_TURNS_WINDOW_MS = 60_000
+export const MAX_PEER_BOT_TURNS_IN_WINDOW = 5
+export const MAX_CONSECUTIVE_PEER_BOT_TURNS_SINCE_HUMAN = 5
+
 export type RouterLogger = {
   info: (msg: string) => void
   warn: (msg: string) => void
@@ -71,6 +92,7 @@ type QueuedInbound = {
   text: string
   authorId: string
   authorName: string
+  authorIsBot: boolean
   externalMessageId: string
   isBotMention: boolean
   replyToBotMessageId: string | null
@@ -82,6 +104,7 @@ type ObservedInbound = {
   text: string
   authorId: string
   authorName: string
+  authorIsBot: boolean
   receivedAt: number
 }
 
@@ -114,6 +137,15 @@ type LiveSession = {
   // (n-th in a row), nudging the model to yield without forcing it to.
   consecutiveSends: Map<string, number>
   successfulChannelSends: number
+  // Loop-guard state. See PEER_BOT_TURNS_WINDOW_MS / MAX_* constants
+  // above. Updated in route() on every engaged peer-bot inbound, reset on
+  // any human inbound. The two axes (window ring buffer + since-human
+  // counter) are independent — either tripping sets `loopGuardActive`
+  // until the next human posts. The active flag is read by
+  // composeTurnPrompt() and prepended to the user-turn text.
+  recentEngagedPeerBotTurns: { authorId: string; ts: number }[]
+  consecutiveEngagedPeerBotTurns: number
+  loopGuardActive: boolean
   destroyed: boolean
 }
 
@@ -301,6 +333,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         consecutiveAborts: 0,
         consecutiveSends: new Map(),
         successfulChannelSends: 0,
+        recentEngagedPeerBotTurns: [],
+        consecutiveEngagedPeerBotTurns: 0,
+        loopGuardActive: false,
         destroyed: false,
       }
       liveSessions.set(keyId, live)
@@ -416,7 +451,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         startTypingHeartbeat(live)
         const batch = live.promptQueue.splice(0, live.promptQueue.length)
         const observed = live.contextBuffer.splice(0, live.contextBuffer.length)
-        const text = composeTurnPrompt(observed, batch)
+        const text = composeTurnPrompt(observed, batch, { loopGuardActive: live.loopGuardActive })
 
         live.currentTurnAuthorId = batch.length > 0 ? batch[batch.length - 1]!.authorId : null
         live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
@@ -484,7 +519,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
     const live = await ensureLive(key)
 
-    live.participants = updateParticipants(live.participants, event.authorId, event.authorName, now())
+    live.participants = updateParticipants(
+      live.participants,
+      event.authorId,
+      event.authorName,
+      now(),
+      event.authorIsBot,
+    )
     void persistParticipants(live)
 
     const decision: EngagementDecision = decideEngagement({
@@ -500,6 +541,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       observe(live, event)
       return
     }
+
+    updateLoopGuard(live, event)
 
     enqueue(live, event)
 
@@ -518,11 +561,34 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     scheduleDebouncedDrain(live)
   }
 
+  const updateLoopGuard = (live: LiveSession, event: InboundMessage): void => {
+    if (!event.authorIsBot) {
+      live.recentEngagedPeerBotTurns.length = 0
+      live.consecutiveEngagedPeerBotTurns = 0
+      live.loopGuardActive = false
+      return
+    }
+    const t = now()
+    live.consecutiveEngagedPeerBotTurns++
+    live.recentEngagedPeerBotTurns.push({ authorId: event.authorId, ts: t })
+    const cutoff = t - PEER_BOT_TURNS_WINDOW_MS
+    while (live.recentEngagedPeerBotTurns.length > 0 && live.recentEngagedPeerBotTurns[0]!.ts < cutoff) {
+      live.recentEngagedPeerBotTurns.shift()
+    }
+    if (
+      live.consecutiveEngagedPeerBotTurns >= MAX_CONSECUTIVE_PEER_BOT_TURNS_SINCE_HUMAN ||
+      live.recentEngagedPeerBotTurns.length >= MAX_PEER_BOT_TURNS_IN_WINDOW
+    ) {
+      live.loopGuardActive = true
+    }
+  }
+
   const observe = (live: LiveSession, event: InboundMessage): void => {
     live.contextBuffer.push({
       text: event.text,
       authorId: event.authorId,
       authorName: event.authorName,
+      authorIsBot: event.authorIsBot,
       receivedAt: event.replyToBotMessageId === null ? now() : now(),
     })
     if (live.contextBuffer.length > CONTEXT_BUFFER_SIZE) {
@@ -535,6 +601,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       text: event.text,
       authorId: event.authorId,
       authorName: event.authorName,
+      authorIsBot: event.authorIsBot,
       externalMessageId: event.externalMessageId,
       isBotMention: event.isBotMention,
       replyToBotMessageId: event.replyToBotMessageId,
@@ -766,20 +833,47 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 }
 
-function composeTurnPrompt(observed: readonly ObservedInbound[], batch: readonly QueuedInbound[]): string {
+function composeTurnPrompt(
+  observed: readonly ObservedInbound[],
+  batch: readonly QueuedInbound[],
+  state: { loopGuardActive: boolean } = { loopGuardActive: false },
+): string {
   const parts: string[] = []
+  // Warning lives in the user-turn text (recomposed every drain) rather
+  // than in the system prompt so it does not invalidate the prompt-prefix
+  // cache. The cached prefix covers system + tools + earlier turns; the
+  // current user-turn suffix is non-cacheable by design, so adding a
+  // section here is cache-neutral.
+  if (state.loopGuardActive) {
+    parts.push(
+      '## ⚠️ Loop guard active',
+      '',
+      `You have been engaged by peer bots ${MAX_CONSECUTIVE_PEER_BOT_TURNS_SINCE_HUMAN}+ times in a row without any human input, or `,
+      `${MAX_PEER_BOT_TURNS_IN_WINDOW}+ peer-bot engagements in the last ${PEER_BOT_TURNS_WINDOW_MS / 1000}s. Consider:`,
+      '- Ending your turn now unless this message clearly requires a reply.',
+      '- Reply with `NO_REPLY` if continuing this thread would be noisy.',
+      '',
+      'This warning will clear automatically once a human posts.',
+      '',
+    )
+  }
   if (observed.length > 0) {
     parts.push('## Recent context (not addressed to you, for awareness only)')
     for (const o of observed) {
-      parts.push(`<@${o.authorId}> (${o.authorName}): ${o.text}`)
+      parts.push(formatAuthorLine(o.authorId, o.authorName, o.authorIsBot, o.text))
     }
     parts.push('')
     parts.push(batch.length === 1 ? '## Current message (addressed to you)' : '## Current messages (addressed to you)')
   }
   for (const b of batch) {
-    parts.push(`<@${b.authorId}> (${b.authorName}): ${b.text}`)
+    parts.push(formatAuthorLine(b.authorId, b.authorName, b.authorIsBot, b.text))
   }
   return parts.join('\n')
+}
+
+function formatAuthorLine(authorId: string, authorName: string, authorIsBot: boolean, text: string): string {
+  const tag = authorIsBot ? ' [bot]' : ''
+  return `<@${authorId}> (${authorName})${tag}: ${text}`
 }
 
 function tryOpenSessionManager(
