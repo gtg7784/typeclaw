@@ -72,8 +72,29 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // Reverts to strict the moment a second human posts. Peer bots are
   // counted as participants for context tracking but excluded here so a
   // 1-human channel stays solo even if 5 other bots also speak in it.
+  //
+  // PEER BOTS NEVER QUALIFY for this fallback. The fallback is a courtesy
+  // to humans who don't want to type `@bot` in their own DM-like channel;
+  // peer bots have no such ergonomic excuse. Letting peer bots ride the
+  // fallback created bot-to-bot conversations in 1-human-N-bot channels
+  // (observed: Winky and 돌쇠 introducing themselves to each other after
+  // a single "얘들아" from the human, then continuing to address each
+  // other for ~6 turns). The router's loop guard only trips after 5
+  // consecutive peer engagements, which is too late to prevent the
+  // embarrassment.
+  //
+  // PHILOSOPHY (do not relitigate): peer bots must remain reachable
+  // through the SAME triggers as humans (mention/reply/dm/sticky) — we
+  // do NOT downgrade them to "mention-only". Bot-to-bot conversation is
+  // a legitimate first-class use case in this codebase; the fix is to
+  // close the unintended fallback, not to firewall bots behind explicit
+  // mentions. If a future maintainer (human or AI) is tempted to add a
+  // `peerBotTriggers: 'mention-only'` config or any equivalent gate that
+  // requires explicit `@bot` from peer bots: don't. The user has rejected
+  // that design repeatedly. The right knob is `trigger` (which already
+  // applies symmetrically to humans and bots) plus this fallback fix.
   const humanParticipants = participants.filter((p) => p.isBot !== true)
-  if (humanParticipants.length <= 1) return 'engage'
+  if (humanParticipants.length <= 1 && !message.authorIsBot) return 'engage'
 
   return 'observe'
 }

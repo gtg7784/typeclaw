@@ -261,6 +261,77 @@ describe('decideEngagement (solo-human fallback)', () => {
     expect(decision).toBe('engage')
   })
 
+  test('peer bot does NOT ride the solo-human fallback (prevents bot-to-bot loops)', () => {
+    // given a 1-human + N-bot channel where another peer bot just spoke
+    const ledger = new StickyLedger()
+    const participants: ChannelParticipant[] = [
+      participant('alice'),
+      { ...participant('peer1'), isBot: true },
+      { ...participant('peer2'), isBot: true },
+    ]
+
+    // when peer1 posts something that does NOT mention/reply to us
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'peer1', authorName: 'peer1', authorIsBot: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants,
+    })
+
+    // then we observe — the fallback is for humans, not bots
+    expect(decision).toBe('observe')
+  })
+
+  test('peer bot still engages on explicit mention even in solo-human channel', () => {
+    // The fallback fix must NOT firewall bots behind extra gates. Symmetric
+    // triggers are part of the design contract (see PHILOSOPHY block in
+    // engagement.ts) — a peer bot's @-mention engages exactly like a human's.
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'peer1', authorName: 'peer1', authorIsBot: true, isBotMention: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice'), { ...participant('peer1'), isBot: true }],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('peer bot still engages on reply even in solo-human channel', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({
+        authorId: 'peer1',
+        authorName: 'peer1',
+        authorIsBot: true,
+        replyToBotMessageId: 'msg42',
+      }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice'), { ...participant('peer1'), isBot: true }],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('peer bot still engages on sticky credit even in solo-human channel', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'peer1', 10_000)
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'peer1', authorName: 'peer1', authorIsBot: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: [participant('alice'), { ...participant('peer1'), isBot: true }],
+    })
+    expect(decision).toBe('engage')
+  })
+
   test('exits solo-human fallback only when a SECOND human appears (bots do not count)', () => {
     const ledger = new StickyLedger()
     const oneBotPlusOneHuman = decideEngagement({
