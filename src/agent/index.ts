@@ -259,9 +259,12 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
 
   const additionalSkillPaths = [getBundledSkillsDir()]
   // pi-coding-agent's DefaultResourceLoader auto-discovers <agentDir>/skills/
-  // but not <agentDir>/.agents/skills/, even though the system prompt advertises
-  // both. Add the user-installed location explicitly so a fresh SKILL.md drop
-  // is picked up the next time a session is created.
+  // but not <agentDir>/.agents/skills/. We do not scaffold <agentDir>/skills/
+  // and the system prompt no longer advertises it — the only skill directories
+  // a TypeClaw agent owns are .agents/skills/ (user-installed) and
+  // memory/skills/ (dreaming-owned). Both are wired in explicitly below;
+  // anything the upstream loader auto-discovers under <agentDir>/skills/ is
+  // outside our supported surface.
   const userInstalledSkillsDir = join(agentDir, '.agents', 'skills')
   if (existsSync(userInstalledSkillsDir)) {
     additionalSkillPaths.push(userInstalledSkillsDir)

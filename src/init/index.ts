@@ -18,7 +18,7 @@ const PACKAGE_FILE = 'package.json'
 
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'] as const
 
-const DIRECTORIES = ['workspace', 'sessions', 'skills', '.agents/skills', 'mounts'] as const
+const DIRECTORIES = ['workspace', 'sessions', '.agents/skills', 'mounts'] as const
 
 export type InstallResult = { ok: true } | { ok: false; reason: string }
 export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason: string }

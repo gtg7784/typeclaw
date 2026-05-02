@@ -352,7 +352,7 @@ describe('scaffold', () => {
   test('creates expected directories', async () => {
     await scaffold(root)
 
-    for (const dir of ['workspace', 'sessions', 'skills', '.agents/skills', 'mounts']) {
+    for (const dir of ['workspace', 'sessions', '.agents/skills', 'mounts']) {
       const path = join(root, dir)
       expect(existsSync(path)).toBe(true)
       expect(statSync(path).isDirectory()).toBe(true)
