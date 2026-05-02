@@ -39,6 +39,7 @@ function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
     isBotMention: false,
     replyToBotMessageId: null,
     isDm: false,
+    ts: 0,
     ...over,
   }
 }

@@ -25,6 +25,12 @@ export type InboundMessage = {
   isBotMention: boolean
   replyToBotMessageId: string | null
   isDm: boolean
+  // Original platform-side timestamp in milliseconds since epoch. Sourced
+  // from Slack's `event.ts` or Discord's `event.timestamp` (via the
+  // adapter classifier), NOT the local time the router observed it. Zero
+  // means "unknown" — the formatter renders such lines without a
+  // timestamp prefix instead of stamping them with the wrong clock.
+  ts: number
 }
 
 // File on disk that the agent wants to attach to an outbound message. The

@@ -177,6 +177,7 @@ describe('classifyInbound — route path', () => {
       isBotMention: true,
       replyToBotMessageId: null,
       isDm: false,
+      ts: Date.parse('2024-01-01T00:00:00Z'),
     })
   })
 

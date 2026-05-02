@@ -2,6 +2,7 @@ import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
 import type { SlackSocketMessageEvent } from './agent-messenger-slack-shim'
+import { slackTsToMillis } from './slack-bot-time'
 
 export type InboundDropReason =
   | 'self_author' // event.user === botUserId; we never route our own messages back to ourselves
@@ -87,6 +88,7 @@ export function classifyInbound(
       isBotMention,
       replyToBotMessageId,
       isDm,
+      ts: slackTsToMillis(event.ts),
     },
   }
 }

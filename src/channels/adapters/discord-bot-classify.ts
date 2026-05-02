@@ -54,6 +54,8 @@ export function classifyInbound(
   const replyToBotMessageId =
     event.message_reference?.message_id !== undefined && botUserId !== null ? event.message_reference.message_id : null
 
+  const ts = Date.parse(event.timestamp)
+
   return {
     kind: 'route',
     payload: {
@@ -69,6 +71,7 @@ export function classifyInbound(
       isBotMention,
       replyToBotMessageId,
       isDm,
+      ts: Number.isFinite(ts) ? ts : 0,
     },
   }
 }

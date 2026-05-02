@@ -120,6 +120,9 @@ function makeRouter(
   return { router, sessions, origins }
 }
 
+const FIXED_INBOUND_TS = Date.parse('2024-06-15T12:34:56.000Z')
+const FIXED_INBOUND_ISO = '2024-06-15T12:34:56.000Z'
+
 function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
   return {
     adapter: 'discord-bot',
@@ -134,6 +137,7 @@ function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
     isBotMention: true,
     replyToBotMessageId: null,
     isDm: false,
+    ts: FIXED_INBOUND_TS,
     ...over,
   }
 }
@@ -194,6 +198,24 @@ describe('ChannelRouter engagement and prompt composition', () => {
     await router.__testing!.flushDebounce(KEY)
     expect(sessions[0]!.prompts).toHaveLength(1)
     expect(sessions[0]!.prompts[0]).toContain('<@alice> (alice): what time is it?')
+  })
+
+  test('prompt line is prefixed with the platform-side ISO 8601 timestamp from event.ts', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound({ text: 'hello there', ts: FIXED_INBOUND_TS }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts[0]).toContain(`[${FIXED_INBOUND_ISO}] <@alice> (alice): hello there`)
+  })
+
+  test('prompt line omits the timestamp prefix when ts is unknown (0)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound({ text: 'hello there', ts: 0 }))
+    await router.__testing!.flushDebounce(KEY)
+    const line = sessions[0]!.prompts[0]!
+    expect(line).toContain('<@alice> (alice): hello there')
+    expect(line).not.toMatch(/\[\d{4}-\d{2}-\d{2}T/)
   })
 
   test('non-engaging inbound goes to context buffer, not session.prompt', async () => {

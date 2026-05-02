@@ -22,6 +22,7 @@ import {
 import { createSlackAuthorResolver } from './slack-bot-author-resolver'
 import { createSlackChannelResolver } from './slack-bot-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './slack-bot-classify'
+import { slackTsToMillis } from './slack-bot-time'
 
 // Bound on the dedupe ring buffer. Slack's Events API may deliver the same
 // channel mention twice — once as `message` (when the bot has channel
@@ -245,14 +246,6 @@ function mapSlackMessage(msg: SlackRawHistoryMessage, botUserId: string | null):
 function clampLimit(requested: number, max: number): number {
   if (!Number.isFinite(requested) || requested <= 0) return max
   return Math.min(Math.floor(requested), max)
-}
-
-// Slack timestamps are "<seconds>.<microseconds>" strings. Convert to ms
-// so callers can sort/render chronologically without re-parsing.
-function slackTsToMillis(ts: string): number {
-  const parsed = Number.parseFloat(ts)
-  if (!Number.isFinite(parsed)) return 0
-  return Math.round(parsed * 1000)
 }
 
 // Slack channel ids are globally unique on Slack's side, so a `channel:C…`

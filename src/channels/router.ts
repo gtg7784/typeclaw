@@ -98,6 +98,12 @@ type QueuedInbound = {
   replyToBotMessageId: string | null
   isDm: boolean
   receivedAt: number
+  // Original platform timestamp (Slack/Discord), in ms since epoch. Used
+  // by composeTurnPrompt to render an ISO 8601 prefix on each line so the
+  // model sees when each message was actually posted, not when the router
+  // happened to dequeue it. Zero means "unknown" (the formatter omits the
+  // prefix for those).
+  ts: number
 }
 
 type ObservedInbound = {
@@ -106,6 +112,7 @@ type ObservedInbound = {
   authorName: string
   authorIsBot: boolean
   receivedAt: number
+  ts: number
 }
 
 type LiveSession = {
@@ -590,6 +597,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       authorName: event.authorName,
       authorIsBot: event.authorIsBot,
       receivedAt: event.replyToBotMessageId === null ? now() : now(),
+      ts: event.ts,
     })
     if (live.contextBuffer.length > CONTEXT_BUFFER_SIZE) {
       live.contextBuffer.splice(0, live.contextBuffer.length - CONTEXT_BUFFER_SIZE)
@@ -607,6 +615,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       replyToBotMessageId: event.replyToBotMessageId,
       isDm: event.isDm,
       receivedAt: now(),
+      ts: event.ts,
     })
   }
 
@@ -880,20 +889,27 @@ function composeTurnPrompt(
   if (observed.length > 0) {
     parts.push('## Recent context (not addressed to you, for awareness only)')
     for (const o of observed) {
-      parts.push(formatAuthorLine(o.authorId, o.authorName, o.authorIsBot, o.text))
+      parts.push(formatAuthorLine(o.ts, o.authorId, o.authorName, o.authorIsBot, o.text))
     }
     parts.push('')
     parts.push(batch.length === 1 ? '## Current message (addressed to you)' : '## Current messages (addressed to you)')
   }
   for (const b of batch) {
-    parts.push(formatAuthorLine(b.authorId, b.authorName, b.authorIsBot, b.text))
+    parts.push(formatAuthorLine(b.ts, b.authorId, b.authorName, b.authorIsBot, b.text))
   }
   return parts.join('\n')
 }
 
-function formatAuthorLine(authorId: string, authorName: string, authorIsBot: boolean, text: string): string {
+function formatAuthorLine(
+  ts: number,
+  authorId: string,
+  authorName: string,
+  authorIsBot: boolean,
+  text: string,
+): string {
   const tag = authorIsBot ? ' [bot]' : ''
-  return `<@${authorId}> (${authorName})${tag}: ${text}`
+  const stamp = ts > 0 ? `[${new Date(ts).toISOString()}] ` : ''
+  return `${stamp}<@${authorId}> (${authorName})${tag}: ${text}`
 }
 
 function tryOpenSessionManager(

@@ -152,6 +152,7 @@ describe('slack-bot classifyInbound — route path', () => {
       isBotMention: true,
       replyToBotMessageId: null,
       isDm: false,
+      ts: 1_700_000_000_000,
     })
   })
 
