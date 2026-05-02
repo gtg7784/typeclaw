@@ -113,7 +113,7 @@ describe('send', () => {
           s.data.buf += chunk.toString('utf8')
           const newline = s.data.buf.indexOf('\n')
           if (newline < 0) return
-          s.write(`${JSON.stringify({ ok: true, result: { brokers: [] } })}\n`)
+          s.write(`${JSON.stringify({ ok: true, result: { registrations: [] } })}\n`)
           s.end()
         },
         close: () => {},
