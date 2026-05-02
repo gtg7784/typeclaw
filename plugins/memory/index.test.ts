@@ -84,6 +84,12 @@ describe('memory plugin shape', () => {
     }
   })
 
+  test('accepts five-field dreaming schedules with extra whitespace', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, { dreaming: { schedule: '  */5   * * * *  ' } })
+
+    expect(exports.cronJobs?.dreaming?.schedule).toBe('  */5   * * * *  ')
+  })
+
   test('registers the dreaming cron job with the default schedule when dreaming is not configured', async () => {
     const { exports } = await bootMemoryPlugin(agentDir, { idleMs: 5000 })
     expect(exports.cronJobs?.dreaming?.schedule).toBe('0 4 * * *')
@@ -99,6 +105,10 @@ describe('memory plugin shape', () => {
 
   test('rejects invalid cron expression in dreaming.schedule', async () => {
     await expect(bootMemoryPlugin(agentDir, { dreaming: { schedule: 'not a cron' } })).rejects.toThrow(/cron/i)
+  })
+
+  test('rejects second-level dreaming schedules to prevent tight cron loops', async () => {
+    await expect(bootMemoryPlugin(agentDir, { dreaming: { schedule: '* * * * * *' } })).rejects.toThrow(/five-field/i)
   })
 
   test('rejects idleMs below the 1000ms minimum (lower bound prevents memory-logger thrash)', async () => {

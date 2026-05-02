@@ -23,10 +23,15 @@ function isValidCronExpression(schedule: string): boolean {
   }
 }
 
+function hasFiveCronFields(schedule: string): boolean {
+  return schedule.trim().split(/\s+/).length === 5
+}
+
 const dreamingConfigSchema = z.object({
   schedule: z
     .string()
     .min(1)
+    .refine(hasFiveCronFields, { message: 'memory.dreaming.schedule must be a five-field cron expression' })
     .refine(isValidCronExpression, { message: 'memory.dreaming.schedule must be a valid cron expression' })
     .optional(),
 })
