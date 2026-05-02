@@ -47,7 +47,7 @@ export const configSchema = z
     // restarting the container or pre-declaring ports.
     autoForward: z.boolean().default(true),
     autoForwardExclude: z.array(z.number().int().min(1).max(65535)).default([]),
-    autoForwardLoopback: z.array(z.number().int().min(1).max(65535)).default([]),
+    autoForwardLoopback: z.array(z.number().int().min(1).max(65535)).default([4848]),
   })
   .catchall(z.unknown())
 
