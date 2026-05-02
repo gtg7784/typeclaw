@@ -3,6 +3,7 @@ import { chmod, unlink } from 'node:fs/promises'
 
 import type { Socket, UnixSocketListener } from 'bun'
 
+import { loadConfigSync } from '@/config'
 import { defaultDockerExec, type DockerExec } from '@/container'
 
 import { isDaemonReachable } from './client'
@@ -14,6 +15,7 @@ import {
   type ContainerIpResolver,
   type ForwarderFactory,
 } from './portbroker/broker'
+import type { LoopbackProxyFactory } from './portbroker/loopback-proxy'
 import type {
   ListResult,
   Request,
@@ -30,6 +32,7 @@ export type DaemonOptions = {
   exec?: DockerExec
   resolveIp?: ContainerIpResolver
   forwarderFactory?: ForwarderFactory
+  loopbackProxyFactory?: LoopbackProxyFactory
   onLog?: (event: BrokerLogEvent | DaemonLogEvent | SupervisorLogEvent) => void
   gcIntervalMs?: number
   gcMissesToDeregister?: number
@@ -131,12 +134,20 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         log({ kind: 'register', containerName: req.containerName })
         return { ok: true }
       }
+      let loopbackPorts: number[] = []
+      try {
+        loopbackPorts = loadConfigSync(req.cwd).autoForwardLoopback
+      } catch (error) {
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+      }
       const result = await startBroker({
         containerName: req.containerName,
         excludePorts: new Set<number>(req.excludePorts ?? []),
+        loopbackPorts: new Set<number>(loopbackPorts),
         exec,
         resolveIp: opts.resolveIp,
         forwarderFactory: opts.forwarderFactory,
+        loopbackProxyFactory: opts.loopbackProxyFactory,
         onLog: (event) => log(event),
         onFatal: () => {
           void runSerially(req.containerName, async () => {
