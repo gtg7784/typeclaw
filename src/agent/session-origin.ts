@@ -155,6 +155,7 @@ function renderChannelOrigin(
     '`{ ok: false }` otherwise).',
     '',
     `To mention someone in your reply, use ${platform} syntax \`<@USER_ID>\`.`,
+    ...renderMentionExample(origin.participants ?? [], platform, now),
   )
 
   const participantsBlock = renderParticipants(origin.participants ?? [], now)
@@ -162,6 +163,38 @@ function renderChannelOrigin(
 
   lines.push('', 'Be concise; chat clients punish multi-paragraph replies.')
   return lines.join('\n')
+}
+
+function renderMentionExample(
+  participants: readonly ChannelParticipant[],
+  platform: 'Discord' | 'Slack',
+  now: number,
+): string[] {
+  // Concrete worked example anchored on a REAL participant when possible.
+  // Models reliably copy concrete examples; abstract `<@USER_ID>` placeholders
+  // get treated as generic instructions and ignored. Prefer a peer bot for
+  // the example because that's the addressing case where plain-text names
+  // silently fail (the human path is forgiving — humans see their name and
+  // respond regardless of mention syntax). Fall back to any non-self
+  // participant, then to a generic placeholder if the channel is brand new.
+  //
+  // Apply the SAME staleness cutoff as `renderParticipants` so we never name
+  // someone in the example who isn't shown in the participants block — that
+  // would surface a "ghost" name from >7d ago and confuse the model about
+  // who is actually around.
+  const cutoff = now - PARTICIPANTS_MAX_AGE_MS
+  const fresh = [...participants]
+    .filter((p) => p.lastMessageAt >= cutoff)
+    .sort((a, b) => b.lastMessageAt - a.lastMessageAt)
+  const peerBot = fresh.find((p) => p.isBot === true)
+  const anyPeer = peerBot ?? fresh[0]
+  const exampleId = anyPeer?.authorId ?? '123456789'
+  const exampleName = anyPeer?.authorName ?? 'PeerBot'
+  return [
+    `For example, to address ${exampleName} in this conversation, write \`<@${exampleId}> hello\` —`,
+    `**not** "${exampleName} hello". Plain-text names do not notify the recipient on ${platform},`,
+    'and other bots in this channel will not see the message as addressed to them.',
+  ]
 }
 
 function renderConversationLine(origin: {
@@ -189,10 +222,19 @@ function renderParticipants(participants: readonly ChannelParticipant[], now: nu
 
   const top = [...fresh].sort((a, b) => b.lastMessageAt - a.lastMessageAt).slice(0, PARTICIPANTS_TOP_K)
 
+  // Format flipped from `name (id: 123)` to `<@123> (name)` so the model sees
+  // the SAME shape it will need to emit when addressing someone — copy-paste
+  // the leading `<@id>` token verbatim. The previous format presented the
+  // human-readable name first and the ID parenthetically, which (combined
+  // with `<@id> (name) [bot]:` in inbound message lines) trained the model
+  // to treat `<@id>` as Discord's render-time decoration rather than syntax
+  // it must produce. Symptom in the wild: 돌쇠 addressing Winky as "Winky님"
+  // (plain text), which never trips Winky's `isBotMention` check, so Winky
+  // observes silently and the conversation stalls.
   const lines = ['## Recent participants (last 7 days, top 10 by recency)', '']
   for (const p of top) {
     const ago = formatAgo(now - p.lastMessageAt)
-    lines.push(`- ${p.authorName}  (id: ${p.authorId}) — last message: ${ago}, total: ${p.messageCount}`)
+    lines.push(`- <@${p.authorId}> (${p.authorName}) — last message: ${ago}, total: ${p.messageCount}`)
   }
   lines.push(
     '',
@@ -203,8 +245,8 @@ function renderParticipants(participants: readonly ChannelParticipant[], now: nu
     'of everyone who ever spoke here.',
     '',
     "If a sender in the current turn isn't in the list, you can still",
-    "address them — `<@authorId>` works for any author you've seen, even",
-    'once. The list is a convenience for "who\'s been around lately,"',
+    'address them — `<@authorId>` works for any author you have seen,',
+    'even once. The list is a convenience for "who\'s been around lately,"',
     'not an exhaustive directory.',
   )
   return lines.join('\n')

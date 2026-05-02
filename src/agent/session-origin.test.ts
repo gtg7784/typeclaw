@@ -123,8 +123,87 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('Recent participants')
     expect(out).toContain('alice')
     expect(out).toContain('bob')
-    expect(out).toContain('id: 1')
-    expect(out).toContain('id: 2')
+    // Format is `<@id> (name)` so the model copies the leading `<@id>` token
+    // verbatim when addressing a peer. The old `name (id: 123)` format
+    // trained the model that `<@id>` was just rendering chrome.
+    expect(out).toContain('<@1> (alice)')
+    expect(out).toContain('<@2> (bob)')
+    expect(out).not.toContain('alice  (id: 1)')
+  })
+
+  test('channel origin includes a concrete worked example for mention syntax', () => {
+    // given: a peer bot in the channel
+    const now = Date.now()
+    const participants: ChannelParticipant[] = [
+      {
+        authorId: '999',
+        authorName: 'Winky',
+        firstMessageAt: now - 1000,
+        lastMessageAt: now - 1000,
+        messageCount: 5,
+        isBot: true,
+      },
+      {
+        authorId: '111',
+        authorName: 'alice',
+        firstMessageAt: now - 1000,
+        lastMessageAt: now - 1000,
+        messageCount: 5,
+      },
+    ]
+
+    // when
+    const out = renderSessionOrigin(
+      { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: '222', thread: null, participants },
+      now,
+    )
+
+    // then: the example uses the peer bot's real id and name
+    expect(out).toContain('<@999> hello')
+    expect(out).toContain('Winky')
+    expect(out).toContain('Plain-text names do not notify')
+  })
+
+  test('channel origin mention example falls back to a placeholder when no participants exist', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: '@dm',
+      chat: '999',
+      thread: null,
+      participants: [],
+    })
+    expect(out).toContain('<@123456789> hello')
+    expect(out).toContain('PeerBot')
+  })
+
+  test('channel origin mention example prefers a peer bot over a human participant', () => {
+    // The example needs to demonstrate the failure mode — peer-bot addressing —
+    // not the human-addressing case which is forgiving in practice.
+    const now = Date.now()
+    const participants: ChannelParticipant[] = [
+      {
+        authorId: '111',
+        authorName: 'alice',
+        firstMessageAt: now - 1000,
+        lastMessageAt: now - 1000,
+        messageCount: 5,
+      },
+      {
+        authorId: '999',
+        authorName: 'Winky',
+        firstMessageAt: now - 60_000,
+        lastMessageAt: now - 60_000,
+        messageCount: 2,
+        isBot: true,
+      },
+    ]
+    const out = renderSessionOrigin(
+      { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: '222', thread: null, participants },
+      now,
+    )
+    expect(out).toContain('<@999> hello')
+    expect(out).not.toContain('<@111> hello')
   })
 
   test('channel origin sorts participants by recency descending', () => {
