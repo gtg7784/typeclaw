@@ -14,8 +14,17 @@ import {
   type ContainerIpResolver,
   type ForwarderFactory,
 } from './portbroker/broker'
-import type { ListResult, Request, Response, RestartResult, StatusResult } from './protocol'
+import type {
+  ListResult,
+  Request,
+  Response,
+  RestartResult,
+  ShutdownResult,
+  StatusResult,
+  VersionResult,
+} from './protocol'
 import { buildSupervisor, type SupervisorLogEvent, type SupervisorRestart } from './supervisor'
+import { UNVERSIONED_SENTINEL } from './version'
 
 export type DaemonOptions = {
   exec?: DockerExec
@@ -29,6 +38,16 @@ export type DaemonOptions = {
   // (containerName, cwd) it captured at register time. Omit to disable the
   // capability (e.g. in unit tests that only care about port forwarding).
   restart?: SupervisorRestart
+  // Source-tree fingerprint captured at daemon boot. Reported via the
+  // `version` RPC so the CLI can detect when its on-disk source has drifted
+  // from what the running daemon loaded, and trigger a respawn over the
+  // `shutdown` RPC. Omit to advertise as unversioned (drift detection
+  // disabled — both peers compare equal on the sentinel).
+  version?: string
+  // Invoked after the daemon finishes its self-initiated stop in response to
+  // a `shutdown` RPC. Production wiring exits the process here so the host
+  // can spawn a fresh daemon; tests omit it to keep the process alive.
+  onShutdown?: () => void
 }
 
 export type DaemonLogEvent =
@@ -36,6 +55,7 @@ export type DaemonLogEvent =
   | { kind: 'daemon-stopping' }
   | { kind: 'register'; containerName: string }
   | { kind: 'deregister'; containerName: string; reason: 'requested' | 'gone' | 'fatal' }
+  | { kind: 'shutdown-requested' }
 
 export type Daemon = {
   registered: () => string[]
@@ -65,6 +85,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const exec = opts.exec ?? defaultDockerExec
   const gcIntervalMs = opts.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS
   const gcMissesToDeregister = opts.gcMissesToDeregister ?? DEFAULT_GC_MISSES_TO_DEREGISTER
+  const version = opts.version ?? UNVERSIONED_SENTINEL
   const brokers = new Map<string, Broker>()
   const cwds = new Map<string, string>()
   const perContainerSerial = new Map<string, Promise<unknown>>()
@@ -189,6 +210,30 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     return { ok: true, result }
   }
 
+  const handleVersion = (): Response => {
+    const result: VersionResult = { version }
+    return { ok: true, result }
+  }
+
+  // Honors a `shutdown` RPC by ACKing first, then tearing the daemon down on
+  // the next tick so the reply has time to drain over the socket. The CLI's
+  // respawn flow polls the socket file's disappearance to know when it can
+  // safely spawn a fresh daemon, which is why teardown must complete (and
+  // unlink the socket) before exit. Why an RPC instead of the pidfile-based
+  // SIGTERM the AGENTS.md "PID-reuse safety" rule warns about: the socket
+  // round-trip itself proves we are talking to the daemon we just registered
+  // with, so a stale pidfile cannot redirect the kill to an unrelated process.
+  const handleShutdown = (): Response => {
+    if (stopped) return { ok: true, result: { scheduled: true } satisfies ShutdownResult }
+    log({ kind: 'shutdown-requested' })
+    setTimeout(() => {
+      void daemonHandle.stop().then(() => {
+        if (opts.onShutdown) opts.onShutdown()
+      })
+    }, 0)
+    return { ok: true, result: { scheduled: true } satisfies ShutdownResult }
+  }
+
   const dispatch = async (req: Request): Promise<Response> => {
     switch (req.kind) {
       case 'register':
@@ -201,6 +246,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         return handleStatus(req)
       case 'restart':
         return handleRestart(req)
+      case 'version':
+        return handleVersion()
+      case 'shutdown':
+        return handleShutdown()
     }
   }
 
@@ -304,7 +353,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     void runGc()
   }, gcIntervalMs)
 
-  return {
+  const daemonHandle: Daemon = {
     registered: () => Array.from(brokers.keys()),
     stop: async () => {
       if (stopped) return
@@ -323,4 +372,5 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       } catch {}
     },
   }
+  return daemonHandle
 }

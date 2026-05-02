@@ -36,6 +36,15 @@ export {
   type ForwarderOptions,
   type ForwarderStartResult,
 } from './portbroker/forwarder'
-export type { ListResult, Request, Response, RestartResult, StatusResult } from './protocol'
+export type {
+  ListResult,
+  Request,
+  Response,
+  RestartResult,
+  ShutdownResult,
+  StatusResult,
+  VersionResult,
+} from './protocol'
 export { ensureDaemon, type EnsureDaemonOptions, type EnsureDaemonResult } from './spawn'
 export type { SupervisorOptions } from './supervisor'
+export { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL, type SourceVersion } from './version'

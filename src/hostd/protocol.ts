@@ -13,6 +13,8 @@ export type Request =
   | { kind: 'list' }
   | { kind: 'status'; containerName: string }
   | { kind: 'restart'; containerName: string }
+  | { kind: 'version' }
+  | { kind: 'shutdown' }
 
 export type Response = { ok: true; result?: unknown } | { ok: false; reason: string }
 
@@ -28,5 +30,13 @@ export type StatusResult = {
 
 export type RestartResult = {
   containerName: string
+  scheduled: true
+}
+
+export type VersionResult = {
+  version: string
+}
+
+export type ShutdownResult = {
   scheduled: true
 }
