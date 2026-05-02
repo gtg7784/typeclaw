@@ -41,12 +41,6 @@ export const configSchema = z
     mounts: z.array(mountSchema).default([]),
     plugins: z.array(z.string().min(1)).default([]),
     channels: channelsSchema,
-    // When true, `typeclaw start` spawns a host-side TCP broker that polls the
-    // container for new LISTEN ports and userland-proxies each to the same
-    // host port. Lets the agent expose dev servers (e.g. :5173) without
-    // restarting the container or pre-declaring ports.
-    autoForward: z.boolean().default(true),
-    autoForwardExclude: z.array(z.number().int().min(1).max(65535)).default([]),
   })
   .catchall(z.unknown())
 
@@ -122,8 +116,6 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   mounts: 'restart-required',
   plugins: 'restart-required',
   channels: 'applied',
-  autoForward: 'restart-required',
-  autoForwardExclude: 'restart-required',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -177,16 +169,7 @@ function readPath(obj: unknown, path: string): unknown {
 // each block against its plugin's `configSchema`.
 export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'object' || raw === null) return {}
-  const known = new Set([
-    '$schema',
-    'port',
-    'model',
-    'mounts',
-    'plugins',
-    'channels',
-    'autoForward',
-    'autoForwardExclude',
-  ])
+  const known = new Set(['$schema', 'port', 'model', 'mounts', 'plugins', 'channels'])
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!known.has(key)) result[key] = value
