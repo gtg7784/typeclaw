@@ -7,7 +7,7 @@ import type { VersionResult } from './protocol'
 import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from './version'
 
 export type EnsureDaemonOptions = {
-  brokerEntry: string
+  cliEntry: string
   spawnTimeoutMs?: number
   // Test seam: tests inject a deterministic version probe + respawn so the
   // unit test can exercise the drift path without spawning a real daemon.
@@ -24,7 +24,7 @@ const POLL_INTERVAL_MS = 50
 
 export async function ensureDaemon(opts: EnsureDaemonOptions): Promise<EnsureDaemonResult> {
   if (await isDaemonReachable()) {
-    const expected = opts.expectedVersion ?? (await deriveExpectedVersion(opts.brokerEntry))
+    const expected = opts.expectedVersion ?? (await deriveExpectedVersion(opts.cliEntry))
     if (await daemonVersionMatches(expected)) {
       return { ok: true, pid: await readPidQuiet(), spawned: false, respawned: false }
     }
@@ -44,8 +44,8 @@ export async function ensureDaemon(opts: EnsureDaemonOptions): Promise<EnsureDae
   return { ...result, respawned: false }
 }
 
-async function deriveExpectedVersion(brokerEntry: string): Promise<string> {
-  const srcRoot = resolveSrcRoot(brokerEntry)
+async function deriveExpectedVersion(cliEntry: string): Promise<string> {
+  const srcRoot = resolveSrcRoot(cliEntry)
   if (srcRoot === null) return UNVERSIONED_SENTINEL
   return computeSourceVersion({ srcRoot })
 }
@@ -113,7 +113,7 @@ async function spawnDaemonDetached(opts: EnsureDaemonOptions): Promise<SpawnAtte
   let proc: ReturnType<typeof Bun.spawn>
   try {
     proc = Bun.spawn({
-      cmd: [process.execPath, opts.brokerEntry, '_hostd'],
+      cmd: [process.execPath, opts.cliEntry, '_hostd'],
       stdin: 'ignore',
       stdout: handle.fd,
       stderr: handle.fd,

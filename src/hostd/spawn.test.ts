@@ -34,7 +34,7 @@ describe('ensureDaemon', () => {
     })
 
     const result = await ensureDaemon({
-      brokerEntry: '/nowhere/cli.ts',
+      cliEntry: '/nowhere/cli.ts',
       expectedVersion: 'matching-hash',
     })
 
@@ -52,14 +52,14 @@ describe('ensureDaemon', () => {
     expect(existsSync(socketPath())).toBe(true)
 
     const result = await ensureDaemon({
-      brokerEntry: '/nonexistent/cli.ts',
+      cliEntry: '/nonexistent/cli.ts',
       expectedVersion: 'new',
       spawnTimeoutMs: 500,
     })
 
     // After detecting drift, ensureDaemon sends `shutdown` and waits for the
     // socket to disappear (which it does, because daemon.stop unlinks it).
-    // Then it tries to respawn the daemon at the dummy brokerEntry, which
+    // Then it tries to respawn the daemon at the dummy CLI entry, which
     // fails. The end-to-end behavior we want to assert: the stale daemon was
     // torn down (socket gone) and ensureDaemon did NOT reuse it.
     daemon = null
@@ -69,15 +69,15 @@ describe('ensureDaemon', () => {
     expect(result.reason.toLowerCase()).toContain('reachable')
   })
 
-  test('happy path: socket missing -> spawns a new daemon (when brokerEntry resolves)', async () => {
+  test('happy path: socket missing -> spawns a new daemon (when cliEntry resolves)', async () => {
     expect(existsSync(socketPath())).toBe(false)
 
     const result = await ensureDaemon({
-      brokerEntry: '/nonexistent/cli.ts',
+      cliEntry: '/nonexistent/cli.ts',
       spawnTimeoutMs: 500,
     })
 
-    // Production path requires a real brokerEntry; the test invokes with a
+    // Production path requires a real CLI entry; the test invokes with a
     // dummy path, so spawn fails. The test asserts the failure mode is the
     // spawn failure (not the drift path).
     expect(result.ok).toBe(false)

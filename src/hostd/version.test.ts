@@ -149,7 +149,7 @@ describe('computeSourceVersion', () => {
 })
 
 describe('resolveSrcRoot', () => {
-  test('returns the src dir for a brokerEntry inside src/', () => {
+  test('returns the src dir for a CLI entry inside src/', () => {
     expect(resolveSrcRoot('/home/x/typeclaw/src/cli/index.ts')).toBe('/home/x/typeclaw/src')
     expect(resolveSrcRoot('/home/x/typeclaw/src/hostd/spawn.ts')).toBe('/home/x/typeclaw/src')
   })

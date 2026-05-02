@@ -9,7 +9,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 // process. Bun reads source files once at process start; subsequent edits on
 // disk do not propagate. A short-lived CLI invocation (`typeclaw start`) sees
 // the new code immediately, but if it reuses an existing daemon, the daemon
-// keeps serving the old in-memory parser/broker logic indefinitely. The
+// keeps serving old in-memory daemon logic indefinitely. The
 // observable effect is that bug fixes "don't apply" until the user manually
 // kills `_hostd` — which is invisible footgun territory.
 //
@@ -92,13 +92,13 @@ async function collectSourceFiles(root: string, dir: string, fs: VersionFs): Pro
   return out
 }
 
-// Resolves the project's `src/` directory from a brokerEntry path
+// Resolves the project's `src/` directory from a CLI entry path
 // (typically `process.argv[1]`, which points at `src/cli/index.ts` in dev
 // stage or a bundled JS entry in published builds). Returns `null` if no
 // `src/` ancestor is found, in which case versioning falls back to a
 // constant — disabling drift detection rather than crashing.
-export function resolveSrcRoot(brokerEntry: string): string | null {
-  let current = resolve(brokerEntry)
+export function resolveSrcRoot(cliEntry: string): string | null {
+  let current = resolve(cliEntry)
   while (true) {
     const parent = dirname(current)
     if (parent === current) return null
