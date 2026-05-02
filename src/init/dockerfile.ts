@@ -26,6 +26,14 @@ ARG TARGETARCH
 #   - python3 + pip + venv + python-is-python3: agents routinely shell out to
 #     Python scripts (data wrangling, ML tooling, ad-hoc \`pip install\`).
 #     python-is-python3 makes \`python\` resolve to python3 so both names work.
+#   - tmux: agents use it for long-running sessions, multiplexed shells, and
+#     detachable workflows (matches what host-stage tooling expects).
+#   - curl + gnupg: needed to register the GitHub CLI apt repository below.
+#     Kept installed since agents reach for curl constantly anyway.
+#   - gh (GitHub CLI): not in Debian's default repos, so we add the official
+#     cli.github.com apt source with a pinned keyring before installing. Done
+#     inside the same RUN so the apt cache cleanup at the end covers both
+#     update cycles and we don't ship two cached package indexes.
 #   - chromium (arm64 only): Chrome for Testing has no Linux ARM64 build, so
 #     we use Debian's chromium package on that arch. Bundling it into the same
 #     apt invocation avoids a second \`apt-get update\` later and keeps the
@@ -34,6 +42,15 @@ RUN apt-get update \\
  && apt-get install -y --no-install-recommends \\
       git ca-certificates \\
       python3 python3-pip python3-venv python-is-python3 \\
+      tmux curl gnupg \\
+ && mkdir -p -m 755 /etc/apt/keyrings \\
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \\
+      | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \\
+ && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \\
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \\
+      > /etc/apt/sources.list.d/github-cli.list \\
+ && apt-get update \\
+ && apt-get install -y --no-install-recommends gh \\
  && if [ "$TARGETARCH" = "arm64" ]; then \\
       apt-get install -y --no-install-recommends chromium; \\
     fi \\

@@ -639,6 +639,34 @@ describe('writeDockerAssets', () => {
     expect(dockerfile).toMatch(/^[^#\n]*\bagent-browser install --with-deps\b/m)
   })
 
+  test('Dockerfile bundles tmux for long-running detachable agent sessions', async () => {
+    await scaffold(root)
+
+    await writeDockerAssets(root)
+
+    const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
+    // tmux must come from the same apt-install batch as git so the image
+    // ships with multiplexer support without a second update/cleanup cycle.
+    // The batch spans line continuations, so match across them with [\s\S].
+    expect(dockerfile).toMatch(/apt-get install[\s\S]+?\btmux\b[\s\S]+?rm -rf \/var\/lib\/apt\/lists/)
+  })
+
+  test('Dockerfile bundles GitHub CLI via the official cli.github.com apt repo', async () => {
+    await scaffold(root)
+
+    await writeDockerAssets(root)
+
+    const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
+    // gh is not in Debian's default repos; the only sustainable install is
+    // through the upstream apt source. Pin the URL, the keyring location,
+    // and the final `apt-get install gh` so a regression in any of these
+    // (key removed, repo line dropped) fails loudly here instead of at
+    // `docker build` time on a user's machine.
+    expect(dockerfile).toContain('https://cli.github.com/packages')
+    expect(dockerfile).toContain('/etc/apt/keyrings/githubcli-archive-keyring.gpg')
+    expect(dockerfile).toMatch(/apt-get install[^\n]*\bgh\b/)
+  })
+
   test('Dockerfile falls back to apt chromium on arm64 since Chrome for Testing has no linux/arm64 build', async () => {
     await scaffold(root)
 
