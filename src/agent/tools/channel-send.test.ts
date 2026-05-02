@@ -19,6 +19,9 @@ function fakeRouter(
     unregisterTyping: () => {},
     registerChannelNameResolver: () => {},
     unregisterChannelNameResolver: () => {},
+    registerHistory: () => {},
+    unregisterHistory: () => {},
+    fetchHistory: async () => ({ ok: false, error: 'history-not-supported' }),
     stop: async () => {},
     liveCount: () => 0,
   }

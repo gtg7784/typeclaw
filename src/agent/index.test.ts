@@ -4,9 +4,11 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { createChannelRouter } from '@/channels/router'
 import { createHookBus, type PluginRegistry } from '@/plugin'
 
-import { createOverrideResourceLoader, createResourceLoader, getBundledSkillsDir } from './index'
+import { buildChannelTools, createOverrideResourceLoader, createResourceLoader, getBundledSkillsDir } from './index'
+import type { SessionOrigin } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
 
 async function runGit(cwd: string, args: string[]): Promise<void> {
@@ -286,6 +288,87 @@ describe('createOverrideResourceLoader', () => {
 
     // then
     expect(loader.getAppendSystemPrompt()).toEqual([])
+  })
+})
+
+describe('buildChannelTools', () => {
+  function makeRouter() {
+    return createChannelRouter({
+      agentDir: '/tmp/test-channel-tools',
+      configForAdapter: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+      }),
+    })
+  }
+
+  const channelOrigin: SessionOrigin = {
+    kind: 'channel',
+    adapter: 'slack-bot',
+    workspace: 'T0',
+    chat: 'C0',
+    thread: '1700000000.000100',
+  }
+
+  const tuiOrigin: SessionOrigin = { kind: 'tui', sessionId: 'ses-tui-1' }
+  const cronOrigin: SessionOrigin = { kind: 'cron', jobId: 'j1', jobKind: 'prompt' }
+
+  test('exposes channel_send, channel_reply, AND channel_history when origin is channel', () => {
+    // given
+    const router = makeRouter()
+
+    // when
+    const tools = buildChannelTools(router, channelOrigin)
+
+    // then
+    const names = tools.map((t) => t.name).sort()
+    expect(names).toEqual(['channel_history', 'channel_reply', 'channel_send'])
+  })
+
+  test('exposes only channel_send (no reply or history) when origin is non-channel', () => {
+    // given
+    const router = makeRouter()
+
+    // when
+    const tools = buildChannelTools(router, tuiOrigin)
+
+    // then
+    const names = tools.map((t) => t.name).sort()
+    expect(names).toEqual(['channel_send'])
+  })
+
+  test('exposes only channel_send when origin is cron (not channel-routed)', () => {
+    // given
+    const router = makeRouter()
+
+    // when
+    const tools = buildChannelTools(router, cronOrigin)
+
+    // then
+    const names = tools.map((t) => t.name).sort()
+    expect(names).toEqual(['channel_send'])
+  })
+
+  test('exposes no channel tools when channelRouter is undefined', () => {
+    // when
+    const tools = buildChannelTools(undefined, channelOrigin)
+    // then
+    expect(tools).toHaveLength(0)
+  })
+
+  test('exposes no channel tools when origin is undefined and channelRouter is undefined', () => {
+    // when
+    const tools = buildChannelTools(undefined, undefined)
+    // then
+    expect(tools).toHaveLength(0)
+  })
+
+  test('exposes only channel_send when channelRouter is set but origin is undefined', () => {
+    // when
+    const tools = buildChannelTools(makeRouter(), undefined)
+    // then
+    expect(tools.map((t) => t.name)).toEqual(['channel_send'])
   })
 })
 

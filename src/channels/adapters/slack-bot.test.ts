@@ -1,9 +1,14 @@
 import { describe, expect, test } from 'bun:test'
 
-import { isAllowed } from '@/channels/schema'
+import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 
 import type { SlackSocketAppMentionEvent } from './agent-messenger-slack-shim'
-import { createTypingCallback, promoteAppMentionToMessage } from './slack-bot'
+import {
+  createSlackHistoryCallback,
+  createTypingCallback,
+  promoteAppMentionToMessage,
+  SLACK_HISTORY_LIMIT_MAX,
+} from './slack-bot'
 import { classifyInbound } from './slack-bot-classify'
 
 describe('slack-bot adapter (unit-level pure helpers)', () => {
@@ -177,5 +182,326 @@ describe('slack-bot promoteAppMentionToMessage', () => {
       isBotMention: true,
       isDm: false,
     })
+  })
+})
+
+describe('createSlackHistoryCallback', () => {
+  type FetchCall = { url: string; init: RequestInit }
+
+  function fakeFetch(response: unknown): { fn: typeof fetch; calls: FetchCall[] } {
+    const calls: FetchCall[] = []
+    const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push({ url, init: init ?? {} })
+      return new Response(JSON.stringify(response), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }) as unknown as typeof fetch
+    return { fn, calls }
+  }
+
+  function silentLogger() {
+    return { info: () => {}, warn: () => {}, error: () => {} }
+  }
+
+  function permissiveConfig(): ChannelAdapterConfig {
+    return { allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }
+  }
+
+  test('uses conversations.replies when thread is set, with channel + ts in the body', async () => {
+    // given
+    const { fn, calls } = fakeFetch({
+      ok: true,
+      messages: [
+        { ts: '1700000000.000100', user: 'UALICE', text: 'parent', thread_ts: '1700000000.000100' },
+        { ts: '1700000001.000200', user: 'UBOB', text: 'reply', thread_ts: '1700000000.000100' },
+      ],
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'xoxb-tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => 'UBOT',
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0CHANNEL', thread: '1700000000.000100', limit: 10 })
+    // then
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toBe('https://slack.com/api/conversations.replies')
+    expect(calls[0]!.init.method).toBe('POST')
+    const headers = calls[0]!.init.headers as Record<string, string>
+    expect(headers.Authorization).toBe('Bearer xoxb-tok')
+    expect(headers['Content-Type']).toContain('application/x-www-form-urlencoded')
+    const body = (calls[0]!.init.body as string) ?? ''
+    const params = new URLSearchParams(body)
+    expect(params.get('channel')).toBe('C0CHANNEL')
+    expect(params.get('ts')).toBe('1700000000.000100')
+    expect(params.get('limit')).toBe('10')
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.messages.map((m) => m.externalMessageId)).toEqual(['1700000000.000100', '1700000001.000200'])
+  })
+
+  test('uses conversations.history when thread is null', async () => {
+    // given
+    const { fn, calls } = fakeFetch({ ok: true, messages: [] })
+    const cb = createSlackHistoryCallback({
+      token: 'xoxb-tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    await cb({ chat: 'C0CHANNEL', thread: null, limit: 5 })
+    // then
+    expect(calls[0]!.url).toBe('https://slack.com/api/conversations.history')
+    const params = new URLSearchParams(calls[0]!.init.body as string)
+    expect(params.get('channel')).toBe('C0CHANNEL')
+    expect(params.get('ts')).toBeNull()
+  })
+
+  test('reverses conversations.history (newest-first) into oldest-first', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [
+        { ts: '1700000003.000300', user: 'UC', text: 'newest' },
+        { ts: '1700000002.000200', user: 'UB', text: 'middle' },
+        { ts: '1700000001.000100', user: 'UA', text: 'oldest' },
+      ],
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.messages.map((m) => m.text)).toEqual(['oldest', 'middle', 'newest'])
+  })
+
+  test('preserves conversations.replies order (already oldest-first)', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [
+        { ts: '1700000001.000100', user: 'UA', text: 'first', thread_ts: '1700000001.000100' },
+        { ts: '1700000002.000200', user: 'UB', text: 'second', thread_ts: '1700000001.000100' },
+      ],
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: '1700000001.000100', limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.messages.map((m) => m.text)).toEqual(['first', 'second'])
+  })
+
+  test('marks bot_message subtype as isBot', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [
+        { ts: '1.1', user: 'UALICE', text: 'human' },
+        { ts: '2.2', subtype: 'bot_message', bot_id: 'B123', text: 'from a bot' },
+      ],
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const byTs = Object.fromEntries(result.messages.map((m) => [m.externalMessageId, m.isBot]))
+    expect(byTs['1.1']).toBe(false)
+    expect(byTs['2.2']).toBe(true)
+  })
+
+  test('marks our own bot user id as isBot even when subtype is missing', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [
+        { ts: '1.1', user: 'UBOT', text: 'self message via web api' },
+        { ts: '2.2', user: 'UHUMAN', text: 'human reply' },
+      ],
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => 'UBOT',
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const byTs = Object.fromEntries(result.messages.map((m) => [m.externalMessageId, m.isBot]))
+    expect(byTs['1.1']).toBe(true)
+    expect(byTs['2.2']).toBe(false)
+  })
+
+  test('exposes nextCursor when Slack returns response_metadata.next_cursor', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [{ ts: '1.1', user: 'UA', text: 'a' }],
+      response_metadata: { next_cursor: 'cur-page-2' },
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.nextCursor).toBe('cur-page-2')
+  })
+
+  test('omits nextCursor when Slack returns an empty cursor', async () => {
+    // given
+    const { fn } = fakeFetch({ ok: true, messages: [], response_metadata: { next_cursor: '' } })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    expect(result.nextCursor).toBeUndefined()
+  })
+
+  test('passes cursor through verbatim on follow-up calls', async () => {
+    // given
+    const { fn, calls } = fakeFetch({ ok: true, messages: [] })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    await cb({ chat: 'C0', thread: null, limit: 10, cursor: 'cur-page-2' })
+    // then
+    const params = new URLSearchParams(calls[0]!.init.body as string)
+    expect(params.get('cursor')).toBe('cur-page-2')
+  })
+
+  test('clamps limit to SLACK_HISTORY_LIMIT_MAX', async () => {
+    // given
+    const { fn, calls } = fakeFetch({ ok: true, messages: [] })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    await cb({ chat: 'C0', thread: null, limit: 999 })
+    // then
+    const params = new URLSearchParams(calls[0]!.init.body as string)
+    expect(params.get('limit')).toBe(String(SLACK_HISTORY_LIMIT_MAX))
+  })
+
+  test('returns ok:false with the slack error string when ok=false', async () => {
+    // given
+    const { fn } = fakeFetch({ ok: false, error: 'channel_not_found' })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    expect(result).toEqual({ ok: false, error: 'channel_not_found' })
+  })
+
+  test('swallows fetch rejection into ok:false (does not throw)', async () => {
+    // given
+    const fn = (async () => {
+      throw new Error('network down')
+    }) as unknown as typeof fetch
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: permissiveConfig,
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    expect(result).toEqual({ ok: false, error: 'network down' })
+  })
+
+  test('refuses fetch when chat is not in the allow list', async () => {
+    // given
+    const { fn, calls } = fakeFetch({ ok: true, messages: [] })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: () => ({
+        allow: ['team:T0OTHER'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+      }),
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0CHANNEL', thread: null, limit: 10 })
+    // then
+    expect(calls).toHaveLength(0)
+    expect(result).toEqual({ ok: false, error: 'denied by allow rules' })
+  })
+
+  test('admits per-channel allow rule (channel:C0) without a workspace at fetch time', async () => {
+    // given
+    const { fn, calls } = fakeFetch({ ok: true, messages: [] })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      configRef: (): ChannelAdapterConfig => ({
+        allow: ['channel:C0CHANNEL'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+      }),
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0CHANNEL', thread: null, limit: 10 })
+    // then
+    expect(calls).toHaveLength(1)
+    expect(result.ok).toBe(true)
   })
 })

@@ -18,6 +18,9 @@ import type { ChannelAdapterConfig } from './schema'
 import type {
   ChannelKey,
   ChannelNameResolver,
+  FetchHistoryArgs,
+  FetchHistoryResult,
+  HistoryCallback,
   InboundMessage,
   OutboundCallback,
   OutboundMessage,
@@ -129,6 +132,9 @@ export type ChannelRouter = {
   unregisterTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   registerChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
   unregisterChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
+  registerHistory: (adapter: ChannelKey['adapter'], cb: HistoryCallback) => void
+  unregisterHistory: (adapter: ChannelKey['adapter'], cb: HistoryCallback) => void
+  fetchHistory: (adapter: ChannelKey['adapter'], args: FetchHistoryArgs) => Promise<FetchHistoryResult>
   stop: () => Promise<void>
   liveCount: () => number
   __testing?: {
@@ -156,6 +162,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
+  const historyCallbacks = new Map<ChannelKey['adapter'], Set<HistoryCallback>>()
   const stickyLedger = new StickyLedger()
 
   let mappings: ChannelSessionRecord[] | null = null
@@ -575,6 +582,36 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     channelNameResolvers.get(adapter)?.delete(resolver)
   }
 
+  const registerHistory = (adapter: ChannelKey['adapter'], cb: HistoryCallback): void => {
+    let set = historyCallbacks.get(adapter)
+    if (!set) {
+      set = new Set()
+      historyCallbacks.set(adapter, set)
+    }
+    set.add(cb)
+  }
+
+  const unregisterHistory = (adapter: ChannelKey['adapter'], cb: HistoryCallback): void => {
+    historyCallbacks.get(adapter)?.delete(cb)
+  }
+
+  const fetchHistory = async (adapter: ChannelKey['adapter'], args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
+    const callbacks = historyCallbacks.get(adapter)
+    if (!callbacks || callbacks.size === 0) {
+      return { ok: false, error: 'history-not-supported' }
+    }
+    // Snapshot before iterating, mirroring `send`: a callback that mutates
+    // the set (e.g. unregisters mid-call) must not skip siblings.
+    const snapshot = Array.from(callbacks)
+    let lastError: FetchHistoryResult & { ok: false } = { ok: false, error: 'history-not-supported' }
+    for (const cb of snapshot) {
+      const result = await cb(args)
+      if (result.ok) return result
+      lastError = result
+    }
+    return lastError
+  }
+
   const send = async (msg: OutboundMessage): Promise<SendResult> => {
     const callbacks = outboundCallbacks.get(msg.adapter)
     if (!callbacks || callbacks.size === 0) {
@@ -700,6 +737,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     unregisterTyping,
     registerChannelNameResolver,
     unregisterChannelNameResolver,
+    registerHistory,
+    unregisterHistory,
+    fetchHistory,
     stop,
     liveCount: () => liveSessions.size,
     __testing: {
