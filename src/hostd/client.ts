@@ -22,6 +22,38 @@ export type SendOptions = {
   socket?: string
 }
 
+export type SendHttpOptions = {
+  timeoutMs?: number
+  url: string
+  token: string
+}
+
+export async function sendHttp(req: Request, opts: SendHttpOptions): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(new URL('/rpc', opts.url), {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${opts.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify(req),
+      signal: controller.signal,
+    })
+    const parsed = (await res.json()) as Response
+    return parsed
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      return { ok: false, reason: `daemon ack timeout after ${timeoutMs}ms` }
+    }
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function send(req: Request, opts: SendOptions = {}): Promise<Response> {
   const path = opts.socket ?? socketPath()
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS

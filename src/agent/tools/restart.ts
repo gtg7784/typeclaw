@@ -1,7 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
-import { send } from '@/hostd/client'
+import { send, sendHttp } from '@/hostd/client'
 import { containerSocketPath } from '@/hostd/paths'
 
 const ACK_TIMEOUT_MS = 5_000
@@ -11,12 +11,16 @@ export type CreateRestartToolOptions = {
   containerName: string
   exit?: (code: number) => void
   socketPath?: string
+  hostdUrl?: string
+  hostdToken?: string
 }
 
 export type RestartToolDetails = { ok: boolean; containerName: string; reason?: string }
 
-export function createRestartTool({ containerName, exit, socketPath }: CreateRestartToolOptions) {
+export function createRestartTool({ containerName, exit, socketPath, hostdUrl, hostdToken }: CreateRestartToolOptions) {
   const doExit = exit ?? ((code: number) => process.exit(code))
+  const httpUrl = hostdUrl ?? process.env.TYPECLAW_HOSTD_URL
+  const httpToken = hostdToken ?? process.env.TYPECLAW_HOSTD_TOKEN
 
   return defineTool({
     name: 'restart',
@@ -30,10 +34,11 @@ export function createRestartTool({ containerName, exit, socketPath }: CreateRes
       'TUI must reconnect after the new container is up.',
     parameters: Type.Object({}),
     execute: async () => {
-      const reply = await send(
-        { kind: 'restart', containerName },
-        { timeoutMs: ACK_TIMEOUT_MS, socket: socketPath ?? containerSocketPath() },
-      )
+      const request = { kind: 'restart' as const, containerName }
+      const reply =
+        httpUrl && httpToken
+          ? await sendHttp(request, { timeoutMs: ACK_TIMEOUT_MS, url: httpUrl, token: httpToken })
+          : await send(request, { timeoutMs: ACK_TIMEOUT_MS, socket: socketPath ?? containerSocketPath() })
       if (!reply.ok) {
         const details: RestartToolDetails = { ok: false, containerName, reason: reply.reason }
         return {

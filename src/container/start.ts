@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -5,7 +6,6 @@ import { isAbsolute, join, resolve } from 'node:path'
 
 import { configSchema, type Mount } from '@/config/config'
 import { send as sendToDaemon } from '@/hostd/client'
-import { containerHostRunDir, runDir } from '@/hostd/paths'
 import { ensureDaemon } from '@/hostd/spawn'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
@@ -17,6 +17,8 @@ const PACKAGE_FILE = 'package.json'
 const CONFIG_FILE = 'typeclaw.json'
 const ENV_FILE = '.env'
 const COMPOSE_PROJECT = 'typeclaw'
+const CONTAINER_HOSTD_HOST = 'host.docker.internal'
+const HOST_GATEWAY_ALIAS = `${CONTAINER_HOSTD_HOST}:host-gateway`
 
 const MOUNT_TARGET_PREFIX = '/agent/mounts'
 
@@ -35,6 +37,12 @@ export type PlanStartOptions = {
   hostPort: number
   imageExists: boolean
   forceBuild?: boolean
+  hostdControl?: HostDaemonControl
+}
+
+export type HostDaemonControl = {
+  url: string
+  token: string
 }
 
 export type StartOptions = {
@@ -104,6 +112,9 @@ export async function start({
       }
     }
 
+    const hostd = cliEntry ? await registerWithDaemon({ cwd, containerName, cliEntry }) : { state: 'disabled' as const }
+    const hostdControl = hostd.state === 'registered' ? hostd.control : undefined
+
     const imageExisted = await imageExists(exec, imageTagValue)
 
     // First attempt uses the user's preferred host port (8973 by default, or
@@ -111,12 +122,15 @@ export async function start({
     // we fall through to a kernel-assigned ephemeral port. The container's
     // internal port stays fixed at CONTAINER_PORT regardless.
     let hostPort = await allocatePort(preferredHostPort)
-    let plan = await planStart({ cwd, hostPort, imageExists: imageExisted, forceBuild })
+    let plan = await planStart({ cwd, hostPort, imageExists: imageExisted, forceBuild, hostdControl })
 
     let built = false
     if (plan.needsBuild) {
       const build = await exec(['build', '-t', plan.imageTag, plan.buildContext], { cwd, inheritStdio: true })
-      if (build.exitCode !== 0) return { ok: false, reason: 'docker build failed' }
+      if (build.exitCode !== 0) {
+        await cleanupHostDaemonRegistration(containerName, hostd)
+        return { ok: false, reason: 'docker build failed' }
+      }
       built = true
     }
 
@@ -128,23 +142,16 @@ export async function start({
     // Skip rebuild on retry: the image is already on disk from the first attempt.
     if (run.exitCode !== 0 && isPortAllocatedError(run.stderr)) {
       hostPort = await allocatePort(0)
-      plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false })
+      plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false, hostdControl })
       run = await exec(plan.runArgs, { cwd })
     }
 
     if (run.exitCode !== 0) {
+      await cleanupHostDaemonRegistration(containerName, hostd)
       return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
     }
 
-    const hostd = cliEntry
-      ? await registerWithDaemon({
-          cwd,
-          containerName: plan.containerName,
-          cliEntry,
-        })
-      : { state: 'disabled' as const }
-
-    return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, hostd }
+    return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, hostd: stripHostDaemonControl(hostd) }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -155,6 +162,7 @@ export async function planStart({
   hostPort,
   imageExists,
   forceBuild = false,
+  hostdControl,
 }: PlanStartOptions): Promise<StartPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
@@ -163,6 +171,10 @@ export async function planStart({
   const mounts = await loadMounts(cwd)
 
   const runArgs = ['run', '-d', '--name', containerName, '--rm', '-p', `${hostPort}:${CONTAINER_PORT}`]
+
+  if (hostdControl) {
+    runArgs.push('--add-host', HOST_GATEWAY_ALIAS)
+  }
 
   for (const [key, value] of Object.entries(composeLabels(cwd, containerName))) {
     runArgs.push('--label', `${key}=${value}`)
@@ -187,15 +199,12 @@ export async function planStart({
   // env var — same way TZ is plumbed.
   runArgs.push('-e', `TYPECLAW_CONTAINER_NAME=${containerName}`)
 
-  runArgs.push('-v', `${cwd}:/agent`)
+  if (hostdControl) {
+    runArgs.push('-e', `TYPECLAW_HOSTD_URL=${hostdControl.url}`)
+    runArgs.push('-e', `TYPECLAW_HOSTD_TOKEN=${hostdControl.token}`)
+  }
 
-  // Bind-mount the host daemon's run dir into the container at a fixed path
-  // so the agent can talk to the singleton hostd over its Unix socket. This
-  // is what makes container-initiated operations (e.g. the `restart` tool)
-  // possible without giving the container access to the Docker socket.
-  // Read-write because the bun TCP/Unix client opens the socket file; the
-  // daemon enforces auth by scoping each RPC to the registered containerName.
-  runArgs.push('-v', `${runDir()}:${containerHostRunDir()}`)
+  runArgs.push('-v', `${cwd}:/agent`)
 
   // Dev mode: node_modules/typeclaw is a symlink to an absolute host path
   // outside /agent. Mirror-mount that path so the symlink resolves in-container.
@@ -331,16 +340,33 @@ async function registerWithDaemon({
   cwd: string
   containerName: string
   cliEntry: string
-}): Promise<HostDaemonStatus> {
+}): Promise<PreparedHostDaemonStatus> {
   const ensured = await ensureDaemon({ cliEntry })
   if (!ensured.ok) return { state: 'unavailable', reason: ensured.reason }
+  const token = randomBytes(32).toString('base64url')
   const reply = await sendToDaemon({
     kind: 'register',
     containerName,
     cwd,
+    restartToken: token,
   })
   if (!reply.ok) return { state: 'unavailable', reason: reply.reason }
-  return { state: 'registered' }
+  return { state: 'registered', control: { url: `http://${CONTAINER_HOSTD_HOST}:${ensured.httpPort}`, token } }
+}
+
+type PreparedHostDaemonStatus =
+  | { state: 'registered'; control: HostDaemonControl }
+  | { state: 'unavailable'; reason: string }
+  | { state: 'disabled' }
+
+function stripHostDaemonControl(status: PreparedHostDaemonStatus): HostDaemonStatus {
+  if (status.state === 'registered') return { state: 'registered' }
+  return status
+}
+
+async function cleanupHostDaemonRegistration(containerName: string, status: PreparedHostDaemonStatus): Promise<void> {
+  if (status.state !== 'registered') return
+  await sendToDaemon({ kind: 'deregister', containerName }).catch(() => {})
 }
 
 // process.env.TZ is honored first because users who explicitly set it (e.g.

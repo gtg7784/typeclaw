@@ -6,10 +6,10 @@ import { join } from 'node:path'
 
 import type { DockerExec } from '@/container'
 
-import { send } from './client'
+import { send, sendHttp } from './client'
 import { startDaemon, type Daemon } from './daemon'
 import { socketPath } from './paths'
-import type { ListResult, VersionResult } from './protocol'
+import type { HttpInfoResult, ListResult, VersionResult } from './protocol'
 
 let home: string
 let prev: string | undefined
@@ -181,6 +181,63 @@ describe('startDaemon', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
+  })
+
+  test('HTTP restart ACKs with the registered container token', async () => {
+    const restartCalls: Array<{ containerName: string; cwd: string }> = []
+    daemon = await startDaemon({
+      exec: fakeExec(new Set(['coder'])),
+      gcIntervalMs: 1_000_000,
+      restart: async ({ containerName, cwd }) => {
+        restartCalls.push({ containerName, cwd })
+        return { ok: true }
+      },
+    })
+    const info = await send({ kind: 'http-info' })
+    expect(info.ok).toBe(true)
+    if (!info.ok) return
+    const port = (info.result as HttpInfoResult).port
+
+    await send({ kind: 'register', containerName: 'coder', cwd: '/agent/coder', restartToken: 'secret' })
+    const ack = await sendHttp(
+      { kind: 'restart', containerName: 'coder' },
+      { url: `http://127.0.0.1:${port}`, token: 'secret' },
+    )
+    expect(ack.ok).toBe(true)
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
+  })
+
+  test('HTTP restart rejects an invalid container token', async () => {
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, restart: async () => ({ ok: true }) })
+    const info = await send({ kind: 'http-info' })
+    expect(info.ok).toBe(true)
+    if (!info.ok) return
+
+    await send({ kind: 'register', containerName: 'coder', cwd: '/agent/coder', restartToken: 'secret' })
+    const ack = await sendHttp(
+      { kind: 'restart', containerName: 'coder' },
+      { url: `http://127.0.0.1:${(info.result as HttpInfoResult).port}`, token: 'wrong' },
+    )
+    expect(ack.ok).toBe(false)
+    if (ack.ok) return
+    expect(ack.reason).toContain('invalid restart token')
+  })
+
+  test('HTTP restart rejects oversized unauthenticated requests before parsing JSON', async () => {
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, restart: async () => ({ ok: true }) })
+    const info = await send({ kind: 'http-info' })
+    expect(info.ok).toBe(true)
+    if (!info.ok) return
+
+    const res = await fetch(`http://127.0.0.1:${(info.result as HttpInfoResult).port}/rpc`, {
+      method: 'POST',
+      body: '{'.repeat(70_000),
+    })
+    const body = (await res.json()) as { ok: false; reason: string }
+    expect(res.status).toBe(401)
+    expect(body.reason).toContain('missing bearer token')
   })
 
   test('restart RPC rejects unknown containerName (auth: scope by registered name)', async () => {

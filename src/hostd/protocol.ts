@@ -3,11 +3,13 @@ export type Request =
       kind: 'register'
       containerName: string
       cwd: string
+      restartToken?: string
     }
   | { kind: 'deregister'; containerName: string }
   | { kind: 'list' }
   | { kind: 'status'; containerName: string }
   | { kind: 'restart'; containerName: string }
+  | { kind: 'http-info' }
   | { kind: 'version' }
   | { kind: 'shutdown' }
 
@@ -25,6 +27,10 @@ export type StatusResult = {
 export type RestartResult = {
   containerName: string
   scheduled: true
+}
+
+export type HttpInfoResult = {
+  port: number
 }
 
 export type VersionResult = {

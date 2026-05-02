@@ -74,8 +74,7 @@ export type CreateSessionOptions = {
   // session creation so subagents see exactly what they declared.
   pluginSubagent?: PluginSubagentSelection
   // Enables the `restart` tool. Set when the agent is running inside a
-  // typeclaw-managed container and the host daemon is reachable via the
-  // bind-mounted run dir. Read from TYPECLAW_CONTAINER_NAME at the call site.
+  // typeclaw-managed container. Read from TYPECLAW_CONTAINER_NAME at the call site.
   containerName?: string
 }
 
