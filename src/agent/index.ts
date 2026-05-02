@@ -131,14 +131,22 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
             ...buildChannelTools(options.channelRouter, options.origin),
-            ...(options.containerName ? [createRestartTool({ containerName: options.containerName })] : []),
+            ...(options.containerName
+              ? [
+                  createRestartTool({
+                    containerName: options.containerName,
+                    ...(options.stream ? { stream: options.stream } : {}),
+                  }),
+                ]
+              : []),
             ...pluginCustomTools,
           ]
 
+  const sessionManager = options.sessionManager ?? SessionManager.inMemory()
   const model = resolveModel(getConfig().model)
   const { session } = await createAgentSession({
     model,
-    sessionManager: options.sessionManager ?? SessionManager.inMemory(),
+    sessionManager,
     settingsManager: createCompactionSettingsManager(model),
     authStorage,
     modelRegistry,
@@ -147,10 +155,63 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     customTools,
   })
 
+  const unsubRestart = subscribeRestartNotice(options.stream, sessionManager)
+
   const dispose = async () => {
+    unsubRestart?.()
     if (materializedSkills) await materializedSkills.dispose()
   }
   return { session, dispose }
+}
+
+// Subscribes the given session to the in-process broadcast that the `restart`
+// tool fires on a successful hostd ACK. Each subscriber appends a
+// `typeclaw.restart` custom_message entry to its own transcript, so the
+// resumed session in the next container sees a SYSTEM MESSAGE block as the
+// most recent context entry on the next prompt — fixing the user-visible bug
+// where bots restarted themselves and then continued the conversation with no
+// awareness it had happened. display:false keeps the entry out of any TUI
+// rendering that might inspect the JSONL later. Exported so unit tests can
+// verify the wiring without going through createAgentSession (which needs
+// auth and model registry); the integration test at the bottom of this
+// module covers the full createSession path.
+export function subscribeRestartNotice(
+  stream: Stream | undefined,
+  sessionManager: SessionManager,
+): (() => void) | null {
+  if (!stream) return null
+  const unsub = stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
+    const payload = msg.payload as { kind?: unknown; restartedAt?: unknown } | null
+    if (!payload || payload.kind !== 'container-restarting') return
+    if (typeof payload.restartedAt !== 'string') return
+    sessionManager.appendCustomMessageEntry('typeclaw.restart', formatRestartNotice(payload.restartedAt), false)
+  })
+  return unsub
+}
+
+// Convention documented in src/channels/router.ts:996-1013: runtime-injected
+// content in the user turn must use the `**[SYSTEM MESSAGE — not from a human]**`
+// framing fenced by `---`, plus an explicit "do not acknowledge or reply"
+// line. Without it, persona-rich models read the heading as a human-authored
+// instruction and reply to it on the next unrelated message.
+export function formatRestartNotice(restartedAt: string): string {
+  return [
+    '---',
+    '**[SYSTEM MESSAGE — not from a human]**',
+    '',
+    `The TypeClaw container was restarted at ${restartedAt}. The previous session`,
+    'state was preserved on disk and you have been resumed inside a new container',
+    'process. **Do not acknowledge or reply to this notice unless a human directly',
+    'asks whether the restart happened.**',
+    '',
+    'Guidance:',
+    '- If a human asks whether you actually restarted, you may confirm: yes, you',
+    `  did restart at ${restartedAt}.`,
+    '- Otherwise, continue the conversation normally.',
+    '',
+    '---',
+    '',
+  ].join('\n')
 }
 
 // Builds the channel tool subset: channel_send (always when a router is

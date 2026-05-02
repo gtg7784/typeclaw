@@ -4,11 +4,21 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { SessionManager } from '@mariozechner/pi-coding-agent'
+
 import { createChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig } from '@/channels/schema'
 import { createHookBus, type PluginRegistry } from '@/plugin'
+import { createStream } from '@/stream'
 
-import { buildChannelTools, createOverrideResourceLoader, createResourceLoader, getBundledSkillsDir } from './index'
+import {
+  buildChannelTools,
+  createOverrideResourceLoader,
+  createResourceLoader,
+  formatRestartNotice,
+  getBundledSkillsDir,
+  subscribeRestartNotice,
+} from './index'
 import type { SessionOrigin } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
 
@@ -397,4 +407,146 @@ describe('getBundledSkillsDir', () => {
       expect(frontmatter).toMatch(/^description:\s*\S/m)
     },
   )
+})
+
+describe('formatRestartNotice', () => {
+  test('uses the SYSTEM MESSAGE framing convention required for runtime-injected text', () => {
+    // when
+    const text = formatRestartNotice('2026-05-03T17:39:00.000Z')
+
+    // then
+    expect(text).toContain('**[SYSTEM MESSAGE — not from a human]**')
+    expect(text.startsWith('---\n')).toBe(true)
+    expect(text).toMatch(/\n---\n$/)
+    expect(text).toContain('Do not acknowledge or reply to this notice unless a human directly')
+  })
+
+  test('embeds the restart timestamp in the body and the guidance', () => {
+    // when
+    const text = formatRestartNotice('2026-05-03T17:39:00.000Z')
+
+    // then
+    const matches = text.match(/2026-05-03T17:39:00\.000Z/g) ?? []
+    expect(matches.length).toBeGreaterThanOrEqual(2)
+  })
+})
+
+describe('subscribeRestartNotice', () => {
+  test('appends a typeclaw.restart custom_message entry on a container-restarting broadcast', () => {
+    // given
+    const stream = createStream()
+    const sessionManager = SessionManager.inMemory()
+    subscribeRestartNotice(stream, sessionManager)
+
+    // when
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: { kind: 'container-restarting', restartedAt: '2026-05-03T17:39:00.000Z' },
+    })
+
+    // then
+    const entries = sessionManager.getEntries()
+    const restartEntries = entries.filter(
+      (e): e is typeof e & { type: 'custom_message' } => e.type === 'custom_message',
+    )
+    expect(restartEntries).toHaveLength(1)
+    const entry = restartEntries[0]!
+    expect(entry.customType).toBe('typeclaw.restart')
+    expect(entry.display).toBe(false)
+    expect(typeof entry.content === 'string' ? entry.content : '').toContain('2026-05-03T17:39:00.000Z')
+    expect(typeof entry.content === 'string' ? entry.content : '').toContain('**[SYSTEM MESSAGE — not from a human]**')
+  })
+
+  test('ignores broadcasts whose payload kind is not container-restarting', () => {
+    // given
+    const stream = createStream()
+    const sessionManager = SessionManager.inMemory()
+    subscribeRestartNotice(stream, sessionManager)
+
+    // when
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: { kind: 'something-else', restartedAt: '2026-05-03T17:39:00.000Z' },
+    })
+    stream.publish({ target: { kind: 'broadcast' }, payload: { foo: 'bar' } })
+    stream.publish({ target: { kind: 'broadcast' }, payload: null })
+
+    // then
+    expect(sessionManager.getEntries()).toHaveLength(0)
+  })
+
+  test('ignores container-restarting broadcasts with non-string restartedAt', () => {
+    // given
+    const stream = createStream()
+    const sessionManager = SessionManager.inMemory()
+    subscribeRestartNotice(stream, sessionManager)
+
+    // when
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: { kind: 'container-restarting', restartedAt: 12345 },
+    })
+
+    // then
+    expect(sessionManager.getEntries()).toHaveLength(0)
+  })
+
+  test('returns null and is a no-op when stream is undefined', () => {
+    // given
+    const sessionManager = SessionManager.inMemory()
+
+    // when
+    const unsub = subscribeRestartNotice(undefined, sessionManager)
+
+    // then
+    expect(unsub).toBeNull()
+    expect(sessionManager.getEntries()).toHaveLength(0)
+  })
+
+  test('stops appending entries after the returned unsubscribe is called', () => {
+    // given
+    const stream = createStream()
+    const sessionManager = SessionManager.inMemory()
+    const unsub = subscribeRestartNotice(stream, sessionManager)
+    expect(unsub).not.toBeNull()
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: { kind: 'container-restarting', restartedAt: '2026-05-03T17:39:00.000Z' },
+    })
+    expect(sessionManager.getEntries()).toHaveLength(1)
+
+    // when
+    unsub?.()
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: { kind: 'container-restarting', restartedAt: '2026-05-03T18:00:00.000Z' },
+    })
+
+    // then
+    expect(sessionManager.getEntries()).toHaveLength(1)
+  })
+
+  test('fans out a single broadcast to multiple subscribed sessions (composition mutation check)', () => {
+    // given two sessions sharing one stream — simulating two live channel
+    // sessions in a dying container at restart time.
+    const stream = createStream()
+    const sessionA = SessionManager.inMemory()
+    const sessionB = SessionManager.inMemory()
+    subscribeRestartNotice(stream, sessionA)
+    subscribeRestartNotice(stream, sessionB)
+
+    // when the restart tool publishes once
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: { kind: 'container-restarting', restartedAt: '2026-05-03T17:39:00.000Z' },
+    })
+
+    // then both sessions get the notice independently
+    const aEntries = sessionA.getEntries().filter((e) => e.type === 'custom_message')
+    const bEntries = sessionB.getEntries().filter((e) => e.type === 'custom_message')
+    expect(aEntries).toHaveLength(1)
+    expect(bEntries).toHaveLength(1)
+    expect((aEntries[0] as { customType: string }).customType).toBe('typeclaw.restart')
+    expect((bEntries[0] as { customType: string }).customType).toBe('typeclaw.restart')
+  })
 })

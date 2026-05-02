@@ -3,6 +3,7 @@ import { defineTool } from '@mariozechner/pi-coding-agent'
 
 import { send, sendHttp } from '@/hostd/client'
 import { containerSocketPath } from '@/hostd/paths'
+import type { Stream } from '@/stream'
 
 const ACK_TIMEOUT_MS = 5_000
 const EXIT_DELAY_MS = 500
@@ -13,11 +14,27 @@ export type CreateRestartToolOptions = {
   socketPath?: string
   hostdUrl?: string
   hostdToken?: string
+  // Optional so unit tests and ad-hoc tool construction keep working without
+  // building a Stream. In production wiring, every live AgentSession's
+  // broadcast subscriber turns this signal into a transcript entry.
+  stream?: Stream
 }
 
 export type RestartToolDetails = { ok: boolean; containerName: string; reason?: string }
 
-export function createRestartTool({ containerName, exit, socketPath, hostdUrl, hostdToken }: CreateRestartToolOptions) {
+export type ContainerRestartingBroadcast = {
+  kind: 'container-restarting'
+  restartedAt: string
+}
+
+export function createRestartTool({
+  containerName,
+  exit,
+  socketPath,
+  hostdUrl,
+  hostdToken,
+  stream,
+}: CreateRestartToolOptions) {
   const doExit = exit ?? ((code: number) => process.exit(code))
   const httpUrl = hostdUrl ?? process.env.TYPECLAW_HOSTD_URL
   const httpToken = hostdToken ?? process.env.TYPECLAW_HOSTD_TOKEN
@@ -46,6 +63,17 @@ export function createRestartTool({ containerName, exit, socketPath, hostdUrl, h
           details,
         }
       }
+
+      // Hostd ACK == restart is committed. Fan out the notice to every live
+      // session BEFORE arming the exit timer. Stream broker delivery is
+      // synchronous (broker.ts deliver()) and SessionManager.appendCustomMessageEntry
+      // does a synchronous JSONL write, so the fan-out completes inside this
+      // tick — well before the EXIT_DELAY_MS timer fires.
+      const broadcast: ContainerRestartingBroadcast = {
+        kind: 'container-restarting',
+        restartedAt: new Date().toISOString(),
+      }
+      stream?.publish({ target: { kind: 'broadcast' }, payload: broadcast })
 
       // Schedule the exit on the next tick so the tool result is delivered to
       // the model before the process dies. The host daemon polls for the
