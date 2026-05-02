@@ -54,6 +54,8 @@ function formatLog(event: DaemonLogEvent | SupervisorLogEvent): string {
   switch (event.kind) {
     case 'daemon-listening':
       return `[hostd] listening on ${event.socket}`
+    case 'daemon-http-listening':
+      return `[hostd] HTTP control listening on ${event.host}:${event.port}`
     case 'daemon-stopping':
       return `[hostd] stopping`
     case 'shutdown-requested':

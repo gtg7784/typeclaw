@@ -8,9 +8,10 @@ import { defaultDockerExec, type DockerExec } from '@/container'
 import { isDaemonReachable } from './client'
 import { ensureDirs, socketPath } from './paths'
 import type {
+  HttpInfoResult,
   ListResult,
   Request,
-  Response,
+  Response as RpcResponse,
   RestartResult,
   ShutdownResult,
   StatusResult,
@@ -39,10 +40,13 @@ export type DaemonOptions = {
   // a `shutdown` RPC. Production wiring exits the process here so the host
   // can spawn a fresh daemon; tests omit it to keep the process alive.
   onShutdown?: () => void
+  httpHost?: string
+  httpPort?: number
 }
 
 export type DaemonLogEvent =
   | { kind: 'daemon-listening'; socket: string }
+  | { kind: 'daemon-http-listening'; host: string; port: number }
   | { kind: 'daemon-stopping' }
   | { kind: 'register'; containerName: string }
   | { kind: 'deregister'; containerName: string; reason: 'requested' | 'gone' }
@@ -56,8 +60,23 @@ export type Daemon = {
 const DEFAULT_GC_INTERVAL_MS = 30_000
 const DEFAULT_GC_MISSES_TO_DEREGISTER = 3
 const MAX_REQUEST_BUFFER_BYTES = 64 * 1024
+const MAX_HTTP_REQUEST_BYTES = 64 * 1024
 
 type ServerState = { buf: string }
+
+function json(response: RpcResponse, status = 200): globalThis.Response {
+  return new Response(JSON.stringify(response), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+function bearerToken(value: string | null): string | null {
+  if (!value) return null
+  const prefix = 'Bearer '
+  if (!value.startsWith(prefix)) return null
+  return value.slice(prefix.length)
+}
 
 export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   await ensureDirs()
@@ -78,9 +97,11 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const gcMissesToDeregister = opts.gcMissesToDeregister ?? DEFAULT_GC_MISSES_TO_DEREGISTER
   const version = opts.version ?? UNVERSIONED_SENTINEL
   const cwds = new Map<string, string>()
+  const restartTokens = new Map<string, string>()
   const perContainerSerial = new Map<string, Promise<unknown>>()
   const gcMisses = new Map<string, number>()
   let stopped = false
+  let httpPort = 0
 
   const supervisor = opts.restart
     ? buildSupervisor({
@@ -103,12 +124,18 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     return next
   }
 
-  const handleRegister = async (req: { containerName: string; cwd: string }): Promise<Response> => {
+  const handleRegister = async (req: {
+    containerName: string
+    cwd: string
+    restartToken?: string
+  }): Promise<RpcResponse> => {
     if (stopped) return { ok: false, reason: 'daemon stopping' }
     return runSerially(req.containerName, async () => {
       if (stopped) return { ok: false, reason: 'daemon stopping' }
       const alreadyRegistered = cwds.has(req.containerName)
       cwds.set(req.containerName, req.cwd)
+      if (req.restartToken) restartTokens.set(req.containerName, req.restartToken)
+      else restartTokens.delete(req.containerName)
       if (!alreadyRegistered) {
         log({ kind: 'register', containerName: req.containerName })
       }
@@ -116,22 +143,23 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     })
   }
 
-  const handleDeregister = async (req: { containerName: string }): Promise<Response> =>
+  const handleDeregister = async (req: { containerName: string }): Promise<RpcResponse> =>
     runSerially(req.containerName, async () => {
       const hadCwd = cwds.delete(req.containerName)
+      restartTokens.delete(req.containerName)
       gcMisses.delete(req.containerName)
       if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
       return { ok: true }
     })
 
-  const handleList = (): Response => {
+  const handleList = (): RpcResponse => {
     const result: ListResult = {
       registrations: Array.from(cwds.entries()).map(([containerName, cwd]) => ({ containerName, cwd })),
     }
     return { ok: true, result }
   }
 
-  const handleStatus = (req: { containerName: string }): Response => {
+  const handleStatus = (req: { containerName: string }): RpcResponse => {
     const cwd = cwds.get(req.containerName)
     if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
     const result: StatusResult = {
@@ -146,7 +174,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   // reaches the mounted socket could otherwise restart any peer container on
   // the host. Scoping by registered name limits the blast radius to the set
   // of containers this user already started.
-  const handleRestart = (req: { containerName: string }): Response => {
+  const handleRestart = (req: { containerName: string }): RpcResponse => {
     if (!supervisor) return { ok: false, reason: 'restart capability not enabled on this daemon' }
     const cwd = cwds.get(req.containerName)
     if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
@@ -156,7 +184,12 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     return { ok: true, result }
   }
 
-  const handleVersion = (): Response => {
+  const handleHttpInfo = (): RpcResponse => {
+    const result: HttpInfoResult = { port: httpPort }
+    return { ok: true, result }
+  }
+
+  const handleVersion = (): RpcResponse => {
     const result: VersionResult = { version }
     return { ok: true, result }
   }
@@ -169,7 +202,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   // SIGTERM the AGENTS.md "PID-reuse safety" rule warns about: the socket
   // round-trip itself proves we are talking to the daemon we just registered
   // with, so a stale pidfile cannot redirect the kill to an unrelated process.
-  const handleShutdown = (): Response => {
+  const handleShutdown = (): RpcResponse => {
     if (stopped) return { ok: true, result: { scheduled: true } satisfies ShutdownResult }
     log({ kind: 'shutdown-requested' })
     setTimeout(() => {
@@ -180,7 +213,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     return { ok: true, result: { scheduled: true } satisfies ShutdownResult }
   }
 
-  const dispatch = async (req: Request): Promise<Response> => {
+  const dispatch = async (req: Request): Promise<RpcResponse> => {
     switch (req.kind) {
       case 'register':
         return handleRegister(req)
@@ -192,6 +225,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         return handleStatus(req)
       case 'restart':
         return handleRestart(req)
+      case 'http-info':
+        return handleHttpInfo()
       case 'version':
         return handleVersion()
       case 'shutdown':
@@ -199,7 +234,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     }
   }
 
-  const respond = (sock: Socket<ServerState>, response: Response): void => {
+  const respond = (sock: Socket<ServerState>, response: RpcResponse): void => {
     try {
       sock.write(`${JSON.stringify(response)}\n`)
     } catch {}
@@ -232,6 +267,41 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       newline = sock.data.buf.indexOf('\n')
     }
   }
+
+  const httpServer = Bun.serve({
+    hostname: opts.httpHost ?? '0.0.0.0',
+    port: opts.httpPort ?? 0,
+    async fetch(req) {
+      const url = new URL(req.url)
+      if (req.method !== 'POST' || url.pathname !== '/rpc') {
+        return json({ ok: false, reason: 'not found' }, 404)
+      }
+      const token = bearerToken(req.headers.get('authorization'))
+      if (!token) return json({ ok: false, reason: 'missing bearer token' }, 401)
+      const contentLength = Number(req.headers.get('content-length') ?? '0')
+      if (Number.isFinite(contentLength) && contentLength > MAX_HTTP_REQUEST_BYTES) {
+        return json({ ok: false, reason: 'request exceeds buffer limit' }, 413)
+      }
+      let rpc: Request
+      try {
+        const body = await req.text()
+        if (body.length > MAX_HTTP_REQUEST_BYTES)
+          return json({ ok: false, reason: 'request exceeds buffer limit' }, 413)
+        rpc = JSON.parse(body) as Request
+      } catch {
+        return json({ ok: false, reason: 'invalid request json' }, 400)
+      }
+      if (rpc.kind !== 'restart') {
+        return json({ ok: false, reason: 'http transport only supports restart' }, 403)
+      }
+      if (restartTokens.get(rpc.containerName) !== token) {
+        return json({ ok: false, reason: 'invalid restart token' }, 403)
+      }
+      return json(handleRestart(rpc))
+    },
+  })
+  httpPort = httpServer.port ?? 0
+  log({ kind: 'daemon-http-listening', host: opts.httpHost ?? '0.0.0.0', port: httpPort })
 
   const listener: UnixSocketListener<ServerState> = Bun.listen<ServerState>({
     unix: path,
@@ -302,7 +372,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       try {
         listener.stop(true)
       } catch {}
+      httpServer.stop(true)
       cwds.clear()
+      restartTokens.clear()
       try {
         if (existsSync(path)) await unlink(path)
       } catch {}
