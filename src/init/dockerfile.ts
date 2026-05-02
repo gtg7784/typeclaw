@@ -23,12 +23,17 @@ ARG TARGETARCH
 # Layer 1 (stable): all apt packages in a single update/install/cleanup cycle.
 #   - git + ca-certificates: required by the agent runtime (cloning,
 #     committing workspace state, version-controlled tooling).
+#   - python3 + pip + venv + python-is-python3: agents routinely shell out to
+#     Python scripts (data wrangling, ML tooling, ad-hoc \`pip install\`).
+#     python-is-python3 makes \`python\` resolve to python3 so both names work.
 #   - chromium (arm64 only): Chrome for Testing has no Linux ARM64 build, so
 #     we use Debian's chromium package on that arch. Bundling it into the same
 #     apt invocation avoids a second \`apt-get update\` later and keeps the
 #     image's apt cache cleanup in one place.
 RUN apt-get update \\
- && apt-get install -y --no-install-recommends git ca-certificates \\
+ && apt-get install -y --no-install-recommends \\
+      git ca-certificates \\
+      python3 python3-pip python3-venv python-is-python3 \\
  && if [ "$TARGETARCH" = "arm64" ]; then \\
       apt-get install -y --no-install-recommends chromium; \\
     fi \\
