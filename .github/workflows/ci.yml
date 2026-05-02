@@ -35,5 +35,13 @@ jobs:
       - name: Format check
         run: bun run format:check
 
+      - name: Configure git identity
+        # Several tests shell out to `git commit` against tmp repos. GitHub
+        # Actions runners have no global user.name/user.email, so the commits
+        # would silently fail and leave files staged.
+        run: |
+          git config --global user.email "ci@typeclaw.dev"
+          git config --global user.name "TypeClaw CI"
+
       - name: Test
         run: bun test
