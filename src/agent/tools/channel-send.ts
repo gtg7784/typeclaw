@@ -4,7 +4,7 @@ import { defineTool } from '@mariozechner/pi-coding-agent'
 import type { ChannelRouter } from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 
-import { renderEcho } from './channel-reply'
+import { renderOutboundEcho } from './channel-reply'
 
 export type ChannelSendOrigin = {
   adapter: AdapterId
@@ -56,28 +56,61 @@ export function createChannelSendTool({ router, origin }: CreateChannelSendToolO
           minLength: 1,
         }),
       ),
-      text: Type.String({
-        description:
-          'The message body. Use Discord syntax `<@USER_ID>` for Discord mentions or Slack syntax `<@USER_ID>` for Slack mentions (Slack user ids start with "U").',
-        minLength: 1,
-      }),
+      text: Type.Optional(
+        Type.String({
+          description:
+            'The message body. Use Discord syntax `<@USER_ID>` for Discord mentions or Slack syntax `<@USER_ID>` for Slack mentions (Slack user ids start with "U"). Optional only when `attachments` is set; one of `text` or `attachments` must be present.',
+          minLength: 1,
+        }),
+      ),
+      attachments: Type.Optional(
+        Type.Array(
+          Type.Object({
+            path: Type.String({
+              description:
+                'Absolute path inside the agent container to the file to upload (e.g. "/agent/workspace/report.pdf"). The runtime reads the file just before the API call.',
+              minLength: 1,
+            }),
+            filename: Type.Optional(
+              Type.String({
+                description:
+                  'Filename to display in the chat. Defaults to the basename of `path`. Useful when the on-disk name carries a tempdir suffix the user should not see.',
+                minLength: 1,
+              }),
+            ),
+          }),
+          {
+            description:
+              "Optional files to upload alongside the text. Slack: `text` is sent as the first file's caption (single Slack message). Discord: each file is uploaded individually (no caption support upstream), then `text` is posted as a separate message; uploads land in the channel root even when `thread` is set.",
+            minItems: 1,
+          },
+        ),
+      ),
     }),
 
     async execute(_toolCallId, params) {
       const adapter = params.adapter as AdapterId
+      const bodyText = params.text
+      const attachments = params.attachments
+      if ((bodyText === undefined || bodyText === '') && (attachments === undefined || attachments.length === 0)) {
+        return {
+          content: [
+            { type: 'text' as const, text: 'channel_send denied: must provide `text`, `attachments`, or both.' },
+          ],
+          details: { ok: false, error: 'missing text and attachments' },
+        }
+      }
       const result = await router.send({
         adapter,
         workspace: params.workspace,
         chat: params.chat,
         ...(params.thread !== undefined ? { thread: params.thread } : {}),
-        text: params.text,
+        ...(bodyText !== undefined ? { text: bodyText } : {}),
+        ...(attachments !== undefined ? { attachments } : {}),
       })
 
       const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
-      // See channel-reply.ts for the rationale: the model has no other way
-      // to see what it just sent (self_author drop on the inbound path),
-      // and without an echo it duplicates messages within a single turn.
-      const echo = renderEcho(params.text)
+      const echo = renderOutboundEcho(bodyText, attachments)
       const baseText = result.ok
         ? `posted to ${params.adapter}:${params.workspace}/${params.chat}: ${echo}`
         : `channel_send denied: ${result.error}`
@@ -101,9 +134,9 @@ export function createChannelSendTool({ router, origin }: CreateChannelSendToolO
         })
         if (threadMismatch) hints.push(threadMismatch)
       }
-      const text = hints.length > 0 ? `${baseText} — ${hints.join(' ')}` : baseText
+      const responseText = hints.length > 0 ? `${baseText} — ${hints.join(' ')}` : baseText
       return {
-        content: [{ type: 'text' as const, text }],
+        content: [{ type: 'text' as const, text: responseText }],
         details,
       }
     },

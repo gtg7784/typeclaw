@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import type { OutboundMessage } from '@/channels/types'
 
+import type { DiscordBotClient, DiscordFile, DiscordMessage } from './agent-messenger-shim'
 import { DiscordIntent } from './agent-messenger-shim'
 import {
   createDiscordHistoryCallback,
+  createOutboundCallback,
   createTypingCallback,
   DISCORD_BOT_INTENTS,
   DISCORD_HISTORY_LIMIT_MAX,
@@ -477,5 +480,182 @@ describe('createDiscordHistoryCallback', () => {
     // then
     expect(calls).toHaveLength(1)
     expect(result.ok).toBe(true)
+  })
+})
+
+describe('discord-bot createOutboundCallback', () => {
+  type SendCall = { chat: string; content: string; options?: { thread_id?: string } }
+  type UploadCall = { chat: string; path: string }
+
+  function makeFakeClient(
+    behavior: {
+      sendMessage?: 'ok' | 'reject'
+      uploadFile?: 'ok' | 'reject'
+    } = {},
+  ): {
+    client: Pick<DiscordBotClient, 'sendMessage' | 'uploadFile'>
+    sends: SendCall[]
+    uploads: UploadCall[]
+  } {
+    const sends: SendCall[] = []
+    const uploads: UploadCall[] = []
+    return {
+      sends,
+      uploads,
+      client: {
+        sendMessage: async (chat, content, options) => {
+          sends.push({ chat, content, options })
+          if (behavior.sendMessage === 'reject') throw new Error('discord_send_failed')
+          return {
+            id: `m${sends.length}`,
+            channel_id: chat,
+            author: { id: 'b1', username: 'bot' },
+            content,
+            timestamp: '',
+          } as DiscordMessage
+        },
+        uploadFile: async (chat, path) => {
+          uploads.push({ chat, path })
+          if (behavior.uploadFile === 'reject') throw new Error('discord_upload_failed')
+          const filename = path.split('/').pop() ?? 'file'
+          return { id: `f${uploads.length}`, filename, size: 12, url: `https://cdn.example/${filename}` } as DiscordFile
+        },
+      },
+    }
+  }
+
+  function silentLogger() {
+    return { info: () => {}, warn: () => {}, error: () => {} }
+  }
+
+  function permissive(): ChannelAdapterConfig {
+    return { allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }
+  }
+
+  function makeMsg(overrides: Partial<OutboundMessage>): OutboundMessage {
+    return { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'hi', ...overrides } as OutboundMessage
+  }
+
+  const tag = async (_w: string, _c: string) => 'guild=g1 channel=c1'
+
+  test('text-only path posts via sendMessage and never calls uploadFile', async () => {
+    // given
+    const { client, sends, uploads } = makeFakeClient()
+    const cb = createOutboundCallback({ client, configRef: permissive, logger: silentLogger(), formatChannelTag: tag })
+    // when
+    const result = await cb(makeMsg({ text: 'hello' }))
+    // then
+    expect(result.ok).toBe(true)
+    expect(uploads).toHaveLength(0)
+    expect(sends).toEqual([{ chat: 'c1', content: 'hello', options: undefined }])
+  })
+
+  test('threaded text-only post forwards thread_id to sendMessage', async () => {
+    const { client, sends } = makeFakeClient()
+    const cb = createOutboundCallback({ client, configRef: permissive, logger: silentLogger(), formatChannelTag: tag })
+    await cb(makeMsg({ text: 'hello', thread: 't1' }))
+    expect(sends).toEqual([{ chat: 'c1', content: 'hello', options: { thread_id: 't1' } }])
+  })
+
+  test('attachments-only post uploads each file with no follow-up sendMessage', async () => {
+    const { client, sends, uploads } = makeFakeClient()
+    const cb = createOutboundCallback({ client, configRef: permissive, logger: silentLogger(), formatChannelTag: tag })
+    const result = await cb(
+      makeMsg({ text: undefined, attachments: [{ path: '/agent/a.png' }, { path: '/agent/b.pdf' }] }),
+    )
+    expect(result.ok).toBe(true)
+    expect(uploads).toEqual([
+      { chat: 'c1', path: '/agent/a.png' },
+      { chat: 'c1', path: '/agent/b.pdf' },
+    ])
+    expect(sends).toHaveLength(0)
+  })
+
+  test('text+attachments uploads first, then posts text in same channel', async () => {
+    // given
+    const { client, sends, uploads } = makeFakeClient()
+    const order: string[] = []
+    const recordingClient = {
+      sendMessage: async (...args: Parameters<DiscordBotClient['sendMessage']>) => {
+        order.push('send')
+        return client.sendMessage(...args)
+      },
+      uploadFile: async (...args: Parameters<DiscordBotClient['uploadFile']>) => {
+        order.push('upload')
+        return client.uploadFile(...args)
+      },
+    }
+    const cb = createOutboundCallback({
+      client: recordingClient,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+    })
+    // when
+    await cb(makeMsg({ text: 'caption', attachments: [{ path: '/agent/a.png' }] }))
+    // then
+    expect(order).toEqual(['upload', 'send'])
+    expect(uploads).toEqual([{ chat: 'c1', path: '/agent/a.png' }])
+    expect(sends).toEqual([{ chat: 'c1', content: 'caption', options: undefined }])
+  })
+
+  test('threaded text+attachments warns about file landing in channel root and still threads the text', async () => {
+    // given
+    const { client, sends } = makeFakeClient()
+    const warns: string[] = []
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+      formatChannelTag: tag,
+    })
+    // when
+    await cb(makeMsg({ text: 'caption', thread: 't1', attachments: [{ path: '/agent/a.png' }] }))
+    // then
+    expect(sends).toEqual([{ chat: 'c1', content: 'caption', options: { thread_id: 't1' } }])
+    expect(warns.some((m) => m.includes('channel root, not thread t1'))).toBe(true)
+  })
+
+  test('upload failure aborts before sendMessage runs', async () => {
+    const { client, sends } = makeFakeClient({ uploadFile: 'reject' })
+    const cb = createOutboundCallback({ client, configRef: permissive, logger: silentLogger(), formatChannelTag: tag })
+    const result = await cb(makeMsg({ text: 'caption', attachments: [{ path: '/agent/a.png' }] }))
+    expect(result.ok).toBe(false)
+    expect(result.ok === false ? result.error : '').toContain('uploadFile failed')
+    expect(sends).toHaveLength(0)
+  })
+
+  test('rejects when message has neither text nor attachments', async () => {
+    const { client } = makeFakeClient()
+    const cb = createOutboundCallback({ client, configRef: permissive, logger: silentLogger(), formatChannelTag: tag })
+    const result = await cb(makeMsg({ text: undefined, attachments: [] }))
+    expect(result.ok).toBe(false)
+  })
+
+  test('honors resolvePath for sandboxed-path translation before uploading', async () => {
+    const { client, uploads } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      resolvePath: (p) => p.replace('/agent/', '/host/mounts/agent/'),
+    })
+    await cb(makeMsg({ text: undefined, attachments: [{ path: '/agent/a.png' }] }))
+    expect(uploads).toEqual([{ chat: 'c1', path: '/host/mounts/agent/a.png' }])
+  })
+
+  test('denies when allow rules reject the channel without contacting the API', async () => {
+    const { client, sends, uploads } = makeFakeClient()
+    const restrictive = (): ChannelAdapterConfig => ({
+      allow: ['guild:other/*'],
+      engagement: { trigger: ['mention'], stickiness: 'off' },
+      enabled: true,
+    })
+    const cb = createOutboundCallback({ client, configRef: restrictive, logger: silentLogger(), formatChannelTag: tag })
+    const result = await cb(makeMsg({ text: 'hi' }))
+    expect(result.ok).toBe(false)
+    expect(sends).toHaveLength(0)
+    expect(uploads).toHaveLength(0)
   })
 })

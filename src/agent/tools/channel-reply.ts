@@ -35,19 +35,49 @@ export function createChannelReplyTool({ router, origin }: CreateChannelReplyToo
       'you only supply the text. To post somewhere else (different chat, break out of the current ' +
       'thread, etc.), use `channel_send` instead.',
     parameters: Type.Object({
-      text: Type.String({
-        description: 'The message body. Use platform mention syntax `<@USER_ID>` for Slack/Discord mentions.',
-        minLength: 1,
-      }),
+      text: Type.Optional(
+        Type.String({
+          description:
+            'The message body. Use platform mention syntax `<@USER_ID>` for Slack/Discord mentions. Optional only when `attachments` is set.',
+          minLength: 1,
+        }),
+      ),
+      attachments: Type.Optional(
+        Type.Array(
+          Type.Object({
+            path: Type.String({
+              description: 'Absolute path inside the agent container to the file to upload.',
+              minLength: 1,
+            }),
+            filename: Type.Optional(Type.String({ minLength: 1 })),
+          }),
+          {
+            description:
+              'Optional files to attach. Slack folds `text` into the first file as a caption (single message). Discord uploads files separately and may post `text` as a follow-up message; uploaded files land in channel root even when replying inside a thread (upstream limitation).',
+            minItems: 1,
+          },
+        ),
+      ),
     }),
 
     async execute(_toolCallId, params) {
+      const text = params.text
+      const attachments = params.attachments
+      if ((text === undefined || text === '') && (attachments === undefined || attachments.length === 0)) {
+        return {
+          content: [
+            { type: 'text' as const, text: 'channel_reply denied: must provide `text`, `attachments`, or both.' },
+          ],
+          details: { ok: false, error: 'missing text and attachments' },
+        }
+      }
       const result = await router.send({
         adapter: origin.adapter,
         workspace: origin.workspace,
         chat: origin.chat,
         thread: origin.thread,
-        text: params.text,
+        ...(text !== undefined ? { text } : {}),
+        ...(attachments !== undefined ? { attachments } : {}),
       })
 
       const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
@@ -69,7 +99,7 @@ export function createChannelReplyTool({ router, origin }: CreateChannelReplyToo
       // size on every subsequent iteration; the prefix is enough to detect
       // duplication, and the full text is recoverable from the session
       // JSONL if needed.
-      const echo = renderEcho(params.text)
+      const echo = renderOutboundEcho(text, attachments)
       const baseText = result.ok
         ? `posted to ${origin.adapter}:${origin.workspace}/${origin.chat}: ${echo}`
         : `channel_reply denied: ${result.error}`
@@ -96,6 +126,24 @@ export const ECHO_MAX_CHARS = 500
 export function renderEcho(text: string): string {
   if (text.length <= ECHO_MAX_CHARS) return JSON.stringify(text)
   return `${JSON.stringify(text.slice(0, ECHO_MAX_CHARS))}... (${text.length} chars total)`
+}
+
+export function renderOutboundEcho(
+  text: string | undefined,
+  attachments: ReadonlyArray<{ path: string; filename?: string }> | undefined,
+): string {
+  const hasText = text !== undefined && text !== ''
+  const hasAttachments = attachments !== undefined && attachments.length > 0
+  if (hasText && hasAttachments) {
+    const filenames = attachments.map((a) => a.filename ?? a.path.split('/').pop() ?? a.path)
+    return `${renderEcho(text)} + ${attachments.length} file(s): ${filenames.join(', ')}`
+  }
+  if (hasText) return renderEcho(text)
+  if (hasAttachments) {
+    const filenames = attachments.map((a) => a.filename ?? a.path.split('/').pop() ?? a.path)
+    return `${attachments.length} file(s): ${filenames.join(', ')}`
+  }
+  return '(empty)'
 }
 
 // Mirror of the same hint used by channel_send. Kept identical so the model

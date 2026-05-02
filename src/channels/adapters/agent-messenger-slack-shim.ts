@@ -81,11 +81,29 @@ export type SlackBotListenerEventMap = {
   error: [error: Error]
 }
 
+export type SlackFile = {
+  id: string
+  name: string
+  title: string
+  mimetype: string
+  size: number
+  url_private: string
+  created: number
+  user: string
+  channels?: string[]
+}
+
 export interface SlackBotClient {
   login(credentials?: { token: string }): Promise<this>
   testAuth(): Promise<SlackTestAuth>
   postMessage(channel: string, text: string, options?: { thread_ts?: string }): Promise<SlackPostedMessage>
   setAssistantStatus(channel: string, threadTs: string, status: string): Promise<void>
+  uploadFile(
+    channel: string,
+    file: Buffer,
+    filename: string,
+    options?: { thread_ts?: string; title?: string; initial_comment?: string },
+  ): Promise<SlackFile>
 }
 
 export interface SlackBotListener {

@@ -336,7 +336,7 @@ describe('ChannelRouter outbound', () => {
     const captured: { chat: string; text: string } = { chat: '', text: '' }
     router.registerOutbound('discord-bot', async (msg) => {
       captured.chat = msg.chat
-      captured.text = msg.text
+      captured.text = msg.text ?? ''
       return { ok: true }
     })
     const result = await router.send({
@@ -386,7 +386,7 @@ describe('ChannelRouter channel-turn protocol', () => {
     const { router, sessions } = makeRouter(dir, { logs })
     const sent: Array<{ chat: string; thread: string | null | undefined; text: string }> = []
     router.registerOutbound('discord-bot', async (msg) => {
-      sent.push({ chat: msg.chat, thread: msg.thread, text: msg.text })
+      sent.push({ chat: msg.chat, thread: msg.thread, text: msg.text ?? '' })
       return { ok: true }
     })
 

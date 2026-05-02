@@ -3,7 +3,13 @@ import { describe, expect, test } from 'bun:test'
 import type { ChannelRouter } from '@/channels/router'
 import type { OutboundMessage, SendResult } from '@/channels/types'
 
-import { createChannelReplyTool, ECHO_MAX_CHARS, renderEcho, type ChannelReplyOrigin } from './channel-reply'
+import {
+  createChannelReplyTool,
+  ECHO_MAX_CHARS,
+  renderEcho,
+  renderOutboundEcho,
+  type ChannelReplyOrigin,
+} from './channel-reply'
 
 function fakeRouter(
   handler: (msg: OutboundMessage) => Promise<SendResult>,
@@ -210,5 +216,82 @@ describe('createChannelReplyTool', () => {
     expect(tool.name).toBe('channel_reply')
     expect(tool.label).toBe('Channel Reply')
     expect(tool.description).toContain('default way to respond')
+  })
+
+  describe('attachments', () => {
+    test('forwards attachments and text to router.send', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+        origin: slackThreadOrigin,
+      })
+      await runTool(tool, { text: 'see attached', attachments: [{ path: '/agent/r.pdf' }] })
+      expect(calls[0]).toMatchObject({
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        thread: '1700000000.000100',
+        text: 'see attached',
+        attachments: [{ path: '/agent/r.pdf' }],
+      })
+    })
+
+    test('allows attachments without text', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+        origin: slackChannelRootOrigin,
+      })
+      const result = await runTool(tool, { attachments: [{ path: '/agent/a.png' }] })
+      expect(result.details).toEqual({ ok: true })
+      expect(calls[0]?.text).toBeUndefined()
+    })
+
+    test('rejects when neither text nor attachments are provided', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, {})
+      expect(calls).toHaveLength(0)
+      expect(result.details).toEqual({ ok: false, error: 'missing text and attachments' })
+    })
+  })
+})
+
+describe('renderOutboundEcho', () => {
+  test('text only renders the JSON-quoted text', () => {
+    expect(renderOutboundEcho('hi', undefined)).toBe('"hi"')
+  })
+
+  test('attachments only renders count and filenames', () => {
+    expect(renderOutboundEcho(undefined, [{ path: '/agent/a.png' }, { path: '/agent/b.pdf' }])).toBe(
+      '2 file(s): a.png, b.pdf',
+    )
+  })
+
+  test('both combines echo and filename summary', () => {
+    expect(renderOutboundEcho('caption', [{ path: '/agent/a.png' }])).toBe('"caption" + 1 file(s): a.png')
+  })
+
+  test('attachment.filename overrides the basename in the echo', () => {
+    expect(renderOutboundEcho(undefined, [{ path: '/agent/tmp-XYZ.bin', filename: 'report.pdf' }])).toBe(
+      '1 file(s): report.pdf',
+    )
+  })
+
+  test('empty input renders a sentinel', () => {
+    expect(renderOutboundEcho(undefined, undefined)).toBe('(empty)')
+    expect(renderOutboundEcho('', [])).toBe('(empty)')
   })
 })
