@@ -7,13 +7,6 @@ import { defaultDockerExec, type DockerExec } from '@/container'
 
 import { isDaemonReachable } from './client'
 import { ensureDirs, socketPath } from './paths'
-import {
-  startBroker,
-  type Broker,
-  type BrokerLogEvent,
-  type ContainerIpResolver,
-  type ForwarderFactory,
-} from './portbroker/broker'
 import type {
   ListResult,
   Request,
@@ -28,15 +21,13 @@ import { UNVERSIONED_SENTINEL } from './version'
 
 export type DaemonOptions = {
   exec?: DockerExec
-  resolveIp?: ContainerIpResolver
-  forwarderFactory?: ForwarderFactory
-  onLog?: (event: BrokerLogEvent | DaemonLogEvent | SupervisorLogEvent) => void
+  onLog?: (event: DaemonLogEvent | SupervisorLogEvent) => void
   gcIntervalMs?: number
   gcMissesToDeregister?: number
   socket?: string
   // When provided, the daemon honors `restart` RPCs by invoking this with the
   // (containerName, cwd) it captured at register time. Omit to disable the
-  // capability (e.g. in unit tests that only care about port forwarding).
+  // capability in tests.
   restart?: SupervisorRestart
   // Source-tree fingerprint captured at daemon boot. Reported via the
   // `version` RPC so the CLI can detect when its on-disk source has drifted
@@ -54,7 +45,7 @@ export type DaemonLogEvent =
   | { kind: 'daemon-listening'; socket: string }
   | { kind: 'daemon-stopping' }
   | { kind: 'register'; containerName: string }
-  | { kind: 'deregister'; containerName: string; reason: 'requested' | 'gone' | 'fatal' }
+  | { kind: 'deregister'; containerName: string; reason: 'requested' | 'gone' }
   | { kind: 'shutdown-requested' }
 
 export type Daemon = {
@@ -86,7 +77,6 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   const gcIntervalMs = opts.gcIntervalMs ?? DEFAULT_GC_INTERVAL_MS
   const gcMissesToDeregister = opts.gcMissesToDeregister ?? DEFAULT_GC_MISSES_TO_DEREGISTER
   const version = opts.version ?? UNVERSIONED_SENTINEL
-  const brokers = new Map<string, Broker>()
   const cwds = new Map<string, string>()
   const perContainerSerial = new Map<string, Promise<unknown>>()
   const gcMisses = new Map<string, number>()
@@ -100,9 +90,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       })
     : null
 
-  // Per-container serialization: register/deregister/fatal-deregister chain
-  // through the same promise per containerName, so a deregister arriving
-  // mid-register cannot observe a partial state.
+  // Per-container serialization: register/deregister chains through the same
+  // promise per containerName, so a deregister arriving mid-register cannot
+  // observe a partial state.
   const runSerially = <T>(name: string, op: () => Promise<T>): Promise<T> => {
     const prev = perContainerSerial.get(name) ?? Promise.resolve()
     const next = prev.then(op, op)
@@ -113,84 +103,40 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     return next
   }
 
-  const handleRegister = async (req: {
-    containerName: string
-    cwd: string
-    excludePorts?: number[]
-    disableForwarding?: boolean
-  }): Promise<Response> => {
+  const handleRegister = async (req: { containerName: string; cwd: string }): Promise<Response> => {
     if (stopped) return { ok: false, reason: 'daemon stopping' }
     return runSerially(req.containerName, async () => {
       if (stopped) return { ok: false, reason: 'daemon stopping' }
-      if (brokers.has(req.containerName) || cwds.has(req.containerName)) {
-        cwds.set(req.containerName, req.cwd)
-        return { ok: true }
-      }
-      if (req.disableForwarding === true) {
-        cwds.set(req.containerName, req.cwd)
-        log({ kind: 'register', containerName: req.containerName })
-        return { ok: true }
-      }
-      const result = await startBroker({
-        containerName: req.containerName,
-        excludePorts: new Set<number>(req.excludePorts ?? []),
-        exec,
-        resolveIp: opts.resolveIp,
-        forwarderFactory: opts.forwarderFactory,
-        onLog: (event) => log(event),
-        onFatal: () => {
-          void runSerially(req.containerName, async () => {
-            const broker = brokers.get(req.containerName)
-            if (!broker) return { ok: true }
-            brokers.delete(req.containerName)
-            cwds.delete(req.containerName)
-            log({ kind: 'deregister', containerName: req.containerName, reason: 'fatal' })
-            await broker.stop()
-            return { ok: true }
-          })
-        },
-      })
-      if (!result.ok) return { ok: false, reason: result.reason }
-      brokers.set(req.containerName, result.broker)
+      const alreadyRegistered = cwds.has(req.containerName)
       cwds.set(req.containerName, req.cwd)
-      log({ kind: 'register', containerName: req.containerName })
+      if (!alreadyRegistered) {
+        log({ kind: 'register', containerName: req.containerName })
+      }
       return { ok: true }
     })
   }
 
   const handleDeregister = async (req: { containerName: string }): Promise<Response> =>
     runSerially(req.containerName, async () => {
-      const broker = brokers.get(req.containerName)
       const hadCwd = cwds.delete(req.containerName)
       gcMisses.delete(req.containerName)
-      if (!broker) {
-        if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
-        return { ok: true }
-      }
-      brokers.delete(req.containerName)
-      log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
-      await broker.stop()
+      if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
       return { ok: true }
     })
 
   const handleList = (): Response => {
     const result: ListResult = {
-      brokers: Array.from(brokers.values()).map((b) => ({
-        containerName: b.containerName,
-        forwardedPorts: b.forwardedPorts(),
-        containerIp: b.containerIp(),
-      })),
+      registrations: Array.from(cwds.entries()).map(([containerName, cwd]) => ({ containerName, cwd })),
     }
     return { ok: true, result }
   }
 
   const handleStatus = (req: { containerName: string }): Response => {
-    const broker = brokers.get(req.containerName)
-    if (!broker) return { ok: false, reason: `not registered: ${req.containerName}` }
+    const cwd = cwds.get(req.containerName)
+    if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
     const result: StatusResult = {
-      containerName: broker.containerName,
-      containerIp: broker.containerIp(),
-      forwardedPorts: broker.forwardedPorts(),
+      containerName: req.containerName,
+      cwd,
     }
     return { ok: true, result }
   }
@@ -303,8 +249,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   log({ kind: 'daemon-listening', socket: path })
 
   // GC tick distinguishes "container confirmed gone" from "docker call failed":
-  // a `docker ps` blip should not deregister a live broker, so we require
-  // gcMissesToDeregister consecutive confirmed-absences before tearing down.
+  // a `docker ps` blip should not deregister a live container registration, so
+  // we require gcMissesToDeregister consecutive confirmed absences.
   const probeContainerAlive = async (name: string): Promise<'alive' | 'gone' | 'unknown'> => {
     try {
       const result = await exec(['ps', '-a', '--filter', `name=^${name}$`, '--format', '{{.Names}}'])
@@ -334,15 +280,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       }
       gcMisses.delete(name)
       void runSerially(name, async () => {
-        const broker = brokers.get(name)
         const hadCwd = cwds.delete(name)
-        if (!broker) {
-          if (hadCwd) log({ kind: 'deregister', containerName: name, reason: 'gone' })
-          return { ok: true }
-        }
-        brokers.delete(name)
-        log({ kind: 'deregister', containerName: name, reason: 'gone' })
-        await broker.stop()
+        if (hadCwd) log({ kind: 'deregister', containerName: name, reason: 'gone' })
         return { ok: true }
       })
     }
@@ -354,7 +293,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   }, gcIntervalMs)
 
   const daemonHandle: Daemon = {
-    registered: () => Array.from(brokers.keys()),
+    registered: () => Array.from(cwds.keys()),
     stop: async () => {
       if (stopped) return
       stopped = true
@@ -363,10 +302,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       try {
         listener.stop(true)
       } catch {}
-      const all = Array.from(brokers.values())
-      brokers.clear()
       cwds.clear()
-      await Promise.all(all.map((b) => b.stop()))
       try {
         if (existsSync(path)) await unlink(path)
       } catch {}
