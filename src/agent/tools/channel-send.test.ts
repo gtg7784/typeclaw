@@ -94,7 +94,7 @@ describe('createChannelSendTool', () => {
     expect((result.content[0] as { text: string }).text).toContain('denied')
   })
 
-  test('first send (count=1) returns the bare delivery confirmation', async () => {
+  test('first send (count=1) returns the delivery confirmation with echoed text', async () => {
     const tool = createChannelSendTool({
       router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 1 }),
     })
@@ -105,7 +105,7 @@ describe('createChannelSendTool', () => {
       text: 'first reply',
     })
     const text = (result.content[0] as { text: string }).text
-    expect(text).toBe('posted to slack-bot:T0/C0')
+    expect(text).toBe('posted to slack-bot:T0/C0: "first reply"')
   })
 
   test('second consecutive send appends a soft yield hint', async () => {
@@ -119,7 +119,7 @@ describe('createChannelSendTool', () => {
       text: 'continuing',
     })
     const text = (result.content[0] as { text: string }).text
-    expect(text).toContain('posted to slack-bot:T0/C0')
+    expect(text).toContain('posted to slack-bot:T0/C0: "continuing"')
     expect(text).toContain('2nd consecutive message')
     expect(text).toContain('continue only if')
   })
@@ -137,6 +137,7 @@ describe('createChannelSendTool', () => {
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('5th consecutive message')
     expect(text).toContain('end your turn now')
+    expect(text).toContain('"still going"')
   })
 
   test('denied sends never carry the hint suffix', async () => {
@@ -164,7 +165,7 @@ describe('createChannelSendTool', () => {
       })
       const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'oops' })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toContain('posted to slack-bot:T0/C0')
+      expect(text).toContain('posted to slack-bot:T0/C0: "oops"')
       expect(text).toContain('origin thread is "1700000000.000100"')
       expect(text).toContain('channel root')
       expect(text).toContain('channel_reply')
@@ -183,7 +184,7 @@ describe('createChannelSendTool', () => {
         text: 'in thread',
       })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toBe('posted to slack-bot:T0/C0')
+      expect(text).toBe('posted to slack-bot:T0/C0: "in thread"')
     })
 
     test('does NOT warn when the model deliberately posts to a DIFFERENT chat', async () => {
@@ -198,7 +199,7 @@ describe('createChannelSendTool', () => {
         text: 'cross-channel post',
       })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toBe('posted to slack-bot:T0/C-other')
+      expect(text).toBe('posted to slack-bot:T0/C-other: "cross-channel post"')
     })
 
     test('does NOT warn when the origin had no thread to begin with (channel-root origin)', async () => {
@@ -213,7 +214,7 @@ describe('createChannelSendTool', () => {
         text: 'channel-root reply',
       })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toBe('posted to slack-bot:T0/C0')
+      expect(text).toBe('posted to slack-bot:T0/C0: "channel-root reply"')
     })
 
     test('does NOT warn when no origin is supplied (cron / non-channel session)', async () => {
@@ -222,7 +223,7 @@ describe('createChannelSendTool', () => {
       })
       const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'cron post' })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toBe('posted to slack-bot:T0/C0')
+      expect(text).toBe('posted to slack-bot:T0/C0: "cron post"')
     })
 
     test('does NOT warn on adapter mismatch (cross-platform post)', async () => {
@@ -237,7 +238,7 @@ describe('createChannelSendTool', () => {
         text: 'cross-platform',
       })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toBe('posted to discord-bot:g1/d1')
+      expect(text).toBe('posted to discord-bot:g1/d1: "cross-platform"')
     })
 
     test('combines with the consecutive-send hint when both fire', async () => {
@@ -247,7 +248,7 @@ describe('createChannelSendTool', () => {
       })
       const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'oops twice' })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toContain('posted to slack-bot:T0/C0')
+      expect(text).toContain('posted to slack-bot:T0/C0: "oops twice"')
       expect(text).toContain('2nd consecutive message')
       expect(text).toContain('origin thread is "1700000000.000100"')
     })

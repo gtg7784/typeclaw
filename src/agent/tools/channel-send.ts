@@ -4,6 +4,8 @@ import { defineTool } from '@mariozechner/pi-coding-agent'
 import type { ChannelRouter } from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 
+import { renderEcho } from './channel-reply'
+
 export type ChannelSendOrigin = {
   adapter: AdapterId
   workspace: string
@@ -72,8 +74,12 @@ export function createChannelSendTool({ router, origin }: CreateChannelSendToolO
       })
 
       const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
+      // See channel-reply.ts for the rationale: the model has no other way
+      // to see what it just sent (self_author drop on the inbound path),
+      // and without an echo it duplicates messages within a single turn.
+      const echo = renderEcho(params.text)
       const baseText = result.ok
-        ? `posted to ${params.adapter}:${params.workspace}/${params.chat}`
+        ? `posted to ${params.adapter}:${params.workspace}/${params.chat}: ${echo}`
         : `channel_send denied: ${result.error}`
       const hints: string[] = []
       if (result.ok) {

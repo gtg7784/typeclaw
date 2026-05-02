@@ -51,8 +51,27 @@ export function createChannelReplyTool({ router, origin }: CreateChannelReplyToo
       })
 
       const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
+      // Echo the delivered text back to the model. The adapter classifier
+      // drops self-authored messages on the inbound path (`self_author`),
+      // so the bot otherwise has ZERO visibility into what it just said —
+      // not in the next iteration's context, not in later turns' history.
+      // Without this echo, a model that splits a multi-part reply has no
+      // way to tell "did I already send part 1?" from "I haven't started
+      // yet", and routinely re-sends near-duplicates within the same turn
+      // (observed in production: 돌쇠/Winky channel, two consecutive
+      // identical "전하, 돌쇠가 여기 있나이다!" messages to one prompt).
+      //
+      // We deliberately do NOT cap sends-per-turn here. A complex user
+      // request legitimately needs split replies, and a hard cap would
+      // mutilate that. The fix is to give the model honest feedback —
+      // show it what it sent, let it decide whether to continue.
+      // Truncate past 500 chars so a long reply doesn't double the prompt
+      // size on every subsequent iteration; the prefix is enough to detect
+      // duplication, and the full text is recoverable from the session
+      // JSONL if needed.
+      const echo = renderEcho(params.text)
       const baseText = result.ok
-        ? `posted to ${origin.adapter}:${origin.workspace}/${origin.chat}`
+        ? `posted to ${origin.adapter}:${origin.workspace}/${origin.chat}: ${echo}`
         : `channel_reply denied: ${result.error}`
       const hint = result.ok
         ? consecutiveSendHint(
@@ -70,6 +89,13 @@ export function createChannelReplyTool({ router, origin }: CreateChannelReplyToo
       }
     },
   })
+}
+
+export const ECHO_MAX_CHARS = 500
+
+export function renderEcho(text: string): string {
+  if (text.length <= ECHO_MAX_CHARS) return JSON.stringify(text)
+  return `${JSON.stringify(text.slice(0, ECHO_MAX_CHARS))}... (${text.length} chars total)`
 }
 
 // Mirror of the same hint used by channel_send. Kept identical so the model

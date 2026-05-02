@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ChannelRouter } from '@/channels/router'
 import type { OutboundMessage, SendResult } from '@/channels/types'
 
-import { createChannelReplyTool, type ChannelReplyOrigin } from './channel-reply'
+import { createChannelReplyTool, ECHO_MAX_CHARS, renderEcho, type ChannelReplyOrigin } from './channel-reply'
 
 function fakeRouter(
   handler: (msg: OutboundMessage) => Promise<SendResult>,
@@ -85,14 +85,37 @@ describe('createChannelReplyTool', () => {
     expect(captured.thread).toBeNull()
   })
 
-  test('reports the origin chat in the success message', async () => {
+  test('reports the origin chat AND echoes the sent text in the success message', async () => {
     const tool = createChannelReplyTool({
       router: fakeRouter(async () => ({ ok: true })),
       origin: slackThreadOrigin,
     })
     const result = await runTool(tool, { text: 'hi' })
     const text = (result.content[0] as { text: string }).text
-    expect(text).toBe('posted to slack-bot:T0/C0')
+    expect(text).toBe('posted to slack-bot:T0/C0: "hi"')
+  })
+
+  test('echoes JSON-quoted text so the model can detect duplicates across iterations', async () => {
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: true })),
+      origin: slackThreadOrigin,
+    })
+    const result = await runTool(tool, { text: '전하, 돌쇠가 여기 있나이다!' })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('"전하, 돌쇠가 여기 있나이다!"')
+  })
+
+  test('truncates echo past 500 chars and includes total length so context cost stays bounded', async () => {
+    const long = 'a'.repeat(ECHO_MAX_CHARS * 4)
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: true })),
+      origin: slackThreadOrigin,
+    })
+    const result = await runTool(tool, { text: long })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain(`(${long.length} chars total)`)
+    expect(text).toContain('...')
+    expect(text.length).toBeLessThan(long.length)
   })
 
   test('reports denial back to the agent without throwing', async () => {
@@ -114,8 +137,36 @@ describe('createChannelReplyTool', () => {
     })
     const result = await runTool(tool, { text: 'continuing' })
     const text = (result.content[0] as { text: string }).text
-    expect(text).toContain('posted to slack-bot:T0/C0')
+    expect(text).toContain('posted to slack-bot:T0/C0: "continuing"')
     expect(text).toContain('2nd consecutive message')
+  })
+
+  describe('renderEcho', () => {
+    test('JSON-quotes short text', () => {
+      expect(renderEcho('hi')).toBe('"hi"')
+    })
+
+    test('preserves multibyte characters under the limit', () => {
+      expect(renderEcho('전하, 돌쇠가 여기 있나이다!')).toBe('"전하, 돌쇠가 여기 있나이다!"')
+    })
+
+    test('escapes embedded quotes via JSON.stringify', () => {
+      expect(renderEcho('she said "hi"')).toBe('"she said \\"hi\\""')
+    })
+
+    test('truncates and reports total length past the limit', () => {
+      const long = 'x'.repeat(ECHO_MAX_CHARS + 1)
+      const out = renderEcho(long)
+      expect(out).toContain(`(${long.length} chars total)`)
+      expect(out).toContain('...')
+    })
+
+    test('does NOT truncate at exactly the limit (boundary)', () => {
+      const exact = 'y'.repeat(ECHO_MAX_CHARS)
+      const out = renderEcho(exact)
+      expect(out).toBe(JSON.stringify(exact))
+      expect(out).not.toContain('...')
+    })
   })
 
   test('queries consecutive send count using the origin thread, not a hardcoded null', async () => {
