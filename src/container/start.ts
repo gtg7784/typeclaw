@@ -43,6 +43,7 @@ export type PlanStartOptions = {
 export type HostDaemonControl = {
   url: string
   token: string
+  brokerToken: string
 }
 
 export type StartOptions = {
@@ -112,9 +113,6 @@ export async function start({
       }
     }
 
-    const hostd = cliEntry ? await registerWithDaemon({ cwd, containerName, cliEntry }) : { state: 'disabled' as const }
-    const hostdControl = hostd.state === 'registered' ? hostd.control : undefined
-
     const imageExisted = await imageExists(exec, imageTagValue)
 
     // First attempt uses the user's preferred host port (8973 by default, or
@@ -122,6 +120,14 @@ export async function start({
     // we fall through to a kernel-assigned ephemeral port. The container's
     // internal port stays fixed at CONTAINER_PORT regardless.
     let hostPort = await allocatePort(preferredHostPort)
+
+    // Register AFTER port allocation so the daemon's portbroker has the right
+    // wsHostPort. Re-register on TOCTOU retry below if the port changes.
+    let hostd: PreparedHostDaemonStatus = cliEntry
+      ? await registerWithDaemon({ cwd, containerName, cliEntry, hostPort })
+      : { state: 'disabled' as const }
+    let hostdControl = hostd.state === 'registered' ? hostd.control : undefined
+
     let plan = await planStart({ cwd, hostPort, imageExists: imageExisted, forceBuild, hostdControl })
 
     let built = false
@@ -140,8 +146,13 @@ export async function start({
     // `docker run`, or the kernel-assigned port may itself have been claimed.
     // Treat docker as the authority and retry once with a fresh ephemeral port.
     // Skip rebuild on retry: the image is already on disk from the first attempt.
+    // Re-register so the daemon's broker resolver returns the new port.
     if (run.exitCode !== 0 && isPortAllocatedError(run.stderr)) {
       hostPort = await allocatePort(0)
+      if (cliEntry) {
+        hostd = await registerWithDaemon({ cwd, containerName, cliEntry, hostPort })
+        hostdControl = hostd.state === 'registered' ? hostd.control : undefined
+      }
       plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false, hostdControl })
       run = await exec(plan.runArgs, { cwd })
     }
@@ -202,6 +213,7 @@ export async function planStart({
   if (hostdControl) {
     runArgs.push('-e', `TYPECLAW_HOSTD_URL=${hostdControl.url}`)
     runArgs.push('-e', `TYPECLAW_HOSTD_TOKEN=${hostdControl.token}`)
+    runArgs.push('-e', `TYPECLAW_HOSTD_BROKER_TOKEN=${hostdControl.brokerToken}`)
   }
 
   runArgs.push('-v', `${cwd}:/agent`)
@@ -336,22 +348,41 @@ async function registerWithDaemon({
   cwd,
   containerName,
   cliEntry,
+  hostPort,
 }: {
   cwd: string
   containerName: string
   cliEntry: string
+  hostPort: number
 }): Promise<PreparedHostDaemonStatus> {
   const ensured = await ensureDaemon({ cliEntry })
   if (!ensured.ok) return { state: 'unavailable', reason: ensured.reason }
   const token = randomBytes(32).toString('base64url')
+  const brokerToken = randomBytes(32).toString('base64url')
+  const cfg = configSchema.parse(await loadConfigJson(cwd))
   const reply = await sendToDaemon({
     kind: 'register',
     containerName,
     cwd,
     restartToken: token,
+    wsHostPort: hostPort,
+    portForward: cfg.portForward,
+    brokerToken,
   })
   if (!reply.ok) return { state: 'unavailable', reason: reply.reason }
-  return { state: 'registered', control: { url: `http://${CONTAINER_HOSTD_HOST}:${ensured.httpPort}`, token } }
+  return {
+    state: 'registered',
+    control: { url: `http://${CONTAINER_HOSTD_HOST}:${ensured.httpPort}`, token, brokerToken },
+  }
+}
+
+async function loadConfigJson(cwd: string): Promise<unknown> {
+  try {
+    const raw = await readFile(join(cwd, CONFIG_FILE), 'utf8')
+    return JSON.parse(raw)
+  } catch {
+    return {}
+  }
 }
 
 type PreparedHostDaemonStatus =
