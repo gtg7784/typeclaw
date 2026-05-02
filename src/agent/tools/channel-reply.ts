@@ -71,6 +71,15 @@ export function createChannelReplyTool({ router, origin }: CreateChannelReplyToo
           details: { ok: false, error: 'missing text and attachments' },
         }
       }
+
+      const noReplyError = noReplyMisuseError(text)
+      if (noReplyError) {
+        return {
+          content: [{ type: 'text' as const, text: `channel_reply denied: ${noReplyError}` }],
+          details: { ok: false, error: noReplyError },
+        }
+      }
+
       const result = await router.send({
         adapter: origin.adapter,
         workspace: origin.workspace,
@@ -144,6 +153,20 @@ export function renderOutboundEcho(
     return `${attachments.length} file(s): ${filenames.join(', ')}`
   }
   return '(empty)'
+}
+
+// Mirror of the same guard used by channel_send. Blocks the literal
+// `NO_REPLY` from being sent as a message body — same misuse, same denial,
+// regardless of which sending tool the model picked. Returns '' when text
+// is undefined (attachments-only reply, can't be misusing the signal).
+function noReplyMisuseError(text: string | undefined): string {
+  if (text === undefined) return ''
+  if (text.trim() !== 'NO_REPLY') return ''
+  return (
+    '`NO_REPLY` is the silent-turn signal, not a message body. ' +
+    'To stay silent, end your turn with `NO_REPLY` as your entire visible response and NO channel tool call. ' +
+    'To send an actual reply, call this tool again with different text.'
+  )
 }
 
 // Mirror of the same hint used by channel_send. Kept identical so the model

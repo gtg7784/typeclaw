@@ -335,4 +335,73 @@ describe('createChannelSendTool', () => {
       expect(text).toContain('report.pdf')
     })
   })
+
+  describe('no-reply misuse guard', () => {
+    test('blocks the send when text is exactly "NO_REPLY" and never invokes router.send', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+      const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'NO_REPLY' })
+      expect(calls).toHaveLength(0)
+      expect(result.details).toMatchObject({ ok: false })
+      expect((result.details as { error: string }).error).toContain('silent-turn signal')
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toContain('channel_send denied')
+      expect(text).toContain('silent-turn signal')
+      expect(text).not.toContain('posted to')
+    })
+
+    test('blocks on whitespace-padded "NO_REPLY" (mirrors router trim semantics)', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+      const result = await runTool(tool, {
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        text: '  NO_REPLY\n',
+      })
+      expect(calls).toHaveLength(0)
+      expect(result.details).toMatchObject({ ok: false })
+    })
+
+    test('does NOT block when "NO_REPLY" appears as a substring inside a real message', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+      const result = await runTool(tool, {
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        text: 'NO_REPLY means stay silent',
+      })
+      expect(calls).toHaveLength(1)
+      expect(result.details).toEqual({ ok: true })
+    })
+
+    test('does NOT block on lowercase or other casings (must match exactly)', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+      const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'no_reply' })
+      expect(calls).toHaveLength(1)
+      expect(result.details).toEqual({ ok: true })
+    })
+  })
 })

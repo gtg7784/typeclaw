@@ -100,6 +100,15 @@ export function createChannelSendTool({ router, origin }: CreateChannelSendToolO
           details: { ok: false, error: 'missing text and attachments' },
         }
       }
+
+      const noReplyError = noReplyMisuseError(bodyText)
+      if (noReplyError) {
+        return {
+          content: [{ type: 'text' as const, text: `channel_send denied: ${noReplyError}` }],
+          details: { ok: false, error: noReplyError },
+        }
+      }
+
       const result = await router.send({
         adapter,
         workspace: params.workspace,
@@ -166,6 +175,25 @@ function threadMismatchHint(
     `note: this session's origin thread is ${JSON.stringify(origin.thread)} but you posted to channel root. ` +
     `if breaking out of the thread was intentional, ignore this; otherwise prefer \`channel_reply\` ` +
     `or pass \`thread: ${JSON.stringify(origin.thread)}\` on your next channel_send.`
+  )
+}
+
+// Blocks a specific misuse: the model tried to send the literal string
+// `NO_REPLY` as a channel message. `NO_REPLY` is the silent-turn signal —
+// it belongs in the model's *visible response* when no channel tool is
+// called (see session-origin.ts and router.ts validateChannelTurn), NOT
+// in the body of a sent message. We short-circuit BEFORE router.send so
+// the literal "NO_REPLY" never reaches the chat. Detection mirrors the
+// router's exact-after-trim semantics. Returns the error message to use
+// in the denial, or '' if the text is fine (including when text is
+// undefined — an attachments-only send can't be misusing the signal).
+function noReplyMisuseError(text: string | undefined): string {
+  if (text === undefined) return ''
+  if (text.trim() !== 'NO_REPLY') return ''
+  return (
+    '`NO_REPLY` is the silent-turn signal, not a message body. ' +
+    'To stay silent, end your turn with `NO_REPLY` as your entire visible response and NO channel tool call. ' +
+    'To send an actual reply, call this tool again with different text.'
   )
 }
 
