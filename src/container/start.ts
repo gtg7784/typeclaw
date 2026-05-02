@@ -45,14 +45,11 @@ export type StartOptions = {
   // Test seam: allows tests to inject a deterministic port allocator. In
   // production we go through the real kernel via `findFreePort`.
   allocatePort?: (preferred: number) => Promise<number>
-  autoForward?: boolean
-  autoForwardExclude?: number[]
-  brokerEntry?: string
+  cliEntry?: string
 }
 
-export type BrokerStatus =
+export type HostDaemonStatus =
   | { state: 'registered' }
-  | { state: 'supervisor-only' }
   | { state: 'unavailable'; reason: string }
   | { state: 'disabled' }
 
@@ -63,7 +60,7 @@ export type StartResult =
       containerId: string
       built: boolean
       hostPort: number
-      broker: BrokerStatus
+      hostd: HostDaemonStatus
     }
   | { ok: false; reason: string }
 
@@ -73,9 +70,7 @@ export async function start({
   forceBuild = false,
   exec = defaultDockerExec,
   allocatePort = findFreePort,
-  autoForward = false,
-  autoForwardExclude = [],
-  brokerEntry,
+  cliEntry,
 }: StartOptions): Promise<StartResult> {
   try {
     // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
@@ -141,17 +136,15 @@ export async function start({
       return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
     }
 
-    const broker = brokerEntry
+    const hostd = cliEntry
       ? await registerWithDaemon({
           cwd,
           containerName: plan.containerName,
-          brokerEntry,
-          excludePorts: [CONTAINER_PORT, ...autoForwardExclude],
-          disableForwarding: !autoForward,
+          cliEntry,
         })
       : { state: 'disabled' as const }
 
-    return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, broker }
+    return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, hostd }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -333,27 +326,21 @@ function expandMountPath(input: string, cwd: string): string {
 async function registerWithDaemon({
   cwd,
   containerName,
-  brokerEntry,
-  excludePorts,
-  disableForwarding,
+  cliEntry,
 }: {
   cwd: string
   containerName: string
-  brokerEntry: string
-  excludePorts: number[]
-  disableForwarding: boolean
-}): Promise<BrokerStatus> {
-  const ensured = await ensureDaemon({ brokerEntry })
+  cliEntry: string
+}): Promise<HostDaemonStatus> {
+  const ensured = await ensureDaemon({ cliEntry })
   if (!ensured.ok) return { state: 'unavailable', reason: ensured.reason }
   const reply = await sendToDaemon({
     kind: 'register',
     containerName,
     cwd,
-    excludePorts,
-    disableForwarding,
   })
   if (!reply.ok) return { state: 'unavailable', reason: reply.reason }
-  return { state: disableForwarding ? 'supervisor-only' : 'registered' }
+  return { state: 'registered' }
 }
 
 // process.env.TZ is honored first because users who explicitly set it (e.g.
