@@ -76,6 +76,26 @@ describe('planStart', () => {
     expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
   })
 
+  test('adds hostd HTTP control env when restart transport is available', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({
+      cwd: root,
+      hostPort: 8973,
+      imageExists: true,
+      hostdControl: { url: 'http://host.docker.internal:49123', token: 'secret' },
+    })
+
+    expect(plan.runArgs).toContain('-e')
+    expect(plan.runArgs).toContain(`TYPECLAW_CONTAINER_NAME=${basename(root)}`)
+    expect(plan.runArgs).toContain('TYPECLAW_HOSTD_URL=http://host.docker.internal:49123')
+    expect(plan.runArgs).toContain('TYPECLAW_HOSTD_TOKEN=secret')
+    expect(plan.runArgs).toContain('--add-host')
+    expect(plan.runArgs).toContain('host.docker.internal:host-gateway')
+    expect(plan.runArgs.some((arg) => arg.includes('/run/typeclaw-host'))).toBe(false)
+  })
+
   test('groups all agents under a single "typeclaw" compose project', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
