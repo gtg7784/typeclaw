@@ -86,7 +86,7 @@ describe('startAgent', () => {
     await expect(fetch(`http://localhost:${port}`)).rejects.toThrow()
   })
 
-  test('skips scheduler when cron.json is absent', async () => {
+  test('starts scheduler when cron.json is absent because the bundled memory plugin contributes a default dreaming cron job', async () => {
     const factoryCalls: Array<{ cwd: string; file: CronFile }> = []
     const createSchedulerFor: SchedulerFactory = (opts) => {
       factoryCalls.push(opts)
@@ -95,8 +95,8 @@ describe('startAgent', () => {
 
     running = await startAgent({ port: 0, attachTui: false, loadCron: noCron, createSchedulerFor })
 
-    expect(factoryCalls).toHaveLength(0)
-    expect(running.scheduler).toBeNull()
+    expect(factoryCalls).toHaveLength(1)
+    expect(running.scheduler).not.toBeNull()
   })
 
   test('creates scheduler when cron.json exists but has no jobs (so reload can later swap in jobs)', async () => {
@@ -149,10 +149,10 @@ describe('startAgent', () => {
     expect(running.reloadRegistry.has('cron')).toBe(true)
   })
 
-  test('does not register cron in the reload registry when cron.json is absent', async () => {
+  test('registers cron in the reload registry even when cron.json is absent because the bundled memory plugin contributes a default dreaming cron job', async () => {
     running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
 
-    expect(running.reloadRegistry.has('cron')).toBe(false)
+    expect(running.reloadRegistry.has('cron')).toBe(true)
   })
 
   test('logs and continues when cron.json fails to load', async () => {
@@ -207,15 +207,15 @@ describe('startAgent', () => {
     expect(running.cronConsumer).not.toBeNull()
   })
 
-  test('cronConsumer is null when scheduler is null (no cron.json)', async () => {
+  test('cronConsumer is started when bundled memory plugin contributes a default dreaming cron job (no cron.json)', async () => {
     running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
 
-    expect(running.cronConsumer).toBeNull()
+    expect(running.cronConsumer).not.toBeNull()
   })
 })
 
 describe('startAgent bundled memory plugin (dreaming cron)', () => {
-  test('does NOT register a scheduler when memory.dreaming is unconfigured AND cron.json is absent', async () => {
+  test('registers a scheduler with the default dreaming schedule when memory.dreaming is unconfigured AND cron.json is absent', async () => {
     const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-no-dream-'))
     try {
       await Bun.write(
@@ -236,8 +236,8 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
         createSchedulerFor,
       })
 
-      expect(factoryCalls).toHaveLength(0)
-      expect(running.scheduler).toBeNull()
+      expect(factoryCalls).toHaveLength(1)
+      expect(running.scheduler).not.toBeNull()
     } finally {
       await rm(agentDir, { recursive: true, force: true })
     }

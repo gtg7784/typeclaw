@@ -27,8 +27,8 @@ const dreamingConfigSchema = z.object({
   schedule: z
     .string()
     .min(1)
-    .default(DEFAULT_DREAMING_SCHEDULE)
-    .refine(isValidCronExpression, { message: 'memory.dreaming.schedule must be a valid cron expression' }),
+    .refine(isValidCronExpression, { message: 'memory.dreaming.schedule must be a valid cron expression' })
+    .optional(),
 })
 
 // `bufferBytes` is a size-based ceiling on top of the `idleMs` debounce. In
@@ -57,7 +57,7 @@ export default definePlugin({
   plugin: async (ctx) => {
     const idleMs = ctx.config.idleMs
     const bufferBytes = ctx.config.bufferBytes
-    const dreamingSchedule = ctx.config.dreaming?.schedule
+    const dreamingSchedule = ctx.config.dreaming?.schedule ?? DEFAULT_DREAMING_SCHEDULE
 
     const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined }>()
@@ -118,19 +118,15 @@ export default definePlugin({
         'memory-logger': createMemoryLoggerSubagent({ logger: subagentLogger }),
         dreaming: createDreamingSubagent({ logger: subagentLogger }),
       },
-      ...(dreamingSchedule !== undefined
-        ? {
-            cronJobs: {
-              dreaming: {
-                schedule: dreamingSchedule,
-                kind: 'prompt' as const,
-                prompt: '(internal: dreaming consolidation; user prompt is built by the dreaming subagent handler)',
-                subagent: 'dreaming',
-                payload: { agentDir: ctx.agentDir } satisfies DreamingPayload,
-              },
-            },
-          }
-        : {}),
+      cronJobs: {
+        dreaming: {
+          schedule: dreamingSchedule,
+          kind: 'prompt' as const,
+          prompt: '(internal: dreaming consolidation; user prompt is built by the dreaming subagent handler)',
+          subagent: 'dreaming',
+          payload: { agentDir: ctx.agentDir } satisfies DreamingPayload,
+        },
+      },
       hooks: {
         'session.prompt': async (event) => {
           const memorySection = await loadMemory(ctx.agentDir)

@@ -289,7 +289,7 @@ export default {
 
     running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
 
-    const job = running.pluginRuntime.get().registry.cronJobs[0]?.job
+    const job = running.pluginRuntime.get().registry.cronJobs.find((entry) => entry.localId === 'magic')?.job
     expect(job?.kind).toBe('prompt')
     expect(job?.schedule).toBe('7 * * * *')
   })
