@@ -20,6 +20,7 @@ import type { ReloadRegistry } from '@/reload'
 import type { Stream } from '@/stream'
 
 import { getAuth } from './auth'
+import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
 import { resolveBuiltinToolRefs, wrapPluginTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
@@ -134,9 +135,11 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             ...pluginCustomTools,
           ]
 
+  const model = resolveModel(getConfig().model)
   const { session } = await createAgentSession({
-    model: resolveModel(getConfig().model),
+    model,
     sessionManager: options.sessionManager ?? SessionManager.inMemory(),
+    settingsManager: createCompactionSettingsManager(model),
     authStorage,
     modelRegistry,
     resourceLoader,
