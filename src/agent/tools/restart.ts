@@ -26,7 +26,7 @@ export function createRestartTool({ containerName, exit, socketPath }: CreateRes
       'this process exits, and the host daemon then runs `typeclaw stop` followed by `typeclaw start` ' +
       'for the agent folder. Use when on-disk source has changed in a way that `reload` cannot pick up — ' +
       'e.g. the typeclaw CLI itself was updated, the Dockerfile template changed, or a boot-only config ' +
-      'field needs to take effect (port, mounts, plugins, autoForward). The current session is lost; the ' +
+      'field needs to take effect (port, mounts, plugins). The current session is lost; the ' +
       'TUI must reconnect after the new container is up.',
     parameters: Type.Object({}),
     execute: async () => {
