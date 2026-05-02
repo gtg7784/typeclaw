@@ -6,6 +6,7 @@ export {
   loadConfigSync,
   loadPluginConfigsSync,
   mountSchema,
+  portForwardSchema,
   reloadConfig,
   resolveModel,
   validateConfig,
@@ -13,6 +14,7 @@ export {
   type ConfigChange,
   type ConfigReloadDiff,
   type Mount,
+  type PortForward,
   type ValidateConfigResult,
 } from './config'
 export { type KnownModelRef, type KnownProviderId } from './providers'

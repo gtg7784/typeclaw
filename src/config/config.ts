@@ -30,6 +30,25 @@ export const mountSchema = z.object({
 
 export type Mount = z.infer<typeof mountSchema>
 
+const portNumber = z.number().int().min(1).max(65535)
+
+// `allow` is the discriminator between "forward everything" ('*') and a fixed
+// allowlist (number[]). `deny` is only meaningful when allow === '*'; combining
+// it with a number[] allow is rejected at parse time so a typo doesn't silently
+// drop the deny rule. An empty allowlist (`allow: []`) is the off switch.
+export const portForwardSchema = z
+  .object({
+    allow: z.union([z.literal('*'), z.array(portNumber)]),
+    deny: z.array(portNumber).optional(),
+  })
+  .refine((v) => !(Array.isArray(v.allow) && v.deny !== undefined && v.deny.length > 0), {
+    message: 'portForward.deny is only meaningful when allow is "*"; remove deny or set allow to "*"',
+    path: ['deny'],
+  })
+  .default({ allow: '*' })
+
+export type PortForward = z.infer<typeof portForwardSchema>
+
 export const configSchema = z
   .object({
     $schema: z.string().optional(),
@@ -41,6 +60,7 @@ export const configSchema = z
     mounts: z.array(mountSchema).default([]),
     plugins: z.array(z.string().min(1)).default([]),
     channels: channelsSchema,
+    portForward: portForwardSchema,
   })
   .catchall(z.unknown())
 
@@ -116,6 +136,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   mounts: 'restart-required',
   plugins: 'restart-required',
   channels: 'applied',
+  portForward: 'restart-required',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -169,7 +190,7 @@ function readPath(obj: unknown, path: string): unknown {
 // each block against its plugin's `configSchema`.
 export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'object' || raw === null) return {}
-  const known = new Set(['$schema', 'port', 'model', 'mounts', 'plugins', 'channels'])
+  const known = new Set(['$schema', 'port', 'model', 'mounts', 'plugins', 'channels', 'portForward'])
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!known.has(key)) result[key] = value
