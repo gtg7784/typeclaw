@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import { defaultHistoryConfig, isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { OutboundMessage } from '@/channels/types'
 
 import type { DiscordBotClient, DiscordFile, DiscordMessage } from './agent-messenger-shim'
@@ -65,7 +65,12 @@ describe('createTypingCallback', () => {
   test('POSTs to /channels/{chat}/typing with bot token authorization', async () => {
     const cb = createTypingCallback({
       token: 'tok-abc',
-      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
@@ -79,7 +84,12 @@ describe('createTypingCallback', () => {
   test('uses thread id as the channel id when thread is set', async () => {
     const cb = createTypingCallback({
       token: 'tok',
-      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 'thr-9' })
@@ -93,6 +103,7 @@ describe('createTypingCallback', () => {
         allow: ['guild:other'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
+        history: defaultHistoryConfig(),
       }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
@@ -105,7 +116,12 @@ describe('createTypingCallback', () => {
     const warns: string[] = []
     const cb = createTypingCallback({
       token: 'tok',
-      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
     })
     await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
@@ -119,7 +135,12 @@ describe('createTypingCallback', () => {
     const warns: string[] = []
     const cb = createTypingCallback({
       token: 'tok',
-      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
     })
     await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
@@ -129,7 +150,12 @@ describe('createTypingCallback', () => {
   test('rejects non-discord adapter without calling fetch', async () => {
     const cb = createTypingCallback({
       token: 'tok',
-      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     await cb({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })
@@ -161,7 +187,12 @@ describe('createDiscordHistoryCallback', () => {
   }
 
   function permissiveConfig(): ChannelAdapterConfig {
-    return { allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }
+    return {
+      allow: ['*'],
+      engagement: { trigger: ['mention'], stickiness: 'off' },
+      enabled: true,
+      history: defaultHistoryConfig(),
+    }
   }
 
   test('GETs /channels/{chat}/messages with bot token authorization', async () => {
@@ -449,6 +480,7 @@ describe('createDiscordHistoryCallback', () => {
         allow: ['guild:other-guild'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
+        history: defaultHistoryConfig(),
       }),
       logger: silentLogger(),
       botUserIdRef: () => null,
@@ -470,6 +502,7 @@ describe('createDiscordHistoryCallback', () => {
         allow: ['channel:channel-id'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
+        history: defaultHistoryConfig(),
       }),
       logger: silentLogger(),
       botUserIdRef: () => null,
@@ -529,7 +562,12 @@ describe('discord-bot createOutboundCallback', () => {
   }
 
   function permissive(): ChannelAdapterConfig {
-    return { allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }
+    return {
+      allow: ['*'],
+      engagement: { trigger: ['mention'], stickiness: 'off' },
+      enabled: true,
+      history: defaultHistoryConfig(),
+    }
   }
 
   function makeMsg(overrides: Partial<OutboundMessage>): OutboundMessage {
@@ -651,6 +689,7 @@ describe('discord-bot createOutboundCallback', () => {
       allow: ['guild:other/*'],
       engagement: { trigger: ['mention'], stickiness: 'off' },
       enabled: true,
+      history: defaultHistoryConfig(),
     })
     const cb = createOutboundCallback({ client, configRef: restrictive, logger: silentLogger(), formatChannelTag: tag })
     const result = await cb(makeMsg({ text: 'hi' }))

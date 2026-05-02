@@ -36,9 +36,66 @@ const engagementSchema = z
     stickiness: { perReply: { window: STICKY_DEFAULT_WINDOW_MS } },
   })
 
+// Cold-start prefetch windows. The router seeds `contextBuffer` once when a
+// brand-new channel session is created (no persisted sessionId for the
+// (workspace, chat, thread) tuple). Set any field to 0 to disable that side
+// of the prefetch. Non-fatal: if the upstream history fetch fails (missing
+// scopes, network error, adapter doesn't expose history), the session still
+// starts and the agent can call `channel_history` on demand.
+//
+// Reload semantics: `channels` is `applied` in FIELD_EFFECTS, but prefetch
+// only fires at session creation, so changes here only affect the *next*
+// cold start; in-flight live sessions are unaffected.
+export const PREFETCH_DEFAULTS = {
+  thread: { head: 3, tail: 10 },
+  channel: { tail: 10 },
+} as const
+
+export function defaultHistoryConfig(): {
+  prefetch: { thread: { head: number; tail: number }; channel: { tail: number } }
+} {
+  return {
+    prefetch: {
+      thread: { head: PREFETCH_DEFAULTS.thread.head, tail: PREFETCH_DEFAULTS.thread.tail },
+      channel: { tail: PREFETCH_DEFAULTS.channel.tail },
+    },
+  }
+}
+
+const prefetchWindowSchema = z.number().int().min(0).max(200)
+
+const historySchema = z
+  .object({
+    prefetch: z
+      .object({
+        thread: z
+          .object({
+            head: prefetchWindowSchema.default(PREFETCH_DEFAULTS.thread.head),
+            tail: prefetchWindowSchema.default(PREFETCH_DEFAULTS.thread.tail),
+          })
+          .default({ head: PREFETCH_DEFAULTS.thread.head, tail: PREFETCH_DEFAULTS.thread.tail }),
+        channel: z
+          .object({
+            tail: prefetchWindowSchema.default(PREFETCH_DEFAULTS.channel.tail),
+          })
+          .default({ tail: PREFETCH_DEFAULTS.channel.tail }),
+      })
+      .default({
+        thread: { head: PREFETCH_DEFAULTS.thread.head, tail: PREFETCH_DEFAULTS.thread.tail },
+        channel: { tail: PREFETCH_DEFAULTS.channel.tail },
+      }),
+  })
+  .default({
+    prefetch: {
+      thread: { head: PREFETCH_DEFAULTS.thread.head, tail: PREFETCH_DEFAULTS.thread.tail },
+      channel: { tail: PREFETCH_DEFAULTS.channel.tail },
+    },
+  })
+
 const adapterSchema = z.object({
   allow: z.array(allowRuleSchema).default([]),
   engagement: engagementSchema,
+  history: historySchema,
   enabled: z.boolean().default(true),
 })
 

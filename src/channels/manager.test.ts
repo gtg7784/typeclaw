@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createChannelManager } from './manager'
-import type { ChannelsConfig } from './schema'
+import { defaultHistoryConfig, type ChannelsConfig } from './schema'
 
 type FakeAdapter = {
   start: () => Promise<void>
@@ -50,6 +50,7 @@ const enabledAdapterCfg = () => ({
     trigger: ['mention', 'reply', 'dm'] as Array<'mention' | 'reply' | 'dm'>,
     stickiness: { perReply: { window: 300_000 } },
   },
+  history: defaultHistoryConfig(),
 })
 
 describe('channel manager — slack adapter lifecycle', () => {

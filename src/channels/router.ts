@@ -16,6 +16,7 @@ import {
 } from './persistence'
 import type { ChannelAdapterConfig } from './schema'
 import type {
+  ChannelHistoryMessage,
   ChannelKey,
   ChannelNameResolver,
   FetchHistoryArgs,
@@ -263,7 +264,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return merged
   }
 
-  const ensureLive = async (key: ChannelKey): Promise<LiveSession> => {
+  const ensureLive = async (key: ChannelKey, triggeringMessageId?: string): Promise<LiveSession> => {
     const keyId = channelKeyId(key)
     const existing = liveSessions.get(keyId)
     if (existing && !existing.destroyed) return existing
@@ -286,6 +287,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         thread: key.thread,
         participants,
       }
+
+      const isColdStart = record?.sessionId === undefined
 
       const created = await createForChannel({
         key,
@@ -346,6 +349,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         destroyed: false,
       }
       liveSessions.set(keyId, live)
+
+      if (isColdStart) {
+        const adapterConfig = options.configForAdapter(key.adapter)
+        if (adapterConfig) {
+          await prefetchChannelContext(live, adapterConfig, triggeringMessageId)
+        }
+      }
+
       return live
     })()
 
@@ -355,6 +366,81 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     } finally {
       creating.delete(keyId)
     }
+  }
+
+  const prefetchChannelContext = async (
+    live: LiveSession,
+    adapterConfig: ChannelAdapterConfig,
+    triggeringMessageId: string | undefined,
+  ): Promise<void> => {
+    const prefetch = adapterConfig.history.prefetch
+    const isThread = live.key.thread !== null
+    const head = isThread ? prefetch.thread.head : 0
+    const tail = isThread ? prefetch.thread.tail : prefetch.channel.tail
+    if (head === 0 && tail === 0) return
+
+    // One fetch per cold start. We always pass the live thread when present so
+    // we get the thread-scoped history; channel cold starts pass `thread: null`
+    // so we get the channel scrollback. The router's contract is oldest-first,
+    // which lets us slice [head] + [tail] without re-sorting. We over-request
+    // by one (head + tail + 1) so we can detect "exactly head + tail" without
+    // emitting a misleading elision marker for a zero-length gap.
+    const requested = head + tail + 1
+    const result = await fetchHistory(live.key.adapter, {
+      chat: live.key.chat,
+      thread: live.key.thread,
+      limit: requested,
+    })
+
+    if (!result.ok) {
+      logger.warn(`[channels] ${live.keyId}: prefetch skipped (history fetch failed: ${result.error})`)
+      return
+    }
+
+    // Drop the engaging message itself if it appears in the history result.
+    // Without this, the model would see the same message twice — once in
+    // "Recent context" and once in "Current message". Adapters typically
+    // return the latest channel/thread messages, so this overlap is the
+    // common case, not the edge case.
+    const filteredMessages =
+      triggeringMessageId !== undefined
+        ? result.messages.filter((m) => m.externalMessageId !== triggeringMessageId)
+        : result.messages
+    if (filteredMessages.length === 0) return
+
+    const seeded = sliceHeadTail(filteredMessages, head, tail)
+    const observed: ObservedInbound[] = []
+    for (const item of seeded) {
+      if (item.kind === 'message') {
+        observed.push({
+          text: item.message.text,
+          authorId: item.message.authorId,
+          authorName: item.message.authorName,
+          authorIsBot: item.message.isBot,
+          receivedAt: now(),
+          ts: item.message.ts,
+        })
+      } else {
+        observed.push({
+          text: `[… ${item.elidedCount} earlier messages elided; call channel_history for full thread …]`,
+          authorId: '__typeclaw_system__',
+          authorName: 'TypeClaw',
+          authorIsBot: true,
+          receivedAt: now(),
+          ts: 0,
+        })
+      }
+    }
+
+    if (observed.length === 0) return
+
+    // Cold-start prefetch is one-shot and may exceed CONTEXT_BUFFER_SIZE — the
+    // 20-message cap exists to bound *runtime* observation drift, not the
+    // initial seed. Subsequent observe() calls will trim back to the cap as
+    // normal. We push into contextBuffer (not promptQueue) because these are
+    // background context for the model, not turns it must respond to.
+    live.contextBuffer.push(...observed)
+    logger.info(`[channels] ${live.keyId}: prefetched ${observed.length} context messages`)
   }
 
   const persistParticipants = async (live: LiveSession): Promise<void> => {
@@ -524,7 +610,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       chat: event.chat,
       thread: event.thread,
     }
-    const live = await ensureLive(key)
+    const live = await ensureLive(key, event.externalMessageId)
 
     live.participants = updateParticipants(
       live.participants,
@@ -910,6 +996,20 @@ function formatAuthorLine(
   const tag = authorIsBot ? ' [bot]' : ''
   const stamp = ts > 0 ? `[${new Date(ts).toISOString()}] ` : ''
   return `${stamp}<@${authorId}> (${authorName})${tag}: ${text}`
+}
+
+type Sliced = { kind: 'message'; message: ChannelHistoryMessage } | { kind: 'elision'; elidedCount: number }
+
+export function sliceHeadTail(messages: readonly ChannelHistoryMessage[], head: number, tail: number): Sliced[] {
+  if (head < 0 || tail < 0) throw new Error(`sliceHeadTail: head and tail must be non-negative (got ${head}, ${tail})`)
+  if (head === 0 && tail === 0) return []
+  if (messages.length <= head + tail) {
+    return messages.map((m) => ({ kind: 'message', message: m }))
+  }
+  const headSlice: Sliced[] = head > 0 ? messages.slice(0, head).map((m) => ({ kind: 'message', message: m })) : []
+  const tailSlice: Sliced[] = tail > 0 ? messages.slice(-tail).map((m) => ({ kind: 'message', message: m })) : []
+  const elidedCount = messages.length - head - tail
+  return [...headSlice, { kind: 'elision', elidedCount }, ...tailSlice]
 }
 
 function tryOpenSessionManager(

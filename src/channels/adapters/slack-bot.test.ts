@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import { defaultHistoryConfig, isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { OutboundMessage } from '@/channels/types'
 
 import type {
@@ -66,7 +66,12 @@ describe('slack-bot createTypingCallback', () => {
     const { client, calls } = makeFakeClient()
     const cb = createTypingCallback({
       client,
-      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     // when
@@ -81,7 +86,12 @@ describe('slack-bot createTypingCallback', () => {
     const infos: string[] = []
     const cb = createTypingCallback({
       client,
-      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
       logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
     })
     // when
@@ -97,7 +107,12 @@ describe('slack-bot createTypingCallback', () => {
     const warns: string[] = []
     const cb = createTypingCallback({
       client,
-      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
     })
     // when
@@ -118,6 +133,7 @@ describe('slack-bot createTypingCallback', () => {
         allow: ['team:T0OTHER'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
+        history: defaultHistoryConfig(),
       }),
       logger: { info: (m) => infos.push(m), warn: (m) => warns.push(m), error: () => {} },
     })
@@ -135,7 +151,12 @@ describe('slack-bot createTypingCallback', () => {
     const infos: string[] = []
     const cb = createTypingCallback({
       client,
-      configRef: () => ({ allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }),
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
       logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
     })
     // when
@@ -176,7 +197,12 @@ describe('slack-bot promoteAppMentionToMessage', () => {
     const promoted = promoteAppMentionToMessage(baseAppMention)
     const verdict = classifyInbound(
       promoted,
-      { allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true },
+      {
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      },
       { teamId: 'T0ACME', botUserId: 'UBOT' },
     )
 
@@ -210,7 +236,12 @@ describe('createSlackHistoryCallback', () => {
   }
 
   function permissiveConfig(): ChannelAdapterConfig {
-    return { allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }
+    return {
+      allow: ['*'],
+      engagement: { trigger: ['mention'], stickiness: 'off' },
+      enabled: true,
+      history: defaultHistoryConfig(),
+    }
   }
 
   test('uses conversations.replies when thread is set, with channel + ts in the body', async () => {
@@ -479,6 +510,7 @@ describe('createSlackHistoryCallback', () => {
         allow: ['team:T0OTHER'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
+        history: defaultHistoryConfig(),
       }),
       logger: silentLogger(),
       botUserIdRef: () => null,
@@ -500,6 +532,7 @@ describe('createSlackHistoryCallback', () => {
         allow: ['channel:C0CHANNEL'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
+        history: defaultHistoryConfig(),
       }),
       logger: silentLogger(),
       botUserIdRef: () => null,
@@ -561,7 +594,12 @@ describe('slack-bot createOutboundCallback', () => {
   }
 
   function permissive(): ChannelAdapterConfig {
-    return { allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }
+    return {
+      allow: ['*'],
+      engagement: { trigger: ['mention'], stickiness: 'off' },
+      enabled: true,
+      history: defaultHistoryConfig(),
+    }
   }
 
   function makeMsg(overrides: Partial<OutboundMessage>): OutboundMessage {
@@ -741,6 +779,7 @@ describe('slack-bot createOutboundCallback', () => {
       allow: ['team:OTHER/*'],
       engagement: { trigger: ['mention'], stickiness: 'off' },
       enabled: true,
+      history: defaultHistoryConfig(),
     })
     const cb = createOutboundCallback({
       client,

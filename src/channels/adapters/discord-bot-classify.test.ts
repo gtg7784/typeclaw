@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ChannelAdapterConfig } from '@/channels/schema'
+import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 
 import type { DiscordGatewayMessageCreateEvent } from './agent-messenger-shim'
 import { classifyInbound } from './discord-bot-classify'
@@ -14,6 +14,7 @@ const baseConfig: ChannelAdapterConfig = {
     trigger: ['mention', 'reply', 'dm'],
     stickiness: { perReply: { window: 300_000 } },
   },
+  history: defaultHistoryConfig(),
 }
 
 function buildEvent(overrides: Partial<DiscordGatewayMessageCreateEvent> = {}): DiscordGatewayMessageCreateEvent {

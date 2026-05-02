@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ChannelAdapterConfig } from '@/channels/schema'
+import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 
 import type { SlackSocketMessageEvent } from './agent-messenger-slack-shim'
 import { classifyInbound } from './slack-bot-classify'
@@ -15,6 +15,7 @@ const baseConfig: ChannelAdapterConfig = {
     trigger: ['mention', 'reply', 'dm'],
     stickiness: { perReply: { window: 300_000 } },
   },
+  history: defaultHistoryConfig(),
 }
 
 function buildEvent(overrides: Partial<SlackSocketMessageEvent> = {}): SlackSocketMessageEvent {

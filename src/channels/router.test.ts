@@ -10,10 +10,10 @@ import type { AgentSession } from '@/agent'
 import type { SessionOrigin } from '@/agent/session-origin'
 import type { HookBus } from '@/plugin'
 
-import { loadChannelSessions } from './persistence'
-import { createChannelRouter, type ChannelRouter } from './router'
-import type { ChannelAdapterConfig } from './schema'
-import type { ChannelKey, FetchHistoryArgs, HistoryCallback, InboundMessage } from './types'
+import { loadChannelSessions, saveChannelSessions } from './persistence'
+import { createChannelRouter, sliceHeadTail, type ChannelRouter } from './router'
+import { defaultHistoryConfig, type ChannelAdapterConfig } from './schema'
+import type { ChannelHistoryMessage, ChannelKey, FetchHistoryArgs, HistoryCallback, InboundMessage } from './types'
 
 class FakeSession {
   public prompts: string[] = []
@@ -80,6 +80,7 @@ const baseConfig: ChannelAdapterConfig = {
   allow: ['*'],
   engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
   enabled: true,
+  history: defaultHistoryConfig(),
 }
 
 function makeRouter(
@@ -272,6 +273,7 @@ describe('ChannelRouter engagement and prompt composition', () => {
         allow: [],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
+        history: defaultHistoryConfig(),
       },
     })
     // Prime participants with carol so the next non-mention message hits the
@@ -1156,5 +1158,271 @@ describe('ChannelRouter history dispatch', () => {
 
     expect(discordCalls).toBe(1)
     expect(slackCalls).toBe(0)
+  })
+})
+
+function historyMessage(over: Partial<ChannelHistoryMessage> = {}): ChannelHistoryMessage {
+  return {
+    externalMessageId: 'h1',
+    authorId: 'u1',
+    authorName: 'Hist Author',
+    text: 'historic',
+    ts: 100,
+    isBot: false,
+    replyToBotMessageId: null,
+    ...over,
+  }
+}
+
+describe('sliceHeadTail', () => {
+  const m = (id: string): ChannelHistoryMessage => historyMessage({ externalMessageId: id, text: id })
+
+  test('returns all messages without elision when total <= head + tail', () => {
+    const result = sliceHeadTail([m('a'), m('b'), m('c')], 2, 1)
+    expect(result.map((s) => (s.kind === 'message' ? s.message.externalMessageId : 'ELIDE'))).toEqual(['a', 'b', 'c'])
+  })
+
+  test('elides the middle when total > head + tail', () => {
+    const result = sliceHeadTail([m('a'), m('b'), m('c'), m('d'), m('e')], 1, 2)
+    expect(result.map((s) => (s.kind === 'message' ? s.message.externalMessageId : `ELIDE:${s.elidedCount}`))).toEqual([
+      'a',
+      'ELIDE:2',
+      'd',
+      'e',
+    ])
+  })
+
+  test('head=0 returns only tail with no elision marker when no head requested', () => {
+    const result = sliceHeadTail([m('a'), m('b'), m('c'), m('d')], 0, 2)
+    expect(result.map((s) => (s.kind === 'message' ? s.message.externalMessageId : `ELIDE:${s.elidedCount}`))).toEqual([
+      'ELIDE:2',
+      'c',
+      'd',
+    ])
+  })
+
+  test('tail=0 returns only head', () => {
+    const result = sliceHeadTail([m('a'), m('b'), m('c'), m('d')], 2, 0)
+    expect(result.map((s) => (s.kind === 'message' ? s.message.externalMessageId : `ELIDE:${s.elidedCount}`))).toEqual([
+      'a',
+      'b',
+      'ELIDE:2',
+    ])
+  })
+
+  test('both zero returns empty', () => {
+    expect(sliceHeadTail([m('a'), m('b')], 0, 0)).toEqual([])
+  })
+
+  test('rejects negative head/tail', () => {
+    expect(() => sliceHeadTail([m('a')], -1, 0)).toThrow()
+    expect(() => sliceHeadTail([m('a')], 0, -1)).toThrow()
+  })
+})
+
+describe('ChannelRouter cold-start prefetch', () => {
+  const THREAD_KEY: ChannelKey = { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' }
+
+  test('prefetches thread history into contextBuffer on a brand-new thread session', async () => {
+    // given: a thread cold start with default windows (head=3, tail=10)
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({ externalMessageId: 'older1', text: 'thread-opener', authorName: 'Alice' }),
+        historyMessage({ externalMessageId: 'mid1', text: 'middle1', authorName: 'Bob' }),
+        historyMessage({ externalMessageId: 'mid2', text: 'middle2', authorName: 'Bob' }),
+        historyMessage({ externalMessageId: 'recent1', text: 'recent', authorName: 'Carol' }),
+      ],
+    }))
+
+    // when: an inbound arrives in a fresh thread
+    await router.route(inbound({ thread: 't-A', externalMessageId: 'engage1', text: 'hey bot' }))
+    await router.__testing!.flushDebounce(THREAD_KEY)
+
+    // then: the composed prompt includes prefetched messages under "Recent context"
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt).toContain('## Recent context')
+    expect(prompt).toContain('thread-opener')
+    expect(prompt).toContain('recent')
+    expect(prompt).toContain('## Current message')
+    expect(prompt).toContain('hey bot')
+  })
+
+  test('prefetches channel scrollback (tail-only) when session is not in a thread', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({ externalMessageId: 'h1', text: 'channel-msg-1' }),
+        historyMessage({ externalMessageId: 'h2', text: 'channel-msg-2' }),
+      ],
+    }))
+
+    await router.route(inbound({ externalMessageId: 'engage', text: 'help me' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt).toContain('## Recent context')
+    expect(prompt).toContain('channel-msg-1')
+    expect(prompt).toContain('channel-msg-2')
+  })
+
+  test('reopened session (existing sessionId persisted) skips prefetch', async () => {
+    const dir = await tempDir()
+    // given: a pre-existing channel→session mapping on disk
+    await saveChannelSessions(dir, [
+      {
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        thread: null,
+        sessionId: 'ses_preexisting',
+        participants: [],
+      },
+    ])
+    let historyCalls = 0
+    const { router, sessions } = makeRouter(dir)
+    router.registerHistory('discord-bot', async () => {
+      historyCalls++
+      return { ok: true, messages: [historyMessage({ text: 'should-not-appear' })] }
+    })
+
+    await router.route(inbound({ externalMessageId: 'engage', text: 'hi' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(historyCalls).toBe(0)
+    expect(sessions[0]!.prompts[0]).not.toContain('should-not-appear')
+    expect(sessions[0]!.prompts[0]).not.toContain('## Recent context')
+  })
+
+  test('history fetch failure is non-fatal; session still processes the engaging message', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerHistory('discord-bot', async () => ({ ok: false, error: 'rate-limited' }))
+
+    await router.route(inbound({ externalMessageId: 'engage', text: 'still works' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sessions[0]!.prompts[0]).toContain('still works')
+    expect(sessions[0]!.prompts[0]).not.toContain('## Recent context')
+    expect(
+      logs.some((l) => l.startsWith('warn:') && l.includes('prefetch skipped') && l.includes('rate-limited')),
+    ).toBe(true)
+  })
+
+  test('no history adapter registered → prefetch quietly skipped, no error', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    // no router.registerHistory call
+
+    await router.route(inbound({ externalMessageId: 'engage', text: 'hello' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sessions[0]!.prompts[0]).not.toContain('## Recent context')
+  })
+
+  test('drops the engaging message itself from prefetched history (dedup by externalMessageId)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({ externalMessageId: 'older', text: 'before-engage' }),
+        historyMessage({ externalMessageId: 'engage', text: 'engaging-message-duplicated' }),
+      ],
+    }))
+
+    await router.route(inbound({ externalMessageId: 'engage', text: 'engaging-message-current' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt).toContain('before-engage')
+    expect(prompt).not.toContain('engaging-message-duplicated')
+    // the engaging message itself appears exactly once, in the Current section
+    expect(prompt).toContain('engaging-message-current')
+    const occurrences = prompt.split('engaging-message').length - 1
+    expect(occurrences).toBe(1)
+  })
+
+  test('emits an elision marker when thread length exceeds head + tail', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, {
+      // override defaults to make elision easy to trigger
+      config: {
+        allow: ['*'],
+        engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
+        enabled: true,
+        history: { prefetch: { thread: { head: 1, tail: 1 }, channel: { tail: 0 } } },
+      },
+    })
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({ externalMessageId: 'h1', text: 'oldest-of-three' }),
+        historyMessage({ externalMessageId: 'h2', text: 'middle-of-three' }),
+        historyMessage({ externalMessageId: 'h3', text: 'newest-of-three' }),
+      ],
+    }))
+
+    await router.route(inbound({ thread: 't-A', externalMessageId: 'engage', text: 'hi' }))
+    await router.__testing!.flushDebounce(THREAD_KEY)
+
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt).toContain('oldest-of-three')
+    expect(prompt).not.toContain('middle-of-three')
+    expect(prompt).toContain('newest-of-three')
+    expect(prompt).toContain('1 earlier messages elided')
+  })
+
+  test('all prefetch windows zero → no fetch is issued', async () => {
+    const dir = await tempDir()
+    let historyCalls = 0
+    const { router, sessions } = makeRouter(dir, {
+      config: {
+        allow: ['*'],
+        engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
+        enabled: true,
+        history: { prefetch: { thread: { head: 0, tail: 0 }, channel: { tail: 0 } } },
+      },
+    })
+    router.registerHistory('discord-bot', async () => {
+      historyCalls++
+      return { ok: true, messages: [historyMessage({ text: 'never-fetched' })] }
+    })
+
+    await router.route(inbound({ externalMessageId: 'engage', text: 'hello' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(historyCalls).toBe(0)
+    expect(sessions[0]!.prompts[0]).not.toContain('## Recent context')
+  })
+
+  test('passes thread-scoped fetch args (thread id, head+tail+1 limit) on thread cold start', async () => {
+    const dir = await tempDir()
+    const captured: FetchHistoryArgs[] = []
+    const { router } = makeRouter(dir, {
+      config: {
+        allow: ['*'],
+        engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
+        enabled: true,
+        history: { prefetch: { thread: { head: 2, tail: 5 }, channel: { tail: 8 } } },
+      },
+    })
+    router.registerHistory('discord-bot', async (args) => {
+      captured.push(args)
+      return { ok: true, messages: [] }
+    })
+
+    await router.route(inbound({ thread: 't-A', externalMessageId: 'engage', text: 'hi' }))
+    await router.__testing!.flushDebounce(THREAD_KEY)
+
+    expect(captured).toEqual([{ chat: 'c1', thread: 't-A', limit: 8 }])
   })
 })

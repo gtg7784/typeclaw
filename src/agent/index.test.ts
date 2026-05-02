@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createChannelRouter } from '@/channels/router'
+import { defaultHistoryConfig } from '@/channels/schema'
 import { createHookBus, type PluginRegistry } from '@/plugin'
 
 import { buildChannelTools, createOverrideResourceLoader, createResourceLoader, getBundledSkillsDir } from './index'
@@ -299,6 +300,7 @@ describe('buildChannelTools', () => {
         allow: ['*'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
+        history: defaultHistoryConfig(),
       }),
     })
   }

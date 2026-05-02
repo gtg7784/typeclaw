@@ -1,13 +1,18 @@
 import { describe, expect, test } from 'bun:test'
 
 import { createChannelRouter, type ChannelRouter } from '@/channels/router'
-import type { ChannelAdapterConfig } from '@/channels/schema'
+import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 import type { ChannelHistoryMessage, FetchHistoryArgs, FetchHistoryResult, HistoryCallback } from '@/channels/types'
 
 import { createChannelHistoryTool, type ChannelHistoryOrigin } from './channel-history'
 
 function emptyAdapterConfig(): ChannelAdapterConfig {
-  return { allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }
+  return {
+    allow: ['*'],
+    engagement: { trigger: ['mention'], stickiness: 'off' },
+    enabled: true,
+    history: defaultHistoryConfig(),
+  }
 }
 
 async function makeRouter(): Promise<ChannelRouter> {
