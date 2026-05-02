@@ -47,6 +47,7 @@ export const configSchema = z
     // restarting the container or pre-declaring ports.
     autoForward: z.boolean().default(true),
     autoForwardExclude: z.array(z.number().int().min(1).max(65535)).default([]),
+    autoForwardLoopback: z.array(z.number().int().min(1).max(65535)).default([]),
   })
   .catchall(z.unknown())
 
@@ -124,6 +125,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   channels: 'applied',
   autoForward: 'restart-required',
   autoForwardExclude: 'restart-required',
+  autoForwardLoopback: 'restart-required',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -186,6 +188,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'channels',
     'autoForward',
     'autoForwardExclude',
+    'autoForwardLoopback',
   ])
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
