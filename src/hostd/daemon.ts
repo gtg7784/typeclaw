@@ -3,7 +3,9 @@ import { chmod, unlink } from 'node:fs/promises'
 
 import type { Socket, UnixSocketListener } from 'bun'
 
+import type { PortForward } from '@/config'
 import { defaultDockerExec, type DockerExec } from '@/container'
+import type { PortForwardEvent } from '@/portbroker'
 
 import { isDaemonReachable } from './client'
 import { ensureDirs, socketPath } from './paths'
@@ -42,6 +44,24 @@ export type DaemonOptions = {
   onShutdown?: () => void
   httpHost?: string
   httpPort?: number
+  // Port-broker capability. When provided, register-RPC's portForward/wsHostPort
+  // fields trigger broker spawn alongside supervisor registration. Tests omit
+  // it to keep the broker out of unrelated suites.
+  portbroker?: PortbrokerCallbacks
+}
+
+export type PortbrokerCallbacks = {
+  start: (input: PortbrokerStartInput) => void
+  stop: (containerName: string, reason: 'deregistered' | 'broker-stopped') => Promise<void>
+}
+
+export type PortbrokerStartInput = {
+  containerName: string
+  cwd: string
+  policy: PortForward
+  wsHostPort: number
+  brokerToken: string
+  onEvent: (event: PortForwardEvent) => void
 }
 
 export type DaemonLogEvent =
@@ -51,6 +71,7 @@ export type DaemonLogEvent =
   | { kind: 'register'; containerName: string }
   | { kind: 'deregister'; containerName: string; reason: 'requested' | 'gone' }
   | { kind: 'shutdown-requested' }
+  | { kind: 'port-forward-event'; event: PortForwardEvent }
 
 export type Daemon = {
   registered: () => string[]
@@ -128,6 +149,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     containerName: string
     cwd: string
     restartToken?: string
+    wsHostPort?: number
+    portForward?: PortForward
+    brokerToken?: string
   }): Promise<RpcResponse> => {
     if (stopped) return { ok: false, reason: 'daemon stopping' }
     return runSerially(req.containerName, async () => {
@@ -139,6 +163,21 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       if (!alreadyRegistered) {
         log({ kind: 'register', containerName: req.containerName })
       }
+      if (
+        opts.portbroker &&
+        req.wsHostPort !== undefined &&
+        req.portForward !== undefined &&
+        req.brokerToken !== undefined
+      ) {
+        opts.portbroker.start({
+          containerName: req.containerName,
+          cwd: req.cwd,
+          policy: req.portForward,
+          wsHostPort: req.wsHostPort,
+          brokerToken: req.brokerToken,
+          onEvent: (event) => log({ kind: 'port-forward-event', event }),
+        })
+      }
       return { ok: true }
     })
   }
@@ -148,6 +187,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       const hadCwd = cwds.delete(req.containerName)
       restartTokens.delete(req.containerName)
       gcMisses.delete(req.containerName)
+      if (opts.portbroker) await opts.portbroker.stop(req.containerName, 'deregistered').catch(() => {})
       if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
       return { ok: true }
     })
@@ -351,6 +391,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       gcMisses.delete(name)
       void runSerially(name, async () => {
         const hadCwd = cwds.delete(name)
+        if (opts.portbroker) await opts.portbroker.stop(name, 'deregistered').catch(() => {})
         if (hadCwd) log({ kind: 'deregister', containerName: name, reason: 'gone' })
         return { ok: true }
       })
@@ -373,6 +414,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         listener.stop(true)
       } catch {}
       httpServer.stop(true)
+      if (opts.portbroker) {
+        const names = Array.from(cwds.keys())
+        await Promise.allSettled(names.map((n) => opts.portbroker!.stop(n, 'broker-stopped')))
+      }
       cwds.clear()
       restartTokens.clear()
       try {

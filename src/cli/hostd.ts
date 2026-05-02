@@ -3,6 +3,7 @@ import { defineCommand } from 'citty'
 import { loadConfigSync, validateConfig } from '@/config'
 import { start, stop } from '@/container'
 import { startDaemon, type DaemonLogEvent } from '@/hostd/daemon'
+import { createPortbrokerManager } from '@/hostd/portbroker-manager'
 import type { SupervisorLogEvent } from '@/hostd/supervisor'
 import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from '@/hostd/version'
 
@@ -17,10 +18,15 @@ export const hostdCommand = defineCommand({
     const srcRoot = resolveSrcRoot(cliEntry)
     const version = srcRoot === null ? UNVERSIONED_SENTINEL : await computeSourceVersion({ srcRoot })
 
+    const portbroker = createPortbrokerManager({
+      onLog: (msg) => console.log(msg),
+    })
+
     const daemon = await startDaemon({
       onLog: (e) => console.log(formatLog(e)),
       version,
       onShutdown: () => process.exit(0),
+      portbroker,
       restart: async ({ containerName, cwd }) => {
         const validated = validateConfig(cwd)
         if (!validated.ok) {
@@ -41,7 +47,10 @@ export const hostdCommand = defineCommand({
     })
 
     const shutdown = (): void => {
-      void daemon.stop().then(() => process.exit(0))
+      void daemon
+        .stop()
+        .then(() => portbroker.drain())
+        .then(() => process.exit(0))
     }
     process.on('SIGTERM', shutdown)
     process.on('SIGINT', shutdown)
@@ -70,5 +79,18 @@ function formatLog(event: DaemonLogEvent | SupervisorLogEvent): string {
       return `[hostd] restart completed for ${event.containerName}`
     case 'restart-failed':
       return `[hostd] restart failed for ${event.containerName}: ${event.reason}`
+    case 'port-forward-event':
+      return formatPortForwardEvent(event.event)
+  }
+}
+
+function formatPortForwardEvent(event: import('@/portbroker').PortForwardEvent): string {
+  switch (event.kind) {
+    case 'port-forward-opened':
+      return `[hostd] port-forward opened ${event.containerName}:${event.port} (${event.bindAddr}) → localhost:${event.port}`
+    case 'port-forward-closed':
+      return `[hostd] port-forward closed ${event.containerName}:${event.port} (${event.reason})`
+    case 'port-forward-failed':
+      return `[hostd] port-forward FAILED ${event.containerName}:${event.port} — ${event.reason}`
   }
 }
