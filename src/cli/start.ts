@@ -1,6 +1,6 @@
 import { defineCommand } from 'citty'
 
-import { config, loadConfigSync } from '@/config'
+import { config } from '@/config'
 import { start } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
@@ -30,14 +30,11 @@ export const startCommand = defineCommand({
       process.exit(1)
     }
 
-    const cfg = loadConfigSync(cwd)
     const result = await start({
       cwd,
       preferredHostPort: Number(args.port),
       forceBuild: args.build,
-      autoForward: cfg.autoForward,
-      autoForwardExclude: cfg.autoForwardExclude,
-      brokerEntry: process.argv[1],
+      cliEntry: process.argv[1],
     })
     if (!result.ok) {
       console.error(result.reason)
@@ -50,12 +47,10 @@ export const startCommand = defineCommand({
     console.log(
       `Container ${result.plan.containerName} started on host port ${result.hostPort} (${result.containerId.slice(0, 12)}).`,
     )
-    if (result.broker.state === 'registered') {
-      console.log(`Host daemon active; any port the agent binds is reachable on localhost.`)
-    } else if (result.broker.state === 'supervisor-only') {
-      console.log(`Host daemon active (port forwarding disabled).`)
-    } else if (result.broker.state === 'unavailable') {
-      console.warn(`Host daemon unavailable: ${result.broker.reason}`)
+    if (result.hostd.state === 'registered') {
+      console.log(`Host daemon active.`)
+    } else if (result.hostd.state === 'unavailable') {
+      console.warn(`Host daemon unavailable: ${result.hostd.reason}`)
     }
     console.log(`Follow logs:  typeclaw logs -f`)
     console.log(`Attach TUI:   typeclaw tui`)
