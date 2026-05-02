@@ -36,6 +36,7 @@ describe('createRestartTool', () => {
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
       hostdToken: 'secret',
+      originatingSessionId: 'ses-test-origin',
       exit: (code) => {
         exitCode = code
       },
@@ -65,6 +66,7 @@ describe('createRestartTool', () => {
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
       hostdToken: 'bad',
+      originatingSessionId: 'ses-test-origin',
       exit: () => {
         throw new Error('exit should not run')
       },
@@ -87,6 +89,7 @@ describe('createRestartTool', () => {
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
       hostdToken: 'secret',
+      originatingSessionId: 'ses-test-origin',
       exit: () => {},
       stream,
     })
@@ -101,6 +104,32 @@ describe('createRestartTool', () => {
     expect(typeof payload.restartedAt).toBe('string')
     expect(() => new Date(payload.restartedAt).toISOString()).not.toThrow()
     expect(new Date(payload.restartedAt).toISOString()).toBe(payload.restartedAt)
+  })
+
+  test('broadcast carries the originatingSessionId passed at construction', async () => {
+    // given
+    server = startOkServer()
+    const stream = createStream()
+    const received: StreamMessage[] = []
+    stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
+      received.push(msg)
+    })
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-the-one-that-asked',
+      exit: () => {},
+      stream,
+    })
+
+    // when
+    await tool.execute('id', {}, undefined, undefined, fakeCtx)
+
+    // then
+    expect(received).toHaveLength(1)
+    const payload = received[0]?.payload as { originatingSessionId: string }
+    expect(payload.originatingSessionId).toBe('ses-the-one-that-asked')
   })
 
   test('does not publish a broadcast when hostd denies the restart', async () => {
@@ -120,6 +149,7 @@ describe('createRestartTool', () => {
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
       hostdToken: 'bad',
+      originatingSessionId: 'ses-test-origin',
       exit: () => {
         throw new Error('exit should not run')
       },
@@ -141,6 +171,7 @@ describe('createRestartTool', () => {
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
       hostdToken: 'secret',
+      originatingSessionId: 'ses-test-origin',
       exit: (code) => {
         exitCode = code
       },

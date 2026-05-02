@@ -16,6 +16,7 @@ import {
   createOverrideResourceLoader,
   createResourceLoader,
   formatRestartNotice,
+  formatRestartNoticeOriginating,
   getBundledSkillsDir,
   subscribeRestartNotice,
 } from './index'
@@ -409,7 +410,7 @@ describe('getBundledSkillsDir', () => {
   )
 })
 
-describe('formatRestartNotice', () => {
+describe('formatRestartNotice (sibling sessions: do not acknowledge unless asked)', () => {
   test('uses the SYSTEM MESSAGE framing convention required for runtime-injected text', () => {
     // when
     const text = formatRestartNotice('2026-05-03T17:39:00.000Z')
@@ -431,8 +432,84 @@ describe('formatRestartNotice', () => {
   })
 })
 
+describe('formatRestartNoticeOriginating (originating session: proactively confirm)', () => {
+  test('uses the SYSTEM MESSAGE framing convention so persona-rich models do not reply to the framing', () => {
+    // when
+    const text = formatRestartNoticeOriginating('2026-05-03T17:39:00.000Z')
+
+    // then
+    expect(text).toContain('**[SYSTEM MESSAGE — not from a human]**')
+    expect(text.startsWith('---\n')).toBe(true)
+    expect(text).toMatch(/\n---\n$/)
+  })
+
+  test('instructs the model to proactively confirm restart completion in the very next reply', () => {
+    // when
+    const text = formatRestartNoticeOriginating('2026-05-03T17:39:00.000Z')
+
+    // then
+    expect(text).toContain('**Your very next reply must briefly confirm the restart completed**')
+    expect(text).toContain("user's explicit\nrequest via the `restart` tool")
+  })
+
+  test('explicitly tells the model not to keep mentioning the restart after the first confirmation', () => {
+    // when
+    const text = formatRestartNoticeOriginating('2026-05-03T17:39:00.000Z')
+
+    // then
+    expect(text).toContain('do\nnot mention the restart again unless the user explicitly asks about it')
+  })
+
+  test('does NOT include the sibling-only "Do not acknowledge or reply" directive (would contradict proactive confirmation)', () => {
+    // when
+    const text = formatRestartNoticeOriginating('2026-05-03T17:39:00.000Z')
+
+    // then
+    expect(text).not.toContain('Do not acknowledge or reply to this notice')
+  })
+
+  test('embeds the restart timestamp in the body', () => {
+    // when
+    const text = formatRestartNoticeOriginating('2026-05-03T17:39:00.000Z')
+
+    // then
+    expect(text).toContain('2026-05-03T17:39:00.000Z')
+  })
+})
+
 describe('subscribeRestartNotice', () => {
-  test('appends a typeclaw.restart custom_message entry on a container-restarting broadcast', () => {
+  test('appends a typeclaw.restart-self entry to the originating session (sessionId matches payload)', () => {
+    // given
+    const stream = createStream()
+    const sessionManager = SessionManager.inMemory()
+    const sessionId = sessionManager.getSessionId()
+    subscribeRestartNotice(stream, sessionManager)
+
+    // when
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: {
+        kind: 'container-restarting',
+        restartedAt: '2026-05-03T17:39:00.000Z',
+        originatingSessionId: sessionId,
+      },
+    })
+
+    // then
+    const entries = sessionManager.getEntries()
+    const restartEntries = entries.filter(
+      (e): e is typeof e & { type: 'custom_message' } => e.type === 'custom_message',
+    )
+    expect(restartEntries).toHaveLength(1)
+    const entry = restartEntries[0]!
+    expect(entry.customType).toBe('typeclaw.restart-self')
+    expect(entry.display).toBe(false)
+    const content = typeof entry.content === 'string' ? entry.content : ''
+    expect(content).toContain('2026-05-03T17:39:00.000Z')
+    expect(content).toContain('**Your very next reply must briefly confirm the restart completed**')
+  })
+
+  test('appends a typeclaw.restart entry to a sibling session (sessionId differs from payload)', () => {
     // given
     const stream = createStream()
     const sessionManager = SessionManager.inMemory()
@@ -441,7 +518,11 @@ describe('subscribeRestartNotice', () => {
     // when
     stream.publish({
       target: { kind: 'broadcast' },
-      payload: { kind: 'container-restarting', restartedAt: '2026-05-03T17:39:00.000Z' },
+      payload: {
+        kind: 'container-restarting',
+        restartedAt: '2026-05-03T17:39:00.000Z',
+        originatingSessionId: 'ses-some-other-session',
+      },
     })
 
     // then
@@ -453,20 +534,26 @@ describe('subscribeRestartNotice', () => {
     const entry = restartEntries[0]!
     expect(entry.customType).toBe('typeclaw.restart')
     expect(entry.display).toBe(false)
-    expect(typeof entry.content === 'string' ? entry.content : '').toContain('2026-05-03T17:39:00.000Z')
-    expect(typeof entry.content === 'string' ? entry.content : '').toContain('**[SYSTEM MESSAGE — not from a human]**')
+    const content = typeof entry.content === 'string' ? entry.content : ''
+    expect(content).toContain('2026-05-03T17:39:00.000Z')
+    expect(content).toContain('Do not acknowledge or reply to this notice unless a human directly')
   })
 
   test('ignores broadcasts whose payload kind is not container-restarting', () => {
     // given
     const stream = createStream()
     const sessionManager = SessionManager.inMemory()
+    const sessionId = sessionManager.getSessionId()
     subscribeRestartNotice(stream, sessionManager)
 
     // when
     stream.publish({
       target: { kind: 'broadcast' },
-      payload: { kind: 'something-else', restartedAt: '2026-05-03T17:39:00.000Z' },
+      payload: {
+        kind: 'something-else',
+        restartedAt: '2026-05-03T17:39:00.000Z',
+        originatingSessionId: sessionId,
+      },
     })
     stream.publish({ target: { kind: 'broadcast' }, payload: { foo: 'bar' } })
     stream.publish({ target: { kind: 'broadcast' }, payload: null })
@@ -479,12 +566,33 @@ describe('subscribeRestartNotice', () => {
     // given
     const stream = createStream()
     const sessionManager = SessionManager.inMemory()
+    const sessionId = sessionManager.getSessionId()
     subscribeRestartNotice(stream, sessionManager)
 
     // when
     stream.publish({
       target: { kind: 'broadcast' },
-      payload: { kind: 'container-restarting', restartedAt: 12345 },
+      payload: {
+        kind: 'container-restarting',
+        restartedAt: 12345,
+        originatingSessionId: sessionId,
+      },
+    })
+
+    // then
+    expect(sessionManager.getEntries()).toHaveLength(0)
+  })
+
+  test('ignores container-restarting broadcasts missing originatingSessionId (legacy / malformed payloads)', () => {
+    // given
+    const stream = createStream()
+    const sessionManager = SessionManager.inMemory()
+    subscribeRestartNotice(stream, sessionManager)
+
+    // when
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: { kind: 'container-restarting', restartedAt: '2026-05-03T17:39:00.000Z' },
     })
 
     // then
@@ -507,11 +615,16 @@ describe('subscribeRestartNotice', () => {
     // given
     const stream = createStream()
     const sessionManager = SessionManager.inMemory()
+    const sessionId = sessionManager.getSessionId()
     const unsub = subscribeRestartNotice(stream, sessionManager)
     expect(unsub).not.toBeNull()
     stream.publish({
       target: { kind: 'broadcast' },
-      payload: { kind: 'container-restarting', restartedAt: '2026-05-03T17:39:00.000Z' },
+      payload: {
+        kind: 'container-restarting',
+        restartedAt: '2026-05-03T17:39:00.000Z',
+        originatingSessionId: sessionId,
+      },
     })
     expect(sessionManager.getEntries()).toHaveLength(1)
 
@@ -519,34 +632,63 @@ describe('subscribeRestartNotice', () => {
     unsub?.()
     stream.publish({
       target: { kind: 'broadcast' },
-      payload: { kind: 'container-restarting', restartedAt: '2026-05-03T18:00:00.000Z' },
+      payload: {
+        kind: 'container-restarting',
+        restartedAt: '2026-05-03T18:00:00.000Z',
+        originatingSessionId: sessionId,
+      },
     })
 
     // then
     expect(sessionManager.getEntries()).toHaveLength(1)
   })
 
-  test('fans out a single broadcast to multiple subscribed sessions (composition mutation check)', () => {
-    // given two sessions sharing one stream — simulating two live channel
-    // sessions in a dying container at restart time.
+  test('dispatches origin-vs-siblings correctly for one originator and two siblings sharing one stream (composition mutation check)', () => {
+    // given three sessions sharing one stream — the originator that called the
+    // restart tool, and two siblings that did not. This is the canonical
+    // mutation-check: regression to "everyone gets the same notice" fails it,
+    // regression to "dispatch is inverted" fails it, regression where the
+    // broadcast doesn't carry the originator ID fails it.
     const stream = createStream()
-    const sessionA = SessionManager.inMemory()
-    const sessionB = SessionManager.inMemory()
-    subscribeRestartNotice(stream, sessionA)
-    subscribeRestartNotice(stream, sessionB)
+    const originator = SessionManager.inMemory()
+    const siblingA = SessionManager.inMemory()
+    const siblingB = SessionManager.inMemory()
+    subscribeRestartNotice(stream, originator)
+    subscribeRestartNotice(stream, siblingA)
+    subscribeRestartNotice(stream, siblingB)
 
-    // when the restart tool publishes once
+    // when the originator's restart tool publishes once
     stream.publish({
       target: { kind: 'broadcast' },
-      payload: { kind: 'container-restarting', restartedAt: '2026-05-03T17:39:00.000Z' },
+      payload: {
+        kind: 'container-restarting',
+        restartedAt: '2026-05-03T17:39:00.000Z',
+        originatingSessionId: originator.getSessionId(),
+      },
     })
 
-    // then both sessions get the notice independently
-    const aEntries = sessionA.getEntries().filter((e) => e.type === 'custom_message')
-    const bEntries = sessionB.getEntries().filter((e) => e.type === 'custom_message')
-    expect(aEntries).toHaveLength(1)
-    expect(bEntries).toHaveLength(1)
-    expect((aEntries[0] as { customType: string }).customType).toBe('typeclaw.restart')
-    expect((bEntries[0] as { customType: string }).customType).toBe('typeclaw.restart')
+    // then originator gets restart-self, siblings get restart
+    const originatorEntries = originator.getEntries().filter((e) => e.type === 'custom_message')
+    const siblingAEntries = siblingA.getEntries().filter((e) => e.type === 'custom_message')
+    const siblingBEntries = siblingB.getEntries().filter((e) => e.type === 'custom_message')
+
+    expect(originatorEntries).toHaveLength(1)
+    expect(siblingAEntries).toHaveLength(1)
+    expect(siblingBEntries).toHaveLength(1)
+
+    expect((originatorEntries[0] as { customType: string }).customType).toBe('typeclaw.restart-self')
+    expect((siblingAEntries[0] as { customType: string }).customType).toBe('typeclaw.restart')
+    expect((siblingBEntries[0] as { customType: string }).customType).toBe('typeclaw.restart')
+
+    const originatorContent =
+      typeof (originatorEntries[0] as { content: unknown }).content === 'string'
+        ? ((originatorEntries[0] as { content: string }).content as string)
+        : ''
+    const siblingAContent =
+      typeof (siblingAEntries[0] as { content: unknown }).content === 'string'
+        ? ((siblingAEntries[0] as { content: string }).content as string)
+        : ''
+    expect(originatorContent).toContain('**Your very next reply must briefly confirm the restart completed**')
+    expect(siblingAContent).toContain('Do not acknowledge or reply to this notice unless a human directly')
   })
 })

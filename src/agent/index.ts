@@ -120,6 +120,12 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 
   const tools = options.tools ?? (subagentBuiltinTools as AgentSessionTools | undefined)
 
+  // Hoisted above tool construction so the restart tool can be wired with the
+  // session's stable identity (sessionManager.getSessionId()). Subscribers use
+  // that ID to distinguish the originating session from siblings on the
+  // container-restarting broadcast.
+  const sessionManager = options.sessionManager ?? SessionManager.inMemory()
+
   const customTools =
     options.customTools !== undefined
       ? [...options.customTools, ...pluginCustomTools]
@@ -135,6 +141,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
               ? [
                   createRestartTool({
                     containerName: options.containerName,
+                    originatingSessionId: sessionManager.getSessionId(),
                     ...(options.stream ? { stream: options.stream } : {}),
                   }),
                 ]
@@ -142,7 +149,6 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             ...pluginCustomTools,
           ]
 
-  const sessionManager = options.sessionManager ?? SessionManager.inMemory()
   const model = resolveModel(getConfig().model)
   const { session } = await createAgentSession({
     model,
@@ -165,26 +171,36 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 }
 
 // Subscribes the given session to the in-process broadcast that the `restart`
-// tool fires on a successful hostd ACK. Each subscriber appends a
-// `typeclaw.restart` custom_message entry to its own transcript, so the
-// resumed session in the next container sees a SYSTEM MESSAGE block as the
-// most recent context entry on the next prompt — fixing the user-visible bug
-// where bots restarted themselves and then continued the conversation with no
-// awareness it had happened. display:false keeps the entry out of any TUI
-// rendering that might inspect the JSONL later. Exported so unit tests can
-// verify the wiring without going through createAgentSession (which needs
-// auth and model registry); the integration test at the bottom of this
-// module covers the full createSession path.
+// tool fires on a successful hostd ACK. The subscriber dispatches by identity:
+// the session whose tool execution fired the restart (originator) gets a
+// `typeclaw.restart-self` notice instructing the model to proactively confirm
+// restart completion in its very next reply. All other sessions (siblings) get
+// the `typeclaw.restart` notice instructing them not to mention the restart
+// unless directly asked. Two distinct customTypes let downstream consumers
+// distinguish the cases unambiguously. display:false keeps either entry out of
+// any TUI rendering that might inspect the JSONL later. Exported so unit tests
+// can verify the wiring without going through createAgentSession (which needs
+// auth and model registry); the composition test at the bottom of this
+// module's test file covers originator + siblings end to end.
 export function subscribeRestartNotice(
   stream: Stream | undefined,
   sessionManager: SessionManager,
 ): (() => void) | null {
   if (!stream) return null
   const unsub = stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
-    const payload = msg.payload as { kind?: unknown; restartedAt?: unknown } | null
+    const payload = msg.payload as { kind?: unknown; restartedAt?: unknown; originatingSessionId?: unknown } | null
     if (!payload || payload.kind !== 'container-restarting') return
     if (typeof payload.restartedAt !== 'string') return
-    sessionManager.appendCustomMessageEntry('typeclaw.restart', formatRestartNotice(payload.restartedAt), false)
+    if (typeof payload.originatingSessionId !== 'string') return
+    if (payload.originatingSessionId === sessionManager.getSessionId()) {
+      sessionManager.appendCustomMessageEntry(
+        'typeclaw.restart-self',
+        formatRestartNoticeOriginating(payload.restartedAt),
+        false,
+      )
+    } else {
+      sessionManager.appendCustomMessageEntry('typeclaw.restart', formatRestartNotice(payload.restartedAt), false)
+    }
   })
   return unsub
 }
@@ -208,6 +224,33 @@ export function formatRestartNotice(restartedAt: string): string {
     '- If a human asks whether you actually restarted, you may confirm: yes, you',
     `  did restart at ${restartedAt}.`,
     '- Otherwise, continue the conversation normally.',
+    '',
+    '---',
+    '',
+  ].join('\n')
+}
+
+// Variant for the session that called the `restart` tool. The user explicitly
+// asked this conversation to restart; staying silent after the reboot is the
+// reported bug ("뭐야 너네 재시작 한 것도 모르냐"). This notice instructs the
+// model to acknowledge restart completion in its very next reply — once — then
+// stop mentioning it. Same SYSTEM MESSAGE framing as the sibling notice so
+// persona-rich models don't reply to the framing itself.
+export function formatRestartNoticeOriginating(restartedAt: string): string {
+  return [
+    '---',
+    '**[SYSTEM MESSAGE — not from a human]**',
+    '',
+    `The TypeClaw container was restarted at ${restartedAt} at the user's explicit`,
+    'request via the `restart` tool. The restart completed successfully and you',
+    'have been resumed inside a new container process with your previous',
+    'conversation memory intact.',
+    '',
+    '**Your very next reply must briefly confirm the restart completed** (e.g.',
+    '"restart finished, I\'m back" — or in whatever voice fits your persona),',
+    "even if the user's next message is about something unrelated. After that",
+    "single confirmation, address whatever the user's next message says, and do",
+    'not mention the restart again unless the user explicitly asks about it.',
     '',
     '---',
     '',

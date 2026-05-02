@@ -18,6 +18,15 @@ export type CreateRestartToolOptions = {
   // building a Stream. In production wiring, every live AgentSession's
   // broadcast subscriber turns this signal into a transcript entry.
   stream?: Stream
+  // Identifies the session whose `restart` tool execution fired the broadcast.
+  // Subscribers compare against their own SessionManager.getSessionId() to
+  // pick the right notice variant (proactive-confirmation for the originator,
+  // do-not-acknowledge for siblings). Required when stream is set; without it
+  // every session would get the sibling notice and the originator would never
+  // confirm restart completion proactively — the exact bug this dispatch
+  // fixes. Required even when stream is absent so the type stays simple and
+  // the field's presence documents the runtime contract.
+  originatingSessionId: string
 }
 
 export type RestartToolDetails = { ok: boolean; containerName: string; reason?: string }
@@ -25,6 +34,7 @@ export type RestartToolDetails = { ok: boolean; containerName: string; reason?: 
 export type ContainerRestartingBroadcast = {
   kind: 'container-restarting'
   restartedAt: string
+  originatingSessionId: string
 }
 
 export function createRestartTool({
@@ -34,6 +44,7 @@ export function createRestartTool({
   hostdUrl,
   hostdToken,
   stream,
+  originatingSessionId,
 }: CreateRestartToolOptions) {
   const doExit = exit ?? ((code: number) => process.exit(code))
   const httpUrl = hostdUrl ?? process.env.TYPECLAW_HOSTD_URL
@@ -72,6 +83,7 @@ export function createRestartTool({
       const broadcast: ContainerRestartingBroadcast = {
         kind: 'container-restarting',
         restartedAt: new Date().toISOString(),
+        originatingSessionId,
       }
       stream?.publish({ target: { kind: 'broadcast' }, payload: broadcast })
 
