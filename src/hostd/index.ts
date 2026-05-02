@@ -36,13 +36,6 @@ export {
   type ForwarderOptions,
   type ForwarderStartResult,
 } from './portbroker/forwarder'
-export {
-  startLoopbackProxy,
-  type LoopbackProxy,
-  type LoopbackProxyFactory,
-  type LoopbackProxyOptions,
-  type LoopbackProxyStartResult,
-} from './portbroker/loopback-proxy'
 export type {
   ListResult,
   Request,

@@ -211,7 +211,6 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
     mounts: [],
-    autoForwardLoopback: [4848],
     memory: {
       idleMs: 10_000,
       dreaming: { schedule: '0 4 * * *' },

@@ -4,12 +4,6 @@ import type { DockerExec } from '@/container'
 
 import { startBroker, type BrokerLogEvent, defaultResolveIp, type ForwarderFactory } from './broker'
 import type { Forwarder, ForwarderOptions, ForwarderStartResult } from './forwarder'
-import type {
-  LoopbackProxy,
-  LoopbackProxyFactory,
-  LoopbackProxyOptions,
-  LoopbackProxyStartResult,
-} from './loopback-proxy'
 
 const PROC_HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
 
@@ -47,43 +41,6 @@ function fakeForwarderFactory(): {
     }
     open.set(options.hostPort, options)
     return { ok: true, forwarder }
-  }
-  return {
-    factory,
-    active: () => open,
-    failNext: (reason: string) => {
-      failure = reason
-    },
-    history: () => history,
-  }
-}
-
-function fakeLoopbackProxyFactory(): {
-  factory: LoopbackProxyFactory
-  active: () => Map<number, LoopbackProxyOptions>
-  failNext: (reason: string) => void
-  history: () => LoopbackProxyOptions[]
-} {
-  const open = new Map<number, LoopbackProxyOptions>()
-  const history: LoopbackProxyOptions[] = []
-  let failure: string | null = null
-  const factory: LoopbackProxyFactory = async (options: LoopbackProxyOptions): Promise<LoopbackProxyStartResult> => {
-    history.push(options)
-    if (failure !== null) {
-      const reason = failure
-      failure = null
-      return { ok: false, reason }
-    }
-    const proxy: LoopbackProxy = {
-      containerName: options.containerName,
-      listenHost: options.listenHost,
-      port: options.port,
-      stop: async () => {
-        open.delete(options.port)
-      },
-    }
-    open.set(options.port, options)
-    return { ok: true, proxy }
   }
   return {
     factory,
@@ -384,96 +341,6 @@ describe('startBroker', () => {
       await waitFor(() => events.some((e) => e.kind === 'skip-loopback' && e.port === 4848))
       expect(active().has(4848)).toBe(false)
       expect(events.some((e) => e.kind === 'open' && e.hostPort === 4848)).toBe(false)
-    } finally {
-      await result.broker.stop()
-    }
-  })
-
-  test('proxies allowlisted loopback-only ports before forwarding them', async () => {
-    const { factory, active } = fakeForwarderFactory()
-    const loopback = fakeLoopbackProxyFactory()
-    const exec: DockerExec = async (args) => {
-      if (args[0] === 'inspect') return { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }
-      return { exitCode: 0, stdout: procWithPorts([4848], '0100007F'), stderr: '' }
-    }
-
-    const result = await startBroker({
-      containerName: 'coder',
-      excludePorts: new Set(),
-      loopbackPorts: new Set([4848]),
-      exec,
-      intervalMs: 30,
-      forwarderFactory: factory,
-      loopbackProxyFactory: loopback.factory,
-      onLog: (e) => events.push(e),
-    })
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    try {
-      await waitFor(() => active().has(4848))
-      expect(loopback.active().get(4848)).toMatchObject({ containerName: 'coder', listenHost: '10.0.0.5', port: 4848 })
-      expect(active().get(4848)).toEqual({ hostPort: 4848, upstreamHost: '10.0.0.5', upstreamPort: 4848 })
-      expect(events.some((e) => e.kind === 'loopback-proxy-open' && e.port === 4848)).toBe(true)
-    } finally {
-      await result.broker.stop()
-    }
-    expect(loopback.active().has(4848)).toBe(false)
-  })
-
-  test('removes host forwarder when an allowlisted loopback proxy exits', async () => {
-    const { factory, active } = fakeForwarderFactory()
-    const loopback = fakeLoopbackProxyFactory()
-    const exec: DockerExec = async (args) => {
-      if (args[0] === 'inspect') return { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }
-      return { exitCode: 0, stdout: procWithPorts([4848], '0100007F'), stderr: '' }
-    }
-
-    const result = await startBroker({
-      containerName: 'coder',
-      excludePorts: new Set(),
-      loopbackPorts: new Set([4848]),
-      exec,
-      intervalMs: 30,
-      forwarderFactory: factory,
-      loopbackProxyFactory: loopback.factory,
-      onLog: (e) => events.push(e),
-    })
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    try {
-      await waitFor(() => active().has(4848))
-      loopback.active().get(4848)?.onExit?.('proxy crashed')
-      await waitFor(() => !active().has(4848))
-      expect(events.some((e) => e.kind === 'loopback-proxy-exited' && e.port === 4848)).toBe(true)
-    } finally {
-      await result.broker.stop()
-    }
-  })
-
-  test('does not expose allowlisted loopback port when proxy startup fails', async () => {
-    const { factory, active } = fakeForwarderFactory()
-    const loopback = fakeLoopbackProxyFactory()
-    loopback.failNext('bind failed')
-    const exec: DockerExec = async (args) => {
-      if (args[0] === 'inspect') return { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }
-      return { exitCode: 0, stdout: procWithPorts([4848], '0100007F'), stderr: '' }
-    }
-
-    const result = await startBroker({
-      containerName: 'coder',
-      excludePorts: new Set(),
-      loopbackPorts: new Set([4848]),
-      exec,
-      intervalMs: 30,
-      forwarderFactory: factory,
-      loopbackProxyFactory: loopback.factory,
-      onLog: (e) => events.push(e),
-    })
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    try {
-      await waitFor(() => events.some((e) => e.kind === 'loopback-proxy-failed' && e.port === 4848))
-      expect(active().has(4848)).toBe(false)
     } finally {
       await result.broker.stop()
     }

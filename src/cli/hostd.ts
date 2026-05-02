@@ -78,13 +78,7 @@ function formatLog(event: BrokerLogEvent | DaemonLogEvent | SupervisorLogEvent):
     case 'skip-excluded':
       return `[${event.containerName}] skipping :${event.port} (excluded)`
     case 'skip-loopback':
-      return `[${event.containerName}] skipping :${event.port} (bound to 127.0.0.1 inside the container; add it to autoForwardLoopback to expose it)`
-    case 'loopback-proxy-open':
-      return `[${event.containerName}] proxying loopback :${event.port} via ${event.listenHost}:${event.port}`
-    case 'loopback-proxy-failed':
-      return `[${event.containerName}] loopback proxy :${event.port} failed: ${event.reason}`
-    case 'loopback-proxy-exited':
-      return `[${event.containerName}] loopback proxy :${event.port} exited: ${event.reason}`
+      return `[${event.containerName}] skipping :${event.port} (bound to 127.0.0.1 inside the container — bind to 0.0.0.0 to expose it)`
     case 'skip-eaddrinuse':
       return `[${event.containerName}] localhost:${event.port} unavailable: ${event.reason}`
     case 'ip-resolved':

@@ -48,11 +48,8 @@ describe('createConfigReloadable', () => {
     expect(getConfig().port).toBe(9001)
   })
 
-  test('field fence: port, mounts, and forwarding changes land in `restartRequired`', async () => {
-    await writeFile(
-      join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL_A, port: 9001, mounts: [], autoForwardLoopback: [] }),
-    )
+  test('field fence: port and mounts changes land in `restartRequired`', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, port: 9001, mounts: [] }))
     const reloadable = createConfigReloadable({ cwd })
     await reloadable.reload()
 
@@ -62,7 +59,6 @@ describe('createConfigReloadable', () => {
         model: VALID_MODEL_A,
         port: 9002,
         mounts: [{ name: 'projects', path: '~/projects' }],
-        autoForwardLoopback: [4848],
       }),
     )
     const result = await reloadable.reload()
@@ -75,7 +71,7 @@ describe('createConfigReloadable', () => {
       ignored: unknown[]
     }
     const paths = diff.restartRequired.map((c) => c.path).sort()
-    expect(paths).toEqual(['autoForwardLoopback', 'mounts', 'port'])
+    expect(paths).toEqual(['mounts', 'port'])
   })
 
   test('field fence: $schema change is ignored', async () => {

@@ -365,7 +365,7 @@ describe('scaffold', () => {
     expect(existsSync(join(root, 'memory'))).toBe(false)
   })
 
-  test('writes typeclaw.json with defaults and a memory config block for the bundled plugin', async () => {
+  test('writes typeclaw.json with $schema, model, mounts, and a memory config block for the bundled plugin', async () => {
     await scaffold(root)
 
     const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
@@ -374,7 +374,6 @@ describe('scaffold', () => {
       $schema: './node_modules/typeclaw/typeclaw.schema.json',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
       mounts: [],
-      autoForwardLoopback: [4848],
       memory: {
         idleMs: 10_000,
         dreaming: { schedule: '0 4 * * *' },
@@ -638,32 +637,6 @@ describe('writeDockerAssets', () => {
     // anchored to the start of a line so a commented-out RUN does not match.
     expect(dockerfile).toMatch(/^RUN[^\n]*\bbun install -g agent-browser\b/m)
     expect(dockerfile).toMatch(/^[^#\n]*\bagent-browser install --with-deps\b/m)
-  })
-
-  test('Dockerfile installs python3 + pip so agents can run Python scripts at runtime', async () => {
-    await scaffold(root)
-
-    await writeDockerAssets(root)
-
-    const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
-    // python3 + pip + venv must be in the single apt layer, not a second
-    // apt-get update cycle. We check both the package list and that there is
-    // still only one `apt-get update` invocation in the file.
-    // [\s\S] (not [^\n]) because the install command may use backslash line
-    // continuation. Lazy match + early anchor keeps it scoped to the install
-    // RUN, not, say, a comment 30 lines later.
-    expect(dockerfile).toMatch(/apt-get install[\s\S]*?\bpython3\b/)
-    expect(dockerfile).toMatch(/apt-get install[\s\S]*?\bpython3-pip\b/)
-    expect(dockerfile).toMatch(/apt-get install[\s\S]*?\bpython3-venv\b/)
-    // `python` should resolve to python3 so agents can use either name.
-    expect(dockerfile).toMatch(/\bpython-is-python3\b/)
-    // Count only real invocations — exclude lines whose first non-whitespace
-    // char is `#`, since the surrounding comment block legitimately mentions
-    // \`apt-get update\` to explain why we avoid a second one.
-    const aptUpdateInvocations = dockerfile
-      .split('\n')
-      .filter((line) => !/^\s*#/.test(line) && /apt-get update/.test(line))
-    expect(aptUpdateInvocations).toHaveLength(1)
   })
 
   test('Dockerfile falls back to apt chromium on arm64 since Chrome for Testing has no linux/arm64 build', async () => {

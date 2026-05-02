@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -10,11 +10,9 @@ import { send } from './client'
 import { startDaemon, type Daemon } from './daemon'
 import { socketPath } from './paths'
 import type { Forwarder, ForwarderOptions, ForwarderStartResult } from './portbroker/forwarder'
-import type { LoopbackProxy, LoopbackProxyOptions, LoopbackProxyStartResult } from './portbroker/loopback-proxy'
 import type { ListResult, VersionResult } from './protocol'
 
 const PROC_HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n'
-const VALID_MODEL_A = 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo'
 
 function procWithPorts(ports: number[]): string {
   const lines = ports.map(
@@ -32,19 +30,6 @@ const noopForwarderFactory = async (options: ForwarderOptions): Promise<Forwarde
     stop: async () => {},
   }
   return { ok: true, forwarder }
-}
-
-function recordingLoopbackProxyFactory(seen: LoopbackProxyOptions[]) {
-  return async (options: LoopbackProxyOptions): Promise<LoopbackProxyStartResult> => {
-    seen.push(options)
-    const proxy: LoopbackProxy = {
-      containerName: options.containerName,
-      listenHost: options.listenHost,
-      port: options.port,
-      stop: async () => {},
-    }
-    return { ok: true, proxy }
-  }
 }
 
 let home: string
@@ -279,45 +264,6 @@ describe('startDaemon', () => {
       await new Promise((resolve) => setTimeout(resolve, 30))
     }
     throw new Error(`exclude not honored; saw events: ${events.join(',')}`)
-  })
-
-  test('register derives loopback forwarding allowlist from host-stage config', async () => {
-    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-daemon-agent-'))
-    try {
-      await writeFile(
-        join(agentDir, 'typeclaw.json'),
-        JSON.stringify({ model: VALID_MODEL_A, autoForwardLoopback: [4848] }),
-      )
-      const routes = new Map([
-        ['inspect:coder', { exitCode: 0, stdout: '{"bridge":{"IPAddress":"10.0.0.5"}}', stderr: '' }],
-        [
-          'proc:coder',
-          { exitCode: 0, stdout: procWithPorts([4848]).replace('00000000:12F0', '0100007F:12F0'), stderr: '' },
-        ],
-      ])
-      const proxies: LoopbackProxyOptions[] = []
-      daemon = await startDaemon({
-        exec: fakeExec(routes),
-        forwarderFactory: noopForwarderFactory,
-        loopbackProxyFactory: recordingLoopbackProxyFactory(proxies),
-        gcIntervalMs: 1_000_000,
-      })
-
-      const register = await send({ kind: 'register', containerName: 'coder', cwd: agentDir })
-      expect(register.ok).toBe(true)
-
-      const start = Date.now()
-      while (Date.now() - start < 1500) {
-        if (proxies.some((p) => p.port === 4848)) {
-          expect(proxies.some((p) => p.port === 9999)).toBe(false)
-          return
-        }
-        await new Promise((resolve) => setTimeout(resolve, 30))
-      }
-      throw new Error('host config loopback allowlist was not honored')
-    } finally {
-      await rm(agentDir, { recursive: true, force: true })
-    }
   })
 
   test('register concurrent with deregister is serialized: no broker remains', async () => {
