@@ -25,6 +25,9 @@ export type DiscordGatewayMessageCreateEvent = {
   guild_id?: string
   author: { id: string; username: string; bot?: boolean }
   content: string
+  attachments?: DiscordGatewayAttachment[]
+  embeds?: DiscordGatewayEmbed[]
+  sticker_items?: DiscordGatewayStickerItem[]
   timestamp: string
   edited_timestamp?: string
   mentions?: Array<{ id: string; username: string }>
@@ -33,6 +36,26 @@ export type DiscordGatewayMessageCreateEvent = {
     channel_id?: string
     guild_id?: string
   }
+}
+
+export type DiscordGatewayAttachment = {
+  id: string
+  filename: string
+  url?: string
+  content_type?: string
+}
+
+export type DiscordGatewayEmbed = {
+  type?: string
+  title?: string
+  description?: string
+  url?: string
+}
+
+export type DiscordGatewayStickerItem = {
+  id: string
+  name: string
+  format_type?: number
 }
 
 export type DiscordBotListenerConnected = {

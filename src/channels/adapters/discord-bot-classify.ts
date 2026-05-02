@@ -1,7 +1,12 @@
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
-import type { DiscordGatewayMessageCreateEvent } from './agent-messenger-shim'
+import type {
+  DiscordGatewayAttachment,
+  DiscordGatewayEmbed,
+  DiscordGatewayMessageCreateEvent,
+  DiscordGatewayStickerItem,
+} from './agent-messenger-shim'
 
 export type InboundDropReason =
   | 'bot_author' // event.author.bot === true; dropping prevents echo loops
@@ -24,7 +29,8 @@ export function classifyInbound(
   botUserId: string | null,
 ): InboundClassification {
   if (event.author.bot === true) return { kind: 'drop', reason: 'bot_author' }
-  if (event.content === '') return { kind: 'drop', reason: 'empty_content' }
+  const text = inboundText(event)
+  if (text === '') return { kind: 'drop', reason: 'empty_content' }
 
   const isDm = event.guild_id === undefined
   const workspace = isDm ? '@dm' : event.guild_id!
@@ -47,7 +53,7 @@ export function classifyInbound(
       workspace,
       chat: event.channel_id,
       thread: null,
-      text: event.content,
+      text,
       externalMessageId: event.id,
       authorId: event.author.id,
       authorName: event.author.username,
@@ -56,4 +62,39 @@ export function classifyInbound(
       isDm,
     },
   }
+}
+
+function inboundText(event: DiscordGatewayMessageCreateEvent): string {
+  if (event.content !== '') return event.content
+  const mediaSummary = summarizeDiscordMedia(event)
+  return mediaSummary.length > 0 ? `[Discord message with ${mediaSummary.join('; ')}]` : ''
+}
+
+function summarizeDiscordMedia(event: DiscordGatewayMessageCreateEvent): string[] {
+  return [
+    ...(event.attachments ?? []).map(summarizeAttachment),
+    ...(event.embeds ?? []).map(summarizeEmbed),
+    ...(event.sticker_items ?? []).map(summarizeSticker),
+  ]
+}
+
+function summarizeAttachment(attachment: DiscordGatewayAttachment): string {
+  return compactJoin(' ', [
+    `attachment: ${attachment.filename}`,
+    attachment.content_type === undefined ? undefined : `(${attachment.content_type})`,
+    attachment.url,
+  ])
+}
+
+function summarizeEmbed(embed: DiscordGatewayEmbed): string {
+  const label = embed.title ?? embed.description ?? embed.url ?? embed.type ?? 'embed'
+  return compactJoin(' ', ['embed:', label, embed.url !== undefined && embed.url !== label ? embed.url : undefined])
+}
+
+function summarizeSticker(sticker: DiscordGatewayStickerItem): string {
+  return `sticker: ${sticker.name}`
+}
+
+function compactJoin(separator: string, parts: Array<string | undefined>): string {
+  return parts.filter((part) => part !== undefined && part !== '').join(separator)
 }
