@@ -11,7 +11,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import type { HookBus } from '@/plugin'
 
 import { loadChannelSessions, saveChannelSessions } from './persistence'
-import { createChannelRouter, sliceHeadTail, type ChannelRouter } from './router'
+import { createChannelRouter, SESSION_IDLE_MS, sliceHeadTail, type ChannelRouter } from './router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from './schema'
 import type { ChannelHistoryMessage, ChannelKey, FetchHistoryArgs, HistoryCallback, InboundMessage } from './types'
 
@@ -1424,5 +1424,192 @@ describe('ChannelRouter cold-start prefetch', () => {
     await router.__testing!.flushDebounce(THREAD_KEY)
 
     expect(captured).toEqual([{ chat: 'c1', thread: 't-A', limit: 8 }])
+  })
+})
+
+// Idle GC evicts LiveSessions whose lastInboundAt is older than
+// SESSION_IDLE_MS. Persistence (channels/sessions.json) is intentionally
+// untouched: the next inbound rehydrates from disk against the same
+// sessionId, so the agent gets a fresh in-memory session but the on-disk
+// transcript continues. Tests drive the GC via the `__testing.runIdleGc()`
+// seam; production uses a setInterval.
+describe('ChannelRouter idle session GC', () => {
+  test('evicts a session that has been idle longer than SESSION_IDLE_MS', async () => {
+    // given: an engaged session at t=1000 (creates the session)
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(router.liveCount()).toBe(1)
+
+    // when: time advances past the idle threshold and the GC runs
+    nowRef.value = 1000 + SESSION_IDLE_MS + 1
+    await router.__testing!.runIdleGc!()
+
+    // then: live map drops the entry, the session is aborted+disposed
+    expect(router.liveCount()).toBe(0)
+    expect(sessions[0]!.aborted).toBe(1)
+    expect(sessions[0]!.disposed).toBe(1)
+  })
+
+  test('does not evict a session whose lastInboundAt is within SESSION_IDLE_MS', async () => {
+    // given
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when: advance time but stay just under the threshold
+    nowRef.value = 1000 + SESSION_IDLE_MS - 1
+    await router.__testing!.runIdleGc!()
+
+    // then
+    expect(router.liveCount()).toBe(1)
+    expect(sessions[0]!.aborted).toBe(0)
+  })
+
+  test('does not evict a session that is currently draining', async () => {
+    // given: a session whose prompt() blocks until we release it
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    let release: (() => void) | undefined
+    const blocked = new Promise<void>((r) => {
+      release = r
+    })
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ text: 'hi bot' }))
+    sessions[0]!.onPrompt = async () => {
+      await blocked
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+
+    // when: time leaps past the threshold while the turn is in flight
+    nowRef.value = 1000 + SESSION_IDLE_MS + 1
+    await router.__testing!.runIdleGc!()
+
+    // then: GC respects the in-flight turn and leaves the session alone
+    expect(router.liveCount()).toBe(1)
+    expect(sessions[0]!.aborted).toBe(0)
+
+    // cleanup so the test process can exit
+    release!()
+    await draining
+  })
+
+  test('next inbound after eviction creates a fresh session and rehydrates the persisted sessionId', async () => {
+    // given: session is evicted
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value = 1000 + SESSION_IDLE_MS + 1
+    await router.__testing!.runIdleGc!()
+    expect(router.liveCount()).toBe(0)
+
+    // when
+    await router.route(inbound({ text: 'still here?', externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(sessions).toHaveLength(2)
+    expect(router.liveCount()).toBe(1)
+    const persisted = await loadChannelSessions(dir)
+    expect(persisted).toHaveLength(1)
+    expect(persisted[0]?.sessionId).toBeDefined()
+  })
+
+  test('fires session.end hook on the evicted session before disposing', async () => {
+    // given: a session with hooks
+    const dir = await tempDir()
+    const events: string[] = []
+    const nowRef = { value: 1000 }
+    const sessions: FakeSession[] = []
+    const hooks: HookBus = {
+      registerAll: () => {},
+      unregisterAll: () => {},
+      runSessionStart: async () => {},
+      runSessionEnd: async (e) => {
+        events.push(`end:${e.sessionId}`)
+      },
+      runSessionIdle: async (e) => {
+        events.push(`idle:${e.sessionId}`)
+      },
+      runSessionPrompt: async () => {},
+      runToolBefore: async () => undefined,
+      runToolAfter: async () => {},
+      count: () => 0,
+    }
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      now: () => nowRef.value,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        sessions.push(fake)
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: `ses_fake_${sessions.length}`,
+          dispose: async () => {
+            fake.dispose()
+          },
+          hooks,
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when
+    nowRef.value = 1000 + SESSION_IDLE_MS + 1
+    await router.__testing!.runIdleGc!()
+
+    // then: idle fires after the prompt (existing behavior), then end on
+    // eviction; end must precede dispose so plugins can still touch state.
+    expect(events).toEqual(['idle:ses_fake_1', 'end:ses_fake_1'])
+    expect(sessions[0]!.disposed).toBe(1)
+  })
+
+  test('runIdleGc tolerates dispose throwing and still removes the entry', async () => {
+    // given
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const sessions: FakeSession[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      now: () => nowRef.value,
+      logger: {
+        info: (m) => logs.push(`info:${m}`),
+        warn: (m) => logs.push(`warn:${m}`),
+        error: (m) => logs.push(`error:${m}`),
+      },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        sessions.push(fake)
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: `ses_fake_${sessions.length}`,
+          dispose: async () => {
+            throw new Error('dispose boom')
+          },
+        }
+      },
+    })
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when
+    nowRef.value = 1000 + SESSION_IDLE_MS + 1
+    await router.__testing!.runIdleGc!()
+
+    // then
+    expect(router.liveCount()).toBe(0)
+    expect(logs.some((l) => l.includes('dispose'))).toBe(true)
   })
 })
