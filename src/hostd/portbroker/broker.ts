@@ -2,6 +2,7 @@ import { defaultDockerExec, type DockerExec } from '@/container'
 
 import { startDetector, type Detector, type PortChange } from './detector'
 import { startForwarder, type Forwarder, type ForwarderOptions, type ForwarderStartResult } from './forwarder'
+import { startLoopbackProxy, type LoopbackProxy, type LoopbackProxyFactory } from './loopback-proxy'
 
 export type ForwarderFactory = (opts: ForwarderOptions) => Promise<ForwarderStartResult>
 
@@ -10,6 +11,9 @@ export type BrokerLogEvent =
   | { kind: 'close'; containerName: string; hostPort: number }
   | { kind: 'skip-excluded'; containerName: string; port: number }
   | { kind: 'skip-loopback'; containerName: string; port: number }
+  | { kind: 'loopback-proxy-open'; containerName: string; port: number; listenHost: string }
+  | { kind: 'loopback-proxy-failed'; containerName: string; port: number; reason: string }
+  | { kind: 'loopback-proxy-exited'; containerName: string; port: number; reason: string }
   | { kind: 'skip-eaddrinuse'; containerName: string; port: number; reason: string }
   | { kind: 'ip-resolved'; containerName: string; containerIp: string }
   | { kind: 'ip-changed'; containerName: string; from: string; to: string }
@@ -21,11 +25,13 @@ export type ContainerIpResolver = (containerName: string, exec: DockerExec) => P
 export type BrokerOptions = {
   containerName: string
   excludePorts: Set<number>
+  loopbackPorts?: Set<number>
   exec?: DockerExec
   intervalMs?: number
   maxConsecutiveFailures?: number
   resolveIp?: ContainerIpResolver
   forwarderFactory?: ForwarderFactory
+  loopbackProxyFactory?: LoopbackProxyFactory
   onLog?: (event: BrokerLogEvent) => void
   onFatal?: () => void
 }
@@ -35,6 +41,12 @@ export type Broker = {
   containerIp: () => string
   forwardedPorts: () => number[]
   stop: () => Promise<void>
+}
+
+type Exposure = {
+  forwarder: Forwarder
+  loopbackProxy: LoopbackProxy | null
+  reachableFromBridge: boolean
 }
 
 export type StartBrokerResult = { ok: true; broker: Broker } | { ok: false; reason: string }
@@ -70,7 +82,9 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
   const exec = opts.exec ?? defaultDockerExec
   const resolveIp = opts.resolveIp ?? defaultResolveIp
   const forwarderFactory = opts.forwarderFactory ?? startForwarder
+  const loopbackProxyFactory = opts.loopbackProxyFactory ?? startLoopbackProxy
   const log = opts.onLog ?? (() => {})
+  const loopbackPorts = opts.loopbackPorts ?? new Set<number>()
 
   const initialIp = await resolveIp(opts.containerName, exec)
   if (initialIp === null) {
@@ -78,13 +92,13 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
   }
   log({ kind: 'ip-resolved', containerName: opts.containerName, containerIp: initialIp })
 
-  const forwarders = new Map<number, Forwarder>()
+  const exposures = new Map<number, Exposure>()
   let containerIp = initialIp
   let stopped = false
   let detector: Detector | null = null
   // Promise chain serializes change handling so concurrent open/close/IP-reset
   // events for the same broker can never observe partial state. Each operation
-  // awaits the previous one before mutating `forwarders` or `containerIp`.
+  // awaits the previous one before mutating `exposures` or `containerIp`.
   let serial: Promise<void> = Promise.resolve()
 
   const enqueue = (op: () => Promise<void>): void => {
@@ -103,11 +117,44 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
       log({ kind: 'skip-excluded', containerName: opts.containerName, port })
       return
     }
+    let loopbackProxy: LoopbackProxy | null = null
     if (!reachableFromBridge) {
+      if (!loopbackPorts.has(port)) {
+        log({ kind: 'skip-loopback', containerName: opts.containerName, port })
+        return
+      }
+      let ownedProxy: LoopbackProxy | null = null
+      const proxyResult = await loopbackProxyFactory({
+        containerName: opts.containerName,
+        listenHost: containerIp,
+        port,
+        onExit: (reason) => {
+          enqueue(async () => {
+            if (stopped) return
+            const current = exposures.get(port)
+            if (!current || current.loopbackProxy !== ownedProxy) return
+            exposures.delete(port)
+            await current.forwarder.stop()
+            log({ kind: 'loopback-proxy-exited', containerName: opts.containerName, port, reason })
+          })
+        },
+      })
+      if (!proxyResult.ok) {
+        log({ kind: 'loopback-proxy-failed', containerName: opts.containerName, port, reason: proxyResult.reason })
+        return
+      }
+      ownedProxy = proxyResult.proxy
+      loopbackProxy = proxyResult.proxy
+      log({ kind: 'loopback-proxy-open', containerName: opts.containerName, port, listenHost: containerIp })
+    }
+    if (exposures.has(port)) {
+      if (loopbackProxy) await loopbackProxy.stop()
+      return
+    }
+    if (!reachableFromBridge && loopbackProxy === null) {
       log({ kind: 'skip-loopback', containerName: opts.containerName, port })
       return
     }
-    if (forwarders.has(port)) return
     const fr = await forwarderFactory({
       hostPort: port,
       upstreamHost: containerIp,
@@ -115,13 +162,15 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
     })
     if (stopped) {
       if (fr.ok) await fr.forwarder.stop()
+      if (loopbackProxy) await loopbackProxy.stop()
       return
     }
     if (!fr.ok) {
+      if (loopbackProxy) await loopbackProxy.stop()
       log({ kind: 'skip-eaddrinuse', containerName: opts.containerName, port, reason: fr.reason })
       return
     }
-    forwarders.set(port, fr.forwarder)
+    exposures.set(port, { forwarder: fr.forwarder, loopbackProxy, reachableFromBridge })
     log({
       kind: 'open',
       containerName: opts.containerName,
@@ -132,24 +181,26 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
   }
 
   const removeForwarder = async (port: number): Promise<void> => {
-    const existing = forwarders.get(port)
+    const existing = exposures.get(port)
     if (!existing) return
-    forwarders.delete(port)
-    await existing.stop()
+    exposures.delete(port)
+    await existing.forwarder.stop()
+    if (existing.loopbackProxy) await existing.loopbackProxy.stop()
     log({ kind: 'close', containerName: opts.containerName, hostPort: port })
   }
 
   const resetForwardersForNewIp = async (nextIp: string): Promise<void> => {
     if (stopped) return
-    const ports = Array.from(forwarders.keys())
-    const old = Array.from(forwarders.values())
-    forwarders.clear()
-    await Promise.all(old.map((f) => f.stop()))
+    const ports = Array.from(exposures.entries()).map(([port, exposure]) => ({
+      port,
+      reachableFromBridge: exposure.reachableFromBridge,
+    }))
+    const old = Array.from(exposures.values())
+    exposures.clear()
+    await Promise.all(old.map((f) => Promise.all([f.forwarder.stop(), f.loopbackProxy?.stop() ?? Promise.resolve()])))
     log({ kind: 'ip-changed', containerName: opts.containerName, from: containerIp, to: nextIp })
     containerIp = nextIp
-    // Ports in `forwarders` were already vetted as bridge-reachable when first
-    // installed; reinstall with the same assumption against the new IP.
-    for (const port of ports) await installForwarder(port, true)
+    for (const { port, reachableFromBridge } of ports) await installForwarder(port, reachableFromBridge)
   }
 
   detector = startDetector({
@@ -182,14 +233,14 @@ export async function startBroker(opts: BrokerOptions): Promise<StartBrokerResul
   const broker: Broker = {
     containerName: opts.containerName,
     containerIp: () => containerIp,
-    forwardedPorts: () => Array.from(forwarders.keys()),
+    forwardedPorts: () => Array.from(exposures.keys()),
     stop: async () => {
       stopped = true
       await serial.catch(() => {})
       if (detector) await detector.stop()
-      const all = Array.from(forwarders.values())
-      forwarders.clear()
-      await Promise.all(all.map((f) => f.stop()))
+      const all = Array.from(exposures.values())
+      exposures.clear()
+      await Promise.all(all.map((f) => Promise.all([f.forwarder.stop(), f.loopbackProxy?.stop() ?? Promise.resolve()])))
     },
   }
   return { ok: true, broker }
