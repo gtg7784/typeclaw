@@ -1,3 +1,5 @@
+import { basename } from 'node:path'
+
 import type { AssistantMessage } from '@mariozechner/pi-ai'
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
@@ -90,6 +92,13 @@ const consoleLogger: RouterLogger = {
 export type CreateSessionForChannel = (params: {
   key: ChannelKey
   existingSessionId?: string
+  // Basename of the JSONL file the prior session wrote to, captured at
+  // creation time and persisted in channels/sessions.json. Used for
+  // reopening — without this, sessionId alone is insufficient because
+  // pi-coding-agent prefixes filenames with an ISO timestamp at write time
+  // that the UUID does not encode. Optional for forward-compat with v2
+  // mappings that predate the `sessionFile` field.
+  existingSessionFile?: string
   participants: readonly ChannelParticipant[]
   origin: SessionOrigin
 }) => Promise<{
@@ -239,11 +248,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const createForChannel: CreateSessionForChannel =
     options.createSessionForChannel ??
-    (async ({ key, existingSessionId, origin }) => {
+    (async ({ key, existingSessionId, existingSessionFile, origin }) => {
       const sessionDir = options.sessionDir ?? `${options.agentDir}/sessions`
-      const sessionManager = existingSessionId
-        ? tryOpenSessionManager(options.agentDir, sessionDir, existingSessionId, logger)
-        : SessionManager.create(options.agentDir, sessionDir)
+      const sessionManager =
+        existingSessionId !== undefined
+          ? tryOpenSessionManager(options.agentDir, sessionDir, existingSessionId, existingSessionFile, logger)
+          : SessionManager.create(options.agentDir, sessionDir)
       const session = await createSession({
         sessionManager,
         origin,
@@ -256,6 +266,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         dispose: async () => {
           session.dispose()
         },
+        getTranscriptPath: () => sessionManager.getSessionFile(),
       }
     })
 
@@ -307,16 +318,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const created = await createForChannel({
         key,
         ...(record?.sessionId ? { existingSessionId: record.sessionId } : {}),
+        ...(record?.sessionFile ? { existingSessionFile: record.sessionFile } : {}),
         participants,
         origin,
       })
 
+      const transcriptPath = created.getTranscriptPath?.()
       const persistedRecord: ChannelSessionRecord = {
         adapter: key.adapter,
         workspace: key.workspace,
         chat: key.chat,
         thread: key.thread,
         sessionId: created.sessionId,
+        ...(transcriptPath ? { sessionFile: basename(transcriptPath) } : {}),
         participants,
       }
       if (mappings) {
@@ -1061,13 +1075,22 @@ function tryOpenSessionManager(
   agentDir: string,
   sessionDir: string,
   existingSessionId: string,
+  existingSessionFile: string | undefined,
   logger: RouterLogger,
 ): SessionManager {
+  if (existingSessionFile === undefined) {
+    logger.warn(
+      `[channels] session ${existingSessionId} has no sessionFile (v2 mapping not yet migrated); creating new`,
+    )
+    return SessionManager.create(agentDir, sessionDir)
+  }
   try {
-    const path = `${sessionDir}/${existingSessionId}.jsonl`
+    const path = `${sessionDir}/${existingSessionFile}`
     return SessionManager.open(path)
   } catch (err) {
-    logger.warn(`[channels] could not rehydrate session ${existingSessionId}: ${describe(err)}; creating new`)
+    logger.warn(
+      `[channels] could not rehydrate session ${existingSessionId} from ${existingSessionFile}: ${describe(err)}; creating new`,
+    )
     return SessionManager.create(agentDir, sessionDir)
   }
 }

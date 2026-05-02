@@ -35,11 +35,12 @@ export type BuildChannelSessionFactoryDeps = {
 // "channel-aware" sessions that need the same full plumbing.
 export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps): CreateSessionForChannel {
   const createSession = deps.createSession ?? defaultCreateSession
-  return async ({ existingSessionId, origin }) => {
+  return async ({ existingSessionId, existingSessionFile, origin }) => {
     const sessionDir = deps.sessionFactory.sessionDir()
-    const sessionManager = existingSessionId
-      ? tryReopenOrCreate(deps.cwd, sessionDir, existingSessionId)
-      : SessionManager.create(deps.cwd, sessionDir)
+    const sessionManager =
+      existingSessionId !== undefined
+        ? tryReopenOrCreate(deps.cwd, sessionDir, existingSessionId, existingSessionFile)
+        : SessionManager.create(deps.cwd, sessionDir)
 
     const snap = deps.pluginRuntime.get()
     const session = await createSession({
@@ -74,13 +75,31 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
 }
 
 // Reopen the persisted session manager when possible so the agent picks up
-// where it left off. Failure to reopen (corruption, missing file, schema
-// drift) falls back to a fresh session — matching the router's existing
-// behavior where channel sessions are best-effort durable.
-function tryReopenOrCreate(cwd: string, sessionDir: string, existingSessionId: string): SessionManager {
+// where it left off. We use the persisted basename (sessionFile) directly
+// because pi-coding-agent prefixes filenames with an ISO timestamp at write
+// time that is not derivable from sessionId alone. Failure to reopen
+// (corruption, missing file, schema drift, or v2 mapping with no sessionFile)
+// falls back to a fresh session — matching the router's existing best-effort
+// durability for channel sessions.
+function tryReopenOrCreate(
+  cwd: string,
+  sessionDir: string,
+  existingSessionId: string,
+  existingSessionFile: string | undefined,
+): SessionManager {
+  if (existingSessionFile === undefined) {
+    console.warn(
+      `[channels] session ${existingSessionId} has no sessionFile (v2 mapping not yet migrated); creating new`,
+    )
+    return SessionManager.create(cwd, sessionDir)
+  }
   try {
-    return SessionManager.open(`${sessionDir}/${existingSessionId}.jsonl`)
-  } catch {
+    return SessionManager.open(`${sessionDir}/${existingSessionFile}`)
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    console.warn(
+      `[channels] could not rehydrate session ${existingSessionId} from ${existingSessionFile}: ${reason}; creating new`,
+    )
     return SessionManager.create(cwd, sessionDir)
   }
 }
