@@ -41,6 +41,19 @@ export const CONTEXT_BUFFER_SIZE = 20
 // continuously visible while we debounce + generate without spamming the API.
 export const TYPING_HEARTBEAT_MS = 8000
 
+// Idle GC: a LiveSession whose `lastInboundAt` is older than
+// SESSION_IDLE_MS gets evicted on the next GC tick. Persistence
+// (channels/sessions.json) is intentionally untouched — the next inbound
+// rehydrates from disk against the same sessionId, so the on-disk
+// transcript continues across the eviction. The point is to free memory
+// (LiveSession holds an open SessionManager + transcript in RAM) and to
+// give the next conversation a fresh start without forcing the user to
+// notice anything. `lastInboundAt` is bumped only by *engaged* inbounds
+// (see scheduleDebouncedDrain), so passive observation alone won't keep
+// a session warm forever — that's intentional.
+export const SESSION_IDLE_MS = 30 * 60 * 1000
+export const SESSION_GC_INTERVAL_MS = 60 * 1000
+
 // Two-axis loop guard for peer-bot conversation. Peer bots route into
 // engagement under the SAME rules as humans, so a small ring (A→B→C→A) or
 // a fast cascade can otherwise ping-pong without bound. The guard trips
@@ -181,6 +194,7 @@ export type ChannelRouter = {
     flushDebounce: (key: ChannelKey) => Promise<void>
     fireTypingHeartbeat: (key: ChannelKey) => Promise<void>
     isTypingActive: (key: ChannelKey) => boolean
+    runIdleGc: () => Promise<void>
   }
 }
 
@@ -867,25 +881,55 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return live.consecutiveSends.get(consecutiveSendKey(target.chat, target.thread)) ?? 0
   }
 
+  const tearDownLive = async (live: LiveSession): Promise<void> => {
+    live.destroyed = true
+    if (live.debounceTimer) clearTimeout(live.debounceTimer)
+    live.debounceTimer = null
+    stopTypingHeartbeat(live)
+    try {
+      await live.session.abort()
+    } catch (err) {
+      logger.warn(`[channels] abort failed for ${live.keyId}: ${describe(err)}`)
+    }
+    await fireSessionEnd(live)
+    try {
+      await live.dispose()
+    } catch (err) {
+      logger.warn(`[channels] dispose failed for ${live.keyId}: ${describe(err)}`)
+    }
+  }
+
+  const runIdleGc = async (): Promise<void> => {
+    const t = now()
+    const victims: LiveSession[] = []
+    for (const live of liveSessions.values()) {
+      if (live.destroyed) continue
+      if (live.draining) continue
+      if (live.promptQueue.length > 0) continue
+      if (t - live.lastInboundAt <= SESSION_IDLE_MS) continue
+      victims.push(live)
+    }
+    for (const live of victims) {
+      liveSessions.delete(live.keyId)
+      logger.info(`[channels] ${live.keyId} idle_gc evicting after ${t - live.lastInboundAt}ms idle`)
+      await tearDownLive(live)
+    }
+  }
+
+  let gcTimer: ReturnType<typeof setInterval> | null = setInterval(() => {
+    void runIdleGc()
+  }, SESSION_GC_INTERVAL_MS)
+  // Don't keep the Bun process alive just for the GC tick; the host
+  // server's WebSocket listener owns process lifetime.
+  gcTimer.unref?.()
+
   const stop = async (): Promise<void> => {
+    if (gcTimer) clearInterval(gcTimer)
+    gcTimer = null
     const all = Array.from(liveSessions.values())
     liveSessions.clear()
     for (const live of all) {
-      live.destroyed = true
-      if (live.debounceTimer) clearTimeout(live.debounceTimer)
-      live.debounceTimer = null
-      stopTypingHeartbeat(live)
-      try {
-        await live.session.abort()
-      } catch (err) {
-        logger.warn(`[channels] abort failed for ${live.keyId}: ${describe(err)}`)
-      }
-      await fireSessionEnd(live)
-      try {
-        await live.dispose()
-      } catch (err) {
-        logger.warn(`[channels] dispose failed for ${live.keyId}: ${describe(err)}`)
-      }
+      await tearDownLive(live)
     }
   }
 
@@ -924,6 +968,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const live = liveSessions.get(channelKeyId(key))
         return live?.typingTimer !== null && live?.typingTimer !== undefined
       },
+      runIdleGc,
     },
   }
 }
