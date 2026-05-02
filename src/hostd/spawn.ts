@@ -3,7 +3,7 @@ import { open, readFile, unlink, writeFile } from 'node:fs/promises'
 
 import { isDaemonReachable, send } from './client'
 import { ensureDirs, lockfilePath, logfilePath, pidfilePath, socketPath } from './paths'
-import type { VersionResult } from './protocol'
+import type { HttpInfoResult, VersionResult } from './protocol'
 import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from './version'
 
 export type EnsureDaemonOptions = {
@@ -15,7 +15,7 @@ export type EnsureDaemonOptions = {
 }
 
 export type EnsureDaemonResult =
-  | { ok: true; pid: number; spawned: boolean; respawned: boolean }
+  | { ok: true; pid: number; spawned: boolean; respawned: boolean; httpPort: number }
   | { ok: false; reason: string }
 
 const DEFAULT_SPAWN_TIMEOUT_MS = 5_000
@@ -25,8 +25,9 @@ const POLL_INTERVAL_MS = 50
 export async function ensureDaemon(opts: EnsureDaemonOptions): Promise<EnsureDaemonResult> {
   if (await isDaemonReachable()) {
     const expected = opts.expectedVersion ?? (await deriveExpectedVersion(opts.cliEntry))
-    if (await daemonVersionMatches(expected)) {
-      return { ok: true, pid: await readPidQuiet(), spawned: false, respawned: false }
+    const httpPort = await readHttpPort()
+    if ((await daemonVersionMatches(expected)) && httpPort !== null) {
+      return { ok: true, pid: await readPidQuiet(), spawned: false, respawned: false, httpPort }
     }
     const shutdownOk = await requestShutdownAndWait()
     if (!shutdownOk) {
@@ -62,6 +63,13 @@ async function daemonVersionMatches(expected: string): Promise<boolean> {
   return result.version === expected
 }
 
+async function readHttpPort(): Promise<number | null> {
+  const reply = await send({ kind: 'http-info' }, { timeoutMs: 1_000 })
+  if (!reply.ok) return null
+  const result = reply.result as HttpInfoResult | undefined
+  return typeof result?.port === 'number' && result.port > 0 && result.port <= 65535 ? result.port : null
+}
+
 async function requestShutdownAndWait(): Promise<boolean> {
   const reply = await send({ kind: 'shutdown' }, { timeoutMs: 1_000 })
   if (!reply.ok) return false
@@ -73,12 +81,14 @@ async function requestShutdownAndWait(): Promise<boolean> {
   return false
 }
 
-type SpawnAttemptResult = { ok: true; pid: number; spawned: boolean } | { ok: false; reason: string }
+type SpawnAttemptResult = { ok: true; pid: number; spawned: boolean; httpPort: number } | { ok: false; reason: string }
 
 async function ensureDaemonWithRetry(opts: EnsureDaemonOptions, retriesLeft: number): Promise<SpawnAttemptResult> {
   const lock = await acquireLockOrWait(opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS)
   if (lock.kind === 'daemon-reachable') {
-    return { ok: true, pid: await readPidQuiet(), spawned: false }
+    const httpPort = await readHttpPort()
+    if (httpPort === null) return { ok: false, reason: 'daemon did not report an HTTP control port' }
+    return { ok: true, pid: await readPidQuiet(), spawned: false, httpPort }
   }
   if (lock.kind === 'stale-lock-cleared') {
     if (retriesLeft > 0) return ensureDaemonWithRetry(opts, retriesLeft - 1)
@@ -90,7 +100,9 @@ async function ensureDaemonWithRetry(opts: EnsureDaemonOptions, retriesLeft: num
 
   try {
     if (await isDaemonReachable()) {
-      return { ok: true, pid: await readPidQuiet(), spawned: false }
+      const httpPort = await readHttpPort()
+      if (httpPort === null) return { ok: false, reason: 'daemon did not report an HTTP control port' }
+      return { ok: true, pid: await readPidQuiet(), spawned: false, httpPort }
     }
     return await spawnDaemonDetached(opts)
   } finally {
@@ -137,7 +149,10 @@ async function spawnDaemonDetached(opts: EnsureDaemonOptions): Promise<SpawnAtte
 
   const deadline = Date.now() + (opts.spawnTimeoutMs ?? DEFAULT_SPAWN_TIMEOUT_MS)
   while (Date.now() < deadline) {
-    if (await isDaemonReachable()) return { ok: true, pid: proc.pid, spawned: true }
+    if (await isDaemonReachable()) {
+      const httpPort = await readHttpPort()
+      if (httpPort !== null) return { ok: true, pid: proc.pid, spawned: true, httpPort }
+    }
     await sleep(POLL_INTERVAL_MS)
   }
 
