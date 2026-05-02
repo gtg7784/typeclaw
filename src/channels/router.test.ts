@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdir, mkdtemp, writeFile as writeFileFs } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -10,7 +10,7 @@ import type { AgentSession } from '@/agent'
 import type { SessionOrigin } from '@/agent/session-origin'
 import type { HookBus } from '@/plugin'
 
-import { loadChannelSessions, saveChannelSessions } from './persistence'
+import { channelsSessionsPath, loadChannelSessions, saveChannelSessions } from './persistence'
 import { createChannelRouter, SESSION_IDLE_MS, sliceHeadTail, type ChannelRouter } from './router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from './schema'
 import type { ChannelHistoryMessage, ChannelKey, FetchHistoryArgs, HistoryCallback, InboundMessage } from './types'
@@ -83,6 +83,11 @@ const baseConfig: ChannelAdapterConfig = {
   history: defaultHistoryConfig(),
 }
 
+type SessionFactoryArgs = {
+  existingSessionId?: string
+  existingSessionFile?: string
+}
+
 function makeRouter(
   agentDir: string,
   options: {
@@ -91,6 +96,8 @@ function makeRouter(
     nowRef?: { value: number }
     logs?: string[]
     origins?: SessionOrigin[]
+    factoryCalls?: SessionFactoryArgs[]
+    transcriptPathFor?: (sessionId: string) => string | undefined
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -105,16 +112,24 @@ function makeRouter(
       warn: (m) => options.logs?.push(`warn:${m}`),
       error: (m) => options.logs?.push(`error:${m}`),
     },
-    createSessionForChannel: async ({ origin }) => {
+    createSessionForChannel: async ({ origin, existingSessionId, existingSessionFile }) => {
+      options.factoryCalls?.push({
+        ...(existingSessionId !== undefined ? { existingSessionId } : {}),
+        ...(existingSessionFile !== undefined ? { existingSessionFile } : {}),
+      })
       origins.push(origin)
       const fake = new FakeSession()
       sessions.push(fake)
+      const sessionId = existingSessionId ?? `ses_fake_${sessions.length}`
       return {
         session: fake as unknown as AgentSession,
-        sessionId: `ses_fake_${sessions.length}`,
+        sessionId,
         dispose: async () => {
           fake.dispose()
         },
+        ...(options.transcriptPathFor !== undefined
+          ? { getTranscriptPath: () => options.transcriptPathFor!(sessionId) }
+          : {}),
       }
     },
   })
@@ -170,6 +185,127 @@ describe('ChannelRouter session lifecycle', () => {
     expect(loaded[0]?.chat).toBe('c1')
     expect(loaded[0]?.thread).toBeNull()
     expect(loaded[0]?.sessionId).toBe('ses_fake_1')
+  })
+
+  test('persists sessionFile from getTranscriptPath() so reopen across restart can find the file', async () => {
+    // given: a factory whose session manager exposes a transcript path with a
+    // pi-coding-agent-style ${ISO_TIMESTAMP}_${sessionId}.jsonl basename
+    const dir = await tempDir()
+    const transcriptDir = '/tmp/fake-sessions'
+    const transcriptPathFor = (sessionId: string): string =>
+      `${transcriptDir}/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`
+    const { router } = makeRouter(dir, { transcriptPathFor })
+
+    // when: a brand-new channel session is created
+    await router.route(inbound())
+    await new Promise((r) => setTimeout(r, 10))
+
+    // then: the persisted record carries the basename, NOT the full path
+    const loaded = await loadChannelSessions(dir)
+    expect(loaded[0]?.sessionFile).toBe('2026-05-02T16-56-52-380Z_ses_fake_1.jsonl')
+  })
+
+  test('after restart, a second router instance passes the persisted sessionFile to the factory', async () => {
+    // given: a first router run that produces a persisted mapping with sessionFile
+    const dir = await tempDir()
+    const transcriptPathFor = (sessionId: string): string =>
+      `/tmp/fake-sessions/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`
+    const firstRun = makeRouter(dir, { transcriptPathFor })
+    await firstRun.router.route(inbound({ text: '재시작해줘' }))
+    await firstRun.router.__testing!.flushDebounce(KEY)
+    await firstRun.router.stop()
+
+    // when: a fresh router instance (simulating container restart) handles a new inbound
+    // for the same channel
+    const factoryCalls: SessionFactoryArgs[] = []
+    const secondRun = makeRouter(dir, { transcriptPathFor, factoryCalls })
+    await secondRun.router.route(inbound({ text: '다시 해봐', externalMessageId: 'm-followup' }))
+    await secondRun.router.__testing!.flushDebounce(KEY)
+
+    // then: the factory was called with BOTH existingSessionId AND existingSessionFile
+    // (regression: previously only existingSessionId was passed, and the consumer
+    // constructed `${sessionDir}/${sessionId}.jsonl` which never matched the on-disk
+    // ${ISO}_${sessionId}.jsonl, silently creating a fresh session every restart)
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.existingSessionId).toBe('ses_fake_1')
+    expect(factoryCalls[0]?.existingSessionFile).toBe('2026-05-02T16-56-52-380Z_ses_fake_1.jsonl')
+  })
+
+  test('restart with a v2 mapping (no sessionFile, file actually present) migrates and reopens', async () => {
+    // given: a v2 mapping on disk plus the matching pi-coding-agent file
+    const dir = await tempDir()
+    const sessionsDir = join(dir, 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    await writeFileFs(
+      join(sessionsDir, '2026-05-02T16-56-52-380Z_ses_legacy.jsonl'),
+      '{"type":"session","version":3,"id":"ses_legacy","timestamp":"2026-05-02T16:56:52.380Z","cwd":"/agent"}\n',
+    )
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    await writeFileFs(
+      channelsSessionsPath(dir),
+      JSON.stringify({
+        version: 2,
+        sessions: [
+          {
+            adapter: 'discord-bot',
+            workspace: 'g1',
+            chat: 'c1',
+            thread: null,
+            sessionId: 'ses_legacy',
+            participants: [],
+          },
+        ],
+      }),
+    )
+
+    const factoryCalls: SessionFactoryArgs[] = []
+    const transcriptPathFor = (sessionId: string): string =>
+      `${sessionsDir}/2026-05-02T16-56-52-380Z_${sessionId}.jsonl`
+    const { router } = makeRouter(dir, { factoryCalls, transcriptPathFor })
+
+    // when: a new inbound arrives after the v2→v3 migration
+    await router.route(inbound({ text: 'hi' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the migrated sessionFile was passed to the factory
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.existingSessionId).toBe('ses_legacy')
+    expect(factoryCalls[0]?.existingSessionFile).toBe('2026-05-02T16-56-52-380Z_ses_legacy.jsonl')
+  })
+
+  test('restart with a v2 mapping whose session file is missing creates a fresh session', async () => {
+    // given: a v2 mapping pointing at a session id with no on-disk file
+    const dir = await tempDir()
+    await mkdir(join(dir, 'sessions'), { recursive: true })
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    await writeFileFs(
+      channelsSessionsPath(dir),
+      JSON.stringify({
+        version: 2,
+        sessions: [
+          {
+            adapter: 'discord-bot',
+            workspace: 'g1',
+            chat: 'c1',
+            thread: null,
+            sessionId: 'ses_lost',
+            participants: [],
+          },
+        ],
+      }),
+    )
+
+    const factoryCalls: SessionFactoryArgs[] = []
+    const { router } = makeRouter(dir, { factoryCalls })
+
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    // existingSessionId still propagates, but existingSessionFile is undefined,
+    // signaling the consumer to create a fresh SessionManager
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.existingSessionId).toBe('ses_lost')
+    expect(factoryCalls[0]?.existingSessionFile).toBeUndefined()
   })
 
   test('separate (workspace, chat) tuples get separate sessions', async () => {

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import type { ChannelParticipant } from '@/agent/session-origin'
@@ -6,20 +6,38 @@ import type { ChannelParticipant } from '@/agent/session-origin'
 import type { AdapterId } from './schema'
 import type { ChannelKey } from './types'
 
-const FILE_VERSION = 2
+const FILE_VERSION = 3
 
+// `sessionFile` is the basename (not the full path) of the JSONL transcript
+// for this (adapter, workspace, chat, thread) tuple. pi-coding-agent writes
+// session files as `${ISO_TIMESTAMP}_${UUID}.jsonl`, where the UUID matches
+// `sessionId` but the timestamp prefix only exists at write time. Without
+// the basename persisted, reopen attempts can only guess the path from the
+// UUID, which never matches on disk — every restart silently creates a
+// fresh session and the channel loses its transcript memory.
+//
+// `sessionFile` is optional because v2 records (pre-fix) only carried the
+// UUID. Those are migrated in-place at load time by globbing the sessions
+// directory for `*_${sessionId}.jsonl`; if no match is found the file is
+// considered lost and reopen will fall back to a fresh session.
 export type ChannelSessionRecord = {
   adapter: AdapterId
   workspace: string
   chat: string
   thread: string | null
   sessionId: string
+  sessionFile?: string
   participants: ChannelParticipant[]
+}
+
+type FileV3 = {
+  version: 3
+  sessions: ChannelSessionRecord[]
 }
 
 type FileV2 = {
   version: 2
-  sessions: ChannelSessionRecord[]
+  sessions: Array<Omit<ChannelSessionRecord, 'sessionFile'>>
 }
 
 export type ChannelSessionsLogger = {
@@ -34,6 +52,10 @@ const consoleLogger: ChannelSessionsLogger = {
 
 export function channelsSessionsPath(agentDir: string): string {
   return join(agentDir, 'channels', 'sessions.json')
+}
+
+function sessionsDirOf(agentDir: string): string {
+  return join(agentDir, 'sessions')
 }
 
 export async function loadChannelSessions(
@@ -54,13 +76,24 @@ export async function loadChannelSessions(
     logger.error(`[channels] ${path} corrupted: ${describe(err)}; starting fresh`)
     return []
   }
-  if (!isObject(parsed) || (parsed as { version?: unknown }).version !== FILE_VERSION) {
-    logger.warn(`[channels] ${path} not version ${FILE_VERSION}; ignored`)
+  if (!isObject(parsed)) {
+    logger.warn(`[channels] ${path} not an object; ignored`)
     return []
   }
-  const file = parsed as FileV2
-  if (!Array.isArray(file.sessions)) return []
-  return file.sessions.filter(isValidRecord)
+  const version = (parsed as { version?: unknown }).version
+  if (version === FILE_VERSION) {
+    const file = parsed as FileV3
+    if (!Array.isArray(file.sessions)) return []
+    return file.sessions.filter(isValidRecord)
+  }
+  if (version === 2) {
+    const file = parsed as FileV2
+    if (!Array.isArray(file.sessions)) return []
+    const v2Records = file.sessions.filter(isValidV2Record)
+    return await migrateV2Records(agentDir, v2Records, logger)
+  }
+  logger.warn(`[channels] ${path} version ${String(version)} not supported (expected 2 or ${FILE_VERSION}); ignored`)
+  return []
 }
 
 export async function saveChannelSessions(
@@ -69,7 +102,7 @@ export async function saveChannelSessions(
   logger: ChannelSessionsLogger = consoleLogger,
 ): Promise<void> {
   const path = channelsSessionsPath(agentDir)
-  const payload: FileV2 = { version: FILE_VERSION, sessions: dedupe(sessions) }
+  const payload: FileV3 = { version: FILE_VERSION, sessions: dedupe(sessions) }
   try {
     await mkdir(dirname(path), { recursive: true })
     const tmp = `${path}.tmp`
@@ -79,6 +112,52 @@ export async function saveChannelSessions(
   } catch (err) {
     logger.error(`[channels] failed to persist sessions: ${describe(err)}`)
   }
+}
+
+// One-shot migration from v2 (sessionId only) to v3 (sessionId + sessionFile).
+// pi-coding-agent writes session files as `${ISO_TIMESTAMP}_${UUID}.jsonl`,
+// so we look for any file ending in `_${sessionId}.jsonl`. If a directory
+// scan fails we leave sessionFile undefined; the next reopen attempt will
+// fall back to a fresh session (the same broken behavior v2 had — but at
+// least the next successful create will populate sessionFile correctly and
+// we'll be migrated forward.)
+async function migrateV2Records(
+  agentDir: string,
+  v2Records: readonly Omit<ChannelSessionRecord, 'sessionFile'>[],
+  logger: ChannelSessionsLogger,
+): Promise<ChannelSessionRecord[]> {
+  if (v2Records.length === 0) return []
+  const sessionsDir = sessionsDirOf(agentDir)
+  let entries: string[]
+  try {
+    entries = await readdir(sessionsDir)
+  } catch {
+    logger.warn(`[channels] could not scan ${sessionsDir} for v2→v3 migration; sessionFile left empty`)
+    return v2Records.map((r) => ({ ...r }))
+  }
+  // pi-coding-agent writes files as `${ISO_TIMESTAMP}_${UUID}.jsonl` where
+  // the ISO timestamp uses `-` (no `_`) and the UUID may contain `-`. Split
+  // on the FIRST underscore so the trailing portion is the full UUID even
+  // when the UUID contains hyphens.
+  const bySessionIdSuffix = new Map<string, string>()
+  for (const entry of entries) {
+    if (!entry.endsWith('.jsonl')) continue
+    const underscore = entry.indexOf('_')
+    if (underscore < 0) continue
+    const trailing = entry.slice(underscore + 1, -'.jsonl'.length)
+    bySessionIdSuffix.set(trailing, entry)
+  }
+  return v2Records.map((r) => {
+    const matched = bySessionIdSuffix.get(r.sessionId)
+    if (matched === undefined) {
+      logger.warn(
+        `[channels] v2→v3: no session file matching *_${r.sessionId}.jsonl in ${sessionsDir}; ` +
+          `sessionFile left empty (next inbound will create a fresh session for ${r.adapter}:${r.chat}:${r.thread ?? ''})`,
+      )
+      return { ...r }
+    }
+    return { ...r, sessionFile: matched }
+  })
 }
 
 function dedupe(sessions: readonly ChannelSessionRecord[]): ChannelSessionRecord[] {
@@ -106,7 +185,7 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
-function isValidRecord(v: unknown): v is ChannelSessionRecord {
+function isValidV2Record(v: unknown): v is Omit<ChannelSessionRecord, 'sessionFile'> {
   if (!isObject(v)) return false
   const r = v as Record<string, unknown>
   return (
@@ -117,6 +196,12 @@ function isValidRecord(v: unknown): v is ChannelSessionRecord {
     typeof r.sessionId === 'string' &&
     Array.isArray(r.participants)
   )
+}
+
+function isValidRecord(v: unknown): v is ChannelSessionRecord {
+  if (!isValidV2Record(v)) return false
+  const r = v as Record<string, unknown>
+  return r.sessionFile === undefined || typeof r.sessionFile === 'string'
 }
 
 function describe(err: unknown): string {
