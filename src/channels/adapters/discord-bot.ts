@@ -220,6 +220,82 @@ function isAllowedAnyGuild(rules: readonly string[], chat: string): boolean {
   return false
 }
 
+// Discord-side asymmetry: agent-messenger's upstream `uploadFile` posts the
+// file to `POST /channels/{id}/messages` as a multipart-only request. It does
+// not accept a `content` body or a `thread_id`. So when the agent wants to
+// send "text + file together in a thread", we cannot do it in one round-trip
+// the way Slack can. Compromise that preserves observable intent without
+// patching upstream:
+//   1. Upload each attachment individually via uploadFile(chat, path).
+//      Files land in channel root even when the session is in a thread —
+//      logged as a warning so it shows up in operator triage.
+//   2. After uploads, if `text` was provided, send it via sendMessage with
+//      thread_id when applicable. Text DOES get the thread, file does not.
+// Failure semantics: if any upload fails, we abort and return ok:false with
+// the upload error (the file the agent wanted to share is the load-bearing
+// part of the message). The text post is best-effort and only attempted
+// after every upload succeeds.
+export function createOutboundCallback(deps: {
+  client: Pick<DiscordBotClient, 'sendMessage' | 'uploadFile'>
+  configRef: () => ChannelAdapterConfig
+  logger: DiscordBotAdapterLogger
+  formatChannelTag: (workspace: string, chat: string) => Promise<string>
+  resolvePath?: (path: string) => string
+}): OutboundCallback {
+  const { client, configRef, logger, formatChannelTag, resolvePath } = deps
+  return async (msg: OutboundMessage): Promise<SendResult> => {
+    if (msg.adapter !== 'discord-bot') {
+      return { ok: false, error: `unknown adapter: ${msg.adapter}` }
+    }
+    const config = configRef()
+    if (!isAllowed(config.allow, msg.workspace, msg.chat)) {
+      logger.warn(`[discord-bot] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
+      return { ok: false, error: 'denied by allow rules' }
+    }
+    const text = msg.text ?? ''
+    const attachments = msg.attachments ?? []
+    if (text === '' && attachments.length === 0) {
+      return { ok: false, error: 'message has neither text nor attachments' }
+    }
+    const tag = await formatChannelTag(msg.workspace, msg.chat)
+    logger.info(
+      `[discord-bot] outbound ${tag} text_len=${text.length} attachments=${attachments.length}${msg.thread ? ` thread=${msg.thread}` : ''}`,
+    )
+
+    for (const attachment of attachments) {
+      const path = resolvePath ? resolvePath(attachment.path) : attachment.path
+      try {
+        const file = await client.uploadFile(msg.chat, path)
+        logger.info(`[discord-bot] uploaded id=${file.id} filename=${file.filename} size=${file.size} ${tag}`)
+        if (msg.thread) {
+          logger.warn(
+            `[discord-bot] uploaded file landed in channel root, not thread ${msg.thread}: ` +
+              'agent-messenger uploadFile does not accept thread_id',
+          )
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        logger.error(`[discord-bot] uploadFile failed for ${path}: ${message}`)
+        return { ok: false, error: `uploadFile failed: ${message}` }
+      }
+    }
+
+    if (text === '') {
+      return { ok: true }
+    }
+
+    try {
+      const sent = await client.sendMessage(msg.chat, text, msg.thread ? { thread_id: msg.thread } : undefined)
+      logger.info(`[discord-bot] sent id=${sent.id} ${tag}`)
+      return { ok: true }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error(`[discord-bot] sendMessage failed: ${message}`)
+      return { ok: false, error: message }
+    }
+  }
+}
+
 export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): DiscordBotAdapter {
   const logger = options.logger ?? consoleLogger
   const client = new DiscordBotClient()
@@ -254,30 +330,12 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
     botUserIdRef: () => botUserId,
   })
 
-  const outboundCallback: OutboundCallback = async (msg: OutboundMessage): Promise<SendResult> => {
-    if (msg.adapter !== 'discord-bot') {
-      return { ok: false, error: `unknown adapter: ${msg.adapter}` }
-    }
-    const config = options.configRef()
-    if (!isAllowed(config.allow, msg.workspace, msg.chat)) {
-      logger.warn(`[discord-bot] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
-      return { ok: false, error: 'denied by allow rules' }
-    }
-    const tag = await formatChannelTag(msg.workspace, msg.chat)
-    // Logged before the API call so we can tell from logs whether the agent
-    // even tried to reply, vs. tried-and-failed. Mirrors the inbound log
-    // contract on the receive side.
-    logger.info(`[discord-bot] outbound ${tag} text_len=${msg.text.length}`)
-    try {
-      const sent = await client.sendMessage(msg.chat, msg.text, msg.thread ? { thread_id: msg.thread } : undefined)
-      logger.info(`[discord-bot] sent id=${sent.id} ${tag}`)
-      return { ok: true }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      logger.error(`[discord-bot] sendMessage failed: ${message}`)
-      return { ok: false, error: message }
-    }
-  }
+  const outboundCallback = createOutboundCallback({
+    client,
+    configRef: options.configRef,
+    logger,
+    formatChannelTag,
+  })
 
   const handleMessageCreate = async (event: DiscordGatewayMessageCreateEvent): Promise<void> => {
     inflightInbounds++

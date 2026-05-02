@@ -1,9 +1,16 @@
 import { describe, expect, test } from 'bun:test'
 
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import type { OutboundMessage } from '@/channels/types'
 
-import type { SlackSocketAppMentionEvent } from './agent-messenger-slack-shim'
+import type {
+  SlackBotClient,
+  SlackFile,
+  SlackPostedMessage,
+  SlackSocketAppMentionEvent,
+} from './agent-messenger-slack-shim'
 import {
+  createOutboundCallback,
   createSlackHistoryCallback,
   createTypingCallback,
   promoteAppMentionToMessage,
@@ -503,5 +510,252 @@ describe('createSlackHistoryCallback', () => {
     // then
     expect(calls).toHaveLength(1)
     expect(result.ok).toBe(true)
+  })
+})
+
+describe('slack-bot createOutboundCallback', () => {
+  type PostCall = { channel: string; text: string; options?: { thread_ts?: string } }
+  type UploadCall = {
+    channel: string
+    bytes: number
+    filename: string
+    options?: { thread_ts?: string; title?: string; initial_comment?: string }
+  }
+
+  function makeFakeClient(behavior: { postMessage?: 'ok' | 'reject'; uploadFile?: 'ok' | 'reject' } = {}): {
+    client: Pick<SlackBotClient, 'postMessage' | 'uploadFile'>
+    posts: PostCall[]
+    uploads: UploadCall[]
+  } {
+    const posts: PostCall[] = []
+    const uploads: UploadCall[] = []
+    return {
+      posts,
+      uploads,
+      client: {
+        postMessage: async (channel, text, options) => {
+          posts.push({ channel, text, options })
+          if (behavior.postMessage === 'reject') throw new Error('slack_post_failed')
+          return { ts: `ts${posts.length}`, text, type: 'message' } as SlackPostedMessage
+        },
+        uploadFile: async (channel, file, filename, options) => {
+          uploads.push({ channel, bytes: file.length, filename, options })
+          if (behavior.uploadFile === 'reject') throw new Error('slack_upload_failed')
+          return {
+            id: `F${uploads.length}`,
+            name: filename,
+            title: filename,
+            mimetype: 'application/octet-stream',
+            size: file.length,
+            url_private: '',
+            created: 0,
+            user: 'U1',
+          } as SlackFile
+        },
+      },
+    }
+  }
+
+  function silentLogger() {
+    return { info: () => {}, warn: () => {}, error: () => {} }
+  }
+
+  function permissive(): ChannelAdapterConfig {
+    return { allow: ['*'], engagement: { trigger: ['mention'], stickiness: 'off' }, enabled: true }
+  }
+
+  function makeMsg(overrides: Partial<OutboundMessage>): OutboundMessage {
+    return { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'hi', ...overrides } as OutboundMessage
+  }
+
+  const tag = async (_w: string, _c: string) => 'team=T0 channel=C0'
+  const fakeRead = async (_path: string) => Buffer.from('test-bytes')
+
+  test('text-only path posts via postMessage and never calls uploadFile', async () => {
+    // given
+    const { client, posts, uploads } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    // when
+    const result = await cb(makeMsg({ text: 'hello' }))
+    // then
+    expect(result.ok).toBe(true)
+    expect(uploads).toHaveLength(0)
+    expect(posts).toEqual([{ channel: 'C0', text: 'hello', options: undefined }])
+  })
+
+  test('threaded text-only post forwards thread_ts to postMessage', async () => {
+    const { client, posts } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    await cb(makeMsg({ text: 'hello', thread: '1700.000100' }))
+    expect(posts).toEqual([{ channel: 'C0', text: 'hello', options: { thread_ts: '1700.000100' } }])
+  })
+
+  test('text+single-attachment folds text into initial_comment and never calls postMessage', async () => {
+    // given
+    const { client, posts, uploads } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    // when
+    await cb(makeMsg({ text: 'caption', attachments: [{ path: '/agent/a.png' }] }))
+    // then
+    expect(posts).toHaveLength(0)
+    expect(uploads).toEqual([{ channel: 'C0', bytes: 10, filename: 'a.png', options: { initial_comment: 'caption' } }])
+  })
+
+  test('multi-attachment puts caption only on the FIRST upload; rest are bare', async () => {
+    const { client, uploads } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    await cb(makeMsg({ text: 'caption', attachments: [{ path: '/agent/a.png' }, { path: '/agent/b.pdf' }] }))
+    expect(uploads).toEqual([
+      { channel: 'C0', bytes: 10, filename: 'a.png', options: { initial_comment: 'caption' } },
+      { channel: 'C0', bytes: 10, filename: 'b.pdf', options: {} },
+    ])
+  })
+
+  test('threaded uploads forward thread_ts on every attachment', async () => {
+    const { client, uploads } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    await cb(
+      makeMsg({
+        text: 'caption',
+        thread: '1700.000100',
+        attachments: [{ path: '/agent/a.png' }, { path: '/agent/b.pdf' }],
+      }),
+    )
+    expect(uploads).toEqual([
+      {
+        channel: 'C0',
+        bytes: 10,
+        filename: 'a.png',
+        options: { thread_ts: '1700.000100', initial_comment: 'caption' },
+      },
+      { channel: 'C0', bytes: 10, filename: 'b.pdf', options: { thread_ts: '1700.000100' } },
+    ])
+  })
+
+  test('attachment.filename overrides the path basename', async () => {
+    const { client, uploads } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    await cb(makeMsg({ text: undefined, attachments: [{ path: '/agent/tmp-XYZ.bin', filename: 'report.pdf' }] }))
+    expect(uploads[0]!.filename).toBe('report.pdf')
+  })
+
+  test('attachments-only post (no text) uploads bare, not as initial_comment', async () => {
+    const { client, uploads } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    await cb(makeMsg({ text: undefined, attachments: [{ path: '/agent/a.png' }] }))
+    expect(uploads).toEqual([{ channel: 'C0', bytes: 10, filename: 'a.png', options: {} }])
+  })
+
+  test('upload failure aborts the loop and returns ok:false', async () => {
+    const { client, uploads } = makeFakeClient({ uploadFile: 'reject' })
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    const result = await cb(
+      makeMsg({ text: 'caption', attachments: [{ path: '/agent/a.png' }, { path: '/agent/b.pdf' }] }),
+    )
+    expect(result.ok).toBe(false)
+    expect(uploads).toHaveLength(1)
+  })
+
+  test('readFile failure surfaces as ok:false without calling uploadFile', async () => {
+    const { client, uploads } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: async () => {
+        throw new Error('ENOENT: no such file')
+      },
+    })
+    const result = await cb(makeMsg({ text: undefined, attachments: [{ path: '/agent/missing.png' }] }))
+    expect(result.ok).toBe(false)
+    expect(result.ok === false ? result.error : '').toContain('readFile failed')
+    expect(uploads).toHaveLength(0)
+  })
+
+  test('rejects when message has neither text nor attachments', async () => {
+    const { client } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    const result = await cb(makeMsg({ text: undefined, attachments: [] }))
+    expect(result.ok).toBe(false)
+  })
+
+  test('denies when allow rules reject the channel without reading the file', async () => {
+    const { client, posts, uploads } = makeFakeClient()
+    let readCalls = 0
+    const restrictive = (): ChannelAdapterConfig => ({
+      allow: ['team:OTHER/*'],
+      engagement: { trigger: ['mention'], stickiness: 'off' },
+      enabled: true,
+    })
+    const cb = createOutboundCallback({
+      client,
+      configRef: restrictive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: async (p) => {
+        readCalls++
+        return fakeRead(p)
+      },
+    })
+    const result = await cb(makeMsg({ text: 'hi', attachments: [{ path: '/agent/a.png' }] }))
+    expect(result.ok).toBe(false)
+    expect(posts).toHaveLength(0)
+    expect(uploads).toHaveLength(0)
+    expect(readCalls).toBe(0)
   })
 })

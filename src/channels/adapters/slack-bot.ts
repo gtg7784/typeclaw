@@ -274,6 +274,99 @@ function isAllowedAnyTeam(rules: readonly string[], chat: string): boolean {
   return false
 }
 
+// Slack supports text+file in a single API call via `initial_comment`, and
+// honors `thread_ts` on every upload — both luxuries Discord lacks. So we
+// fold `text` into the FIRST attachment's `initial_comment` rather than
+// posting it separately, which preserves the "single message" appearance
+// in the Slack UI (one notification, one anchored thread reply, one event
+// in the bot's own channel history).
+//
+// Multi-attachment behavior: each attachment is uploaded sequentially. The
+// first carries the comment; the rest are uploaded bare. Sequential not
+// parallel because (a) order matters for users' visual scan and (b) Slack
+// rate-limits aggressive parallel uploads on the bot's behalf.
+//
+// Failure semantics mirror the Discord adapter: any upload failure aborts
+// and returns ok:false. The text-only fallback (no attachments) keeps the
+// original `postMessage` path so message routing and rate limits behave
+// exactly as before for the common case.
+async function readAttachmentBuffer(path: string): Promise<Buffer> {
+  const { readFile } = await import('node:fs/promises')
+  return await readFile(path)
+}
+
+export function createOutboundCallback(deps: {
+  client: Pick<SlackBotClient, 'postMessage' | 'uploadFile'>
+  configRef: () => ChannelAdapterConfig
+  logger: SlackBotAdapterLogger
+  formatChannelTag: (workspace: string, chat: string) => Promise<string>
+  readFile?: (path: string) => Promise<Buffer>
+}): OutboundCallback {
+  const { client, configRef, logger, formatChannelTag } = deps
+  const readFile = deps.readFile ?? readAttachmentBuffer
+  return async (msg: OutboundMessage): Promise<SendResult> => {
+    if (msg.adapter !== 'slack-bot') {
+      return { ok: false, error: `unknown adapter: ${msg.adapter}` }
+    }
+    const config = configRef()
+    if (!isAllowed(config.allow, msg.workspace, msg.chat)) {
+      logger.warn(`[slack-bot] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
+      return { ok: false, error: 'denied by allow rules' }
+    }
+    const text = msg.text ?? ''
+    const attachments = msg.attachments ?? []
+    if (text === '' && attachments.length === 0) {
+      return { ok: false, error: 'message has neither text nor attachments' }
+    }
+    const tag = await formatChannelTag(msg.workspace, msg.chat)
+    logger.info(
+      `[slack-bot] outbound ${tag} text_len=${text.length} attachments=${attachments.length}${msg.thread ? ` thread=${msg.thread}` : ''}`,
+    )
+
+    if (attachments.length === 0) {
+      try {
+        const sent = await client.postMessage(
+          msg.chat,
+          text,
+          msg.thread !== undefined && msg.thread !== null ? { thread_ts: msg.thread } : undefined,
+        )
+        logger.info(`[slack-bot] sent ts=${sent.ts} ${tag}`)
+        return { ok: true }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        logger.error(`[slack-bot] postMessage failed: ${message}`)
+        return { ok: false, error: message }
+      }
+    }
+
+    const threadTs = msg.thread !== undefined && msg.thread !== null ? msg.thread : undefined
+    for (const [index, attachment] of attachments.entries()) {
+      const filename = attachment.filename ?? attachment.path.split('/').pop() ?? 'file'
+      let buffer: Buffer
+      try {
+        buffer = await readFile(attachment.path)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        logger.error(`[slack-bot] readFile failed for ${attachment.path}: ${message}`)
+        return { ok: false, error: `readFile failed: ${message}` }
+      }
+      const isFirst = index === 0
+      const uploadOptions: { thread_ts?: string; initial_comment?: string } = {}
+      if (threadTs !== undefined) uploadOptions.thread_ts = threadTs
+      if (isFirst && text !== '') uploadOptions.initial_comment = text
+      try {
+        const file = await client.uploadFile(msg.chat, buffer, filename, uploadOptions)
+        logger.info(`[slack-bot] uploaded id=${file.id} filename=${file.name} size=${file.size} ${tag}`)
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        logger.error(`[slack-bot] uploadFile failed for ${attachment.path}: ${message}`)
+        return { ok: false, error: `uploadFile failed: ${message}` }
+      }
+    }
+    return { ok: true }
+  }
+}
+
 export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBotAdapter {
   const logger = options.logger ?? consoleLogger
   const client = new SlackBotClient()
@@ -305,31 +398,12 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     botUserIdRef: () => botUserId,
   })
 
-  const outboundCallback: OutboundCallback = async (msg: OutboundMessage): Promise<SendResult> => {
-    if (msg.adapter !== 'slack-bot') {
-      return { ok: false, error: `unknown adapter: ${msg.adapter}` }
-    }
-    const config = options.configRef()
-    if (!isAllowed(config.allow, msg.workspace, msg.chat)) {
-      logger.warn(`[slack-bot] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
-      return { ok: false, error: 'denied by allow rules' }
-    }
-    const tag = await formatChannelTag(msg.workspace, msg.chat)
-    logger.info(`[slack-bot] outbound ${tag} text_len=${msg.text.length}`)
-    try {
-      const sent = await client.postMessage(
-        msg.chat,
-        msg.text,
-        msg.thread !== undefined && msg.thread !== null ? { thread_ts: msg.thread } : undefined,
-      )
-      logger.info(`[slack-bot] sent ts=${sent.ts} ${tag}`)
-      return { ok: true }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      logger.error(`[slack-bot] postMessage failed: ${message}`)
-      return { ok: false, error: message }
-    }
-  }
+  const outboundCallback = createOutboundCallback({
+    client,
+    configRef: options.configRef,
+    logger,
+    formatChannelTag,
+  })
 
   // Bounded set of "channel:ts" keys we've already routed, used to dedupe
   // the message/app_mention double-delivery. Insertion-ordered Set lets us

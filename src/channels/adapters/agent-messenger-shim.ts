@@ -70,9 +70,20 @@ export type DiscordBotListenerEventMap = {
   error: [error: Error]
 }
 
+export type DiscordFile = {
+  id: string
+  filename: string
+  size: number
+  url: string
+  content_type?: string
+  height?: number
+  width?: number
+}
+
 export interface DiscordBotClient {
   login(credentials?: { token: string }): Promise<this>
   sendMessage(channelId: string, content: string, options?: { thread_id?: string }): Promise<DiscordMessage>
+  uploadFile(channelId: string, filePath: string): Promise<DiscordFile>
 }
 
 export interface DiscordBotListener {

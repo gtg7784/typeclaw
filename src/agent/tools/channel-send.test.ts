@@ -264,4 +264,75 @@ describe('createChannelSendTool', () => {
       expect(text).not.toContain('origin thread')
     })
   })
+
+  describe('attachments', () => {
+    test('forwards attachments to router.send', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+      await runTool(tool, {
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        text: 'see attached',
+        attachments: [{ path: '/agent/report.pdf' }],
+      })
+      expect(calls[0]?.attachments).toEqual([{ path: '/agent/report.pdf' }])
+      expect(calls[0]?.text).toBe('see attached')
+    })
+
+    test('allows attachments without text', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+      const result = await runTool(tool, {
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        attachments: [{ path: '/agent/a.png' }],
+      })
+      expect(result.details).toEqual({ ok: true })
+      expect(calls[0]?.text).toBeUndefined()
+      expect(calls[0]?.attachments).toEqual([{ path: '/agent/a.png' }])
+    })
+
+    test('rejects when neither text nor attachments are provided', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+      const result = await runTool(tool, { adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })
+      expect(calls).toHaveLength(0)
+      expect(result.details).toEqual({ ok: false, error: 'missing text and attachments' })
+    })
+
+    test('echo summarizes filenames when text+attachments are sent', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: true })),
+      })
+      const result = await runTool(tool, {
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        text: 'caption',
+        attachments: [{ path: '/agent/a.png' }, { path: '/agent/b.pdf', filename: 'report.pdf' }],
+      })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toContain('"caption"')
+      expect(text).toContain('2 file(s)')
+      expect(text).toContain('a.png')
+      expect(text).toContain('report.pdf')
+    })
+  })
 })

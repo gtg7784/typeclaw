@@ -27,12 +27,36 @@ export type InboundMessage = {
   isDm: boolean
 }
 
+// File on disk that the agent wants to attach to an outbound message. The
+// agent runs inside a container with /agent bind-mounted from the host;
+// `path` should be an absolute path the container can `readFile`. The
+// optional `filename` overrides the basename of `path` when uploading
+// (useful when the on-disk name carries a tempdir suffix the user
+// shouldn't see in the chat). Adapters that cannot upload files MUST
+// fail loudly via `SendResult.ok = false` rather than silently dropping
+// the attachment.
+export type OutboundAttachment = {
+  path: string
+  filename?: string
+}
+
 export type OutboundMessage = {
   adapter: AdapterId
   workspace: string
   chat: string
   thread?: string | null
-  text: string
+  // Optional when `attachments` is non-empty (file-only post is allowed).
+  // Adapters that always need text (e.g. some webhook backends in the
+  // future) must validate this themselves.
+  text?: string
+  // Each attachment is uploaded once. Order is preserved. For Slack, the
+  // first attachment carries `text` as the file's `initial_comment` so
+  // both arrive in a single API call; subsequent attachments are uploaded
+  // bare. For Discord, attachments are uploaded first (no text) and then
+  // `text` is posted as a separate message — Discord's upstream
+  // `uploadFile` does not accept a content body or a thread id, see the
+  // adapter for the workaround details.
+  attachments?: OutboundAttachment[]
 }
 
 export type SendResult = { ok: true } | { ok: false; error: string }
