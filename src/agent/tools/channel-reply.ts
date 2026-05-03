@@ -97,8 +97,8 @@ export function createChannelReplyTool({ router, origin }: CreateChannelReplyToo
       // Without this echo, a model that splits a multi-part reply has no
       // way to tell "did I already send part 1?" from "I haven't started
       // yet", and routinely re-sends near-duplicates within the same turn
-      // (observed in production: 돌쇠/Winky channel, two consecutive
-      // identical "전하, 돌쇠가 여기 있나이다!" messages to one prompt).
+      // (observed in production: two consecutive identical
+      // greeting messages to one prompt).
       //
       // We deliberately do NOT cap sends-per-turn here. A complex user
       // request legitimately needs split replies, and a hard cap would

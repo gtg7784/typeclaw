@@ -106,9 +106,9 @@ describe('createChannelReplyTool', () => {
       router: fakeRouter(async () => ({ ok: true })),
       origin: slackThreadOrigin,
     })
-    const result = await runTool(tool, { text: '전하, 돌쇠가 여기 있나이다!' })
+    const result = await runTool(tool, { text: 'hello, I am here!' })
     const text = (result.content[0] as { text: string }).text
-    expect(text).toContain('"전하, 돌쇠가 여기 있나이다!"')
+    expect(text).toContain('"hello, I am here!"')
   })
 
   test('truncates echo past 500 chars and includes total length so context cost stays bounded', async () => {
@@ -153,7 +153,7 @@ describe('createChannelReplyTool', () => {
     })
 
     test('preserves multibyte characters under the limit', () => {
-      expect(renderEcho('전하, 돌쇠가 여기 있나이다!')).toBe('"전하, 돌쇠가 여기 있나이다!"')
+      expect(renderEcho('héllo wörld 🌍 café')).toBe('"héllo wörld 🌍 café"')
     })
 
     test('escapes embedded quotes via JSON.stringify', () => {
