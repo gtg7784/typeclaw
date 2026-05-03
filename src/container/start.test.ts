@@ -84,7 +84,7 @@ describe('planStart', () => {
       cwd: root,
       hostPort: 8973,
       imageExists: true,
-      hostdControl: { url: 'http://host.docker.internal:49123', token: 'secret' },
+      hostdControl: { url: 'http://host.docker.internal:49123', token: 'secret', brokerToken: 'broker-secret' },
     })
 
     expect(plan.runArgs).toContain('-e')

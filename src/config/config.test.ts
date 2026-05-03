@@ -60,6 +60,47 @@ describe('configSchema preserves unknown top-level keys (plugin config blocks)',
   })
 })
 
+describe('portForwardSchema', () => {
+  test('defaults to allow:* when omitted', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.portForward).toEqual({ allow: '*' })
+  })
+
+  test('accepts allow:* with no deny', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: '*' } })
+    expect(parsed.portForward).toEqual({ allow: '*' })
+  })
+
+  test('accepts allow:* with deny list', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: '*', deny: [9229, 9999] } })
+    expect(parsed.portForward).toEqual({ allow: '*', deny: [9229, 9999] })
+  })
+
+  test('accepts allow as number array (allowlist mode)', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: [3000, 5173] } })
+    expect(parsed.portForward).toEqual({ allow: [3000, 5173] })
+  })
+
+  test('accepts allow:[] as off-switch', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: [] } })
+    expect(parsed.portForward).toEqual({ allow: [] })
+  })
+
+  test('rejects deny combined with allow:number[] so user typos do not silently drop the deny rule', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, portForward: { allow: [3000], deny: [9000] } })).toThrow(
+      /portForward\.deny is only meaningful when allow is/,
+    )
+  })
+
+  test('rejects out-of-range port numbers in allow', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, portForward: { allow: [99999] } })).toThrow()
+  })
+
+  test('rejects out-of-range port numbers in deny', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, portForward: { allow: '*', deny: [0] } })).toThrow()
+  })
+})
+
 describe('mountSchema name validation', () => {
   test.each([
     ['lowercase', 'projects'],
@@ -244,6 +285,15 @@ describe('plugin config layout', () => {
       memory: { idleMs: 5000 },
       'standup-log': { schedule: '0 17 * * 5' },
     })
+  })
+
+  test('extractPluginConfigs treats portForward as a known top-level key (not a plugin block)', () => {
+    const result = extractPluginConfigs({
+      model: VALID_MODEL,
+      portForward: { allow: '*' },
+      'standup-log': { schedule: '0 17 * * 5' },
+    })
+    expect(result).toEqual({ 'standup-log': { schedule: '0 17 * * 5' } })
   })
 
   test('loadPluginConfigsSync reads per-plugin blocks from disk', async () => {

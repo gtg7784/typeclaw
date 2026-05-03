@@ -1,9 +1,14 @@
+import type { PortForward } from '@/config'
+
 export type Request =
   | {
       kind: 'register'
       containerName: string
       cwd: string
       restartToken?: string
+      wsHostPort?: number
+      portForward?: PortForward
+      brokerToken?: string
     }
   | { kind: 'deregister'; containerName: string }
   | { kind: 'list' }

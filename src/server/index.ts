@@ -8,6 +8,7 @@ import {
 } from '@/agent'
 import type { ChannelRouter } from '@/channels/router'
 import type { HookBus } from '@/plugin'
+import type { BrokerWsData, ContainerBroker } from '@/portbroker'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { PluginRuntime, PluginRuntimeState } from '@/run/plugin-runtime'
 import type { SessionFactory } from '@/sessions'
@@ -28,12 +29,18 @@ export type ServerOptions = {
   agentDir?: string
   pluginRuntime?: PluginRuntime
   containerName?: string
+  // Optional in-process portbroker handler. When provided, requests to the
+  // /portbroker WS path are routed to it instead of being treated as TUI
+  // sessions. Omit to keep TUI-only behavior (used by tests + non-container
+  // dev runs).
+  containerBroker?: ContainerBroker
 }
 
 export type Server = ReturnType<typeof createServer>
 
-type WsData = { sessionId: string }
-type Ws = ServerWebSocket<WsData>
+type TuiWsData = { kind: 'tui'; sessionId: string }
+type WsData = TuiWsData | BrokerWsData
+type Ws = ServerWebSocket<TuiWsData>
 
 type QueuedPrompt = {
   streamMessageId: StreamMessageId
@@ -72,6 +79,7 @@ export function createServer({
   agentDir,
   pluginRuntime,
   containerName,
+  containerBroker,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
 
@@ -79,12 +87,25 @@ export function createServer({
     const bunServer = Bun.serve<WsData>({
       port,
       fetch(req, server) {
+        const url = new URL(req.url)
+        if (url.pathname === '/portbroker') {
+          if (!containerBroker) return new Response('portbroker disabled', { status: 404 })
+          const data: BrokerWsData = { kind: 'portbroker', authed: false }
+          if (server.upgrade(req, { data })) return
+          return new Response('upgrade failed', { status: 400 })
+        }
         const sessionId = crypto.randomUUID()
-        if (server.upgrade(req, { data: { sessionId } })) return
+        const data: TuiWsData = { kind: 'tui', sessionId }
+        if (server.upgrade(req, { data })) return
         return new Response('typeclaw agent', { status: 200 })
       },
       websocket: {
-        async open(ws) {
+        async open(rawWs) {
+          if (rawWs.data.kind === 'portbroker') {
+            containerBroker?.open(rawWs as ServerWebSocket<BrokerWsData>)
+            return
+          }
+          const ws = rawWs as Ws
           const sessionManager = sessionFactory?.createPersisted()
           const sessionFileId = sessionManager?.getSessionId() ?? ws.data.sessionId
           // Snapshot the runtime once so the entire session lifecycle for this
@@ -151,7 +172,12 @@ export function createServer({
           send(ws, { type: 'connected', sessionId: sessionFileId })
           console.log(`session ${sessionFileId}: open`)
         },
-        async message(ws, raw) {
+        async message(rawWs, raw) {
+          if (rawWs.data.kind === 'portbroker') {
+            await containerBroker?.message(rawWs as ServerWebSocket<BrokerWsData>, raw as string | Buffer)
+            return
+          }
+          const ws = rawWs as Ws
           const msg = JSON.parse(String(raw)) as ClientMessage
           const state = sessionStates.get(ws)
 
@@ -202,7 +228,12 @@ export function createServer({
             return
           }
         },
-        async close(ws) {
+        async close(rawWs) {
+          if (rawWs.data.kind === 'portbroker') {
+            containerBroker?.close(rawWs as ServerWebSocket<BrokerWsData>)
+            return
+          }
+          const ws = rawWs as Ws
           const state = sessionStates.get(ws)
           state?.unsubBroadcast?.()
           state?.unsubPrompts?.()

@@ -23,6 +23,7 @@ import {
   type Scheduler,
 } from '@/cron'
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
+import { createContainerBroker } from '@/portbroker'
 import { ReloadRegistry } from '@/reload'
 import { createServer, type Server } from '@/server'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
@@ -261,6 +262,26 @@ export async function startAgent({
     console.log(`[plugin] loaded ${summarizeLoaded(pluginsLoaded.loadedPlugins, pluginRegistry)}`)
   }
 
+  // Container-side portbroker is instantiated only when the host plumbed a
+  // broker token in via env var. Outside the container (tests, ad-hoc dev
+  // runs), the env var is absent and the broker stays off — same fence as
+  // TYPECLAW_CONTAINER_NAME guards the restart tool.
+  const brokerTokenEnv = process.env.TYPECLAW_HOSTD_BROKER_TOKEN
+  const containerBroker =
+    brokerTokenEnv !== undefined && brokerTokenEnv.length > 0
+      ? createContainerBroker({
+          expectedToken: brokerTokenEnv,
+          onLog: (event) => {
+            if (event.kind === 'subscribed') return
+            stream.publish({
+              target: { kind: 'broadcast' },
+              payload: { kind: 'portbroker-log', event },
+            })
+          },
+        })
+      : undefined
+  const containerBrokerOpt = containerBroker ? { containerBroker } : {}
+
   const server = createServer({
     port,
     reloadAll: () => reloadRegistry.reloadAll(),
@@ -271,6 +292,7 @@ export async function startAgent({
     agentDir: cwd,
     pluginRuntime,
     ...containerNameOpt,
+    ...containerBrokerOpt,
   }).start()
 
   let stopped = false
