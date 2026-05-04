@@ -5,6 +5,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, type AgentSession } from '@/agent'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
+import { createCommandRegistry } from '@/commands'
 import type { HookBus } from '@/plugin'
 
 import { decideEngagement, grantStickyForReplyTargets, StickyLedger, type EngagementDecision } from './engagement'
@@ -179,6 +180,11 @@ type LiveSession = {
   destroyed: boolean
 }
 
+type ChannelCommandContext = {
+  live: LiveSession
+  event: InboundMessage
+}
+
 export type ChannelRouter = {
   route: (event: InboundMessage) => Promise<void>
   send: (msg: OutboundMessage) => Promise<SendResult>
@@ -227,6 +233,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
   const historyCallbacks = new Map<ChannelKey['adapter'], Set<HistoryCallback>>()
   const stickyLedger = new StickyLedger()
+  const commands = createCommandRegistry<ChannelCommandContext>([
+    {
+      name: 'stop',
+      handler: async ({ live }) => {
+        await stopCurrentChannelTurn(live)
+      },
+    },
+  ])
 
   let mappings: ChannelSessionRecord[] | null = null
   let loadOnce: Promise<void> | null = null
@@ -560,6 +574,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  const stopCurrentChannelTurn = async (live: LiveSession): Promise<void> => {
+    if (live.debounceTimer) clearTimeout(live.debounceTimer)
+    live.debounceTimer = null
+    live.firstUnprocessedAt = 0
+    live.promptQueue.length = 0
+    stopTypingHeartbeat(live)
+    try {
+      await live.session.abort()
+      logger.info(`[channels] ${live.keyId}: command /stop aborted current turn`)
+    } catch (err) {
+      logger.warn(`[channels] ${live.keyId}: command /stop abort failed: ${describe(err)}`)
+    }
+  }
+
   const drain = async (live: LiveSession): Promise<void> => {
     if (live.draining || live.destroyed) return
     live.draining = true
@@ -638,6 +666,23 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       chat: event.chat,
       thread: event.thread,
     }
+
+    const parsedCommand = commands.parse(event.text)
+    if (parsedCommand !== null) {
+      const keyId = channelKeyId(key)
+      if (!commands.has(parsedCommand.name)) {
+        logger.info(`[channels] ${keyId}: ignoring unknown command /${parsedCommand.name}`)
+        return
+      }
+      const existingLive = liveSessions.get(keyId)
+      if (!existingLive || existingLive.destroyed) {
+        logger.info(`[channels] ${keyId}: ignoring command /${parsedCommand.name} with no live session`)
+        return
+      }
+      const commandResult = await commands.execute(event.text, { live: existingLive, event })
+      if (commandResult.kind !== 'not-command') return
+    }
+
     const live = await ensureLive(key, event.externalMessageId)
 
     live.participants = updateParticipants(

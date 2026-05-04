@@ -160,6 +160,14 @@ function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
   }
 }
 
+async function waitFor(predicate: () => boolean): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+  throw new Error('condition not met')
+}
+
 const KEY: ChannelKey = { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null }
 
 describe('ChannelRouter session lifecycle', () => {
@@ -705,6 +713,65 @@ describe('ChannelRouter stop', () => {
     expect(router.__testing!.isTypingActive(KEY)).toBe(true)
     await router.stop()
     expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+  })
+})
+
+describe('ChannelRouter commands', () => {
+  test('/stop clears a queued channel turn before it reaches the agent', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'please do this' }))
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    await router.route(inbound({ text: '/stop', externalMessageId: 'm-stop' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.aborted).toBe(1)
+    expect(sessions[0]!.prompts).toEqual([])
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+  })
+
+  test('/stop aborts an in-flight channel turn without prompting on the command text', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    let releasePrompt: (() => void) | undefined
+
+    await router.route(inbound({ text: 'long task' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length === 1)
+
+    await router.route(inbound({ text: '/stop', externalMessageId: 'm-stop' }))
+    releasePrompt!()
+    await draining
+
+    expect(sessions[0]!.aborted).toBe(1)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sessions[0]!.prompts[0]).toContain('long task')
+  })
+
+  test('unknown commands are consumed instead of sent as prompts', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: '/unknown arg' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions).toHaveLength(0)
+  })
+
+  test('/stop on a cold channel is consumed without creating a session', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: '/stop' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions).toHaveLength(0)
   })
 })
 
