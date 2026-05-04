@@ -89,6 +89,8 @@ function formatLog(event: DaemonLogEvent | SupervisorLogEvent): string {
       return `[hostd] restart failed for ${event.containerName}: ${event.reason}`
     case 'port-forward-event':
       return formatPortForwardEvent(event.event)
+    case 'tailscale-serve-event':
+      return formatTailscaleServeEvent(event.event)
   }
 }
 
@@ -100,5 +102,18 @@ function formatPortForwardEvent(event: import('@/portbroker').PortForwardEvent):
       return `[hostd] port-forward closed ${event.containerName}:${event.port} (${event.reason})`
     case 'port-forward-failed':
       return `[hostd] port-forward FAILED ${event.containerName}:${event.port} — ${event.reason}`
+  }
+}
+
+function formatTailscaleServeEvent(event: import('@/hostd/tailscale').TailscaleServeEvent): string {
+  switch (event.kind) {
+    case 'tailscale-serve-opened':
+      return `[hostd] tailscale serve opened ${event.containerName}:${event.port}`
+    case 'tailscale-serve-closed':
+      return `[hostd] tailscale serve closed ${event.containerName}:${event.port}`
+    case 'tailscale-serve-skipped':
+      return `[hostd] tailscale serve skipped ${event.containerName}:${event.port} — ${event.reason}`
+    case 'tailscale-serve-failed':
+      return `[hostd] tailscale serve FAILED ${event.containerName}:${event.port} (${event.command}) — ${event.reason}`
   }
 }
