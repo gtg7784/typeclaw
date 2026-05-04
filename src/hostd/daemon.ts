@@ -21,6 +21,7 @@ import type {
   VersionResult,
 } from './protocol'
 import { buildSupervisor, type SupervisorLogEvent, type SupervisorRestart } from './supervisor'
+import type { TailscaleServeEvent } from './tailscale'
 import { UNVERSIONED_SENTINEL } from './version'
 
 export type DaemonOptions = {
@@ -63,6 +64,7 @@ export type PortbrokerStartInput = {
   wsHostPort: number
   brokerToken: string
   onEvent: (event: PortForwardEvent) => void
+  onTailscaleServeEvent: (event: TailscaleServeEvent) => void
 }
 
 export type DaemonLogEvent =
@@ -75,6 +77,7 @@ export type DaemonLogEvent =
   | { kind: 'registration-skipped'; containerName: string; reason: string }
   | { kind: 'shutdown-requested' }
   | { kind: 'port-forward-event'; event: PortForwardEvent }
+  | { kind: 'tailscale-serve-event'; event: TailscaleServeEvent }
 
 export type Daemon = {
   registered: () => string[]
@@ -262,6 +265,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         wsHostPort: payload.wsHostPort,
         brokerToken: payload.brokerToken,
         onEvent: (event) => log({ kind: 'port-forward-event', event }),
+        onTailscaleServeEvent: (event) => log({ kind: 'tailscale-serve-event', event }),
       })
     }
   }
