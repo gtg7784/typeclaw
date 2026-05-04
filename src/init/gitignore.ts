@@ -1,7 +1,11 @@
+import type { GitignoreConfig } from '@/config/config'
+
 export const GITIGNORE_FILE = '.gitignore'
 
-export function buildGitignore(): string {
-  return `# Truly ignored: secrets, runtime junk, the agent's free-write zone, and
+export function buildGitignore(config: GitignoreConfig = { append: [] }): string {
+  const customEntries = renderCustomGitignoreEntries(config.append)
+
+  return `${customEntries}# Truly ignored: secrets, runtime junk, the agent's free-write zone, and
 # regenerated-on-every-start system files. Never enter git history.
 #
 # Dockerfile is rewritten from the typeclaw CLI template on every \`typeclaw
@@ -22,5 +26,13 @@ Dockerfile
 sessions/
 memory/
 channels/
+`
+}
+
+function renderCustomGitignoreEntries(entries: string[]): string {
+  if (entries.length === 0) return ''
+  return `# Custom entries from typeclaw.json#gitignore.append.
+${entries.join('\n')}
+
 `
 }

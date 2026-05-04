@@ -10,6 +10,7 @@ import * as z from 'zod'
 import { configSchema } from '@/config/config'
 
 import { buildDockerfile } from './dockerfile'
+import { buildGitignore } from './gitignore'
 import {
   findAgentDir,
   type HatchingResult,
@@ -494,6 +495,23 @@ describe('scaffold', () => {
     expect(gitignore).toMatch(/^workspace\/$/m)
     expect(gitignore).toContain('mounts/')
     expect(gitignore).toMatch(/^Dockerfile$/m)
+  })
+
+  test('buildGitignore includes custom entries from gitignore.append before managed entries', () => {
+    const gitignore = buildGitignore({ append: ['scratch/', '*.local.log'] })
+
+    const customCommentIdx = gitignore.indexOf('# Custom entries from typeclaw.json#gitignore.append.')
+    const scratchIdx = gitignore.indexOf('scratch/')
+    const logIdx = gitignore.indexOf('*.local.log')
+    const trulyIgnoredIdx = gitignore.indexOf('# Truly ignored:')
+    expect(customCommentIdx).toBeGreaterThan(-1)
+    expect(customCommentIdx).toBeLessThan(scratchIdx)
+    expect(scratchIdx).toBeLessThan(logIdx)
+    expect(logIdx).toBeLessThan(trulyIgnoredIdx)
+  })
+
+  test('buildGitignore without config matches an empty gitignore.append config', () => {
+    expect(buildGitignore()).toBe(buildGitignore({ append: [] }))
   })
 
   test('preserves existing markdown files instead of overwriting', async () => {

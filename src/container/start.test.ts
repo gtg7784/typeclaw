@@ -33,6 +33,7 @@ async function writeDockerfile(dir: string): Promise<void> {
 type ScaffoldedConfig = {
   mounts?: Array<{ name: string; path: string; readOnly?: boolean; description?: string }>
   dockerfile?: { append?: string[] }
+  gitignore?: { append?: string[] }
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -41,6 +42,7 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
     mounts: overrides.mounts ?? [],
     ...(overrides.dockerfile ? { dockerfile: overrides.dockerfile } : {}),
+    ...(overrides.gitignore ? { gitignore: overrides.gitignore } : {}),
   }
   await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
 }
@@ -454,6 +456,46 @@ describe('refreshGitignore', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test('writes custom append entries from typeclaw.json before the managed template', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-gitignore-refresh-'))
+    try {
+      await writeTypeclawConfig(dir, { gitignore: { append: ['scratch/', '*.local.log'] } })
+
+      await refreshGitignore(dir)
+
+      const written = await readFile(join(dir, '.gitignore'), 'utf8')
+      const customCommentIdx = written.indexOf('# Custom entries from typeclaw.json#gitignore.append.')
+      const scratchIdx = written.indexOf('scratch/')
+      const logIdx = written.indexOf('*.local.log')
+      const trulyIgnoredIdx = written.indexOf('# Truly ignored:')
+      expect(customCommentIdx).toBeGreaterThan(-1)
+      expect(customCommentIdx).toBeLessThan(scratchIdx)
+      expect(scratchIdx).toBeLessThan(logIdx)
+      expect(logIdx).toBeLessThan(trulyIgnoredIdx)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('keeps TypeClaw-owned entries ignored when custom entries try to negate them', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-gitignore-refresh-'))
+    try {
+      await gitInit(dir)
+      await writeTypeclawConfig(dir, { gitignore: { append: ['!sessions/', '!sessions/**', 'scratch/'] } })
+
+      await refreshGitignore(dir)
+
+      expect(await isGitIgnored(dir, '.env')).toBe(true)
+      expect(await isGitIgnored(dir, 'Dockerfile')).toBe(true)
+      expect(await isGitIgnored(dir, 'sessions/history.jsonl')).toBe(true)
+      expect(await isGitIgnored(dir, 'memory/MEMORY.md')).toBe(true)
+      expect(await isGitIgnored(dir, 'channels/slack.json')).toBe(true)
+      expect(await isGitIgnored(dir, 'scratch/tmp.txt')).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 async function runGit(cwd: string, args: string[]): Promise<string> {
@@ -461,6 +503,11 @@ async function runGit(cwd: string, args: string[]): Promise<string> {
   const out = await new Response(proc.stdout).text()
   await proc.exited
   return out.trim()
+}
+
+async function isGitIgnored(cwd: string, path: string): Promise<boolean> {
+  const proc = Bun.spawn({ cmd: ['git', 'check-ignore', '--quiet', path], cwd, stdout: 'pipe', stderr: 'pipe' })
+  return (await proc.exited) === 0
 }
 
 async function gitInit(cwd: string): Promise<void> {
@@ -648,6 +695,22 @@ describe('start (composition)', () => {
     const onDisk = await readFile(join(root, '.gitignore'), 'utf8')
     expect(onDisk).toBe(buildGitignore())
     expect(onDisk).not.toContain('old-entry')
+  })
+
+  test('start refreshes .gitignore with custom append entries from typeclaw.json', async () => {
+    await writeFile(join(root, '.gitignore'), '# stale\n')
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { gitignore: { append: ['scratch/', '*.local.log'] } })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+
+    expect(result.ok).toBe(true)
+    const onDisk = await readFile(join(root, '.gitignore'), 'utf8')
+    expect(onDisk).toContain('scratch/')
+    expect(onDisk).toContain('*.local.log')
+    expect(onDisk.indexOf('*.local.log')).toBeLessThan(onDisk.indexOf('# Truly ignored:'))
   })
 
   test('forceBuild=true also refreshes the Dockerfile so docker build sees the fresh template', async () => {
