@@ -19,11 +19,11 @@ export const hostdCommand = defineCommand({
     const version = srcRoot === null ? UNVERSIONED_SENTINEL : await computeSourceVersion({ srcRoot })
 
     const portbroker = createPortbrokerManager({
-      onLog: (msg) => console.log(msg),
+      onLog: (msg) => writeLogLine(msg),
     })
 
     const daemon = await startDaemon({
-      onLog: (e) => console.log(formatLog(e)),
+      onLog: (e) => writeLogLine(formatLog(e)),
       version,
       onShutdown: () => process.exit(0),
       portbroker,
@@ -58,6 +58,10 @@ export const hostdCommand = defineCommand({
     await new Promise<void>(() => {})
   },
 })
+
+function writeLogLine(msg: string): void {
+  console.log(`${new Date().toISOString()} ${msg}`)
+}
 
 function formatLog(event: DaemonLogEvent | SupervisorLogEvent): string {
   switch (event.kind) {
