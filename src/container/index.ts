@@ -14,6 +14,7 @@ export {
   start,
   type HostDaemonStatus,
   type PlanStartOptions,
+  type StartOptions,
   type StartPlan,
   type StartResult,
 } from './start'
