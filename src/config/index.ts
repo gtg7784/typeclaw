@@ -1,6 +1,7 @@
 export {
   config,
   configSchema,
+  expandMountPath,
   extractPluginConfigs,
   getConfig,
   loadConfigSync,
@@ -10,6 +11,7 @@ export {
   reloadConfig,
   resolveModel,
   validateConfig,
+  validateMount,
   type Config,
   type ConfigChange,
   type ConfigReloadDiff,

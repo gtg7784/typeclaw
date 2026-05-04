@@ -1,16 +1,20 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
   configSchema,
   extractPluginConfigs,
+  expandMountPath,
   loadConfigSync,
   loadPluginConfigsSync,
   mountSchema,
   validateConfig,
+  validateMount,
 } from './config'
+
+const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 
 const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo'
 
@@ -165,13 +169,47 @@ describe('validateConfig', () => {
     expect(result.ok).toBe(true)
   })
 
-  test('returns ok for a valid config with a mount', async () => {
+  test('returns ok for a valid config with a mount whose host path exists, is a directory, and is read-write', async () => {
+    const mountDir = join(cwd, 'projects')
+    await mkdir(mountDir)
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL, mounts: [{ name: 'projects', path: '~/projects' }] }),
+      JSON.stringify({ model: VALID_MODEL, mounts: [{ name: 'projects', path: mountDir }] }),
     )
     const result = validateConfig(cwd)
     expect(result.ok).toBe(true)
+  })
+
+  test('fails when a mount path does not exist on the host', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL, mounts: [{ name: 'projects', path: join(cwd, 'missing') }] }),
+    )
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('mount "projects"')
+      expect(result.reason).toContain('does not exist')
+    }
+  })
+
+  test('reports the first failing mount when multiple are broken (matches schema-error shape)', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        model: VALID_MODEL,
+        mounts: [
+          { name: 'first', path: join(cwd, 'missing-1') },
+          { name: 'second', path: join(cwd, 'missing-2') },
+        ],
+      }),
+    )
+    const result = validateConfig(cwd)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('"first"')
+      expect(result.reason).not.toContain('"second"')
+    }
   })
 
   test('fails on malformed JSON', async () => {
@@ -206,6 +244,126 @@ describe('validateConfig', () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, mounts: [], port: 99999 }))
     const result = validateConfig(cwd)
     expect(result.ok).toBe(false)
+  })
+})
+
+describe('validateMount', () => {
+  let cwd: string
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'typeclaw-validate-mount-'))
+  })
+
+  afterEach(async () => {
+    // Best-effort: tests that chmod 000 a path under cwd would otherwise block
+    // the cleanup. Restore perms before rm.
+    try {
+      await chmod(cwd, 0o755)
+    } catch {
+      // ignore
+    }
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  test('ok when path exists, is a directory, and is read-write', async () => {
+    const dir = join(cwd, 'data')
+    await mkdir(dir)
+    const result = validateMount({ name: 'data', path: dir, readOnly: false }, cwd)
+    expect(result.ok).toBe(true)
+  })
+
+  test('fails with "does not exist" when the path is missing', () => {
+    const result = validateMount({ name: 'data', path: join(cwd, 'nope'), readOnly: false }, cwd)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('mount "data"')
+      expect(result.reason).toContain('does not exist')
+    }
+  })
+
+  test('fails with "not a directory" when the path is a regular file', async () => {
+    const filePath = join(cwd, 'file.txt')
+    await writeFile(filePath, 'hi')
+    const result = validateMount({ name: 'data', path: filePath, readOnly: false }, cwd)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('mount "data"')
+      expect(result.reason).toContain('not a directory')
+    }
+  })
+
+  test('expands ~ and relative paths via expandMountPath', () => {
+    const relative = './does-not-exist-' + Math.random().toString(36).slice(2)
+    const result = validateMount({ name: 'data', path: relative, readOnly: false }, cwd)
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain(join(cwd, relative.slice(2)))
+    }
+  })
+
+  test.skipIf(isRoot)('fails when readOnly:false but path is read-only on disk', async () => {
+    const dir = join(cwd, 'ro')
+    await mkdir(dir)
+    await chmod(dir, 0o555)
+    try {
+      const result = validateMount({ name: 'ro', path: dir, readOnly: false }, cwd)
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.reason).toContain('not writable')
+      }
+    } finally {
+      await chmod(dir, 0o755)
+    }
+  })
+
+  test.skipIf(isRoot)('ok when readOnly:true and path is read-only on disk', async () => {
+    const dir = join(cwd, 'ro')
+    await mkdir(dir)
+    await chmod(dir, 0o555)
+    try {
+      const result = validateMount({ name: 'ro', path: dir, readOnly: true }, cwd)
+      expect(result.ok).toBe(true)
+    } finally {
+      await chmod(dir, 0o755)
+    }
+  })
+
+  test.skipIf(isRoot)('fails when path is unreadable', async () => {
+    const dir = join(cwd, 'noread')
+    await mkdir(dir)
+    await chmod(dir, 0o000)
+    try {
+      const result = validateMount({ name: 'noread', path: dir, readOnly: true }, cwd)
+      expect(result.ok).toBe(false)
+      if (!result.ok) {
+        expect(result.reason).toContain('not readable')
+      }
+    } finally {
+      await chmod(dir, 0o755)
+    }
+  })
+})
+
+describe('expandMountPath', () => {
+  test('returns absolute paths unchanged', () => {
+    expect(expandMountPath('/abs/path', '/cwd')).toBe('/abs/path')
+  })
+
+  test('resolves relative paths against cwd', () => {
+    expect(expandMountPath('./rel', '/cwd')).toBe('/cwd/rel')
+    expect(expandMountPath('rel', '/cwd')).toBe('/cwd/rel')
+  })
+
+  test('expands ~ to homedir', () => {
+    const expanded = expandMountPath('~/notes', '/cwd')
+    expect(expanded.endsWith('/notes')).toBe(true)
+    expect(expanded.startsWith('/cwd')).toBe(false)
+  })
+
+  test('expands bare ~ to homedir', () => {
+    const expanded = expandMountPath('~', '/cwd')
+    expect(expanded.startsWith('/cwd')).toBe(false)
+    expect(expanded.length).toBeGreaterThan(0)
   })
 })
 

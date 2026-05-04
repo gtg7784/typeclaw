@@ -1,5 +1,6 @@
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { accessSync, constants as fsConstants, readFileSync, statSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { isAbsolute, join, resolve } from 'node:path'
 
 import type { Model } from '@mariozechner/pi-ai'
 import { z } from 'zod'
@@ -72,6 +73,17 @@ export function resolveModel(ref: KnownModelRef): Model<'openai-completions'> {
   const providerId = ref.slice(0, slash) as KnownProviderId
   const modelId = ref.slice(slash + 1)
   return KNOWN_PROVIDERS[providerId].models[modelId as never]
+}
+
+// Resolves a mount's `path` field to an absolute host path, mirroring shell
+// expansion rules: `~`/`~/...` → home dir, relative → resolved against `cwd`,
+// absolute → unchanged. Single source of truth so validation and Docker arg
+// building agree on the resolved path.
+export function expandMountPath(input: string, cwd: string): string {
+  if (input === '~' || input.startsWith('~/')) {
+    return join(homedir(), input.slice(1))
+  }
+  return isAbsolute(input) ? input : resolve(cwd, input)
 }
 
 // Loaded eagerly from process.cwd()/typeclaw.json at module-import time so
@@ -242,6 +254,13 @@ export type ValidateConfigResult = { ok: true } | { ok: false; reason: string }
 // Missing file → ok (matches `loadMounts` in src/container/up.ts; `isInitialized`
 // is the dedicated check for "not initialized"). Present but invalid → fail, so
 // `restart` doesn't stop the container before discovering the config is broken.
+//
+// Mount accessibility is checked here (after schema parse succeeds) so every
+// caller — `typeclaw start`, `restart`, `reload`, hostd's restart RPC — fails
+// fast with a clear, mount-named error instead of letting Docker surface a
+// confusing path-sharing error (or, on some Linux setups, silently bind-mount
+// an empty auto-created directory). First-failure reporting matches the
+// schema-error path's shape; users fix one and re-run.
 export function validateConfig(cwd: string): ValidateConfigResult {
   let raw: string
   try {
@@ -261,6 +280,59 @@ export function validateConfig(cwd: string): ValidateConfigResult {
   const result = configSchema.safeParse(json)
   if (!result.success) {
     return { ok: false, reason: `${CONFIG_FILE} is invalid: ${formatZodError(result.error)}` }
+  }
+
+  for (const mount of result.data.mounts) {
+    const check = validateMount(mount, cwd)
+    if (!check.ok) return check
+  }
+
+  return { ok: true }
+}
+
+// Verifies a mount's host path: exists, is a directory, is readable, and is
+// writable when not declared `readOnly`. Symlinks are followed (statSync's
+// default) so a broken symlink reads as "does not exist". Permission checks
+// are skipped when running as root (uid 0) — euidaccess returns success
+// regardless, so the test would be vacuous and inconsistent with non-root.
+export function validateMount(mount: Mount, cwd: string): ValidateConfigResult {
+  const resolved = expandMountPath(mount.path, cwd)
+  const label = `mount "${mount.name}"`
+
+  let stats: ReturnType<typeof statSync>
+  try {
+    stats = statSync(resolved)
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'ENOENT') {
+      return { ok: false, reason: `${label}: path ${resolved} does not exist` }
+    }
+    const detail = error instanceof Error ? error.message : String(error)
+    return { ok: false, reason: `${label}: cannot stat ${resolved}: ${detail}` }
+  }
+
+  if (!stats.isDirectory()) {
+    return { ok: false, reason: `${label}: path ${resolved} is not a directory` }
+  }
+
+  const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
+  if (isRoot) return { ok: true }
+
+  try {
+    accessSync(resolved, fsConstants.R_OK)
+  } catch {
+    return { ok: false, reason: `${label}: path ${resolved} is not readable` }
+  }
+
+  if (!mount.readOnly) {
+    try {
+      accessSync(resolved, fsConstants.W_OK)
+    } catch {
+      return {
+        ok: false,
+        reason: `${label}: path ${resolved} is not writable (declare readOnly: true if read-only access is intended)`,
+      }
+    }
   }
 
   return { ok: true }

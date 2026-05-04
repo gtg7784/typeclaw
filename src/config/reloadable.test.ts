@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -36,6 +36,29 @@ describe('createConfigReloadable', () => {
     expect(getConfig().port).toBe(9001)
   })
 
+  test('atomicity: mount path that does not exist on host fails reload and leaves live config untouched', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, port: 9001, mounts: [] }))
+    const reloadable = createConfigReloadable({ cwd })
+    await reloadable.reload()
+
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        model: VALID_MODEL_A,
+        port: 9001,
+        mounts: [{ name: 'gone', path: join(cwd, 'definitely-missing') }],
+      }),
+    )
+    const result = await reloadable.reload()
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.reason).toContain('mount "gone"')
+      expect(result.reason).toContain('does not exist')
+    }
+    expect(getConfig().port).toBe(9001)
+  })
+
   test('atomicity: schema-invalid config leaves the live config untouched', async () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, port: 9001 }))
     const reloadable = createConfigReloadable({ cwd })
@@ -53,12 +76,14 @@ describe('createConfigReloadable', () => {
     const reloadable = createConfigReloadable({ cwd })
     await reloadable.reload()
 
+    const mountDir = join(cwd, 'projects')
+    await mkdir(mountDir)
     await writeFile(
       join(cwd, 'typeclaw.json'),
       JSON.stringify({
         model: VALID_MODEL_A,
         port: 9002,
-        mounts: [{ name: 'projects', path: '~/projects' }],
+        mounts: [{ name: 'projects', path: mountDir }],
       }),
     )
     const result = await reloadable.reload()
@@ -102,13 +127,15 @@ describe('createConfigReloadable', () => {
     const reloadable = createConfigReloadable({ cwd })
     await reloadable.reload()
 
+    const mountDir = join(cwd, 'data')
+    await mkdir(mountDir)
     await writeFile(
       join(cwd, 'typeclaw.json'),
       JSON.stringify({
         model: VALID_MODEL_A,
         port: 9002,
         $schema: './b.json',
-        mounts: [{ name: 'data', path: '/x' }],
+        mounts: [{ name: 'data', path: mountDir }],
       }),
     )
     const result = await reloadable.reload()
