@@ -41,14 +41,19 @@ export const portForwardSchema = z
   .object({
     allow: z.union([z.literal('*'), z.array(portNumber)]),
     deny: z.array(portNumber).optional(),
+    tailscaleServe: z.boolean().default(false),
   })
   .refine((v) => !(Array.isArray(v.allow) && v.deny !== undefined && v.deny.length > 0), {
     message: 'portForward.deny is only meaningful when allow is "*"; remove deny or set allow to "*"',
     path: ['deny'],
   })
-  .default({ allow: '*' })
+  .default({ allow: '*', tailscaleServe: false })
 
-export type PortForward = z.infer<typeof portForwardSchema>
+export type PortForward = {
+  allow: '*' | number[]
+  deny?: number[]
+  tailscaleServe?: boolean
+}
 
 export const configSchema = z
   .object({
