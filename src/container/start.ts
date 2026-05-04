@@ -1,10 +1,9 @@
 import { randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
-import { configSchema, type Mount } from '@/config/config'
+import { configSchema, expandMountPath, type Mount } from '@/config/config'
 import { send as sendToDaemon } from '@/hostd/client'
 import { ensureDaemon } from '@/hostd/spawn'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
@@ -335,13 +334,6 @@ async function loadMounts(cwd: string): Promise<Mount[]> {
   }
   const parsed = configSchema.parse(JSON.parse(raw))
   return parsed.mounts
-}
-
-function expandMountPath(input: string, cwd: string): string {
-  if (input === '~' || input.startsWith('~/')) {
-    return join(homedir(), input.slice(1))
-  }
-  return isAbsolute(input) ? input : resolve(cwd, input)
 }
 
 async function registerWithDaemon({
