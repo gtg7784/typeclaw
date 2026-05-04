@@ -9,6 +9,7 @@ import * as z from 'zod'
 
 import { configSchema } from '@/config/config'
 
+import { buildDockerfile } from './dockerfile'
 import {
   findAgentDir,
   type HatchingResult,
@@ -695,6 +696,29 @@ describe('writeDockerAssets', () => {
     // to the legacy builder, which silently ignores --mount=type=cache and
     // leaves us with no cache benefit at all.
     expect(dockerfile.split('\n')[0]).toBe('# syntax=docker/dockerfile:1.7')
+  })
+
+  test('Dockerfile includes custom lines from typeclaw.json dockerfile.append before ENTRYPOINT', async () => {
+    await scaffold(root)
+    const raw = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
+    raw.dockerfile = { append: ['RUN apt-get update', 'ENV CUSTOM_TOOL=1'] }
+    await writeFile(join(root, 'typeclaw.json'), `${JSON.stringify(raw, null, 2)}\n`)
+
+    await writeDockerAssets(root)
+
+    const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
+    const commentIdx = dockerfile.indexOf('# Custom lines from typeclaw.json#dockerfile.append.')
+    const runIdx = dockerfile.indexOf('RUN apt-get update')
+    const envIdx = dockerfile.indexOf('ENV CUSTOM_TOOL=1')
+    const entrypointIdx = dockerfile.indexOf('ENTRYPOINT ["bun", "run", "typeclaw"]')
+    expect(commentIdx).toBeGreaterThan(-1)
+    expect(commentIdx).toBeLessThan(runIdx)
+    expect(runIdx).toBeLessThan(envIdx)
+    expect(envIdx).toBeLessThan(entrypointIdx)
+  })
+
+  test('buildDockerfile without config matches an empty dockerfile.append config', () => {
+    expect(buildDockerfile()).toBe(buildDockerfile({ append: [] }))
   })
 
   test('Dockerfile cache-mounts apt directories so package re-installs reuse downloaded .debs', async () => {
