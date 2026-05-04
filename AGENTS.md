@@ -12,6 +12,10 @@ bun run format
 
 No exceptions. If any of them fail, fix the cause before committing — do not `--no-verify`, do not stage partial fixes.
 
+## Vocabulary
+
+When the user says "channel" — or mentions tools/code with a `channel_` prefix (e.g. `channel_send`, `channel_reply`) — they almost always mean **`src/channels/`**, this repo's channels subsystem (router, manager, persistence, adapters for Slack/Discord, etc.), **not** Channel Talk (the customer-support SaaS), Slack channels in the abstract, or the agent-messenger CLI's `agent-channeltalk*` skills. Default to `src/channels/` and only branch out when the user explicitly names a different platform or product.
+
 ## Stages
 
 TypeClaw runs code in three distinct stages. Each stage has a different filesystem, a different process owner, and a different invocation path. Confusing them is the single most common source of bugs in this codebase, so always name the stage explicitly when discussing any command, path, or mount.
