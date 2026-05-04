@@ -67,32 +67,27 @@ describe('configSchema preserves unknown top-level keys (plugin config blocks)',
 describe('portForwardSchema', () => {
   test('defaults to allow:* when omitted', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL })
-    expect(parsed.portForward).toEqual({ allow: '*', tailscaleServe: false })
+    expect(parsed.portForward).toEqual({ allow: '*' })
   })
 
   test('accepts allow:* with no deny', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: '*' } })
-    expect(parsed.portForward).toEqual({ allow: '*', tailscaleServe: false })
+    expect(parsed.portForward).toEqual({ allow: '*' })
   })
 
   test('accepts allow:* with deny list', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: '*', deny: [9229, 9999] } })
-    expect(parsed.portForward).toEqual({ allow: '*', deny: [9229, 9999], tailscaleServe: false })
+    expect(parsed.portForward).toEqual({ allow: '*', deny: [9229, 9999] })
   })
 
   test('accepts allow as number array (allowlist mode)', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: [3000, 5173] } })
-    expect(parsed.portForward).toEqual({ allow: [3000, 5173], tailscaleServe: false })
+    expect(parsed.portForward).toEqual({ allow: [3000, 5173] })
   })
 
   test('accepts allow:[] as off-switch', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: [] } })
-    expect(parsed.portForward).toEqual({ allow: [], tailscaleServe: false })
-  })
-
-  test('accepts tailscaleServe opt-in', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: '*', tailscaleServe: true } })
-    expect(parsed.portForward).toEqual({ allow: '*', tailscaleServe: true })
+    expect(parsed.portForward).toEqual({ allow: [] })
   })
 
   test('rejects deny combined with allow:number[] so user typos do not silently drop the deny rule', () => {
