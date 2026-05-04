@@ -5,12 +5,17 @@ type Auth = {
   modelRegistry: ModelRegistry
 }
 
+const TEST_DUMMY_API_KEY = 'fw_test_dummy'
+
 let cached: Auth | null = null
 
 export function getAuth(): Auth {
   if (cached) return cached
 
-  const apiKey = process.env.FIREWORKS_API_KEY
+  // Bun sets NODE_ENV=test automatically under `bun test`. Use a dummy key
+  // there so suites that build sessions but never hit the LLM don't need real
+  // credentials; production still hard-exits to surface misconfiguration.
+  const apiKey = process.env.FIREWORKS_API_KEY ?? (process.env.NODE_ENV === 'test' ? TEST_DUMMY_API_KEY : undefined)
   if (!apiKey) {
     console.error('Set FIREWORKS_API_KEY to use Kimi K2.5 Turbo via Fireworks.')
     process.exit(1)
@@ -22,4 +27,8 @@ export function getAuth(): Auth {
 
   cached = { authStorage, modelRegistry }
   return cached
+}
+
+export function resetAuthForTesting(): void {
+  cached = null
 }
