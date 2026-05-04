@@ -8,6 +8,7 @@ import { logsCommand } from './logs'
 import { reload } from './reload'
 import { restartCommand } from './restart'
 import { run } from './run'
+import { shellCommand } from './shell'
 import { startCommand } from './start'
 import { stopCommand } from './stop'
 import { tui } from './tui'
@@ -26,6 +27,7 @@ const main = defineCommand({
     restart: restartCommand,
     reload,
     logs: logsCommand,
+    shell: shellCommand,
     _hostd: hostdCommand,
   },
 })
