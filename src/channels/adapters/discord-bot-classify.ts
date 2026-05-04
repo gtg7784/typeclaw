@@ -51,8 +51,25 @@ export function classifyInbound(
   // after start-up from being misclassified as ambient chatter.
   const isBotMention =
     botUserId !== null ? event.content.includes(`<@${botUserId}>`) || event.content.includes(`<@!${botUserId}>`) : true
+
+  // Discord sends a structured `mentions` array on every message, so we can
+  // tell "tagged someone other than us" apart from "no mentions at all"
+  // without parsing the content. We hold off until botUserId is known —
+  // during the cold-start race we'd otherwise misclassify our own mention
+  // as `mentionsOthers` and silently drop the very first inbound.
+  const mentionsOthers =
+    botUserId !== null && (event.mentions ?? []).length > 0 && !(event.mentions ?? []).some((m) => m.id === botUserId)
+
+  const replyToParentId = event.message_reference?.message_id
   const replyToBotMessageId =
-    event.message_reference?.message_id !== undefined && botUserId !== null ? event.message_reference.message_id : null
+    replyToParentId !== undefined && botUserId !== null && isReplyToBot(event, botUserId) ? replyToParentId : null
+  // Discord does not echo the parent message's author on `message_reference`,
+  // but in practice the replied-to user is auto-mentioned in the reply's
+  // `mentions` array (this is how the Discord client renders the "Replying
+  // to @user" header). So when the parent reference exists and our id is NOT
+  // among the mentions, the reply is targeted at someone else.
+  const replyToOtherMessageId =
+    replyToParentId !== undefined && replyToBotMessageId === null && botUserId !== null ? replyToParentId : null
 
   const ts = Date.parse(event.timestamp)
 
@@ -70,10 +87,20 @@ export function classifyInbound(
       authorIsBot: event.author.bot === true,
       isBotMention,
       replyToBotMessageId,
+      mentionsOthers,
+      replyToOtherMessageId,
       isDm,
       ts: Number.isFinite(ts) ? ts : 0,
     },
   }
+}
+
+// Discord's `message_reference.message_id` only carries the parent id, not
+// the parent author. We infer "this reply targets the bot" from the auto-
+// mention Discord injects into the reply's `mentions` array (the same
+// mechanism that drives the "Replying to @user" header in the client).
+function isReplyToBot(event: DiscordGatewayMessageCreateEvent, botUserId: string): boolean {
+  return (event.mentions ?? []).some((m) => m.id === botUserId)
 }
 
 function inboundText(event: DiscordGatewayMessageCreateEvent): string {

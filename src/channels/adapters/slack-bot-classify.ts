@@ -69,6 +69,22 @@ export function classifyInbound(
   const replyToBotMessageId =
     event.thread_ts !== undefined && event.thread_ts !== event.ts && context.botUserId !== null ? event.thread_ts : null
 
+  // Defer the mentionsOthers signal until botUserId is known. During the
+  // cold-start race window we cannot tell our own mention apart from a
+  // foreign one, and a wrong `true` here would silently suppress the
+  // very first inbound after start-up via the engagement layer.
+  const mentionedUserIds = extractMentionedUserIds(text)
+  const mentionsOthers =
+    context.botUserId !== null && mentionedUserIds.length > 0 && !mentionedUserIds.includes(context.botUserId)
+
+  // Slack does not surface the parent message's author on `event`, so we
+  // cannot positively identify a reply-to-other from the inbound alone.
+  // Leaving this null keeps the contract honest — the engagement layer's
+  // mention-based suppressor still covers the common case of "@-someone
+  // in a thread reply", and the solo-human fallback only matters in
+  // 1-human channels where there is no "other" human to reply to anyway.
+  const replyToOtherMessageId: string | null = null
+
   // Slack signals "this message was authored by a bot" via either a non-empty
   // bot_id or subtype === 'bot_message'. Either is sufficient.
   const authorIsBot = (event.bot_id !== undefined && event.bot_id !== '') || event.subtype === 'bot_message'
@@ -87,8 +103,24 @@ export function classifyInbound(
       authorIsBot,
       isBotMention,
       replyToBotMessageId,
+      mentionsOthers,
+      replyToOtherMessageId,
       isDm,
       ts: slackTsToMillis(event.ts),
     },
   }
+}
+
+// Slack encodes user mentions inline as `<@U…>` (or `<@W…>` for some org
+// accounts, and `<@U…|fallback>` when the client supplied a label). Pull
+// every distinct id out of the text — duplicates collapse so the caller
+// can do a clean `includes()` check against the bot's own id.
+const MENTION_PATTERN = /<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g
+
+function extractMentionedUserIds(text: string): string[] {
+  const seen = new Set<string>()
+  for (const match of text.matchAll(MENTION_PATTERN)) {
+    seen.add(match[1]!)
+  }
+  return Array.from(seen)
 }

@@ -152,6 +152,8 @@ describe('slack-bot classifyInbound — route path', () => {
       authorIsBot: false,
       isBotMention: true,
       replyToBotMessageId: null,
+      mentionsOthers: false,
+      replyToOtherMessageId: null,
       isDm: false,
       ts: 1_700_000_000_000,
     })
@@ -230,5 +232,71 @@ describe('slack-bot classifyInbound — route path', () => {
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.replyToBotMessageId).toBeNull()
+  })
+})
+
+describe('slack-bot classifyInbound — targets-others detection', () => {
+  test('marks mentionsOthers=true when text mentions a non-bot user only', () => {
+    const event = buildEvent({ text: 'hey <@UBOB> can you check this?' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.mentionsOthers).toBe(true)
+  })
+
+  test('marks mentionsOthers=false when the bot is among the mentioned users', () => {
+    const event = buildEvent({ text: `<@UBOB> <@${BOT_USER_ID}> please weigh in` })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.mentionsOthers).toBe(false)
+  })
+
+  test('marks mentionsOthers=false when the message has no mentions at all', () => {
+    const event = buildEvent({ text: 'just some chatter' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.mentionsOthers).toBe(false)
+  })
+
+  test('parses the labelled mention form `<@U…|name>` correctly', () => {
+    const event = buildEvent({ text: 'cc <@UBOB|bob>' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.mentionsOthers).toBe(true)
+  })
+
+  test('marks mentionsOthers=false during the pre-connected race window (botUserId unknown)', () => {
+    const event = buildEvent({ text: 'hey <@UBOB>' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: null })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.mentionsOthers).toBe(false)
+  })
+
+  test('Slack does not surface the parent author on inbounds, so replyToOtherMessageId is always null', () => {
+    const event = buildEvent({
+      text: 'thanks',
+      ts: '1700000010.000200',
+      thread_ts: '1700000000.000100',
+    })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.replyToOtherMessageId).toBeNull()
   })
 })

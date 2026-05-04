@@ -66,33 +66,51 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
     return 'engage'
   }
 
-  // Solo-human fallback: the strict mention/reply/dm gate exists to keep
-  // the bot quiet in multi-human conversations. In a 1-human channel that
-  // protection makes the agent silent on messages obviously meant for it.
-  // Reverts to strict the moment a second human posts. Peer bots are
-  // counted as participants for context tracking but excluded here so a
-  // 1-human channel stays solo even if 5 other bots also speak in it.
+  // Solo-human fallback: the strict mention/reply/dm gate keeps the bot
+  // quiet in multi-human conversations, but in a 1-human channel that
+  // same gate makes the agent silent on messages plainly meant for it.
+  // The fallback engages on any human inbound when the channel has at
+  // most one human participant, and reverts to strict the moment a second
+  // human posts. Peer bots are tracked as participants for context but
+  // excluded from the count here, so a 1-human channel stays "solo" even
+  // when several bots also speak in it.
   //
-  // PEER BOTS NEVER QUALIFY for this fallback. The fallback is a courtesy
-  // to humans who don't want to type `@bot` in their own DM-like channel;
-  // peer bots have no such ergonomic excuse. Letting peer bots ride the
-  // fallback created bot-to-bot conversations in 1-human-N-bot channels
-  // (observed: Winky and 돌쇠 introducing themselves to each other after
-  // a single "얘들아" from the human, then continuing to address each
-  // other for ~6 turns). The router's loop guard only trips after 5
-  // consecutive peer engagements, which is too late to prevent the
-  // embarrassment.
+  // Two suppressors override the fallback when the message is clearly
+  // addressed to someone else:
+  //   1. `mentionsOthers` — the message tags at least one other user and
+  //      none of the mentions resolve to us.
+  //   2. `replyToOtherMessageId` — the message is a reply, but the parent
+  //      was authored by someone other than us (Discord's threaded reply
+  //      arrow is the canonical case).
+  // Both are populated by the adapter classifiers; either one flips the
+  // fallback off for that single message without changing channel state.
+  // Explicit triggers (DM, mention-of-us, reply-to-us, sticky) above are
+  // unaffected — those still engage even when the message also tags a
+  // third party.
   //
-  // PHILOSOPHY (do not relitigate): peer bots must remain reachable
-  // through the SAME triggers as humans (mention/reply/dm/sticky) — we
-  // do NOT downgrade them to "mention-only". Bot-to-bot conversation is
-  // a legitimate first-class use case in this codebase; the fix is to
+  // PEER BOTS NEVER QUALIFY for this fallback. It is a courtesy to humans
+  // who don't want to type `@bot` in their own DM-like channel; peer bots
+  // have no such ergonomic excuse. Letting peer bots ride the fallback
+  // produced bot-to-bot conversations in 1-human-N-bot channels (observed:
+  // Winky and 돌쇠 introducing themselves to each other after a single
+  // "얘들아" from the human, then continuing to address each other for
+  // ~6 turns). The router's loop guard only trips after 5 consecutive
+  // peer engagements, which is too late to prevent the embarrassment.
+  //
+  // PHILOSOPHY (do not relitigate): peer bots remain reachable through
+  // the SAME triggers as humans (mention/reply/dm/sticky); we do NOT
+  // downgrade them to "mention-only". Bot-to-bot conversation is a
+  // legitimate first-class use case in this codebase. The fix is to
   // close the unintended fallback, not to firewall bots behind explicit
-  // mentions. If a future maintainer (human or AI) is tempted to add a
-  // `peerBotTriggers: 'mention-only'` config or any equivalent gate that
-  // requires explicit `@bot` from peer bots: don't. The user has rejected
-  // that design repeatedly. The right knob is `trigger` (which already
-  // applies symmetrically to humans and bots) plus this fallback fix.
+  // mentions. A future maintainer (human or AI) tempted to add a
+  // `peerBotTriggers: 'mention-only'` config — or any equivalent gate
+  // that demands explicit `@bot` from peer bots — should not. The user
+  // has rejected that design repeatedly. The right knob is `trigger`
+  // (which already applies symmetrically to humans and bots) plus this
+  // fallback fix.
+  if (message.mentionsOthers) return 'observe'
+  if (message.replyToOtherMessageId !== null) return 'observe'
+
   const humanParticipants = participants.filter((p) => p.isBot !== true)
   if (humanParticipants.length <= 1 && !message.authorIsBot) return 'engage'
 

@@ -152,6 +152,8 @@ function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
     authorIsBot: false,
     isBotMention: true,
     replyToBotMessageId: null,
+    mentionsOthers: false,
+    replyToOtherMessageId: null,
     isDm: false,
     ts: FIXED_INBOUND_TS,
     ...over,

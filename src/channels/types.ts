@@ -24,6 +24,25 @@ export type InboundMessage = {
   authorIsBot: boolean
   isBotMention: boolean
   replyToBotMessageId: string | null
+  // True when the message contains at least one user mention AND none of
+  // those mentions resolve to the bot. Used by the engagement layer to
+  // suppress the solo-human fallback: if the human is explicitly tagging
+  // someone else, the message almost certainly is not addressed to us.
+  // False when the message has no mentions at all (the fallback still
+  // applies in that case) or when one of the mentions IS the bot (which
+  // is already handled by `isBotMention`). Adapters that cannot reliably
+  // enumerate mentions MUST default this to false rather than true.
+  mentionsOthers: boolean
+  // Set to the parent message id when the inbound is a reply AND the
+  // parent was authored by someone other than the bot (or by an unknown
+  // author the adapter could not attribute). Mirrors `replyToBotMessageId`
+  // but for the inverse case. Used by the engagement layer to suppress
+  // the solo-human fallback on Discord-style replies that are clearly
+  // directed at another user. Null when the message is not a reply, or
+  // when the parent is the bot's own message (already covered by
+  // `replyToBotMessageId`). Adapters that cannot determine the parent's
+  // author MUST leave this null rather than guessing.
+  replyToOtherMessageId: string | null
   isDm: boolean
   // Original platform-side timestamp in milliseconds since epoch. Sourced
   // from Slack's `event.ts` or Discord's `event.timestamp` (via the

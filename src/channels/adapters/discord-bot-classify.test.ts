@@ -177,6 +177,8 @@ describe('classifyInbound — route path', () => {
       authorIsBot: false,
       isBotMention: true,
       replyToBotMessageId: null,
+      mentionsOthers: false,
+      replyToOtherMessageId: null,
       isDm: false,
       ts: Date.parse('2024-01-01T00:00:00Z'),
     })
@@ -212,10 +214,11 @@ describe('classifyInbound — route path', () => {
     expect(verdict.payload).toMatchObject({ workspace: '@dm', chat: 'dm1', isDm: true })
   })
 
-  test('reply to bot message surfaces replyToBotMessageId', () => {
+  test('reply to bot message surfaces replyToBotMessageId via Discord auto-mention', () => {
     const event = buildEvent({
       content: 'thanks',
       message_reference: { message_id: 'parent-1', channel_id: 'c1' },
+      mentions: [{ id: BOT_USER_ID, username: 'me' }],
     })
 
     const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
@@ -223,6 +226,7 @@ describe('classifyInbound — route path', () => {
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.replyToBotMessageId).toBe('parent-1')
+    expect(verdict.payload.replyToOtherMessageId).toBeNull()
   })
 
   test('treats every event as a mention while botUserId is unknown (pre-connected race window)', () => {
@@ -247,5 +251,98 @@ describe('classifyInbound — route path', () => {
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.replyToBotMessageId).toBeNull()
+  })
+})
+
+describe('discord-bot classifyInbound — targets-others detection', () => {
+  test('marks mentionsOthers=true when only non-bot users are mentioned', () => {
+    const event = buildEvent({
+      content: 'hey <@u2> can you check?',
+      mentions: [{ id: 'u2', username: 'bob' }],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.mentionsOthers).toBe(true)
+  })
+
+  test('marks mentionsOthers=false when the bot is among the mentioned users', () => {
+    const event = buildEvent({
+      content: `<@u2> <@${BOT_USER_ID}> please weigh in`,
+      mentions: [
+        { id: 'u2', username: 'bob' },
+        { id: BOT_USER_ID, username: 'me' },
+      ],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.mentionsOthers).toBe(false)
+  })
+
+  test('marks mentionsOthers=false when the message has no mentions at all', () => {
+    const event = buildEvent({ content: 'just some chatter' })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.mentionsOthers).toBe(false)
+  })
+
+  test('marks mentionsOthers=false during the pre-connected race window (botUserId unknown)', () => {
+    const event = buildEvent({
+      content: 'hey <@u2>',
+      mentions: [{ id: 'u2', username: 'bob' }],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, null)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.mentionsOthers).toBe(false)
+  })
+
+  test('reply to a non-bot message surfaces replyToOtherMessageId, not replyToBotMessageId', () => {
+    const event = buildEvent({
+      content: 'I disagree',
+      message_reference: { message_id: 'parent-from-bob' },
+      mentions: [{ id: 'u2', username: 'bob' }],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.replyToBotMessageId).toBeNull()
+    expect(verdict.payload.replyToOtherMessageId).toBe('parent-from-bob')
+  })
+
+  test('reply with no mentions array is still attributed to "other" (parent author unknown but not us)', () => {
+    const event = buildEvent({
+      content: 'late reply',
+      message_reference: { message_id: 'parent-x' },
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.replyToBotMessageId).toBeNull()
+    expect(verdict.payload.replyToOtherMessageId).toBe('parent-x')
+  })
+
+  test('non-replies leave replyToOtherMessageId null', () => {
+    const event = buildEvent({ content: 'just talking' })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.replyToOtherMessageId).toBeNull()
   })
 })

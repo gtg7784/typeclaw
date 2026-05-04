@@ -38,6 +38,8 @@ function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
     authorIsBot: false,
     isBotMention: false,
     replyToBotMessageId: null,
+    mentionsOthers: false,
+    replyToOtherMessageId: null,
     isDm: false,
     ts: 0,
     ...over,
@@ -354,6 +356,87 @@ describe('decideEngagement (solo-human fallback)', () => {
       participants: [participant('alice'), participant('bob'), { ...participant('peer1'), isBot: true }],
     })
     expect(twoHumans).toBe('observe')
+  })
+})
+
+describe('decideEngagement (targets-others suppressors)', () => {
+  test('observes a solo-human message that mentions someone other than us', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ mentionsOthers: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('observes a solo-human reply whose parent is someone else', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ replyToOtherMessageId: 'parent-from-bob' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('mention-of-us still engages even when the message also tags others', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ isBotMention: true, mentionsOthers: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: crowded,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('reply-to-us still engages even when other users are also tagged', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ replyToBotMessageId: 'msg42', mentionsOthers: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: crowded,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('DM still engages even with mentions-of-others present', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ isDm: true, workspace: '@dm', mentionsOthers: true }),
+      config: baseConfig,
+      key: 'discord-bot:@dm:d1:',
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('sticky credit still engages even with mentions-of-others present', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const decision = decideEngagement({
+      message: inbound({ mentionsOthers: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: [participant('alice')],
+    })
+    expect(decision).toBe('engage')
   })
 })
 
