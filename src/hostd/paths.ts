@@ -8,6 +8,14 @@ import { join } from 'node:path'
 // location at runtime.
 const CONTAINER_HOST_RUN_DIR = '/run/typeclaw-host'
 const SOCKET_FILE = 'hostd.sock'
+const REGISTRATIONS_DIR = 'registrations'
+
+// Defense-in-depth: containerName arrives from RPC payloads (some of which
+// originate inside the container). Docker already forbids slashes and most
+// punctuation in names, but we don't want to trust the wire to enforce that.
+// The character class mirrors Docker's container-naming rules; anything
+// else is rejected so a malicious payload can't escape registrationsDir().
+const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/
 
 export function homeRoot(): string {
   const override = process.env.TYPECLAW_HOME
@@ -39,6 +47,20 @@ export function logfilePath(): string {
   return join(logDir(), 'hostd.log')
 }
 
+export function registrationsDir(): string {
+  return join(runDir(), REGISTRATIONS_DIR)
+}
+
+// Throws on any name that could traverse out of registrationsDir() or
+// confuse the filesystem. Caller's responsibility to handle the error;
+// don't catch-and-ignore — an invalid name is a protocol violation.
+export function registrationFilePath(containerName: string): string {
+  if (!SAFE_NAME.test(containerName)) {
+    throw new Error(`invalid container name for registration file: ${JSON.stringify(containerName)}`)
+  }
+  return join(registrationsDir(), `${containerName}.json`)
+}
+
 // In-container path to the same socket the host daemon listens on. The
 // container-stage agent tool dials this path; the host bind-mounts the host
 // run dir at CONTAINER_HOST_RUN_DIR so the socket is reachable.
@@ -53,6 +75,8 @@ export function containerHostRunDir(): string {
 export async function ensureDirs(): Promise<void> {
   await mkdir(runDir(), { recursive: true })
   await mkdir(logDir(), { recursive: true })
+  await mkdir(registrationsDir(), { recursive: true })
   await chmod(runDir(), 0o700).catch(() => {})
   await chmod(logDir(), 0o700).catch(() => {})
+  await chmod(registrationsDir(), 0o700).catch(() => {})
 }

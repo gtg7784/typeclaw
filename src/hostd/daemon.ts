@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs'
-import { chmod, unlink } from 'node:fs/promises'
+import { chmod, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import type { Socket, UnixSocketListener } from 'bun'
 
@@ -8,7 +9,7 @@ import { defaultDockerExec, type DockerExec } from '@/container'
 import type { PortForwardEvent } from '@/portbroker'
 
 import { isDaemonReachable } from './client'
-import { ensureDirs, socketPath } from './paths'
+import { ensureDirs, registrationFilePath, registrationsDir, socketPath } from './paths'
 import type {
   HttpInfoResult,
   ListResult,
@@ -70,6 +71,7 @@ export type DaemonLogEvent =
   | { kind: 'daemon-stopping' }
   | { kind: 'register'; containerName: string }
   | { kind: 'deregister'; containerName: string; reason: 'requested' | 'gone' }
+  | { kind: 'registration-skipped'; containerName: string; reason: string }
   | { kind: 'shutdown-requested' }
   | { kind: 'port-forward-event'; event: PortForwardEvent }
 
@@ -97,6 +99,59 @@ function bearerToken(value: string | null): string | null {
   const prefix = 'Bearer '
   if (!value.startsWith(prefix)) return null
   return value.slice(prefix.length)
+}
+
+type RestoredPayload = {
+  containerName: string
+  cwd: string
+  restartToken?: string
+  wsHostPort?: number
+  portForward?: PortForward
+  brokerToken?: string
+}
+
+function isValidRestoredPayload(value: unknown, expectedName: string): value is RestoredPayload {
+  if (!value || typeof value !== 'object') return false
+  const v = value as Record<string, unknown>
+  if (v.containerName !== expectedName) return false
+  if (typeof v.cwd !== 'string') return false
+  if (v.restartToken !== undefined && typeof v.restartToken !== 'string') return false
+  if (v.wsHostPort !== undefined && (typeof v.wsHostPort !== 'number' || !Number.isFinite(v.wsHostPort))) return false
+  if (v.brokerToken !== undefined && typeof v.brokerToken !== 'string') return false
+  return true
+}
+
+async function restorePersistedRegistrations(
+  apply: (payload: RestoredPayload) => void,
+  log: (event: DaemonLogEvent | SupervisorLogEvent) => void,
+): Promise<void> {
+  let entries: string[]
+  try {
+    entries = await readdir(registrationsDir())
+  } catch {
+    return
+  }
+  for (const entry of entries) {
+    if (!entry.endsWith('.json')) continue
+    const expectedName = entry.slice(0, -'.json'.length)
+    const filePath = join(registrationsDir(), entry)
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(await readFile(filePath, 'utf8'))
+    } catch (error) {
+      log({ kind: 'registration-skipped', containerName: expectedName, reason: stringifyError(error) })
+      continue
+    }
+    if (!isValidRestoredPayload(parsed, expectedName)) {
+      log({ kind: 'registration-skipped', containerName: expectedName, reason: 'schema mismatch' })
+      continue
+    }
+    apply(parsed)
+  }
+}
+
+function stringifyError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
@@ -145,39 +200,76 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     return next
   }
 
-  const handleRegister = async (req: {
+  type RegisterPayload = {
     containerName: string
     cwd: string
     restartToken?: string
     wsHostPort?: number
     portForward?: PortForward
     brokerToken?: string
-  }): Promise<RpcResponse> => {
+  }
+
+  // Atomic write: temp + rename within registrationsDir() so a crash mid-write
+  // never leaves a half-written file that boot-time restore would misparse.
+  const persistRegistration = async (payload: RegisterPayload): Promise<void> => {
+    const final = registrationFilePath(payload.containerName)
+    const tmp = `${final}.${process.pid}.tmp`
+    const record = {
+      containerName: payload.containerName,
+      cwd: payload.cwd,
+      restartToken: payload.restartToken,
+      wsHostPort: payload.wsHostPort,
+      portForward: payload.portForward,
+      brokerToken: payload.brokerToken,
+    }
+    await writeFile(tmp, JSON.stringify(record), { mode: 0o600 })
+    await rename(tmp, final)
+  }
+
+  const removeRegistrationFile = async (containerName: string): Promise<void> => {
+    try {
+      await unlink(registrationFilePath(containerName))
+    } catch {}
+  }
+
+  const applyRegistration = (payload: RegisterPayload): void => {
+    const alreadyRegistered = cwds.has(payload.containerName)
+    cwds.set(payload.containerName, payload.cwd)
+    if (payload.restartToken) restartTokens.set(payload.containerName, payload.restartToken)
+    else restartTokens.delete(payload.containerName)
+    if (!alreadyRegistered) {
+      log({ kind: 'register', containerName: payload.containerName })
+    }
+    if (
+      opts.portbroker &&
+      payload.wsHostPort !== undefined &&
+      payload.portForward !== undefined &&
+      payload.brokerToken !== undefined
+    ) {
+      opts.portbroker.start({
+        containerName: payload.containerName,
+        cwd: payload.cwd,
+        policy: payload.portForward,
+        wsHostPort: payload.wsHostPort,
+        brokerToken: payload.brokerToken,
+        onEvent: (event) => log({ kind: 'port-forward-event', event }),
+      })
+    }
+  }
+
+  const handleRegister = async (req: RegisterPayload): Promise<RpcResponse> => {
     if (stopped) return { ok: false, reason: 'daemon stopping' }
     return runSerially(req.containerName, async () => {
       if (stopped) return { ok: false, reason: 'daemon stopping' }
-      const alreadyRegistered = cwds.has(req.containerName)
-      cwds.set(req.containerName, req.cwd)
-      if (req.restartToken) restartTokens.set(req.containerName, req.restartToken)
-      else restartTokens.delete(req.containerName)
-      if (!alreadyRegistered) {
-        log({ kind: 'register', containerName: req.containerName })
+      try {
+        await persistRegistration(req)
+      } catch (error) {
+        return {
+          ok: false,
+          reason: `failed to persist registration: ${error instanceof Error ? error.message : String(error)}`,
+        }
       }
-      if (
-        opts.portbroker &&
-        req.wsHostPort !== undefined &&
-        req.portForward !== undefined &&
-        req.brokerToken !== undefined
-      ) {
-        opts.portbroker.start({
-          containerName: req.containerName,
-          cwd: req.cwd,
-          policy: req.portForward,
-          wsHostPort: req.wsHostPort,
-          brokerToken: req.brokerToken,
-          onEvent: (event) => log({ kind: 'port-forward-event', event }),
-        })
-      }
+      applyRegistration(req)
       return { ok: true }
     })
   }
@@ -188,6 +280,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       restartTokens.delete(req.containerName)
       gcMisses.delete(req.containerName)
       if (opts.portbroker) await opts.portbroker.stop(req.containerName, 'deregistered').catch(() => {})
+      await removeRegistrationFile(req.containerName)
       if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
       return { ok: true }
     })
@@ -343,6 +436,13 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   httpPort = httpServer.port ?? 0
   log({ kind: 'daemon-http-listening', host: opts.httpHost ?? '0.0.0.0', port: httpPort })
 
+  // Boot-time restore: replay every persisted registration into the in-memory
+  // maps and revive portbroker for it. Runs before Bun.listen so the socket
+  // is never accepting RPCs against a half-restored registry. A bad file
+  // (parse error, schema mismatch) is logged-and-skipped — one corrupt
+  // registration must not gate every other container's recovery.
+  await restorePersistedRegistrations(applyRegistration, log)
+
   const listener: UnixSocketListener<ServerState> = Bun.listen<ServerState>({
     unix: path,
     socket: {
@@ -391,7 +491,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       gcMisses.delete(name)
       void runSerially(name, async () => {
         const hadCwd = cwds.delete(name)
+        restartTokens.delete(name)
         if (opts.portbroker) await opts.portbroker.stop(name, 'deregistered').catch(() => {})
+        await removeRegistrationFile(name)
         if (hadCwd) log({ kind: 'deregister', containerName: name, reason: 'gone' })
         return { ok: true }
       })

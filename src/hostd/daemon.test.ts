@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { DockerExec } from '@/container'
 
 import { send, sendHttp } from './client'
-import { startDaemon, type Daemon } from './daemon'
-import { socketPath } from './paths'
+import { startDaemon, type Daemon, type PortbrokerCallbacks, type PortbrokerStartInput } from './daemon'
+import { registrationFilePath, registrationsDir, socketPath } from './paths'
 import type { HttpInfoResult, ListResult, VersionResult } from './protocol'
 
 let home: string
@@ -315,5 +315,122 @@ describe('startDaemon', () => {
       await new Promise((resolve) => setTimeout(resolve, 30))
     }
     throw new Error('shutdown did not complete in time')
+  })
+
+  test('register persists the payload to registrations/<name>.json with mode 0600', async () => {
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+
+    const reg = await send({
+      kind: 'register',
+      containerName: 'coder',
+      cwd: '/agent/coder',
+      restartToken: 'tok-1',
+      wsHostPort: 12345,
+      portForward: { allow: '*' },
+      brokerToken: 'broker-1',
+    })
+    expect(reg.ok).toBe(true)
+
+    const filePath = registrationFilePath('coder')
+    expect(existsSync(filePath)).toBe(true)
+
+    const stats = await stat(filePath)
+    expect(stats.mode & 0o777).toBe(0o600)
+
+    const contents = JSON.parse(await readFile(filePath, 'utf8'))
+    expect(contents).toEqual({
+      containerName: 'coder',
+      cwd: '/agent/coder',
+      restartToken: 'tok-1',
+      wsHostPort: 12345,
+      portForward: { allow: '*' },
+      brokerToken: 'broker-1',
+    })
+  })
+
+  test('deregister unlinks the persisted registration file', async () => {
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+    await send({ kind: 'register', containerName: 'coder', cwd: '/agent/coder' })
+    expect(existsSync(registrationFilePath('coder'))).toBe(true)
+
+    await send({ kind: 'deregister', containerName: 'coder' })
+    expect(existsSync(registrationFilePath('coder'))).toBe(false)
+  })
+
+  test('persisted registrations survive daemon respawn', async () => {
+    const restartCalls: Array<{ containerName: string; cwd: string }> = []
+    const restart = async ({ containerName, cwd }: { containerName: string; cwd: string }) => {
+      restartCalls.push({ containerName, cwd })
+      return { ok: true as const }
+    }
+
+    const d1 = await startDaemon({ exec: fakeExec(new Set(['coder'])), gcIntervalMs: 1_000_000, restart })
+    await send({
+      kind: 'register',
+      containerName: 'coder',
+      cwd: '/agent/coder',
+      restartToken: 'tok-survives',
+    })
+    await d1.stop()
+
+    daemon = await startDaemon({ exec: fakeExec(new Set(['coder'])), gcIntervalMs: 1_000_000, restart })
+
+    const list = await send({ kind: 'list' })
+    expect(list.ok).toBe(true)
+    if (!list.ok) return
+    expect((list.result as ListResult).registrations).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
+
+    const ack = await send({ kind: 'restart', containerName: 'coder' })
+    expect(ack.ok).toBe(true)
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
+  })
+
+  test('boot-time restore tolerates corrupted registration files', async () => {
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+    await send({ kind: 'register', containerName: 'good', cwd: '/agent/good' })
+    await daemon.stop()
+
+    await writeFile(join(registrationsDir(), 'broken.json'), '{ this is not json')
+    await writeFile(join(registrationsDir(), 'mismatch.json'), JSON.stringify({ containerName: 'other', cwd: '/x' }))
+
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+
+    const list = await send({ kind: 'list' })
+    expect(list.ok).toBe(true)
+    if (!list.ok) return
+    expect((list.result as ListResult).registrations.map((r) => r.containerName).sort()).toEqual(['good'])
+  })
+
+  test('boot-time restore revives portbroker for persisted registrations with portbroker fields', async () => {
+    const startCalls: PortbrokerStartInput[] = []
+    const portbroker: PortbrokerCallbacks = {
+      start: (input) => {
+        startCalls.push(input)
+      },
+      stop: async () => {},
+    }
+
+    const d1 = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, portbroker })
+    await send({
+      kind: 'register',
+      containerName: 'with-broker',
+      cwd: '/agent/with-broker',
+      restartToken: 't',
+      wsHostPort: 54321,
+      portForward: { allow: '*' },
+      brokerToken: 'btok',
+    })
+    await d1.stop()
+
+    startCalls.length = 0
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, portbroker })
+
+    expect(startCalls).toHaveLength(1)
+    expect(startCalls[0]?.containerName).toBe('with-broker')
+    expect(startCalls[0]?.cwd).toBe('/agent/with-broker')
+    expect(startCalls[0]?.wsHostPort).toBe(54321)
+    expect(startCalls[0]?.brokerToken).toBe('btok')
   })
 })
