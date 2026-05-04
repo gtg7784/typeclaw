@@ -123,6 +123,30 @@ describe('createConfigReloadable', () => {
     expect(diff.restartRequired.map((c) => c.path)).toEqual(['dockerfile'])
   })
 
+  test('field fence: gitignore changes land in `restartRequired`', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL_A, gitignore: { append: ['scratch/'] } }),
+    )
+    const reloadable = createConfigReloadable({ cwd })
+    await reloadable.reload()
+
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: VALID_MODEL_A, gitignore: { append: ['scratch/', '*.local.log'] } }),
+    )
+    const result = await reloadable.reload()
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const diff = result.details as {
+      applied: unknown[]
+      restartRequired: { path: string }[]
+      ignored: unknown[]
+    }
+    expect(diff.restartRequired.map((c) => c.path)).toEqual(['gitignore'])
+  })
+
   test('field fence: $schema change is ignored', async () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, $schema: './a.json' }))
     const reloadable = createConfigReloadable({ cwd })

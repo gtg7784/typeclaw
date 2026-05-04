@@ -134,6 +134,35 @@ describe('dockerfileSchema', () => {
   })
 })
 
+describe('gitignoreSchema', () => {
+  test('defaults to an empty append array when omitted', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.gitignore).toEqual({ append: [] })
+  })
+
+  test('accepts custom gitignore entries in append order', () => {
+    const parsed = configSchema.parse({
+      model: VALID_MODEL,
+      gitignore: { append: ['scratch/', '*.local.log'] },
+    })
+    expect(parsed.gitignore.append).toEqual(['scratch/', '*.local.log'])
+  })
+
+  test('defaults append to an empty array when gitignore object is present', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, gitignore: {} })
+    expect(parsed.gitignore).toEqual({ append: [] })
+  })
+
+  test('rejects multiline append entries so each array item maps to one gitignore line', () => {
+    expect(() =>
+      configSchema.parse({
+        model: VALID_MODEL,
+        gitignore: { append: ['scratch/\n*.local.log'] },
+      }),
+    ).toThrow(/single gitignore lines/)
+  })
+})
+
 describe('mountSchema name validation', () => {
   test.each([
     ['lowercase', 'projects'],

@@ -62,6 +62,18 @@ export const dockerfileSchema = z
 
 export type DockerfileConfig = z.infer<typeof dockerfileSchema>
 
+const gitignoreLineSchema = z.string().refine((line) => !/[\r\n]/.test(line), {
+  message: 'gitignore.append entries must be single gitignore lines; split multiline patterns into array entries',
+})
+
+export const gitignoreSchema = z
+  .object({
+    append: z.array(gitignoreLineSchema).default([]),
+  })
+  .default({ append: [] })
+
+export type GitignoreConfig = z.infer<typeof gitignoreSchema>
+
 export const configSchema = z
   .object({
     $schema: z.string().optional(),
@@ -75,6 +87,7 @@ export const configSchema = z
     channels: channelsSchema,
     portForward: portForwardSchema,
     dockerfile: dockerfileSchema,
+    gitignore: gitignoreSchema,
   })
   .catchall(z.unknown())
 
@@ -163,6 +176,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   channels: 'applied',
   portForward: 'restart-required',
   dockerfile: 'restart-required',
+  gitignore: 'restart-required',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -216,7 +230,17 @@ function readPath(obj: unknown, path: string): unknown {
 // each block against its plugin's `configSchema`.
 export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'object' || raw === null) return {}
-  const known = new Set(['$schema', 'port', 'model', 'mounts', 'plugins', 'channels', 'portForward', 'dockerfile'])
+  const known = new Set([
+    '$schema',
+    'port',
+    'model',
+    'mounts',
+    'plugins',
+    'channels',
+    'portForward',
+    'dockerfile',
+    'gitignore',
+  ])
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!known.has(key)) result[key] = value
