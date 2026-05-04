@@ -1,6 +1,6 @@
 import { defineCommand } from 'citty'
 
-import { config } from '@/config'
+import { config, validateConfig } from '@/config'
 import { start } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
@@ -27,6 +27,12 @@ export const startCommand = defineCommand({
 
     if (!isInitialized(cwd)) {
       console.error('TypeClaw config file not found. Run `typeclaw init` first.')
+      process.exit(1)
+    }
+
+    const validated = validateConfig(cwd)
+    if (!validated.ok) {
+      console.error(validated.reason)
       process.exit(1)
     }
 
