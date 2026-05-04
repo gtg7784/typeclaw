@@ -31,6 +31,7 @@ async function writeDockerfile(dir: string): Promise<void> {
 
 type ScaffoldedConfig = {
   mounts?: Array<{ name: string; path: string; readOnly?: boolean; description?: string }>
+  dockerfile?: { append?: string[] }
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -38,6 +39,7 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
     mounts: overrides.mounts ?? [],
+    ...(overrides.dockerfile ? { dockerfile: overrides.dockerfile } : {}),
   }
   await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
 }
@@ -402,6 +404,25 @@ describe('refreshDockerfile', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test('writes custom append lines from typeclaw.json before the entrypoint', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-'))
+    try {
+      await writeTypeclawConfig(dir, { dockerfile: { append: ['RUN echo custom', 'ENV CUSTOM_FLAG=1'] } })
+
+      await refreshDockerfile(dir)
+
+      const written = await readFile(join(dir, 'Dockerfile'), 'utf8')
+      const runIdx = written.indexOf('RUN echo custom')
+      const envIdx = written.indexOf('ENV CUSTOM_FLAG=1')
+      const entrypointIdx = written.indexOf('ENTRYPOINT ["bun", "run", "typeclaw"]')
+      expect(runIdx).toBeGreaterThan(-1)
+      expect(runIdx).toBeLessThan(envIdx)
+      expect(envIdx).toBeLessThan(entrypointIdx)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('refreshGitignore', () => {
@@ -646,6 +667,29 @@ describe('start (composition)', () => {
     expect(buildCall).toBeDefined()
     expect(buildCall!.dockerfileSnapshot).toBe(buildDockerfile())
     expect(buildCall!.dockerfileSnapshot).not.toContain('FROM stale')
+  })
+
+  test('start refreshes Dockerfile with custom append lines from typeclaw.json', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { dockerfile: { append: ['RUN echo from-config'] } })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      exec,
+      allocatePort: deterministicAllocator,
+    })
+
+    expect(result.ok).toBe(true)
+    const buildCall = calls.find((c) => c.args[0] === 'build')
+    if (!buildCall?.dockerfileSnapshot) throw new Error('expected docker build to capture Dockerfile snapshot')
+    expect(buildCall.dockerfileSnapshot).toContain('RUN echo from-config')
+    expect(buildCall.dockerfileSnapshot.indexOf('RUN echo from-config')).toBeLessThan(
+      buildCall.dockerfileSnapshot.indexOf('ENTRYPOINT ["bun", "run", "typeclaw"]'),
+    )
   })
 
   test('commits the refreshed .gitignore when the agent folder is a git repo', async () => {

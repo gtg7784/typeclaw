@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { config } from '@/config'
+import { config, configSchema, type Config } from '@/config'
 import { start } from '@/container'
 import { createTui } from '@/tui'
 
@@ -290,7 +290,10 @@ export async function writeDockerAssets(root: string): Promise<DockerAssetsResul
     const typeclawSpec = pkg.dependencies?.typeclaw ?? ''
     const devMode = typeclawSpec.startsWith('file:')
 
-    await writeFile(join(root, DOCKERFILE), buildDockerfile(), { flag: 'wx' }).catch(ignoreExists)
+    const typeclawConfig = await readTypeclawConfig(root)
+    await writeFile(join(root, DOCKERFILE), buildDockerfile(typeclawConfig.dockerfile), { flag: 'wx' }).catch(
+      ignoreExists,
+    )
 
     return { ok: true, devMode }
   } catch (error) {
@@ -301,6 +304,16 @@ export async function writeDockerAssets(root: string): Promise<DockerAssetsResul
 async function readPackageJson(root: string): Promise<{ name?: string; dependencies?: Record<string, string> }> {
   const raw = await readFile(join(root, PACKAGE_FILE), 'utf8')
   return JSON.parse(raw) as { name?: string; dependencies?: Record<string, string> }
+}
+
+async function readTypeclawConfig(root: string): Promise<Config> {
+  try {
+    const raw = await readFile(join(root, CONFIG_FILE), 'utf8')
+    return configSchema.parse(JSON.parse(raw))
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return configSchema.parse({})
+    throw error
+  }
 }
 
 export async function runBunInstall(cwd: string): Promise<InstallResult> {

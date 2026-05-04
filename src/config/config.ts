@@ -50,6 +50,18 @@ export const portForwardSchema = z
 
 export type PortForward = z.infer<typeof portForwardSchema>
 
+const dockerfileLineSchema = z.string().refine((line) => !/[\r\n]/.test(line), {
+  message: 'dockerfile.append entries must be single Dockerfile lines; split multiline instructions into array entries',
+})
+
+export const dockerfileSchema = z
+  .object({
+    append: z.array(dockerfileLineSchema).default([]),
+  })
+  .default({ append: [] })
+
+export type DockerfileConfig = z.infer<typeof dockerfileSchema>
+
 export const configSchema = z
   .object({
     $schema: z.string().optional(),
@@ -62,6 +74,7 @@ export const configSchema = z
     plugins: z.array(z.string().min(1)).default([]),
     channels: channelsSchema,
     portForward: portForwardSchema,
+    dockerfile: dockerfileSchema,
   })
   .catchall(z.unknown())
 
@@ -149,6 +162,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   plugins: 'restart-required',
   channels: 'applied',
   portForward: 'restart-required',
+  dockerfile: 'restart-required',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -202,7 +216,7 @@ function readPath(obj: unknown, path: string): unknown {
 // each block against its plugin's `configSchema`.
 export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
   if (typeof raw !== 'object' || raw === null) return {}
-  const known = new Set(['$schema', 'port', 'model', 'mounts', 'plugins', 'channels', 'portForward'])
+  const known = new Set(['$schema', 'port', 'model', 'mounts', 'plugins', 'channels', 'portForward', 'dockerfile'])
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
     if (!known.has(key)) result[key] = value
