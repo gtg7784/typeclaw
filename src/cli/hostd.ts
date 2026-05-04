@@ -65,6 +65,8 @@ function formatLog(event: DaemonLogEvent | SupervisorLogEvent): string {
       return `[hostd] listening on ${event.socket}`
     case 'daemon-http-listening':
       return `[hostd] HTTP control listening on ${event.host}:${event.port}`
+    case 'daemon-http-port-fallback':
+      return `[hostd] HTTP preferred port ${event.preferred} busy; fell back to ${event.actual} (containers started on ${event.preferred} will see stale TYPECLAW_HOSTD_URL until restarted)`
     case 'daemon-stopping':
       return `[hostd] stopping`
     case 'shutdown-requested':

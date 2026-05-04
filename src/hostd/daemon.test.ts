@@ -357,7 +357,7 @@ describe('startDaemon', () => {
     expect(existsSync(registrationFilePath('coder'))).toBe(false)
   })
 
-  test('persisted registrations survive daemon respawn', async () => {
+  test('persisted registrations survive daemon respawn (HTTP restart works against a fresh daemon)', async () => {
     const restartCalls: Array<{ containerName: string; cwd: string }> = []
     const restart = async ({ containerName, cwd }: { containerName: string; cwd: string }) => {
       restartCalls.push({ containerName, cwd })
@@ -380,7 +380,15 @@ describe('startDaemon', () => {
     if (!list.ok) return
     expect((list.result as ListResult).registrations).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
 
-    const ack = await send({ kind: 'restart', containerName: 'coder' })
+    const httpInfo = await send({ kind: 'http-info' })
+    expect(httpInfo.ok).toBe(true)
+    if (!httpInfo.ok) return
+    const port = (httpInfo.result as HttpInfoResult).port
+
+    const ack = await sendHttp(
+      { kind: 'restart', containerName: 'coder' },
+      { url: `http://127.0.0.1:${port}`, token: 'tok-survives' },
+    )
     expect(ack.ok).toBe(true)
 
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -432,5 +440,52 @@ describe('startDaemon', () => {
     expect(startCalls[0]?.cwd).toBe('/agent/with-broker')
     expect(startCalls[0]?.wsHostPort).toBe(54321)
     expect(startCalls[0]?.brokerToken).toBe('btok')
+  })
+
+  test('HTTP control falls back to an ephemeral port when the preferred port is busy', async () => {
+    const blocker = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('blocker') })
+    try {
+      const events: Array<{ kind: string; preferred?: number; actual?: number }> = []
+      daemon = await startDaemon({
+        exec: fakeExec(),
+        gcIntervalMs: 1_000_000,
+        httpPort: blocker.port,
+        httpHost: '127.0.0.1',
+        onLog: (event) => {
+          if (event.kind === 'daemon-http-port-fallback' || event.kind === 'daemon-http-listening') {
+            events.push(event as { kind: string; preferred?: number; actual?: number })
+          }
+        },
+      })
+
+      const fallback = events.find((e) => e.kind === 'daemon-http-port-fallback')
+      const listening = events.find((e) => e.kind === 'daemon-http-listening')
+      expect(fallback).toBeDefined()
+      expect(fallback!.preferred).toBe(blocker.port)
+      expect(listening).toBeDefined()
+      expect(listening!.actual ?? 0).not.toBe(blocker.port)
+    } finally {
+      blocker.stop(true)
+    }
+  })
+
+  test('HTTP control uses the preferred port when it is free', async () => {
+    const probe = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch: () => new Response('probe') })
+    const candidatePort = probe.port
+    probe.stop(true)
+
+    const events: Array<{ kind: string; port?: number }> = []
+    daemon = await startDaemon({
+      exec: fakeExec(),
+      gcIntervalMs: 1_000_000,
+      httpPort: candidatePort,
+      httpHost: '127.0.0.1',
+      onLog: (event) => {
+        if (event.kind === 'daemon-http-listening') events.push(event as { kind: string; port?: number })
+      },
+    })
+
+    expect(events).toHaveLength(1)
+    expect(events[0]?.port).toBe(candidatePort)
   })
 })

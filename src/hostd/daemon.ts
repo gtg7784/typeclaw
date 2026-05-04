@@ -68,6 +68,7 @@ export type PortbrokerStartInput = {
 export type DaemonLogEvent =
   | { kind: 'daemon-listening'; socket: string }
   | { kind: 'daemon-http-listening'; host: string; port: number }
+  | { kind: 'daemon-http-port-fallback'; preferred: number; actual: number }
   | { kind: 'daemon-stopping' }
   | { kind: 'register'; containerName: string }
   | { kind: 'deregister'; containerName: string; reason: 'requested' | 'gone' }
@@ -84,6 +85,14 @@ const DEFAULT_GC_INTERVAL_MS = 30_000
 const DEFAULT_GC_MISSES_TO_DEREGISTER = 3
 const MAX_REQUEST_BUFFER_BYTES = 64 * 1024
 const MAX_HTTP_REQUEST_BYTES = 64 * 1024
+
+// Preferred port for the HTTP control surface. Adjacent to CONTAINER_PORT
+// (8973) for mnemonics. Stability matters: containers cache the URL in
+// TYPECLAW_HOSTD_URL at `docker run` time, so a respawn that picks a fresh
+// random port would leave running containers with stale URLs and no way to
+// reach hostd. We try 8974 first and only fall back to an ephemeral port if
+// it's already in use by some other local service.
+const STABLE_HTTP_PORT = 8974
 
 type ServerState = { buf: string }
 
@@ -401,40 +410,62 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     }
   }
 
-  const httpServer = Bun.serve({
-    hostname: opts.httpHost ?? '0.0.0.0',
-    port: opts.httpPort ?? 0,
-    async fetch(req) {
-      const url = new URL(req.url)
-      if (req.method !== 'POST' || url.pathname !== '/rpc') {
-        return json({ ok: false, reason: 'not found' }, 404)
+  const httpFetch = async (req: globalThis.Request): Promise<globalThis.Response> => {
+    const url = new URL(req.url)
+    if (req.method !== 'POST' || url.pathname !== '/rpc') {
+      return json({ ok: false, reason: 'not found' }, 404)
+    }
+    const token = bearerToken(req.headers.get('authorization'))
+    if (!token) return json({ ok: false, reason: 'missing bearer token' }, 401)
+    const contentLength = Number(req.headers.get('content-length') ?? '0')
+    if (Number.isFinite(contentLength) && contentLength > MAX_HTTP_REQUEST_BYTES) {
+      return json({ ok: false, reason: 'request exceeds buffer limit' }, 413)
+    }
+    let rpc: Request
+    try {
+      const body = await req.text()
+      if (body.length > MAX_HTTP_REQUEST_BYTES) return json({ ok: false, reason: 'request exceeds buffer limit' }, 413)
+      rpc = JSON.parse(body) as Request
+    } catch {
+      return json({ ok: false, reason: 'invalid request json' }, 400)
+    }
+    if (rpc.kind !== 'restart') {
+      return json({ ok: false, reason: 'http transport only supports restart' }, 403)
+    }
+    if (restartTokens.get(rpc.containerName) !== token) {
+      return json({ ok: false, reason: 'invalid restart token' }, 403)
+    }
+    return json(handleRestart(rpc))
+  }
+
+  const httpHostname = opts.httpHost ?? '0.0.0.0'
+  // Try the stable port first so containers' cached TYPECLAW_HOSTD_URL stays
+  // valid across hostd respawns. EADDRINUSE means another local service holds
+  // it — fall back to ephemeral so the daemon still comes up. The fallback
+  // doesn't break NEW container starts (the URL is captured fresh from
+  // httpServer.port), but it does break the URL of containers that started
+  // when 8974 was free and are still running. That trade-off favors keeping
+  // hostd alive over preserving every URL — fail-hard would brick the whole
+  // dev workflow whenever a port collision is hit.
+  const tryServe = (port: number): ReturnType<typeof Bun.serve> | { error: 'EADDRINUSE' } => {
+    try {
+      return Bun.serve({ hostname: httpHostname, port, fetch: httpFetch })
+    } catch (error) {
+      if (error instanceof Error && (error as Error & { code?: string }).code === 'EADDRINUSE') {
+        return { error: 'EADDRINUSE' }
       }
-      const token = bearerToken(req.headers.get('authorization'))
-      if (!token) return json({ ok: false, reason: 'missing bearer token' }, 401)
-      const contentLength = Number(req.headers.get('content-length') ?? '0')
-      if (Number.isFinite(contentLength) && contentLength > MAX_HTTP_REQUEST_BYTES) {
-        return json({ ok: false, reason: 'request exceeds buffer limit' }, 413)
-      }
-      let rpc: Request
-      try {
-        const body = await req.text()
-        if (body.length > MAX_HTTP_REQUEST_BYTES)
-          return json({ ok: false, reason: 'request exceeds buffer limit' }, 413)
-        rpc = JSON.parse(body) as Request
-      } catch {
-        return json({ ok: false, reason: 'invalid request json' }, 400)
-      }
-      if (rpc.kind !== 'restart') {
-        return json({ ok: false, reason: 'http transport only supports restart' }, 403)
-      }
-      if (restartTokens.get(rpc.containerName) !== token) {
-        return json({ ok: false, reason: 'invalid restart token' }, 403)
-      }
-      return json(handleRestart(rpc))
-    },
-  })
+      throw error
+    }
+  }
+  const preferredPort = opts.httpPort ?? STABLE_HTTP_PORT
+  const stableAttempt = tryServe(preferredPort)
+  const httpServer =
+    'error' in stableAttempt ? Bun.serve({ hostname: httpHostname, port: 0, fetch: httpFetch }) : stableAttempt
+  if ('error' in stableAttempt) {
+    log({ kind: 'daemon-http-port-fallback', preferred: preferredPort, actual: httpServer.port ?? 0 })
+  }
   httpPort = httpServer.port ?? 0
-  log({ kind: 'daemon-http-listening', host: opts.httpHost ?? '0.0.0.0', port: httpPort })
+  log({ kind: 'daemon-http-listening', host: httpHostname, port: httpPort })
 
   // Boot-time restore: replay every persisted registration into the in-memory
   // maps and revive portbroker for it. Runs before Bun.listen so the socket
