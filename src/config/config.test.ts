@@ -105,6 +105,35 @@ describe('portForwardSchema', () => {
   })
 })
 
+describe('dockerfileSchema', () => {
+  test('defaults to an empty append array when omitted', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.dockerfile).toEqual({ append: [] })
+  })
+
+  test('accepts custom Dockerfile lines in append order', () => {
+    const parsed = configSchema.parse({
+      model: VALID_MODEL,
+      dockerfile: { append: ['RUN apt-get update', 'ENV CUSTOM_TOOL=1'] },
+    })
+    expect(parsed.dockerfile.append).toEqual(['RUN apt-get update', 'ENV CUSTOM_TOOL=1'])
+  })
+
+  test('defaults append to an empty array when dockerfile object is present', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, dockerfile: {} })
+    expect(parsed.dockerfile).toEqual({ append: [] })
+  })
+
+  test('rejects multiline append entries so each array item maps to one Dockerfile line', () => {
+    expect(() =>
+      configSchema.parse({
+        model: VALID_MODEL,
+        dockerfile: { append: ['RUN printf "one\ntwo"'] },
+      }),
+    ).toThrow(/single Dockerfile lines/)
+  })
+})
+
 describe('mountSchema name validation', () => {
   test.each([
     ['lowercase', 'projects'],
@@ -449,6 +478,7 @@ describe('plugin config layout', () => {
     const result = extractPluginConfigs({
       model: VALID_MODEL,
       portForward: { allow: '*' },
+      dockerfile: { append: [] },
       'standup-log': { schedule: '0 17 * * 5' },
     })
     expect(result).toEqual({ 'standup-log': { schedule: '0 17 * * 5' } })
