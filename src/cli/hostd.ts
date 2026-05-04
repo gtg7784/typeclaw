@@ -1,10 +1,10 @@
 import { defineCommand } from 'citty'
 
-import { loadConfigSync, validateConfig } from '@/config'
-import { start, stop } from '@/container'
+import { loadConfigSync, validateConfig, type Config, type ValidateConfigResult } from '@/config'
+import { start, stop, type StartOptions, type StartResult, type StopResult } from '@/container'
 import { startDaemon, type DaemonLogEvent } from '@/hostd/daemon'
 import { createPortbrokerManager } from '@/hostd/portbroker-manager'
-import type { SupervisorLogEvent } from '@/hostd/supervisor'
+import type { SupervisorLogEvent, SupervisorRestart } from '@/hostd/supervisor'
 import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from '@/hostd/version'
 
 export const hostdCommand = defineCommand({
@@ -27,23 +27,7 @@ export const hostdCommand = defineCommand({
       version,
       onShutdown: () => process.exit(0),
       portbroker,
-      restart: async ({ containerName, cwd }) => {
-        const validated = validateConfig(cwd)
-        if (!validated.ok) {
-          return { ok: false, reason: `invalid config for ${containerName}: ${validated.reason}` }
-        }
-        const stopResult = await stop({ cwd })
-        if (!stopResult.ok) return { ok: false, reason: `stop failed: ${stopResult.reason}` }
-
-        const cfg = loadConfigSync(cwd)
-        const startResult = await start({
-          cwd,
-          preferredHostPort: cfg.port,
-          cliEntry,
-        })
-        if (!startResult.ok) return { ok: false, reason: `start failed: ${startResult.reason}` }
-        return { ok: true }
-      },
+      restart: buildHostdRestart(cliEntry),
     })
 
     const shutdown = (): void => {
@@ -58,6 +42,41 @@ export const hostdCommand = defineCommand({
     await new Promise<void>(() => {})
   },
 })
+
+export type HostdRestartDeps = {
+  validateConfig: (cwd: string) => ValidateConfigResult
+  stop: (opts: { cwd: string }) => Promise<StopResult>
+  loadConfigSync: (cwd: string) => Config
+  start: (opts: StartOptions) => Promise<StartResult>
+}
+
+const defaultRestartDeps: HostdRestartDeps = {
+  validateConfig,
+  stop,
+  loadConfigSync,
+  start,
+}
+
+export function buildHostdRestart(cliEntry: string, deps: HostdRestartDeps = defaultRestartDeps): SupervisorRestart {
+  return async ({ containerName, cwd }) => {
+    const validated = deps.validateConfig(cwd)
+    if (!validated.ok) {
+      return { ok: false, reason: `invalid config for ${containerName}: ${validated.reason}` }
+    }
+    const stopResult = await deps.stop({ cwd })
+    if (!stopResult.ok) return { ok: false, reason: `stop failed: ${stopResult.reason}` }
+
+    const cfg = deps.loadConfigSync(cwd)
+    const startResult = await deps.start({
+      cwd,
+      preferredHostPort: cfg.port,
+      cliEntry,
+      reuseCurrentHostDaemon: true,
+    })
+    if (!startResult.ok) return { ok: false, reason: `start failed: ${startResult.reason}` }
+    return { ok: true }
+  }
+}
 
 function writeLogLine(msg: string): void {
   console.log(`${new Date().toISOString()} ${msg}`)
