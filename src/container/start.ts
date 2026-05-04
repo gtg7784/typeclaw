@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
-import { configSchema, expandMountPath, type Mount } from '@/config/config'
+import { configSchema, expandMountPath, type Config } from '@/config/config'
 import { send as sendToDaemon } from '@/hostd/client'
 import { ensureDaemon } from '@/hostd/spawn'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
@@ -243,7 +243,8 @@ export async function planStart({
 }
 
 export async function refreshDockerfile(cwd: string): Promise<void> {
-  await writeFile(join(cwd, DOCKERFILE), buildDockerfile())
+  const cfg = await loadTypeclawConfig(cwd)
+  await writeFile(join(cwd, DOCKERFILE), buildDockerfile(cfg.dockerfile))
 }
 
 export async function refreshGitignore(cwd: string): Promise<void> {
@@ -325,15 +326,13 @@ async function detectDevSource(cwd: string): Promise<string | null> {
 // folder mid-init). Anything else — malformed JSON, schema-invalid config,
 // invalid mount entry — must surface so the user sees they configured a mount
 // that won't be applied.
-async function loadMounts(cwd: string): Promise<Mount[]> {
-  let raw: string
-  try {
-    raw = await readFile(join(cwd, CONFIG_FILE), 'utf8')
-  } catch {
-    return []
-  }
-  const parsed = configSchema.parse(JSON.parse(raw))
-  return parsed.mounts
+async function loadMounts(cwd: string): Promise<Config['mounts']> {
+  const cfg = await loadTypeclawConfig(cwd)
+  return cfg.mounts
+}
+
+async function loadTypeclawConfig(cwd: string): Promise<Config> {
+  return configSchema.parse(await loadConfigJson(cwd))
 }
 
 async function registerWithDaemon({
@@ -351,7 +350,7 @@ async function registerWithDaemon({
   if (!ensured.ok) return { state: 'unavailable', reason: ensured.reason }
   const token = randomBytes(32).toString('base64url')
   const brokerToken = randomBytes(32).toString('base64url')
-  const cfg = configSchema.parse(await loadConfigJson(cwd))
+  const cfg = await loadTypeclawConfig(cwd)
   const reply = await sendToDaemon({
     kind: 'register',
     containerName,
@@ -369,12 +368,13 @@ async function registerWithDaemon({
 }
 
 async function loadConfigJson(cwd: string): Promise<unknown> {
+  let raw: string
   try {
-    const raw = await readFile(join(cwd, CONFIG_FILE), 'utf8')
-    return JSON.parse(raw)
+    raw = await readFile(join(cwd, CONFIG_FILE), 'utf8')
   } catch {
     return {}
   }
+  return JSON.parse(raw)
 }
 
 type PreparedHostDaemonStatus =
