@@ -22,7 +22,7 @@ async function settle(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20))
 }
 
-describe('createPortbrokerManager tailscaleServe', () => {
+describe('createPortbrokerManager Tailscale Serve', () => {
   test('serves opened forwarded ports and turns them off on broker stop', async () => {
     const calls: string[][] = []
     const forwarded: PortForwardEvent[] = []
@@ -47,7 +47,7 @@ describe('createPortbrokerManager tailscaleServe', () => {
     manager.start({
       containerName: 'coder',
       cwd: '/agent/coder',
-      policy: { allow: '*', tailscaleServe: true },
+      policy: { allow: '*' },
       wsHostPort: 12345,
       brokerToken: 'tok',
       onEvent: (event) => forwarded.push(event),
@@ -78,35 +78,35 @@ describe('createPortbrokerManager tailscaleServe', () => {
     ])
   })
 
-  test('does not invoke tailscale when tailscaleServe is disabled', async () => {
+  test('off-switch policy never opens a broker connection or serves tailscale ports', async () => {
     const calls: string[][] = []
-    let captured: BrokerOptions | null = null
+    let startCalls = 0
     const manager = createPortbrokerManager({
       tailscaleExec: fakeTailscaleExec(calls),
-      createBrokerFor: (opts): Broker => {
-        captured = opts
-        return { start: () => {}, stop: async () => {}, forwardedPorts: () => [] }
+      createBrokerFor: (): Broker => {
+        return {
+          start: () => {
+            startCalls += 1
+          },
+          stop: async () => {},
+          forwardedPorts: () => [],
+        }
       },
     })
 
     manager.start({
       containerName: 'coder',
       cwd: '/agent/coder',
-      policy: { allow: '*', tailscaleServe: false },
+      policy: { allow: [] },
       wsHostPort: 12345,
       brokerToken: 'tok',
       onEvent: () => {},
       onTailscaleServeEvent: () => {},
     })
 
-    requireCapturedOptions(captured).onEvent({
-      kind: 'port-forward-opened',
-      containerName: 'coder',
-      port: 5173,
-      bindAddr: '127.0.0.1',
-    })
     await manager.stop('coder', 'deregistered')
 
+    expect(startCalls).toBe(1)
     expect(calls).toEqual([])
   })
 })

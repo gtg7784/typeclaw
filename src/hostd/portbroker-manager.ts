@@ -36,15 +36,13 @@ export function createPortbrokerManager(opts: PortbrokerManagerOptions = {}): Po
         tailscaleManagers.delete(input.containerName)
         void existingTailscale.stopAll().catch(() => {})
       }
-      const tailscale = input.policy.tailscaleServe
-        ? createTailscaleServeManager({
-            containerName: input.containerName,
-            exec: opts.tailscaleExec,
-            onEvent: input.onTailscaleServeEvent,
-            onLog: (msg) => log(`[tailscale:${input.containerName}] ${msg}`),
-          })
-        : null
-      if (tailscale) tailscaleManagers.set(input.containerName, tailscale)
+      const tailscale = createTailscaleServeManager({
+        containerName: input.containerName,
+        exec: opts.tailscaleExec,
+        onEvent: input.onTailscaleServeEvent,
+        onLog: (msg) => log(`[tailscale:${input.containerName}] ${msg}`),
+      })
+      tailscaleManagers.set(input.containerName, tailscale)
       const broker = brokerFactory({
         containerName: input.containerName,
         cwd: input.cwd,
@@ -53,8 +51,8 @@ export function createPortbrokerManager(opts: PortbrokerManagerOptions = {}): Po
         brokerToken: input.brokerToken,
         onEvent: (event) => {
           input.onEvent(event)
-          if (event.kind === 'port-forward-opened') tailscale?.servePort(event.port)
-          else if (event.kind === 'port-forward-closed') tailscale?.stopPort(event.port)
+          if (event.kind === 'port-forward-opened') tailscale.servePort(event.port)
+          else if (event.kind === 'port-forward-closed') tailscale.stopPort(event.port)
         },
         onLog: (msg) => log(`[portbroker:${input.containerName}] ${msg}`),
       })
