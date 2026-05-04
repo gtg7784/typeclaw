@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
+import { startDaemon, type Daemon } from '@/hostd/daemon'
 import { buildDockerfile } from '@/init/dockerfile'
 import { buildGitignore } from '@/init/gitignore'
 
@@ -755,6 +756,39 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
     expect(headAfter).toBe(headBefore)
+  })
+
+  test('can register through the current hostd without drift respawn during daemon-owned restart', async () => {
+    const previousHome = process.env.TYPECLAW_HOME
+    const home = await mkdtemp(join(tmpdir(), 'typeclaw-current-hostd-'))
+    let daemon: Daemon | null = null
+    try {
+      process.env.TYPECLAW_HOME = home
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: '^0.1.0' })
+      await writeTypeclawConfig(root)
+      daemon = await startDaemon({ version: 'old-hostd-version', gcIntervalMs: 1_000_000 })
+      const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+      const result = await start({
+        cwd: root,
+        preferredHostPort: 8973,
+        exec,
+        allocatePort: deterministicAllocator,
+        cliEntry: '/nonexistent/newer-cli.ts',
+        reuseCurrentHostDaemon: true,
+      })
+
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      expect(result.hostd.state).toBe('registered')
+      expect(daemon.registered()).toContain(basename(root))
+    } finally {
+      if (daemon) await daemon.stop().catch(() => {})
+      if (previousHome === undefined) delete process.env.TYPECLAW_HOME
+      else process.env.TYPECLAW_HOME = previousHome
+      await rm(home, { recursive: true, force: true })
+    }
   })
 
   test('forceBuild=false skips build entirely when image already exists', async () => {

@@ -5,6 +5,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 
 import { configSchema, expandMountPath, type Config } from '@/config/config'
 import { send as sendToDaemon } from '@/hostd/client'
+import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
@@ -54,6 +55,9 @@ export type StartOptions = {
   // production we go through the real kernel via `findFreePort`.
   allocatePort?: (preferred: number) => Promise<number>
   cliEntry?: string
+  // Hostd's supervisor restart callback already runs inside the daemon process.
+  // Reusing that daemon avoids a self-shutdown when disk source has drifted.
+  reuseCurrentHostDaemon?: boolean
 }
 
 export type HostDaemonStatus =
@@ -79,6 +83,7 @@ export async function start({
   exec = defaultDockerExec,
   allocatePort = findFreePort,
   cliEntry,
+  reuseCurrentHostDaemon = false,
 }: StartOptions): Promise<StartResult> {
   try {
     // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
@@ -123,7 +128,7 @@ export async function start({
     // Register AFTER port allocation so the daemon's portbroker has the right
     // wsHostPort. Re-register on TOCTOU retry below if the port changes.
     let hostd: PreparedHostDaemonStatus = cliEntry
-      ? await registerWithDaemon({ cwd, containerName, cliEntry, hostPort })
+      ? await registerWithDaemon({ cwd, containerName, cliEntry, hostPort, reuseCurrentHostDaemon })
       : { state: 'disabled' as const }
     let hostdControl = hostd.state === 'registered' ? hostd.control : undefined
 
@@ -149,7 +154,7 @@ export async function start({
     if (run.exitCode !== 0 && isPortAllocatedError(run.stderr)) {
       hostPort = await allocatePort(0)
       if (cliEntry) {
-        hostd = await registerWithDaemon({ cwd, containerName, cliEntry, hostPort })
+        hostd = await registerWithDaemon({ cwd, containerName, cliEntry, hostPort, reuseCurrentHostDaemon })
         hostdControl = hostd.state === 'registered' ? hostd.control : undefined
       }
       plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false, hostdControl })
@@ -340,14 +345,16 @@ async function registerWithDaemon({
   containerName,
   cliEntry,
   hostPort,
+  reuseCurrentHostDaemon,
 }: {
   cwd: string
   containerName: string
   cliEntry: string
   hostPort: number
+  reuseCurrentHostDaemon: boolean
 }): Promise<PreparedHostDaemonStatus> {
-  const ensured = await ensureDaemon({ cliEntry })
-  if (!ensured.ok) return { state: 'unavailable', reason: ensured.reason }
+  const prepared = reuseCurrentHostDaemon ? await useCurrentHostDaemon() : await ensureDaemon({ cliEntry })
+  if (!prepared.ok) return { state: 'unavailable', reason: prepared.reason }
   const token = randomBytes(32).toString('base64url')
   const brokerToken = randomBytes(32).toString('base64url')
   const cfg = await loadTypeclawConfig(cwd)
@@ -363,8 +370,18 @@ async function registerWithDaemon({
   if (!reply.ok) return { state: 'unavailable', reason: reply.reason }
   return {
     state: 'registered',
-    control: { url: `http://${CONTAINER_HOSTD_HOST}:${ensured.httpPort}`, token, brokerToken },
+    control: { url: `http://${CONTAINER_HOSTD_HOST}:${prepared.httpPort}`, token, brokerToken },
   }
+}
+
+async function useCurrentHostDaemon(): Promise<{ ok: true; httpPort: number } | { ok: false; reason: string }> {
+  const reply = await sendToDaemon({ kind: 'http-info' })
+  if (!reply.ok) return { ok: false, reason: reply.reason }
+  const result = reply.result as HttpInfoResult | undefined
+  if (typeof result?.port !== 'number' || result.port <= 0 || result.port > 65_535) {
+    return { ok: false, reason: 'daemon did not report an HTTP control port' }
+  }
+  return { ok: true, httpPort: result.port }
 }
 
 async function loadConfigJson(cwd: string): Promise<unknown> {
