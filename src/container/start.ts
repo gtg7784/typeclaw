@@ -253,7 +253,8 @@ export async function refreshDockerfile(cwd: string): Promise<void> {
 }
 
 export async function refreshGitignore(cwd: string): Promise<void> {
-  await writeFile(join(cwd, GITIGNORE_FILE), buildGitignore())
+  const cfg = await loadTypeclawConfig(cwd)
+  await writeFile(join(cwd, GITIGNORE_FILE), buildGitignore(cfg.gitignore))
 }
 
 // Commits a TypeClaw-owned system file if it's dirty in git. Skips silently
