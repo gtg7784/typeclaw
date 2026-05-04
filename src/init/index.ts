@@ -207,14 +207,15 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
 
   // TODO: hardcoded model. Mirror src/config/index.ts until the config loader
   // and provider registry exist (TypeClaw.md Phase 1 + Phase 4).
+  //
+  // Only fields without sensible defaults elsewhere are emitted. `mounts`
+  // defaults to `[]` in configSchema, and the bundled memory plugin owns its
+  // own defaults in plugins/memory/index.ts — re-emitting either here would
+  // be duplicate noise the user has to maintain in sync with the source of
+  // truth.
   const config: Record<string, unknown> = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
     model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
-    mounts: [],
-    memory: {
-      idleMs: 10_000,
-      dreaming: { schedule: '0 4 * * *' },
-    },
   }
   const channels: Record<string, { allow: string[] }> = {}
   if (options.withDiscord) channels['discord-bot'] = { allow: options.discordAllowAll === false ? [] : ['*'] }

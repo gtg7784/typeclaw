@@ -54,9 +54,9 @@ export const configSchema = z
     $schema: z.string().optional(),
     port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
     model: z.enum(knownModelRefs).default('fireworks/accounts/fireworks/routers/kimi-k2p5-turbo'), // FIXME: TEMP default
-    // Defaults to `[]` so configs predating the field still load. `typeclaw init`
-    // writes `"mounts": []` explicitly, but a missing field is treated the same
-    // way (no host paths exposed) rather than failing the whole config load.
+    // Defaults to `[]` so the field can be omitted from `typeclaw.json` (no
+    // host paths exposed) without failing the whole config load. `typeclaw
+    // init` omits this field so users don't see noise for the empty case.
     mounts: z.array(mountSchema).default([]),
     plugins: z.array(z.string().min(1)).default([]),
     channels: channelsSchema,

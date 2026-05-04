@@ -365,7 +365,7 @@ describe('scaffold', () => {
     expect(existsSync(join(root, 'memory'))).toBe(false)
   })
 
-  test('writes typeclaw.json with $schema, model, mounts, and a memory config block for the bundled plugin', async () => {
+  test('writes typeclaw.json with only $schema and model (defaults for mounts and memory live in their owners)', async () => {
     await scaffold(root)
 
     const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
@@ -373,12 +373,15 @@ describe('scaffold', () => {
     expect(JSON.parse(raw)).toEqual({
       $schema: './node_modules/typeclaw/typeclaw.schema.json',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
-      mounts: [],
-      memory: {
-        idleMs: 10_000,
-        dreaming: { schedule: '0 4 * * *' },
-      },
     })
+  })
+
+  test('omits fields whose defaults are already provided by configSchema or the bundled plugin', async () => {
+    await scaffold(root)
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
+    expect(cfg.mounts).toBeUndefined()
+    expect(cfg.memory).toBeUndefined()
   })
 
   test('writes cron.json with an empty jobs array and $schema reference', async () => {
