@@ -8,7 +8,7 @@ import type { SessionEntry } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession } from '@/agent'
 import type { SessionOrigin } from '@/agent/session-origin'
-import type { HookBus } from '@/plugin'
+import type { HookBus, SessionIdleEvent } from '@/plugin'
 
 import { channelsSessionsPath, loadChannelSessions, saveChannelSessions } from './persistence'
 import { createChannelRouter, SESSION_IDLE_MS, sliceHeadTail, type ChannelRouter } from './router'
@@ -932,6 +932,77 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     // then
     expect(sessions[0]!.prompts).toHaveLength(1)
     expect(events).toEqual(['idle:ses_fake_1:/tmp/t.jsonl'])
+  })
+
+  test('passes current channel origin and participants to session.idle', async () => {
+    // given
+    const dir = await tempDir()
+    const idleEvents: SessionIdleEvent[] = []
+    const hooks: HookBus = {
+      registerAll: () => {},
+      unregisterAll: () => {},
+      runSessionStart: async () => {},
+      runSessionEnd: async () => {},
+      runSessionIdle: async (e) => {
+        idleEvents.push(e)
+      },
+      runSessionPrompt: async () => {},
+      runToolBefore: async () => undefined,
+      runToolAfter: async () => {},
+      count: () => 0,
+    }
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      now: () => 5000,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      createSessionForChannel: async () => ({
+        session: new FakeSession() as unknown as AgentSession,
+        sessionId: 'ses_fake_1',
+        dispose: async () => {},
+        hooks,
+        getTranscriptPath: () => '/tmp/t.jsonl',
+      }),
+    })
+
+    // when
+    await router.route(
+      inbound({
+        adapter: 'slack-bot',
+        workspace: 'T123',
+        chat: 'C456',
+        thread: '171234.0001',
+        authorId: 'U1',
+        authorName: 'Neo',
+      }),
+    )
+    await router.__testing!.flushDebounce({
+      adapter: 'slack-bot',
+      workspace: 'T123',
+      chat: 'C456',
+      thread: '171234.0001',
+    })
+
+    // then
+    expect(idleEvents).toHaveLength(1)
+    expect(idleEvents[0]!.origin).toEqual({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T123',
+      chat: 'C456',
+      thread: '171234.0001',
+      lastInboundAuthorId: 'U1',
+      participants: [
+        {
+          authorId: 'U1',
+          authorName: 'Neo',
+          firstMessageAt: 5000,
+          lastMessageAt: 5000,
+          messageCount: 1,
+          isBot: false,
+        },
+      ],
+    })
   })
 
   test('fires session.idle even when prompt throws so plugins still wake up', async () => {

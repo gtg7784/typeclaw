@@ -559,11 +559,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         sessionId: live.sessionId,
         parentTranscriptPath: live.getTranscriptPath?.(),
         idleMs: 0,
+        origin: buildLiveOrigin(live),
       })
     } catch (err) {
       logger.warn(`[channels] session.idle hook threw for ${live.keyId}: ${describe(err)}`)
     }
   }
+
+  const buildLiveOrigin = (live: LiveSession): SessionOrigin => ({
+    kind: 'channel',
+    adapter: live.key.adapter,
+    workspace: live.key.workspace,
+    ...(live.resolvedNames.workspaceName !== undefined ? { workspaceName: live.resolvedNames.workspaceName } : {}),
+    chat: live.key.chat,
+    ...(live.resolvedNames.chatName !== undefined ? { chatName: live.resolvedNames.chatName } : {}),
+    thread: live.key.thread,
+    ...(live.currentTurnAuthorId !== null ? { lastInboundAuthorId: live.currentTurnAuthorId } : {}),
+    participants: live.participants,
+  })
 
   const fireSessionEnd = async (live: LiveSession): Promise<void> => {
     if (!live.hooks) return
