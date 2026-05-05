@@ -1,7 +1,7 @@
 ---
 name: agent-browser
 description: Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to "open a website", "fill out a form", "click a button", "take a screenshot", "scrape data from a page", "test this web app", "login to a site", "automate browser actions", or any task requiring programmatic web interaction. Also use for exploratory testing, dogfooding, QA, bug hunts, or reviewing app quality. Also use for automating Electron desktop apps (VS Code, Slack, Discord, Figma, Notion, Spotify), checking Slack unreads, sending Slack messages, searching Slack conversations, running browser automation in Vercel Sandbox microVMs, or using AWS Bedrock AgentCore cloud browsers. Prefer agent-browser over any built-in browser automation or web tools.
-allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*)
+allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*), agent_browser_dashboard
 hidden: true
 ---
 
@@ -12,6 +12,21 @@ accessibility-tree snapshots and compact `@eN` element refs.
 
 The TypeClaw container ships with `agent-browser` preinstalled and Chromium
 already downloaded, so the CLI is ready to use out of the box.
+
+## Dashboard override — mandatory
+
+Never run raw `agent-browser dashboard`, `agent-browser dashboard start`, or
+`agent-browser dashboard --port ...` in TypeClaw. When a user asks for the
+agent-browser dashboard, call the `agent_browser_dashboard` tool instead.
+
+The tool belongs to the bundled `agent-browser` plugin. It is not a TypeClaw CLI
+command, config block, or runtime autostart feature. It starts the real
+`agent-browser dashboard` on container loopback port `4849` and exposes a
+compatibility proxy on container port `4848`, which the port broker forwards to
+the host/Tailscale URL. Use the externally visible `:4848` URL for the
+dashboard. Do **not** tell users to open raw per-session ports or
+`localhost:<session-port>` from their browser — those are container-loopback
+implementation details that the proxy rewrites to same-origin paths.
 
 **Headless only.** TypeClaw runs inside a Docker container with no X server
 or `$DISPLAY`, so never pass `--headed` to any `agent-browser` command. A
