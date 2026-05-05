@@ -2,7 +2,7 @@ import { defineCommand } from 'citty'
 
 import { loadConfigSync, validateConfig, type Config, type ValidateConfigResult } from '@/config'
 import { start, stop, type StartOptions, type StartResult, type StopResult } from '@/container'
-import { startDaemon, type DaemonLogEvent } from '@/hostd/daemon'
+import { startDaemon, type DaemonLogEvent, type RestartPreflight } from '@/hostd/daemon'
 import { createPortbrokerManager } from '@/hostd/portbroker-manager'
 import type { SupervisorLogEvent, SupervisorRestart } from '@/hostd/supervisor'
 import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from '@/hostd/version'
@@ -27,7 +27,8 @@ export const hostdCommand = defineCommand({
       version,
       onShutdown: () => process.exit(0),
       portbroker,
-      restart: buildHostdRestart(cliEntry),
+      restartPreflight: buildHostdRestartPreflight(cliEntry, version),
+      restart: buildHostdRestart(cliEntry, defaultRestartDeps, version),
     })
 
     const shutdown = (): void => {
@@ -57,8 +58,15 @@ const defaultRestartDeps: HostdRestartDeps = {
   start,
 }
 
-export function buildHostdRestart(cliEntry: string, deps: HostdRestartDeps = defaultRestartDeps): SupervisorRestart {
+export function buildHostdRestart(
+  cliEntry: string,
+  deps: HostdRestartDeps = defaultRestartDeps,
+  daemonVersion?: string,
+): SupervisorRestart {
   return async ({ containerName, cwd, build = false }) => {
+    const drift = await detectSourceDrift(cliEntry, daemonVersion)
+    if (drift) return { ok: false, reason: drift }
+
     const validated = deps.validateConfig(cwd)
     if (!validated.ok) {
       return { ok: false, reason: `invalid config for ${containerName}: ${validated.reason}` }
@@ -77,6 +85,22 @@ export function buildHostdRestart(cliEntry: string, deps: HostdRestartDeps = def
     if (!startResult.ok) return { ok: false, reason: `start failed: ${startResult.reason}` }
     return { ok: true }
   }
+}
+
+export function buildHostdRestartPreflight(cliEntry: string, daemonVersion: string): RestartPreflight {
+  return async () => {
+    const drift = await detectSourceDrift(cliEntry, daemonVersion)
+    return drift ? { ok: false, reason: drift } : null
+  }
+}
+
+async function detectSourceDrift(cliEntry: string, daemonVersion: string | undefined): Promise<string | null> {
+  if (!daemonVersion || daemonVersion === UNVERSIONED_SENTINEL) return null
+  const srcRoot = resolveSrcRoot(cliEntry)
+  if (srcRoot === null) return null
+  const currentVersion = await computeSourceVersion({ srcRoot })
+  if (currentVersion === daemonVersion) return null
+  return 'host daemon source has drifted from the current typeclaw source; run `typeclaw restart --build` from the host-stage agent folder so the daemon respawns before rebuilding the Docker image'
 }
 
 function writeLogLine(msg: string): void {

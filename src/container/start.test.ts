@@ -32,7 +32,13 @@ async function writeDockerfile(dir: string): Promise<void> {
 
 type ScaffoldedConfig = {
   mounts?: Array<{ name: string; path: string; readOnly?: boolean; description?: string }>
-  dockerfile?: { append?: string[] }
+  dockerfile?: {
+    append?: string[]
+    ffmpeg?: boolean | string
+    gh?: boolean | string
+    python?: boolean
+    tmux?: boolean | string
+  }
   gitignore?: { append?: string[] }
 }
 
@@ -426,6 +432,20 @@ describe('refreshDockerfile', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test('writes ffmpeg from typeclaw.json into the apt package list', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-'))
+    try {
+      await writeTypeclawConfig(dir, { dockerfile: { ffmpeg: true } })
+
+      await refreshDockerfile(dir)
+
+      const written = await readFile(join(dir, 'Dockerfile'), 'utf8')
+      expect(written).toMatch(/apt-get install -y --no-install-recommends[\s\S]+\bffmpeg\b/)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('refreshGitignore', () => {
@@ -754,6 +774,26 @@ describe('start (composition)', () => {
     expect(buildCall.dockerfileSnapshot.indexOf('RUN echo from-config')).toBeLessThan(
       buildCall.dockerfileSnapshot.indexOf('ENTRYPOINT ["bun", "run", "typeclaw"]'),
     )
+  })
+
+  test('forceBuild=true rebuild sees Dockerfile with ffmpeg from typeclaw.json', async () => {
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { dockerfile: { ffmpeg: true } })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      exec,
+      allocatePort: deterministicAllocator,
+    })
+
+    expect(result.ok).toBe(true)
+    const buildCall = calls.find((c) => c.args[0] === 'build')
+    if (!buildCall?.dockerfileSnapshot) throw new Error('expected docker build to capture Dockerfile snapshot')
+    expect(buildCall.dockerfileSnapshot).toMatch(/apt-get install -y --no-install-recommends[\s\S]+\bffmpeg\b/)
   })
 
   test('commits the refreshed .gitignore when the agent folder is a git repo', async () => {

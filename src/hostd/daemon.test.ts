@@ -216,6 +216,26 @@ describe('startDaemon', () => {
     expect(ack.reason).toContain('boolean')
   })
 
+  test('restart RPC returns preflight rejection before scheduling supervisor work', async () => {
+    const restartCalls: Array<{ containerName: string; cwd: string; build?: boolean }> = []
+    daemon = await startDaemon({
+      exec: fakeExec(new Set(['coder'])),
+      gcIntervalMs: 1_000_000,
+      restartPreflight: async () => ({ ok: false, reason: 'source drift' }),
+      restart: async ({ containerName, cwd, build }) => {
+        restartCalls.push({ containerName, cwd, build })
+        return { ok: true }
+      },
+    })
+
+    await send({ kind: 'register', containerName: 'coder', cwd: '/agent/coder' })
+    const ack = await send({ kind: 'restart', containerName: 'coder', build: true })
+
+    expect(ack).toEqual({ ok: false, reason: 'source drift' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(restartCalls).toEqual([])
+  })
+
   test('HTTP restart ACKs with the registered container token', async () => {
     const restartCalls: Array<{ containerName: string; cwd: string; build?: boolean }> = []
     daemon = await startDaemon({

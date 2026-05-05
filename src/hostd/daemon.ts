@@ -34,6 +34,7 @@ export type DaemonOptions = {
   // (containerName, cwd) it captured at register time. Omit to disable the
   // capability in tests.
   restart?: SupervisorRestart
+  restartPreflight?: RestartPreflight
   // Source-tree fingerprint captured at daemon boot. Reported via the
   // `version` RPC so the CLI can detect when its on-disk source has drifted
   // from what the running daemon loaded, and trigger a respawn over the
@@ -51,6 +52,12 @@ export type DaemonOptions = {
   // it to keep the broker out of unrelated suites.
   portbroker?: PortbrokerCallbacks
 }
+
+export type RestartPreflight = (input: {
+  containerName: string
+  cwd: string
+  build?: boolean
+}) => Promise<RpcResponse | null>
 
 export type PortbrokerCallbacks = {
   start: (input: PortbrokerStartInput) => void
@@ -320,13 +327,17 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   // reaches the mounted socket could otherwise restart any peer container on
   // the host. Scoping by registered name limits the blast radius to the set
   // of containers this user already started.
-  const handleRestart = (req: { containerName: string; build?: boolean }): RpcResponse => {
+  const handleRestart = async (req: { containerName: string; build?: boolean }): Promise<RpcResponse> => {
     if (!supervisor) return { ok: false, reason: 'restart capability not enabled on this daemon' }
     if (req.build !== undefined && typeof req.build !== 'boolean') {
       return { ok: false, reason: 'restart.build must be a boolean if provided' }
     }
     const cwd = cwds.get(req.containerName)
     if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
+    const preflight = opts.restartPreflight
+      ? await opts.restartPreflight({ containerName: req.containerName, cwd, build: req.build })
+      : null
+    if (preflight) return preflight
     const ack = supervisor.scheduleRestart({ containerName: req.containerName, cwd, build: req.build })
     if (!ack.ok) return ack
     const result: RestartResult = { containerName: req.containerName, scheduled: true }
@@ -442,7 +453,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     if (restartTokens.get(rpc.containerName) !== token) {
       return json({ ok: false, reason: 'invalid restart token' }, 403)
     }
-    return json(handleRestart(rpc))
+    return json(await handleRestart(rpc))
   }
 
   const httpHostname = opts.httpHost ?? '0.0.0.0'

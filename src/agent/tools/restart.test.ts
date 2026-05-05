@@ -124,6 +124,31 @@ describe('createRestartTool', () => {
     expect(result.details).toEqual({ ok: false, containerName: 'coder', reason: 'invalid restart token' })
   })
 
+  test('does not exit when hostd rejects restart before ACK', async () => {
+    server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ ok: false, reason: 'host daemon source has drifted' })
+      },
+    })
+    let exitCalled = false
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-test-origin',
+      exit: () => {
+        exitCalled = true
+      },
+    })
+
+    const result = await tool.execute('id', { build: true }, undefined, undefined, fakeCtx)
+
+    expect(result.details).toEqual({ ok: false, containerName: 'coder', reason: 'host daemon source has drifted' })
+    await new Promise((resolve) => setTimeout(resolve, 600))
+    expect(exitCalled).toBe(false)
+  })
+
   test('publishes a container-restarting broadcast on successful ACK', async () => {
     // given
     server = startOkServer()
