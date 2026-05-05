@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 
 import * as z from 'zod'
 
-import { configSchema } from '@/config/config'
+import { configSchema, dockerfileSchema } from '@/config/config'
 
 import { buildDockerfile } from './dockerfile'
 import { buildGitignore } from './gitignore'
@@ -735,8 +735,8 @@ describe('writeDockerAssets', () => {
     expect(envIdx).toBeLessThan(entrypointIdx)
   })
 
-  test('buildDockerfile without config matches an empty dockerfile.append config', () => {
-    expect(buildDockerfile()).toBe(buildDockerfile({ append: [] }))
+  test('buildDockerfile without config matches a fully-defaulted dockerfile config', () => {
+    expect(buildDockerfile()).toBe(buildDockerfile(dockerfileSchema.parse({})))
   })
 
   test('Dockerfile cache-mounts apt directories so package re-installs reuse downloaded .debs', async () => {
@@ -796,17 +796,16 @@ describe('writeDockerAssets', () => {
 
     const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
     // The keyring fetch (curl + gpg --dearmor) must complete in an earlier
-    // RUN than the apt-get install line that lists tmux as a package.
-    // Otherwise, editing the package list invalidates the keyring fetch too,
-    // wasting network on every Dockerfile.ts change. We compare positions of
-    // the actual command strings (not comment text), so we anchor on the
-    // verbatim package-list token "tmux gh" which only appears in the real
-    // install command, never in surrounding prose comments.
+    // RUN than the apt-get install line that pulls gh. Otherwise, editing the
+    // package list invalidates the keyring fetch too, wasting network on
+    // every Dockerfile.ts change. Anchor on the install command's exact
+    // option flags (not comment text) so the assertion ignores prose mentions
+    // of "gh" in surrounding comments.
     const curlIdx = dockerfile.indexOf('curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg')
-    const tmuxPackageIdx = dockerfile.indexOf('tmux gh')
+    const aptInstallIdx = dockerfile.indexOf('apt-get install -y --no-install-recommends \\\n')
     expect(curlIdx).toBeGreaterThan(-1)
-    expect(tmuxPackageIdx).toBeGreaterThan(-1)
-    expect(curlIdx).toBeLessThan(tmuxPackageIdx)
+    expect(aptInstallIdx).toBeGreaterThan(-1)
+    expect(curlIdx).toBeLessThan(aptInstallIdx)
   })
 
   test('Dockerfile falls back to apt chromium on arm64 since Chrome for Testing has no linux/arm64 build', async () => {

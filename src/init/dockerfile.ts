@@ -1,8 +1,29 @@
-import type { DockerfileConfig } from '@/config/config'
+import type { DockerfileConfig, DockerfileFeatureToggle } from '@/config/config'
 
 export const DOCKERFILE = 'Dockerfile'
 
-export function buildDockerfile(config: DockerfileConfig = { append: [] }): string {
+// Apt packages that EVERY image must have — git for the agent runtime,
+// curl/ca-certificates/gnupg for HTTPS and key fetches that downstream layers
+// (e.g. the gh keyring) depend on. Listed first in the apt-get install line so
+// the package set is self-documenting at a glance.
+const BASELINE_APT_PACKAGES = ['git', 'ca-certificates', 'curl', 'gnupg'] as const
+
+type AptFeature = {
+  toAptArgs: (toggle: DockerfileFeatureToggle) => string[]
+}
+
+const APT_FEATURES: Record<'ffmpeg' | 'gh' | 'tmux' | 'python', AptFeature> = {
+  ffmpeg: { toAptArgs: (v) => singlePackageArgs('ffmpeg', v) },
+  gh: { toAptArgs: (v) => singlePackageArgs('gh', v) },
+  tmux: { toAptArgs: (v) => singlePackageArgs('tmux', v) },
+  python: {
+    toAptArgs: (v) => (v === true ? ['python3', 'python3-pip', 'python3-venv', 'python-is-python3'] : []),
+  },
+}
+
+export function buildDockerfile(config: DockerfileConfig = defaultConfig()): string {
+  const aptArgs = collectAptArgs(config)
+  const ghKeyringLayer = renderGhKeyringLayer(config.gh)
   const customLines = renderCustomDockerfileLines(config.append)
 
   return `# syntax=docker/dockerfile:1.7
@@ -44,38 +65,13 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \\
  && echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache \\
  && mkdir -p -m 755 /etc/apt/keyrings
 
-# Layer 1 (rarely changes): register the GitHub CLI apt repository and trust
-# its keyring. Split from the package install below so editing the package
-# list (the most frequent change to this Dockerfile) does NOT re-fetch the
-# GPG key over the network. The cache mount on /var/cache/apt covers the
-# tiny gnupg/curl install we need to bootstrap the key fetch.
-RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
-    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\
-    apt-get update \\
- && apt-get install -y --no-install-recommends curl ca-certificates gnupg \\
- && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \\
-      | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \\
- && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \\
- && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \\
-      > /etc/apt/sources.list.d/github-cli.list
-
-# Layer 2 (changes when the package list changes): the actual apt install.
+${ghKeyringLayer}# Layer 2 (changes when the package list changes): the actual apt install.
 # Cache mounts make a re-install nearly free when this layer is invalidated:
 # .deb files come straight from the host's BuildKit cache instead of being
-# refetched from Debian/GitHub mirrors.
-#   - git: required by the agent runtime (cloning, committing workspace
-#     state, version-controlled tooling). curl + ca-certificates were
-#     already installed in Layer 1; re-listing here is a no-op idempotent
-#     install that keeps the package set self-documenting.
-#   - python3 + pip + venv + python-is-python3: agents routinely shell out to
-#     Python scripts (data wrangling, ML tooling, ad-hoc \`pip install\`).
-#     python-is-python3 makes \`python\` resolve to python3 so both names work.
-#   - tmux: agents use it for long-running sessions, multiplexed shells, and
-#     detachable workflows (matches what host-stage tooling expects).
-#   - gh (GitHub CLI): registered in Layer 1; installed here in the main
-#     batch so a future package addition doesn't re-run the keyring layer.
-#   - chromium (arm64 only): Chrome for Testing has no Linux ARM64 build, so
-#     we use Debian's chromium package on that arch.
+# refetched from Debian/GitHub mirrors. Package set is composed from the
+# \`dockerfile\` config block in typeclaw.json — toggles for tmux/python/gh/
+# ffmpeg fan out into the args below. Baseline (git/ca-certificates/curl/
+# gnupg) is always installed because downstream layers depend on it.
 #
 # No \`rm -rf /var/lib/apt/lists/*\` because the lists live on a cache mount
 # that is excluded from the image layer by definition.
@@ -83,9 +79,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\
     apt-get update \\
  && apt-get install -y --no-install-recommends \\
-      git ca-certificates curl gnupg \\
-      python3 python3-pip python3-venv python-is-python3 \\
-      tmux gh \\
+      ${aptArgs.join(' ')} \\
  && if [ "$TARGETARCH" = "arm64" ]; then \\
       apt-get install -y --no-install-recommends chromium; \\
     fi
@@ -129,6 +123,48 @@ ENV NODE_ENV=production
 
 ${customLines}ENTRYPOINT ["bun", "run", "typeclaw"]
 CMD ["run"]
+`
+}
+
+function defaultConfig(): DockerfileConfig {
+  return { ffmpeg: false, gh: true, python: true, tmux: true, append: [] }
+}
+
+function collectAptArgs(config: DockerfileConfig): string[] {
+  const args: string[] = [...BASELINE_APT_PACKAGES]
+  for (const key of ['ffmpeg', 'gh', 'python', 'tmux'] as const) {
+    args.push(...APT_FEATURES[key].toAptArgs(config[key]))
+  }
+  return args
+}
+
+function singlePackageArgs(name: string, toggle: DockerfileFeatureToggle): string[] {
+  if (toggle === false) return []
+  if (toggle === true) return [name]
+  return [`${name}=${toggle}`]
+}
+
+// The gh keyring bootstrap is a separate layer so editing the package list
+// (the most frequent change) does not re-fetch the GPG key over the network.
+// When `gh` is disabled, omit the layer entirely — both to skip the network
+// roundtrip on cold builds and to keep the package source registry clean.
+function renderGhKeyringLayer(toggle: DockerfileFeatureToggle): string {
+  if (toggle === false) return ''
+  return `# Layer 1 (rarely changes): register the GitHub CLI apt repository and trust
+# its keyring. Split from the package install below so editing the package
+# list (the most frequent change to this Dockerfile) does NOT re-fetch the
+# GPG key over the network. The cache mount on /var/cache/apt covers the
+# tiny gnupg/curl install we need to bootstrap the key fetch.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\
+    apt-get update \\
+ && apt-get install -y --no-install-recommends curl ca-certificates gnupg \\
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \\
+      | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \\
+ && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \\
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \\
+      > /etc/apt/sources.list.d/github-cli.list
+
 `
 }
 

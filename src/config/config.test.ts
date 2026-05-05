@@ -116,9 +116,14 @@ describe('portForwardSchema', () => {
 })
 
 describe('dockerfileSchema', () => {
-  test('defaults to an empty append array when omitted', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
-    expect(parsed.dockerfile).toEqual({ append: [] })
+  const FULL_DEFAULTS = { ffmpeg: false, gh: true, python: true, tmux: true, append: [] }
+
+  test('defaults to a fully-populated object when omitted (omitted == empty object)', () => {
+    const omitted = configSchema.parse({ model: VALID_MODEL })
+    const present = configSchema.parse({ model: VALID_MODEL, dockerfile: {} })
+
+    expect(omitted.dockerfile).toEqual(FULL_DEFAULTS)
+    expect(present.dockerfile).toEqual(FULL_DEFAULTS)
   })
 
   test('accepts custom Dockerfile lines in append order', () => {
@@ -129,11 +134,6 @@ describe('dockerfileSchema', () => {
     expect(parsed.dockerfile.append).toEqual(['RUN apt-get update', 'ENV CUSTOM_TOOL=1'])
   })
 
-  test('defaults append to an empty array when dockerfile object is present', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, dockerfile: {} })
-    expect(parsed.dockerfile).toEqual({ append: [] })
-  })
-
   test('rejects multiline append entries so each array item maps to one Dockerfile line', () => {
     expect(() =>
       configSchema.parse({
@@ -141,6 +141,24 @@ describe('dockerfileSchema', () => {
         dockerfile: { append: ['RUN printf "one\ntwo"'] },
       }),
     ).toThrow(/single Dockerfile lines/)
+  })
+
+  test('feature toggles accept boolean and version-string forms; partial overrides preserve other defaults', () => {
+    const parsed = configSchema.parse({
+      model: VALID_MODEL,
+      dockerfile: { tmux: false, gh: '2.40.0', ffmpeg: true },
+    })
+    expect(parsed.dockerfile).toEqual({
+      ffmpeg: true,
+      gh: '2.40.0',
+      python: true,
+      tmux: false,
+      append: [],
+    })
+  })
+
+  test('python is boolean-only (string version is not a meaningful apt pin for the python3 meta-package)', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, dockerfile: { python: '3.11' } })).toThrow()
   })
 })
 

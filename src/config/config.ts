@@ -54,13 +54,37 @@ const dockerfileLineSchema = z.string().refine((line) => !/[\r\n]/.test(line), {
   message: 'dockerfile.append entries must be single Dockerfile lines; split multiline instructions into array entries',
 })
 
-export const dockerfileSchema = z
-  .object({
-    append: z.array(dockerfileLineSchema).default([]),
-  })
-  .default({ append: [] })
+// A feature toggle is either a boolean (install latest / don't install) or a
+// version string that becomes an apt pin (`pkg=<version>`). The string form
+// rejects whitespace and `=` so the `pkg=<version>` invocation we pass to
+// apt-get cannot be smuggled into a separate package or option flag.
+const dockerfileFeatureSchema = z.union([
+  z.boolean(),
+  z
+    .string()
+    .min(1)
+    .refine((v) => !/[\s=]/.test(v), {
+      message: 'dockerfile feature version strings must not contain whitespace or "="',
+    }),
+])
+
+// `default(() => ({}))` paired with field-level defaults is the idiom that
+// makes both `dockerfile: {}` and an omitted `dockerfile` key resolve to the
+// SAME fully-populated object. A plain `.default({})` would short-circuit the
+// inner field defaults when the key is omitted, leaving downstream code with
+// `{ append: undefined, tmux: undefined, ... }` and a `lines.length` crash.
+const dockerfileObjectSchema = z.object({
+  ffmpeg: dockerfileFeatureSchema.default(false),
+  gh: dockerfileFeatureSchema.default(true),
+  python: z.boolean().default(true),
+  tmux: dockerfileFeatureSchema.default(true),
+  append: z.array(dockerfileLineSchema).default([]),
+})
+
+export const dockerfileSchema = dockerfileObjectSchema.default(() => dockerfileObjectSchema.parse({}))
 
 export type DockerfileConfig = z.infer<typeof dockerfileSchema>
+export type DockerfileFeatureToggle = z.infer<typeof dockerfileFeatureSchema>
 
 const gitignoreLineSchema = z.string().refine((line) => !/[\r\n]/.test(line), {
   message: 'gitignore.append entries must be single gitignore lines; split multiline patterns into array entries',
