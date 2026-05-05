@@ -1,5 +1,7 @@
 import type { z } from 'zod'
 
+import type { SessionOrigin } from '@/agent/session-origin'
+
 export type ContentPart = { type: 'text'; text: string } | { type: 'image'; mimeType: string; data: string }
 
 export type ToolResult = {
@@ -92,6 +94,7 @@ export type SessionIdleEvent = {
   sessionId: string
   parentTranscriptPath: string | undefined
   idleMs: number
+  origin?: SessionOrigin
 }
 
 // Provider prompt caching requires byte-identical prefixes. Mutations near the

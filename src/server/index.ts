@@ -6,6 +6,7 @@ import {
   type CreateSessionOptions,
   type CreateSessionResult,
 } from '@/agent'
+import type { SessionOrigin } from '@/agent/session-origin'
 import type { ChannelRouter } from '@/channels/router'
 import type { HookBus } from '@/plugin'
 import type { BrokerWsData, ContainerBroker } from '@/portbroker'
@@ -52,6 +53,7 @@ type QueuedPrompt = {
 type SessionState = {
   session: AgentSession
   sessionFileId: string
+  origin: SessionOrigin
   sessionManager: { getSessionFile: () => string | undefined } | undefined
   drainQueue: QueuedPrompt[]
   draining: boolean
@@ -122,10 +124,11 @@ export function createServer({
                   agentDir,
                 }
               : undefined
+          const origin: SessionOrigin = { kind: 'tui', sessionId: sessionFileId }
           const result = await createSession({
             reloadRegistry,
             sessionManager,
-            origin: { kind: 'tui', sessionId: sessionFileId },
+            origin,
             ...(stream ? { stream } : {}),
             ...(channelRouter ? { channelRouter } : {}),
             ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
@@ -137,6 +140,7 @@ export function createServer({
           const state: SessionState = {
             session,
             sessionFileId,
+            origin,
             sessionManager,
             drainQueue: [],
             draining: false,
@@ -329,6 +333,7 @@ function makeIdleHookCaller(state: SessionState): () => Promise<void> {
       sessionId: state.sessionFileId,
       parentTranscriptPath: state.sessionManager?.getSessionFile(),
       idleMs: 0,
+      origin: state.origin,
     })
   }
 }
