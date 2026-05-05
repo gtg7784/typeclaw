@@ -275,15 +275,39 @@ async function proxyHttp({
 }): Promise<Response> {
   const target = `http://${host}:${port}${path}`
   try {
-    return await fetcher(target, {
+    const response = await fetcher(target, {
       method: request.method,
       headers: hopHeaders(request.headers),
       body: request.body,
       redirect: 'manual',
     })
+    return rewriteCorsHeaders(response, request)
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
     return new Response(`Failed to proxy ${target}: ${reason}`, { status: 502 })
+  }
+}
+
+function rewriteCorsHeaders(response: Response, request: Request): Response {
+  const origin = request.headers.get('origin')
+  if (origin === null) return response
+
+  const allowOrigin = response.headers.get('access-control-allow-origin')
+  if (allowOrigin === null || !isLoopbackOrigin(allowOrigin)) return response
+
+  const headers = new Headers(response.headers)
+  headers.set('access-control-allow-origin', origin)
+  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
+}
+
+function isLoopbackOrigin(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return (
+      url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]' || url.hostname === '::1'
+    )
+  } catch {
+    return false
   }
 }
 

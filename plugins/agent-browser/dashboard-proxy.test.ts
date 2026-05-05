@@ -69,6 +69,8 @@ describe('startDashboardProxy', () => {
             headers: { 'content-type': 'text/html' },
           })
         if (url.pathname === '/api/sessions') return Response.json([{ session: 'default', port: sessionServer.port }])
+        if (url.pathname === '/api/models')
+          return Response.json(['model-a'], { headers: { 'access-control-allow-origin': 'http://localhost' } })
         return new Response('not found', { status: 404 })
       },
     })
@@ -87,6 +89,12 @@ describe('startDashboardProxy', () => {
       `http://127.0.0.1:${proxy.server.port}/__typeclaw_agent_browser_http/${sessionServer.port}/api/tabs`,
     ).then((r) => r.json())
     expect(tabs).toEqual([{ id: 'tab-1' }])
+
+    const models = await fetch(`http://127.0.0.1:${proxy.server.port}/api/models`, {
+      headers: { origin: 'http://m5.chicken-temperature.ts.net:4849' },
+    })
+    expect(models.headers.get('access-control-allow-origin')).toBe('http://m5.chicken-temperature.ts.net:4849')
+    expect(await models.json()).toEqual(['model-a'])
   })
 
   test('rejects loopback proxy requests for ports not reported by the dashboard sessions API', async () => {
