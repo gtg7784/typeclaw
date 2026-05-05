@@ -62,6 +62,16 @@ describe('configSchema preserves unknown top-level keys (plugin config blocks)',
     })
     expect(parsed['memory']).toEqual({ idleMs: 60_000, dreaming: { schedule: '30 3 * * *' } })
   })
+
+  test('agentBrowser is treated as plugin/user config instead of a core key', () => {
+    const configs = extractPluginConfigs({
+      model: VALID_MODEL,
+      agentBrowser: { dashboardProxy: false },
+      customPlugin: { enabled: true },
+    })
+
+    expect(configs).toEqual({ agentBrowser: { dashboardProxy: false }, customPlugin: { enabled: true } })
+  })
 })
 
 describe('portForwardSchema', () => {

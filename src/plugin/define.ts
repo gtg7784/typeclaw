@@ -9,13 +9,13 @@ type DefinePluginSpec<S extends z.ZodType<unknown> | undefined> =
         plugin: (ctx: PluginContext<T>) => Promise<PluginExports>
       }
     : {
-        plugin: (ctx: PluginContext<never>) => Promise<PluginExports>
+        plugin: (ctx: PluginContext<unknown>) => Promise<PluginExports>
       }
 
 export function definePlugin<S extends z.ZodType<unknown> | undefined = undefined>(
   spec: DefinePluginSpec<S>,
-): DefinedPlugin<S extends z.ZodType<infer T> ? T : never> {
-  return spec as DefinedPlugin<S extends z.ZodType<infer T> ? T : never>
+): DefinedPlugin<S extends z.ZodType<infer T> ? T : unknown> {
+  return spec as DefinedPlugin<S extends z.ZodType<infer T> ? T : unknown>
 }
 
 export function defineTool<P>(tool: Tool<P>): Tool<P> {

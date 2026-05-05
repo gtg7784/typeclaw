@@ -386,15 +386,12 @@ describe('buildChannelTools', () => {
 })
 
 describe('getBundledSkillsDir', () => {
-  test.each([['typeclaw-cron'], ['typeclaw-config'], ['agent-browser']])(
-    'points at a directory containing %s/SKILL.md',
-    (skill) => {
-      const dir = getBundledSkillsDir()
-      expect(existsSync(join(dir, skill, 'SKILL.md'))).toBe(true)
-    },
-  )
+  test.each([['typeclaw-cron'], ['typeclaw-config']])('points at a directory containing %s/SKILL.md', (skill) => {
+    const dir = getBundledSkillsDir()
+    expect(existsSync(join(dir, skill, 'SKILL.md'))).toBe(true)
+  })
 
-  test.each([['typeclaw-cron'], ['typeclaw-config'], ['agent-browser']])(
+  test.each([['typeclaw-cron'], ['typeclaw-config']])(
     '%s SKILL.md has YAML frontmatter with name and description',
     async (skill) => {
       const path = join(getBundledSkillsDir(), skill, 'SKILL.md')

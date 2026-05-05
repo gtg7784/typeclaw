@@ -153,6 +153,25 @@ export default {
     expect(running.pluginRuntime.get().registry.skills.map((s) => s.localName)).toEqual(['how-to-x'])
   })
 
+  test('bundled agent-browser plugin contributes the agent-browser skill directory', async () => {
+    agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-e2e-'))
+    await writeFile(
+      join(agentDir, 'typeclaw.json'),
+      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo' }),
+    )
+
+    running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
+
+    expect(running.loadedPlugins.map((p) => p.name)).toContain('agent-browser')
+    const skillDirs = running.pluginRuntime.get().registry.skillsDirs
+    expect(skillDirs).toContainEqual(
+      expect.objectContaining({
+        pluginName: 'agent-browser',
+        path: expect.stringContaining('plugins/agent-browser/skills'),
+      }),
+    )
+  })
+
   test('plugin subagent is registered and its tools are forwarded to the spawned session', async () => {
     agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-e2e-'))
     await writeFile(

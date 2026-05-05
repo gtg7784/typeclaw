@@ -1,5 +1,6 @@
 import type { ResolvedPlugin } from '@/plugin'
 
+import agentBrowserPlugin from '../../plugins/agent-browser'
 import memoryPlugin from '../../plugins/memory'
 
 // Consumed by both `startAgent` (auto-loaded before user plugins) AND
@@ -9,4 +10,5 @@ import memoryPlugin from '../../plugins/memory'
 // need to know about plugin-owned blocks.
 export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'memory', version: undefined, source: '<bundled>', defined: memoryPlugin },
+  { name: 'agent-browser', version: undefined, source: '<bundled>', defined: agentBrowserPlugin },
 ]
