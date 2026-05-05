@@ -288,8 +288,8 @@ hooks: {
 | `session.end`    | observe             | `{ sessionId }`                               | Awaited before close handler resolves.                                                                                                                                                                                                                                         |
 | `session.idle`   | observe             | `{ sessionId, parentTranscriptPath, idleMs }` | Fires **after every prompt completion** (success or error). The agent is "idle" the moment it stops responding. Plugins owning idle-debounced work (e.g. memory-logger spawn) install their own `setTimeout` and reset it on each event. `idleMs` is reserved (currently `0`). |
 | `session.prompt` | intervene           | `{ prompt, sessionId, agentDir }`             | Reassign `event.prompt`. Runs once per session start, in plugin-load order.                                                                                                                                                                                                    |
-| `tool.before`    | intervene           | `{ tool, sessionId, callId, args }`           | **Plugin-defined custom tools only** — built-in tools NOT intercepted. Mutate `event.args`, or return `{ block: true, reason }`. First block short-circuits.                                                                                                                   |
-| `tool.after`     | observe / transform | `{ tool, sessionId, callId, result }`         | **Plugin-defined custom tools only**. Mutate `event.result` to rewrite.                                                                                                                                                                                                        |
+| `tool.before`    | intervene           | `{ tool, sessionId, callId, args }`           | Fires for plugin-defined tools and TypeClaw-exposed system tools, including built-in pi tools when plugins are wired. Mutate `event.args`, or return `{ block: true, reason }`. First block short-circuits.                                                                    |
+| `tool.after`     | observe / transform | `{ tool, sessionId, callId, result }`         | Fires after plugin-defined tools and TypeClaw-exposed system tools. Observe `event.result`; tool result mutation is best-effort and tool-specific.                                                                                                                             |
 
 **Multiple plugins** for the same hook run **in plugin-load order**. For `session.prompt`, the next plugin sees the previous plugin's mutated string.
 
@@ -409,9 +409,9 @@ plugin: async (ctx) => ({
 }
 ```
 
-### ❌ Expecting `tool.before/after` to fire for built-in tools
+### ❌ Assuming `tool.before/after` only cover plugin tools
 
-`read`, `bash`, `edit`, `write`, etc. are NOT intercepted. Only **plugin-defined custom tools** trigger `tool.before` / `tool.after`. If you need to gate built-ins, register a custom tool that wraps them (declared on a subagent's `tools: [readTool, ...]`).
+`tool.before` / `tool.after` also intercept TypeClaw-exposed system tools, including `read`, `bash`, `edit`, `write`, etc. when plugins are wired into the session. Scope your hook by `event.tool` before mutating args or blocking.
 
 ### ❌ Forgetting plugin name derivation
 
@@ -456,7 +456,7 @@ Plugin `ToolContext` is `{ signal, sessionId, agentDir, logger }`. There is no `
   - `session.prompt`: `src/agent/index.ts` `createResourceLoader` (after default prompt assembly)
   - `session.idle`: `src/server/index.ts` `drain()` — fires immediately after every `session.prompt()` resolves (success or error)
   - `session.start`/`session.end`: `src/server/index.ts` ws open/close
-  - `tool.before`/`tool.after`: `src/agent/plugin-tools.ts` `wrapPluginTool`
+  - `tool.before`/`tool.after`: `src/agent/plugin-tools.ts` `wrapPluginTool`, `wrapSystemTool`, and `wrapSystemAgentTool`
 - **Schema additions**: `src/config/config.ts` (`plugins` array, `.catchall(z.unknown())` for per-plugin blocks, `extractPluginConfigs`)
 
 ### Audit log on boot
@@ -480,7 +480,7 @@ If `ctx.config.foo` is unexpectedly missing or default:
 ### Debugging a not-firing hook
 
 1. `session.start` / `session.end` are tied to **websocket** open/close. They don't fire during cron-only invocations.
-2. `tool.before` / `tool.after` fire **only for plugin-defined custom tools**. Confirm the tool you're hooking is in `tools: { ... }` of some plugin.
+2. `tool.before` / `tool.after` fire for plugin-defined and TypeClaw-exposed system tools only when plugins are wired into the session. Confirm the session loaded your plugin and check `event.tool` matches the expected tool name.
 3. Hooks that throw are logged (`reportHookError`) and do NOT abort the loop. Check the plugin logger output.
 
 ### Restart vs reload
@@ -511,7 +511,6 @@ If you find yourself wanting any of these, the design has gone wrong somewhere �
 - **Host-stage CLI commands** registered by plugins. Plugins are container-stage only.
 - **`extendConfig`** for arbitrary top-level fields outside the plugin's own config block.
 - **Per-LLM-call hooks** (`llm.params` / `llm.headers`). Wait until a real plugin needs them.
-- **`tool.before` / `tool.after` for built-in engine tools**. Plugin-defined custom tools only.
 
 ---
 
