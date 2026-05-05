@@ -150,6 +150,41 @@ describe('session.idle hook (debouncer)', () => {
     })
   })
 
+  test('passes conversation origin to memory-logger payload', async () => {
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, { idleMs: 1000 })
+    const origin: SessionIdleEvent['origin'] = {
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T123',
+      workspaceName: 'Acme',
+      chat: 'C456',
+      chatName: 'infra',
+      thread: '171234.0001',
+      lastInboundAuthorId: 'U1',
+      participants: [
+        {
+          authorId: 'U1',
+          authorName: 'Neo',
+          firstMessageAt: 1000,
+          lastMessageAt: 2000,
+          messageCount: 2,
+        },
+      ],
+    }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0, origin }
+
+    await exports.hooks!['session.idle']!(event, { agentDir, pluginName: 'memory', logger: createPluginLogger('m') })
+    await new Promise((r) => setTimeout(r, 1100))
+
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0]!.payload).toEqual({
+      parentSessionId: 'ses_a',
+      parentTranscriptPath: '/tmp/t.jsonl',
+      agentDir,
+      origin,
+    })
+  })
+
   test('rapid idle events debounce: only one spawn after the LAST idle + idleMs', async () => {
     const { exports, spawned } = await bootMemoryPlugin(agentDir, { idleMs: 1000 })
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }

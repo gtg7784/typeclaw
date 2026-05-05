@@ -3,6 +3,7 @@ import { stat } from 'node:fs/promises'
 import { CronExpressionParser } from 'cron-parser'
 import { z } from 'zod'
 
+import type { SessionOrigin } from '@/agent/session-origin'
 import { definePlugin } from '@/plugin'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
@@ -65,7 +66,7 @@ export default definePlugin({
     const dreamingSchedule = ctx.config.dreaming?.schedule ?? DEFAULT_DREAMING_SCHEDULE
 
     const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
-    const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined }>()
+    const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
     const bytesAtLastRun = new Map<string, number>()
 
     const fireMemoryLogger = async (
@@ -78,6 +79,7 @@ export default definePlugin({
         parentSessionId: sessionId,
         parentTranscriptPath: last.parentTranscriptPath,
         agentDir: ctx.agentDir,
+        ...(last.origin !== undefined ? { origin: last.origin } : {}),
       }
       const currentSize = await readSize(last.parentTranscriptPath)
       bytesAtLastRun.set(sessionId, currentSize)
@@ -145,7 +147,10 @@ export default definePlugin({
         // grown by `bufferBytes` since the last run, so busy channel sessions
         // (which rarely go idle) still produce memory updates.
         'session.idle': async (event) => {
-          lastIdleEvent.set(event.sessionId, { parentTranscriptPath: event.parentTranscriptPath })
+          lastIdleEvent.set(event.sessionId, {
+            parentTranscriptPath: event.parentTranscriptPath,
+            ...(event.origin !== undefined ? { origin: event.origin } : {}),
+          })
           cancelTimer(event.sessionId)
           const sessionId = event.sessionId
           const timer = setTimeout(() => {

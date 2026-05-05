@@ -2,6 +2,7 @@ import { join } from 'node:path'
 
 import { z } from 'zod'
 
+import type { SessionOrigin } from '@/agent/session-origin'
 import { type Subagent, readTool } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
@@ -12,6 +13,7 @@ export const memoryLoggerPayloadSchema = z.object({
   parentSessionId: z.string().min(1),
   parentTranscriptPath: z.string().min(1),
   agentDir: z.string().min(1),
+  origin: z.custom<SessionOrigin>().optional(),
 })
 
 export type MemoryLoggerPayload = z.infer<typeof memoryLoggerPayloadSchema>
@@ -93,6 +95,8 @@ The body is the substance of the fragment. The form is flexible, but every body 
 1. **Self-contained.** A future agent reads this without the transcript open. Replace pronouns with names. Include enough context that the fragment stands alone.
 2. **Anchored to evidence.** Somewhere in the body, point at what makes this true: a quote from the transcript, an enumerated set of occurrences, the explicit premise you reasoned from. Specifics survive — "the build broke on line 42 of vite.config.ts" beats "the build broke somewhere." If a fragment has no anchor at all, don't write it.
 
+When the user prompt includes a Conversation context section, use it to make fragments self-contained: mention the relevant adapter, workspace/chat/thread, and participant names/IDs when that location or participant set matters to the memory. Do not paste the full context into every fragment mechanically; include only the fields that help a future agent understand where the event happened and who was involved.
+
 Useful body shapes (pick whichever fits — none is mandatory):
 
 - **Plain prose.** A few sentences. Often the right shape for a stable fact, a decision, or an observed reaction.
@@ -125,6 +129,8 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
     `Daily stream file: ${streamFile}`,
     `Long-term memory file: ${join(payload.agentDir, 'MEMORY.md')}`,
   ]
+  const conversationContext = renderConversationContext(payload.origin)
+  if (conversationContext !== null) lines.push('', conversationContext)
   if (watermark === null) {
     lines.push('Watermark: none (no prior fragments for this session — read the transcript from the start)')
   } else {
@@ -139,6 +145,34 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
       ' entry=<latestEntryId> -->` to the daily stream file recording the latest entry id you evaluated, then stop. Never exit without either a new fragment or a new watermark marker.',
   )
   return lines.join('\n')
+}
+
+function renderConversationContext(origin: SessionOrigin | undefined): string | null {
+  if (origin === undefined) return null
+  if (origin.kind !== 'channel') return ['Conversation context:', `- Origin: ${origin.kind}`].join('\n')
+
+  const lines = [
+    'Conversation context:',
+    `- Adapter: ${origin.adapter}`,
+    `- Workspace: ${formatNamedId(origin.workspace, origin.workspaceName)}`,
+    `- Chat: ${formatNamedId(origin.chat, origin.chatName)}`,
+    `- Thread: ${origin.thread ?? '(channel root)'}`,
+  ]
+  if (origin.lastInboundAuthorId !== undefined) lines.push(`- Last inbound author: ${origin.lastInboundAuthorId}`)
+  if (origin.participants !== undefined && origin.participants.length > 0) {
+    lines.push('- Participants:')
+    for (const participant of origin.participants) {
+      const botLabel = participant.isBot === true ? ' bot' : ''
+      lines.push(
+        `  - ${participant.authorName} (${participant.authorId})${botLabel}; messages=${participant.messageCount}`,
+      )
+    }
+  }
+  return lines.join('\n')
+}
+
+function formatNamedId(id: string, name: string | undefined): string {
+  return name === undefined ? id : `${name} (${id})`
 }
 
 export type MemoryLoggerLogger = {
