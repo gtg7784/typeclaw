@@ -59,10 +59,23 @@ export function createRestartTool({
       'for the agent folder. Use when on-disk source has changed in a way that `reload` cannot pick up — ' +
       'e.g. the typeclaw CLI itself was updated, the Dockerfile template changed, or a boot-only config ' +
       'field needs to take effect (port, mounts, plugins). The current session is lost; the ' +
-      'TUI must reconnect after the new container is up.',
-    parameters: Type.Object({}),
-    execute: async () => {
-      const request = { kind: 'restart' as const, containerName }
+      'TUI must reconnect after the new container is up. Pass `build: true` to also rebuild the ' +
+      'Docker image (equivalent to `typeclaw restart --build`) — required when a dependency in the ' +
+      'Dockerfile template changed but the image already exists, since `start` only rebuilds if the ' +
+      'image is missing or `build` is set.',
+    parameters: Type.Object({
+      build: Type.Optional(
+        Type.Boolean({
+          description:
+            'When true, rebuild the Docker image (`docker build`) before starting the new container. ' +
+            'Default false (reuse the existing image if present). Set this when the Dockerfile template ' +
+            'or its inputs have changed since the image was last built.',
+        }),
+      ),
+    }),
+    async execute(_toolCallId, params) {
+      const build = params.build === true
+      const request = { kind: 'restart' as const, containerName, build }
       const reply =
         httpUrl && httpToken
           ? await sendHttp(request, { timeoutMs: ACK_TIMEOUT_MS, url: httpUrl, token: httpToken })
@@ -94,11 +107,12 @@ export function createRestartTool({
       setTimeout(() => doExit(0), EXIT_DELAY_MS)
 
       const details: RestartToolDetails = { ok: true, containerName }
+      const buildSuffix = build ? ' (with image rebuild)' : ''
       return {
         content: [
           {
             type: 'text' as const,
-            text: `restart scheduled for ${containerName}; this process will exit shortly and a new container will be started by the host daemon.`,
+            text: `restart${buildSuffix} scheduled for ${containerName}; this process will exit shortly and a new container will be started by the host daemon.`,
           },
         ],
         details,

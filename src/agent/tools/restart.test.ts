@@ -48,11 +48,58 @@ describe('createRestartTool', () => {
     expect(requests).toEqual([
       {
         auth: 'Bearer secret',
-        body: { kind: 'restart', containerName: 'coder' },
+        body: { kind: 'restart', containerName: 'coder', build: false },
       },
     ])
     await new Promise((resolve) => setTimeout(resolve, 600))
     expect(exitCode).toBe(0)
+  })
+
+  test('forwards build:true in the RPC body when invoked with { build: true }', async () => {
+    const requests: Array<{ body: unknown }> = []
+    server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        requests.push({ body: await req.json() })
+        return Response.json({ ok: true, result: { containerName: 'coder', scheduled: true } })
+      },
+    })
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-test-origin',
+      exit: () => {},
+    })
+
+    const result = await tool.execute('id', { build: true }, undefined, undefined, fakeCtx)
+
+    expect(result.details).toEqual({ ok: true, containerName: 'coder' })
+    expect(requests).toEqual([{ body: { kind: 'restart', containerName: 'coder', build: true } }])
+    expect(result.content[0]).toMatchObject({ text: expect.stringContaining('image rebuild') })
+  })
+
+  test('omitting build defaults to build:false in the RPC body', async () => {
+    const requests: Array<{ body: unknown }> = []
+    server = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        requests.push({ body: await req.json() })
+        return Response.json({ ok: true, result: { containerName: 'coder', scheduled: true } })
+      },
+    })
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-test-origin',
+      exit: () => {},
+    })
+
+    const result = await tool.execute('id', {}, undefined, undefined, fakeCtx)
+
+    expect(requests).toEqual([{ body: { kind: 'restart', containerName: 'coder', build: false } }])
+    expect(result.content[0]).toMatchObject({ text: expect.not.stringContaining('image rebuild') })
   })
 
   test('returns denial details when HTTP restart is rejected', async () => {

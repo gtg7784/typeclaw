@@ -58,7 +58,7 @@ const defaultRestartDeps: HostdRestartDeps = {
 }
 
 export function buildHostdRestart(cliEntry: string, deps: HostdRestartDeps = defaultRestartDeps): SupervisorRestart {
-  return async ({ containerName, cwd }) => {
+  return async ({ containerName, cwd, build = false }) => {
     const validated = deps.validateConfig(cwd)
     if (!validated.ok) {
       return { ok: false, reason: `invalid config for ${containerName}: ${validated.reason}` }
@@ -70,6 +70,7 @@ export function buildHostdRestart(cliEntry: string, deps: HostdRestartDeps = def
     const startResult = await deps.start({
       cwd,
       preferredHostPort: cfg.port,
+      forceBuild: build,
       cliEntry,
       reuseCurrentHostDaemon: true,
     })
@@ -101,7 +102,7 @@ function formatLog(event: DaemonLogEvent | SupervisorLogEvent): string {
     case 'registration-skipped':
       return `[hostd] skipped persisted registration ${event.containerName}: ${event.reason}`
     case 'restart-scheduled':
-      return `[hostd] restart scheduled for ${event.containerName}`
+      return `[hostd] restart scheduled for ${event.containerName}${event.build ? ' (with rebuild)' : ''}`
     case 'restart-completed':
       return `[hostd] restart completed for ${event.containerName}`
     case 'restart-failed':

@@ -27,7 +27,45 @@ describe('buildHostdRestart', () => {
       preferredHostPort: 61234,
       cliEntry: '/repo/src/cli/index.ts',
       reuseCurrentHostDaemon: true,
+      forceBuild: false,
     })
+  })
+
+  test('forwards build:true to start() as forceBuild', async () => {
+    const starts: StartOptions[] = []
+    const restart = buildHostdRestart('/repo/src/cli/index.ts', {
+      validateConfig: () => ({ ok: true }),
+      stop: async () => ({ ok: true, containerName: 'agent', running: true }),
+      loadConfigSync: () => configSchema.parse({ port: 61234 }),
+      start: async (opts) => {
+        starts.push(opts)
+        return startOk(opts)
+      },
+    })
+
+    const result = await restart({ containerName: 'agent', cwd: '/agent-dir', build: true })
+
+    expect(result.ok).toBe(true)
+    expect(starts).toHaveLength(1)
+    expect(starts[0]?.forceBuild).toBe(true)
+  })
+
+  test('omitted build defaults to forceBuild:false', async () => {
+    const starts: StartOptions[] = []
+    const restart = buildHostdRestart('/repo/src/cli/index.ts', {
+      validateConfig: () => ({ ok: true }),
+      stop: async () => ({ ok: true, containerName: 'agent', running: true }),
+      loadConfigSync: () => configSchema.parse({ port: 61234 }),
+      start: async (opts) => {
+        starts.push(opts)
+        return startOk(opts)
+      },
+    })
+
+    const result = await restart({ containerName: 'agent', cwd: '/agent-dir' })
+
+    expect(result.ok).toBe(true)
+    expect(starts[0]?.forceBuild).toBe(false)
   })
 })
 

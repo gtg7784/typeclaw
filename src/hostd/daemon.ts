@@ -320,11 +320,14 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   // reaches the mounted socket could otherwise restart any peer container on
   // the host. Scoping by registered name limits the blast radius to the set
   // of containers this user already started.
-  const handleRestart = (req: { containerName: string }): RpcResponse => {
+  const handleRestart = (req: { containerName: string; build?: boolean }): RpcResponse => {
     if (!supervisor) return { ok: false, reason: 'restart capability not enabled on this daemon' }
+    if (req.build !== undefined && typeof req.build !== 'boolean') {
+      return { ok: false, reason: 'restart.build must be a boolean if provided' }
+    }
     const cwd = cwds.get(req.containerName)
     if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
-    const ack = supervisor.scheduleRestart({ containerName: req.containerName, cwd })
+    const ack = supervisor.scheduleRestart({ containerName: req.containerName, cwd, build: req.build })
     if (!ack.ok) return ack
     const result: RestartResult = { containerName: req.containerName, scheduled: true }
     return { ok: true, result }

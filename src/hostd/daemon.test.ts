@@ -165,12 +165,12 @@ describe('startDaemon', () => {
   })
 
   test('restart RPC ACKs and invokes the supervisor with the registered cwd', async () => {
-    const restartCalls: Array<{ containerName: string; cwd: string }> = []
+    const restartCalls: Array<{ containerName: string; cwd: string; build?: boolean }> = []
     daemon = await startDaemon({
       exec: fakeExec(new Set(['coder'])),
       gcIntervalMs: 1_000_000,
-      restart: async ({ containerName, cwd }) => {
-        restartCalls.push({ containerName, cwd })
+      restart: async ({ containerName, cwd, build }) => {
+        restartCalls.push({ containerName, cwd, build })
         return { ok: true }
       },
     })
@@ -180,16 +180,49 @@ describe('startDaemon', () => {
     expect(ack.ok).toBe(true)
 
     await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
+    expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder', build: false }])
   })
 
-  test('HTTP restart ACKs with the registered container token', async () => {
-    const restartCalls: Array<{ containerName: string; cwd: string }> = []
+  test('restart RPC forwards build:true to the supervisor', async () => {
+    const restartCalls: Array<{ containerName: string; cwd: string; build?: boolean }> = []
     daemon = await startDaemon({
       exec: fakeExec(new Set(['coder'])),
       gcIntervalMs: 1_000_000,
-      restart: async ({ containerName, cwd }) => {
-        restartCalls.push({ containerName, cwd })
+      restart: async ({ containerName, cwd, build }) => {
+        restartCalls.push({ containerName, cwd, build })
+        return { ok: true }
+      },
+    })
+
+    await send({ kind: 'register', containerName: 'coder', cwd: '/agent/coder' })
+    const ack = await send({ kind: 'restart', containerName: 'coder', build: true })
+    expect(ack.ok).toBe(true)
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder', build: true }])
+  })
+
+  test('restart RPC rejects a non-boolean build field', async () => {
+    daemon = await startDaemon({
+      exec: fakeExec(new Set(['coder'])),
+      gcIntervalMs: 1_000_000,
+      restart: async () => ({ ok: true }),
+    })
+
+    await send({ kind: 'register', containerName: 'coder', cwd: '/agent/coder' })
+    const ack = await send({ kind: 'restart', containerName: 'coder', build: 'yes' as unknown as boolean })
+    expect(ack.ok).toBe(false)
+    if (ack.ok) return
+    expect(ack.reason).toContain('boolean')
+  })
+
+  test('HTTP restart ACKs with the registered container token', async () => {
+    const restartCalls: Array<{ containerName: string; cwd: string; build?: boolean }> = []
+    daemon = await startDaemon({
+      exec: fakeExec(new Set(['coder'])),
+      gcIntervalMs: 1_000_000,
+      restart: async ({ containerName, cwd, build }) => {
+        restartCalls.push({ containerName, cwd, build })
         return { ok: true }
       },
     })
@@ -206,7 +239,33 @@ describe('startDaemon', () => {
     expect(ack.ok).toBe(true)
 
     await new Promise((resolve) => setTimeout(resolve, 50))
-    expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
+    expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder', build: false }])
+  })
+
+  test('HTTP restart forwards build:true to the supervisor', async () => {
+    const restartCalls: Array<{ containerName: string; cwd: string; build?: boolean }> = []
+    daemon = await startDaemon({
+      exec: fakeExec(new Set(['coder'])),
+      gcIntervalMs: 1_000_000,
+      restart: async ({ containerName, cwd, build }) => {
+        restartCalls.push({ containerName, cwd, build })
+        return { ok: true }
+      },
+    })
+    const info = await send({ kind: 'http-info' })
+    expect(info.ok).toBe(true)
+    if (!info.ok) return
+    const port = (info.result as HttpInfoResult).port
+
+    await send({ kind: 'register', containerName: 'coder', cwd: '/agent/coder', restartToken: 'secret' })
+    const ack = await sendHttp(
+      { kind: 'restart', containerName: 'coder', build: true },
+      { url: `http://127.0.0.1:${port}`, token: 'secret' },
+    )
+    expect(ack.ok).toBe(true)
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder', build: true }])
   })
 
   test('HTTP restart rejects an invalid container token', async () => {

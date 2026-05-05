@@ -13,7 +13,7 @@ export type Request =
   | { kind: 'deregister'; containerName: string }
   | { kind: 'list' }
   | { kind: 'status'; containerName: string }
-  | { kind: 'restart'; containerName: string }
+  | { kind: 'restart'; containerName: string; build?: boolean }
   | { kind: 'http-info' }
   | { kind: 'version' }
   | { kind: 'shutdown' }
