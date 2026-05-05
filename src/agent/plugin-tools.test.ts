@@ -1,12 +1,19 @@
 import { describe, expect, test } from 'bun:test'
 
+import { defineTool as definePiTool } from '@mariozechner/pi-coding-agent'
+import { Type } from '@sinclair/typebox'
 import { z } from 'zod'
 
 import { createHookBus, defineTool } from '@/plugin'
 
-import { wrapPluginTool, zodToToolParameters } from './plugin-tools'
+import { wrapPluginTool, wrapSystemAgentTool, wrapSystemTool, zodToToolParameters } from './plugin-tools'
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
+
+function textOfFirstContent(result: { content: { type: string; text?: string }[] }): string | undefined {
+  const first = result.content[0]
+  return first?.type === 'text' ? first.text : undefined
+}
 
 describe('zodToToolParameters', () => {
   test('produces a JSON-schema-shaped object from a Zod schema', () => {
@@ -210,5 +217,123 @@ describe('wrapPluginTool', () => {
     const controller = new AbortController()
     await wrapped.execute('c', {}, controller.signal, undefined, {} as never)
     expect(captured.signal).toBe(controller.signal)
+  })
+})
+
+describe('wrapSystemTool', () => {
+  test('tool.before mutations propagate to TypeClaw system tool execution and tool.after can rewrite the result', async () => {
+    const seen: unknown[] = []
+    const observed: unknown[] = []
+    const tool = definePiTool({
+      name: 'reload',
+      label: 'reload',
+      description: '',
+      parameters: Type.Object({ q: Type.String() }),
+      async execute(_callId, params) {
+        seen.push(params)
+        return { content: [{ type: 'text', text: `q=${params.q}` }], details: { q: params.q } }
+      },
+    })
+    const hooks = createHookBus()
+    hooks.registerAll('p1', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        event.args.q = 'mutated'
+      },
+      'tool.after': (event) => {
+        observed.push(event.result.details)
+        event.result.content = [{ type: 'text', text: 'rewritten' }]
+        event.result.details = { rewritten: true }
+      },
+    })
+
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+
+    const result = await wrapped.execute('c', { q: 'original' }, undefined, undefined, {} as never)
+    expect(textOfFirstContent(result)).toBe('rewritten')
+    expect(result.details).toEqual({ rewritten: true })
+    expect(seen[0]).toEqual({ q: 'mutated' })
+    expect(observed[0]).toEqual({ q: 'mutated' })
+  })
+
+  test('tool.before { block: true } rejects TypeClaw system tool execution through the engine error path', async () => {
+    const calls: number[] = []
+    const tool = definePiTool({
+      name: 'restart',
+      label: 'restart',
+      description: '',
+      parameters: Type.Object({}),
+      async execute() {
+        calls.push(1)
+        return { content: [], details: undefined }
+      },
+    })
+    const hooks = createHookBus()
+    hooks.registerAll('p1', '/agent', noopLogger, {
+      'tool.before': () => ({ block: true, reason: 'no restart' }),
+    })
+
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+
+    await expect(wrapped.execute('c', {}, undefined, undefined, {} as never)).rejects.toThrow('blocked: no restart')
+    expect(calls).toEqual([])
+  })
+})
+
+describe('wrapSystemAgentTool', () => {
+  test('tool.before and tool.after fire for built-in pi-style agent tools and can rewrite the result', async () => {
+    const seen: unknown[] = []
+    const observed: unknown[] = []
+    const tool = {
+      name: 'read',
+      label: 'read',
+      description: '',
+      parameters: Type.Object({ path: Type.String() }),
+      async execute(_callId: string, params: { path: string }) {
+        seen.push(params)
+        return { content: [{ type: 'text' as const, text: params.path }], details: { path: params.path } }
+      },
+    }
+    const hooks = createHookBus()
+    hooks.registerAll('p1', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        event.args.path = '/mutated'
+      },
+      'tool.after': (event) => {
+        observed.push(event.result.details)
+        event.result.content = [{ type: 'text', text: 'rewritten read' }]
+        event.result.details = { rewritten: true }
+      },
+    })
+
+    const wrapped = wrapSystemAgentTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+
+    const result = await wrapped.execute('c', { path: '/original' })
+    expect(textOfFirstContent(result)).toBe('rewritten read')
+    expect(result.details as Record<string, unknown>).toEqual({ rewritten: true })
+    expect(seen[0]).toEqual({ path: '/mutated' })
+    expect(observed[0]).toEqual({ path: '/mutated' })
+  })
+
+  test('tool.before { block: true } rejects built-in pi-style agent tool execution through the engine error path', async () => {
+    const calls: number[] = []
+    const tool = {
+      name: 'bash',
+      label: 'bash',
+      description: '',
+      parameters: Type.Object({ command: Type.String() }),
+      async execute(_callId: string, _params: { command: string }) {
+        calls.push(1)
+        return { content: [], details: undefined }
+      },
+    }
+    const hooks = createHookBus()
+    hooks.registerAll('p1', '/agent', noopLogger, {
+      'tool.before': () => ({ block: true, reason: 'no bash' }),
+    })
+
+    const wrapped = wrapSystemAgentTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+
+    await expect(wrapped.execute('c', { command: 'pwd' })).rejects.toThrow('blocked: no bash')
+    expect(calls).toEqual([])
   })
 })

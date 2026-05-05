@@ -103,8 +103,8 @@ export type SessionPromptEvent = {
   agentDir: string
 }
 
-// Plugin-defined custom tools only. Built-in pi tools (read/bash/edit/write)
-// are not intercepted in v0.1.
+// Fired for plugin-defined tools and TypeClaw-exposed system tools, including
+// built-in pi tools (read/bash/edit/write/grep/find/ls) when plugins are wired.
 export type ToolBeforeEvent = {
   tool: string
   sessionId: string

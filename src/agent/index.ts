@@ -22,7 +22,7 @@ import type { Stream } from '@/stream'
 import { getAuth } from './auth'
 import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
-import { resolveBuiltinToolRefs, wrapPluginTool } from './plugin-tools'
+import { resolveBuiltinToolRefs, wrapPluginTool, wrapSystemAgentTool, wrapSystemTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { renderSessionOrigin, type SessionOrigin } from './session-origin'
@@ -118,7 +118,10 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins)
     : wrapRegistryTools(options.plugins)
 
-  const tools = options.tools ?? (subagentBuiltinTools as AgentSessionTools | undefined)
+  const tools = wrapSystemAgentTools(
+    options.tools ?? (subagentBuiltinTools as AgentSessionTools | undefined),
+    options.plugins,
+  )
 
   // Hoisted above tool construction so the restart tool can be wired with the
   // session's stable identity (sessionManager.getSessionId()). Subscribers use
@@ -126,11 +129,11 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // container-restarting broadcast.
   const sessionManager = options.sessionManager ?? SessionManager.inMemory()
 
-  const customTools =
+  const customSystemTools =
     options.customTools !== undefined
-      ? [...options.customTools, ...pluginCustomTools]
+      ? options.customTools
       : options.pluginSubagent
-        ? pluginCustomTools
+        ? []
         : [
             websearchTool,
             webfetchTool,
@@ -146,8 +149,8 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
                   }),
                 ]
               : []),
-            ...pluginCustomTools,
           ]
+  const customTools = [...wrapSystemTools(customSystemTools, options.plugins), ...pluginCustomTools]
 
   const model = resolveModel(getConfig().model)
   const { session } = await createAgentSession({
@@ -296,6 +299,36 @@ function wrapRegistryTools(plugins: PluginSessionWiring | undefined): ToolDefini
       hooks: plugins.hooks,
     }),
   )
+}
+
+function wrapSystemAgentTools(
+  tools: AgentSessionTools | undefined,
+  plugins: PluginSessionWiring | undefined,
+): AgentSessionTools | undefined {
+  if (!tools || !hasToolHooks(plugins)) return tools
+  return tools.map((tool) =>
+    wrapSystemAgentTool(tool, {
+      agentDir: plugins.agentDir,
+      sessionId: plugins.sessionId,
+      hooks: plugins.hooks,
+    }),
+  )
+}
+
+function wrapSystemTools(tools: ToolDefinition[], plugins: PluginSessionWiring | undefined): ToolDefinition[] {
+  if (!hasToolHooks(plugins)) return tools
+  return tools.map((tool) =>
+    wrapSystemTool(tool, {
+      agentDir: plugins.agentDir,
+      sessionId: plugins.sessionId,
+      hooks: plugins.hooks,
+    }),
+  )
+}
+
+function hasToolHooks(plugins: PluginSessionWiring | undefined): plugins is PluginSessionWiring {
+  if (!plugins) return false
+  return plugins.hooks.count('tool.before') > 0 || plugins.hooks.count('tool.after') > 0
 }
 
 function wrapSubagentCustomTools(

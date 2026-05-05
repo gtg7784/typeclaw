@@ -1,3 +1,4 @@
+import type { AgentTool } from '@mariozechner/pi-agent-core'
 import {
   bashTool as piBashTool,
   defineTool as piDefineTool,
@@ -9,7 +10,7 @@ import {
   writeTool as piWriteTool,
 } from '@mariozechner/pi-coding-agent'
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
-import type { TSchema } from '@sinclair/typebox'
+import type { Static, TSchema } from '@sinclair/typebox'
 import { z } from 'zod'
 
 import type {
@@ -56,6 +57,12 @@ export type WrapToolOptions = {
   agentDir: string
   sessionId: string
   logger: PluginLogger
+  hooks: HookBus
+}
+
+export type WrapSystemToolOptions = {
+  agentDir: string
+  sessionId: string
   hooks: HookBus
 }
 
@@ -118,6 +125,80 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
       }
     },
   })
+}
+
+export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TState = unknown>(
+  tool: ToolDefinition<TParams, TDetails, TState>,
+  opts: WrapSystemToolOptions,
+): ToolDefinition<TParams, TDetails, TState> {
+  return piDefineTool({
+    ...tool,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const mutableArgs = params as Record<string, unknown>
+      const blockResult = await opts.hooks.runToolBefore({
+        tool: tool.name,
+        sessionId: opts.sessionId,
+        callId: toolCallId,
+        args: mutableArgs,
+      })
+      if (blockResult !== undefined) {
+        throw new Error(`blocked: ${blockResult.reason}`)
+      }
+
+      const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx)
+      const hookResult: ToolResult = {
+        content: result.content as ContentPart[],
+        details: result.details,
+      }
+      await opts.hooks.runToolAfter({
+        tool: tool.name,
+        sessionId: opts.sessionId,
+        callId: toolCallId,
+        result: hookResult,
+      })
+      return {
+        content: hookResult.content,
+        details: hookResult.details as TDetails,
+      }
+    },
+  })
+}
+
+export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>(
+  tool: AgentTool<TParams, TDetails>,
+  opts: WrapSystemToolOptions,
+): AgentTool<TParams, TDetails> {
+  return {
+    ...tool,
+    async execute(toolCallId, params, signal, onUpdate) {
+      const mutableArgs = params as Record<string, unknown>
+      const blockResult = await opts.hooks.runToolBefore({
+        tool: tool.name,
+        sessionId: opts.sessionId,
+        callId: toolCallId,
+        args: mutableArgs,
+      })
+      if (blockResult !== undefined) {
+        throw new Error(`blocked: ${blockResult.reason}`)
+      }
+
+      const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate)
+      const hookResult: ToolResult = {
+        content: result.content as ContentPart[],
+        details: result.details,
+      }
+      await opts.hooks.runToolAfter({
+        tool: tool.name,
+        sessionId: opts.sessionId,
+        callId: toolCallId,
+        result: hookResult,
+      })
+      return {
+        content: hookResult.content,
+        details: hookResult.details as TDetails,
+      }
+    },
+  }
 }
 
 function errorResult(message: string) {
