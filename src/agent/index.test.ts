@@ -140,8 +140,22 @@ describe('createResourceLoader', () => {
     expect(configSkill?.description.length).toBeGreaterThan(0)
   })
 
-  test('exposes the agent-browser bundled skill to the agent', async () => {
-    const loader = await createResourceLoader({ agentDir })
+  test('exposes the agent-browser bundled plugin skill to the agent', async () => {
+    const hooks = createHookBus()
+    const registry: PluginRegistry = {
+      tools: [],
+      subagents: [],
+      cronJobs: [],
+      skills: [],
+      skillsDirs: [
+        { pluginName: 'agent-browser', path: join(import.meta.dir, '..', '..', 'plugins', 'agent-browser', 'skills') },
+      ],
+    }
+
+    const loader = await createResourceLoader({
+      agentDir,
+      plugins: { registry, hooks, sessionId: 'test-session', agentDir },
+    })
 
     const { skills } = loader.getSkills()
     const browserSkill = skills.find((s) => s.name === 'agent-browser')

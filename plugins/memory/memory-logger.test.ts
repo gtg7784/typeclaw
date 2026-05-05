@@ -53,6 +53,35 @@ describe('isMemoryLoggerPayload', () => {
     ).toBe(true)
   })
 
+  test('accepts a payload with channel origin context', () => {
+    expect(
+      isMemoryLoggerPayload({
+        parentSessionId: 'ses_abc',
+        parentTranscriptPath: '/path/to/file.jsonl',
+        agentDir: '/path/to/agent',
+        origin: {
+          kind: 'channel',
+          adapter: 'slack-bot',
+          workspace: 'T123',
+          workspaceName: 'Acme',
+          chat: 'C456',
+          chatName: 'infra',
+          thread: '171234.0001',
+          lastInboundAuthorId: 'U1',
+          participants: [
+            {
+              authorId: 'U1',
+              authorName: 'Neo',
+              firstMessageAt: 1000,
+              lastMessageAt: 2000,
+              messageCount: 2,
+            },
+          ],
+        },
+      }),
+    ).toBe(true)
+  })
+
   test('rejects when fields are missing', () => {
     expect(isMemoryLoggerPayload({})).toBe(false)
     expect(isMemoryLoggerPayload({ parentSessionId: '', parentTranscriptPath: 'b', agentDir: 'c' })).toBe(false)
@@ -133,6 +162,49 @@ describe('memoryLoggerSubagent', () => {
     expect(prompt).toContain(transcript)
     expect(prompt).toContain('ses_abc')
     expect(prompt).toMatch(/memory\/\d{4}-\d{2}-\d{2}\.md/)
+  })
+
+  test('handler includes channel location and participants in the initial prompt', async () => {
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+
+    const { runSessionCalls } = await invokeWith(
+      {
+        parentSessionId: 'ses_abc',
+        parentTranscriptPath: transcript,
+        agentDir,
+        origin: {
+          kind: 'channel',
+          adapter: 'slack-bot',
+          workspace: 'T123',
+          workspaceName: 'Acme',
+          chat: 'C456',
+          chatName: 'infra',
+          thread: '171234.0001',
+          lastInboundAuthorId: 'U1',
+          participants: [
+            {
+              authorId: 'U1',
+              authorName: 'Neo',
+              firstMessageAt: 1000,
+              lastMessageAt: 2000,
+              messageCount: 2,
+            },
+          ],
+        },
+      },
+      agentDir,
+    )
+
+    const prompt = runSessionCalls[0]!.userPrompt!
+    expect(prompt).toContain('Conversation context:')
+    expect(prompt).toContain('- Adapter: slack-bot')
+    expect(prompt).toContain('- Workspace: Acme (T123)')
+    expect(prompt).toContain('- Chat: infra (C456)')
+    expect(prompt).toContain('- Thread: 171234.0001')
+    expect(prompt).toContain('- Last inbound author: U1')
+    expect(prompt).toContain('Neo (U1); messages=2')
   })
 
   test('handler includes the watermark when one exists in the daily stream', async () => {
