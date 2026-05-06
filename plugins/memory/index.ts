@@ -136,7 +136,7 @@ export default definePlugin({
       },
       hooks: {
         'session.prompt': async (event) => {
-          const memorySection = await loadMemory(ctx.agentDir)
+          const memorySection = await loadMemory(ctx.agentDir, { origin: event.origin })
           event.prompt = `${event.prompt}\n\n${memorySection}`
         },
         // Core fires `session.idle` immediately after every prompt completion;

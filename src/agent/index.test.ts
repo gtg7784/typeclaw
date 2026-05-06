@@ -288,6 +288,42 @@ describe('createResourceLoader', () => {
     expect(nudgeIdx).toBeGreaterThan(-1)
     expect(nudgeIdx).toBeGreaterThan(pluginIdx)
   })
+
+  test('passes session origin to plugin session.prompt hooks', async () => {
+    // given
+    let capturedOrigin: SessionOrigin | undefined
+    const hooks = createHookBus()
+    hooks.registerAll('plugin-test', agentDir, silentLogger(), {
+      'session.prompt': async (event) => {
+        capturedOrigin = event.origin
+      },
+    })
+    const registry: PluginRegistry = {
+      tools: [],
+      subagents: [],
+      cronJobs: [],
+      skills: [],
+      skillsDirs: [],
+    }
+    const origin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      thread: null,
+      participants: [],
+    }
+
+    // when
+    await createResourceLoader({
+      agentDir,
+      origin,
+      plugins: { registry, hooks, sessionId: 'test-session', agentDir },
+    })
+
+    // then
+    expect(capturedOrigin).toEqual(origin)
+  })
 })
 
 describe('createOverrideResourceLoader', () => {
