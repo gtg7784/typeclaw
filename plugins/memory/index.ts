@@ -13,7 +13,7 @@ import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-l
 const DEFAULT_IDLE_MS = 10_000
 const DEFAULT_BUFFER_BYTES = 100_000
 const MIN_BUFFER_BYTES = 10_000
-const DEFAULT_DREAMING_SCHEDULE = '0 4 * * *'
+const DEFAULT_DREAMING_SCHEDULE = '0 */2 * * *'
 
 function isValidCronExpression(schedule: string): boolean {
   try {
