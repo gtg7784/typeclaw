@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
-import type { HookContext, PluginContext, ToolBeforeEvent } from '@/plugin'
+import type { ContentPart, HookContext, PluginContext, ToolAfterEvent, ToolBeforeEvent, ToolResult } from '@/plugin'
 
 import guardPlugin from './index'
 
@@ -264,7 +264,101 @@ describe('guard plugin', () => {
     expect(readResult).toBeUndefined()
     expect(invalidPathResult).toBeUndefined()
   })
+
+  test('appends an uncommitted-changes advisory to write/edit/bash results when the worktree is dirty', async () => {
+    const agentDir = await initDirtyGitRepo()
+    const hook = await toolAfterHook()
+
+    for (const tool of ['write', 'edit', 'bash']) {
+      const result = textResult('tool ok')
+      await hook(afterEvent(tool, result), hookContext(agentDir))
+      expect(textOf(result)).toContain('tool ok')
+      expect(textOf(result)).toContain('uncommittedChanges')
+    }
+  })
+
+  test('does not append an advisory after non-file-touching tools', async () => {
+    const agentDir = await initDirtyGitRepo()
+    const hook = await toolAfterHook()
+
+    const result = textResult('read output')
+    await hook(afterEvent('read', result), hookContext(agentDir))
+
+    expect(textOf(result)).toBe('read output')
+  })
+
+  test('does not append an advisory when the worktree is clean', async () => {
+    const agentDir = await initCleanGitRepo()
+    const hook = await toolAfterHook()
+
+    const result = textResult('wrote ok')
+    await hook(afterEvent('write', result), hookContext(agentDir))
+
+    expect(textOf(result)).toBe('wrote ok')
+  })
+
+  test('does not append an advisory when only runtime-owned (sessions/, memory/) files are dirty', async () => {
+    const agentDir = await initCleanGitRepo()
+    await mkdir(path.join(agentDir, 'sessions'), { recursive: true })
+    await mkdir(path.join(agentDir, 'memory'), { recursive: true })
+    await writeFile(path.join(agentDir, 'sessions', 'a.jsonl'), '{}')
+    await writeFile(path.join(agentDir, 'memory', 'b.md'), '#')
+    const hook = await toolAfterHook()
+
+    const result = textResult('wrote ok')
+    await hook(afterEvent('write', result), hookContext(agentDir))
+
+    expect(textOf(result)).toBe('wrote ok')
+  })
 })
+
+function textResult(text: string): ToolResult {
+  return { content: [{ type: 'text', text }] }
+}
+
+function textOf(result: ToolResult): string {
+  const part = result.content.find((p): p is ContentPart & { type: 'text' } => p.type === 'text')
+  return part ? part.text : ''
+}
+
+function afterEvent(tool: string, result: ToolResult): ToolAfterEvent {
+  return { tool, sessionId: 's', callId: 'c', result }
+}
+
+async function toolAfterHook(): Promise<
+  NonNullable<NonNullable<Awaited<ReturnType<typeof guardPlugin.plugin>>['hooks']>['tool.after']>
+> {
+  const exports = await guardPlugin.plugin(pluginContext('/agent'))
+  const hook = exports.hooks?.['tool.after']
+  if (!hook) throw new Error('guard plugin did not register tool.after')
+  return hook
+}
+
+async function initCleanGitRepo(): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), 'typeclaw-guard-after-'))
+  const agentDir = path.join(root, 'agent')
+  await mkdir(agentDir, { recursive: true })
+  await runGit(agentDir, ['init', '-b', 'main'])
+  await writeFile(path.join(agentDir, 'README.md'), 'seed\n')
+  await runGit(agentDir, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'add', 'README.md'])
+  await runGit(agentDir, ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-m', 'seed'])
+  return agentDir
+}
+
+async function initDirtyGitRepo(): Promise<string> {
+  const agentDir = await initCleanGitRepo()
+  await writeFile(path.join(agentDir, 'dirty.txt'), 'hi\n')
+  return agentDir
+}
+
+async function runGit(cwd: string, args: string[]): Promise<void> {
+  const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const exit = await proc.exited
+  if (exit !== 0) {
+    const stderr = await new Response(proc.stderr).text()
+    throw new Error(`git ${args.join(' ')} failed (${exit}): ${stderr.trim() || '<no stderr>'}`)
+  }
+}
 
 async function toolBeforeHook(): Promise<
   NonNullable<NonNullable<Awaited<ReturnType<typeof guardPlugin.plugin>>['hooks']>['tool.before']>
