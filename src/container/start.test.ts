@@ -21,7 +21,24 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
+// Mirror the post-init agent-folder shape: package.json declares the
+// `packages/*` bun workspace and `packages/.gitkeep` exists so refreshPackageJson
+// is a no-op. Tests that want to exercise the migration path should call
+// `writePackageJsonPreMigration` instead.
 async function writePackageJson(dir: string, deps: Record<string, string>): Promise<void> {
+  const pkg = {
+    name: basename(dir),
+    private: true,
+    type: 'module',
+    workspaces: ['packages/*'],
+    dependencies: deps,
+  }
+  await writeFile(join(dir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
+  await mkdir(join(dir, 'packages'), { recursive: true })
+  await writeFile(join(dir, 'packages', '.gitkeep'), '')
+}
+
+async function writePackageJsonPreMigration(dir: string, deps: Record<string, string>): Promise<void> {
   const pkg = { name: basename(dir), private: true, type: 'module', dependencies: deps }
   await writeFile(join(dir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`)
 }
@@ -869,6 +886,57 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
     expect(headAfter).toBe(headBefore)
+  })
+
+  test('migrates a pre-monorepo agent folder by injecting workspaces and committing the change', async () => {
+    // given: an agent folder from before bun-workspaces support — package.json has no
+    // `workspaces` field, packages/.gitkeep does not exist
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJsonPreMigration(root, { typeclaw: '^0.1.0' })
+    await runGit(root, ['add', '.gitignore', 'package.json'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when: start runs (refreshPackageJson should inject workspaces and create .gitkeep)
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+
+    // then: a new commit landed with the migration
+    expect(result.ok).toBe(true)
+    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfter).not.toBe(headBefore)
+    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
+    expect(subjects).toContain('Enable bun workspaces (packages/*)')
+    // and: the agent folder is now in the post-migration shape
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<string, unknown>
+    expect(pkg.workspaces).toEqual(['packages/*'])
+    expect(existsSync(join(root, 'packages', '.gitkeep'))).toBe(true)
+    // and: the migration commit tracks both files
+    const filesInCommit = (await runGit(root, ['show', '--name-only', '--format=', 'HEAD'])).split('\n').sort()
+    expect(filesInCommit).toEqual(['package.json', 'packages/.gitkeep'])
+  })
+
+  test('migration is idempotent: a second start on the migrated folder does not create another commit', async () => {
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJsonPreMigration(root, { typeclaw: '^0.1.0' })
+    await runGit(root, ['add', '.gitignore', 'package.json'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // first start: migrates
+    const first = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    expect(first.ok).toBe(true)
+    const headAfterFirst = await runGit(root, ['rev-parse', 'HEAD'])
+
+    // second start: no-op
+    const second = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    expect(second.ok).toBe(true)
+    const headAfterSecond = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfterSecond).toBe(headAfterFirst)
   })
 
   test('can register through the current hostd without drift respawn during daemon-owned restart', async () => {

@@ -9,6 +9,7 @@ import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
+import { refreshPackageJson } from '@/init/packagejson'
 
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import { containerNameFromCwd, defaultDockerExec, type DockerExec, getBun, imageTagFromCwd } from './shared'
@@ -97,21 +98,30 @@ export async function start({
 
     // Probe container state BEFORE refreshing Dockerfile/.gitignore: when the
     // container is already running, start() is a no-op and must not produce
-    // side effects (template writes, .gitignore commits) that would surprise
-    // a user invoking `compose up` against a partially-up tree.
+    // side effects (template writes, .gitignore commits, package.json migration)
+    // that would surprise a user invoking `compose up` against a partially-up
+    // tree.
     const state = await inspectContainer(exec, containerName)
     if (state.exists && state.running) {
       return await reportAlreadyRunning(exec, cwd, containerName)
     }
 
-    // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
-    // CLI templates on every fresh start (not just --build) so version drift
-    // between the agent folder and the CLI is corrected automatically. The
-    // Dockerfile is gitignored (regenerated on every start, never tracked),
-    // so only the .gitignore needs an auto-commit if its content changed.
+    // TypeClaw owns Dockerfile, .gitignore, and the bun-workspaces shape of
+    // package.json. Refresh them from the current CLI templates on every fresh
+    // start (not just --build) so version drift between the agent folder and
+    // the CLI is corrected automatically. The Dockerfile is gitignored
+    // (regenerated on every start, never tracked), so only .gitignore and the
+    // package.json migration land in git. The package.json migration is
+    // one-shot and idempotent — once `workspaces` is set, refreshPackageJson
+    // is a no-op, so users who never edit their agent folder pay zero cost on
+    // subsequent starts and users who customized `workspaces` are not clobbered.
     await refreshDockerfile(cwd)
     await refreshGitignore(cwd)
+    const pkgRefresh = await refreshPackageJson(cwd)
     await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
+    if (pkgRefresh.changed) {
+      await commitSystemFile(cwd, pkgRefresh.files, 'Enable bun workspaces (packages/*)')
+    }
 
     if (state.exists) {
       // Container is stopped/exited/being-removed but still holds the name.
@@ -276,17 +286,24 @@ export async function refreshGitignore(cwd: string): Promise<void> {
   await writeFile(join(cwd, GITIGNORE_FILE), buildGitignore(cfg.gitignore))
 }
 
-// Commits a TypeClaw-owned system file if it's dirty in git. Skips silently
+// Commits TypeClaw-owned system file(s) if any are dirty in git. Skips silently
 // when the agent folder is not a git repo, when bun is unavailable, or when
-// the file is clean (no changes since last commit). Uses the user's global
-// git config for authorship — TypeClaw does not impersonate the user here.
-export async function commitSystemFile(cwd: string, file: string, message: string): Promise<void> {
+// every named file is clean (no changes since last commit). Uses the user's
+// global git config for authorship — TypeClaw does not impersonate the user
+// here. Accepts a single file or an array; the array form produces a single
+// atomic commit covering all listed paths, used for migrations that touch
+// multiple files together (e.g. enabling bun workspaces writes both
+// package.json and packages/.gitkeep in one commit).
+export async function commitSystemFile(cwd: string, file: string | readonly string[], message: string): Promise<void> {
+  const files = typeof file === 'string' ? [file] : file
+  if (files.length === 0) return
+
   const bun = getBun()
   if (!bun) return
   if (!existsSync(join(cwd, '.git'))) return
 
   const status = bun.spawn({
-    cmd: ['git', 'status', '--porcelain', '--', file],
+    cmd: ['git', 'status', '--porcelain', '--', ...files],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -295,11 +312,11 @@ export async function commitSystemFile(cwd: string, file: string, message: strin
   const dirty = (await new Response(status.stdout).text()).trim().length > 0
   if (!dirty) return
 
-  const add = bun.spawn({ cmd: ['git', 'add', '--', file], cwd, stdout: 'pipe', stderr: 'pipe' })
+  const add = bun.spawn({ cmd: ['git', 'add', '--', ...files], cwd, stdout: 'pipe', stderr: 'pipe' })
   if ((await add.exited) !== 0) return
 
   const commit = bun.spawn({
-    cmd: ['git', 'commit', '-m', message, '--only', '--', file],
+    cmd: ['git', 'commit', '-m', message, '--only', '--', ...files],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
