@@ -435,3 +435,35 @@ describe('discord-bot classifyInbound — group mentions', () => {
     expect(verdict.payload.isBotMention).toBe(true)
   })
 })
+
+describe('classifyInbound — author name resolution', () => {
+  test('prefers global_name (display name) over username so the agent never addresses users by their numeric handle', () => {
+    const event = buildEvent({ author: { id: 'u1', username: '1411531', global_name: '세영', bot: false } })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.authorName).toBe('세영')
+  })
+
+  test('falls back to username when global_name is absent', () => {
+    const event = buildEvent({ author: { id: 'u1', username: 'alice', bot: false } })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.authorName).toBe('alice')
+  })
+
+  test('falls back to username when global_name is null (Discord serializes unset display names this way)', () => {
+    const event = buildEvent({ author: { id: 'u1', username: 'alice', global_name: null, bot: false } })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.authorName).toBe('alice')
+  })
+})

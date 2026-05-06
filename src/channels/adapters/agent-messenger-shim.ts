@@ -23,7 +23,7 @@ export type DiscordGatewayMessageCreateEvent = {
   id: string
   channel_id: string
   guild_id?: string
-  author: { id: string; username: string; bot?: boolean }
+  author: { id: string; username: string; global_name?: string | null; bot?: boolean }
   content: string
   attachments?: DiscordGatewayAttachment[]
   embeds?: DiscordGatewayEmbed[]
