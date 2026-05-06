@@ -191,7 +191,3 @@ function matchRule(rule: string, workspace: string, chat: string): boolean {
   }
   return false
 }
-
-export function isEngagementOff(engagement: EngagementConfig): boolean {
-  return engagement.trigger.length === 0 && engagement.stickiness === 'off'
-}
