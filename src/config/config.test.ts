@@ -54,6 +54,31 @@ describe('configSchema', () => {
   })
 })
 
+describe('configSchema alias field', () => {
+  test('defaults to [] when omitted', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.alias).toEqual([])
+  })
+
+  test('accepts a non-empty alias array', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, alias: ['bongbong', '봉봉'] })
+    expect(parsed.alias).toEqual(['bongbong', '봉봉'])
+  })
+
+  test('trims surrounding whitespace from each entry', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, alias: ['  bongbong  ', '\t봉봉\n'] })
+    expect(parsed.alias).toEqual(['bongbong', '봉봉'])
+  })
+
+  test('rejects empty-string entries', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, alias: [''] })).toThrow()
+  })
+
+  test('rejects whitespace-only entries (would otherwise match every message after trim)', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, alias: ['   '] })).toThrow()
+  })
+})
+
 describe('configSchema preserves unknown top-level keys (plugin config blocks)', () => {
   test('a top-level "memory" block survives the schema as unknown (consumed by the bundled memory plugin)', () => {
     const parsed = configSchema.parse({
