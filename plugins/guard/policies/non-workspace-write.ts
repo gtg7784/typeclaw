@@ -12,8 +12,11 @@ const AGENT_ROOT_WRITE_ALLOWLIST = new Set([
   'SOUL.md',
   'USER.md',
   'cron.json',
+  'package.json',
   'typeclaw.json',
 ])
+
+const AGENT_ROOT_DIRECTORY_ALLOWLIST = new Set(['mounts'])
 
 export async function checkNonWorkspaceWriteGuard(options: {
   tool: string
@@ -28,12 +31,11 @@ export async function checkNonWorkspaceWriteGuard(options: {
 
   const targetPath = path.resolve(agentDir, rawPath)
   const workspacePath = path.resolve(agentDir, 'workspace')
-  if (isAllowedAgentRootWrite(agentDir, targetPath)) return undefined
-
   const [realTargetPath, realWorkspacePath] = await Promise.all([
     resolveRealIntendedPath(targetPath),
     resolveRealIntendedPath(workspacePath),
   ])
+  if (await isAllowedAgentRootWrite(agentDir, targetPath, realTargetPath)) return undefined
   if (isInside(realWorkspacePath, realTargetPath)) return undefined
   if (isGuardAcknowledged(args, GUARD_NON_WORKSPACE_WRITE)) return undefined
 
@@ -47,10 +49,17 @@ export async function checkNonWorkspaceWriteGuard(options: {
   }
 }
 
-function isAllowedAgentRootWrite(agentDir: string, targetPath: string): boolean {
-  return (
-    path.dirname(targetPath) === path.resolve(agentDir) && AGENT_ROOT_WRITE_ALLOWLIST.has(path.basename(targetPath))
-  )
+async function isAllowedAgentRootWrite(agentDir: string, targetPath: string, realTargetPath: string): Promise<boolean> {
+  const resolvedAgentDir = path.resolve(agentDir)
+  if (path.dirname(targetPath) === resolvedAgentDir && AGENT_ROOT_WRITE_ALLOWLIST.has(path.basename(targetPath))) {
+    return true
+  }
+
+  for (const dir of AGENT_ROOT_DIRECTORY_ALLOWLIST) {
+    const rootDir = path.join(resolvedAgentDir, dir)
+    if (isInside(await resolveRealIntendedPath(rootDir), realTargetPath)) return true
+  }
+  return false
 }
 
 function isInside(parent: string, child: string): boolean {

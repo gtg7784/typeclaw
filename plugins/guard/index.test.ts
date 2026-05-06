@@ -71,10 +71,35 @@ describe('guard plugin', () => {
   test('allows known writable files at the agent root', async () => {
     const hook = await toolBeforeHook()
 
-    for (const file of ['AGENTS.md', 'IDENTITY.md', 'MEMORY.md', 'SOUL.md', 'USER.md', 'cron.json', 'typeclaw.json']) {
+    for (const file of [
+      'AGENTS.md',
+      'IDENTITY.md',
+      'MEMORY.md',
+      'SOUL.md',
+      'USER.md',
+      'cron.json',
+      'package.json',
+      'typeclaw.json',
+    ]) {
       const result = await hook(toolEvent('write', { path: file, content: 'x' }), hookContext('/agent'))
       expect(result).toBeUndefined()
     }
+  })
+
+  test('allows writes under the agent root mounts directory', async () => {
+    const hook = await toolBeforeHook()
+
+    const relativeResult = await hook(
+      toolEvent('write', { path: 'mounts/data/file.txt', content: 'x' }),
+      hookContext('/agent'),
+    )
+    const absoluteResult = await hook(
+      toolEvent('edit', { path: '/agent/mounts/config.json', edits: [{ oldText: 'x', newText: 'y' }] }),
+      hookContext('/agent'),
+    )
+
+    expect(relativeResult).toBeUndefined()
+    expect(absoluteResult).toBeUndefined()
   })
 
   test('still blocks unknown files and nested paths under allowed root names', async () => {
