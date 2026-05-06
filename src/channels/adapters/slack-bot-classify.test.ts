@@ -300,3 +300,60 @@ describe('slack-bot classifyInbound — targets-others detection', () => {
     expect(verdict.payload.replyToOtherMessageId).toBeNull()
   })
 })
+
+describe('slack-bot classifyInbound — group mentions', () => {
+  test.each([
+    ['<!here>', '<!here> deploy is starting'],
+    ['<!channel>', 'heads up <!channel> — meeting moved'],
+    ['<!everyone>', '<!everyone> the building is on fire'],
+    ['<!here|here>', '<!here|here> labelled form'],
+  ])('treats Slack group mention %s as a bot mention', (_label, text) => {
+    const event = buildEvent({ text })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(true)
+  })
+
+  test('group mention in a team channel roots a thread at the message ts (same as direct mention)', () => {
+    const event = buildEvent({ text: '<!channel> ping' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.thread).toBe('1700000000.000100')
+  })
+
+  test('does NOT treat <!subteam^ID> as a group mention (would require subteam membership context)', () => {
+    const event = buildEvent({ text: '<!subteam^S0ENG|engineering> please review' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(false)
+  })
+
+  test('group mention overrides mentionsOthers — bot is included in the broadcast', () => {
+    const event = buildEvent({ text: '<!here> <@UBOB> can you take this?' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(true)
+  })
+
+  test('non-group "<!" markup (e.g. <!date^…>) does not flip isBotMention', () => {
+    const event = buildEvent({ text: 'meeting at <!date^1700000000^{date_short}|Nov 14>' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(false)
+  })
+})

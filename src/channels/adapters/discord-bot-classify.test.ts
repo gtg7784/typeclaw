@@ -346,3 +346,59 @@ describe('discord-bot classifyInbound — targets-others detection', () => {
     expect(verdict.payload.replyToOtherMessageId).toBeNull()
   })
 })
+
+describe('discord-bot classifyInbound — group mentions', () => {
+  test('treats mention_everyone=true (covers @everyone and @here) as a bot mention', () => {
+    const event = buildEvent({ content: '@everyone deploy starting', mention_everyone: true })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(true)
+  })
+
+  test('treats role mentions (mention_roles non-empty) as a bot mention', () => {
+    const event = buildEvent({ content: '<@&role-eng> can someone look', mention_roles: ['role-eng'] })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(true)
+  })
+
+  test('absent mention_everyone/mention_roles fields fall back to direct-mention check', () => {
+    const event = buildEvent({ content: 'just chatter' })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(false)
+  })
+
+  test('mention_everyone=false with empty mention_roles does not flip isBotMention', () => {
+    const event = buildEvent({ content: 'no broadcast', mention_everyone: false, mention_roles: [] })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(false)
+  })
+
+  test('group mention combined with @-someone-else still engages the bot', () => {
+    const event = buildEvent({
+      content: '@here can <@u2> take this?',
+      mention_everyone: true,
+      mentions: [{ id: 'u2', username: 'bob' }],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(true)
+  })
+})

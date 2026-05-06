@@ -59,7 +59,16 @@ export function classifyInbound(
   // botUserId is null until app.connections.open returns auth metadata. In
   // that race window, treat any inbound as a mention so the very first
   // message after start-up isn't misclassified as ambient chatter.
-  const isBotMention = context.botUserId !== null ? text.includes(`<@${context.botUserId}>`) : true
+  //
+  // Group mentions (`<!here>`, `<!channel>`, `<!everyone>`) are coerced to
+  // direct mentions: the user fired a broadcast that explicitly includes the
+  // bot, and from the engagement layer's perspective there is no meaningful
+  // difference between "@bot, look at this" and "@channel, look at this" —
+  // both are an invitation to participate. Treating them identically also
+  // means the existing 'mention' trigger in typeclaw.json catches both
+  // without any new config surface.
+  const hasGroupMention = GROUP_MENTION_PATTERN.test(text)
+  const isBotMention = hasGroupMention || (context.botUserId !== null ? text.includes(`<@${context.botUserId}>`) : true)
   const thread = event.thread_ts ?? (!isDm && isBotMention ? event.ts : null)
 
   // thread_ts identifies the parent message of a thread. We can only know it
@@ -116,6 +125,13 @@ export function classifyInbound(
 // every distinct id out of the text — duplicates collapse so the caller
 // can do a clean `includes()` check against the bot's own id.
 const MENTION_PATTERN = /<@([UW][A-Z0-9]+)(?:\|[^>]*)?>/g
+
+// Slack's group mention markup uses `!` (not `@`) and may carry an optional
+// `|label` suffix, same as user mentions. We deliberately exclude the
+// `<!subteam^ID>` form — engaging on every user-group ping would require
+// knowing which subteams the bot is a member of, which is outside what
+// Socket Mode events surface to us.
+const GROUP_MENTION_PATTERN = /<!(?:here|channel|everyone)(?:\|[^>]*)?>/
 
 function extractMentionedUserIds(text: string): string[] {
   const seen = new Set<string>()
