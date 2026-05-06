@@ -47,12 +47,120 @@ describe('slack-bot classifyInbound — drop paths', () => {
     expect(verdict).toEqual({ kind: 'drop', reason: 'no_user' })
   })
 
-  test('drops empty-text messages with reason=empty_text', () => {
+  test('drops messages with neither text nor files with reason=empty_text', () => {
     const event = buildEvent({ text: '' })
 
     const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
 
     expect(verdict).toEqual({ kind: 'drop', reason: 'empty_text' })
+  })
+
+  test('routes file-only uploads (empty text) with attachment summary so the agent sees the upload', () => {
+    const event = buildEvent({
+      text: '',
+      files: [
+        {
+          id: 'F1',
+          name: 'diagram.png',
+          title: 'diagram',
+          mimetype: 'image/png',
+          size: 1234,
+          url_private: 'https://files.slack.com/f/F1/diagram.png',
+          created: 1700000000,
+          user: 'UALICE',
+        },
+      ],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.text).toBe('[Slack message with attachment: diagram.png (image/png) id=F1]')
+  })
+
+  test('appends attachment summary to user text so the agent sees BOTH text and the file when the user typed something alongside the upload', () => {
+    const event = buildEvent({
+      text: 'look at this',
+      files: [
+        {
+          id: 'F1',
+          name: 'diagram.png',
+          title: 'diagram',
+          mimetype: 'image/png',
+          size: 1234,
+          url_private: 'https://files.slack.com/f/F1/diagram.png',
+          created: 1700000000,
+          user: 'UALICE',
+        },
+      ],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.text).toBe('look at this\n[Slack message with attachment: diagram.png (image/png) id=F1]')
+  })
+
+  test('multiple file uploads each surface as a separate attachment ref so the agent can fetch any of them', () => {
+    const event = buildEvent({
+      text: '',
+      files: [
+        {
+          id: 'F1',
+          name: 'one.png',
+          title: 'one',
+          mimetype: 'image/png',
+          size: 1,
+          url_private: 'https://files.slack.com/f/F1/one.png',
+          created: 1700000000,
+          user: 'UALICE',
+        },
+        {
+          id: 'F2',
+          name: 'two.txt',
+          title: 'two',
+          mimetype: 'text/plain',
+          size: 2,
+          url_private: 'https://files.slack.com/f/F2/two.txt',
+          created: 1700000001,
+          user: 'UALICE',
+        },
+      ],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.text).toBe(
+      '[Slack message with attachment: one.png (image/png) id=F1; attachment: two.txt (text/plain) id=F2]',
+    )
+  })
+
+  test('appended attachment summary does not register `<@…>` ids inside file URLs as bot mentions', () => {
+    const event = buildEvent({
+      text: 'check this',
+      files: [
+        {
+          id: 'F1',
+          name: 'note.txt',
+          title: 'note',
+          mimetype: 'text/plain',
+          size: 1,
+          url_private: `https://files.slack.com/<@${BOT_USER_ID}>/F1/note.txt`,
+          created: 1700000000,
+          user: 'UALICE',
+        },
+      ],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(false)
   })
 
   test('drops messages from a team not in the allow list with reason=not_in_allow_list', () => {

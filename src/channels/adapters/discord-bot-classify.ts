@@ -107,9 +107,10 @@ function isReplyToBot(event: DiscordGatewayMessageCreateEvent, botUserId: string
 }
 
 function inboundText(event: DiscordGatewayMessageCreateEvent): string {
-  if (event.content !== '') return event.content
   const mediaSummary = summarizeDiscordMedia(event)
-  return mediaSummary.length > 0 ? `[Discord message with ${mediaSummary.join('; ')}]` : ''
+  if (mediaSummary.length === 0) return event.content
+  const summary = `[Discord message with ${mediaSummary.join('; ')}]`
+  return event.content === '' ? summary : `${event.content}\n${summary}`
 }
 
 function summarizeDiscordMedia(event: DiscordGatewayMessageCreateEvent): string[] {

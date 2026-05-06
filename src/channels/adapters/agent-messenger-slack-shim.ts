@@ -44,6 +44,13 @@ export type SlackSocketMessageEvent = {
   // key for the case where one user action surfaces as two events with
   // different `ts` values. Absent on bot messages and most system events.
   client_msg_id?: string
+  // Files uploaded by the user alongside (or in lieu of) text. Slack
+  // delivers file metadata on the same `message` event — there is no
+  // separate `file_share` event for messages we receive. Surfaced as a
+  // typed field (rather than relying on the catchall below) so the
+  // classifier can read it without `as` casts and so adapters can hand
+  // file ids to the SDK's downloadFile API for fetching.
+  files?: SlackFile[]
   [key: string]: unknown
 }
 
@@ -115,6 +122,7 @@ export interface SlackBotClient {
     filename: string,
     options?: { thread_ts?: string; title?: string; initial_comment?: string },
   ): Promise<SlackFile>
+  downloadFile(fileId: string): Promise<{ buffer: Buffer; file: SlackFile }>
 }
 
 export interface SlackBotListener {
