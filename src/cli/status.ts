@@ -35,9 +35,25 @@ async function fetchHostdStatus(containerName: string): Promise<HostdStatus> {
   if (!(await isDaemonReachable())) return { kind: 'unreachable' }
   const reply = await send({ kind: 'status', containerName })
   if (!reply.ok) return { kind: 'not-registered', reason: reply.reason }
-  const result = reply.result as StatusResult | undefined
-  if (!result) return { kind: 'not-registered', reason: 'daemon returned empty status' }
-  return { kind: 'registered', cwd: result.cwd, forwardedPorts: result.forwardedPorts }
+  const parsed = parseStatusResult(reply.result)
+  if (!parsed) return { kind: 'not-registered', reason: 'daemon returned malformed status' }
+  return { kind: 'registered', cwd: parsed.cwd, forwardedPorts: parsed.forwardedPorts }
+}
+
+// Validate the daemon payload at runtime: a drift-respawn race or an older
+// daemon binary can deliver a `StatusResult` without `forwardedPorts`, and the
+// blind `as` cast then crashed the renderer with `undefined.length`. Defaulting
+// the field to `[]` (and rejecting non-string `cwd`) keeps `typeclaw status`
+// usable as a diagnostic when the daemon and CLI have drifted.
+export function parseStatusResult(value: unknown): StatusResult | null {
+  if (typeof value !== 'object' || value === null) return null
+  const v = value as Record<string, unknown>
+  if (typeof v.cwd !== 'string') return null
+  const containerName = typeof v.containerName === 'string' ? v.containerName : ''
+  const forwardedPorts = Array.isArray(v.forwardedPorts)
+    ? v.forwardedPorts.filter((p): p is number => typeof p === 'number' && Number.isFinite(p))
+    : []
+  return { containerName, cwd: v.cwd, forwardedPorts }
 }
 
 export type FormatOptions = { useColor?: boolean }
