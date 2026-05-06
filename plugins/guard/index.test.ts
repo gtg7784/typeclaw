@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, mkdir, symlink } from 'node:fs/promises'
+import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -157,6 +157,104 @@ describe('guard plugin', () => {
     expect(result?.block).toBe(true)
   })
 
+  test('allows valid skill writes under memory and user-installed skill roots without acknowledgement', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'typeclaw-guard-'))
+    const agentDir = path.join(root, 'agent')
+    await mkdir(path.join(agentDir, 'memory', 'skills'), { recursive: true })
+    await mkdir(path.join(agentDir, '.agents', 'skills'), { recursive: true })
+    const hook = await toolBeforeHook()
+
+    const memoryResult = await hook(
+      toolEvent('write', {
+        path: 'memory/skills/release-checklist/SKILL.md',
+        content: skillFile('release-checklist'),
+      }),
+      hookContext(agentDir),
+    )
+    const userResult = await hook(
+      toolEvent('write', {
+        path: '.agents/skills/review_flow/SKILL.md',
+        content: skillFile('review_flow'),
+      }),
+      hookContext(agentDir),
+    )
+
+    expect(memoryResult).toBeUndefined()
+    expect(userResult).toBeUndefined()
+  })
+
+  test('validates skill authoring path and frontmatter for write calls', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'typeclaw-guard-'))
+    const agentDir = path.join(root, 'agent')
+    await mkdir(path.join(agentDir, 'memory', 'skills'), { recursive: true })
+    const hook = await toolBeforeHook()
+
+    const wrongFile = await hook(
+      toolEvent('write', {
+        path: 'memory/skills/release-checklist/README.md',
+        content: skillFile('release-checklist'),
+      }),
+      hookContext(agentDir),
+    )
+    const wrongName = await hook(
+      toolEvent('write', { path: 'memory/skills/release-checklist/SKILL.md', content: skillFile('other-name') }),
+      hookContext(agentDir),
+    )
+    const reservedName = await hook(
+      toolEvent('write', { path: 'memory/skills/typeclaw-secret/SKILL.md', content: skillFile('typeclaw-secret') }),
+      hookContext(agentDir),
+    )
+
+    expect(wrongFile?.reason).toContain('skillAuthoring')
+    expect(wrongName?.reason).toContain('frontmatter name must match')
+    expect(reservedName?.reason).toContain('reserved')
+  })
+
+  test('validates edited final skill content before allowing edit calls', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'typeclaw-guard-'))
+    const agentDir = path.join(root, 'agent')
+    const skillPath = path.join(agentDir, 'memory', 'skills', 'release-checklist', 'SKILL.md')
+    await mkdir(path.dirname(skillPath), { recursive: true })
+    await writeFile(skillPath, skillFile('release-checklist', 'Old description'))
+    const hook = await toolBeforeHook()
+
+    const validEdit = await hook(
+      toolEvent('edit', {
+        path: 'memory/skills/release-checklist/SKILL.md',
+        edits: [{ oldText: 'Old description', newText: 'New description' }],
+      }),
+      hookContext(agentDir),
+    )
+    const invalidEdit = await hook(
+      toolEvent('edit', {
+        path: 'memory/skills/release-checklist/SKILL.md',
+        edits: [{ oldText: 'name: release-checklist', newText: 'name: other-name' }],
+      }),
+      hookContext(agentDir),
+    )
+
+    expect(validEdit).toBeUndefined()
+    expect(invalidEdit?.reason).toContain('frontmatter name must match')
+  })
+
+  test('blocks skill writes through symlinks that escape the skill root', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'typeclaw-guard-'))
+    const agentDir = path.join(root, 'agent')
+    const skillsDir = path.join(agentDir, 'memory', 'skills')
+    const outsideDir = path.join(root, 'outside')
+    await mkdir(skillsDir, { recursive: true })
+    await mkdir(outsideDir)
+    await symlink(outsideDir, path.join(skillsDir, 'outside-link'))
+    const hook = await toolBeforeHook()
+
+    const result = await hook(
+      toolEvent('write', { path: 'memory/skills/outside-link/SKILL.md', content: skillFile('outside-link') }),
+      hookContext(agentDir),
+    )
+
+    expect(result?.block).toBe(true)
+  })
+
   test('ignores non-mutating tools and invalid paths', async () => {
     const hook = await toolBeforeHook()
 
@@ -194,4 +292,8 @@ function pluginContext(agentDir: string): PluginContext<undefined> {
     logger: noopLogger,
     spawnSubagent: async () => {},
   }
+}
+
+function skillFile(name: string, description = 'Use when shipping a release.'): string {
+  return `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`
 }
