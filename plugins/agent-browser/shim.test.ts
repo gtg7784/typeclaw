@@ -18,7 +18,7 @@ describe('classifyDashboardCommand', () => {
     expect(classifyDashboardCommand(cmd.split(' ').filter(Boolean))).toBe(expected as never)
   })
 
-  test('classifies an unknown subcommand as other so we do not start a proxy for it', () => {
+  test('classifies an unknown subcommand as other so we do not rewrite for it', () => {
     expect(classifyDashboardCommand(['dashboard', 'reload'])).toBe('other')
   })
 
@@ -79,32 +79,24 @@ describe('rewriteDashboardArgs', () => {
 })
 
 describe('runShim', () => {
-  test('passthrough: spawns real bin with unchanged argv and no proxy', async () => {
-    let proxyStarted = false
+  test('passthrough: spawns real bin with unchanged argv for non-dashboard commands', async () => {
     const spawned: string[][] = []
 
     const exit = await runShim({
       argv: ['open', 'https://example.com'],
       realBin: '/stub/agent-browser',
-      proxyPort: 4848,
       upstreamPort: 4849,
       spawn: (cmd) => {
         spawned.push(cmd)
         return { exited: Promise.resolve(0) }
       },
-      startProxy: () => {
-        proxyStarted = true
-        return { server: { stop: () => {} } as never, stop: () => {} }
-      },
     })
 
     expect(exit).toBe(0)
-    expect(proxyStarted).toBe(false)
     expect(spawned).toEqual([['/stub/agent-browser', 'open', 'https://example.com']])
   })
 
-  test('dashboard stop: passthrough, no proxy started', async () => {
-    let proxyStarted = false
+  test('dashboard stop: passthrough, no rewrite', async () => {
     const spawned: string[][] = []
 
     const exit = await runShim({
@@ -114,41 +106,26 @@ describe('runShim', () => {
         spawned.push(cmd)
         return { exited: Promise.resolve(0) }
       },
-      startProxy: () => {
-        proxyStarted = true
-        return { server: { stop: () => {} } as never, stop: () => {} }
-      },
     })
 
     expect(exit).toBe(0)
-    expect(proxyStarted).toBe(false)
     expect(spawned).toEqual([['/stub/agent-browser', 'dashboard', 'stop']])
   })
 
-  test('dashboard start: starts proxy, rewrites --port, spawns real bin, stops proxy on exit', async () => {
+  test('dashboard start: rewrites --port to upstream port and spawns real bin', async () => {
     const spawned: string[][] = []
-    const proxyEvents: string[] = []
 
     const exit = await runShim({
       argv: ['dashboard', 'start', '--port', '9999'],
       realBin: '/stub/agent-browser',
-      proxyPort: 4848,
       upstreamPort: 4849,
       spawn: (cmd) => {
         spawned.push(cmd)
         return { exited: Promise.resolve(0) }
       },
-      startProxy: (opts = {}) => {
-        proxyEvents.push(`start:${opts.listenPort}:${opts.upstreamPort}`)
-        return {
-          server: { stop: () => {} } as never,
-          stop: () => proxyEvents.push('stop'),
-        }
-      },
     })
 
     expect(exit).toBe(0)
-    expect(proxyEvents).toEqual(['start:4848:4849', 'stop'])
     expect(spawned).toEqual([['/stub/agent-browser', 'dashboard', 'start', '--port', '4849']])
   })
 
@@ -162,50 +139,18 @@ describe('runShim', () => {
         spawned.push(cmd)
         return { exited: Promise.resolve(0) }
       },
-      startProxy: () => ({ server: { stop: () => {} } as never, stop: () => {} }),
     })
 
     expect(spawned).toEqual([['/stub/agent-browser', 'dashboard', 'start', '--port', '4849']])
   })
 
-  test('dashboard start: stops proxy even when the real binary exits non-zero', async () => {
-    const proxyEvents: string[] = []
-
+  test('propagates the real binary exit code', async () => {
     const exit = await runShim({
       argv: ['dashboard'],
       realBin: '/stub/agent-browser',
       spawn: () => ({ exited: Promise.resolve(42) }),
-      startProxy: () => {
-        proxyEvents.push('start')
-        return {
-          server: { stop: () => {} } as never,
-          stop: () => proxyEvents.push('stop'),
-        }
-      },
     })
 
     expect(exit).toBe(42)
-    expect(proxyEvents).toEqual(['start', 'stop'])
-  })
-
-  test('dashboard start: stops proxy even when spawn rejects', async () => {
-    const proxyEvents: string[] = []
-
-    await expect(
-      runShim({
-        argv: ['dashboard'],
-        realBin: '/stub/agent-browser',
-        spawn: () => ({ exited: Promise.reject(new Error('boom')) }),
-        startProxy: () => {
-          proxyEvents.push('start')
-          return {
-            server: { stop: () => {} } as never,
-            stop: () => proxyEvents.push('stop'),
-          }
-        },
-      }),
-    ).rejects.toThrow('boom')
-
-    expect(proxyEvents).toEqual(['start', 'stop'])
   })
 })
