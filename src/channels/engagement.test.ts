@@ -32,10 +32,10 @@ function participant(authorId: string, lastMessageAt = 0): ChannelParticipant {
 const crowded: readonly ChannelParticipant[] = [participant('alice'), participant('bob')]
 
 function decideEngagement(
-  input: Omit<EngagementInput, 'membership' | 'selfAliases'> &
-    Partial<Pick<EngagementInput, 'membership' | 'selfAliases'>>,
+  input: Omit<EngagementInput, 'membership' | 'selfAliases' | 'botInThread'> &
+    Partial<Pick<EngagementInput, 'membership' | 'selfAliases' | 'botInThread'>>,
 ): ReturnType<typeof decideEngagementRaw> {
-  return decideEngagementRaw({ membership: null, selfAliases: [], ...input })
+  return decideEngagementRaw({ membership: null, selfAliases: [], botInThread: false, ...input })
 }
 
 function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
@@ -755,6 +755,60 @@ describe('decideEngagement (targets-others suppressors)', () => {
       ledger,
       now: 0,
       participants: [participant('rio')],
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('engages in a thread we already participate in even when parent_user_id resolves to a human (PR #58 follow-up)', () => {
+    // Incident: a human starts a thread by @-mentioning the bot. The bot
+    // replies (mention trigger). The human follows up in the thread. Slack
+    // surfaces parent_user_id = the human (the thread ROOT author, not the
+    // immediate parent), so the adapter sets replyToOtherMessageId. Without
+    // botInThread, the suppressor at the bottom of decideEngagement drops
+    // the follow-up — silently, with no log line — and the bot appears dead
+    // for the rest of the thread. The fix: once botInThread is true, the
+    // replyToOtherMessageId suppressor stops firing, because this is no
+    // longer a side conversation between humans. The two-humans regression
+    // test above still passes because that case has botInThread=false.
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({
+        authorId: 'human-asker',
+        text: 'follow-up question',
+        thread: 'human-asker-thread-root-ts',
+        replyToBotMessageId: null,
+        replyToOtherMessageId: 'human-asker-thread-root-ts',
+      }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('human-asker')],
+      botInThread: true,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('mentionsOthers still suppresses even when bot is in the thread (only the replyToOther gate is conditional)', () => {
+    // botInThread relaxes the parent-author gate (which is wrong-ish for
+    // Slack semantics) but NOT the explicit-tag-of-someone-else gate. If
+    // the human is now @-mentioning a third party in the thread, the bot
+    // should stay quiet — explicit tagging is unambiguous, parent_user_id
+    // is not.
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({
+        authorId: 'human-asker',
+        text: 'hey <@UBOB> can you help here?',
+        thread: 'thread-root-ts',
+        mentionsOthers: true,
+      }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: crowded,
+      botInThread: true,
     })
     expect(decision).toBe('observe')
   })

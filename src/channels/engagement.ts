@@ -64,10 +64,22 @@ export type EngagementInput = {
   // generic ("bot", "ai") it WILL produce false matches and the operator
   // owns curation.
   selfAliases: readonly string[]
+  // True when the bot has previously sent into this exact thread (or
+  // channel — the suppressor only checks this when the message is a
+  // thread reply, but the field is general). Set by the router from
+  // `live.successfulChannelSends > 0` plus any bot-authored prefetched
+  // history in `contextBuffer`. Suppresses the `replyToOtherMessageId`
+  // gate below: once the bot is participating in a thread, subsequent
+  // replies are part of OUR conversation even when `parent_user_id` (the
+  // thread root author) is a human. Without this, a thread that started
+  // with a human @-mention drops every follow-up reply because Slack's
+  // `parent_user_id` always points at the (human) thread root, never the
+  // bot's intermediate replies — see incident in PR #58 follow-up.
+  botInThread: boolean
 }
 
 export function decideEngagement(input: EngagementInput): EngagementDecision {
-  const { message, config, key, ledger, now, participants, selfAliases } = input
+  const { message, config, key, ledger, now, participants, selfAliases, botInThread } = input
 
   if (config.trigger.includes('dm') && message.isDm) return 'engage'
   if (config.trigger.includes('mention') && message.isBotMention) return 'engage'
@@ -132,7 +144,18 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // (which already applies symmetrically to humans and bots) plus this
   // fallback fix.
   if (message.mentionsOthers) return 'observe'
-  if (message.replyToOtherMessageId !== null) return 'observe'
+  // The replyToOtherMessageId suppressor exists to keep the bot out of
+  // human-to-human side conversations in busy channels. But Slack's
+  // `parent_user_id` is the THREAD ROOT author, not the immediate parent
+  // author — so a thread the human starts by @-mentioning the bot
+  // produces `replyToOtherMessageId` on every follow-up (root author is
+  // the human, not us), which would silently drop every reply after the
+  // first. Once the bot has actually sent into this thread, subsequent
+  // replies are part of OUR conversation regardless of who started it,
+  // so the suppressor stops applying. The two-humans-in-a-thread case
+  // PR #58 fixed is preserved because the bot never sent into that
+  // thread in the first place.
+  if (message.replyToOtherMessageId !== null && !botInThread) return 'observe'
 
   // Plain-text peer-bot addressing as a fallback suppressor. We've reached
   // here because the message lacks a structural mention/reply/dm AND
