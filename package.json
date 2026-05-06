@@ -20,6 +20,9 @@
     "cron.schema.json"
   ],
   "type": "module",
+  "exports": {
+    "./plugin": "./src/plugin/index.ts"
+  },
   "publishConfig": {
     "access": "public"
   },
