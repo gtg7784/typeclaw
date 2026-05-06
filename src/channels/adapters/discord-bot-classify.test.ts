@@ -95,6 +95,46 @@ describe('classifyInbound — drop paths', () => {
     expect(verdict.payload.text).toBe('[Discord message with embed: Release notes https://example.com/releases]')
   })
 
+  test('appends attachment summary to user content so the agent sees BOTH text and the file when the user typed something alongside an upload', () => {
+    const event = buildEvent({
+      content: 'look at this',
+      attachments: [
+        {
+          id: 'a1',
+          filename: 'diagram.png',
+          url: 'https://cdn.discordapp.com/attachments/c1/a1/diagram.png',
+          content_type: 'image/png',
+        },
+      ],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.text).toBe(
+      'look at this\n[Discord message with attachment: diagram.png (image/png) https://cdn.discordapp.com/attachments/c1/a1/diagram.png]',
+    )
+  })
+
+  test('appends multiple attachments separated by `;` so each file ref reaches the agent', () => {
+    const event = buildEvent({
+      content: 'two files',
+      attachments: [
+        { id: 'a1', filename: 'one.png', url: 'https://cdn.discordapp.com/.../one.png', content_type: 'image/png' },
+        { id: 'a2', filename: 'two.txt', url: 'https://cdn.discordapp.com/.../two.txt', content_type: 'text/plain' },
+      ],
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.text).toBe(
+      'two files\n[Discord message with attachment: one.png (image/png) https://cdn.discordapp.com/.../one.png; attachment: two.txt (text/plain) https://cdn.discordapp.com/.../two.txt]',
+    )
+  })
+
   test('drops messages from a workspace not in the allow list with reason=not_in_allow_list', () => {
     const config: ChannelAdapterConfig = { ...baseConfig, allow: ['guild:other'] }
     const event = buildEvent({ guild_id: 'g1' })

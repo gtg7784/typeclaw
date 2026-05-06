@@ -136,6 +136,17 @@ export type FetchHistoryResult =
 // 'history-not-supported' for those.
 export type HistoryCallback = (args: FetchHistoryArgs) => Promise<FetchHistoryResult>
 
+export type FetchAttachmentArgs = {
+  ref: string
+  filename?: string
+}
+
+export type FetchAttachmentResult =
+  | { ok: true; buffer: Buffer; filename: string; mimetype?: string; size: number }
+  | { ok: false; error: string }
+
+export type FetchAttachmentCallback = (args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
+
 export function channelKeyId(key: ChannelKey): string {
   return `${key.adapter}:${key.workspace}:${key.chat}:${key.thread ?? ''}`
 }

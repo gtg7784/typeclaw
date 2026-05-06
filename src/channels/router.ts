@@ -29,6 +29,9 @@ import type {
   ChannelHistoryMessage,
   ChannelKey,
   ChannelNameResolver,
+  FetchAttachmentArgs,
+  FetchAttachmentCallback,
+  FetchAttachmentResult,
   FetchHistoryArgs,
   FetchHistoryResult,
   HistoryCallback,
@@ -213,6 +216,9 @@ export type ChannelRouter = {
   registerHistory: (adapter: ChannelKey['adapter'], cb: HistoryCallback) => void
   unregisterHistory: (adapter: ChannelKey['adapter'], cb: HistoryCallback) => void
   fetchHistory: (adapter: ChannelKey['adapter'], args: FetchHistoryArgs) => Promise<FetchHistoryResult>
+  registerFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
+  unregisterFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
+  fetchAttachment: (adapter: ChannelKey['adapter'], args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
   stop: () => Promise<void>
   liveCount: () => number
   __testing?: {
@@ -253,6 +259,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const membershipResolvers = new Map<ChannelKey['adapter'], Set<MembershipResolver>>()
   const membershipCaches = new Map<ChannelKey['adapter'], MembershipCache>()
   const historyCallbacks = new Map<ChannelKey['adapter'], Set<HistoryCallback>>()
+  const fetchAttachmentCallbacks = new Map<ChannelKey['adapter'], Set<FetchAttachmentCallback>>()
   const stickyLedger = new StickyLedger()
   const commands = createCommandRegistry<ChannelCommandContext>([
     {
@@ -998,6 +1005,37 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return lastError
   }
 
+  const registerFetchAttachment = (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback): void => {
+    let set = fetchAttachmentCallbacks.get(adapter)
+    if (!set) {
+      set = new Set()
+      fetchAttachmentCallbacks.set(adapter, set)
+    }
+    set.add(cb)
+  }
+
+  const unregisterFetchAttachment = (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback): void => {
+    fetchAttachmentCallbacks.get(adapter)?.delete(cb)
+  }
+
+  const fetchAttachment = async (
+    adapter: ChannelKey['adapter'],
+    args: FetchAttachmentArgs,
+  ): Promise<FetchAttachmentResult> => {
+    const callbacks = fetchAttachmentCallbacks.get(adapter)
+    if (!callbacks || callbacks.size === 0) {
+      return { ok: false, error: 'fetch-attachment-not-supported' }
+    }
+    const snapshot = Array.from(callbacks)
+    let lastError: FetchAttachmentResult & { ok: false } = { ok: false, error: 'fetch-attachment-not-supported' }
+    for (const cb of snapshot) {
+      const result = await cb(args)
+      if (result.ok) return result
+      lastError = result
+    }
+    return lastError
+  }
+
   const send = async (msg: OutboundMessage): Promise<SendResult> => {
     const callbacks = outboundCallbacks.get(msg.adapter)
     if (!callbacks || callbacks.size === 0) {
@@ -1158,6 +1196,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerHistory,
     unregisterHistory,
     fetchHistory,
+    registerFetchAttachment,
+    unregisterFetchAttachment,
+    fetchAttachment,
     stop,
     liveCount: () => liveSessions.size,
     __testing: {

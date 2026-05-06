@@ -9,6 +9,7 @@ import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
+  FetchAttachmentCallback,
   FetchHistoryArgs,
   FetchHistoryResult,
   HistoryCallback,
@@ -409,6 +410,63 @@ export function createOutboundCallback(deps: {
   }
 }
 
+// Discord CDN URLs (`cdn.discordapp.com/attachments/...`) are signed and
+// expire (~24h). Sending the bot token alongside makes no difference for
+// public CDN URLs (Discord ignores it), but is required for the rare
+// guild-restricted attachment, so we set it unconditionally — fail-open
+// to ensure-public is the wrong default for a fetch primitive that the
+// agent will lean on. URL validation refuses anything outside Discord's
+// own domains so the agent can't be tricked into using this callback as
+// a generic credentialed fetch.
+const DISCORD_ATTACHMENT_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net'])
+
+export function createFetchAttachmentCallback(deps: {
+  token: string
+  logger: DiscordBotAdapterLogger
+  fetchImpl?: typeof fetch
+}): FetchAttachmentCallback {
+  const { token, logger } = deps
+  const fetchImpl = deps.fetchImpl ?? fetch
+  return async ({ ref, filename }) => {
+    let url: URL
+    try {
+      url = new URL(ref)
+    } catch {
+      return { ok: false, error: `invalid Discord attachment URL: ${ref}` }
+    }
+    if (!DISCORD_ATTACHMENT_HOSTS.has(url.hostname)) {
+      return { ok: false, error: `not a Discord CDN URL: ${url.hostname}` }
+    }
+    try {
+      const res = await fetchImpl(url.toString(), { headers: { Authorization: `Bot ${token}` } })
+      if (!res.ok) {
+        const body = await res.text().catch(() => '')
+        const message = `discord cdn fetch ${res.status} ${res.statusText}${body ? `: ${body.slice(0, 200)}` : ''}`
+        logger.error(`[discord-bot] fetchAttachment failed for ${url.toString()}: ${message}`)
+        return { ok: false, error: message }
+      }
+      const arrayBuffer = await res.arrayBuffer()
+      const buffer = Buffer.from(arrayBuffer)
+      const inferredFilename = filename ?? url.pathname.split('/').pop() ?? 'attachment'
+      const contentType = res.headers.get('content-type') ?? undefined
+      logger.info(
+        `[discord-bot] downloaded url=${url.toString()} name=${inferredFilename} size=${buffer.length}${contentType ? ` type=${contentType}` : ''}`,
+      )
+      return {
+        ok: true,
+        buffer,
+        filename: inferredFilename,
+        ...(contentType !== undefined ? { mimetype: contentType } : {}),
+        size: buffer.length,
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error(`[discord-bot] fetchAttachment failed for ${url.toString()}: ${message}`)
+      return { ok: false, error: message }
+    }
+  }
+}
+
 export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): DiscordBotAdapter {
   const logger = options.logger ?? consoleLogger
   const client = new DiscordBotClient()
@@ -455,6 +513,8 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
     logger,
     formatChannelTag,
   })
+
+  const fetchAttachmentCallback = createFetchAttachmentCallback({ token: options.token, logger })
 
   const handleMessageCreate = async (event: DiscordGatewayMessageCreateEvent): Promise<void> => {
     inflightInbounds++
@@ -522,6 +582,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.registerTyping('discord-bot', typingCallback)
       options.router.registerChannelNameResolver('discord-bot', channelResolver)
       options.router.registerHistory('discord-bot', historyCallback)
+      options.router.registerFetchAttachment('discord-bot', fetchAttachmentCallback)
       options.router.registerMembership('discord-bot', membershipResolver)
 
       try {
@@ -540,6 +601,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.unregisterTyping('discord-bot', typingCallback)
       options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
       options.router.unregisterHistory('discord-bot', historyCallback)
+      options.router.unregisterFetchAttachment('discord-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('discord-bot', membershipResolver)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {

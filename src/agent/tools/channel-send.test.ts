@@ -24,6 +24,9 @@ function fakeRouter(
     registerHistory: () => {},
     unregisterHistory: () => {},
     fetchHistory: async () => ({ ok: false, error: 'history-not-supported' }),
+    registerFetchAttachment: () => {},
+    unregisterFetchAttachment: () => {},
+    fetchAttachment: async () => ({ ok: false, error: 'fetch-attachment-not-supported' }),
     stop: async () => {},
     liveCount: () => 0,
   }

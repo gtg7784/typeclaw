@@ -1,13 +1,13 @@
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
-import type { SlackSocketMessageEvent } from './agent-messenger-slack-shim'
+import type { SlackFile, SlackSocketMessageEvent } from './agent-messenger-slack-shim'
 import { slackTsToMillis } from './slack-bot-time'
 
 export type InboundDropReason =
   | 'self_author' // event.user === botUserId; we never route our own messages back to ourselves
   | 'no_user' // event has no `user` field (e.g. system messages: channel_join, message_changed)
-  | 'empty_text' // event.text is empty or missing — nothing for the agent to act on
+  | 'empty_text' // event has neither text nor files — nothing for the agent to act on
   | 'not_in_allow_list' // workspace/channel not admitted by typeclaw.json `channels.slack-bot.allow`
   | 'pre_connect' // bot identity is not known yet, so mention/self/reply classification cannot be trusted
 
@@ -47,7 +47,8 @@ export function classifyInbound(
     return { kind: 'drop', reason: 'no_user' }
   }
 
-  const text = event.text ?? ''
+  const rawText = event.text ?? ''
+  const text = inboundText(event)
   if (text === '') return { kind: 'drop', reason: 'empty_text' }
 
   const isDm = event.channel_type === 'im'
@@ -60,6 +61,9 @@ export function classifyInbound(
     return { kind: 'drop', reason: 'pre_connect' }
   }
 
+  // Mention parsing runs against the raw user-typed text only — the
+  // appended `[Slack message with attachment: ...]` summary contains URLs
+  // and ids that must not be misread as mentions or group broadcasts.
   // Group mentions (`<!here>`, `<!channel>`, `<!everyone>`) are coerced to
   // direct mentions: the user fired a broadcast that explicitly includes the
   // bot, and from the engagement layer's perspective there is no meaningful
@@ -67,8 +71,8 @@ export function classifyInbound(
   // both are an invitation to participate. Treating them identically also
   // means the existing 'mention' trigger in typeclaw.json catches both
   // without any new config surface.
-  const hasGroupMention = GROUP_MENTION_PATTERN.test(text)
-  const isBotMention = hasGroupMention || text.includes(`<@${context.botUserId}>`)
+  const hasGroupMention = GROUP_MENTION_PATTERN.test(rawText)
+  const isBotMention = hasGroupMention || rawText.includes(`<@${context.botUserId}>`)
   const thread = event.thread_ts ?? (!isDm && isBotMention ? event.ts : null)
 
   // thread_ts identifies the parent message of a thread. We can only know it
@@ -77,7 +81,7 @@ export function classifyInbound(
   // shares its ts with thread_ts).
   const replyToBotMessageId = event.thread_ts !== undefined && event.thread_ts !== event.ts ? event.thread_ts : null
 
-  const mentionedUserIds = extractMentionedUserIds(text)
+  const mentionedUserIds = extractMentionedUserIds(rawText)
   const mentionsOthers = mentionedUserIds.length > 0 && !mentionedUserIds.includes(context.botUserId)
 
   // Slack does not surface the parent message's author on `event`, so we
@@ -133,4 +137,21 @@ function extractMentionedUserIds(text: string): string[] {
     seen.add(match[1]!)
   }
   return Array.from(seen)
+}
+
+function inboundText(event: SlackSocketMessageEvent): string {
+  const rawText = event.text ?? ''
+  const mediaSummary = summarizeSlackMedia(event)
+  if (mediaSummary.length === 0) return rawText
+  const summary = `[Slack message with ${mediaSummary.join('; ')}]`
+  return rawText === '' ? summary : `${rawText}\n${summary}`
+}
+
+function summarizeSlackMedia(event: SlackSocketMessageEvent): string[] {
+  return (event.files ?? []).map(summarizeSlackFile)
+}
+
+function summarizeSlackFile(file: SlackFile): string {
+  const parts: string[] = [`attachment: ${file.name}`, `(${file.mimetype})`, `id=${file.id}`]
+  return parts.join(' ')
 }
