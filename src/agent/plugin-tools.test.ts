@@ -277,6 +277,73 @@ describe('wrapSystemTool', () => {
     await expect(wrapped.execute('c', {}, undefined, undefined, {} as never)).rejects.toThrow('blocked: no restart')
     expect(calls).toEqual([])
   })
+
+  test('write system tool exposes and strips guard acknowledgements before execution', async () => {
+    const seen: unknown[] = []
+    const tool = definePiTool({
+      name: 'write',
+      label: 'write',
+      description: '',
+      parameters: Type.Object(
+        {
+          path: Type.String(),
+          content: Type.String(),
+        },
+        { additionalProperties: false },
+      ),
+      async execute(_callId, params) {
+        seen.push(params)
+        return { content: [{ type: 'text', text: 'wrote' }], details: params }
+      },
+    })
+    const hooks = createHookBus()
+    hooks.registerAll('p1', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        expect(event.args.acknowledgeGuards).toEqual({ nonWorkspaceWrite: true })
+      },
+    })
+
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+
+    const parameters = wrapped.parameters as { properties?: Record<string, unknown> }
+    expect(parameters.properties).toHaveProperty('acknowledgeGuards')
+    await wrapped.execute(
+      'c',
+      { path: 'typeclaw.json', content: '{}', acknowledgeGuards: { nonWorkspaceWrite: true } },
+      undefined,
+      undefined,
+      {} as never,
+    )
+
+    expect(seen[0]).toEqual({ path: 'typeclaw.json', content: '{}' })
+  })
+
+  test('write system tool runs a final guard after hook mutations', async () => {
+    const calls: number[] = []
+    const tool = definePiTool({
+      name: 'write',
+      label: 'write',
+      description: '',
+      parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+      async execute() {
+        calls.push(1)
+        return { content: [], details: undefined }
+      },
+    })
+    const hooks = createHookBus()
+    hooks.registerAll('p1', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        event.args.path = 'typeclaw.json'
+      },
+    })
+
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+
+    await expect(
+      wrapped.execute('c', { path: 'workspace/file.txt', content: 'x' }, undefined, undefined, {} as never),
+    ).rejects.toThrow('Guard `nonWorkspaceWrite` blocked write outside the workspace')
+    expect(calls).toEqual([])
+  })
 })
 
 describe('wrapSystemAgentTool', () => {
@@ -335,5 +402,51 @@ describe('wrapSystemAgentTool', () => {
 
     await expect(wrapped.execute('c', { command: 'pwd' })).rejects.toThrow('blocked: no bash')
     expect(calls).toEqual([])
+  })
+
+  test('edit built-in agent tool exposes and strips guard acknowledgements before execution', async () => {
+    const seen: unknown[] = []
+    const tool = {
+      name: 'edit',
+      label: 'edit',
+      description: '',
+      parameters: Type.Object(
+        {
+          path: Type.String(),
+          edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
+        },
+        { additionalProperties: false },
+      ),
+      async execute(
+        _callId: string,
+        params: {
+          path: string
+          edits: { oldText: string; newText: string }[]
+          acknowledgeGuards?: { nonWorkspaceWrite?: boolean }
+        },
+      ) {
+        seen.push(params)
+        return { content: [{ type: 'text' as const, text: 'edited' }], details: params }
+      },
+    }
+    const hooks = createHookBus()
+    hooks.registerAll('p1', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        expect(event.args.acknowledgeGuards).toEqual({ nonWorkspaceWrite: true })
+      },
+    })
+
+    const wrapped = wrapSystemAgentTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+
+    const parameters = wrapped.parameters as { properties?: Record<string, unknown> }
+    expect(parameters.properties).toHaveProperty('acknowledgeGuards')
+    const params = {
+      path: 'typeclaw.json',
+      edits: [{ oldText: 'x', newText: 'y' }],
+      acknowledgeGuards: { nonWorkspaceWrite: true },
+    } as unknown as Parameters<typeof wrapped.execute>[1]
+    await wrapped.execute('c', params)
+
+    expect(seen[0]).toEqual({ path: 'typeclaw.json', edits: [{ oldText: 'x', newText: 'y' }] })
   })
 })
