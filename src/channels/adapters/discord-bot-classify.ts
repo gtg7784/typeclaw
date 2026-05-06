@@ -86,7 +86,12 @@ export function classifyInbound(
       text,
       externalMessageId: event.id,
       authorId: event.author.id,
-      authorName: event.author.username,
+      // Discord's post-2023 username system allows pure-numeric handles (e.g.
+      // "1411531"); the human-facing display name lives on `global_name`. The
+      // history mapper in discord-bot.ts uses the same fallback chain — keep
+      // them aligned so the agent sees a stable identity for a given user
+      // regardless of whether the message arrived live or via history.
+      authorName: event.author.global_name ?? event.author.username,
       authorIsBot: event.author.bot === true,
       isBotMention,
       replyToBotMessageId,
