@@ -408,4 +408,46 @@ describe('createBroker', () => {
     expect(ws.outbox.find((m) => m.type === 'broker-hello')).toBeDefined()
     await broker.stop()
   })
+
+  test('emits port-forward-result back to container after successful forward', async () => {
+    const { broker, ws } = setup({ policy: { allow: '*' } })
+    broker.start()
+    await new Promise((r) => setTimeout(r, 5))
+    ws.emit({ type: 'broker-hello-ack' })
+    ws.emit({ type: 'port-listen-opened', port: 4848, bindAddr: '127.0.0.1' })
+    await new Promise((r) => setTimeout(r, 5))
+
+    const result = ws.outbox.find((m) => m.type === 'port-forward-result')
+    expect(result).toEqual({ type: 'port-forward-result', port: 4848, ok: true, hostPort: 4848 })
+    await broker.stop()
+  })
+
+  test('emits port-forward-result with failure when host bind fails', async () => {
+    const { broker, ws } = setup({ policy: { allow: '*' }, failPorts: new Set([4848]) })
+    broker.start()
+    await new Promise((r) => setTimeout(r, 5))
+    ws.emit({ type: 'broker-hello-ack' })
+    ws.emit({ type: 'port-listen-opened', port: 4848, bindAddr: '127.0.0.1' })
+    await new Promise((r) => setTimeout(r, 5))
+
+    const result = ws.outbox.find((m) => m.type === 'port-forward-result')
+    expect(result).toMatchObject({ type: 'port-forward-result', port: 4848, ok: false })
+    if (result?.type === 'port-forward-result' && !result.ok) {
+      expect(result.reason.length).toBeGreaterThan(0)
+    }
+    await broker.stop()
+  })
+
+  test('emits port-forward-result with policy-excluded reason for denied ports', async () => {
+    const { broker, ws } = setup({ policy: { allow: [5173] } })
+    broker.start()
+    await new Promise((r) => setTimeout(r, 5))
+    ws.emit({ type: 'broker-hello-ack' })
+    ws.emit({ type: 'port-listen-opened', port: 4848, bindAddr: '127.0.0.1' })
+    await new Promise((r) => setTimeout(r, 5))
+
+    const result = ws.outbox.find((m) => m.type === 'port-forward-result')
+    expect(result).toEqual({ type: 'port-forward-result', port: 4848, ok: false, reason: 'policy excluded' })
+    await broker.stop()
+  })
 })

@@ -6,6 +6,8 @@ export type HostdToContainer =
   | { type: 'broker-hello'; token: string }
   | { type: 'port-watch-subscribe' }
   | { type: 'port-watch-unsubscribe' }
+  | { type: 'port-forward-result'; port: number; ok: true; hostPort: number }
+  | { type: 'port-forward-result'; port: number; ok: false; reason: string }
   | { type: 'relay-open'; streamId: StreamId; port: number }
   | { type: 'relay-data'; streamId: StreamId; bytes: string }
   | { type: 'relay-close'; streamId: StreamId; side: 'upstream' | 'downstream' }

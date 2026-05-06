@@ -266,3 +266,59 @@ describe('createContainerBroker relay', () => {
     expect(upstreams.get(8080)!.ended).toBe(true)
   })
 })
+
+describe('createContainerBroker port-forward-result', () => {
+  test('forwards ok results to onForwardResult subscriber', async () => {
+    const events: Array<{ port: number; ok: boolean }> = []
+    const broker = createContainerBroker({
+      expectedToken: 't',
+      onForwardResult: (e) => events.push({ port: e.port, ok: e.ok }),
+    })
+    const ws = makeFakeSocket()
+    broker.open(ws)
+    await dispatch(broker, ws, { type: 'broker-hello', token: 't' })
+    await dispatch(broker, ws, { type: 'port-forward-result', port: 4848, ok: true, hostPort: 4848 })
+
+    expect(events).toEqual([{ port: 4848, ok: true }])
+  })
+
+  test('forwards failure results with reason', async () => {
+    const events: Array<{ port: number; ok: boolean; reason?: string }> = []
+    const broker = createContainerBroker({
+      expectedToken: 't',
+      onForwardResult: (e) =>
+        events.push(e.ok ? { port: e.port, ok: true } : { port: e.port, ok: false, reason: e.reason }),
+    })
+    const ws = makeFakeSocket()
+    broker.open(ws)
+    await dispatch(broker, ws, { type: 'broker-hello', token: 't' })
+    await dispatch(broker, ws, { type: 'port-forward-result', port: 4848, ok: false, reason: 'EADDRINUSE' })
+
+    expect(events).toEqual([{ port: 4848, ok: false, reason: 'EADDRINUSE' }])
+  })
+
+  test('does not call onForwardResult before broker-hello-ack', async () => {
+    const events: unknown[] = []
+    const broker = createContainerBroker({ expectedToken: 't', onForwardResult: (e) => events.push(e) })
+    const ws = makeFakeSocket()
+    broker.open(ws)
+    await dispatch(broker, ws, { type: 'port-forward-result', port: 4848, ok: true, hostPort: 4848 })
+
+    expect(events).toEqual([])
+  })
+
+  test('swallows subscriber errors so the broker keeps working', async () => {
+    const broker = createContainerBroker({
+      expectedToken: 't',
+      onForwardResult: () => {
+        throw new Error('boom')
+      },
+    })
+    const ws = makeFakeSocket()
+    broker.open(ws)
+    await dispatch(broker, ws, { type: 'broker-hello', token: 't' })
+    await expect(
+      dispatch(broker, ws, { type: 'port-forward-result', port: 4848, ok: true, hostPort: 4848 }),
+    ).resolves.toBeUndefined()
+  })
+})

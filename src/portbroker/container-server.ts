@@ -18,7 +18,16 @@ export type ContainerBrokerOptions = {
   // Test seam: replaces Bun.connect for unit tests.
   upstreamConnect?: (port: number, handlers: UpstreamHandlers) => Promise<UpstreamConnection>
   onLog?: (event: ContainerBrokerLogEvent) => void
+  // In-container consumers (e.g. the agent-browser plugin) call this to learn
+  // whether a port that just opened a LISTEN socket got successfully forwarded
+  // to the host side. Without it, code that picks an in-container port has no
+  // way to detect host-side EADDRINUSE collisions across containers.
+  onForwardResult?: (event: ForwardResultEvent) => void
 }
+
+export type ForwardResultEvent =
+  | { port: number; ok: true; hostPort: number }
+  | { port: number; ok: false; reason: string }
 
 export type UpstreamHandlers = {
   onData: (chunk: Uint8Array) => void
@@ -194,6 +203,22 @@ export function createContainerBroker(opts: ContainerBrokerOptions): ContainerBr
           if (state.pollTimer !== null) {
             log({ kind: 'unsubscribed' })
             stopWatcher(state)
+          }
+          return
+        case 'port-forward-result':
+          if (opts.onForwardResult) {
+            try {
+              opts.onForwardResult(
+                msg.ok
+                  ? { port: msg.port, ok: true, hostPort: msg.hostPort }
+                  : { port: msg.port, ok: false, reason: msg.reason },
+              )
+            } catch (err) {
+              log({
+                kind: 'unexpected',
+                reason: `onForwardResult threw: ${err instanceof Error ? err.message : String(err)}`,
+              })
+            }
           }
           return
         case 'relay-open':
