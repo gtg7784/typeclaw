@@ -10,8 +10,11 @@ type SafeResult = InstallShimResult | { kind: 'error'; binPath: string; error: u
 
 const PROXY_PORT_HINT_PATH = '/tmp/typeclaw-agent-browser-proxy-port'
 const PORT_CANDIDATE_RANGE = 10
+const BROKER_HANDSHAKE_DELAY_MS = 1_000
+const FORWARD_RESULT_TIMEOUT_MS = 10_000
 
 let activeProxy: DashboardProxy | null = null
+let bindingInFlight: Promise<void> | null = null
 
 export default definePlugin({
   plugin: async (ctx) => {
@@ -19,16 +22,19 @@ export default definePlugin({
       logInstallResult(ctx.logger, safeInstallShim(binPath))
     }
 
-    if (activeProxy === null) {
-      const bound = await bindProxyOnFirstFreePort(ctx.logger)
-      if (bound !== null) {
-        activeProxy = bound.proxy
-        recordProxyPort(bound.port, ctx.logger)
-        ctx.logger.info(
-          `dashboard proxy listening on port ${bound.port}` +
-            (bound.hostPort !== null ? ` (forwarded to host:${bound.hostPort})` : ''),
-        )
-      }
+    // Kick off the proxy bind in the background and let the plugin factory
+    // return immediately. Two reasons:
+    //   1. The container-side broker is created AFTER pluginsLoaded.markBooted()
+    //      runs (see src/run/index.ts). If we awaited bindWithForward here, we
+    //      would block the boot sequence past 20s of timeouts before the broker
+    //      even existed to send forward-result events.
+    //   2. The dashboard isn't typically used at boot — the user runs
+    //      `agent-browser dashboard start` later. The proxy has plenty of time
+    //      to settle before its first request.
+    if (activeProxy === null && bindingInFlight === null) {
+      bindingInFlight = bindProxyAfterBrokerSettles(ctx.logger).finally(() => {
+        bindingInFlight = null
+      })
     }
 
     return {
@@ -40,22 +46,34 @@ export default definePlugin({
 export function __resetProxyForTesting(): void {
   activeProxy?.stop()
   activeProxy = null
+  bindingInFlight = null
 }
 
-async function bindProxyOnFirstFreePort(logger: {
+export function __waitForProxyBindForTesting(): Promise<void> {
+  return bindingInFlight ?? Promise.resolve()
+}
+
+async function bindProxyAfterBrokerSettles(logger: {
   info: (msg: string) => void
   warn: (msg: string) => void
-}): Promise<{ proxy: DashboardProxy; port: number; hostPort: number | null } | null> {
+}): Promise<void> {
+  // Give the run-loop time to construct the container broker and let it
+  // complete its WS handshake with hostd. Without this the first candidate
+  // bind fires before the broker is ready, the bus never delivers a result,
+  // and we waste the full timeout × candidate-count budget tearing down
+  // every port in the range. The exact delay isn't load-bearing — anything
+  // longer than the broker's connect+hello round-trip works.
+  if (defaultBrokerEnabled()) {
+    await Bun.sleep(BROKER_HANDSHAKE_DELAY_MS)
+  }
+
   const config = readPortConfig()
   const candidates = buildCandidatePorts(config.listenPort)
-  // Auto-discovery only — we never pin upstream here. The proxy reads
-  // /tmp/typeclaw-agent-browser-upstream-port (written by the shim) and
-  // falls back to procfs. TYPECLAW_DASHBOARD_UPSTREAM_PORT remains as a
-  // unit-test escape hatch only.
   const upstreamOverride = config.upstreamPort
 
   const result = await bindWithForward<DashboardProxy>({
     candidates,
+    timeoutMs: FORWARD_RESULT_TIMEOUT_MS,
     factory: (port) => {
       try {
         const proxy = startDashboardProxy({ listenPort: port, upstreamPort: upstreamOverride })
@@ -73,9 +91,20 @@ async function bindProxyOnFirstFreePort(logger: {
       `could not allocate a host-forwardable dashboard proxy port from ${candidates[0]}-${candidates[candidates.length - 1]}; ` +
         `remote dashboard access will not work until another container releases its port`,
     )
-    return null
+    return
   }
-  return { proxy: result.resource, port: result.port, hostPort: result.hostPort }
+
+  activeProxy = result.resource
+  recordProxyPort(result.port, logger)
+  logger.info(
+    `dashboard proxy listening on port ${result.port}` +
+      (result.hostPort !== null ? ` (forwarded to host:${result.hostPort})` : ''),
+  )
+}
+
+function defaultBrokerEnabled(): boolean {
+  const token = process.env['TYPECLAW_HOSTD_BROKER_TOKEN']
+  return token !== undefined && token.length > 0
 }
 
 function buildCandidatePorts(start: number): number[] {
