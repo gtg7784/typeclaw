@@ -125,6 +125,30 @@ plugin path escapes agent directory: <entry> (resolved to <abs-path>)
 
 This is why `./plugins/x.ts` works and `/Users/me/x.ts` does not.
 
+### Recommended location: `packages/<plugin-name>/`
+
+The agent folder is a **bun monorepo**, and `packages/` is its workspace root. **Custom plugins go there.** A `./packages/standup-log/` plugin is a real workspace package — bun installs its dependencies, the workspace symlink machinery makes it importable, and it lands in git like any other reusable code. Concretely:
+
+```
+packages/
+  standup-log/
+    package.json
+    index.ts            # exports default definePlugin({ ... })
+    index.test.ts
+```
+
+```json
+// typeclaw.json
+{
+  "plugins": ["./packages/standup-log"],
+  "standup-log": { "schedule": "0 17 * * 5" }
+}
+```
+
+The derived plugin name is `standup-log` (basename of the path), so the per-plugin config block uses that key. Read the `typeclaw-monorepo` skill for the full package layout, dependency wiring (`workspace:*`), root-script conventions, and how to share code between multiple workspace packages.
+
+Putting plugins anywhere else (a top-level `./plugins/` folder, a script under `workspace/`, an absolute path) works — but loses the workspace's dependency hoisting, gets you no `bun install` integration, and (for `workspace/`) silently disappears on the next clone because `workspace/` is gitignored.
+
 ### Boot-time effects
 
 - `plugins` is a **`restart-required`** field. Editing the array (add/remove/reorder) needs `typeclaw restart` to take effect — `reload` won't pick it up.

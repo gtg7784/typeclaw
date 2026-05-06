@@ -10,6 +10,9 @@ import { createTui } from '@/tui'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { HATCHING_PROMPT } from './hatching'
+import { GITKEEP_FILE, PACKAGES_DIR } from './paths'
+
+export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 
 const CONFIG_FILE = 'typeclaw.json'
 const CRON_FILE = 'cron.json'
@@ -18,7 +21,13 @@ const PACKAGE_FILE = 'package.json'
 
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'] as const
 
-const DIRECTORIES = ['workspace', 'sessions', '.agents/skills', 'mounts'] as const
+// `packages/` is a bun workspace root (see `workspaces` in buildPackageJson).
+// Reusable systems the agent builds — including custom plugins wired into
+// typeclaw.json — live there as standalone packages, while one-off scripts
+// stay in `workspace/`. The directory is scaffolded empty so the layout is
+// discoverable on day one; a `.gitkeep` is written below so it survives the
+// initial commit.
+const DIRECTORIES = ['workspace', 'sessions', '.agents/skills', 'mounts', 'packages'] as const
 
 export type InstallResult = { ok: true } | { ok: false; reason: string }
 export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason: string }
@@ -205,6 +214,13 @@ export type ScaffoldOptions = {
 export async function scaffold(root: string, options: ScaffoldOptions = {}): Promise<void> {
   await Promise.all(DIRECTORIES.map((dir) => mkdir(join(root, dir), { recursive: true })))
 
+  // git does not track empty directories, so without this file the `packages/`
+  // workspace root would silently disappear from the initial commit and confuse
+  // the agent (its workspaces glob would resolve to nothing). The other
+  // DIRECTORIES are either gitignored (workspace, sessions, mounts) or
+  // immediately populated, so packages/ is the only one that needs this.
+  await writeFile(join(root, PACKAGES_DIR, GITKEEP_FILE), '', { flag: 'wx' }).catch(ignoreExists)
+
   // TODO: hardcoded model. Mirror src/config/index.ts until the config loader
   // and provider registry exist (TypeClaw.md Phase 1 + Phase 4).
   //
@@ -255,6 +271,7 @@ function buildPackageJson(root: string, name: string): Record<string, unknown> {
     name,
     private: true,
     type: 'module',
+    workspaces: [`${PACKAGES_DIR}/*`],
     dependencies: {
       typeclaw: fileSpec,
       'agent-browser': AGENT_BROWSER_VERSION,

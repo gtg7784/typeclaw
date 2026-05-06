@@ -133,6 +133,9 @@ describe('runInit', () => {
     expect(tracked).toContain('package.json')
     expect(tracked).toContain('.gitignore')
     expect(tracked).toContain('AGENTS.md')
+    // packages/.gitkeep must be tracked so cloning the agent folder onto a
+    // fresh machine still has the workspace root present (git ignores empty dirs).
+    expect(tracked).toContain('packages/.gitkeep')
     // Dockerfile is gitignored (regenerated on every `typeclaw start`),
     // so it must NOT appear in the initial commit even though it exists on disk.
     expect(tracked).not.toContain('Dockerfile')
@@ -354,11 +357,19 @@ describe('scaffold', () => {
   test('creates expected directories', async () => {
     await scaffold(root)
 
-    for (const dir of ['workspace', 'sessions', '.agents/skills', 'mounts']) {
+    for (const dir of ['workspace', 'sessions', '.agents/skills', 'mounts', 'packages']) {
       const path = join(root, dir)
       expect(existsSync(path)).toBe(true)
       expect(statSync(path).isDirectory()).toBe(true)
     }
+  })
+
+  test('writes packages/.gitkeep so the empty workspace root survives the initial git commit', async () => {
+    await scaffold(root)
+
+    const gitkeep = join(root, 'packages', '.gitkeep')
+    expect(existsSync(gitkeep)).toBe(true)
+    expect(await readFile(gitkeep, 'utf8')).toBe('')
   })
 
   test('does NOT scaffold MEMORY.md or memory/ (owned by the bundled memory plugin)', async () => {
@@ -453,6 +464,13 @@ describe('scaffold', () => {
     expect(pkg.scripts).toBeUndefined()
   })
 
+  test('package.json declares packages/* as a bun workspace root', async () => {
+    await scaffold(root)
+
+    const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8')) as Record<string, unknown>
+    expect(pkg.workspaces).toEqual(['packages/*'])
+  })
+
   test('package.json bundles agent-browser so the agent-browser skill can shell out to the CLI', async () => {
     await scaffold(root)
 
@@ -495,6 +513,7 @@ describe('scaffold', () => {
     expect(gitignore).toMatch(/^workspace\/$/m)
     expect(gitignore).toContain('mounts/')
     expect(gitignore).toMatch(/^Dockerfile$/m)
+    expect(gitignore).toMatch(/^packages\/\*\/node_modules\/$/m)
   })
 
   test('buildGitignore includes custom entries from gitignore.append before managed entries', () => {

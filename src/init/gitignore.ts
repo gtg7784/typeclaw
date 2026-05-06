@@ -15,6 +15,7 @@ export function buildGitignore(config: GitignoreConfig = { append: [] }): string
 .env
 .env.local
 node_modules/
+packages/*/node_modules/
 workspace/
 mounts/
 Dockerfile
