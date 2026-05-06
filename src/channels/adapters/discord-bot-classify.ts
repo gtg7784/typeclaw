@@ -49,8 +49,20 @@ export function classifyInbound(
   // botUserId is null until the listener has dispatched 'connected'. Treating
   // an event as a mention in that race window prevents the very first message
   // after start-up from being misclassified as ambient chatter.
+  //
+  // Group mentions (`@everyone`, `@here`, role mentions) are coerced to
+  // direct mentions: the broadcast explicitly includes the bot, and the
+  // engagement layer doesn't meaningfully distinguish "@bot" from "@channel"
+  // — both invite participation. Reusing isBotMention also means the
+  // existing 'mention' trigger in typeclaw.json catches both with no new
+  // config surface. Discord's gateway already provides structured fields
+  // for these, so we don't need to parse content.
+  const hasGroupMention = event.mention_everyone === true || (event.mention_roles ?? []).length > 0
   const isBotMention =
-    botUserId !== null ? event.content.includes(`<@${botUserId}>`) || event.content.includes(`<@!${botUserId}>`) : true
+    hasGroupMention ||
+    (botUserId !== null
+      ? event.content.includes(`<@${botUserId}>`) || event.content.includes(`<@!${botUserId}>`)
+      : true)
 
   // Discord sends a structured `mentions` array on every message, so we can
   // tell "tagged someone other than us" apart from "no mentions at all"

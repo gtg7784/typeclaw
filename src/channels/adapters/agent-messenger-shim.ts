@@ -31,6 +31,8 @@ export type DiscordGatewayMessageCreateEvent = {
   timestamp: string
   edited_timestamp?: string
   mentions?: Array<{ id: string; username: string }>
+  mention_everyone?: boolean
+  mention_roles?: string[]
   message_reference?: {
     message_id?: string
     channel_id?: string
