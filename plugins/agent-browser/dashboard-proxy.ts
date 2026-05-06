@@ -1,8 +1,11 @@
 import type { Server } from 'bun'
 
+import { discoverDashboardPort } from './dashboard-discovery'
+
 export type DashboardProxyOptions = {
   listenPort?: number
   upstreamPort?: number
+  resolveUpstreamPort?: () => Promise<number | null>
   upstreamHost?: string
   listenHost?: string
   fetchImpl?: typeof fetch
@@ -10,12 +13,13 @@ export type DashboardProxyOptions = {
 }
 
 export type DashboardProxyLogEvent =
-  | { kind: 'started'; listenHost: string; listenPort: number; upstreamHost: string; upstreamPort: number }
+  | { kind: 'started'; listenHost: string; listenPort: number; upstreamHost: string }
   | { kind: 'http-proxy'; port: number; path: string }
   | { kind: 'ws-proxy'; port: number; path: string }
   | { kind: 'invalid-proxy-target'; prefix: string; pathname: string }
   | { kind: 'proxy-target-denied'; port: number; path: string; reason: string }
   | { kind: 'upstream-error'; target: string; reason: string }
+  | { kind: 'no-upstream'; path: string }
 
 export type DashboardProxy = {
   server: Server<WebSocketData>
@@ -37,15 +41,17 @@ const HTTP_PROXY_PREFIX = '/__typeclaw_agent_browser_http/'
 const WS_PROXY_PREFIX = '/__typeclaw_agent_browser_ws/'
 const TYPECLAW_AGENT_PORT = 8973
 const TYPECLAW_HOSTD_CONTROL_PORT = 8974
+const UPSTREAM_PORT_CACHE_MS = 1_000
 
 export function startDashboardProxy(opts: DashboardProxyOptions = {}): DashboardProxy {
   const listenPort = opts.listenPort ?? DEFAULT_PROXY_PORT
-  const upstreamPort = opts.upstreamPort ?? DEFAULT_UPSTREAM_PORT
   const upstreamHost = opts.upstreamHost ?? DEFAULT_HOST
   const listenHost = opts.listenHost ?? DEFAULT_LISTEN_HOST
   const fetcher = opts.fetchImpl ?? fetch
   const log = opts.onLog ?? (() => {})
-  const deniedPorts = new Set([listenPort, upstreamPort, TYPECLAW_AGENT_PORT, TYPECLAW_HOSTD_CONTROL_PORT])
+
+  const resolveUpstreamPort = makeResolverWithCache(opts, listenPort)
+  const reservedPorts = new Set([listenPort, TYPECLAW_AGENT_PORT, TYPECLAW_HOSTD_CONTROL_PORT])
 
   const server = Bun.serve<WebSocketData>({
     hostname: listenHost,
@@ -55,12 +61,13 @@ export function startDashboardProxy(opts: DashboardProxyOptions = {}): Dashboard
 
       const wsTarget = parsePortPath(url.pathname, WS_PROXY_PREFIX)
       if (wsTarget) {
+        const upstreamPort = await resolveUpstreamPort()
         const denied = await denyProxyTarget({
           target: wsTarget,
-          deniedPorts,
+          reservedPorts,
+          upstreamPort,
           fetcher,
           upstreamHost,
-          upstreamPort,
         })
         if (denied) {
           log({ kind: 'proxy-target-denied', port: wsTarget.port, path: wsTarget.path, reason: denied })
@@ -84,12 +91,13 @@ export function startDashboardProxy(opts: DashboardProxyOptions = {}): Dashboard
 
       const httpTarget = parsePortPath(url.pathname, HTTP_PROXY_PREFIX)
       if (httpTarget) {
+        const upstreamPort = await resolveUpstreamPort()
         const denied = await denyProxyTarget({
           target: httpTarget,
-          deniedPorts,
+          reservedPorts,
+          upstreamPort,
           fetcher,
           upstreamHost,
-          upstreamPort,
         })
         if (denied) {
           log({ kind: 'proxy-target-denied', port: httpTarget.port, path: httpTarget.path, reason: denied })
@@ -108,6 +116,14 @@ export function startDashboardProxy(opts: DashboardProxyOptions = {}): Dashboard
       if (url.pathname.startsWith(HTTP_PROXY_PREFIX)) {
         log({ kind: 'invalid-proxy-target', prefix: HTTP_PROXY_PREFIX, pathname: url.pathname })
         return new Response('Invalid HTTP proxy target', { status: 400 })
+      }
+
+      const upstreamPort = await resolveUpstreamPort()
+      if (upstreamPort === null) {
+        log({ kind: 'no-upstream', path: url.pathname })
+        return new Response('agent-browser dashboard is not running. Start it with `agent-browser dashboard start`.', {
+          status: 502,
+        })
       }
 
       const upstreamPath = `${url.pathname}${url.search}`
@@ -140,12 +156,43 @@ export function startDashboardProxy(opts: DashboardProxyOptions = {}): Dashboard
     },
   })
 
-  if (server.port !== undefined) deniedPorts.add(server.port)
-  log({ kind: 'started', listenHost, listenPort: server.port ?? listenPort, upstreamHost, upstreamPort })
+  if (server.port !== undefined) reservedPorts.add(server.port)
+  log({ kind: 'started', listenHost, listenPort: server.port ?? listenPort, upstreamHost })
 
   return {
     server,
     stop: () => server.stop(true),
+  }
+}
+
+function makeResolverWithCache(opts: DashboardProxyOptions, listenPort: number): () => Promise<number | null> {
+  // The resolver is called on every proxied request; cache for a short
+  // window so concurrent dashboard fetches do not each spawn a procfs walk
+  // and a /api/sessions probe. UPSTREAM_PORT_CACHE_MS is below the
+  // perceptible-latency threshold and well under the time it takes to
+  // start/stop a dashboard, so a stale entry resolves itself within one
+  // tick of the user noticing.
+  if (opts.resolveUpstreamPort) {
+    let cached: { port: number | null; at: number } | null = null
+    return async () => {
+      const now = Date.now()
+      if (cached !== null && now - cached.at < UPSTREAM_PORT_CACHE_MS) return cached.port
+      const port = await opts.resolveUpstreamPort!()
+      cached = { port, at: now }
+      return port
+    }
+  }
+  if (opts.upstreamPort !== undefined) {
+    const fixed = opts.upstreamPort
+    return async () => fixed
+  }
+  let cached: { port: number | null; at: number } | null = null
+  return async () => {
+    const now = Date.now()
+    if (cached !== null && now - cached.at < UPSTREAM_PORT_CACHE_MS) return cached.port
+    const port = await discoverDashboardPort({ excludePort: listenPort })
+    cached = { port, at: now }
+    return port
   }
 }
 
@@ -329,18 +376,20 @@ function toWebSocketPayload(data: string | Buffer): string | ArrayBuffer {
 
 async function denyProxyTarget({
   target,
-  deniedPorts,
+  reservedPorts,
+  upstreamPort,
   fetcher,
   upstreamHost,
-  upstreamPort,
 }: {
   target: { port: number; path: string }
-  deniedPorts: Set<number>
+  reservedPorts: Set<number>
+  upstreamPort: number | null
   fetcher: typeof fetch
   upstreamHost: string
-  upstreamPort: number
 }): Promise<string | null> {
-  if (deniedPorts.has(target.port)) return `port ${target.port} is reserved`
+  if (reservedPorts.has(target.port)) return `port ${target.port} is reserved`
+  if (upstreamPort !== null && target.port === upstreamPort) return `port ${target.port} is reserved`
+  if (upstreamPort === null) return 'agent-browser dashboard is not running; cannot validate session port'
   const allowed = await discoverSessionPorts({ fetcher, upstreamHost, upstreamPort })
   if (!allowed.has(target.port)) return `port ${target.port} is not an active agent-browser session port`
   return null

@@ -2,12 +2,7 @@ import { join } from 'node:path'
 
 import { definePlugin } from '@/plugin'
 
-import {
-  AGENT_BROWSER_DASHBOARD_PROXY_PORT,
-  AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT,
-  startDashboardProxy,
-  type DashboardProxy,
-} from './dashboard-proxy'
+import { AGENT_BROWSER_DASHBOARD_PROXY_PORT, startDashboardProxy, type DashboardProxy } from './dashboard-proxy'
 import { installShim, KNOWN_BIN_PATHS, type InstallShimResult } from './shim-install'
 
 type SafeResult = InstallShimResult | { kind: 'error'; binPath: string; error: unknown }
@@ -44,13 +39,25 @@ export function __resetProxyForTesting(): void {
   activeProxy = null
 }
 
-type PortConfig = { listenPort: number; upstreamPort: number }
+type PortConfig = { listenPort: number; upstreamPort: number | undefined }
 
 function readPortConfig(): PortConfig {
+  // The proxy auto-discovers the dashboard's upstream port via the hint
+  // file + procfs scan, so we do NOT pin it here. TYPECLAW_DASHBOARD_UPSTREAM_PORT
+  // exists only as a test escape hatch (set to a fixed port to bypass
+  // discovery in unit tests where /proc and the hint file aren't useful).
+  const overrideUpstream = process.env['TYPECLAW_DASHBOARD_UPSTREAM_PORT']
   return {
     listenPort: numberFromEnv('TYPECLAW_DASHBOARD_PROXY_PORT', AGENT_BROWSER_DASHBOARD_PROXY_PORT),
-    upstreamPort: numberFromEnv('TYPECLAW_DASHBOARD_UPSTREAM_PORT', AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT),
+    upstreamPort:
+      overrideUpstream === undefined || overrideUpstream === '' ? undefined : numberOrUndefined(overrideUpstream),
   }
+}
+
+function numberOrUndefined(raw: string): number | undefined {
+  const parsed = Number(raw)
+  if (!Number.isInteger(parsed) || parsed < 0 || parsed > 65_535) return undefined
+  return parsed
 }
 
 function numberFromEnv(name: string, fallback: number): number {
