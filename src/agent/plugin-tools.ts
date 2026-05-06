@@ -25,7 +25,7 @@ import type {
   ToolResult,
 } from '@/plugin'
 
-import { ACKNOWLEDGE_GUARDS, checkNonWorkspaceWriteGuard } from '../../plugins/guard/policy'
+import { ACKNOWLEDGE_GUARDS, checkNonWorkspaceWriteGuard, checkSkillAuthoringGuard } from '../../plugins/guard/policy'
 
 type AnyAgentTool =
   | typeof piReadTool
@@ -157,7 +157,7 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
-      const guardResult = await checkNonWorkspaceWriteGuard({
+      const guardResult = await runFinalWriteGuards({
         tool: tool.name,
         args: mutableArgs,
         agentDir: opts.agentDir,
@@ -204,7 +204,7 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
-      const guardResult = await checkNonWorkspaceWriteGuard({
+      const guardResult = await runFinalWriteGuards({
         tool: tool.name,
         args: mutableArgs,
         agentDir: opts.agentDir,
@@ -239,6 +239,10 @@ function errorResult(message: string) {
     details: { error: true, message },
     isError: true,
   }
+}
+
+async function runFinalWriteGuards(options: { tool: string; args: Record<string, unknown>; agentDir: string }) {
+  return (await checkSkillAuthoringGuard(options)) ?? checkNonWorkspaceWriteGuard(options)
 }
 
 function withGuardAcknowledgements<TParams extends TSchema>(toolName: string, parameters: TParams): TParams {

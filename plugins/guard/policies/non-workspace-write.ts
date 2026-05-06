@@ -2,6 +2,7 @@ import { realpath } from 'node:fs/promises'
 import path from 'node:path'
 
 import { ACKNOWLEDGE_GUARDS, type GuardBlock, isGuardAcknowledged } from '../policy'
+import { isSkillAuthoringAllowed } from './skill-authoring'
 
 export const GUARD_NON_WORKSPACE_WRITE = 'nonWorkspaceWrite'
 
@@ -40,6 +41,7 @@ export async function checkNonWorkspaceWriteGuard(options: {
     resolveRealIntendedPath(targetPath),
     resolveRealIntendedPath(workspacePath),
   ])
+  if (await isSkillAuthoringAllowed({ tool, args, agentDir })) return undefined
   if (await isAllowedAgentRootWrite(agentDir, targetPath, realTargetPath)) return undefined
   if (isInside(realWorkspacePath, realTargetPath)) return undefined
   if (isGuardAcknowledged(args, GUARD_NON_WORKSPACE_WRITE)) return undefined

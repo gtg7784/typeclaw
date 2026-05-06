@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdir, mkdtemp } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 import { defineTool as definePiTool } from '@mariozechner/pi-coding-agent'
 import { Type } from '@sinclair/typebox'
@@ -342,6 +345,36 @@ describe('wrapSystemTool', () => {
     await expect(
       wrapped.execute('c', { path: 'workspace/file.txt', content: 'x' }, undefined, undefined, {} as never),
     ).rejects.toThrow('Guard `nonWorkspaceWrite` blocked write outside the workspace')
+    expect(calls).toEqual([])
+  })
+
+  test('write system tool runs final skill guard after hook mutations', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-plugin-tools-'))
+    await mkdir(path.join(agentDir, 'memory', 'skills'), { recursive: true })
+    const calls: number[] = []
+    const tool = definePiTool({
+      name: 'write',
+      label: 'write',
+      description: '',
+      parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+      async execute() {
+        calls.push(1)
+        return { content: [], details: undefined }
+      },
+    })
+    const hooks = createHookBus()
+    hooks.registerAll('p1', agentDir, noopLogger, {
+      'tool.before': (event) => {
+        event.args.path = 'memory/skills/release-checklist/SKILL.md'
+        event.args.content = 'not a skill file'
+      },
+    })
+
+    const wrapped = wrapSystemTool(tool, { agentDir, sessionId: 's', hooks })
+
+    await expect(
+      wrapped.execute('c', { path: 'workspace/file.txt', content: 'x' }, undefined, undefined, {} as never),
+    ).rejects.toThrow('Guard `skillAuthoring` blocked write')
     expect(calls).toEqual([])
   })
 })
