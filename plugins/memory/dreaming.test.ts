@@ -102,6 +102,22 @@ describe('dreaming subagent declarations', () => {
     expect(sub.systemPrompt).toMatch(/description:\s+/)
     expect(sub.systemPrompt).toContain('source: muscle-memory')
   })
+
+  test('teaches the dreaming session that muscle memory has three forms (skill, CLI, plugin)', () => {
+    const sub = createDreamingSubagent()
+    // Three forms named explicitly so the model picks the smallest fit.
+    expect(sub.systemPrompt).toMatch(/Form A.*skill/i)
+    expect(sub.systemPrompt).toMatch(/Form B.*CLI/i)
+    expect(sub.systemPrompt).toMatch(/Form C.*plugin/i)
+    // Suggestion target lives under packages/ — wired to typeclaw-monorepo.
+    expect(sub.systemPrompt).toContain('packages/<name>')
+    // `proposal:` line is the wire format the main agent reads on every prompt.
+    expect(sub.systemPrompt).toContain('proposal: cli packages/<name>')
+    expect(sub.systemPrompt).toContain('proposal: plugin packages/<name>')
+    // Sandbox boundary must stay explicit so the model does not try to write
+    // under packages/ itself (its tools have no policy enforcement).
+    expect(sub.systemPrompt).toMatch(/cannot write under .*packages\//)
+  })
 })
 
 describe('dreaming subagent (orchestration)', () => {
