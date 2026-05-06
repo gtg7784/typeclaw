@@ -27,6 +27,7 @@ import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { renderSessionOrigin, type SessionOrigin } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
+import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
@@ -281,6 +282,12 @@ export function buildChannelTools(
     tools.push(createChannelReplyTool({ router: channelRouter, origin: channelOrigin }))
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
     tools.push(createChannelSendTool({ router: channelRouter, origin: channelOrigin }))
+    tools.push(
+      createChannelFetchAttachmentTool({
+        router: channelRouter,
+        origin: { adapter: origin.adapter },
+      }),
+    )
   } else {
     tools.push(createChannelSendTool({ router: channelRouter }))
   }

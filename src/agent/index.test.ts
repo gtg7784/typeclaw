@@ -341,7 +341,7 @@ describe('buildChannelTools', () => {
   const tuiOrigin: SessionOrigin = { kind: 'tui', sessionId: 'ses-tui-1' }
   const cronOrigin: SessionOrigin = { kind: 'cron', jobId: 'j1', jobKind: 'prompt' }
 
-  test('exposes channel_send, channel_reply, AND channel_history when origin is channel', () => {
+  test('exposes channel_send, channel_reply, channel_history, AND channel_fetch_attachment when origin is channel', () => {
     // given
     const router = makeRouter()
 
@@ -350,7 +350,7 @@ describe('buildChannelTools', () => {
 
     // then
     const names = tools.map((t) => t.name).sort()
-    expect(names).toEqual(['channel_history', 'channel_reply', 'channel_send'])
+    expect(names).toEqual(['channel_fetch_attachment', 'channel_history', 'channel_reply', 'channel_send'])
   })
 
   test('exposes only channel_send (no reply or history) when origin is non-channel', () => {

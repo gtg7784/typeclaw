@@ -9,6 +9,7 @@ import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
+  FetchAttachmentCallback,
   FetchHistoryArgs,
   FetchHistoryResult,
   HistoryCallback,
@@ -506,6 +507,41 @@ export function createOutboundCallback(deps: {
   }
 }
 
+// Slack file URLs (`url_private`) require Bearer auth and an html-page is
+// returned for unauthenticated GETs, so the agent cannot fetch them via a
+// plain HTTP tool. Routing through the SDK's `downloadFile(fileId)` is
+// the only path that works — it issues `files.info` to fetch metadata
+// (mimetype + name) then GETs `url_private` with the bot token. The
+// classifier emits `id=Fxxxx` in the inbound text exactly so the agent
+// can hand the id back to this callback.
+export function createFetchAttachmentCallback(deps: {
+  client: Pick<SlackBotClient, 'downloadFile'>
+  logger: SlackBotAdapterLogger
+}): FetchAttachmentCallback {
+  const { client, logger } = deps
+  return async ({ ref, filename }) => {
+    const fileId = ref.trim()
+    if (!/^F[A-Z0-9]+$/.test(fileId)) {
+      return { ok: false, error: `invalid Slack file id: ${ref}` }
+    }
+    try {
+      const { buffer, file } = await client.downloadFile(fileId)
+      logger.info(`[slack-bot] downloaded id=${file.id} name=${file.name} size=${file.size}`)
+      return {
+        ok: true,
+        buffer,
+        filename: filename ?? file.name,
+        mimetype: file.mimetype,
+        size: file.size,
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.error(`[slack-bot] downloadFile failed for ${fileId}: ${message}`)
+      return { ok: false, error: message }
+    }
+  }
+}
+
 export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBotAdapter {
   const logger = options.logger ?? consoleLogger
   const client = new SlackBotClient()
@@ -549,6 +585,8 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     logger,
     formatChannelTag,
   })
+
+  const fetchAttachmentCallback = createFetchAttachmentCallback({ client, logger })
 
   const dedupe = createSlackDedupe()
 
@@ -664,6 +702,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.registerTyping('slack-bot', typingCallback)
       options.router.registerChannelNameResolver('slack-bot', channelResolver)
       options.router.registerHistory('slack-bot', historyCallback)
+      options.router.registerFetchAttachment('slack-bot', fetchAttachmentCallback)
       options.router.registerMembership('slack-bot', membershipResolver)
 
       try {
@@ -682,6 +721,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.unregisterTyping('slack-bot', typingCallback)
       options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
       options.router.unregisterHistory('slack-bot', historyCallback)
+      options.router.unregisterFetchAttachment('slack-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('slack-bot', membershipResolver)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
