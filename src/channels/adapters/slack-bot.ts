@@ -1,3 +1,10 @@
+import {
+  MEMBERSHIP_ENUMERATION_CAP,
+  type MembershipCount,
+  type MembershipResolver,
+  type MembershipResolverFailure,
+  type MembershipResolverResult,
+} from '@/channels/membership'
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type {
@@ -143,6 +150,128 @@ type SlackHistoryResponse = {
   error?: string
   messages?: SlackRawHistoryMessage[]
   response_metadata?: { next_cursor?: string }
+}
+
+type SlackConversationInfoResponse = {
+  ok: boolean
+  error?: string
+  channel?: { num_members?: number }
+}
+
+type SlackConversationMembersResponse = {
+  ok: boolean
+  error?: string
+  members?: string[]
+}
+
+type SlackUserInfoResponse = {
+  ok: boolean
+  error?: string
+  user?: { is_bot?: boolean; deleted?: boolean }
+}
+
+export function createSlackMembershipResolver(deps: {
+  token: string
+  logger: SlackBotAdapterLogger
+  botUserIdRef?: () => string | null
+  fetchImpl?: typeof fetch
+  now?: () => number
+}): MembershipResolver {
+  const fetchFn = deps.fetchImpl ?? fetch
+  const now = deps.now ?? Date.now
+  const userBotCache = new Map<string, boolean>()
+  return async (key): Promise<MembershipResolverResult> => {
+    if (key.workspace === '@dm') return { humans: 1, bots: 1, fetchedAt: now(), truncated: false }
+
+    const info = await slackApi<SlackConversationInfoResponse>(fetchFn, deps.token, 'conversations.info', {
+      channel: key.chat,
+    })
+    if (!info.ok) {
+      deps.logger.warn(`[slack-bot] membership info channel=${key.chat} failed: ${info.reason}`)
+      return info.failure
+    }
+
+    const total = Math.max(0, Math.floor(info.value.channel?.num_members ?? 0))
+    if (total > MEMBERSHIP_ENUMERATION_CAP) {
+      return approximateSlackMembership(total, deps.botUserIdRef?.() ?? null, now())
+    }
+
+    const members = await slackApi<SlackConversationMembersResponse>(fetchFn, deps.token, 'conversations.members', {
+      channel: key.chat,
+      limit: String(MEMBERSHIP_ENUMERATION_CAP),
+    })
+    if (!members.ok) {
+      deps.logger.warn(`[slack-bot] membership members channel=${key.chat} failed: ${members.reason}`)
+      return members.failure
+    }
+
+    let bots = 0
+    let humans = 0
+    for (const userId of members.value.members ?? []) {
+      const cached = userBotCache.get(userId)
+      const isBot = cached ?? (await resolveSlackUserIsBot(fetchFn, deps.token, userId, deps.logger, userBotCache))
+      if (isBot) bots++
+      else humans++
+    }
+    return { humans, bots, fetchedAt: now(), truncated: false }
+  }
+}
+
+type SlackApiResult<T> = { ok: true; value: T } | { ok: false; reason: string; failure: MembershipResolverFailure }
+
+async function slackApi<T>(
+  fetchFn: typeof fetch,
+  token: string,
+  method: string,
+  fields: Record<string, string>,
+): Promise<SlackApiResult<T>> {
+  const body = new URLSearchParams(fields)
+  let raw: { ok?: boolean; error?: string }
+  try {
+    const response = await fetchFn(`${SLACK_API_BASE}/${method}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8' },
+      body: body.toString(),
+    })
+    raw = (await response.json()) as { ok?: boolean; error?: string }
+  } catch (err) {
+    return { ok: false, reason: describe(err), failure: { kind: 'transient' } }
+  }
+  if (raw.ok !== true) {
+    const reason = raw.error ?? 'unknown slack error'
+    return { ok: false, reason, failure: slackFailureForError(reason) }
+  }
+  return { ok: true, value: raw as T }
+}
+
+async function resolveSlackUserIsBot(
+  fetchFn: typeof fetch,
+  token: string,
+  userId: string,
+  logger: SlackBotAdapterLogger,
+  cache: Map<string, boolean>,
+): Promise<boolean> {
+  const info = await slackApi<SlackUserInfoResponse>(fetchFn, token, 'users.info', { user: userId })
+  if (!info.ok) {
+    logger.warn(`[slack-bot] membership users.info user=${userId} failed: ${info.reason}`)
+    cache.set(userId, false)
+    return false
+  }
+  const isBot = info.value.user?.is_bot === true
+  cache.set(userId, isBot)
+  return isBot
+}
+
+function slackFailureForError(error: string): MembershipResolverFailure {
+  if (['invalid_auth', 'not_authed', 'not_in_channel', 'channel_not_found', 'missing_scope'].includes(error)) {
+    return { kind: 'permanent' }
+  }
+  return { kind: 'transient' }
+}
+
+function approximateSlackMembership(total: number, botUserId: string | null, fetchedAt: number): MembershipCount {
+  const bots = botUserId === null ? 0 : 1
+  return { humans: Math.max(0, total - bots), bots, fetchedAt, truncated: true }
 }
 
 // Direct fetch to Slack's Web API. The shim only exposes postMessage /
@@ -391,6 +520,12 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     botUserIdRef: () => botUserId,
   })
 
+  const membershipResolver = createSlackMembershipResolver({
+    token: options.token,
+    logger,
+    botUserIdRef: () => botUserId,
+  })
+
   const outboundCallback = createOutboundCallback({
     client,
     configRef: options.configRef,
@@ -521,6 +656,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.registerTyping('slack-bot', typingCallback)
       options.router.registerChannelNameResolver('slack-bot', channelResolver)
       options.router.registerHistory('slack-bot', historyCallback)
+      options.router.registerMembership('slack-bot', membershipResolver)
 
       try {
         await listener.start()
@@ -538,6 +674,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       options.router.unregisterTyping('slack-bot', typingCallback)
       options.router.unregisterChannelNameResolver('slack-bot', channelResolver)
       options.router.unregisterHistory('slack-bot', historyCallback)
+      options.router.unregisterMembership('slack-bot', membershipResolver)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)
