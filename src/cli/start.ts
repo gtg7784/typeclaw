@@ -47,16 +47,20 @@ export const startCommand = defineCommand({
       process.exit(1)
     }
 
-    if (result.built) {
-      console.log(`Built image ${result.plan.imageTag}.`)
-    }
-    console.log(
-      `Container ${result.plan.containerName} started on host port ${result.hostPort} (${result.containerId.slice(0, 12)}).`,
-    )
-    if (result.hostd.state === 'registered') {
-      console.log(`Host daemon active.`)
-    } else if (result.hostd.state === 'unavailable') {
-      console.warn(`Host daemon unavailable: ${result.hostd.reason}`)
+    if (result.alreadyRunning) {
+      console.log(`Container ${result.plan.containerName} is already running on host port ${result.hostPort}.`)
+    } else {
+      if (result.built) {
+        console.log(`Built image ${result.plan.imageTag}.`)
+      }
+      console.log(
+        `Container ${result.plan.containerName} started on host port ${result.hostPort} (${result.containerId.slice(0, 12)}).`,
+      )
+      if (result.hostd.state === 'registered') {
+        console.log(`Host daemon active.`)
+      } else if (result.hostd.state === 'unavailable') {
+        console.warn(`Host daemon unavailable: ${result.hostd.reason}`)
+      }
     }
     console.log(`Follow logs:  typeclaw logs -f`)
     console.log(`Attach TUI:   typeclaw tui`)

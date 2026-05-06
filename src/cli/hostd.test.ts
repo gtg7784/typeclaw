@@ -122,5 +122,6 @@ function startOk(opts: StartOptions): StartResult {
     built: false,
     hostPort: opts.preferredHostPort,
     hostd: { state: 'registered' },
+    alreadyRunning: false,
   }
 }

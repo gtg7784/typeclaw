@@ -73,6 +73,12 @@ export type StartResult =
       built: boolean
       hostPort: number
       hostd: HostDaemonStatus
+      // True when the container was already running and start() became a no-op.
+      // Callers that want to distinguish "I just launched it" from "it was up
+      // already" (CLI output, compose summaries) gate on this flag. False on
+      // every fresh launch, including the post-stale-corpse `--rm` recovery
+      // path — that one rebuilds the container from scratch.
+      alreadyRunning: boolean
     }
   | { ok: false; reason: string }
 
@@ -86,22 +92,27 @@ export async function start({
   reuseCurrentHostDaemon = false,
 }: StartOptions): Promise<StartResult> {
   try {
+    const containerName = containerNameFromCwd(cwd)
+    const imageTagValue = imageTagFromCwd(cwd)
+
+    // Probe container state BEFORE refreshing Dockerfile/.gitignore: when the
+    // container is already running, start() is a no-op and must not produce
+    // side effects (template writes, .gitignore commits) that would surprise
+    // a user invoking `compose up` against a partially-up tree.
+    const state = await inspectContainer(exec, containerName)
+    if (state.exists && state.running) {
+      return await reportAlreadyRunning(exec, cwd, containerName)
+    }
+
     // TypeClaw owns Dockerfile and .gitignore. Refresh them from the current
-    // CLI templates on every start (not just --build) so version drift between
-    // the agent folder and the CLI is corrected automatically. The Dockerfile
-    // is gitignored (regenerated on every start, never tracked), so only the
-    // .gitignore needs an auto-commit if its content changed.
+    // CLI templates on every fresh start (not just --build) so version drift
+    // between the agent folder and the CLI is corrected automatically. The
+    // Dockerfile is gitignored (regenerated on every start, never tracked),
+    // so only the .gitignore needs an auto-commit if its content changed.
     await refreshDockerfile(cwd)
     await refreshGitignore(cwd)
     await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
 
-    const containerName = containerNameFromCwd(cwd)
-    const imageTagValue = imageTagFromCwd(cwd)
-
-    const state = await inspectContainer(exec, containerName)
-    if (state.exists && state.running) {
-      return { ok: false, reason: `Container ${containerName} is already running. Run \`typeclaw stop\` first.` }
-    }
     if (state.exists) {
       // Container is stopped/exited/being-removed but still holds the name.
       // This typically means a previous `--rm` cleanup hasn't finished, or a
@@ -166,7 +177,15 @@ export async function start({
       return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
     }
 
-    return { ok: true, plan, containerId: run.stdout.trim(), built, hostPort, hostd: stripHostDaemonControl(hostd) }
+    return {
+      ok: true,
+      plan,
+      containerId: run.stdout.trim(),
+      built,
+      hostPort,
+      hostd: stripHostDaemonControl(hostd),
+      alreadyRunning: false,
+    }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -299,6 +318,59 @@ async function inspectContainer(exec: DockerExec, name: string): Promise<Inspect
   const result = await exec(['inspect', '--format', '{{.State.Running}}', name])
   if (result.exitCode !== 0) return { exists: false }
   return { exists: true, running: result.stdout.trim() === 'true' }
+}
+
+// Idempotent path for `start()`: the named container is already up. Reflect
+// the live container's identity (id) and host port in the result so callers
+// (CLI, compose) can render an accurate "already running on port X" message
+// and stay symmetric with the fresh-launch result shape. We do NOT touch
+// hostd here — the existing container was registered (or not) at its original
+// launch; re-registering would generate a new restart token that the running
+// agent process does not have.
+async function reportAlreadyRunning(exec: DockerExec, cwd: string, containerName: string): Promise<StartResult> {
+  const containerId = await queryContainerId(exec, containerName)
+  const hostPort = await queryPublishedHostPort(exec, containerName)
+  if (hostPort === null) {
+    return {
+      ok: false,
+      reason: `Container ${containerName} is running but its published host port could not be resolved.`,
+    }
+  }
+  const plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false })
+  return {
+    ok: true,
+    plan,
+    containerId,
+    built: false,
+    hostPort,
+    hostd: { state: 'disabled' },
+    alreadyRunning: true,
+  }
+}
+
+async function queryContainerId(exec: DockerExec, name: string): Promise<string> {
+  const result = await exec(['inspect', '--format', '{{.Id}}', name])
+  if (result.exitCode !== 0) return ''
+  return result.stdout.trim()
+}
+
+// Mirrors `resolveHostPort` from ./port (which we cannot reuse directly because
+// it goes through `defaultDockerExec` and would defeat the test seam).
+async function queryPublishedHostPort(exec: DockerExec, name: string): Promise<number | null> {
+  const result = await exec(['port', name, `${CONTAINER_PORT}/tcp`])
+  if (result.exitCode !== 0) return null
+  const lines = result.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+  if (lines.length === 0) return null
+  const ipv4 = lines.find((line) => /^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(line))
+  const candidate = ipv4 ?? lines[0]!
+  const lastColon = candidate.lastIndexOf(':')
+  if (lastColon < 0) return null
+  const port = Number(candidate.slice(lastColon + 1))
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) return null
+  return port
 }
 
 // Mirror the canonical labels `docker compose up` sets so Docker Desktop groups

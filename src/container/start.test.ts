@@ -660,7 +660,17 @@ function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerSc
     }
     if (args[0] === 'inspect') {
       if (!containerState.exists) return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      // The idempotent path probes `inspect --format {{.Id}}` after seeing
+      // the container is up; mirror that here so the fake stays sufficient.
+      const format = args[args.indexOf('--format') + 1] ?? ''
+      if (format.includes('.Id')) {
+        return { exitCode: 0, stdout: 'fake-running-id-123456\n', stderr: '' }
+      }
       return { exitCode: 0, stdout: `${containerState.running}\n`, stderr: '' }
+    }
+    if (args[0] === 'port') {
+      if (!containerState.exists) return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      return { exitCode: 0, stdout: '0.0.0.0:8973\n', stderr: '' }
     }
     if (args[0] === 'rm') {
       if (!containerState.exists) {
@@ -906,20 +916,53 @@ describe('start (composition)', () => {
     expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
   })
 
-  test('refuses to start when a container with the same name is already running', async () => {
-    await writeDockerfile(root)
+  test('is idempotent when a container with the same name is already running', async () => {
+    // given: an already-running container, an existing image, and a stale
+    // Dockerfile on disk so we can prove the no-op path skips the refresh
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n')
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({
       imageExists: true,
       container: { exists: true, running: true },
     })
 
+    // when
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+
+    // then: success with alreadyRunning=true, no docker side effects, no template churn
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.alreadyRunning).toBe(true)
+    expect(result.built).toBe(false)
+    expect(result.hostPort).toBe(8973)
+    expect(result.containerId).toBe('fake-running-id-123456')
+    expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
+    expect(calls.find((c) => c.args[0] === 'rm')).toBeUndefined()
+    expect(calls.find((c) => c.args[0] === 'build')).toBeUndefined()
+    const onDisk = await readFile(join(root, 'Dockerfile'), 'utf8')
+    expect(onDisk).toBe('FROM stale\n')
+  })
+
+  test('reports an error when an already-running container has no published host port', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect' && args.includes('{{.State.Running}}')) {
+        return { exitCode: 0, stdout: 'true\n', stderr: '' }
+      }
+      if (args[0] === 'inspect' && args.includes('{{.Id}}')) {
+        return { exitCode: 0, stdout: 'id\n', stderr: '' }
+      }
+      if (args[0] === 'port') {
+        return { exitCode: 1, stdout: '', stderr: 'Error: No port mapping' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
     const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
 
     expect(result.ok).toBe(false)
-    if (!result.ok) expect(result.reason).toMatch(/already running/)
-    expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
-    expect(calls.find((c) => c.args[0] === 'rm')).toBeUndefined()
+    if (!result.ok) expect(result.reason).toMatch(/published host port could not be resolved/)
   })
 
   test('force-removes a stale stopped container with the same name and proceeds to docker run', async () => {

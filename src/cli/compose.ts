@@ -39,13 +39,14 @@ const upSub = defineCommand({
     let failed = 0
     for (const r of results) {
       if (r.ok) {
-        console.log(`[${r.name}] started on host port ${r.data.hostPort}`)
+        const verb = r.data.alreadyRunning ? 'already running' : 'started'
+        console.log(`[${r.name}] ${verb} on host port ${r.data.hostPort}`)
       } else {
         failed++
         console.error(`[${r.name}] failed: ${r.reason}`)
       }
     }
-    summarize(results, 'started', failed)
+    summarize(results, 'up', failed)
     if (failed > 0) process.exit(1)
   },
 })
