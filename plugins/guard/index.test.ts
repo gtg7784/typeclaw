@@ -13,10 +13,10 @@ describe('guard plugin', () => {
   test('blocks write calls outside workspace until nonWorkspaceWrite is acknowledged', async () => {
     const hook = await toolBeforeHook()
 
-    const blocked = await hook(toolEvent('write', { path: 'typeclaw.json', content: '{}' }), hookContext('/agent'))
+    const blocked = await hook(toolEvent('write', { path: 'notes.md', content: '{}' }), hookContext('/agent'))
     const acknowledged = await hook(
       toolEvent('write', {
-        path: 'typeclaw.json',
+        path: 'notes.md',
         content: '{}',
         acknowledgeGuards: { nonWorkspaceWrite: true },
       }),
@@ -26,7 +26,7 @@ describe('guard plugin', () => {
     expect(blocked).toEqual({
       block: true,
       reason:
-        'Guard `nonWorkspaceWrite` blocked write outside the workspace: /agent/typeclaw.json. The free-write zone is /agent/workspace. Retry with `acknowledgeGuards.nonWorkspaceWrite: true` only if this write is intentional.',
+        'Guard `nonWorkspaceWrite` blocked write outside the workspace: /agent/notes.md. The free-write zone is /agent/workspace. Retry with `acknowledgeGuards.nonWorkspaceWrite: true` only if this write is intentional.',
     })
     expect(acknowledged).toBeUndefined()
   })
@@ -51,7 +51,7 @@ describe('guard plugin', () => {
     const hook = await toolBeforeHook()
 
     const dotDotResult = await hook(
-      toolEvent('write', { path: 'workspace/../typeclaw.json', content: '{}' }),
+      toolEvent('write', { path: 'workspace/../notes.md', content: '{}' }),
       hookContext('/agent'),
     )
     const siblingResult = await hook(
@@ -66,6 +66,28 @@ describe('guard plugin', () => {
     expect(dotDotResult?.block).toBe(true)
     expect(siblingResult?.block).toBe(true)
     expect(absoluteResult?.block).toBe(true)
+  })
+
+  test('allows known writable files at the agent root', async () => {
+    const hook = await toolBeforeHook()
+
+    for (const file of ['AGENTS.md', 'IDENTITY.md', 'MEMORY.md', 'SOUL.md', 'USER.md', 'cron.json', 'typeclaw.json']) {
+      const result = await hook(toolEvent('write', { path: file, content: 'x' }), hookContext('/agent'))
+      expect(result).toBeUndefined()
+    }
+  })
+
+  test('still blocks unknown files and nested paths under allowed root names', async () => {
+    const hook = await toolBeforeHook()
+
+    const unknownRoot = await hook(toolEvent('write', { path: 'notes.md', content: 'x' }), hookContext('/agent'))
+    const nestedUnderAllowedName = await hook(
+      toolEvent('write', { path: 'AGENTS.md/nested.txt', content: 'x' }),
+      hookContext('/agent'),
+    )
+
+    expect(unknownRoot?.block).toBe(true)
+    expect(nestedUnderAllowedName?.block).toBe(true)
   })
 
   test('blocks workspace symlinks that escape the real workspace directory', async () => {

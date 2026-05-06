@@ -333,7 +333,7 @@ describe('wrapSystemTool', () => {
     const hooks = createHookBus()
     hooks.registerAll('p1', '/agent', noopLogger, {
       'tool.before': (event) => {
-        event.args.path = 'typeclaw.json'
+        event.args.path = 'notes.md'
       },
     })
 
