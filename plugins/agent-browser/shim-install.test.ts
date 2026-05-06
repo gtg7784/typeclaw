@@ -71,10 +71,13 @@ describe('installShim', () => {
     expect(result.realBin).toBe('/root/.bun/install/global/node_modules/agent-browser/bin/agent-browser.js')
 
     expect(fake.events).toContain('unlink:/usr/local/bin/agent-browser')
-    expect(fake.events).toContain(
-      'symlink:/usr/local/lib/typeclaw-agent-browser/agent-browser-real->/root/.bun/install/global/node_modules/agent-browser/bin/agent-browser.js',
+    expect(result.stashTarget).toBe(
+      '/usr/local/lib/typeclaw-agent-browser/usr-local-bin-agent-browser/agent-browser-real',
     )
-    const stash = fake.files.get('/usr/local/lib/typeclaw-agent-browser/agent-browser-real')
+    expect(fake.events).toContain(
+      `symlink:${result.stashTarget}->/root/.bun/install/global/node_modules/agent-browser/bin/agent-browser.js`,
+    )
+    const stash = fake.files.get(result.stashTarget)
     if (!stash || stash.kind !== 'symlink') throw new Error('stash not a symlink')
     expect(stash.target.startsWith('/')).toBe(true)
 
@@ -82,20 +85,65 @@ describe('installShim', () => {
     if (!wrapper || wrapper.kind !== 'file') throw new Error('wrapper not written')
     expect(wrapper.mode).toBe(0o755)
     expect(wrapper.data).toContain('TYPECLAW_AGENT_BROWSER_REAL_BIN')
-    expect(wrapper.data).toContain('/usr/local/lib/typeclaw-agent-browser/agent-browser-real')
+    expect(wrapper.data).toContain(result.stashTarget)
     expect(wrapper.data).toContain('exec bun run /agent/node_modules/typeclaw/plugins/agent-browser/shim.ts')
     expect(wrapper.data).toContain('# typeclaw-agent-browser-shim')
+  })
+
+  test('per-binPath stash directory keeps global and local installs from colliding', () => {
+    const fake = new FakeFs()
+    fake.files.set('/usr/local/bin/agent-browser', { kind: 'symlink', target: '/global/real' })
+    fake.files.set('/agent/node_modules/.bin/agent-browser', { kind: 'symlink', target: '/local/real' })
+
+    const global = installShim({ binPath: '/usr/local/bin/agent-browser', shimEntry: '/x/shim.ts', fs: fake.fs() })
+    const local = installShim({
+      binPath: '/agent/node_modules/.bin/agent-browser',
+      shimEntry: '/x/shim.ts',
+      fs: fake.fs(),
+    })
+
+    if (global.kind !== 'installed' || local.kind !== 'installed') throw new Error('expected both installed')
+    expect(global.stashTarget).not.toBe(local.stashTarget)
+    expect(global.realBin).toBe('/global/real')
+    expect(local.realBin).toBe('/local/real')
   })
 
   test('renames an upstream regular file aside (rare: future bun layouts may copy instead of symlink)', () => {
     const fake = new FakeFs()
     fake.files.set('/usr/local/bin/agent-browser', { kind: 'file', data: '#!/usr/bin/env node\n', mode: 0o755 })
 
-    installShim({ binPath: '/usr/local/bin/agent-browser', shimEntry: '/x/shim.ts', fs: fake.fs() })
+    const result = installShim({ binPath: '/usr/local/bin/agent-browser', shimEntry: '/x/shim.ts', fs: fake.fs() })
 
-    expect(fake.events).toContain(
-      'rename:/usr/local/bin/agent-browser->/usr/local/lib/typeclaw-agent-browser/agent-browser-real',
-    )
+    if (result.kind !== 'installed') throw new Error('expected installed')
+    expect(fake.events).toContain(`rename:/usr/local/bin/agent-browser->${result.stashTarget}`)
+  })
+
+  test('re-installs after host-side bun install restored the original symlink (idempotent re-shim)', () => {
+    const fake = new FakeFs()
+    fake.files.set('/agent/node_modules/.bin/agent-browser', {
+      kind: 'symlink',
+      target: '../agent-browser/bin/agent-browser.js',
+    })
+
+    const first = installShim({
+      binPath: '/agent/node_modules/.bin/agent-browser',
+      shimEntry: '/x/shim.ts',
+      fs: fake.fs(),
+    })
+    expect(first.kind).toBe('installed')
+
+    fake.files.set('/agent/node_modules/.bin/agent-browser', {
+      kind: 'symlink',
+      target: '../agent-browser/bin/agent-browser.js',
+    })
+
+    const second = installShim({
+      binPath: '/agent/node_modules/.bin/agent-browser',
+      shimEntry: '/x/shim.ts',
+      fs: fake.fs(),
+    })
+
+    expect(second.kind).toBe('installed')
   })
 
   test('is idempotent: a second run sees the marker and short-circuits', () => {
