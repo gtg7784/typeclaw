@@ -1,6 +1,15 @@
 {
   "name": "typeclaw",
-  "private": true,
+  "version": "0.1.0",
+  "homepage": "https://github.com/typeclaw/typeclaw#readme",
+  "bugs": {
+    "url": "https://github.com/typeclaw/typeclaw/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/typeclaw/typeclaw.git"
+  },
   "bin": {
     "typeclaw": "src/cli/index.ts"
   },
@@ -11,6 +20,9 @@
     "cron.schema.json"
   ],
   "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "typecheck": "tsgo --noEmit",
     "lint": "oxlint",
@@ -46,5 +58,8 @@
   },
   "peerDependencies": {
     "typescript": "^5"
+  },
+  "engines": {
+    "bun": ">=1.1.0"
   }
 }
