@@ -1,5 +1,3 @@
-import { accessSync, chmodSync, constants as fsConstants, existsSync } from 'node:fs'
-
 import type { Server } from 'bun'
 
 export type DashboardProxyOptions = {
@@ -9,10 +7,6 @@ export type DashboardProxyOptions = {
   listenHost?: string
   fetchImpl?: typeof fetch
   onLog?: (event: DashboardProxyLogEvent) => void
-}
-
-export type AgentBrowserDashboardCommandOptions = {
-  executable?: string
 }
 
 export type DashboardProxyLogEvent =
@@ -26,11 +20,6 @@ export type DashboardProxyLogEvent =
 export type DashboardProxy = {
   server: Server<WebSocketData>
   stop: () => void
-}
-
-export type AgentBrowserDashboardProxy = {
-  proxy: DashboardProxy
-  stop: () => Promise<void>
 }
 
 type WebSocketData = {
@@ -48,35 +37,6 @@ const HTTP_PROXY_PREFIX = '/__typeclaw_agent_browser_http/'
 const WS_PROXY_PREFIX = '/__typeclaw_agent_browser_ws/'
 const TYPECLAW_AGENT_PORT = 8973
 const TYPECLAW_HOSTD_CONTROL_PORT = 8974
-
-export async function startAgentBrowserDashboardProxy(
-  opts: DashboardProxyOptions = {},
-  commandOpts: AgentBrowserDashboardCommandOptions = {},
-): Promise<AgentBrowserDashboardProxy> {
-  const upstreamPort = opts.upstreamPort ?? DEFAULT_UPSTREAM_PORT
-  const executable = commandOpts.executable ?? resolveAgentBrowserExecutable()
-  await runAgentBrowserDashboardCommand(executable, ['dashboard', 'start', '--port', String(upstreamPort)])
-  let proxy: DashboardProxy
-  try {
-    proxy = startDashboardProxy(opts)
-  } catch (err) {
-    await runAgentBrowserDashboardCommand(executable, ['dashboard', 'stop']).catch(() => {})
-    throw err
-  }
-
-  return {
-    proxy,
-    async stop() {
-      proxy.stop()
-      await runAgentBrowserDashboardCommand(executable, ['dashboard', 'stop']).catch(() => {})
-    },
-  }
-}
-
-export async function stopAgentBrowserDashboard(commandOpts: AgentBrowserDashboardCommandOptions = {}): Promise<void> {
-  const executable = commandOpts.executable ?? resolveAgentBrowserExecutable()
-  await runAgentBrowserDashboardCommand(executable, ['dashboard', 'stop'])
-}
 
 export function startDashboardProxy(opts: DashboardProxyOptions = {}): DashboardProxy {
   const listenPort = opts.listenPort ?? DEFAULT_PROXY_PORT
@@ -199,10 +159,28 @@ export async function maybeInjectDashboardPatch(response: Response): Promise<Res
 
   const html = await response.text()
   const patch = buildDashboardPatchScript()
-  const patched = html.includes('</head>') ? html.replace('</head>', `${patch}</head>`) : `${patch}${html}`
+  const patched = injectPatch(html, patch)
   const headers = new Headers(response.headers)
   headers.delete('content-length')
   return new Response(patched, { status: response.status, statusText: response.statusText, headers })
+}
+
+function injectPatch(html: string, patch: string): string {
+  const closingHead = html.match(/<\/head\s*>/i)
+  if (closingHead && closingHead.index !== undefined) {
+    return html.slice(0, closingHead.index) + patch + html.slice(closingHead.index)
+  }
+  const openingHead = html.match(/<head\b[^>]*>/i)
+  if (openingHead && openingHead.index !== undefined) {
+    const insertAt = openingHead.index + openingHead[0].length
+    return html.slice(0, insertAt) + patch + html.slice(insertAt)
+  }
+  const openingHtml = html.match(/<html\b[^>]*>/i)
+  if (openingHtml && openingHtml.index !== undefined) {
+    const insertAt = openingHtml.index + openingHtml[0].length
+    return html.slice(0, insertAt) + patch + html.slice(insertAt)
+  }
+  return patch + html
 }
 
 export function parsePortPath(pathname: string, prefix: string): { port: number; path: string } | null {
@@ -392,84 +370,3 @@ async function discoverSessionPorts({
 
 export const AGENT_BROWSER_DASHBOARD_PROXY_PORT = DEFAULT_PROXY_PORT
 export const AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT = DEFAULT_UPSTREAM_PORT
-
-if (import.meta.main) {
-  await runDashboardProxyMain()
-}
-
-async function runDashboardProxyMain(): Promise<void> {
-  const listenPort = portFromEnv('TYPECLAW_AGENT_BROWSER_DASHBOARD_PORT', DEFAULT_PROXY_PORT)
-  const upstreamPort = portFromEnv('TYPECLAW_AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT', DEFAULT_UPSTREAM_PORT)
-  const dashboard = await startAgentBrowserDashboardProxy({
-    listenPort,
-    upstreamPort,
-    onLog: (event) => {
-      if (event.kind === 'http-proxy' || event.kind === 'ws-proxy') return
-      console.error(`[agent-browser-dashboard] ${JSON.stringify(event)}`)
-    },
-  })
-
-  console.log(
-    `TypeClaw agent-browser dashboard proxy listening on 0.0.0.0:${dashboard.proxy.server.port ?? listenPort}`,
-  )
-  console.log(`Upstream agent-browser dashboard is on 127.0.0.1:${upstreamPort}`)
-
-  const stop = async () => {
-    await dashboard.stop()
-    process.exit(0)
-  }
-  process.once('SIGINT', () => void stop())
-  process.once('SIGTERM', () => void stop())
-
-  await new Promise(() => {})
-}
-
-function portFromEnv(name: string, fallback: number): number {
-  const raw = process.env[name]
-  if (raw === undefined || raw === '') return fallback
-  const port = Number(raw)
-  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error(`${name} must be an integer port between 1 and 65535`)
-  }
-  return port
-}
-
-function resolveAgentBrowserExecutable(): string {
-  const arch = process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x64' : null
-  if (arch === null)
-    throw new Error(`agent-browser dashboard proxy does not support ${process.platform}-${process.arch}`)
-  const platform = process.platform === 'linux' ? 'linux' : process.platform === 'darwin' ? 'darwin' : null
-  if (platform === null)
-    throw new Error(`agent-browser dashboard proxy does not support ${process.platform}-${process.arch}`)
-
-  const bundled = `/root/.bun/install/global/node_modules/agent-browser/bin/agent-browser-${platform}-${arch}`
-  if (existsSync(bundled)) {
-    ensureExecutable(bundled)
-    return bundled
-  }
-  return 'agent-browser'
-}
-
-function ensureExecutable(path: string): void {
-  try {
-    accessSync(path, fsConstants.X_OK)
-  } catch {
-    chmodSync(path, 0o755)
-  }
-}
-
-async function runAgentBrowserDashboardCommand(executable: string, args: string[]): Promise<void> {
-  const proc = Bun.spawn([executable, ...args], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-  const [exitCode, stdout, stderr] = await Promise.all([
-    proc.exited,
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-  ])
-  if (exitCode !== 0) {
-    const detail = [stdout.trim(), stderr.trim()].filter(Boolean).join('\n')
-    throw new Error(`agent-browser ${args.join(' ')} failed${detail ? `: ${detail}` : ''}`)
-  }
-}

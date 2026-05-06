@@ -37,6 +37,31 @@ describe('maybeInjectDashboardPatch', () => {
     expect(patched.headers.has('content-length')).toBe(false)
   })
 
+  test('falls back to opening <head> when the closing tag is missing (Next.js streamed HTML)', async () => {
+    const response = new Response('<!DOCTYPE html><html><head><meta charSet="utf-8"/><body>x</body></html>', {
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    })
+
+    const patched = await maybeInjectDashboardPatch(response)
+    const body = await patched.text()
+
+    expect(body).toContain('/__typeclaw_agent_browser_http/')
+    expect(body.indexOf('/__typeclaw_agent_browser_http/')).toBeGreaterThan(body.indexOf('<head>'))
+    expect(body.indexOf('/__typeclaw_agent_browser_http/')).toBeLessThan(body.indexOf('<body>'))
+  })
+
+  test('falls back to opening <html> when no head element is present', async () => {
+    const response = new Response('<!DOCTYPE html><html><body>x</body></html>', {
+      headers: { 'content-type': 'text/html; charset=utf-8' },
+    })
+
+    const patched = await maybeInjectDashboardPatch(response)
+    const body = await patched.text()
+
+    expect(body).toContain('/__typeclaw_agent_browser_http/')
+    expect(body.indexOf('/__typeclaw_agent_browser_http/')).toBeGreaterThan(body.indexOf('<html>'))
+  })
+
   test('leaves non-html responses untouched', async () => {
     const response = new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } })
 
