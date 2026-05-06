@@ -502,6 +502,60 @@ describe('ChannelRouter engagement and prompt composition', () => {
 
     expect(sessions[0]!.prompts).toHaveLength(0)
   })
+
+  test('previously-unseen author triggers a membership refetch (warmup after invalidate)', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let resolverCalls = 0
+    router.registerMembership('discord-bot', async () => {
+      resolverCalls++
+      return { humans: 1, bots: 0, fetchedAt: Date.now(), truncated: false }
+    })
+
+    await router.route(inbound({ authorId: 'alice', authorName: 'alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    const callsAfterFirstAuthor = resolverCalls
+
+    // Same author — no invalidation, no extra resolver call (cache still hot)
+    await router.route(inbound({ authorId: 'alice', authorName: 'alice', externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(resolverCalls).toBe(callsAfterFirstAuthor)
+
+    // Novel author — cache invalidated, warmup kicks off (additional resolver hit)
+    await router.route(inbound({ authorId: 'bob', authorName: 'bob', externalMessageId: 'm3' }))
+    await router.__testing!.flushDebounce(KEY)
+    await waitFor(() => resolverCalls > callsAfterFirstAuthor)
+    expect(resolverCalls).toBeGreaterThan(callsAfterFirstAuthor)
+  })
+
+  test('DM channels skip the new-author invalidation path', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let resolverCalls = 0
+    router.registerMembership('discord-bot', async () => {
+      resolverCalls++
+      return { humans: 1, bots: 1, fetchedAt: Date.now(), truncated: false }
+    })
+
+    const dmKey: ChannelKey = { adapter: 'discord-bot', workspace: '@dm', chat: 'd1', thread: null }
+    await router.route(inbound({ workspace: '@dm', chat: 'd1', isDm: true, authorId: 'alice', authorName: 'alice' }))
+    await router.__testing!.flushDebounce(dmKey)
+    const callsAfterFirst = resolverCalls
+
+    await router.route(
+      inbound({
+        workspace: '@dm',
+        chat: 'd1',
+        isDm: true,
+        authorId: 'bob',
+        authorName: 'bob',
+        externalMessageId: 'm2',
+      }),
+    )
+    await router.__testing!.flushDebounce(dmKey)
+
+    expect(resolverCalls).toBe(callsAfterFirst)
+  })
 })
 
 describe('ChannelRouter sticky credits', () => {

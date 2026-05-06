@@ -767,6 +767,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     const live = await ensureLive(key, event.externalMessageId)
 
+    const isNewAuthor = !live.participants.some((p) => p.authorId === event.authorId)
     live.participants = updateParticipants(
       live.participants,
       event.authorId,
@@ -775,6 +776,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       event.authorIsBot,
     )
     void persistParticipants(live)
+
+    // A previously-unseen author just spoke. The cached membership count
+    // (from /members or history-derived) was computed without them, so
+    // invalidate and warm in the background. We don't await — the warmup
+    // runs alongside this turn's `membershipForEngagement` call so the
+    // *next* turn sees fresh data, but the current turn still gets a
+    // fast answer (cache miss → cold fetch with timeout, or stale-ok).
+    if (isNewAuthor && live.key.workspace !== '@dm') {
+      const cache = membershipCaches.get(live.key.adapter)
+      if (cache !== undefined) {
+        cache.invalidate(live.key)
+        void cache.warmUp(live.key).catch((err) => {
+          logger.warn(`[channels] membership warmup after new author failed for ${live.keyId}: ${describe(err)}`)
+        })
+      }
+    }
 
     const membership = await membershipForEngagement(live)
 
