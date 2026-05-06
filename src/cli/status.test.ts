@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { formatStatus, type StatusReport } from './status'
+import { formatStatus, parseStatusResult, type StatusReport } from './status'
 
 function baseReport(overrides: Partial<StatusReport> = {}): StatusReport {
   return {
@@ -125,6 +125,33 @@ describe('formatStatus', () => {
     expect(out).toContain(`${ESC}[1mContainer${ESC}[0m`)
     expect(out).toContain(`${ESC}[1mHost daemon${ESC}[0m`)
     expect(out).toContain(`${ESC}[1mPort forwarding${ESC}[0m`)
+  })
+
+  test('renders empty forwarding hint when daemon omits forwardedPorts (drift)', () => {
+    const parsed = parseStatusResult({ containerName: 'coder', cwd: '/agents/coder' })
+    expect(parsed).toEqual({ containerName: 'coder', cwd: '/agents/coder', forwardedPorts: [] })
+    const out = formatStatus(
+      baseReport({
+        hostd: { kind: 'registered', cwd: parsed!.cwd, forwardedPorts: parsed!.forwardedPorts },
+      }),
+    )
+    expect(out).toContain('no ports currently forwarded')
+  })
+
+  test('parser drops non-numeric forwardedPorts entries', () => {
+    const parsed = parseStatusResult({
+      containerName: 'coder',
+      cwd: '/agents/coder',
+      forwardedPorts: [3000, 'nope', null, 5173, Number.NaN, 8080],
+    })
+    expect(parsed?.forwardedPorts).toEqual([3000, 5173, 8080])
+  })
+
+  test('parser rejects payloads without a string cwd', () => {
+    expect(parseStatusResult(null)).toBeNull()
+    expect(parseStatusResult('hi')).toBeNull()
+    expect(parseStatusResult({ containerName: 'coder' })).toBeNull()
+    expect(parseStatusResult({ cwd: 42 })).toBeNull()
   })
 
   test('useColor=false produces output free of ANSI escape codes', () => {
