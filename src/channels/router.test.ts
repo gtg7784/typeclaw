@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdir, mkdtemp, writeFile as writeFileFs } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import type { AssistantMessage } from '@mariozechner/pi-ai'
 import type { SessionEntry } from '@mariozechner/pi-coding-agent'
@@ -98,6 +98,7 @@ function makeRouter(
     origins?: SessionOrigin[]
     factoryCalls?: SessionFactoryArgs[]
     transcriptPathFor?: (sessionId: string) => string | undefined
+    configuredAliases?: () => readonly string[]
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -106,6 +107,7 @@ function makeRouter(
   const router = createChannelRouter({
     agentDir,
     configForAdapter: () => options.config ?? baseConfig,
+    ...(options.configuredAliases !== undefined ? { configuredAliases: options.configuredAliases } : {}),
     now: () => nowRef.value,
     logger: {
       info: (m) => options.logs?.push(`info:${m}`),
@@ -555,6 +557,110 @@ describe('ChannelRouter engagement and prompt composition', () => {
     await router.__testing!.flushDebounce(dmKey)
 
     expect(resolverCalls).toBe(callsAfterFirst)
+  })
+})
+
+describe('ChannelRouter alias engagement', () => {
+  test('engages on dir-name implicit alias even with no configured aliases', async () => {
+    const dir = await tempDir()
+    const dirName = basename(dir)
+    const { router, sessions } = makeRouter(dir, {
+      config: { ...baseConfig, engagement: { trigger: [], stickiness: 'off' } },
+    })
+
+    await router.route(
+      inbound({
+        text: `Hey ${dirName.toUpperCase()}, cron 좀 봐줘`,
+        isBotMention: false,
+        authorId: 'devxoul',
+        authorName: 'devxoul',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    await router.route(
+      inbound({
+        externalMessageId: 'm2',
+        text: `Hey ${dirName}, cron 좀 봐줘`,
+        isBotMention: false,
+        authorId: 'second-human',
+        authorName: 'second-human',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
+  })
+
+  test('engages on configured alias substring', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, {
+      config: { ...baseConfig, engagement: { trigger: [], stickiness: 'off' } },
+      configuredAliases: () => ['봉봉', 'bongbong'],
+    })
+
+    await router.route(
+      inbound({
+        text: '봉봉아 cron 좀 봐줘',
+        isBotMention: false,
+        authorId: 'devxoul',
+        authorName: 'devxoul',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    await router.route(
+      inbound({
+        externalMessageId: 'm2',
+        text: '봉봉아 cron 좀 봐줘',
+        isBotMention: false,
+        authorId: 'second-human',
+        authorName: 'second-human',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(2)
+  })
+
+  test('reads aliases live each inbound (live-reload contract)', async () => {
+    const dir = await tempDir()
+    let aliases: readonly string[] = []
+    const { router, sessions } = makeRouter(dir, {
+      config: { ...baseConfig, engagement: { trigger: [], stickiness: 'off' } },
+      configuredAliases: () => aliases,
+    })
+
+    await router.route(
+      inbound({
+        text: '봉봉아 cron',
+        isBotMention: false,
+        authorId: 'devxoul',
+        authorName: 'devxoul',
+      }),
+    )
+    await router.route(
+      inbound({
+        externalMessageId: 'm2',
+        text: 'second human posts',
+        isBotMention: false,
+        authorId: 'second-human',
+        authorName: 'second-human',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    aliases = ['봉봉']
+    await router.route(
+      inbound({
+        externalMessageId: 'm3',
+        text: '봉봉아 cron',
+        isBotMention: false,
+        authorId: 'devxoul',
+        authorName: 'devxoul',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts.some((p) => p.includes('봉봉아 cron'))).toBe(true)
   })
 })
 

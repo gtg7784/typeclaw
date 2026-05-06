@@ -108,6 +108,13 @@ export const configSchema = z
     // init` omits this field so users don't see noise for the empty case.
     mounts: z.array(mountSchema).default([]),
     plugins: z.array(z.string().min(1)).default([]),
+    // Additional names the agent answers to in channel engagement, on top
+    // of `basename(agentDir)` which is always implicit. Each entry is a
+    // plain string matched case-insensitively as a substring of the
+    // inbound text. Empty/whitespace-only entries are rejected at parse
+    // time. Defaults to `[]`. Hatching appends the agent's chosen name
+    // here, so a freshly-hatched bot already has its identity wired up.
+    alias: z.array(z.string().trim().min(1)).default([]),
     channels: channelsSchema,
     portForward: portForwardSchema,
     dockerfile: dockerfileSchema,
@@ -197,6 +204,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   port: 'restart-required',
   mounts: 'restart-required',
   plugins: 'restart-required',
+  alias: 'applied',
   channels: 'applied',
   portForward: 'restart-required',
   dockerfile: 'restart-required',

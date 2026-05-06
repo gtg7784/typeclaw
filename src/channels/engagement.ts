@@ -55,10 +55,19 @@ export type EngagementInput = {
   // — otherwise a 1-human + N-bot channel would silently exit solo mode.
   participants: readonly ChannelParticipant[]
   membership: MembershipCount | null
+  // Names the agent answers to in plain text (no @mention syntax). Built
+  // by the router as `[basename(agentDir), ...config.alias]` and lowered
+  // once. Empty list means alias-based engagement is off — useful for
+  // tests and for agents that explicitly want strict-mention behavior.
+  // Match semantics: case-insensitive substring of inbound text. This is
+  // the operator contract documented in typeclaw-config; if a name is too
+  // generic ("bot", "ai") it WILL produce false matches and the operator
+  // owns curation.
+  selfAliases: readonly string[]
 }
 
 export function decideEngagement(input: EngagementInput): EngagementDecision {
-  const { message, config, key, ledger, now, participants } = input
+  const { message, config, key, ledger, now, participants, selfAliases } = input
 
   if (config.trigger.includes('dm') && message.isDm) return 'engage'
   if (config.trigger.includes('mention') && message.isBotMention) return 'engage'
@@ -67,6 +76,18 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (config.stickiness !== 'off' && ledger.consume(key, message.authorId, now)) {
     return 'engage'
   }
+
+  // Plain-text name addressing: the user wrote our name (or an alias)
+  // somewhere in the message without using <@id> syntax. Engage at the
+  // same priority as an explicit mention — operators add aliases
+  // precisely because they expect the bot to respond when called by
+  // name. Suppression on `mentionsOthers` would defeat the point: the
+  // user can address two bots by name in one message ("봉봉아 펭펭아 둘
+  // 다 봐") and both should engage. Each bot only knows its own
+  // aliases, so cross-bot suppression isn't possible at this layer
+  // anyway — the router-side peer-name suppression in the solo-human
+  // fallback handles that case (follow-up).
+  if (matchesAnyAlias(message.text, selfAliases)) return 'engage'
 
   // Solo-human fallback: the strict mention/reply/dm gate keeps the bot
   // quiet in multi-human conversations, but in a 1-human channel that
@@ -113,11 +134,33 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (message.mentionsOthers) return 'observe'
   if (message.replyToOtherMessageId !== null) return 'observe'
 
+  // Plain-text peer-bot addressing as a fallback suppressor. We've reached
+  // here because the message lacks a structural mention/reply/dm AND
+  // doesn't contain our own alias. If it DOES contain a known peer bot's
+  // observed display name, the solo-human fallback would still engage us
+  // — same wrong behavior the alias trigger is meant to fix, just for
+  // peers instead of self. Each bot only configures its own aliases, so
+  // the only source of peer names is `participants[]` (observed
+  // authorName once a peer has spoken at least once in this channel).
+  // First-time addressing of a never-seen peer slips through; after that
+  // peer's first message it's caught forever.
+  if (textTargetsAnyPeerBot(message.text, participants)) return 'observe'
+
   const persistedHumans = participants.filter((p) => p.isBot !== true).length
   const effectiveHumans = resolveEffectiveHumans(persistedHumans, input.membership, now)
   if (effectiveHumans <= 1 && !message.authorIsBot) return 'engage'
 
   return 'observe'
+}
+
+function textTargetsAnyPeerBot(text: string, participants: readonly ChannelParticipant[]): boolean {
+  const haystack = text.toLocaleLowerCase()
+  for (const p of participants) {
+    if (p.isBot !== true) continue
+    if (p.authorName === '') continue
+    if (haystack.includes(p.authorName.toLocaleLowerCase())) return true
+  }
+  return false
 }
 
 export function resolveEffectiveHumans(
@@ -149,4 +192,13 @@ export function grantStickyForReplyTargets(
   for (const id of authorIds) {
     ledger.grant(key, id, now + window)
   }
+}
+
+export function matchesAnyAlias(text: string, lowercasedAliases: readonly string[]): boolean {
+  if (lowercasedAliases.length === 0) return false
+  const haystack = text.toLocaleLowerCase()
+  for (const alias of lowercasedAliases) {
+    if (haystack.includes(alias)) return true
+  }
+  return false
 }

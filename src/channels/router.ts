@@ -223,9 +223,18 @@ export type ChannelRouter = {
   }
 }
 
+// Returns the additional aliases the agent answers to (beyond the
+// implicit dir-name). Read from the live config every inbound — `alias`
+// is classified `applied` in FIELD_EFFECTS, so a `reload` should change
+// engagement behavior immediately. Defaults to an empty list when not
+// provided, which means alias-based engagement is effectively off (the
+// dir-name is still implicit and added by the router below).
+export type AliasesProvider = () => readonly string[]
+
 export type CreateChannelRouterOptions = {
   agentDir: string
   configForAdapter: ConfigForAdapter
+  configuredAliases?: AliasesProvider
   createSessionForChannel?: CreateSessionForChannel
   sessionDir?: string
   logger?: RouterLogger
@@ -253,6 +262,23 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       },
     },
   ])
+
+  // Implicit dir-name alias: agent folder basename matches Docker
+  // container name (per AGENTS.md), the typical Discord/Slack bot
+  // username, and the natural way the operator refers to the agent.
+  // Lowered once at construction since basename(agentDir) doesn't change
+  // over the router's lifetime; configured aliases are lowered per-call
+  // because they're read from live config.
+  const dirAlias = basename(options.agentDir).toLocaleLowerCase()
+  const computeSelfAliases = (): readonly string[] => {
+    const configured = options.configuredAliases?.() ?? []
+    const set = new Set<string>([dirAlias])
+    for (const a of configured) {
+      const lower = a.toLocaleLowerCase()
+      if (lower !== '') set.add(lower)
+    }
+    return Array.from(set)
+  }
 
   let mappings: ChannelSessionRecord[] | null = null
   let loadOnce: Promise<void> | null = null
@@ -803,6 +829,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       now: now(),
       participants: live.participants,
       membership,
+      selfAliases: computeSelfAliases(),
     })
 
     if (decision === 'observe') {
