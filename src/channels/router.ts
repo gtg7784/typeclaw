@@ -68,7 +68,10 @@ export const MAX_TYPING_HEARTBEAT_MS = 2 * 60 * 1000
 // give the next conversation a fresh start without forcing the user to
 // notice anything. `lastInboundAt` is bumped only by *engaged* inbounds
 // (see scheduleDebouncedDrain), so passive observation alone won't keep
-// a session warm forever — that's intentional.
+// a session warm forever — that's intentional. The session is seeded
+// with `now()` at creation (not `0`) so a freshly-created observe-only
+// session gets a full SESSION_IDLE_MS window before its first GC sweep,
+// not a 56-year-old idle reading from `Date.now() - 0`.
 export const SESSION_IDLE_MS = 30 * 60 * 1000
 export const SESSION_GC_INTERVAL_MS = 60 * 1000
 
@@ -495,7 +498,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         typingStartedAt: 0,
         typingTimedOut: false,
         typingStopPromise: null,
-        lastInboundAt: 0,
+        lastInboundAt: now(),
         firstUnprocessedAt: 0,
         currentTurnAuthorId: null,
         currentTurnAuthorIds: new Set(),
@@ -935,7 +938,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       authorId: event.authorId,
       authorName: event.authorName,
       authorIsBot: event.authorIsBot,
-      receivedAt: event.replyToBotMessageId === null ? now() : now(),
+      receivedAt: now(),
       ts: event.ts,
     })
     if (live.contextBuffer.length > CONTEXT_BUFFER_SIZE) {
