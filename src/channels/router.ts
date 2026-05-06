@@ -53,6 +53,11 @@ export const CONTEXT_BUFFER_SIZE = 20
 // Discord's typing indicator expires after ~10s; an 8s heartbeat keeps it
 // continuously visible while we debounce + generate without spamming the API.
 export const TYPING_HEARTBEAT_MS = 8000
+// A stuck model call or an agent that never yields should not keep re-arming
+// platform-side typing forever. Slack Assistant status in particular has a
+// documented 2-minute timeout, so repeatedly refreshing it after that point
+// turns a temporary status into a permanent-looking artifact.
+export const MAX_TYPING_HEARTBEAT_MS = 2 * 60 * 1000
 
 // Idle GC: a LiveSession whose `lastInboundAt` is older than
 // SESSION_IDLE_MS gets evicted on the next GC tick. Persistence
@@ -164,6 +169,9 @@ type LiveSession = {
   draining: boolean
   debounceTimer: ReturnType<typeof setTimeout> | null
   typingTimer: ReturnType<typeof setInterval> | null
+  typingStartedAt: number
+  typingTimedOut: boolean
+  typingStopPromise: Promise<void> | null
   lastInboundAt: number
   firstUnprocessedAt: number
   currentTurnAuthorId: string | null
@@ -224,6 +232,7 @@ export type ChannelRouter = {
   __testing?: {
     flushDebounce: (key: ChannelKey) => Promise<void>
     fireTypingHeartbeat: (key: ChannelKey, phase?: 'tick' | 'stop') => Promise<void>
+    fireTypingInterval: (key: ChannelKey) => Promise<void>
     isTypingActive: (key: ChannelKey) => boolean
     runIdleGc: () => Promise<void>
   }
@@ -483,6 +492,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         draining: false,
         debounceTimer: null,
         typingTimer: null,
+        typingStartedAt: 0,
+        typingTimedOut: false,
+        typingStopPromise: null,
         lastInboundAt: 0,
         firstUnprocessedAt: 0,
         currentTurnAuthorId: null,
@@ -632,28 +644,44 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const startTypingHeartbeat = (live: LiveSession): void => {
+    if (live.typingTimedOut || live.typingStopPromise) return
     if (live.typingTimer || live.destroyed) return
+    live.typingStartedAt = now()
     // Fire immediately so the indicator appears on the very first inbound,
     // not 8 seconds later.
     void fireTyping(live, 'tick')
     live.typingTimer = setInterval(() => {
       if (live.destroyed) {
-        stopTypingHeartbeat(live)
+        void stopTypingHeartbeat(live)
+        return
+      }
+      if (now() - live.typingStartedAt >= MAX_TYPING_HEARTBEAT_MS) {
+        logger.warn(`[channels] ${live.keyId}: typing heartbeat timed out after ${MAX_TYPING_HEARTBEAT_MS}ms`)
+        live.typingTimedOut = true
+        void stopTypingHeartbeat(live)
         return
       }
       void fireTyping(live, 'tick')
     }, TYPING_HEARTBEAT_MS)
   }
 
-  const stopTypingHeartbeat = (live: LiveSession): void => {
-    if (!live.typingTimer) return
+  const stopTypingHeartbeat = async (live: LiveSession): Promise<void> => {
+    if (!live.typingTimer) {
+      await live.typingStopPromise
+      return
+    }
     clearInterval(live.typingTimer)
     live.typingTimer = null
+    live.typingStartedAt = 0
     // Fire 'stop' phase even when destroyed: adapters need the chance to
     // clear platform-side state (e.g. Slack's 2-min server timeout) on
     // teardown. The FIFO inside the slack adapter ensures this clear lands
     // AFTER any in-flight 'tick' from the heartbeat that just stopped.
-    void fireTyping(live, 'stop')
+    const stopped = fireTyping(live, 'stop').finally(() => {
+      if (live.typingStopPromise === stopped) live.typingStopPromise = null
+    })
+    live.typingStopPromise = stopped
+    await stopped
   }
 
   const fireSessionIdle = async (live: LiveSession): Promise<void> => {
@@ -700,7 +728,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.debounceTimer = null
     live.firstUnprocessedAt = 0
     live.promptQueue.length = 0
-    stopTypingHeartbeat(live)
+    await stopTypingHeartbeat(live)
     try {
       await live.session.abort()
       logger.info(`[channels] ${live.keyId}: command /stop aborted current turn`)
@@ -714,6 +742,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.draining = true
     try {
       while (live.promptQueue.length > 0 && !live.destroyed) {
+        live.typingTimedOut = false
         // Heartbeat must run during generation as well as during debounce.
         // Because new inbounds during a turn just push into promptQueue
         // without re-entering route(), the route() call site alone wouldn't
@@ -757,7 +786,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.draining = false
       live.currentTurnAuthorId = null
       live.currentTurnAuthorIds = new Set()
-      stopTypingHeartbeat(live)
+      await stopTypingHeartbeat(live)
     }
   }
 
@@ -1085,6 +1114,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const live = liveSessions.get(keyId)
     if (live) {
       live.successfulChannelSends++
+      await stopTypingHeartbeat(live)
       const adapterConfig = options.configForAdapter(msg.adapter)
       if (adapterConfig) {
         const targetIds = Array.from(
@@ -1148,7 +1178,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.destroyed = true
     if (live.debounceTimer) clearTimeout(live.debounceTimer)
     live.debounceTimer = null
-    stopTypingHeartbeat(live)
+    await stopTypingHeartbeat(live)
     try {
       await live.session.abort()
     } catch (err) {
@@ -1231,6 +1261,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const live = liveSessions.get(channelKeyId(key))
         if (!live) return
         await fireTyping(live, phase)
+      },
+      fireTypingInterval: async (key: ChannelKey) => {
+        const live = liveSessions.get(channelKeyId(key))
+        if (!live || !live.typingTimer) return
+        if (live.destroyed) {
+          await stopTypingHeartbeat(live)
+          return
+        }
+        if (now() - live.typingStartedAt >= MAX_TYPING_HEARTBEAT_MS) {
+          logger.warn(`[channels] ${live.keyId}: typing heartbeat timed out after ${MAX_TYPING_HEARTBEAT_MS}ms`)
+          live.typingTimedOut = true
+          await stopTypingHeartbeat(live)
+          return
+        }
+        await fireTyping(live, 'tick')
       },
       isTypingActive: (key: ChannelKey) => {
         const live = liveSessions.get(channelKeyId(key))
