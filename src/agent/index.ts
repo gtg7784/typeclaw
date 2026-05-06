@@ -383,7 +383,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   let systemPrompt = `${DEFAULT_SYSTEM_PROMPT}\n\n${self}`
 
   if (options.plugins) {
-    const event = { prompt: systemPrompt, sessionId: options.plugins.sessionId, agentDir }
+    const event = { prompt: systemPrompt, sessionId: options.plugins.sessionId, agentDir, origin: options.origin }
     await options.plugins.hooks.runSessionPrompt(event)
     systemPrompt = event.prompt
   }

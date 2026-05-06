@@ -104,6 +104,7 @@ export type SessionPromptEvent = {
   prompt: string
   sessionId: string
   agentDir: string
+  origin?: SessionOrigin
 }
 
 // Fired for plugin-defined tools and TypeClaw-exposed system tools, including
