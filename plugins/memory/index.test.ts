@@ -15,7 +15,7 @@ import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
 import memoryPlugin from './index'
 
-type SpawnCall = { name: string; payload: unknown }
+type SpawnCall = { name: string; payload: unknown; startedAt: number; finishedAt: number }
 
 type CapturedLogs = { info: string[]; warn: string[]; error: string[] }
 
@@ -32,7 +32,7 @@ function makeCapturingLogger(): { logger: PluginLogger; logs: CapturedLogs } {
 async function bootMemoryPlugin(
   agentDir: string,
   rawConfig: unknown,
-  options: { logger?: PluginLogger } = {},
+  options: { logger?: PluginLogger; spawnDelayMs?: number } = {},
 ): Promise<{
   exports: PluginExports
   spawned: SpawnCall[]
@@ -41,6 +41,7 @@ async function bootMemoryPlugin(
   const spawned: SpawnCall[] = []
   const parsed = memoryPlugin.configSchema!.safeParse(rawConfig)
   if (!parsed.success) throw new Error(`config invalid: ${parsed.error.message}`)
+  const spawnDelayMs = options.spawnDelayMs ?? 0
   const ctx = createPluginContext({
     name: 'memory',
     version: undefined,
@@ -48,7 +49,10 @@ async function bootMemoryPlugin(
     config: parsed.data,
     logger: options.logger ?? createPluginLogger('memory'),
     spawnSubagent: async (name, payload) => {
-      spawned.push({ name, payload })
+      const startedAt = Date.now()
+      if (spawnDelayMs > 0) await new Promise((r) => setTimeout(r, spawnDelayMs))
+      const finishedAt = Date.now()
+      spawned.push({ name, payload, startedAt, finishedAt })
     },
     isBooted: () => true,
   })
@@ -419,6 +423,103 @@ describe('session.idle hook (buffer-bytes ceiling)', () => {
     // then: only A's session triggered a spawn
     expect(spawned).toHaveLength(1)
     expect((spawned[0]!.payload as { parentSessionId: string }).parentSessionId).toBe('ses_a')
+  })
+})
+
+describe('per-agent spawn serialization', () => {
+  // Two concurrent channel sessions must never call spawnSubagent in parallel —
+  // the subagent consumer keys memory-logger by agentDir and would silently drop
+  // a colliding fire. The plugin owns this serialization via a chained Promise.
+  test('back-to-back idle fires for different sessions run sequentially, not in parallel', async () => {
+    const { exports, spawned } = await bootMemoryPlugin(
+      agentDir,
+      { idleMs: 60_000, bufferBytes: 0 },
+      { spawnDelayMs: 50 },
+    )
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+
+    // given: two sessions trip the buffer ceiling at the same moment via session.end
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: '/tmp/a.jsonl', idleMs: 0 }, ctx)
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_b', parentTranscriptPath: '/tmp/b.jsonl', idleMs: 0 }, ctx)
+
+    // when: both fire via session.end nearly simultaneously
+    await Promise.all([
+      exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx),
+      exports.hooks!['session.end']!({ sessionId: 'ses_b' } as SessionEndEvent, ctx),
+    ])
+
+    // then: both spawned, but the second started AFTER the first finished (no overlap)
+    expect(spawned).toHaveLength(2)
+    const [first, second] = [...spawned].sort((a, b) => a.startedAt - b.startedAt)
+    expect(second!.startedAt).toBeGreaterThanOrEqual(first!.finishedAt)
+  })
+
+  test('three back-to-back fires preserve FIFO order', async () => {
+    const { exports, spawned } = await bootMemoryPlugin(
+      agentDir,
+      { idleMs: 60_000, bufferBytes: 0 },
+      { spawnDelayMs: 20 },
+    )
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: '/tmp/a.jsonl', idleMs: 0 }, ctx)
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_b', parentTranscriptPath: '/tmp/b.jsonl', idleMs: 0 }, ctx)
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_c', parentTranscriptPath: '/tmp/c.jsonl', idleMs: 0 }, ctx)
+
+    await Promise.all([
+      exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx),
+      exports.hooks!['session.end']!({ sessionId: 'ses_b' } as SessionEndEvent, ctx),
+      exports.hooks!['session.end']!({ sessionId: 'ses_c' } as SessionEndEvent, ctx),
+    ])
+
+    expect(spawned).toHaveLength(3)
+    expect(spawned.map((s) => (s.payload as { parentSessionId: string }).parentSessionId)).toEqual([
+      'ses_a',
+      'ses_b',
+      'ses_c',
+    ])
+  })
+
+  test('a failing spawn does not break the chain for subsequent fires', async () => {
+    const spawned: SpawnCall[] = []
+    const parsed = memoryPlugin.configSchema!.safeParse({ idleMs: 60_000, bufferBytes: 0 })
+    if (!parsed.success) throw new Error('config invalid')
+    let firstCall = true
+    const ctx = createPluginContext({
+      name: 'memory',
+      version: undefined,
+      agentDir,
+      config: parsed.data,
+      logger: createPluginLogger('m'),
+      spawnSubagent: async (name, payload) => {
+        const startedAt = Date.now()
+        if (firstCall) {
+          firstCall = false
+          throw new Error('first spawn boom')
+        }
+        spawned.push({ name, payload, startedAt, finishedAt: Date.now() })
+      },
+      isBooted: () => true,
+    })
+    const exports = await memoryPlugin.plugin(ctx)
+    const hookCtx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+
+    await exports.hooks!['session.idle']!(
+      { sessionId: 'ses_a', parentTranscriptPath: '/tmp/a.jsonl', idleMs: 0 },
+      hookCtx,
+    )
+    await exports.hooks!['session.idle']!(
+      { sessionId: 'ses_b', parentTranscriptPath: '/tmp/b.jsonl', idleMs: 0 },
+      hookCtx,
+    )
+
+    await Promise.all([
+      exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, hookCtx),
+      exports.hooks!['session.end']!({ sessionId: 'ses_b' } as SessionEndEvent, hookCtx),
+    ])
+
+    expect(spawned).toHaveLength(1)
+    expect((spawned[0]!.payload as { parentSessionId: string }).parentSessionId).toBe('ses_b')
   })
 })
 

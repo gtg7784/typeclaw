@@ -222,7 +222,7 @@ export function createMemoryLoggerSubagent(
     tools: [readTool],
     customTools: [appendTool],
     payloadSchema: memoryLoggerPayloadSchema,
-    inFlightKey: (payload) => payload.parentSessionId,
+    inFlightKey: (payload) => payload.agentDir,
     handler: async (ctx, runSession) => {
       const today = formatLocalDate()
       const streamFile = join(ctx.payload.agentDir, 'memory', `${today}.md`)
