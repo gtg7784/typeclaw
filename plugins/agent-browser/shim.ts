@@ -12,6 +12,7 @@
 
 import { existsSync } from 'node:fs'
 
+import { writePortHint } from './dashboard-discovery'
 import { AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT } from './dashboard-proxy'
 
 export const REAL_BIN_ENV = 'TYPECLAW_AGENT_BROWSER_REAL_BIN'
@@ -121,6 +122,16 @@ export async function runShim(opts: ShimOptions = {}): Promise<number> {
   const intent = classifyDashboardCommand(argv)
   if (intent !== 'start') {
     return await spawn([realBin, ...argv]).exited
+  }
+
+  // Record the rewritten port to the hint file so the long-lived proxy can
+  // use it as the fast-path upstream lookup. The proxy still falls back to
+  // procfs discovery if the hint is wrong, but the hint avoids that work
+  // on the common path where the shim is the one starting the dashboard.
+  try {
+    writePortHint(upstreamPort)
+  } catch {
+    // Hint is an optimization; failure to write it is non-fatal.
   }
 
   const rewritten = rewriteDashboardArgs(argv, upstreamPort)
