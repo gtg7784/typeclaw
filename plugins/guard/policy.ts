@@ -9,3 +9,9 @@ export function isGuardAcknowledged(args: Record<string, unknown>, guard: string
 }
 
 export { GUARD_NON_WORKSPACE_WRITE, checkNonWorkspaceWriteGuard } from './policies/non-workspace-write'
+export {
+  GUARD_SKILL_AUTHORING,
+  checkSkillAuthoringDecision,
+  checkSkillAuthoringGuard,
+  isSkillAuthoringAllowed,
+} from './policies/skill-authoring'
