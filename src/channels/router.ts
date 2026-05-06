@@ -843,6 +843,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       participants: live.participants,
       membership,
       selfAliases: computeSelfAliases(),
+      botInThread: hasBotParticipated(live),
     })
 
     if (decision === 'observe') {
@@ -889,6 +890,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     ) {
       live.loopGuardActive = true
     }
+  }
+
+  const hasBotParticipated = (live: LiveSession): boolean => {
+    if (live.successfulChannelSends > 0) return true
+    for (const item of live.contextBuffer) {
+      if (item.authorIsBot) return true
+    }
+    return false
   }
 
   const observe = (live: LiveSession, event: InboundMessage): void => {
