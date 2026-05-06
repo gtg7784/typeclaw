@@ -223,7 +223,7 @@ export type ChannelRouter = {
   liveCount: () => number
   __testing?: {
     flushDebounce: (key: ChannelKey) => Promise<void>
-    fireTypingHeartbeat: (key: ChannelKey) => Promise<void>
+    fireTypingHeartbeat: (key: ChannelKey, phase?: 'tick' | 'stop') => Promise<void>
     isTypingActive: (key: ChannelKey) => boolean
     runIdleGc: () => Promise<void>
   }
@@ -610,7 +610,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const regenerateOrigin = (live: LiveSession): SessionOrigin => buildLiveOrigin(live)
 
-  const fireTyping = async (live: LiveSession): Promise<void> => {
+  const fireTyping = async (live: LiveSession, phase: 'tick' | 'stop'): Promise<void> => {
     const callbacks = typingCallbacks.get(live.key.adapter)
     if (!callbacks || callbacks.size === 0) return
     // Snapshot before iterating: a callback could unregister mid-call.
@@ -620,6 +620,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       workspace: live.key.workspace,
       chat: live.key.chat,
       thread: live.key.thread,
+      phase,
     }
     await Promise.all(
       snapshot.map((cb) =>
@@ -634,13 +635,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (live.typingTimer || live.destroyed) return
     // Fire immediately so the indicator appears on the very first inbound,
     // not 8 seconds later.
-    void fireTyping(live)
+    void fireTyping(live, 'tick')
     live.typingTimer = setInterval(() => {
       if (live.destroyed) {
         stopTypingHeartbeat(live)
         return
       }
-      void fireTyping(live)
+      void fireTyping(live, 'tick')
     }, TYPING_HEARTBEAT_MS)
   }
 
@@ -648,6 +649,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (!live.typingTimer) return
     clearInterval(live.typingTimer)
     live.typingTimer = null
+    // Fire 'stop' phase even when destroyed: adapters need the chance to
+    // clear platform-side state (e.g. Slack's 2-min server timeout) on
+    // teardown. The FIFO inside the slack adapter ensures this clear lands
+    // AFTER any in-flight 'tick' from the heartbeat that just stopped.
+    void fireTyping(live, 'stop')
   }
 
   const fireSessionIdle = async (live: LiveSession): Promise<void> => {
@@ -1212,10 +1218,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.firstUnprocessedAt = 0
         await drain(live)
       },
-      fireTypingHeartbeat: async (key: ChannelKey) => {
+      fireTypingHeartbeat: async (key: ChannelKey, phase: 'tick' | 'stop' = 'tick') => {
         const live = liveSessions.get(channelKeyId(key))
         if (!live) return
-        await fireTyping(live)
+        await fireTyping(live, phase)
       },
       isTypingActive: (key: ChannelKey) => {
         const live = liveSessions.get(channelKeyId(key))

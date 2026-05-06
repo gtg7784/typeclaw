@@ -46,23 +46,29 @@ describe('slack-bot adapter (unit-level pure helpers)', () => {
 
 describe('slack-bot createTypingCallback', () => {
   type SetStatusCall = { channel: string; threadTs: string; status: string }
+  type ClearCall = { chat: string; thread: string | null | undefined }
 
   function makeFakeTracker(behavior: 'ok' | 'reject' = 'ok'): {
     tracker: {
       setStatus: (chat: string, threadTs: string, status: string) => Promise<void>
-      clearAfterSend: () => Promise<void>
+      clearAfterSend: (chat: string, thread: string | null | undefined) => Promise<void>
     }
     calls: SetStatusCall[]
+    clears: ClearCall[]
   } {
     const calls: SetStatusCall[] = []
+    const clears: ClearCall[] = []
     return {
       calls,
+      clears,
       tracker: {
         setStatus: async (channel, threadTs, status) => {
           calls.push({ channel, threadTs, status })
           if (behavior === 'reject') throw new Error('channel_not_found')
         },
-        clearAfterSend: async () => {},
+        clearAfterSend: async (chat, thread) => {
+          clears.push({ chat, thread })
+        },
       },
     }
   }
@@ -81,7 +87,13 @@ describe('slack-bot createTypingCallback', () => {
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     // when
-    await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: '1700000000.000100' })
+    await cb({
+      adapter: 'slack-bot',
+      workspace: 'T0ACME',
+      chat: 'C0CHANNEL',
+      thread: '1700000000.000100',
+      phase: 'tick',
+    })
     // then
     expect(calls).toEqual([{ channel: 'C0CHANNEL', threadTs: '1700000000.000100', status: 'is typing...' }])
   })
@@ -101,7 +113,7 @@ describe('slack-bot createTypingCallback', () => {
       logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
     })
     // when
-    await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: null })
+    await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: null, phase: 'tick' })
     // then
     expect(calls).toHaveLength(0)
     expect(infos.some((m) => m.includes('top-level chat'))).toBe(true)
@@ -131,7 +143,13 @@ describe('slack-bot createTypingCallback', () => {
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
     })
     // when
-    await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: '1700000000.000100' })
+    await cb({
+      adapter: 'slack-bot',
+      workspace: 'T0ACME',
+      chat: 'C0CHANNEL',
+      thread: '1700000000.000100',
+      phase: 'tick',
+    })
     // then
     expect(calls).toHaveLength(1)
     expect(warns.some((m) => m.includes('typing') && m.includes('channel_not_found'))).toBe(true)
@@ -153,7 +171,13 @@ describe('slack-bot createTypingCallback', () => {
       logger: { info: (m) => infos.push(m), warn: (m) => warns.push(m), error: () => {} },
     })
     // when
-    await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: '1700000000.000100' })
+    await cb({
+      adapter: 'slack-bot',
+      workspace: 'T0ACME',
+      chat: 'C0CHANNEL',
+      thread: '1700000000.000100',
+      phase: 'tick',
+    })
     // then
     expect(calls).toHaveLength(0)
     expect(infos).toHaveLength(0)
@@ -175,10 +199,84 @@ describe('slack-bot createTypingCallback', () => {
       logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
     })
     // when
-    await cb({ adapter: 'discord-bot', workspace: '1', chat: '2', thread: '3' })
+    await cb({ adapter: 'discord-bot', workspace: '1', chat: '2', thread: '3', phase: 'tick' })
     // then
     expect(calls).toHaveLength(0)
     expect(infos).toHaveLength(0)
+  })
+
+  test('phase=stop in a thread routes to clearAfterSend (not setStatus)', async () => {
+    // given
+    const { tracker, calls, clears } = makeFakeTracker()
+    const cb = createTypingCallback({
+      typingTracker: tracker,
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    // when
+    await cb({
+      adapter: 'slack-bot',
+      workspace: 'T0ACME',
+      chat: 'C0CHANNEL',
+      thread: '1700000000.000100',
+      phase: 'stop',
+    })
+    // then
+    expect(calls).toHaveLength(0)
+    expect(clears).toEqual([{ chat: 'C0CHANNEL', thread: '1700000000.000100' }])
+  })
+
+  test('phase=stop on a top-level chat is a silent no-op (no clearAfterSend, no log)', async () => {
+    // given
+    const { tracker, calls, clears } = makeFakeTracker()
+    const infos: string[] = []
+    const cb = createTypingCallback({
+      typingTracker: tracker,
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
+      logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
+    })
+    // when
+    await cb({ adapter: 'slack-bot', workspace: 'T0ACME', chat: 'C0CHANNEL', thread: null, phase: 'stop' })
+    // then
+    expect(calls).toHaveLength(0)
+    expect(clears).toHaveLength(0)
+    expect(infos).toHaveLength(0)
+  })
+
+  test('phase=stop is gated by allow rules (denied chats trigger no clear)', async () => {
+    // given
+    const { tracker, calls, clears } = makeFakeTracker()
+    const cb = createTypingCallback({
+      typingTracker: tracker,
+      configRef: () => ({
+        allow: ['team:T0OTHER'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    // when
+    await cb({
+      adapter: 'slack-bot',
+      workspace: 'T0ACME',
+      chat: 'C0CHANNEL',
+      thread: '1700000000.000100',
+      phase: 'stop',
+    })
+    // then
+    expect(calls).toHaveLength(0)
+    expect(clears).toHaveLength(0)
   })
 })
 

@@ -93,6 +93,14 @@ export type TypingTarget = {
   workspace: string
   chat: string
   thread?: string | null
+  // 'tick' is the heartbeat fired during debouncing/generation; adapters
+  // should set the indicator visible. 'stop' is fired exactly once when the
+  // router decides the turn is over (drain finally, /stop command, or
+  // teardown); adapters should explicitly clear the indicator if their
+  // platform doesn't auto-expire it. Without 'stop', a 'tick' that lands
+  // after the agent's final reply but before the drain returns will leave
+  // the indicator on for Slack's full 2-minute server timeout.
+  phase: 'tick' | 'stop'
 }
 
 export type TypingCallback = (target: TypingTarget) => Promise<void>

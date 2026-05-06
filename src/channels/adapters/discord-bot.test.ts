@@ -74,7 +74,7 @@ describe('createTypingCallback', () => {
       }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
-    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
+    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, phase: 'tick' })
     expect(calls).toHaveLength(1)
     expect(calls[0]!.url).toBe('https://discord.com/api/v10/channels/c1/typing')
     expect(calls[0]!.init.method).toBe('POST')
@@ -93,7 +93,7 @@ describe('createTypingCallback', () => {
       }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
-    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 'thr-9' })
+    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 'thr-9', phase: 'tick' })
     expect(calls[0]!.url).toBe('https://discord.com/api/v10/channels/thr-9/typing')
   })
 
@@ -108,7 +108,7 @@ describe('createTypingCallback', () => {
       }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
-    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
+    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, phase: 'tick' })
     expect(calls).toHaveLength(0)
   })
 
@@ -125,7 +125,7 @@ describe('createTypingCallback', () => {
       }),
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
     })
-    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
+    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, phase: 'tick' })
     expect(warns.some((m) => m.includes('429'))).toBe(true)
   })
 
@@ -144,7 +144,7 @@ describe('createTypingCallback', () => {
       }),
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
     })
-    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })
+    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, phase: 'tick' })
     expect(warns.some((m) => m.includes('network down'))).toBe(true)
   })
 
@@ -159,7 +159,22 @@ describe('createTypingCallback', () => {
       }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
-    await cb({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })
+    await cb({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null, phase: 'tick' })
+    expect(calls).toHaveLength(0)
+  })
+
+  test('phase=stop is a no-op (Discord typing auto-expires; extra POST would re-arm it)', async () => {
+    const cb = createTypingCallback({
+      token: 'tok',
+      configRef: () => ({
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      }),
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, phase: 'stop' })
     expect(calls).toHaveLength(0)
   })
 })

@@ -92,6 +92,11 @@ export function createTypingCallback(deps: {
   const { token, configRef, logger, formatChannelTag } = deps
   return async (target: TypingTarget): Promise<void> => {
     if (target.adapter !== 'discord-bot') return
+    // Discord's typing indicator auto-expires after ~10s on Discord's side,
+    // and there is no API to clear it explicitly. The 'stop' phase exists
+    // for platforms (Slack) that need an explicit clear; for Discord it
+    // would be extra POSTs that confuse the indicator into reappearing.
+    if (target.phase === 'stop') return
     const config = configRef()
     if (!isAllowed(config.allow, target.workspace, target.chat)) return
     // Threads are channels in Discord, so the typing endpoint takes the

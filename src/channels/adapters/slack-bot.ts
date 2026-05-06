@@ -162,7 +162,7 @@ export function createSlackTypingTracker(deps: {
 }
 
 export function createTypingCallback(deps: {
-  typingTracker: Pick<SlackTypingTracker, 'setStatus'>
+  typingTracker: Pick<SlackTypingTracker, 'setStatus' | 'clearAfterSend'>
   configRef: () => ChannelAdapterConfig
   logger: SlackBotAdapterLogger
   formatChannelTag?: (workspace: string, chat: string) => Promise<string>
@@ -176,7 +176,11 @@ export function createTypingCallback(deps: {
       ? await formatChannelTag(target.workspace, target.thread ?? target.chat)
       : `channel=${target.thread ?? target.chat}`
     if (target.thread === undefined || target.thread === null || target.thread === '') {
-      logger.info(`[slack-bot] typing (no-op, top-level chat) ${tag}`)
+      if (target.phase === 'tick') logger.info(`[slack-bot] typing (no-op, top-level chat) ${tag}`)
+      return
+    }
+    if (target.phase === 'stop') {
+      await typingTracker.clearAfterSend(target.chat, target.thread)
       return
     }
     await typingTracker.setStatus(target.chat, target.thread, 'is typing...')
