@@ -143,8 +143,14 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/Forbidden:.*GH_TOKEN=/s)
   })
 
-  test('warns the subagent that the append tool enforces this rule', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/append.*refuse|refuse.*append/i)
+  test('warns the subagent that the append tool enforces the secret-handling rule', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/append.*refuse.*credential|append.*refuse.*recognizable/i)
+  })
+
+  test('warns about the append-tool dedup rule (content-equality, not marker-equality)', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/byte-equivalent|content-equality|same daily stream/)
+    expect(lower).toMatch(/refuse.*fragment|reject.*fragment/)
   })
 })
 
