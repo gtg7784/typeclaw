@@ -286,6 +286,97 @@ describe('slack-bot classifyInbound — route path', () => {
     expect(verdict.payload.thread).toBeNull()
   })
 
+  test('top-level alias-only addressing anchors thread on the inbound ts so the bot can reply in-thread', () => {
+    // given: a top-level message with no @mention and no thread_ts, but
+    // containing one of the bot's plain-text aliases. Slack treats this
+    // as an isolated channel post; without anchoring `thread` here, the
+    // bot's reply would post as another top-level message, fragmenting
+    // the conversation. Anchoring on `event.ts` lets the outbound
+    // callback set `thread_ts` and turn the bot's reply into the first
+    // thread reply under the user's message — same conversational
+    // affordance as a Slack-native @mention.
+    const event = buildEvent({ text: '윙키야 안녕' })
+
+    const verdict = classifyInbound(event, baseConfig, {
+      teamId: TEAM_ID,
+      botUserId: BOT_USER_ID,
+      selfAliases: ['윙키', 'winky'],
+    })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.isBotMention).toBe(false)
+    expect(verdict.payload.thread).toBe('1700000000.000100')
+  })
+
+  test('alias matching is case-insensitive and substring-based, mirroring the engagement layer', () => {
+    const event = buildEvent({ text: 'WinKy please look at this' })
+
+    const verdict = classifyInbound(event, baseConfig, {
+      teamId: TEAM_ID,
+      botUserId: BOT_USER_ID,
+      selfAliases: ['winky'],
+    })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.thread).toBe('1700000000.000100')
+  })
+
+  test('an existing thread_ts always wins over alias anchoring (sanity check on the `??` short-circuit)', () => {
+    // This is intentionally not a strong mutation guard for the alias
+    // branch — the `event.thread_ts ?? ...` short-circuit at the head of
+    // the thread expression means an inbound that already has a
+    // thread_ts is preserved regardless of what the right-hand-side
+    // does. Kept as a guard against someone "simplifying" by inverting
+    // the precedence (e.g. anchoring on event.ts whenever an alias
+    // matches, even mid-thread, which would silently re-root replies).
+    const event = buildEvent({
+      text: '윙키 in this thread',
+      ts: '1700000010.000200',
+      thread_ts: '1700000000.000100',
+      parent_user_id: 'UCAROL',
+    })
+
+    const verdict = classifyInbound(event, baseConfig, {
+      teamId: TEAM_ID,
+      botUserId: BOT_USER_ID,
+      selfAliases: ['윙키'],
+    })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.thread).toBe('1700000000.000100')
+  })
+
+  test('alias-only addressing in a DM does NOT anchor a thread (DMs are flat)', () => {
+    const event = buildEvent({ channel_type: 'im', channel: 'D0DM', text: '윙키야' })
+
+    const verdict = classifyInbound(event, baseConfig, {
+      teamId: TEAM_ID,
+      botUserId: BOT_USER_ID,
+      selfAliases: ['윙키'],
+    })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.thread).toBeNull()
+  })
+
+  test('non-mention team message with no alias match leaves thread null (existing behavior)', () => {
+    const event = buildEvent({ text: 'just chatting' })
+
+    const verdict = classifyInbound(event, baseConfig, {
+      teamId: TEAM_ID,
+      botUserId: BOT_USER_ID,
+      selfAliases: ['윙키'],
+    })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.thread).toBeNull()
+  })
+
   test('DMs (channel_type=im) route with workspace=@dm and isDm=true', () => {
     const event = buildEvent({ channel_type: 'im', channel: 'D0DMID', text: 'private hi' })
 

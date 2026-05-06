@@ -108,6 +108,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         token,
         appToken,
         logger,
+        selfAliasesRef: () => router.getSelfAliases(),
       })
     }
     return null

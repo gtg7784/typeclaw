@@ -14,6 +14,7 @@ import { channelsSessionsPath, loadChannelSessions, saveChannelSessions } from '
 import {
   createChannelRouter,
   MAX_TYPING_HEARTBEAT_MS,
+  SESSION_GC_INTERVAL_MS,
   SESSION_IDLE_MS,
   sliceHeadTail,
   type ChannelRouter,
@@ -2246,6 +2247,65 @@ describe('ChannelRouter idle session GC', () => {
     // eviction; end must precede dispose so plugins can still touch state.
     expect(events).toEqual(['idle:ses_fake_1', 'end:ses_fake_1'])
     expect(sessions[0]!.disposed).toBe(1)
+  })
+
+  test('observe-only session is not evicted on the next GC tick after creation', async () => {
+    // given: a session created by an observe-only inbound (suppressed by
+    // mentionsOthers, no engage signal). lastInboundAt is initialized to
+    // `now()` at creation (not 0) so a freshly created observe-only
+    // session gets a full SESSION_IDLE_MS window before GC, instead of
+    // being immediately evicted with a `Date.now() - 0` (~56yr) reading.
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router } = makeRouter(dir, { nowRef })
+    await router.route(
+      inbound({
+        isBotMention: false,
+        mentionsOthers: true, // suppressor → observe
+        text: 'hey @someone-else look at this',
+      }),
+    )
+    expect(router.liveCount()).toBe(1)
+
+    // when: GC runs at the next tick (well within SESSION_IDLE_MS)
+    nowRef.value = 1000 + SESSION_GC_INTERVAL_MS
+    await router.__testing!.runIdleGc!()
+
+    // then: session is preserved
+    expect(router.liveCount()).toBe(1)
+  })
+
+  test('observe-only session DOES evict after SESSION_IDLE_MS (passive observation does not keep it warm forever)', async () => {
+    // given: an observe-only session
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router } = makeRouter(dir, { nowRef })
+    await router.route(
+      inbound({
+        isBotMention: false,
+        mentionsOthers: true, // suppressor → observe
+        text: 'hey @someone-else look at this',
+      }),
+    )
+    expect(router.liveCount()).toBe(1)
+
+    // when: more passive observation arrives but never engages, then time
+    // advances past the threshold from session CREATION (not from last
+    // observation) — observe deliberately does not bump lastInboundAt
+    nowRef.value = 1000 + 5 * 60_000
+    await router.route(
+      inbound({
+        externalMessageId: 'm2',
+        isBotMention: false,
+        mentionsOthers: true,
+        text: 'still chatting with someone else',
+      }),
+    )
+    nowRef.value = 1000 + SESSION_IDLE_MS + 1
+    await router.__testing!.runIdleGc!()
+
+    // then: session is evicted; passive traffic does not pin memory
+    expect(router.liveCount()).toBe(0)
   })
 
   test('runIdleGc tolerates dispose throwing and still removes the entry', async () => {

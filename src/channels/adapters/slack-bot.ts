@@ -79,6 +79,11 @@ export type SlackBotAdapterOptions = {
   token: string
   appToken: string
   logger?: SlackBotAdapterLogger
+  // Read live so an `applied`-class reload of `alias` flows through to
+  // thread anchoring without restart. Optional: omitted means the
+  // classifier behaves as before (no alias-driven thread anchoring), so
+  // tests and ad-hoc adapter constructions stay backwards-compatible.
+  selfAliasesRef?: () => readonly string[]
 }
 
 export type SlackBotAdapter = {
@@ -692,7 +697,11 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         return
       }
 
-      const verdict = classifyInbound(event, options.configRef(), { teamId, botUserId })
+      const verdict = classifyInbound(event, options.configRef(), {
+        teamId,
+        botUserId,
+        ...(options.selfAliasesRef ? { selfAliases: options.selfAliasesRef() } : {}),
+      })
       if (verdict.kind === 'drop') {
         logger.info(`[slack-bot] dropped ts=${event.ts} reason=${verdict.reason}${dropHint(verdict.reason)}`)
         return
