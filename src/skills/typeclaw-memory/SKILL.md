@@ -38,7 +38,7 @@ The Claim/Evidence/Implication structure is **required** and the bar is intentio
 
 ### Stage 2: dreaming (offline, scheduled)
 
-The dreaming subagent runs on cron, configured under `memory.dreaming.schedule` (default `"0 */2 * * *"` — every two hours, on the hour, in the agent's timezone). Multiple runs per day are fine; idle ticks short-circuit before any LLM call when no undreamed fragments exist. The cron job id is `__plugin_memory_dreaming` (you cannot list it via the user-facing cron tools — it is plugin-owned).
+The dreaming subagent runs on cron, configured under `memory.dreaming.schedule` (default `"0 4 * * *"` — 4 AM in the agent's timezone). Multiple runs per day are fine. The cron job id is `__plugin_memory_dreaming` (you cannot list it via the user-facing cron tools — it is plugin-owned).
 
 When dreaming fires, it reads:
 
@@ -116,7 +116,7 @@ You cannot remove a fragment cleanly. The right response depends on what X is:
 ## When the user asks "what did you dream?" / "when do you dream next?"
 
 1. **What you dreamed**: read the most recent `Dream` git commit on your agent folder (`git log --grep='^Dream' -1`) and show the diff against `MEMORY.md` if useful. The commit timestamp tells you when dreaming last ran. If the answer is "no `Dream` commits yet", say that — `MEMORY.md` may exist but be the auto-created empty file from the first dreaming attempt.
-2. **When you dream next**: read `memory.dreaming.schedule` from `typeclaw.json` (default `"0 */2 * * *"`). Translate the cron expression to a wall-clock time in the agent's `TZ`. If `memory.dreaming` is omitted from the config, the cron job is **not registered** — dreaming will not fire on a schedule, only if the user explicitly publishes a `new-session` for the `dreaming` subagent (rare). Tell the user honestly if the schedule is missing.
+2. **When you dream next**: read `memory.dreaming.schedule` from `typeclaw.json` (default `"0 4 * * *"`). Translate the cron expression to a wall-clock time in the agent's `TZ`. If `memory.dreaming` is omitted from the config, the cron job is **not registered** — dreaming will not fire on a schedule, only if the user explicitly publishes a `new-session` for the `dreaming` subagent (rare). Tell the user honestly if the schedule is missing.
 
 ## When the user asks "what's a daily stream?" / "where is your memory stored?"
 
@@ -139,7 +139,7 @@ These are the only two configurable knobs. They live in the `memory` block of `t
 {
   "memory": {
     "idleMs": 10000,
-    "dreaming": { "schedule": "0 */2 * * *" }
+    "dreaming": { "schedule": "0 4 * * *" }
   }
 }
 ```
@@ -148,7 +148,7 @@ These are the only two configurable knobs. They live in the `memory` block of `t
 | -------------------------- | --------------------- | ----------------------------------------------------------------------------------- | ----------------- |
 | `memory.idleMs`            | `10000` (min `1000`)  | Debounce window before `memory-logger` spawns after a prompt completes.             | Restart-required. |
 | `memory.dreaming`          | omitted → no cron job | When present, registers the dreaming cron job.                                      | Restart-required. |
-| `memory.dreaming.schedule` | `"0 */2 * * *"`       | Cron expression. Parsed via `cron-parser`; an invalid expression fails config load. | Restart-required. |
+| `memory.dreaming.schedule` | `"0 4 * * *"`         | Cron expression. Parsed via `cron-parser`; an invalid expression fails config load. | Restart-required. |
 
 Both fields are restart-required because plugin config is read once at boot. After editing them, tell the user: "Edited `memory.<field>` — restart-required. Run `typeclaw restart` (host stage) to pick up the change." The bundled plugin's config schema is merged into `typeclaw.schema.json`, so editor autocomplete will validate these fields, but a `reload` will not re-instantiate the plugin.
 
