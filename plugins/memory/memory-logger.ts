@@ -89,6 +89,8 @@ Before reading the transcript, read \`MEMORY.md\` and the current \`memory/yyyy-
 
 Light dedup, not strict dedup. When unsure whether something is "already known," err on writing it. Dreaming will collapse duplicates.
 
+The \`append\` tool refuses byte-equivalent fragments within the same daily stream — if your fragment's topic+body is identical to one already in today's file (modulo whitespace), the tool will reject it and you must rewrite. Two reasonable rewrites: (1) skip the fragment entirely, (2) frame the new occurrence explicitly as "this is the second time today" with a different topic. Do not retry an identical fragment with a different \`entry=\` hoping it will land — content-equality, not marker-equality, is what's checked.
+
 # Fragment format
 
 Each fragment is an HTML comment marker followed by a topic heading and a body:

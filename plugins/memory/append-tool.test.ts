@@ -10,7 +10,7 @@ import { appendTool } from './append-tool'
 async function callExpectingThrow(path: string, content: string): Promise<unknown> {
   try {
     await appendTool.execute({ path, content }, ctx)
-    throw new Error(`expected appendTool.execute to throw for content with secret, but it returned`)
+    throw new Error(`expected appendTool.execute to throw, but it returned`)
   } catch (err) {
     return err
   }
@@ -175,5 +175,92 @@ describe('appendTool', () => {
 
     await call(path, content)
     expect(readFileSync(path, 'utf8')).toBe(content)
+  })
+
+  test('refuses to append a fragment whose topic+body already exists in the file (the winky duplication case)', async () => {
+    const root = tmpRoot()
+    const path = join(root, 'fragments.md')
+    const fragment = (sessionId: string, entryId: string): string =>
+      [
+        `<!-- fragment source=${sessionId} entry=${entryId} -->`,
+        '## Review System Final Design Decisions',
+        'Three Key Decisions raised by Jamie and confirmed:',
+        '1. Eligibility (Conservative) - DELIVERED + no cancellation + no return',
+        '2. Delete Strategy (Hybrid) - hard for user, soft for admin hide',
+        '3. Review Count per Order Item - 1 per (user, order_item) with UNIQUE constraint',
+        '',
+      ].join('\n')
+
+    await call(path, fragment('ses_first', '92ad3a70'))
+    const err = await callExpectingThrow(path, fragment('ses_second', '1db7920a'))
+
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toMatch(/already exist|duplicate|byte-equivalent/i)
+    expect((err as Error).message).toContain('Review System Final Design Decisions')
+  })
+
+  test('does not modify the file when an append is rejected for duplication', async () => {
+    const root = tmpRoot()
+    const path = join(root, 'fragments.md')
+    const original = '<!-- fragment source=ses_a entry=11 -->\n## Existing\noriginal body\n'
+    writeFileSync(path, original)
+
+    const dup = '<!-- fragment source=ses_b entry=22 -->\n## Existing\noriginal body\n'
+    await callExpectingThrow(path, dup)
+
+    expect(readFileSync(path, 'utf8')).toBe(original)
+  })
+
+  test('allows fragments whose topic matches but body differs (legitimately distinct)', async () => {
+    const root = tmpRoot()
+    const path = join(root, 'fragments.md')
+    await call(path, '<!-- fragment source=ses_a entry=11 -->\n## Decision\nuse option A\n')
+    await call(path, '<!-- fragment source=ses_b entry=22 -->\n## Decision\nactually use option B (decision changed)\n')
+
+    const content = readFileSync(path, 'utf8')
+    expect(content).toContain('use option A')
+    expect(content).toContain('actually use option B')
+  })
+
+  test('allows watermark-only appends regardless of existing fragments (no fragments to dedup)', async () => {
+    const root = tmpRoot()
+    const path = join(root, 'fragments.md')
+    writeFileSync(path, '<!-- fragment source=ses_a entry=11 -->\n## Existing\nbody\n')
+
+    await call(path, '<!-- watermark source=ses_b entry=22 -->\n')
+
+    expect(readFileSync(path, 'utf8')).toContain('<!-- watermark source=ses_b')
+  })
+
+  test('refuses an append that contains a duplicate even if other fragments in the same append are new', async () => {
+    const root = tmpRoot()
+    const path = join(root, 'fragments.md')
+    await call(path, '<!-- fragment source=ses_a entry=11 -->\n## ExistingTopic\nshared body\n')
+
+    const mixedAppend = [
+      '<!-- fragment source=ses_b entry=22 -->',
+      '## NewTopic',
+      'genuinely new body',
+      '',
+      '<!-- fragment source=ses_b entry=23 -->',
+      '## ExistingTopic',
+      'shared body',
+      '',
+    ].join('\n')
+
+    const err = await callExpectingThrow(path, mixedAppend)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).message).toContain('ExistingTopic')
+    expect(readFileSync(path, 'utf8')).not.toContain('NewTopic')
+  })
+
+  test('treats whitespace-only differences as duplicates (semantic equivalence)', async () => {
+    const root = tmpRoot()
+    const path = join(root, 'fragments.md')
+    await call(path, '<!-- fragment source=ses_a entry=11 -->\n## Topic\nbody line\n')
+
+    const trailingSpaces = '<!-- fragment source=ses_b entry=22 -->\n## Topic\nbody line   \n'
+    const err = await callExpectingThrow(path, trailingSpaces)
+    expect((err as Error).message).toContain('Topic')
   })
 })
