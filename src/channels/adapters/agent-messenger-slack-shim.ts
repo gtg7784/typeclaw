@@ -35,6 +35,13 @@ export type SlackSocketMessageEvent = {
   text?: string
   ts: string
   thread_ts?: string
+  // Slack populates this on every reply within a thread and sets it to the
+  // user id of the message that started the thread (i.e. the author of
+  // `thread_ts`). Absent on top-level messages and on the thread root
+  // itself. The classifier uses it to decide whether a reply is a reply to
+  // *us* (the bot) — the `event` payload alone otherwise has no way to
+  // know who authored the parent.
+  parent_user_id?: string
   event_ts?: string
   edited?: { user: string; ts: string }
   hidden?: boolean
