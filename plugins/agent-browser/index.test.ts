@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
-import agentBrowserPlugin, { __resetProxyForTesting } from './index'
+import agentBrowserPlugin, { __resetProxyForTesting, __waitForProxyBindForTesting } from './index'
 
 beforeEach(() => {
   process.env['TYPECLAW_DASHBOARD_PROXY_PORT'] = '0'
@@ -24,7 +24,7 @@ describe('agent-browser plugin', () => {
     expect(exports.hooks).toBeUndefined()
   })
 
-  test('binds the dashboard proxy on the configured port at agent boot', async () => {
+  test('binds the dashboard proxy in the background after the plugin factory returns', async () => {
     const messages: string[] = []
     const logger = {
       info: (msg: string) => messages.push(`info:${msg}`),
@@ -32,6 +32,7 @@ describe('agent-browser plugin', () => {
       error: (msg: string) => messages.push(`error:${msg}`),
     }
 
+    const factoryStart = Date.now()
     await agentBrowserPlugin.plugin(
       createPluginContext({
         name: 'agent-browser',
@@ -43,6 +44,14 @@ describe('agent-browser plugin', () => {
         isBooted: () => true,
       }),
     )
+    const factoryReturnedAt = Date.now()
+
+    // Factory must return immediately — the bind happens off the critical path.
+    // Without this guarantee the boot sequence would block on bindWithForward
+    // before the broker that delivers forward-result events even exists.
+    expect(factoryReturnedAt - factoryStart).toBeLessThan(500)
+
+    await __waitForProxyBindForTesting()
 
     expect(messages.some((m) => m.startsWith('info:dashboard proxy listening on port '))).toBe(true)
   })
