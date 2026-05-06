@@ -22,25 +22,6 @@ TypeClaw is the agent I wanted to use:
 - **Multi-channel out of the box** — Slack, Discord, TUI, websocket — all routed through one in-process stream
 - **Self-improving** — the agent observes its own work, distills it into long-term memory and reusable skills, and gets sharper over time without you writing prompts for it
 
-## Install
-
-```sh
-bun add -g typeclaw
-```
-
-Requires Bun ≥ 1.1 and Docker (or OrbStack) on the host.
-
-## Quickstart
-
-```sh
-mkdir my-agent && cd my-agent
-typeclaw init        # scaffold typeclaw.json, .env, Dockerfile, package.json
-typeclaw start       # build + run the container
-typeclaw tui         # attach a terminal UI to the running agent
-```
-
-That's it. The agent is now alive, listening on a websocket, ready to receive prompts from the TUI or any wired channel.
-
 ## Features
 
 - 🐳 **Sandboxed by default** — every agent runs in its own Docker container, with an `.env` and bind-mounted host folders
@@ -65,6 +46,25 @@ The bundled `memory` plugin turns lived experience into reusable knowledge. No m
 3. **Apply.** Tomorrow's prompt sees the updated `MEMORY.md`. Muscle-memory skills sit alongside bundled and user-installed ones, loaded on demand. Every dream is `git commit -m Dream`'d, so growth is auditable.
 
 See [`plugins/memory/README.md`](./plugins/memory/README.md) for the full contract.
+
+## Install
+
+```sh
+bun add -g typeclaw
+```
+
+Requires Bun ≥ 1.1 and Docker (or OrbStack) on the host.
+
+## Quickstart
+
+```sh
+mkdir my-agent && cd my-agent
+typeclaw init        # scaffold typeclaw.json, .env, Dockerfile, package.json
+typeclaw start       # build + run the container
+typeclaw tui         # attach a terminal UI to the running agent
+```
+
+That's it. The agent is now alive, listening on a websocket, ready to receive prompts from the TUI or any wired channel.
 
 ## CLI
 
