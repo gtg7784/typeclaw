@@ -116,15 +116,34 @@ export function createSlackTypingTracker(deps: {
 }): SlackTypingTracker {
   const { client, logger } = deps
   const queues = new Map<string, Promise<void>>()
+  // Monotonic per-tracker counter so the three lifecycle log lines for one
+  // call (queued → sent → ok) can be correlated by id even when many calls
+  // for the same (chat, thread) interleave on the wire.
+  let nextCallId = 0
 
   const enqueue = (chat: string, threadTs: string, status: string): Promise<void> => {
     const key = `${chat}\x00${threadTs}`
+    const callId = nextCallId++
+    // queue depth BEFORE this call is added — tells us whether the FIFO is
+    // back-pressuring (depth>0) or this call gets to fly straight to Slack.
+    const queueDepthBefore = queues.has(key) ? 1 : 0
+    logger.info(
+      `[slack-bot] typing call=${callId} chat=${chat} thread=${threadTs} status="${status}" queued (depth=${queueDepthBefore})`,
+    )
     const prev = queues.get(key) ?? Promise.resolve()
     const next = prev
       .catch(() => {})
-      .then(() => client.setAssistantStatus(chat, threadTs, status))
+      .then(() => {
+        logger.info(`[slack-bot] typing call=${callId} sending`)
+        return client.setAssistantStatus(chat, threadTs, status)
+      })
+      .then(() => {
+        logger.info(`[slack-bot] typing call=${callId} ok`)
+      })
       .catch((err: unknown) => {
-        logger.warn(`[slack-bot] typing chat=${chat} thread=${threadTs} status="${status}" failed: ${describe(err)}`)
+        logger.warn(
+          `[slack-bot] typing call=${callId} chat=${chat} thread=${threadTs} status="${status}" failed: ${describe(err)}`,
+        )
       })
     queues.set(key, next)
     void next.finally(() => {
