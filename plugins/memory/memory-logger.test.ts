@@ -166,14 +166,42 @@ describe('memoryLoggerSubagent', () => {
     expect(memoryLoggerSubagent.customTools!.length).toBe(1)
   })
 
-  test('declares an inFlightKey that keys on parentSessionId', () => {
+  test('declares an inFlightKey that keys on agentDir (so two concurrent sessions for the same agent serialize)', () => {
     expect(memoryLoggerSubagent.inFlightKey).toBeDefined()
     const key = memoryLoggerSubagent.inFlightKey!({
       parentSessionId: 'ses_abc',
       parentTranscriptPath: '/x',
-      agentDir: '/y',
+      agentDir: '/agents/winky',
     })
-    expect(key).toBe('ses_abc')
+    expect(key).toBe('/agents/winky')
+  })
+
+  test('two payloads from different sessions of the same agent produce the same inFlightKey', () => {
+    const keyA = memoryLoggerSubagent.inFlightKey!({
+      parentSessionId: 'ses_a',
+      parentTranscriptPath: '/x',
+      agentDir: '/agents/winky',
+    })
+    const keyB = memoryLoggerSubagent.inFlightKey!({
+      parentSessionId: 'ses_b',
+      parentTranscriptPath: '/y',
+      agentDir: '/agents/winky',
+    })
+    expect(keyA).toBe(keyB)
+  })
+
+  test('two payloads from the same session of different agents produce different inFlightKeys', () => {
+    const keyA = memoryLoggerSubagent.inFlightKey!({
+      parentSessionId: 'ses_x',
+      parentTranscriptPath: '/x',
+      agentDir: '/agents/winky',
+    })
+    const keyB = memoryLoggerSubagent.inFlightKey!({
+      parentSessionId: 'ses_x',
+      parentTranscriptPath: '/x',
+      agentDir: '/agents/dolsoe',
+    })
+    expect(keyA).not.toBe(keyB)
   })
 
   test('handler builds an initial prompt mentioning transcript, session id, and stream file', async () => {

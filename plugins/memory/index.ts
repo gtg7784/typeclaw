@@ -69,26 +69,39 @@ export default definePlugin({
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
     const bytesAtLastRun = new Map<string, number>()
 
-    const fireMemoryLogger = async (
-      sessionId: string,
-      reason: 'idle' | 'buffer-trip' | 'session-end',
-    ): Promise<void> => {
-      const last = lastIdleEvent.get(sessionId)
-      if (!last || last.parentTranscriptPath === undefined) return
-      const payload: MemoryLoggerPayload = {
-        parentSessionId: sessionId,
-        parentTranscriptPath: last.parentTranscriptPath,
-        agentDir: ctx.agentDir,
-        ...(last.origin !== undefined ? { origin: last.origin } : {}),
-      }
-      const currentSize = await readSize(last.parentTranscriptPath)
-      bytesAtLastRun.set(sessionId, currentSize)
-      ctx.logger.info(`memory-logger spawn ${sessionId} reason=${reason} transcript_bytes=${currentSize}`)
-      try {
-        await ctx.spawnSubagent('memory-logger', payload)
-      } catch (err) {
-        ctx.logger.error(`memory-logger spawn failed: ${err instanceof Error ? err.message : String(err)}`)
-      }
+    // memory-logger is now coalesced per agentDir (not per parentSessionId) so that
+    // two concurrent channel sessions for the same agent never write to the same
+    // daily stream file at the same time. The subagent consumer would silently drop
+    // a colliding fire, so we serialize spawn calls *here* (chaining each onto the
+    // previous one's settlement) instead of letting the consumer choose between
+    // dropping or queueing. The chain holds at most one in-flight promise plus one
+    // queued; older queued fires for the same session are superseded by newer ones
+    // through the lastIdleEvent map (each fire reads the latest snapshot).
+    let spawnChain: Promise<void> = Promise.resolve()
+
+    const fireMemoryLogger = (sessionId: string, reason: 'idle' | 'buffer-trip' | 'session-end'): Promise<void> => {
+      const next = spawnChain
+        .catch(() => undefined)
+        .then(async () => {
+          const last = lastIdleEvent.get(sessionId)
+          if (!last || last.parentTranscriptPath === undefined) return
+          const payload: MemoryLoggerPayload = {
+            parentSessionId: sessionId,
+            parentTranscriptPath: last.parentTranscriptPath,
+            agentDir: ctx.agentDir,
+            ...(last.origin !== undefined ? { origin: last.origin } : {}),
+          }
+          const currentSize = await readSize(last.parentTranscriptPath)
+          bytesAtLastRun.set(sessionId, currentSize)
+          ctx.logger.info(`memory-logger spawn ${sessionId} reason=${reason} transcript_bytes=${currentSize}`)
+          try {
+            await ctx.spawnSubagent('memory-logger', payload)
+          } catch (err) {
+            ctx.logger.error(`memory-logger spawn failed: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        })
+      spawnChain = next
+      return next
     }
 
     const cancelTimer = (sessionId: string): void => {
