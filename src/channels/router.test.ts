@@ -1079,6 +1079,34 @@ describe('ChannelRouter typing indicator', () => {
     await router.__testing!.fireTypingHeartbeat(KEY)
     expect(calls).toHaveLength(1)
   })
+
+  test('fires phase=stop exactly once when drain completes (so adapters can clear)', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const phases: Array<'tick' | 'stop'> = []
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+    // when
+    await router.route(inbound({ text: 'hi bot' }))
+    expect(phases).toEqual(['tick'])
+    await router.__testing!.flushDebounce(KEY)
+    // then
+    expect(phases).toEqual(['tick', 'stop'])
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+  })
+
+  test('phase=stop carries the same chat/thread coordinates as ticks', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const stopTargets: Array<{ chat: string; thread: string | null | undefined }> = []
+    router.registerTyping('discord-bot', async (target) => {
+      if (target.phase === 'stop') stopTargets.push({ chat: target.chat, thread: target.thread })
+    })
+    await router.route(inbound({ thread: 'thread-7', text: 'hi bot' }))
+    await router.__testing!.flushDebounce({ ...KEY, thread: 'thread-7' })
+    expect(stopTargets).toEqual([{ chat: 'c1', thread: 'thread-7' }])
+  })
 })
 
 describe('ChannelRouter plugin lifecycle hooks', () => {
