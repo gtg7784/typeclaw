@@ -9,6 +9,7 @@ export type InboundDropReason =
   | 'no_user' // event has no `user` field (e.g. system messages: channel_join, message_changed)
   | 'empty_text' // event.text is empty or missing — nothing for the agent to act on
   | 'not_in_allow_list' // workspace/channel not admitted by typeclaw.json `channels.slack-bot.allow`
+  | 'pre_connect' // bot identity is not known yet, so mention/self/reply classification cannot be trusted
 
 export type InboundClassification =
   | { kind: 'drop'; reason: InboundDropReason }
@@ -31,10 +32,9 @@ export function classifyInbound(
   context: SlackInboundContext,
 ): InboundClassification {
   // Self-drop is the hard floor: never route our own messages back to
-  // ourselves. The check requires `botUserId` (post-auth.test) — before
-  // that, slack-bot.ts already rejects with `pre_connected`, so reaching
-  // here without botUserId means a bot peer's message in the cold-start
-  // window. Let it through (loop guard in the router covers the worst case).
+  // ourselves. The check requires `botUserId` (post-auth.test); before that,
+  // fail closed below because mention, reply, and self classification all
+  // depend on the bot identity.
   if (context.botUserId !== null && event.user === context.botUserId) {
     return { kind: 'drop', reason: 'self_author' }
   }
@@ -56,10 +56,10 @@ export function classifyInbound(
     return { kind: 'drop', reason: 'not_in_allow_list' }
   }
 
-  // botUserId is null until app.connections.open returns auth metadata. In
-  // that race window, treat any inbound as a mention so the very first
-  // message after start-up isn't misclassified as ambient chatter.
-  //
+  if (context.botUserId === null) {
+    return { kind: 'drop', reason: 'pre_connect' }
+  }
+
   // Group mentions (`<!here>`, `<!channel>`, `<!everyone>`) are coerced to
   // direct mentions: the user fired a broadcast that explicitly includes the
   // bot, and from the engagement layer's perspective there is no meaningful
@@ -68,23 +68,17 @@ export function classifyInbound(
   // means the existing 'mention' trigger in typeclaw.json catches both
   // without any new config surface.
   const hasGroupMention = GROUP_MENTION_PATTERN.test(text)
-  const isBotMention = hasGroupMention || (context.botUserId !== null ? text.includes(`<@${context.botUserId}>`) : true)
+  const isBotMention = hasGroupMention || text.includes(`<@${context.botUserId}>`)
   const thread = event.thread_ts ?? (!isDm && isBotMention ? event.ts : null)
 
   // thread_ts identifies the parent message of a thread. We can only know it
   // is a reply to the bot if we recognize the bot's own user id and have a
   // thread_ts that differs from the event ts (the parent message itself
   // shares its ts with thread_ts).
-  const replyToBotMessageId =
-    event.thread_ts !== undefined && event.thread_ts !== event.ts && context.botUserId !== null ? event.thread_ts : null
+  const replyToBotMessageId = event.thread_ts !== undefined && event.thread_ts !== event.ts ? event.thread_ts : null
 
-  // Defer the mentionsOthers signal until botUserId is known. During the
-  // cold-start race window we cannot tell our own mention apart from a
-  // foreign one, and a wrong `true` here would silently suppress the
-  // very first inbound after start-up via the engagement layer.
   const mentionedUserIds = extractMentionedUserIds(text)
-  const mentionsOthers =
-    context.botUserId !== null && mentionedUserIds.length > 0 && !mentionedUserIds.includes(context.botUserId)
+  const mentionsOthers = mentionedUserIds.length > 0 && !mentionedUserIds.includes(context.botUserId)
 
   // Slack does not surface the parent message's author on `event`, so we
   // cannot positively identify a reply-to-other from the inbound alone.

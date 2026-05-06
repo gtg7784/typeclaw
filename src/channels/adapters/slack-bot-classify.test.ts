@@ -81,6 +81,14 @@ describe('slack-bot classifyInbound — drop paths', () => {
 
     expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
   })
+
+  test('drops messages before bot identity is known with reason=pre_connect', () => {
+    const event = buildEvent({ text: 'no explicit mention' })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: null })
+
+    expect(verdict).toEqual({ kind: 'drop', reason: 'pre_connect' })
+  })
 })
 
 describe('slack-bot classifyInbound — peer-bot routing', () => {
@@ -209,18 +217,7 @@ describe('slack-bot classifyInbound — route path', () => {
     expect(verdict.payload.replyToBotMessageId).toBeNull()
   })
 
-  test('treats every event as a mention while botUserId is unknown (pre-connected race window)', () => {
-    const event = buildEvent({ text: 'no explicit mention' })
-
-    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: null })
-
-    expect(verdict.kind).toBe('route')
-    if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.isBotMention).toBe(true)
-    expect(verdict.payload.replyToBotMessageId).toBeNull()
-  })
-
-  test('drops replyToBotMessageId before bot identity is known (cannot be sure parent was ours)', () => {
+  test('drops thread replies before bot identity is known (cannot classify parent target safely)', () => {
     const event = buildEvent({
       text: 'reply',
       ts: '1700000010.000200',
@@ -229,9 +226,7 @@ describe('slack-bot classifyInbound — route path', () => {
 
     const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: null })
 
-    expect(verdict.kind).toBe('route')
-    if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.replyToBotMessageId).toBeNull()
+    expect(verdict).toEqual({ kind: 'drop', reason: 'pre_connect' })
   })
 })
 
@@ -276,14 +271,12 @@ describe('slack-bot classifyInbound — targets-others detection', () => {
     expect(verdict.payload.mentionsOthers).toBe(true)
   })
 
-  test('marks mentionsOthers=false during the pre-connected race window (botUserId unknown)', () => {
+  test('drops mentioned messages during the pre-connected race window (botUserId unknown)', () => {
     const event = buildEvent({ text: 'hey <@UBOB>' })
 
     const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: null })
 
-    expect(verdict.kind).toBe('route')
-    if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.mentionsOthers).toBe(false)
+    expect(verdict).toEqual({ kind: 'drop', reason: 'pre_connect' })
   })
 
   test('Slack does not surface the parent author on inbounds, so replyToOtherMessageId is always null', () => {
