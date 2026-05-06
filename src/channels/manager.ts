@@ -18,6 +18,16 @@ const consoleLogger: ChannelManagerLogger = {
 export type ChannelManagerOptions = {
   agentDir: string
   channelsConfigRef: () => ChannelsConfig
+  // Plain-text names the agent answers to in channel engagement (the
+  // `alias` field in `typeclaw.json`), forwarded to the router as
+  // `configuredAliases`. Read live on every inbound so an `applied`-class
+  // reload of `alias` takes effect without a container restart. Omitted
+  // means alias-based engagement is off — `basename(agentDir)` is still
+  // implicit. This MUST be wired up in production (`src/run/index.ts`)
+  // or the configured aliases are silently orphaned: parsed by the
+  // schema, never read by anyone. See `manager.test.ts` for the
+  // end-to-end engagement assertion that guards this wiring.
+  aliasesRef?: () => readonly string[]
   logger?: ChannelManagerLogger
   env?: NodeJS.ProcessEnv
   // Production wiring passes a factory that builds sessions with the full
@@ -56,6 +66,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     agentDir: options.agentDir,
     configForAdapter: (adapter) => options.channelsConfigRef()[adapter],
     logger,
+    ...(options.aliasesRef ? { configuredAliases: options.aliasesRef } : {}),
     ...(options.createSessionForChannel ? { createSessionForChannel: options.createSessionForChannel } : {}),
   })
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
