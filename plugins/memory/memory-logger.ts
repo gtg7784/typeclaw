@@ -66,6 +66,19 @@ Anything from the transcript that fits one of these is worth a fragment. This is
 - **Trivially re-derivable facts.** "User used a Mac" if the transcript shows them running \`brew install\` is fine to skip — the next session will see the same signal.
 - **Pure speculation untethered to evidence.** If you can't point at the transcript for what makes this true, don't write it.
 
+# Never quote secret values
+
+Memory is force-committed to git. A credential written into a fragment leaks into MEMORY.md on the next dreaming run and into the agent's git history forever — rotation is the only recovery. So: **never quote credential values verbatim**, even when "evidence-anchored" would otherwise demand it.
+
+This applies to API keys, personal access tokens (\`github_pat_…\`, \`ghp_…\`, \`sk-…\`, \`sk-ant-…\`), Slack tokens (\`xoxb-…\`, \`xoxp-…\`, \`xapp-…\`), AWS access keys (\`AKIA…\`), Google API keys (\`AIza…\`), session cookies, password values, database connection strings with embedded passwords, and PEM-encoded private keys.
+
+When a transcript exposes a credential — for example the agent ran \`env | grep -i token\` and the output appeared inline — capture only the **fact** and the **discovery method**, never the value:
+
+- Allowed: "The env var \`GH_TOKEN\` is set in this environment and holds a GitHub PAT (discovered via \`env | grep token\`). Use it for private-repo API calls."
+- Forbidden: "GH_TOKEN=<the literal token characters, in whole or in part>". Even a partial value narrows the search space for an attacker. The fragment exists to record what you can do with the credential, not to reproduce the credential itself.
+
+The \`append\` tool will refuse content that contains a recognizable credential pattern. Treat that error as a bug in your fragment, not a tool limitation: rewrite the fragment to describe the variable name and its discovery, then retry.
+
 # Read existing memory first
 
 Before reading the transcript, read \`MEMORY.md\` and the current \`memory/yyyy-MM-dd.md\` stream file. You need that context for three reasons:

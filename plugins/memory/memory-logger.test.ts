@@ -130,6 +130,22 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
   test('declares a watermark contract that handles the zero-fragment case', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('watermark')
   })
+
+  test('forbids quoting credential values verbatim and explains why', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/never quote secret values|never quote credential values/i)
+    expect(lower).toContain('rotation')
+    expect(lower).toContain('force-committed to git')
+  })
+
+  test('shows allowed vs forbidden secret-handling examples', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/Allowed:.*GH_TOKEN/s)
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/Forbidden:.*GH_TOKEN=/s)
+  })
+
+  test('warns the subagent that the append tool enforces this rule', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/append.*refuse|refuse.*append/i)
+  })
 })
 
 describe('memoryLoggerSubagent', () => {
