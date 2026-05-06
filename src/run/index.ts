@@ -122,6 +122,7 @@ export async function startAgent({
   const channelManager = createChannelManager({
     agentDir: cwd,
     channelsConfigRef: () => getConfig().channels,
+    aliasesRef: () => getConfig().alias,
     createSessionForChannel: buildChannelSessionFactory({
       cwd,
       sessionFactory,
