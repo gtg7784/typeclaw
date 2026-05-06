@@ -6,6 +6,8 @@ export {
   containerNameFromCwd,
   defaultDockerExec,
   imageTagFromCwd,
+  inspectContainer,
+  type ContainerState,
   type DockerExec,
   type DockerExecResult,
 } from './shared'
