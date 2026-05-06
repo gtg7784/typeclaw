@@ -11,7 +11,13 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import type { HookBus, SessionIdleEvent } from '@/plugin'
 
 import { channelsSessionsPath, loadChannelSessions, saveChannelSessions } from './persistence'
-import { createChannelRouter, SESSION_IDLE_MS, sliceHeadTail, type ChannelRouter } from './router'
+import {
+  createChannelRouter,
+  MAX_TYPING_HEARTBEAT_MS,
+  SESSION_IDLE_MS,
+  sliceHeadTail,
+  type ChannelRouter,
+} from './router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from './schema'
 import type { ChannelHistoryMessage, ChannelKey, FetchHistoryArgs, HistoryCallback, InboundMessage } from './types'
 
@@ -1094,6 +1100,165 @@ describe('ChannelRouter typing indicator', () => {
     // then
     expect(phases).toEqual(['tick', 'stop'])
     expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+  })
+
+  test('awaits phase=stop when a turn is dropped without an outbound reply', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const phases: Array<'tick' | 'stop'> = []
+    let releaseStop: (() => void) | undefined
+    let flushResolved = false
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+      if (target.phase === 'stop') {
+        await new Promise<void>((resolve) => {
+          releaseStop = resolve
+        })
+      }
+    })
+
+    await router.route(inbound({ text: 'hi bot' }))
+    const flushed = router.__testing!.flushDebounce(KEY).then(() => {
+      flushResolved = true
+    })
+    await waitFor(() => releaseStop !== undefined)
+
+    expect(flushResolved).toBe(false)
+    expect(phases).toEqual(['tick', 'stop'])
+    releaseStop!()
+    await flushed
+    expect(flushResolved).toBe(true)
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+  })
+
+  test('a later teardown awaits a stop already started by the heartbeat interval', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    let releasePrompt: (() => void) | undefined
+    let releaseStop: (() => void) | undefined
+    let flushResolved = false
+    router.registerTyping('discord-bot', async (target) => {
+      if (target.phase === 'stop') {
+        await new Promise<void>((resolve) => {
+          releaseStop = resolve
+        })
+      }
+    })
+
+    await router.route(inbound({ text: 'long task' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY).then(() => {
+      flushResolved = true
+    })
+    await waitFor(() => releasePrompt !== undefined)
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
+
+    const interval = router.__testing!.fireTypingInterval(KEY)
+    await waitFor(() => releaseStop !== undefined)
+
+    expect(flushResolved).toBe(false)
+    releasePrompt!()
+    releaseStop!()
+    await Promise.all([interval, draining])
+    expect(flushResolved).toBe(true)
+  })
+
+  test('stops and clears typing after the max heartbeat window while a turn is still draining', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { nowRef, logs })
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+
+    await router.route(inbound({ text: 'long task' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
+
+    await router.__testing!.fireTypingInterval(KEY)
+
+    expect(phases).toEqual(['tick', 'stop'])
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+    expect(logs.some((m) => m.includes('typing heartbeat timed out'))).toBe(true)
+
+    releasePrompt!()
+    await draining
+    expect(phases).toEqual(['tick', 'stop'])
+  })
+
+  test('does not restart typing after timeout for a later inbound during the same in-flight turn', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    let promptCount = 0
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+
+    await router.route(inbound({ text: 'long task' }))
+    sessions[0]!.onPrompt = async () => {
+      promptCount++
+      if (promptCount > 1) return
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
+    await router.__testing!.fireTypingInterval(KEY)
+
+    await router.route(inbound({ text: 'still there?', externalMessageId: 'm2' }))
+
+    expect(phases).toEqual(['tick', 'stop'])
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+
+    releasePrompt!()
+    await draining
+  })
+
+  test('a successful channel send stops typing immediately', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ text: 'long task' }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'done' })
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    expect(phases).toEqual(['tick', 'stop'])
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+
+    releasePrompt!()
+    await draining
+    expect(phases).toEqual(['tick', 'stop'])
   })
 
   test('phase=stop carries the same chat/thread coordinates as ticks', async () => {
