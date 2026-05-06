@@ -3,16 +3,16 @@
 // bash-regex `tool.before` block, which was leaky (missed shell variations,
 // bypassed by `typeclaw shell`, by spawned subprocesses, by the user typing
 // it directly). Now ANY in-container `agent-browser` caller routes through
-// here — the dashboard subcommand transparently gets the proxy in front,
-// every other subcommand passes through unchanged.
+// here — the dashboard subcommand transparently gets its --port rewritten
+// onto the agent-process-owned proxy's upstream port, every other subcommand
+// passes through unchanged. The proxy itself lives in the long-lived agent
+// process (see plugins/agent-browser/index.ts); the shim does NOT own its
+// lifecycle, because `agent-browser dashboard start` daemonizes upstream and
+// returns immediately — a shim-owned proxy would die the moment start exits.
 
 import { existsSync } from 'node:fs'
 
-import {
-  AGENT_BROWSER_DASHBOARD_PROXY_PORT,
-  AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT,
-  startDashboardProxy,
-} from './dashboard-proxy'
+import { AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT } from './dashboard-proxy'
 
 export const REAL_BIN_ENV = 'TYPECLAW_AGENT_BROWSER_REAL_BIN'
 
@@ -32,9 +32,9 @@ export function classifyDashboardCommand(argv: readonly string[]): DashboardInte
   if (dashboardIdx === -1) return 'other'
 
   // Look for the next non-flag token after `dashboard`. Upstream treats a
-  // missing subcommand as `start`, so we do too — that path needs the proxy.
-  // `--port <n>` and `-p <n>` consume two argv entries; the value is not a
-  // subcommand and must not be classified as one.
+  // missing subcommand as `start`, so we do too. `--port <n>` and `-p <n>`
+  // consume two argv entries; the value is not a subcommand and must not be
+  // classified as one.
   for (let i = dashboardIdx + 1; i < argv.length; i += 1) {
     const arg = argv[i]!
     if (arg === '--port' || arg === '-p') {
@@ -51,7 +51,7 @@ export function classifyDashboardCommand(argv: readonly string[]): DashboardInte
 
 export function rewriteDashboardArgs(argv: readonly string[], upstreamPort: number): string[] {
   // Force --port to upstreamPort regardless of what the caller passed. The
-  // proxy on AGENT_BROWSER_DASHBOARD_PROXY_PORT is the only externally
+  // proxy on AGENT_BROWSER_DASHBOARD_PROXY_PORT (4848) is the only externally
   // visible surface; honoring a user --port would let a caller bypass the
   // proxy by listening directly on the externally forwarded port. Insert
   // `start` explicitly when the caller relied on the implicit-start behavior
@@ -89,9 +89,9 @@ export function resolveRealAgentBrowserBin(): string {
 
   // Fallback: `bun install -g agent-browser` ships per-platform native bins
   // under this stable path inside the bun image. The installer should have
-  // stashed a copy/symlink, but if a user ran `typeclaw start` against an
-  // image where the installer hasn't yet run, we can still find the real
-  // bin and proxy correctly (the next plugin boot will install the shim).
+  // stashed a copy/symlink, but if the shim runs before the plugin's
+  // installer ever did (e.g. first agent boot), we can still find the real
+  // bin and the next plugin boot will install the shim properly.
   const arch = process.arch === 'arm64' ? 'arm64' : process.arch === 'x64' ? 'x64' : null
   const platform = process.platform === 'linux' ? 'linux' : process.platform === 'darwin' ? 'darwin' : null
   if (arch !== null && platform !== null) {
@@ -108,19 +108,15 @@ export function resolveRealAgentBrowserBin(): string {
 export type ShimOptions = {
   argv?: readonly string[]
   realBin?: string
-  proxyPort?: number
   upstreamPort?: number
   spawn?: (cmd: string[]) => { exited: Promise<number> }
-  startProxy?: typeof startDashboardProxy
 }
 
 export async function runShim(opts: ShimOptions = {}): Promise<number> {
   const argv = opts.argv ?? process.argv.slice(2)
   const realBin = opts.realBin ?? resolveRealAgentBrowserBin()
-  const proxyPort = opts.proxyPort ?? AGENT_BROWSER_DASHBOARD_PROXY_PORT
   const upstreamPort = opts.upstreamPort ?? AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT
   const spawn = opts.spawn ?? defaultSpawn
-  const startProxy = opts.startProxy ?? startDashboardProxy
 
   const intent = classifyDashboardCommand(argv)
   if (intent !== 'start') {
@@ -128,16 +124,7 @@ export async function runShim(opts: ShimOptions = {}): Promise<number> {
   }
 
   const rewritten = rewriteDashboardArgs(argv, upstreamPort)
-  const proxy = startProxy({ listenPort: proxyPort, upstreamPort })
-  try {
-    return await spawn([realBin, ...rewritten]).exited
-  } finally {
-    // Always release the proxy port. If we leak it, the next dashboard call
-    // (from this shim or a reboot of the same agent) sees `EADDRINUSE` and
-    // the shim hard-fails — exactly the silent degradation we are trying
-    // to eliminate.
-    proxy.stop()
-  }
+  return await spawn([realBin, ...rewritten]).exited
 }
 
 function defaultSpawn(cmd: string[]): { exited: Promise<number> } {
