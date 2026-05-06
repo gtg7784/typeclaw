@@ -62,6 +62,12 @@ export type RestartPreflight = (input: {
 export type PortbrokerCallbacks = {
   start: (input: PortbrokerStartInput) => void
   stop: (containerName: string, reason: 'deregistered' | 'broker-stopped') => Promise<void>
+  // Returns ports the broker is currently exposing on the host for this
+  // container. Empty array when the container is unregistered, when the broker
+  // is disabled (`portForward.allow: []`), or when nothing inside the
+  // container has bound a forwardable port yet. Read-only — used by the
+  // `status` RPC to surface live forward state.
+  forwardedPorts: (containerName: string) => number[]
 }
 
 export type PortbrokerStartInput = {
@@ -318,6 +324,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     const result: StatusResult = {
       containerName: req.containerName,
       cwd,
+      forwardedPorts: opts.portbroker?.forwardedPorts(req.containerName) ?? [],
     }
     return { ok: true, result }
   }

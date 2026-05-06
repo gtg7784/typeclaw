@@ -75,14 +75,36 @@ describe('startDaemon', () => {
     expect((list.result as ListResult).registrations).toHaveLength(0)
   })
 
-  test('status returns the registered cwd', async () => {
+  test('status returns the registered cwd with empty forwardedPorts when no portbroker is wired', async () => {
     daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
     await send({ kind: 'register', containerName: 'coder', cwd: '/x' })
 
     const status = await send({ kind: 'status', containerName: 'coder' })
     expect(status.ok).toBe(true)
     if (!status.ok) return
-    expect(status.result).toEqual({ containerName: 'coder', cwd: '/x' })
+    expect(status.result).toEqual({ containerName: 'coder', cwd: '/x', forwardedPorts: [] })
+  })
+
+  test('status surfaces forwardedPorts reported by the portbroker callback', async () => {
+    const portbroker: PortbrokerCallbacks = {
+      start: () => {},
+      stop: async () => {},
+      forwardedPorts: (name) => (name === 'coder' ? [3000, 5173] : []),
+    }
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, portbroker })
+    await send({
+      kind: 'register',
+      containerName: 'coder',
+      cwd: '/x',
+      wsHostPort: 12345,
+      portForward: { allow: '*' },
+      brokerToken: 'tok',
+    })
+
+    const status = await send({ kind: 'status', containerName: 'coder' })
+    expect(status.ok).toBe(true)
+    if (!status.ok) return
+    expect(status.result).toEqual({ containerName: 'coder', cwd: '/x', forwardedPorts: [3000, 5173] })
   })
 
   test('deregister of unknown container is a no-op (ok)', async () => {
@@ -497,6 +519,7 @@ describe('startDaemon', () => {
         startCalls.push(input)
       },
       stop: async () => {},
+      forwardedPorts: () => [],
     }
 
     const d1 = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, portbroker })

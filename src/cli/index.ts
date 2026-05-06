@@ -11,6 +11,7 @@ import { restartCommand } from './restart'
 import { run } from './run'
 import { shellCommand } from './shell'
 import { startCommand } from './start'
+import { statusCommand } from './status'
 import { stopCommand } from './stop'
 import { tui } from './tui'
 
@@ -26,6 +27,7 @@ const main = defineCommand({
     start: startCommand,
     stop: stopCommand,
     restart: restartCommand,
+    status: statusCommand,
     reload,
     logs: logsCommand,
     shell: shellCommand,
