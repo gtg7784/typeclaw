@@ -2,6 +2,7 @@
 
 import { defineCommand, runMain } from 'citty'
 
+import { composeCommand } from './compose'
 import { hostdCommand } from './hostd'
 import { init } from './init'
 import { logsCommand } from './logs'
@@ -28,6 +29,7 @@ const main = defineCommand({
     reload,
     logs: logsCommand,
     shell: shellCommand,
+    compose: composeCommand,
     _hostd: hostdCommand,
   },
 })
