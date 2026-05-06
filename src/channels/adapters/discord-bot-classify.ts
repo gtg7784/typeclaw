@@ -12,6 +12,7 @@ export type InboundDropReason =
   | 'self_author' // event.author.id === botUserId; we never route our own messages back to ourselves
   | 'empty_content' // SDK delivered content: '' — usually missing MessageContent intent
   | 'not_in_allow_list' // workspace/channel not admitted by typeclaw.json `channels.discord-bot.allow`
+  | 'pre_connect' // bot identity is not known yet, so mention/self/reply classification cannot be trusted
 
 export type InboundClassification =
   | { kind: 'drop'; reason: InboundDropReason }
@@ -30,10 +31,8 @@ export function classifyInbound(
 ): InboundClassification {
   // Self-drop is the hard floor: we must never route our own messages back to
   // ourselves under any circumstance. We can only do this once botUserId is
-  // known (post-connect); before that, fall through and let downstream layers
-  // see the message — the cold-start race window is small and the alternative
-  // (dropping every bot message including foreign ones) silently disables
-  // peer-bot conversation.
+  // known (post-connect); before that, fail closed below because mention,
+  // reply, and self classification all depend on the bot identity.
   if (botUserId !== null && event.author.id === botUserId) {
     return { kind: 'drop', reason: 'self_author' }
   }
@@ -46,10 +45,10 @@ export function classifyInbound(
     return { kind: 'drop', reason: 'not_in_allow_list' }
   }
 
-  // botUserId is null until the listener has dispatched 'connected'. Treating
-  // an event as a mention in that race window prevents the very first message
-  // after start-up from being misclassified as ambient chatter.
-  //
+  if (botUserId === null) {
+    return { kind: 'drop', reason: 'pre_connect' }
+  }
+
   // Group mentions (`@everyone`, `@here`, role mentions) are coerced to
   // direct mentions: the broadcast explicitly includes the bot, and the
   // engagement layer doesn't meaningfully distinguish "@bot" from "@channel"
@@ -59,29 +58,21 @@ export function classifyInbound(
   // for these, so we don't need to parse content.
   const hasGroupMention = event.mention_everyone === true || (event.mention_roles ?? []).length > 0
   const isBotMention =
-    hasGroupMention ||
-    (botUserId !== null
-      ? event.content.includes(`<@${botUserId}>`) || event.content.includes(`<@!${botUserId}>`)
-      : true)
+    hasGroupMention || event.content.includes(`<@${botUserId}>`) || event.content.includes(`<@!${botUserId}>`)
 
   // Discord sends a structured `mentions` array on every message, so we can
   // tell "tagged someone other than us" apart from "no mentions at all"
-  // without parsing the content. We hold off until botUserId is known —
-  // during the cold-start race we'd otherwise misclassify our own mention
-  // as `mentionsOthers` and silently drop the very first inbound.
-  const mentionsOthers =
-    botUserId !== null && (event.mentions ?? []).length > 0 && !(event.mentions ?? []).some((m) => m.id === botUserId)
+  // without parsing the content.
+  const mentionsOthers = (event.mentions ?? []).length > 0 && !(event.mentions ?? []).some((m) => m.id === botUserId)
 
   const replyToParentId = event.message_reference?.message_id
-  const replyToBotMessageId =
-    replyToParentId !== undefined && botUserId !== null && isReplyToBot(event, botUserId) ? replyToParentId : null
+  const replyToBotMessageId = replyToParentId !== undefined && isReplyToBot(event, botUserId) ? replyToParentId : null
   // Discord does not echo the parent message's author on `message_reference`,
   // but in practice the replied-to user is auto-mentioned in the reply's
   // `mentions` array (this is how the Discord client renders the "Replying
   // to @user" header). So when the parent reference exists and our id is NOT
   // among the mentions, the reply is targeted at someone else.
-  const replyToOtherMessageId =
-    replyToParentId !== undefined && replyToBotMessageId === null && botUserId !== null ? replyToParentId : null
+  const replyToOtherMessageId = replyToParentId !== undefined && replyToBotMessageId === null ? replyToParentId : null
 
   const ts = Date.parse(event.timestamp)
 

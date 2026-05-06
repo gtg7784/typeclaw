@@ -569,6 +569,7 @@ function dropHint(reason: InboundDropReason): string {
       return ' (enable MESSAGE CONTENT INTENT in Discord Developer Portal and restart)'
     case 'not_in_allow_list':
       return ' (extend channels.discord-bot.allow in typeclaw.json to admit this workspace/channel)'
+    case 'pre_connect':
     case 'self_author':
       return ''
   }
