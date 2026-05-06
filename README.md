@@ -1,6 +1,6 @@
 # TypeClaw
 
-> A TypeScript-native, Bun-powered, Docker-friendly coding agent runtime.
+> A TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime.
 
 ## Why?
 
