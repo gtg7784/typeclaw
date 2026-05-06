@@ -1,10 +1,10 @@
 import {
   MEMBERSHIP_ENUMERATION_CAP,
-  type MembershipCount,
   type MembershipResolver,
   type MembershipResolverFailure,
   type MembershipResolverResult,
 } from '@/channels/membership'
+import { deriveMembershipFromHistory } from '@/channels/membership-from-history'
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type {
@@ -124,7 +124,7 @@ type DiscordGuildMember = {
 export function createDiscordMembershipResolver(deps: {
   token: string
   logger: DiscordBotAdapterLogger
-  botUserIdRef?: () => string | null
+  historyCallback: HistoryCallback
   fetchImpl?: typeof fetch
   now?: () => number
 }): MembershipResolver {
@@ -132,6 +132,12 @@ export function createDiscordMembershipResolver(deps: {
   const now = deps.now ?? Date.now
   return async (key): Promise<MembershipResolverResult> => {
     if (key.workspace === '@dm') return { humans: 1, bots: 1, fetchedAt: now(), truncated: false }
+
+    const fallback = (): Promise<MembershipResolverResult> =>
+      deriveMembershipFromHistory({
+        fetchHistory: (limit) => deps.historyCallback({ chat: key.chat, thread: key.thread, limit }),
+        now,
+      })
 
     const preview = await fetchDiscordJson<DiscordGuildPreview>(
       fetchFn,
@@ -145,7 +151,10 @@ export function createDiscordMembershipResolver(deps: {
 
     const approximate = Math.max(0, Math.floor(preview.value.approximate_member_count ?? 0))
     if (approximate > MEMBERSHIP_ENUMERATION_CAP) {
-      return approximateDiscordMembership(approximate, deps.botUserIdRef?.() ?? null, now())
+      // Beyond the enumeration cap, /members truncates anyway, and the
+      // recent-speakers count is more useful for engagement than a raw
+      // guild-wide approximation that double-counts lurkers.
+      return await fallback()
     }
 
     const members = await fetchDiscordJson<DiscordGuildMember[]>(
@@ -155,10 +164,15 @@ export function createDiscordMembershipResolver(deps: {
     )
     if (!members.ok) {
       if (members.status === 403) {
+        // 403 here is almost always the GUILD_MEMBERS privileged intent
+        // missing on the application (Developer Portal → Bot →
+        // Privileged Gateway Intents → SERVER MEMBERS INTENT). Server-side
+        // ADMINISTRATOR perms do not unlock this — the gate is at the
+        // gateway/API privacy layer.
         deps.logger.warn(
-          `[discord-bot] membership members guild=${key.workspace} status=403; falling back to guild preview`,
+          `[discord-bot] membership members guild=${key.workspace} status=403 (likely missing GUILD_MEMBERS intent); deriving from recent message authors`,
         )
-        return approximateDiscordMembership(approximate, deps.botUserIdRef?.() ?? null, now())
+        return await fallback()
       }
       deps.logger.warn(`[discord-bot] membership members guild=${key.workspace} failed: ${members.reason}`)
       return members.failure
@@ -203,15 +217,6 @@ async function fetchDiscordJson<T>(fetchFn: typeof fetch, url: string, token: st
 function discordFailureForStatus(status: number): MembershipResolverFailure {
   if (status === 401 || status === 403 || status === 404) return { kind: 'permanent' }
   return { kind: 'transient' }
-}
-
-function approximateDiscordMembership(
-  approximate: number,
-  botUserId: string | null,
-  fetchedAt: number,
-): MembershipCount {
-  const bots = botUserId === null ? 0 : 1
-  return { humans: Math.max(0, approximate - bots), bots, fetchedAt, truncated: true }
 }
 
 type DiscordRawHistoryMessage = {
@@ -441,7 +446,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
   const membershipResolver = createDiscordMembershipResolver({
     token: options.token,
     logger,
-    botUserIdRef: () => botUserId,
+    historyCallback,
   })
 
   const outboundCallback = createOutboundCallback({

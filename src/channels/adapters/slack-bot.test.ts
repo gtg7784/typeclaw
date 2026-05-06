@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { defaultHistoryConfig, isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
-import type { OutboundMessage } from '@/channels/types'
+import type { FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
 
 import type {
   SlackBotClient,
@@ -170,6 +170,7 @@ describe('slack-bot createTypingCallback', () => {
 
 describe('createSlackMembershipResolver', () => {
   type FetchCall = { url: string; init: RequestInit }
+  type HistoryCall = { chat: string; thread: string | null; limit: number }
 
   function fakeFetch(responses: Response[]): { fn: typeof fetch; calls: FetchCall[] } {
     const calls: FetchCall[] = []
@@ -189,11 +190,28 @@ describe('createSlackMembershipResolver', () => {
     return { info: () => {}, warn: () => {}, error: () => {} }
   }
 
-  test('DM short-circuits without hitting Slack', async () => {
+  function fakeHistory(result: FetchHistoryResult | (() => Promise<FetchHistoryResult>)): {
+    cb: HistoryCallback
+    calls: HistoryCall[]
+  } {
+    const calls: HistoryCall[] = []
+    const cb: HistoryCallback = async (args) => {
+      calls.push({ chat: args.chat, thread: args.thread, limit: args.limit })
+      return typeof result === 'function' ? await result() : result
+    }
+    return { cb, calls }
+  }
+
+  function emptyHistory(): HistoryCallback {
+    return fakeHistory({ ok: true, messages: [] }).cb
+  }
+
+  test('DM short-circuits without hitting Slack or history', async () => {
     const { fn, calls } = fakeFetch([])
     const resolver = createSlackMembershipResolver({
       token: 'tok',
       logger: silentLogger(),
+      historyCallback: emptyHistory(),
       fetchImpl: fn,
       now: () => 10,
     })
@@ -218,6 +236,7 @@ describe('createSlackMembershipResolver', () => {
     const resolver = createSlackMembershipResolver({
       token: 'tok',
       logger: silentLogger(),
+      historyCallback: emptyHistory(),
       fetchImpl: fn,
       now: () => 20,
     })
@@ -237,37 +256,150 @@ describe('createSlackMembershipResolver', () => {
     ])
   })
 
-  test('large channel uses conversations.info approximation', async () => {
+  test('large channel (>cap) falls back to history-derived count', async () => {
     const { fn, calls } = fakeFetch([slackResponse({ ok: true, channel: { num_members: 80 } })])
+    const { cb, calls: historyCalls } = fakeHistory({
+      ok: true,
+      messages: [
+        {
+          externalMessageId: '1',
+          authorId: 'UALICE',
+          authorName: 'alice',
+          text: 'hi',
+          ts: 0,
+          isBot: false,
+          replyToBotMessageId: null,
+        },
+        {
+          externalMessageId: '2',
+          authorId: 'BBOT',
+          authorName: 'bot',
+          text: 'beep',
+          ts: 0,
+          isBot: true,
+          replyToBotMessageId: null,
+        },
+      ],
+    })
     const resolver = createSlackMembershipResolver({
       token: 'tok',
       logger: silentLogger(),
+      historyCallback: cb,
       fetchImpl: fn,
-      botUserIdRef: () => 'UBOT',
       now: () => 30,
     })
 
     await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toEqual({
-      humans: 79,
+      humans: 1,
       bots: 1,
       fetchedAt: 30,
       truncated: true,
     })
     expect(calls).toHaveLength(1)
+    expect(historyCalls).toEqual([{ chat: 'C1', thread: null, limit: 100 }])
   })
 
-  test('missing-scope style errors return permanent failures', async () => {
+  test('missing_scope on conversations.info falls back to history-derived count', async () => {
     const { fn } = fakeFetch([slackResponse({ ok: false, error: 'missing_scope' })])
-    const resolver = createSlackMembershipResolver({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+    const { cb } = fakeHistory({
+      ok: true,
+      messages: [
+        {
+          externalMessageId: '1',
+          authorId: 'UALICE',
+          authorName: 'alice',
+          text: 'hi',
+          ts: 0,
+          isBot: false,
+          replyToBotMessageId: null,
+        },
+      ],
+    })
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: cb,
+      fetchImpl: fn,
+      now: () => 40,
+    })
 
     await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toEqual({
-      kind: 'permanent',
+      humans: 1,
+      bots: 0,
+      fetchedAt: 40,
+      truncated: true,
     })
   })
 
-  test('rate-limit style errors return transient failures', async () => {
+  test('not_in_channel on conversations.members falls back to history-derived count', async () => {
+    const { fn } = fakeFetch([
+      slackResponse({ ok: true, channel: { num_members: 3 } }),
+      slackResponse({ ok: false, error: 'not_in_channel' }),
+    ])
+    const { cb } = fakeHistory({
+      ok: true,
+      messages: [
+        {
+          externalMessageId: '1',
+          authorId: 'UDEV',
+          authorName: 'dev',
+          text: 'q',
+          ts: 0,
+          isBot: false,
+          replyToBotMessageId: null,
+        },
+        {
+          externalMessageId: '2',
+          authorId: 'BBOT',
+          authorName: 'b',
+          text: 'a',
+          ts: 0,
+          isBot: true,
+          replyToBotMessageId: null,
+        },
+      ],
+    })
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: cb,
+      fetchImpl: fn,
+      now: () => 50,
+    })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toEqual({
+      humans: 1,
+      bots: 1,
+      fetchedAt: 50,
+      truncated: true,
+    })
+  })
+
+  test('rate-limit style errors return transient failures (no fallback)', async () => {
     const { fn } = fakeFetch([slackResponse({ ok: false, error: 'rate_limited' })])
-    const resolver = createSlackMembershipResolver({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+    const { cb, calls: historyCalls } = fakeHistory({ ok: true, messages: [] })
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: cb,
+      fetchImpl: fn,
+    })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toEqual({
+      kind: 'transient',
+    })
+    expect(historyCalls).toHaveLength(0)
+  })
+
+  test('permanent failure + history failure surfaces transient (cache retries soon)', async () => {
+    const { fn } = fakeFetch([slackResponse({ ok: false, error: 'missing_scope' })])
+    const { cb } = fakeHistory({ ok: false, error: 'boom' })
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: cb,
+      fetchImpl: fn,
+    })
 
     await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toEqual({
       kind: 'transient',

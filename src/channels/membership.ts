@@ -1,7 +1,16 @@
 import type { ChannelKey } from './types'
 
 export const MEMBERSHIP_ENUMERATION_CAP = 50
-export const MEMBERSHIP_CACHE_TTL_MS = 5 * 60 * 1000
+// Engagement decisions read this every inbound but tolerate moderate
+// staleness — the count rarely changes between turns. The router
+// invalidates the cache when a previously-unseen author posts (see
+// router.ts), so the only practical sources of staleness this TTL
+// governs are: (1) silent leavers we don't notice until next refetch,
+// (2) lurkers with permission overwrites who never speak. Both are
+// quieting hints at most. 30min matches the upper bound of "session
+// idle" so the cache typically expires around the same time the
+// LiveSession would be GC'd anyway.
+export const MEMBERSHIP_CACHE_TTL_MS = 30 * 60 * 1000
 export const MEMBERSHIP_CACHE_PERMANENT_TTL_MS = 5 * 60 * 1000
 export const MEMBERSHIP_CACHE_TRANSIENT_TTL_MS = 30_000
 export const MEMBERSHIP_FRESHNESS_MS = 60_000

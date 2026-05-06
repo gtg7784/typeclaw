@@ -1,10 +1,10 @@
 import {
   MEMBERSHIP_ENUMERATION_CAP,
-  type MembershipCount,
   type MembershipResolver,
   type MembershipResolverFailure,
   type MembershipResolverResult,
 } from '@/channels/membership'
+import { deriveMembershipFromHistory } from '@/channels/membership-from-history'
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type {
@@ -173,7 +173,7 @@ type SlackUserInfoResponse = {
 export function createSlackMembershipResolver(deps: {
   token: string
   logger: SlackBotAdapterLogger
-  botUserIdRef?: () => string | null
+  historyCallback: HistoryCallback
   fetchImpl?: typeof fetch
   now?: () => number
 }): MembershipResolver {
@@ -183,17 +183,38 @@ export function createSlackMembershipResolver(deps: {
   return async (key): Promise<MembershipResolverResult> => {
     if (key.workspace === '@dm') return { humans: 1, bots: 1, fetchedAt: now(), truncated: false }
 
+    const fallback = (): Promise<MembershipResolverResult> =>
+      deriveMembershipFromHistory({
+        fetchHistory: (limit) => deps.historyCallback({ chat: key.chat, thread: key.thread, limit }),
+        now,
+      })
+
     const info = await slackApi<SlackConversationInfoResponse>(fetchFn, deps.token, 'conversations.info', {
       channel: key.chat,
     })
     if (!info.ok) {
+      // missing_scope / not_in_channel: the bot cannot see the channel's
+      // member list at all, but `conversations.history` (or app_mention
+      // delivery) usually still works enough to derive recent speakers.
+      // Treat any permanent failure here as a signal to fall back rather
+      // than propagate "I don't know" upstream — same shape as Discord's
+      // 403 path.
+      if (info.failure.kind === 'permanent') {
+        deps.logger.warn(
+          `[slack-bot] membership info channel=${key.chat} failed permanently: ${info.reason}; deriving from recent message authors`,
+        )
+        return await fallback()
+      }
       deps.logger.warn(`[slack-bot] membership info channel=${key.chat} failed: ${info.reason}`)
       return info.failure
     }
 
     const total = Math.max(0, Math.floor(info.value.channel?.num_members ?? 0))
     if (total > MEMBERSHIP_ENUMERATION_CAP) {
-      return approximateSlackMembership(total, deps.botUserIdRef?.() ?? null, now())
+      // Beyond the enumeration cap, the recent-speakers count is more
+      // useful for engagement than a raw channel-wide approximation that
+      // double-counts lurkers.
+      return await fallback()
     }
 
     const members = await slackApi<SlackConversationMembersResponse>(fetchFn, deps.token, 'conversations.members', {
@@ -201,6 +222,12 @@ export function createSlackMembershipResolver(deps: {
       limit: String(MEMBERSHIP_ENUMERATION_CAP),
     })
     if (!members.ok) {
+      if (members.failure.kind === 'permanent') {
+        deps.logger.warn(
+          `[slack-bot] membership members channel=${key.chat} failed permanently: ${members.reason}; deriving from recent message authors`,
+        )
+        return await fallback()
+      }
       deps.logger.warn(`[slack-bot] membership members channel=${key.chat} failed: ${members.reason}`)
       return members.failure
     }
@@ -267,11 +294,6 @@ function slackFailureForError(error: string): MembershipResolverFailure {
     return { kind: 'permanent' }
   }
   return { kind: 'transient' }
-}
-
-function approximateSlackMembership(total: number, botUserId: string | null, fetchedAt: number): MembershipCount {
-  const bots = botUserId === null ? 0 : 1
-  return { humans: Math.max(0, total - bots), bots, fetchedAt, truncated: true }
 }
 
 // Direct fetch to Slack's Web API. The shim only exposes postMessage /
@@ -523,7 +545,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
   const membershipResolver = createSlackMembershipResolver({
     token: options.token,
     logger,
-    botUserIdRef: () => botUserId,
+    historyCallback,
   })
 
   const outboundCallback = createOutboundCallback({

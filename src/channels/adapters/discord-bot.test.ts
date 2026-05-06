@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { defaultHistoryConfig, isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
-import type { OutboundMessage } from '@/channels/types'
+import type { FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
 
 import type { DiscordBotClient, DiscordFile, DiscordMessage } from './agent-messenger-shim'
 import { DiscordIntent } from './agent-messenger-shim'
@@ -166,6 +166,7 @@ describe('createTypingCallback', () => {
 
 describe('createDiscordMembershipResolver', () => {
   type FetchCall = { url: string; init: RequestInit }
+  type HistoryCall = { chat: string; thread: string | null; limit: number }
 
   function fakeFetch(responses: Response[]): { fn: typeof fetch; calls: FetchCall[] } {
     const calls: FetchCall[] = []
@@ -185,11 +186,28 @@ describe('createDiscordMembershipResolver', () => {
     return { info: () => {}, warn: () => {}, error: () => {} }
   }
 
-  test('DM short-circuits without hitting Discord', async () => {
+  function fakeHistory(result: FetchHistoryResult | (() => Promise<FetchHistoryResult>)): {
+    cb: HistoryCallback
+    calls: HistoryCall[]
+  } {
+    const calls: HistoryCall[] = []
+    const cb: HistoryCallback = async (args) => {
+      calls.push({ chat: args.chat, thread: args.thread, limit: args.limit })
+      return typeof result === 'function' ? await result() : result
+    }
+    return { cb, calls }
+  }
+
+  function emptyHistory(): HistoryCallback {
+    return fakeHistory({ ok: true, messages: [] }).cb
+  }
+
+  test('DM short-circuits without hitting Discord or history', async () => {
     const { fn, calls } = fakeFetch([])
     const resolver = createDiscordMembershipResolver({
       token: 'tok',
       logger: silentLogger(),
+      historyCallback: emptyHistory(),
       fetchImpl: fn,
       now: () => 42,
     })
@@ -211,6 +229,7 @@ describe('createDiscordMembershipResolver', () => {
     const resolver = createDiscordMembershipResolver({
       token: 'tok',
       logger: silentLogger(),
+      historyCallback: emptyHistory(),
       fetchImpl: fn,
       now: () => 100,
     })
@@ -225,49 +244,155 @@ describe('createDiscordMembershipResolver', () => {
     expect(calls[1]!.url).toBe('https://discord.com/api/v10/guilds/g1/members?limit=100')
   })
 
-  test('large guild uses preview approximation and skips enumeration', async () => {
+  test('large guild (>cap) falls back to history-derived count', async () => {
     const { fn, calls } = fakeFetch([jsonResponse({ approximate_member_count: 75 })])
+    const { cb, calls: historyCalls } = fakeHistory({
+      ok: true,
+      messages: [
+        {
+          externalMessageId: '1',
+          authorId: 'alice',
+          authorName: 'alice',
+          text: 'hi',
+          ts: 0,
+          isBot: false,
+          replyToBotMessageId: null,
+        },
+        {
+          externalMessageId: '2',
+          authorId: 'bob',
+          authorName: 'bob',
+          text: 'hey',
+          ts: 0,
+          isBot: false,
+          replyToBotMessageId: null,
+        },
+        {
+          externalMessageId: '3',
+          authorId: 'b1',
+          authorName: 'b1',
+          text: 'beep',
+          ts: 0,
+          isBot: true,
+          replyToBotMessageId: null,
+        },
+      ],
+    })
     const resolver = createDiscordMembershipResolver({
       token: 'tok',
       logger: silentLogger(),
+      historyCallback: cb,
       fetchImpl: fn,
-      botUserIdRef: () => 'bot-id',
       now: () => 200,
     })
 
     await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
-      humans: 74,
+      humans: 2,
       bots: 1,
       fetchedAt: 200,
       truncated: true,
     })
     expect(calls).toHaveLength(1)
+    expect(historyCalls).toEqual([{ chat: 'c1', thread: null, limit: 100 }])
   })
 
-  test('403 from member fetch falls back to truncated preview count', async () => {
+  test('403 from member fetch falls back to history-derived count', async () => {
     const { fn } = fakeFetch([jsonResponse({ approximate_member_count: 10 }), new Response(null, { status: 403 })])
+    const { cb } = fakeHistory({
+      ok: true,
+      messages: [
+        {
+          externalMessageId: '1',
+          authorId: 'devxoul',
+          authorName: 'devxoul',
+          text: 'hi',
+          ts: 0,
+          isBot: false,
+          replyToBotMessageId: null,
+        },
+        {
+          externalMessageId: '2',
+          authorId: 'bongbong',
+          authorName: 'bongbong',
+          text: 'hey',
+          ts: 0,
+          isBot: true,
+          replyToBotMessageId: null,
+        },
+        {
+          externalMessageId: '3',
+          authorId: 'penpen',
+          authorName: 'penpen',
+          text: 'oi',
+          ts: 0,
+          isBot: true,
+          replyToBotMessageId: null,
+        },
+      ],
+    })
     const resolver = createDiscordMembershipResolver({
       token: 'tok',
       logger: silentLogger(),
+      historyCallback: cb,
       fetchImpl: fn,
       now: () => 300,
     })
 
     await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
-      humans: 10,
-      bots: 0,
+      humans: 1,
+      bots: 2,
       fetchedAt: 300,
       truncated: true,
     })
   })
 
-  test('403 from guild preview is a permanent resolver failure', async () => {
+  test('403 from member fetch + history failure surfaces a transient (cache retries soon)', async () => {
+    const { fn } = fakeFetch([jsonResponse({ approximate_member_count: 10 }), new Response(null, { status: 403 })])
+    const { cb } = fakeHistory({ ok: false, error: 'rate-limited' })
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: cb,
+      fetchImpl: fn,
+      now: () => 0,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      kind: 'transient',
+    })
+  })
+
+  test('non-403 member-fetch failure propagates without falling back to history', async () => {
+    const { fn } = fakeFetch([jsonResponse({ approximate_member_count: 10 }), new Response(null, { status: 500 })])
+    const { cb, calls: historyCalls } = fakeHistory({ ok: true, messages: [] })
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: cb,
+      fetchImpl: fn,
+      now: () => 0,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      kind: 'transient',
+    })
+    expect(historyCalls).toHaveLength(0)
+  })
+
+  test('403 from guild preview is a permanent resolver failure (no fallback)', async () => {
     const { fn } = fakeFetch([new Response(null, { status: 403 })])
-    const resolver = createDiscordMembershipResolver({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+    const { cb, calls: historyCalls } = fakeHistory({ ok: true, messages: [] })
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: cb,
+      fetchImpl: fn,
+    })
 
     await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
       kind: 'permanent',
     })
+    expect(historyCalls).toHaveLength(0)
   })
 })
 
