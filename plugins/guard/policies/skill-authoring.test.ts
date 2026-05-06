@@ -28,6 +28,19 @@ describe('skill authoring guard policy', () => {
     })
   })
 
+  test('does not treat dev-stage bundled skill paths as runtime-authorable skills', async () => {
+    const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-skill-guard-'))
+    await mkdir(path.join(agentDir, 'src', 'skills'), { recursive: true })
+
+    const result = await checkSkillAuthoringDecision({
+      tool: 'write',
+      agentDir,
+      args: { path: 'src/skills/typeclaw-example/SKILL.md', content: skillFile('typeclaw-example') },
+    })
+
+    expect(result).toBeUndefined()
+  })
+
   test('validates the final content produced by edit calls', async () => {
     const agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-skill-guard-'))
     const skillPath = path.join(agentDir, 'memory', 'skills', 'release-checklist', 'SKILL.md')

@@ -11,7 +11,6 @@ const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/
 
 type SkillRoot = {
   path: string
-  reservedPrefixAllowed: boolean
 }
 
 export async function checkSkillAuthoringGuard(options: {
@@ -46,7 +45,7 @@ export async function checkSkillAuthoringDecision(options: {
   if (!skillName || !SKILL_NAME_PATTERN.test(skillName)) {
     return block(tool, targetPath, `skill name must match ${SKILL_NAME_PATTERN}`)
   }
-  if (!target.root.reservedPrefixAllowed && skillName.startsWith('typeclaw-')) {
+  if (skillName.startsWith('typeclaw-')) {
     return block(tool, targetPath, 'the typeclaw- skill namespace is reserved for bundled skills')
   }
 
@@ -76,21 +75,17 @@ export async function isSkillAuthoringAllowed(options: {
   return decision !== undefined && 'allow' in decision
 }
 
-async function resolveSkillTarget(
-  agentDir: string,
-  targetPath: string,
-): Promise<{ root: SkillRoot; rest: string[] } | undefined> {
+async function resolveSkillTarget(agentDir: string, targetPath: string): Promise<{ rest: string[] } | undefined> {
   const roots: SkillRoot[] = [
-    { path: path.join(agentDir, 'memory', 'skills'), reservedPrefixAllowed: false },
-    { path: path.join(agentDir, '.agents', 'skills'), reservedPrefixAllowed: false },
-    { path: path.join(agentDir, 'src', 'skills'), reservedPrefixAllowed: true },
+    { path: path.join(agentDir, 'memory', 'skills') },
+    { path: path.join(agentDir, '.agents', 'skills') },
   ]
   const realTargetPath = await resolveRealIntendedPath(targetPath)
 
   for (const root of roots) {
     const realRootPath = await resolveRealIntendedPath(root.path)
     if (!isInside(realRootPath, realTargetPath)) continue
-    return { root, rest: path.relative(realRootPath, realTargetPath).split(path.sep).filter(Boolean) }
+    return { rest: path.relative(realRootPath, realTargetPath).split(path.sep).filter(Boolean) }
   }
   return undefined
 }
