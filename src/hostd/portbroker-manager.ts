@@ -73,6 +73,12 @@ export function createPortbrokerManager(opts: PortbrokerManagerOptions = {}): Po
       log(`[portbroker:${containerName}] stopped (${reason})`)
     },
 
+    forwardedPorts(containerName) {
+      const broker = brokers.get(containerName)
+      if (!broker) return []
+      return broker.forwardedPorts()
+    },
+
     async drain() {
       const all = Array.from(brokers.values())
       const tailscale = Array.from(tailscaleManagers.values())

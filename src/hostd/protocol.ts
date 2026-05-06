@@ -27,6 +27,7 @@ export type ListResult = {
 export type StatusResult = {
   containerName: string
   cwd: string
+  forwardedPorts: number[]
 }
 
 export type RestartResult = {
