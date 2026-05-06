@@ -585,6 +585,128 @@ describe('decideEngagement (solo-human fallback)', () => {
   })
 })
 
+describe('decideEngagement (peer-bot-name suppressor)', () => {
+  test('observes when text contains a peer-bot authorName from participants', () => {
+    const ledger = new StickyLedger()
+    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('펭펭'), isBot: true }]
+    const decision = decideEngagement({
+      message: inbound({ text: '펭펭아 cron 좀' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants,
+      selfAliases: ['봉봉'],
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('case-insensitive peer-name match', () => {
+    const ledger = new StickyLedger()
+    const participants: readonly ChannelParticipant[] = [
+      participant('alice'),
+      { ...participant('Pengpeng'), isBot: true },
+    ]
+    const decision = decideEngagement({
+      message: inbound({ text: 'Hey PENGPENG, deploy please' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants,
+      selfAliases: ['bongbong'],
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('peer-name in text does NOT block self-alias engagement (own claim wins)', () => {
+    // Mixed-target message: "봉봉아 펭펭아 둘 다 봐" — self matches AND
+    // peer matches. The alias trigger fires earlier in the gate chain
+    // and engages cleanly; we never reach the peer suppressor.
+    const ledger = new StickyLedger()
+    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('펭펭'), isBot: true }]
+    const decision = decideEngagement({
+      message: inbound({ text: '봉봉아 펭펭아 둘 다 봐' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants,
+      selfAliases: ['봉봉'],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('human authorName in text does NOT trigger suppression (only peer bots)', () => {
+    // Solo-human channel where alice writes "bob, hi" — bob has never
+    // spoken so participants only has alice. The peer suppressor MUST
+    // not fire on alice's own name (she's authoring), and a non-bot
+    // 'bob' wouldn't trigger it even if present. Solo-human fallback
+    // engages.
+    const ledger = new StickyLedger()
+    const participants: readonly ChannelParticipant[] = [participant('alice')]
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'alice', text: 'bob, can you check this?' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants,
+      selfAliases: [],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('first-message-before-peer-spoken slips through (known limitation)', () => {
+    // Documents the limitation: if the user names a peer bot before that
+    // peer has ever spoken in this channel, participants[] doesn't yet
+    // contain it and the suppressor can't fire. The solo-human fallback
+    // engages. Follow-up message after the peer has spoken once is fine.
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ text: '펭펭아 cron 좀' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+      selfAliases: ['봉봉'],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('peer suppressor fires before solo-human fallback even with effectiveHumans=1', () => {
+    const ledger = new StickyLedger()
+    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('펭펭'), isBot: true }]
+    const decision = decideEngagement({
+      message: inbound({ text: '펭펭아 그거 어떻게 됐어?' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants,
+      selfAliases: [],
+      membership: { humans: 1, bots: 4, fetchedAt: 0, truncated: false },
+    })
+    expect(decision).toBe('observe')
+  })
+
+  test('peer suppressor does not block explicit triggers (mention still wins)', () => {
+    const ledger = new StickyLedger()
+    const participants: readonly ChannelParticipant[] = [participant('alice'), { ...participant('펭펭'), isBot: true }]
+    const decision = decideEngagement({
+      message: inbound({ isBotMention: true, text: '<@me> hi, also 펭펭아 fyi' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants,
+      selfAliases: [],
+    })
+    expect(decision).toBe('engage')
+  })
+})
+
 describe('decideEngagement (targets-others suppressors)', () => {
   test('observes a solo-human message that mentions someone other than us', () => {
     const ledger = new StickyLedger()

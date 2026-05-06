@@ -134,11 +134,33 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (message.mentionsOthers) return 'observe'
   if (message.replyToOtherMessageId !== null) return 'observe'
 
+  // Plain-text peer-bot addressing as a fallback suppressor. We've reached
+  // here because the message lacks a structural mention/reply/dm AND
+  // doesn't contain our own alias. If it DOES contain a known peer bot's
+  // observed display name, the solo-human fallback would still engage us
+  // — same wrong behavior the alias trigger is meant to fix, just for
+  // peers instead of self. Each bot only configures its own aliases, so
+  // the only source of peer names is `participants[]` (observed
+  // authorName once a peer has spoken at least once in this channel).
+  // First-time addressing of a never-seen peer slips through; after that
+  // peer's first message it's caught forever.
+  if (textTargetsAnyPeerBot(message.text, participants)) return 'observe'
+
   const persistedHumans = participants.filter((p) => p.isBot !== true).length
   const effectiveHumans = resolveEffectiveHumans(persistedHumans, input.membership, now)
   if (effectiveHumans <= 1 && !message.authorIsBot) return 'engage'
 
   return 'observe'
+}
+
+function textTargetsAnyPeerBot(text: string, participants: readonly ChannelParticipant[]): boolean {
+  const haystack = text.toLocaleLowerCase()
+  for (const p of participants) {
+    if (p.isBot !== true) continue
+    if (p.authorName === '') continue
+    if (haystack.includes(p.authorName.toLocaleLowerCase())) return true
+  }
+  return false
 }
 
 export function resolveEffectiveHumans(
