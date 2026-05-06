@@ -1,5 +1,6 @@
 import type { ChannelParticipant } from '@/agent/session-origin'
 
+import { MEMBERSHIP_FRESHNESS_MS, type MembershipCount } from './membership'
 import type { EngagementConfig } from './schema'
 import type { InboundMessage } from './types'
 
@@ -53,6 +54,7 @@ export type EngagementInput = {
   // before), so the solo-human fallback below filters them out explicitly
   // — otherwise a 1-human + N-bot channel would silently exit solo mode.
   participants: readonly ChannelParticipant[]
+  membership: MembershipCount | null
 }
 
 export function decideEngagement(input: EngagementInput): EngagementDecision {
@@ -111,10 +113,28 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (message.mentionsOthers) return 'observe'
   if (message.replyToOtherMessageId !== null) return 'observe'
 
-  const humanParticipants = participants.filter((p) => p.isBot !== true)
-  if (humanParticipants.length <= 1 && !message.authorIsBot) return 'engage'
+  const persistedHumans = participants.filter((p) => p.isBot !== true).length
+  const effectiveHumans = resolveEffectiveHumans(persistedHumans, input.membership, now)
+  if (effectiveHumans <= 1 && !message.authorIsBot) return 'engage'
 
   return 'observe'
+}
+
+export function resolveEffectiveHumans(
+  persistedHumans: number,
+  membership: MembershipCount | null,
+  now: number,
+): number {
+  if (membership === null) return persistedHumans
+  // A fresh complete API read is the only signal that can see lurkers AND
+  // prune recent leavers. Letting persisted speakers win here would preserve
+  // the exact stale-authorship bug the membership lookup exists to fix.
+  const isFresh = now - membership.fetchedAt < MEMBERSHIP_FRESHNESS_MS
+  if (!membership.truncated && isFresh) return membership.humans
+  // Truncated and stale reads are useful quieting hints, not ground truth.
+  // Persisted speakers are bounded to the last 7 days, so `max()` avoids
+  // under-counting active humans while the platform count is approximate.
+  return Math.max(persistedHumans, membership.humans)
 }
 
 export function grantStickyForReplyTargets(
