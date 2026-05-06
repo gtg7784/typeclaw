@@ -26,26 +26,6 @@ const PATCHES: Patch[] = [
     return first
   }`,
   },
-  // agent-messenger ships a `./slackbot` entry under `typesVersions` and the
-  // README documents the import path, but the package's `exports` map omits
-  // it. Without an `exports` entry, Bun + tsgo refuse to resolve
-  // `agent-messenger/slackbot`. Inject the entry to match every other
-  // platform.
-  {
-    file: 'node_modules/agent-messenger/package.json',
-    find: `    "./discordbot": {
-      "types": "./src/platforms/discordbot/index.ts",
-      "default": "./src/platforms/discordbot/index.ts"
-    },`,
-    replace: `    "./discordbot": {
-      "types": "./src/platforms/discordbot/index.ts",
-      "default": "./src/platforms/discordbot/index.ts"
-    },
-    "./slackbot": {
-      "types": "./src/platforms/slackbot/index.ts",
-      "default": "./src/platforms/slackbot/index.ts"
-    },`,
-  },
   // The slackbot credential-manager has multiple `noUncheckedIndexedAccess`
   // strict-mode violations that surface through tsgo (skipLibCheck only
   // applies to .d.ts, and agent-messenger ships .ts source). Suppress them
