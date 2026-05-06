@@ -13,6 +13,7 @@ import {
   createOutboundCallback,
   createSlackHistoryCallback,
   createSlackMembershipResolver,
+  createSlackTypingTracker,
   createTypingCallback,
   promoteAppMentionToMessage,
   SLACK_HISTORY_LIMIT_MAX,
@@ -46,27 +47,31 @@ describe('slack-bot adapter (unit-level pure helpers)', () => {
 describe('slack-bot createTypingCallback', () => {
   type SetStatusCall = { channel: string; threadTs: string; status: string }
 
-  function makeFakeClient(behavior: 'ok' | 'reject' = 'ok'): {
-    client: { setAssistantStatus: (channel: string, threadTs: string, status: string) => Promise<void> }
+  function makeFakeTracker(behavior: 'ok' | 'reject' = 'ok'): {
+    tracker: {
+      setStatus: (chat: string, threadTs: string, status: string) => Promise<void>
+      clearAfterSend: () => Promise<void>
+    }
     calls: SetStatusCall[]
   } {
     const calls: SetStatusCall[] = []
     return {
       calls,
-      client: {
-        setAssistantStatus: async (channel, threadTs, status) => {
+      tracker: {
+        setStatus: async (channel, threadTs, status) => {
           calls.push({ channel, threadTs, status })
           if (behavior === 'reject') throw new Error('channel_not_found')
         },
+        clearAfterSend: async () => {},
       },
     }
   }
 
-  test('calls setAssistantStatus with chat + thread when target is in a thread', async () => {
+  test('calls tracker.setStatus with chat + thread when target is in a thread', async () => {
     // given
-    const { client, calls } = makeFakeClient()
+    const { tracker, calls } = makeFakeTracker()
     const cb = createTypingCallback({
-      client,
+      typingTracker: tracker,
       configRef: () => ({
         allow: ['*'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
@@ -83,10 +88,10 @@ describe('slack-bot createTypingCallback', () => {
 
   test('is a no-op (logs info, no API call) for top-level chats without a thread', async () => {
     // given
-    const { client, calls } = makeFakeClient()
+    const { tracker, calls } = makeFakeTracker()
     const infos: string[] = []
     const cb = createTypingCallback({
-      client,
+      typingTracker: tracker,
       configRef: () => ({
         allow: ['*'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
@@ -104,10 +109,19 @@ describe('slack-bot createTypingCallback', () => {
 
   test('warns (does not throw) when Slack rejects the API call', async () => {
     // given
-    const { client, calls } = makeFakeClient('reject')
+    const calls: SetStatusCall[] = []
     const warns: string[] = []
+    const tracker = createSlackTypingTracker({
+      client: {
+        setAssistantStatus: async (channel, threadTs, status) => {
+          calls.push({ channel, threadTs, status })
+          throw new Error('channel_not_found')
+        },
+      },
+      logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+    })
     const cb = createTypingCallback({
-      client,
+      typingTracker: tracker,
       configRef: () => ({
         allow: ['*'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
@@ -125,11 +139,11 @@ describe('slack-bot createTypingCallback', () => {
 
   test('skips disallowed channels silently (no API call, no log)', async () => {
     // given
-    const { client, calls } = makeFakeClient()
+    const { tracker, calls } = makeFakeTracker()
     const infos: string[] = []
     const warns: string[] = []
     const cb = createTypingCallback({
-      client,
+      typingTracker: tracker,
       configRef: () => ({
         allow: ['team:T0OTHER'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
@@ -148,10 +162,10 @@ describe('slack-bot createTypingCallback', () => {
 
   test('rejects non-slack adapter without API call or logging', async () => {
     // given
-    const { client, calls } = makeFakeClient()
+    const { tracker, calls } = makeFakeTracker()
     const infos: string[] = []
     const cb = createTypingCallback({
-      client,
+      typingTracker: tracker,
       configRef: () => ({
         allow: ['*'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
@@ -165,6 +179,126 @@ describe('slack-bot createTypingCallback', () => {
     // then
     expect(calls).toHaveLength(0)
     expect(infos).toHaveLength(0)
+  })
+})
+
+describe('createSlackTypingTracker', () => {
+  type SetStatusCall = { channel: string; threadTs: string; status: string }
+
+  function makeDeferredClient(): {
+    client: { setAssistantStatus: (channel: string, threadTs: string, status: string) => Promise<void> }
+    calls: SetStatusCall[]
+    pending: Array<{ resolve: () => void; reject: (err: Error) => void }>
+    settledOrder: string[]
+  } {
+    const calls: SetStatusCall[] = []
+    const pending: Array<{ resolve: () => void; reject: (err: Error) => void }> = []
+    const settledOrder: string[] = []
+    return {
+      calls,
+      pending,
+      settledOrder,
+      client: {
+        setAssistantStatus: (channel, threadTs, status) => {
+          calls.push({ channel, threadTs, status })
+          const idx = calls.length - 1
+          return new Promise<void>((resolve, reject) => {
+            pending.push({
+              resolve: () => {
+                settledOrder.push(`${idx}:${status}`)
+                resolve()
+              },
+              reject,
+            })
+          })
+        },
+      },
+    }
+  }
+
+  // Flush all pending microtasks so chained `.then()` continuations run
+  // before the next assertion. The tracker queues calls via promise
+  // chaining, so the first client call is reached on the next microtask
+  // tick rather than synchronously.
+  async function flushMicrotasks(): Promise<void> {
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+  }
+
+  test('serializes calls per (chat, thread) so an explicit clear lands AFTER an in-flight typing call', async () => {
+    // given
+    const { client, pending, settledOrder } = makeDeferredClient()
+    const tracker = createSlackTypingTracker({
+      client,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    // when
+    const typingPromise = tracker.setStatus('C0', 'T0', 'is typing...')
+    const clearPromise = tracker.clearAfterSend('C0', 'T0')
+    await flushMicrotasks()
+    expect(pending).toHaveLength(1)
+    pending[0]!.resolve()
+    await typingPromise
+    await flushMicrotasks()
+    expect(pending).toHaveLength(2)
+    pending[1]!.resolve()
+    await clearPromise
+    // then
+    expect(settledOrder).toEqual(['0:is typing...', '1:'])
+  })
+
+  test('does not block calls for a different (chat, thread) pair', async () => {
+    // given
+    const { client, pending } = makeDeferredClient()
+    const tracker = createSlackTypingTracker({
+      client,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    const a = tracker.setStatus('C0', 'T0', 'is typing...')
+    // when
+    const b = tracker.setStatus('C0', 'T1', 'is typing...')
+    const c = tracker.setStatus('C1', 'T0', 'is typing...')
+    await flushMicrotasks()
+    // then
+    expect(pending).toHaveLength(3)
+    pending[0]!.resolve()
+    pending[1]!.resolve()
+    pending[2]!.resolve()
+    await Promise.all([a, b, c])
+  })
+
+  test('clearAfterSend with no thread is a no-op (top-level chats have no typing indicator)', async () => {
+    const { client, calls } = makeDeferredClient()
+    const tracker = createSlackTypingTracker({
+      client,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+    })
+    await tracker.clearAfterSend('C0', null)
+    await tracker.clearAfterSend('C0', undefined)
+    await tracker.clearAfterSend('C0', '')
+    expect(calls).toHaveLength(0)
+  })
+
+  test('a failing typing call does not poison the queue for the next call', async () => {
+    // given
+    const { client, pending } = makeDeferredClient()
+    const warns: string[] = []
+    const tracker = createSlackTypingTracker({
+      client,
+      logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
+    })
+    const first = tracker.setStatus('C0', 'T0', 'is typing...')
+    const second = tracker.clearAfterSend('C0', 'T0')
+    await flushMicrotasks()
+    expect(pending).toHaveLength(1)
+    pending[0]!.reject(new Error('channel_not_found'))
+    await first
+    await flushMicrotasks()
+    // when
+    expect(pending).toHaveLength(2)
+    pending[1]!.resolve()
+    await second
+    // then
+    expect(warns.some((m) => m.includes('channel_not_found'))).toBe(true)
   })
 })
 
@@ -1036,5 +1170,97 @@ describe('slack-bot createOutboundCallback', () => {
     expect(posts).toHaveLength(0)
     expect(uploads).toHaveLength(0)
     expect(readCalls).toBe(0)
+  })
+
+  test('threaded postMessage triggers typingTracker.clearAfterSend so the indicator does not stay stuck', async () => {
+    // given
+    const { client, posts } = makeFakeClient()
+    const clearCalls: Array<{ chat: string; thread: string | null | undefined }> = []
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+      typingTracker: {
+        clearAfterSend: async (chat, thread) => {
+          clearCalls.push({ chat, thread })
+        },
+      },
+    })
+    // when
+    const result = await cb(makeMsg({ text: 'hello', thread: '1700.000100' }))
+    // then
+    expect(result.ok).toBe(true)
+    expect(posts).toHaveLength(1)
+    expect(clearCalls).toEqual([{ chat: 'C0', thread: '1700.000100' }])
+  })
+
+  test('top-level postMessage still calls clearAfterSend (tracker decides the no-op)', async () => {
+    const { client } = makeFakeClient()
+    const clearCalls: Array<{ chat: string; thread: string | null | undefined }> = []
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+      typingTracker: {
+        clearAfterSend: async (chat, thread) => {
+          clearCalls.push({ chat, thread })
+        },
+      },
+    })
+    await cb(makeMsg({ text: 'hello' }))
+    expect(clearCalls).toEqual([{ chat: 'C0', thread: undefined }])
+  })
+
+  test('threaded uploadFile triggers clearAfterSend after the LAST attachment', async () => {
+    // given
+    const { client, uploads } = makeFakeClient()
+    const clearCalls: Array<{ chat: string; thread: string | null | undefined }> = []
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+      typingTracker: {
+        clearAfterSend: async (chat, thread) => {
+          clearCalls.push({ chat, thread })
+        },
+      },
+    })
+    // when
+    await cb(
+      makeMsg({
+        text: 'caption',
+        thread: '1700.000100',
+        attachments: [{ path: '/agent/a.png' }, { path: '/agent/b.pdf' }],
+      }),
+    )
+    // then
+    expect(uploads).toHaveLength(2)
+    expect(clearCalls).toEqual([{ chat: 'C0', thread: '1700.000100' }])
+  })
+
+  test('failed postMessage does not call clearAfterSend (no message was actually sent)', async () => {
+    const { client } = makeFakeClient({ postMessage: 'reject' })
+    const clearCalls: Array<unknown> = []
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+      typingTracker: {
+        clearAfterSend: async () => {
+          clearCalls.push({})
+        },
+      },
+    })
+    const result = await cb(makeMsg({ text: 'hello', thread: '1700.000100' }))
+    expect(result.ok).toBe(false)
+    expect(clearCalls).toHaveLength(0)
   })
 })

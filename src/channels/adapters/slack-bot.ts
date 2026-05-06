@@ -91,21 +91,63 @@ export type SlackBotAdapter = {
 // `thread_ts`. The classic `user_typing` is RTM-only and rejects bot
 // tokens, so there is nothing to send for top-level (non-threaded) chats —
 // we log and bail in that case. Slack auto-clears the status when the bot
-// posts its reply, so we only set; we never explicitly clear.
+// posts its reply (per the assistant.threads.setStatus docs), but the
+// router heartbeat (~every 8s) and the outbound postMessage can race: an
+// in-flight setStatus("is typing...") that lands AFTER postMessage will
+// re-set the indicator, and Slack's server-side timeout won't clear it
+// for ~2 minutes. The fix is per-thread serialization (see
+// `createSlackTypingTracker`) plus an explicit empty-string setStatus
+// queued by the outbound callback after every successful send.
 //
-// The router fires this on a heartbeat (~every few seconds while
-// debouncing/generating). Slack rejects calls in non-Assistant channels
-// with `channel_not_found` / `not_in_channel`-style errors; we surface
-// those as a single warn line per heartbeat (matching the Discord
-// adapter's non-2xx handling) rather than escalating to error, because
-// the bot may simply be deployed in a regular channel.
-export function createTypingCallback(deps: {
+// Slack rejects calls in non-Assistant channels with `channel_not_found` /
+// `not_in_channel`-style errors; we surface those as a single warn line
+// per heartbeat (matching the Discord adapter's non-2xx handling) rather
+// than escalating to error, because the bot may simply be deployed in a
+// regular channel.
+export type SlackTypingTracker = {
+  setStatus: (chat: string, threadTs: string, status: string) => Promise<void>
+  clearAfterSend: (chat: string, threadTs: string | null | undefined) => Promise<void>
+}
+
+export function createSlackTypingTracker(deps: {
   client: Pick<SlackBotClient, 'setAssistantStatus'>
+  logger: SlackBotAdapterLogger
+}): SlackTypingTracker {
+  const { client, logger } = deps
+  const queues = new Map<string, Promise<void>>()
+
+  const enqueue = (chat: string, threadTs: string, status: string): Promise<void> => {
+    const key = `${chat}\x00${threadTs}`
+    const prev = queues.get(key) ?? Promise.resolve()
+    const next = prev
+      .catch(() => {})
+      .then(() => client.setAssistantStatus(chat, threadTs, status))
+      .catch((err: unknown) => {
+        logger.warn(`[slack-bot] typing chat=${chat} thread=${threadTs} status="${status}" failed: ${describe(err)}`)
+      })
+    queues.set(key, next)
+    void next.finally(() => {
+      if (queues.get(key) === next) queues.delete(key)
+    })
+    return next
+  }
+
+  return {
+    setStatus: (chat, threadTs, status) => enqueue(chat, threadTs, status),
+    clearAfterSend: async (chat, threadTs) => {
+      if (threadTs === null || threadTs === undefined || threadTs === '') return
+      await enqueue(chat, threadTs, '')
+    },
+  }
+}
+
+export function createTypingCallback(deps: {
+  typingTracker: Pick<SlackTypingTracker, 'setStatus'>
   configRef: () => ChannelAdapterConfig
   logger: SlackBotAdapterLogger
   formatChannelTag?: (workspace: string, chat: string) => Promise<string>
 }): TypingCallback {
-  const { client, configRef, logger, formatChannelTag } = deps
+  const { typingTracker, configRef, logger, formatChannelTag } = deps
   return async (target: TypingTarget): Promise<void> => {
     if (target.adapter !== 'slack-bot') return
     const config = configRef()
@@ -117,11 +159,7 @@ export function createTypingCallback(deps: {
       logger.info(`[slack-bot] typing (no-op, top-level chat) ${tag}`)
       return
     }
-    try {
-      await client.setAssistantStatus(target.chat, target.thread, 'is typing...')
-    } catch (err) {
-      logger.warn(`[slack-bot] typing ${tag} failed: ${describe(err)}`)
-    }
+    await typingTracker.setStatus(target.chat, target.thread, 'is typing...')
   }
 }
 
@@ -440,8 +478,9 @@ export function createOutboundCallback(deps: {
   logger: SlackBotAdapterLogger
   formatChannelTag: (workspace: string, chat: string) => Promise<string>
   readFile?: (path: string) => Promise<Buffer>
+  typingTracker?: Pick<SlackTypingTracker, 'clearAfterSend'>
 }): OutboundCallback {
-  const { client, configRef, logger, formatChannelTag } = deps
+  const { client, configRef, logger, formatChannelTag, typingTracker } = deps
   const readFile = deps.readFile ?? readAttachmentBuffer
   return async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'slack-bot') {
@@ -470,6 +509,7 @@ export function createOutboundCallback(deps: {
           msg.thread !== undefined && msg.thread !== null ? { thread_ts: msg.thread } : undefined,
         )
         logger.info(`[slack-bot] sent ts=${sent.ts} ${tag}`)
+        if (typingTracker) await typingTracker.clearAfterSend(msg.chat, msg.thread)
         return { ok: true }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
@@ -502,6 +542,7 @@ export function createOutboundCallback(deps: {
         return { ok: false, error: `uploadFile failed: ${message}` }
       }
     }
+    if (typingTracker) await typingTracker.clearAfterSend(msg.chat, msg.thread)
     return { ok: true }
   }
 }
@@ -528,7 +569,14 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     return `${workspacePart} ${chatPart}`
   }
 
-  const typingCallback = createTypingCallback({ client, configRef: options.configRef, logger, formatChannelTag })
+  const typingTracker = createSlackTypingTracker({ client, logger })
+
+  const typingCallback = createTypingCallback({
+    typingTracker,
+    configRef: options.configRef,
+    logger,
+    formatChannelTag,
+  })
 
   const historyCallback = createSlackHistoryCallback({
     token: options.token,
@@ -548,6 +596,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     configRef: options.configRef,
     logger,
     formatChannelTag,
+    typingTracker,
   })
 
   const dedupe = createSlackDedupe()
