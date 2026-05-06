@@ -102,6 +102,30 @@ describe('guard plugin', () => {
     expect(absoluteResult).toBeUndefined()
   })
 
+  test('allows writes under the agent root packages directory (bun workspace root)', async () => {
+    const hook = await toolBeforeHook()
+
+    const newPackageFile = await hook(
+      toolEvent('write', { path: 'packages/my-plugin/index.ts', content: 'export {}' }),
+      hookContext('/agent'),
+    )
+    const newPackageJson = await hook(
+      toolEvent('write', { path: 'packages/my-plugin/package.json', content: '{}' }),
+      hookContext('/agent'),
+    )
+    const editAbsolute = await hook(
+      toolEvent('edit', {
+        path: '/agent/packages/my-plugin/index.ts',
+        edits: [{ oldText: 'export {}', newText: 'export const x = 1' }],
+      }),
+      hookContext('/agent'),
+    )
+
+    expect(newPackageFile).toBeUndefined()
+    expect(newPackageJson).toBeUndefined()
+    expect(editAbsolute).toBeUndefined()
+  })
+
   test('still blocks unknown files and nested paths under allowed root names', async () => {
     const hook = await toolBeforeHook()
 

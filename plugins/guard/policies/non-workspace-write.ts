@@ -16,7 +16,12 @@ const AGENT_ROOT_WRITE_ALLOWLIST = new Set([
   'typeclaw.json',
 ])
 
-const AGENT_ROOT_DIRECTORY_ALLOWLIST = new Set(['mounts'])
+// `packages/` is a bun workspace root scaffolded at init (see
+// src/init/index.ts#DIRECTORIES). Reusable systems and custom typeclaw
+// plugins live there as standalone packages, so the agent must be able to
+// write into `packages/<name>/...` without acknowledging the guard — same
+// as `workspace/`, but for code intended to be reused rather than discarded.
+const AGENT_ROOT_DIRECTORY_ALLOWLIST = new Set(['mounts', 'packages'])
 
 export async function checkNonWorkspaceWriteGuard(options: {
   tool: string
