@@ -55,10 +55,19 @@ export type EngagementInput = {
   // — otherwise a 1-human + N-bot channel would silently exit solo mode.
   participants: readonly ChannelParticipant[]
   membership: MembershipCount | null
+  // Names the agent answers to in plain text (no @mention syntax). Built
+  // by the router as `[basename(agentDir), ...config.alias]` and lowered
+  // once. Empty list means alias-based engagement is off — useful for
+  // tests and for agents that explicitly want strict-mention behavior.
+  // Match semantics: case-insensitive substring of inbound text. This is
+  // the operator contract documented in typeclaw-config; if a name is too
+  // generic ("bot", "ai") it WILL produce false matches and the operator
+  // owns curation.
+  selfAliases: readonly string[]
 }
 
 export function decideEngagement(input: EngagementInput): EngagementDecision {
-  const { message, config, key, ledger, now, participants } = input
+  const { message, config, key, ledger, now, participants, selfAliases } = input
 
   if (config.trigger.includes('dm') && message.isDm) return 'engage'
   if (config.trigger.includes('mention') && message.isBotMention) return 'engage'
@@ -67,6 +76,18 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (config.stickiness !== 'off' && ledger.consume(key, message.authorId, now)) {
     return 'engage'
   }
+
+  // Plain-text name addressing: the user wrote our name (or an alias)
+  // somewhere in the message without using <@id> syntax. Engage at the
+  // same priority as an explicit mention — operators add aliases
+  // precisely because they expect the bot to respond when called by
+  // name. Suppression on `mentionsOthers` would defeat the point: the
+  // user can address two bots by name in one message ("봉봉아 펭펭아 둘
+  // 다 봐") and both should engage. Each bot only knows its own
+  // aliases, so cross-bot suppression isn't possible at this layer
+  // anyway — the router-side peer-name suppression in the solo-human
+  // fallback handles that case (follow-up).
+  if (matchesAnyAlias(message.text, selfAliases)) return 'engage'
 
   // Solo-human fallback: the strict mention/reply/dm gate keeps the bot
   // quiet in multi-human conversations, but in a 1-human channel that
@@ -149,4 +170,13 @@ export function grantStickyForReplyTargets(
   for (const id of authorIds) {
     ledger.grant(key, id, now + window)
   }
+}
+
+export function matchesAnyAlias(text: string, lowercasedAliases: readonly string[]): boolean {
+  if (lowercasedAliases.length === 0) return false
+  const haystack = text.toLocaleLowerCase()
+  for (const alias of lowercasedAliases) {
+    if (haystack.includes(alias)) return true
+  }
+  return false
 }
