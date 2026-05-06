@@ -296,9 +296,44 @@ describe('slack-bot classifyInbound — route path', () => {
     expect(verdict.payload).toMatchObject({ workspace: '@dm', chat: 'D0DMID', isDm: true })
   })
 
-  test('thread reply surfaces thread_ts as thread and replyToBotMessageId when ts differs', () => {
+  test('thread reply to the bot surfaces thread_ts as both thread and replyToBotMessageId', () => {
     const event = buildEvent({
       text: 'thanks',
+      ts: '1700000010.000200',
+      thread_ts: '1700000000.000100',
+      parent_user_id: BOT_USER_ID,
+    })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.thread).toBe('1700000000.000100')
+    expect(verdict.payload.replyToBotMessageId).toBe('1700000000.000100')
+    expect(verdict.payload.replyToOtherMessageId).toBeNull()
+  })
+
+  test('thread reply between humans (parent is a human) sets replyToOtherMessageId, not replyToBotMessageId', () => {
+    const event = buildEvent({
+      user: 'UALICE',
+      text: 'i agree',
+      ts: '1700000010.000200',
+      thread_ts: '1700000000.000100',
+      parent_user_id: 'UCAROL',
+    })
+
+    const verdict = classifyInbound(event, baseConfig, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.thread).toBe('1700000000.000100')
+    expect(verdict.payload.replyToBotMessageId).toBeNull()
+    expect(verdict.payload.replyToOtherMessageId).toBe('1700000000.000100')
+  })
+
+  test('thread reply with no parent_user_id leaves both reply fields null (refuses to guess)', () => {
+    const event = buildEvent({
+      text: 'reply with unknown parent',
       ts: '1700000010.000200',
       thread_ts: '1700000000.000100',
     })
@@ -308,7 +343,8 @@ describe('slack-bot classifyInbound — route path', () => {
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.thread).toBe('1700000000.000100')
-    expect(verdict.payload.replyToBotMessageId).toBe('1700000000.000100')
+    expect(verdict.payload.replyToBotMessageId).toBeNull()
+    expect(verdict.payload.replyToOtherMessageId).toBeNull()
   })
 
   test('parent message of a thread (ts === thread_ts) does not register as a reply', () => {
@@ -323,6 +359,7 @@ describe('slack-bot classifyInbound — route path', () => {
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.replyToBotMessageId).toBeNull()
+    expect(verdict.payload.replyToOtherMessageId).toBeNull()
   })
 
   test('drops thread replies before bot identity is known (cannot classify parent target safely)', () => {

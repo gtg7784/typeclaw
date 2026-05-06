@@ -734,6 +734,31 @@ describe('decideEngagement (targets-others suppressors)', () => {
     expect(decision).toBe('observe')
   })
 
+  test('observes a thread side-conversation between two humans in a busy channel (incident regression)', () => {
+    // Incident: a thread root authored by Jiyoung mentions Rio (a human peer).
+    // Rio replies in the thread. The bot was engaging on Rio's reply because
+    // the Slack adapter set replyToBotMessageId for every threaded reply
+    // regardless of parent author. Once the adapter correctly populates
+    // replyToOtherMessageId from parent_user_id, this gate fires and the bot
+    // stays out of the human-to-human side-conversation.
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({
+        authorId: 'rio',
+        text: 'i finished the cancellation work',
+        thread: 'jiyoung-thread-root-ts',
+        replyToBotMessageId: null,
+        replyToOtherMessageId: 'jiyoung-thread-root-ts',
+      }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('rio')],
+    })
+    expect(decision).toBe('observe')
+  })
+
   test('mention-of-us still engages even when the message also tags others', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({

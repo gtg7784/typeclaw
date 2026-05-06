@@ -75,22 +75,31 @@ export function classifyInbound(
   const isBotMention = hasGroupMention || rawText.includes(`<@${context.botUserId}>`)
   const thread = event.thread_ts ?? (!isDm && isBotMention ? event.ts : null)
 
-  // thread_ts identifies the parent message of a thread. We can only know it
-  // is a reply to the bot if we recognize the bot's own user id and have a
-  // thread_ts that differs from the event ts (the parent message itself
-  // shares its ts with thread_ts).
-  const replyToBotMessageId = event.thread_ts !== undefined && event.thread_ts !== event.ts ? event.thread_ts : null
+  // A reply is "to the bot" only when the thread parent was authored by the
+  // bot. Slack surfaces the parent author via `parent_user_id` on every
+  // reply event; without that match we don't know who authored the parent
+  // and MUST NOT engage on the `reply` trigger — otherwise every threaded
+  // reply between two humans (or two peer bots) wakes us up. The thread
+  // root itself shares its ts with thread_ts and carries no parent_user_id.
+  const isReply = event.thread_ts !== undefined && event.thread_ts !== event.ts
+  const replyToBotMessageId =
+    isReply && context.botUserId !== null && event.parent_user_id === context.botUserId ? event.thread_ts! : null
 
   const mentionedUserIds = extractMentionedUserIds(rawText)
   const mentionsOthers = mentionedUserIds.length > 0 && !mentionedUserIds.includes(context.botUserId)
 
-  // Slack does not surface the parent message's author on `event`, so we
-  // cannot positively identify a reply-to-other from the inbound alone.
-  // Leaving this null keeps the contract honest — the engagement layer's
-  // mention-based suppressor still covers the common case of "@-someone
-  // in a thread reply", and the solo-human fallback only matters in
-  // 1-human channels where there is no "other" human to reply to anyway.
-  const replyToOtherMessageId: string | null = null
+  // Symmetric to `replyToBotMessageId` above: a reply whose parent author
+  // is identifiable AND is not the bot is a reply-to-other. The engagement
+  // layer uses this to suppress the solo-human fallback so the bot stays
+  // quiet when two humans (or a peer bot and a human) hold a thread side-
+  // conversation in a busy channel — the exact incident this fix addresses.
+  const replyToOtherMessageId =
+    isReply &&
+    event.parent_user_id !== undefined &&
+    event.parent_user_id !== '' &&
+    event.parent_user_id !== context.botUserId
+      ? event.thread_ts!
+      : null
 
   // Slack signals "this message was authored by a bot" via either a non-empty
   // bot_id or subtype === 'bot_message'. Either is sufficient.
