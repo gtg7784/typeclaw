@@ -1,3 +1,4 @@
+import { matchesAnyAlias } from '@/channels/engagement'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
@@ -18,6 +19,15 @@ export type InboundClassification =
 export type SlackInboundContext = {
   teamId: string
   botUserId: string | null
+  // Lowered self-aliases (`alias` from typeclaw.json plus the implicit
+  // basename(agentDir)). When a top-level message contains one of these
+  // but no `<@bot>` mention, the classifier still anchors `thread` on
+  // `event.ts` so the bot's reply lands in a thread under the user's
+  // message instead of as a fragmented top-level post. Optional for
+  // backward compatibility — omitted means "behave like before, no
+  // alias-driven thread anchoring". The router's `computeSelfAliases`
+  // is the source of truth; the adapter just forwards it.
+  selfAliases?: readonly string[]
 }
 
 // All decision logic for "should this Socket Mode message event be routed to
@@ -73,7 +83,15 @@ export function classifyInbound(
   // without any new config surface.
   const hasGroupMention = GROUP_MENTION_PATTERN.test(rawText)
   const isBotMention = hasGroupMention || rawText.includes(`<@${context.botUserId}>`)
-  const thread = event.thread_ts ?? (!isDm && isBotMention ? event.ts : null)
+  // Top-level alias addressing (e.g. "윙키야") is engagement-equivalent
+  // to a `<@bot>` mention (see engagement.ts: alias is unconditional and
+  // ranks alongside explicit triggers). Anchor `thread` on the inbound
+  // ts in that case too, so the bot's reply threads under the user's
+  // message rather than landing as a sibling top-level post. Mention
+  // wins the OR short-circuit; alias matching only runs when no @ was
+  // found, keeping the cost negligible in mention-heavy channels.
+  const aliasMatched = !isBotMention && matchesAnyAlias(rawText, context.selfAliases ?? [])
+  const thread = event.thread_ts ?? (!isDm && (isBotMention || aliasMatched) ? event.ts : null)
 
   // A reply is "to the bot" only when the thread parent was authored by the
   // bot. Slack surfaces the parent author via `parent_user_id` on every

@@ -27,6 +27,7 @@ function fakeRouter(
     registerFetchAttachment: () => {},
     unregisterFetchAttachment: () => {},
     fetchAttachment: async () => ({ ok: false, error: 'fetch-attachment-not-supported' }),
+    getSelfAliases: () => [],
     stop: async () => {},
     liveCount: () => 0,
   }

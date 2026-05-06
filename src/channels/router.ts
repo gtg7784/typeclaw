@@ -230,6 +230,11 @@ export type ChannelRouter = {
   registerFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   unregisterFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   fetchAttachment: (adapter: ChannelKey['adapter'], args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
+  // Lowered self-aliases (configured + implicit dir-name). Adapters use
+  // this to anchor outbound threading on alias-only inbounds — see
+  // slack-bot-classify.ts. Read live so a reload of `alias` propagates
+  // to adapters without a restart.
+  getSelfAliases: () => readonly string[]
   stop: () => Promise<void>
   liveCount: () => number
   __testing?: {
@@ -1247,6 +1252,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerFetchAttachment,
     unregisterFetchAttachment,
     fetchAttachment,
+    getSelfAliases: computeSelfAliases,
     stop,
     liveCount: () => liveSessions.size,
     __testing: {

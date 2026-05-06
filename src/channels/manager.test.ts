@@ -239,6 +239,43 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
     expect(prompts[prompts.length - 1]).toContain('윙키야')
   })
 
+  test('forwards selfAliasesRef to the slack adapter so the classifier can anchor threads on alias-only inbounds', async () => {
+    // given: a manager wired with `aliasesRef` returning ["윙키", "winky"]
+    //   AND a `createSlackAdapter` test seam that captures the options the
+    //   manager passes. The point of this test is the wiring itself: if a
+    //   future refactor drops `selfAliasesRef` from manager.ts, every
+    //   adapter-side and router-side test still passes (the seams keep
+    //   their own fake aliases), but the production thread-anchoring path
+    //   silently regresses. This test fails the moment that wiring
+    //   disappears, so it's the only mutation guard between manager.ts
+    //   and slack-bot-classify.ts.
+    cfg['slack-bot'] = enabledAdapterCfg()
+    let captured: { selfAliasesRef?: () => readonly string[] } | undefined
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      aliasesRef: () => ['윙키', 'winky'],
+      env: { SLACK_BOT_TOKEN: 'xoxb-a', SLACK_APP_TOKEN: 'xapp-b' },
+      createSlackAdapter: (opts) => {
+        captured = opts
+        return makeFakeAdapter()
+      },
+    })
+
+    // when: the adapter is constructed at start
+    await mgr.start()
+
+    // then: the captured options carry a live selfAliasesRef whose result
+    //   includes both the configured aliases AND the implicit dir-name
+    //   alias the router seeds at construction (basename(agentDir))
+    expect(captured?.selfAliasesRef).toBeDefined()
+    const aliases = captured!.selfAliasesRef!()
+    expect(aliases).toContain('윙키')
+    expect(aliases).toContain('winky')
+
+    await mgr.stop()
+  })
+
   test('stops discord adapter when DISCORD_BOT_TOKEN disappears (parity with slack)', async () => {
     cfg['discord-bot'] = enabledAdapterCfg()
     const fake = makeFakeAdapter()
