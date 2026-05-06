@@ -15,3 +15,4 @@ export {
   checkSkillAuthoringGuard,
   isSkillAuthoringAllowed,
 } from './policies/skill-authoring'
+export { GUARD_UNCOMMITTED_CHANGES, checkUncommittedChangesAdvice } from './policies/uncommitted-changes'
