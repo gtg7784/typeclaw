@@ -214,7 +214,7 @@ export async function planStart({
   const devSourcePath = await detectDevSource(cwd)
   const mounts = await loadMounts(cwd)
 
-  const runArgs = ['run', '-d', '--name', containerName, '--rm', '-p', `${hostPort}:${CONTAINER_PORT}`]
+  const runArgs = ['run', '-d', '--name', containerName, '--rm', '-p', `127.0.0.1:${hostPort}:${CONTAINER_PORT}`]
 
   if (hostdControl) {
     runArgs.push('--add-host', HOST_GATEWAY_ALIAS)
