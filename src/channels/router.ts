@@ -9,6 +9,13 @@ import { createCommandRegistry } from '@/commands'
 import type { HookBus } from '@/plugin'
 
 import { decideEngagement, grantStickyForReplyTargets, StickyLedger, type EngagementDecision } from './engagement'
+import {
+  MEMBERSHIP_COLD_FETCH_TIMEOUT_MS,
+  type MembershipCount,
+  type MembershipResolver,
+  type MembershipResolverResult,
+} from './membership'
+import { createMembershipCache, type MembershipCache } from './membership-cache'
 import { updateParticipants } from './participants'
 import {
   channelsSessionsPath,
@@ -177,6 +184,7 @@ type LiveSession = {
   recentEngagedPeerBotTurns: { authorId: string; ts: number }[]
   consecutiveEngagedPeerBotTurns: number
   loopGuardActive: boolean
+  membershipFetch: Promise<MembershipCount | null> | null
   destroyed: boolean
 }
 
@@ -200,6 +208,8 @@ export type ChannelRouter = {
   unregisterTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   registerChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
   unregisterChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
+  registerMembership: (adapter: ChannelKey['adapter'], resolver: MembershipResolver) => void
+  unregisterMembership: (adapter: ChannelKey['adapter'], resolver: MembershipResolver) => void
   registerHistory: (adapter: ChannelKey['adapter'], cb: HistoryCallback) => void
   unregisterHistory: (adapter: ChannelKey['adapter'], cb: HistoryCallback) => void
   fetchHistory: (adapter: ChannelKey['adapter'], args: FetchHistoryArgs) => Promise<FetchHistoryResult>
@@ -231,6 +241,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
+  const membershipResolvers = new Map<ChannelKey['adapter'], Set<MembershipResolver>>()
+  const membershipCaches = new Map<ChannelKey['adapter'], MembershipCache>()
   const historyCallbacks = new Map<ChannelKey['adapter'], Set<HistoryCallback>>()
   const stickyLedger = new StickyLedger()
   const commands = createCommandRegistry<ChannelCommandContext>([
@@ -303,6 +315,64 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return merged
   }
 
+  const readMembership = (key: ChannelKey): MembershipCount | null => {
+    if (key.workspace === '@dm') return dmMembership(now())
+    return membershipCaches.get(key.adapter)?.get(key) ?? null
+  }
+
+  const warmMembership = (key: ChannelKey): Promise<MembershipCount | null> | null => {
+    if (key.workspace === '@dm') return Promise.resolve(dmMembership(now()))
+    const cache = membershipCaches.get(key.adapter)
+    if (cache === undefined) return null
+    return cache.warmUp(key)
+  }
+
+  const resolveThroughRegisteredMembership = async (key: ChannelKey): Promise<MembershipResolverResult> => {
+    const resolvers = membershipResolvers.get(key.adapter)
+    if (!resolvers || resolvers.size === 0) return { kind: 'transient' }
+    const snapshot = Array.from(resolvers)
+    let lastFailure: MembershipResolverResult = { kind: 'transient' }
+    for (const resolver of snapshot) {
+      const result = await resolver(key)
+      if ('humans' in result) return result
+      lastFailure = result
+    }
+    return lastFailure
+  }
+
+  const membershipForPrompt = async (
+    key: ChannelKey,
+    fetchPromise: Promise<MembershipCount | null> | null,
+  ): Promise<MembershipCount | null> => {
+    if (key.workspace === '@dm') return dmMembership(now())
+    const cached = readMembership(key)
+    if (cached !== null) return cached
+    if (fetchPromise === null) return null
+    return await withMembershipTimeout(fetchPromise, key, logger)
+  }
+
+  const membershipForEngagement = async (live: LiveSession): Promise<MembershipCount | null> => {
+    if (live.key.workspace === '@dm') return dmMembership(now())
+    const cache = membershipCaches.get(live.key.adapter)
+    if (cache === undefined) return null
+
+    const cached = cache.read(live.key)
+    if (cached.kind === 'hit') return cached.membership
+    if (cached.kind === 'stale') {
+      void cache.warmUp(live.key).catch((err) => {
+        logger.warn(`[channels] membership refresh failed for ${live.keyId}: ${describe(err)}`)
+      })
+      return cached.membership
+    }
+
+    const fetchPromise = live.membershipFetch ?? warmMembership(live.key)
+    live.membershipFetch = fetchPromise
+    if (fetchPromise === null) return null
+    const membership = await withMembershipTimeout(fetchPromise, live.key, logger)
+    if (live.membershipFetch === fetchPromise) live.membershipFetch = null
+    return membership
+  }
+
   const ensureLive = async (key: ChannelKey, triggeringMessageId?: string): Promise<LiveSession> => {
     const keyId = channelKeyId(key)
     const existing = liveSessions.get(keyId)
@@ -315,7 +385,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       await ensureLoaded()
       const record = mappings ? findRecord(mappings, key) : undefined
       const participants = (record?.participants ?? []) as ChannelParticipant[]
+      const membershipFetch = warmMembership(key)
       const resolvedNames = await resolveChannelNames(key)
+      const membership = await membershipForPrompt(key, membershipFetch)
       const origin: SessionOrigin = {
         kind: 'channel',
         adapter: key.adapter,
@@ -325,6 +397,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         ...(resolvedNames.chatName !== undefined ? { chatName: resolvedNames.chatName } : {}),
         thread: key.thread,
         participants,
+        ...(membership !== null ? { membership } : {}),
       }
 
       const isColdStart = record?.sessionId === undefined
@@ -388,6 +461,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         recentEngagedPeerBotTurns: [],
         consecutiveEngagedPeerBotTurns: 0,
         loopGuardActive: false,
+        membershipFetch,
         destroyed: false,
       }
       liveSessions.set(keyId, live)
@@ -501,16 +575,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     await persist()
   }
 
-  const regenerateOrigin = (live: LiveSession): SessionOrigin => ({
-    kind: 'channel',
-    adapter: live.key.adapter,
-    workspace: live.key.workspace,
-    ...(live.resolvedNames.workspaceName !== undefined ? { workspaceName: live.resolvedNames.workspaceName } : {}),
-    chat: live.key.chat,
-    ...(live.resolvedNames.chatName !== undefined ? { chatName: live.resolvedNames.chatName } : {}),
-    thread: live.key.thread,
-    participants: live.participants,
-  })
+  const regenerateOrigin = (live: LiveSession): SessionOrigin => buildLiveOrigin(live)
 
   const fireTyping = async (live: LiveSession): Promise<void> => {
     const callbacks = typingCallbacks.get(live.key.adapter)
@@ -566,17 +631,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
-  const buildLiveOrigin = (live: LiveSession): SessionOrigin => ({
-    kind: 'channel',
-    adapter: live.key.adapter,
-    workspace: live.key.workspace,
-    ...(live.resolvedNames.workspaceName !== undefined ? { workspaceName: live.resolvedNames.workspaceName } : {}),
-    chat: live.key.chat,
-    ...(live.resolvedNames.chatName !== undefined ? { chatName: live.resolvedNames.chatName } : {}),
-    thread: live.key.thread,
-    ...(live.currentTurnAuthorId !== null ? { lastInboundAuthorId: live.currentTurnAuthorId } : {}),
-    participants: live.participants,
-  })
+  const buildLiveOrigin = (live: LiveSession): SessionOrigin => {
+    const membership = readMembership(live.key)
+    return {
+      kind: 'channel',
+      adapter: live.key.adapter,
+      workspace: live.key.workspace,
+      ...(live.resolvedNames.workspaceName !== undefined ? { workspaceName: live.resolvedNames.workspaceName } : {}),
+      chat: live.key.chat,
+      ...(live.resolvedNames.chatName !== undefined ? { chatName: live.resolvedNames.chatName } : {}),
+      thread: live.key.thread,
+      ...(live.currentTurnAuthorId !== null ? { lastInboundAuthorId: live.currentTurnAuthorId } : {}),
+      participants: live.participants,
+      ...(membership !== null ? { membership } : {}),
+    }
+  }
 
   const fireSessionEnd = async (live: LiveSession): Promise<void> => {
     if (!live.hooks) return
@@ -707,6 +776,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     )
     void persistParticipants(live)
 
+    const membership = await membershipForEngagement(live)
+
     const decision: EngagementDecision = decideEngagement({
       message: event,
       config: adapterConfig.engagement,
@@ -714,6 +785,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ledger: stickyLedger,
       now: now(),
       participants: live.participants,
+      membership,
     })
 
     if (decision === 'observe') {
@@ -828,6 +900,28 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const unregisterChannelNameResolver = (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver): void => {
     channelNameResolvers.get(adapter)?.delete(resolver)
+  }
+
+  const registerMembership = (adapter: ChannelKey['adapter'], resolver: MembershipResolver): void => {
+    let set = membershipResolvers.get(adapter)
+    if (!set) {
+      set = new Set()
+      membershipResolvers.set(adapter, set)
+    }
+    set.add(resolver)
+    if (!membershipCaches.has(adapter)) {
+      membershipCaches.set(
+        adapter,
+        createMembershipCache({ resolver: resolveThroughRegisteredMembership, now, logger }),
+      )
+    }
+  }
+
+  const unregisterMembership = (adapter: ChannelKey['adapter'], resolver: MembershipResolver): void => {
+    membershipResolvers.get(adapter)?.delete(resolver)
+    if ((membershipResolvers.get(adapter)?.size ?? 0) === 0) {
+      membershipCaches.delete(adapter)
+    }
   }
 
   const registerHistory = (adapter: ChannelKey['adapter'], cb: HistoryCallback): void => {
@@ -1015,6 +1109,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     unregisterTyping,
     registerChannelNameResolver,
     unregisterChannelNameResolver,
+    registerMembership,
+    unregisterMembership,
     registerHistory,
     unregisterHistory,
     fetchHistory,
@@ -1155,6 +1251,31 @@ function tryOpenSessionManager(
 
 function consecutiveSendKey(chat: string, thread: string | null | undefined): string {
   return `${chat}:${thread ?? ''}`
+}
+
+function dmMembership(fetchedAt: number): MembershipCount {
+  return { humans: 1, bots: 1, fetchedAt, truncated: false }
+}
+
+async function withMembershipTimeout(
+  promise: Promise<MembershipCount | null>,
+  key: ChannelKey,
+  logger: RouterLogger,
+): Promise<MembershipCount | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      logger.warn(
+        `[channels] ${channelKeyId(key)}: membership cold fetch timed out after ${MEMBERSHIP_COLD_FETCH_TIMEOUT_MS}ms`,
+      )
+      resolve(null)
+    }, MEMBERSHIP_COLD_FETCH_TIMEOUT_MS)
+  })
+  try {
+    return await Promise.race([promise, timeout])
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+  }
 }
 
 function latestAssistantText(session: AgentSession): string | null {

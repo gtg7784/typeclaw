@@ -2,7 +2,13 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ChannelParticipant } from '@/agent/session-origin'
 
-import { decideEngagement, grantStickyForReplyTargets, StickyLedger } from './engagement'
+import {
+  decideEngagement as decideEngagementRaw,
+  grantStickyForReplyTargets,
+  resolveEffectiveHumans,
+  StickyLedger,
+  type EngagementInput,
+} from './engagement'
 import type { EngagementConfig } from './schema'
 import type { InboundMessage } from './types'
 
@@ -24,6 +30,12 @@ function participant(authorId: string, lastMessageAt = 0): ChannelParticipant {
 }
 
 const crowded: readonly ChannelParticipant[] = [participant('alice'), participant('bob')]
+
+function decideEngagement(
+  input: Omit<EngagementInput, 'membership'> & Partial<Pick<EngagementInput, 'membership'>>,
+): ReturnType<typeof decideEngagementRaw> {
+  return decideEngagementRaw({ membership: null, ...input })
+}
 
 function inbound(over: Partial<InboundMessage> = {}): InboundMessage {
   return {
@@ -356,6 +368,95 @@ describe('decideEngagement (solo-human fallback)', () => {
       participants: [participant('alice'), participant('bob'), { ...participant('peer1'), isBot: true }],
     })
     expect(twoHumans).toBe('observe')
+  })
+
+  test('observes lurker channels when fresh exact membership has two humans', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 10_000,
+      participants: [
+        participant('alice'),
+        { ...participant('peer1'), isBot: true },
+        { ...participant('peer2'), isBot: true },
+      ],
+      membership: { humans: 2, bots: 2, fetchedAt: 10_000, truncated: false },
+    })
+
+    expect(decision).toBe('observe')
+  })
+
+  test('preserves legacy solo fallback when membership is unavailable', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice'), { ...participant('peer1'), isBot: true }],
+      membership: null,
+    })
+
+    expect(decision).toBe('engage')
+  })
+
+  test('fresh exact membership wins when persisted speakers have left', () => {
+    expect(resolveEffectiveHumans(3, { humans: 1, bots: 1, fetchedAt: 20_000, truncated: false }, 20_000)).toBe(1)
+  })
+
+  test('truncated and stale membership fall back to the max count', () => {
+    expect(resolveEffectiveHumans(2, { humans: 1, bots: 1, fetchedAt: 0, truncated: true }, 10_000)).toBe(2)
+    expect(resolveEffectiveHumans(2, { humans: 1, bots: 1, fetchedAt: 0, truncated: false }, 120_000)).toBe(2)
+  })
+
+  test('large truncated channels observe even with one persisted human', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [participant('alice')],
+      membership: { humans: 30, bots: 5, fetchedAt: 0, truncated: true },
+    })
+
+    expect(decision).toBe('observe')
+  })
+
+  test('peer bots never qualify for fallback even with bot-only membership', () => {
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'peer1', authorName: 'peer1', authorIsBot: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 0,
+      participants: [{ ...participant('peer1'), isBot: true }],
+      membership: { humans: 0, bots: 5, fetchedAt: 0, truncated: false },
+    })
+
+    expect(decision).toBe('observe')
+  })
+
+  test('sticky credit still bypasses high membership counts', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: [participant('alice')],
+      membership: { humans: 50, bots: 5, fetchedAt: 1000, truncated: false },
+    })
+
+    expect(decision).toBe('engage')
   })
 })
 

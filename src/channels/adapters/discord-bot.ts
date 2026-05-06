@@ -1,3 +1,10 @@
+import {
+  MEMBERSHIP_ENUMERATION_CAP,
+  type MembershipCount,
+  type MembershipResolver,
+  type MembershipResolverFailure,
+  type MembershipResolverResult,
+} from '@/channels/membership'
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type {
@@ -105,6 +112,107 @@ export function createTypingCallback(deps: {
 }
 
 export const DISCORD_HISTORY_LIMIT_MAX = 100
+
+type DiscordGuildPreview = {
+  approximate_member_count?: number
+}
+
+type DiscordGuildMember = {
+  user?: { id?: string; bot?: boolean }
+}
+
+export function createDiscordMembershipResolver(deps: {
+  token: string
+  logger: DiscordBotAdapterLogger
+  botUserIdRef?: () => string | null
+  fetchImpl?: typeof fetch
+  now?: () => number
+}): MembershipResolver {
+  const fetchFn = deps.fetchImpl ?? fetch
+  const now = deps.now ?? Date.now
+  return async (key): Promise<MembershipResolverResult> => {
+    if (key.workspace === '@dm') return { humans: 1, bots: 1, fetchedAt: now(), truncated: false }
+
+    const preview = await fetchDiscordJson<DiscordGuildPreview>(
+      fetchFn,
+      `${DISCORD_API_BASE}/guilds/${key.workspace}/preview`,
+      deps.token,
+    )
+    if (!preview.ok) {
+      deps.logger.warn(`[discord-bot] membership preview guild=${key.workspace} failed: ${preview.reason}`)
+      return preview.failure
+    }
+
+    const approximate = Math.max(0, Math.floor(preview.value.approximate_member_count ?? 0))
+    if (approximate > MEMBERSHIP_ENUMERATION_CAP) {
+      return approximateDiscordMembership(approximate, deps.botUserIdRef?.() ?? null, now())
+    }
+
+    const members = await fetchDiscordJson<DiscordGuildMember[]>(
+      fetchFn,
+      `${DISCORD_API_BASE}/guilds/${key.workspace}/members?limit=100`,
+      deps.token,
+    )
+    if (!members.ok) {
+      if (members.status === 403) {
+        deps.logger.warn(
+          `[discord-bot] membership members guild=${key.workspace} status=403; falling back to guild preview`,
+        )
+        return approximateDiscordMembership(approximate, deps.botUserIdRef?.() ?? null, now())
+      }
+      deps.logger.warn(`[discord-bot] membership members guild=${key.workspace} failed: ${members.reason}`)
+      return members.failure
+    }
+
+    let bots = 0
+    let humans = 0
+    for (const member of members.value) {
+      if (member.user?.bot === true) bots++
+      else humans++
+    }
+    return { humans, bots, fetchedAt: now(), truncated: false }
+  }
+}
+
+type DiscordFetchResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; status: number | null; reason: string; failure: MembershipResolverFailure }
+
+async function fetchDiscordJson<T>(fetchFn: typeof fetch, url: string, token: string): Promise<DiscordFetchResult<T>> {
+  let response: Response
+  try {
+    response = await fetchFn(url, { method: 'GET', headers: { Authorization: `Bot ${token}` } })
+  } catch (err) {
+    return { ok: false, status: null, reason: describe(err), failure: { kind: 'transient' } }
+  }
+  if (!response.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      reason: `http ${response.status}`,
+      failure: discordFailureForStatus(response.status),
+    }
+  }
+  try {
+    return { ok: true, value: (await response.json()) as T }
+  } catch (err) {
+    return { ok: false, status: null, reason: `parse failed: ${describe(err)}`, failure: { kind: 'transient' } }
+  }
+}
+
+function discordFailureForStatus(status: number): MembershipResolverFailure {
+  if (status === 401 || status === 403 || status === 404) return { kind: 'permanent' }
+  return { kind: 'transient' }
+}
+
+function approximateDiscordMembership(
+  approximate: number,
+  botUserId: string | null,
+  fetchedAt: number,
+): MembershipCount {
+  const bots = botUserId === null ? 0 : 1
+  return { humans: Math.max(0, approximate - bots), bots, fetchedAt, truncated: true }
+}
 
 type DiscordRawHistoryMessage = {
   id: string
@@ -330,6 +438,12 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
     botUserIdRef: () => botUserId,
   })
 
+  const membershipResolver = createDiscordMembershipResolver({
+    token: options.token,
+    logger,
+    botUserIdRef: () => botUserId,
+  })
+
   const outboundCallback = createOutboundCallback({
     client,
     configRef: options.configRef,
@@ -403,6 +517,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.registerTyping('discord-bot', typingCallback)
       options.router.registerChannelNameResolver('discord-bot', channelResolver)
       options.router.registerHistory('discord-bot', historyCallback)
+      options.router.registerMembership('discord-bot', membershipResolver)
 
       try {
         await listener.start()
@@ -420,6 +535,7 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       options.router.unregisterTyping('discord-bot', typingCallback)
       options.router.unregisterChannelNameResolver('discord-bot', channelResolver)
       options.router.unregisterHistory('discord-bot', historyCallback)
+      options.router.unregisterMembership('discord-bot', membershipResolver)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)

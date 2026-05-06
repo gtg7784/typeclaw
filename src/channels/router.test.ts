@@ -457,6 +457,51 @@ describe('ChannelRouter engagement and prompt composition', () => {
     await router.__testing!.flushDebounce(KEY)
     expect(sessions[0]!.prompts).toHaveLength(2)
   })
+
+  test('registered membership resolver gates first cold inbound before sticky can start', async () => {
+    const dir = await tempDir()
+    const { router, sessions, origins } = makeRouter(dir)
+    router.registerMembership('discord-bot', async () => ({
+      humans: 5,
+      bots: 2,
+      fetchedAt: Date.now(),
+      truncated: false,
+    }))
+
+    await router.route(inbound({ isBotMention: false, text: 'ambient hello' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(0)
+    expect(origins[0]).toMatchObject({ kind: 'channel', membership: { humans: 5, bots: 2, truncated: false } })
+  })
+
+  test('membership resolver failure preserves legacy null fallback', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerMembership('discord-bot', async () => ({ kind: 'transient' }))
+
+    await router.route(inbound({ isBotMention: false, text: 'solo hello' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sessions[0]!.prompts[0]).toContain('solo hello')
+  })
+
+  test('large approximate membership counts still quiet plain chatter', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerMembership('discord-bot', async () => ({
+      humans: 30,
+      bots: 5,
+      fetchedAt: Date.now(),
+      truncated: true,
+    }))
+
+    await router.route(inbound({ isBotMention: false, text: 'ambient hello' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(0)
+  })
 })
 
 describe('ChannelRouter sticky credits', () => {

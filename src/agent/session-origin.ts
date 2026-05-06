@@ -1,3 +1,4 @@
+import { MEMBERSHIP_FRESHNESS_MS, type MembershipCount } from '@/channels/membership'
 import type { AdapterId } from '@/channels/schema'
 
 export type ChannelParticipant = {
@@ -32,6 +33,7 @@ export type SessionOrigin =
       thread: string | null
       lastInboundAuthorId?: string
       participants?: readonly ChannelParticipant[]
+      membership?: MembershipCount
     }
   | { kind: 'subagent'; subagent: string; parentSessionId: string }
 
@@ -96,6 +98,7 @@ function renderChannelOrigin(
     chatName?: string
     thread: string | null
     participants?: readonly ChannelParticipant[]
+    membership?: MembershipCount
   },
   now: number,
 ): string {
@@ -159,10 +162,31 @@ function renderChannelOrigin(
   )
 
   const participantsBlock = renderParticipants(origin.participants ?? [], now)
+  const membershipLine = renderMembershipSummary(origin, now)
+  if (membershipLine !== null) lines.push('', membershipLine)
   if (participantsBlock) lines.push('', participantsBlock)
 
   lines.push('', 'Be concise; chat clients punish multi-paragraph replies.')
   return lines.join('\n')
+}
+
+function renderMembershipSummary(
+  origin: { adapter: AdapterId; workspace: string; membership?: MembershipCount },
+  now: number,
+): string | null {
+  const membership = origin.membership
+  if (membership === undefined) return null
+
+  const total = membership.humans + membership.bots
+  const caveat =
+    origin.adapter === 'discord-bot' && origin.workspace !== '@dm'
+      ? ' (Note: this is the count of guild members; private channels with permission overwrites may have fewer actual viewers.)'
+      : ''
+  const isExact = !membership.truncated && now - membership.fetchedAt < MEMBERSHIP_FRESHNESS_MS
+  if (isExact) {
+    return `This channel has ${total} members: ${membership.humans} humans, ${membership.bots} bots.${caveat} The 10 most recent speakers are listed below.`
+  }
+  return `This channel has approximately ${total} members (about ${membership.humans} humans, ${membership.bots} bots — the bot count is approximate, the full member list was not enumerated because it exceeds the 50-member cap).${caveat} The 10 most recent speakers are listed below.`
 }
 
 function renderMentionExample(

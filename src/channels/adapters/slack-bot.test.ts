@@ -12,6 +12,7 @@ import type {
 import {
   createOutboundCallback,
   createSlackHistoryCallback,
+  createSlackMembershipResolver,
   createTypingCallback,
   promoteAppMentionToMessage,
   SLACK_HISTORY_LIMIT_MAX,
@@ -164,6 +165,113 @@ describe('slack-bot createTypingCallback', () => {
     // then
     expect(calls).toHaveLength(0)
     expect(infos).toHaveLength(0)
+  })
+})
+
+describe('createSlackMembershipResolver', () => {
+  type FetchCall = { url: string; init: RequestInit }
+
+  function fakeFetch(responses: Response[]): { fn: typeof fetch; calls: FetchCall[] } {
+    const calls: FetchCall[] = []
+    const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push({ url, init: init ?? {} })
+      return responses.shift() ?? slackResponse({ ok: false, error: 'rate_limited' })
+    }) as unknown as typeof fetch
+    return { fn, calls }
+  }
+
+  function slackResponse(value: unknown): Response {
+    return new Response(JSON.stringify(value), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }
+
+  function silentLogger() {
+    return { info: () => {}, warn: () => {}, error: () => {} }
+  }
+
+  test('DM short-circuits without hitting Slack', async () => {
+    const { fn, calls } = fakeFetch([])
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      fetchImpl: fn,
+      now: () => 10,
+    })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: '@dm', chat: 'D1', thread: null })).resolves.toEqual({
+      humans: 1,
+      bots: 1,
+      fetchedAt: 10,
+      truncated: false,
+    })
+    expect(calls).toHaveLength(0)
+  })
+
+  test('small channel enumerates members and classifies bots with users.info', async () => {
+    const { fn, calls } = fakeFetch([
+      slackResponse({ ok: true, channel: { num_members: 3 } }),
+      slackResponse({ ok: true, members: ['U1', 'B1', 'U2'] }),
+      slackResponse({ ok: true, user: { is_bot: false } }),
+      slackResponse({ ok: true, user: { is_bot: true } }),
+      slackResponse({ ok: true, user: { is_bot: false } }),
+    ])
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      fetchImpl: fn,
+      now: () => 20,
+    })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toEqual({
+      humans: 2,
+      bots: 1,
+      fetchedAt: 20,
+      truncated: false,
+    })
+    expect(calls.map((c) => c.url)).toEqual([
+      'https://slack.com/api/conversations.info',
+      'https://slack.com/api/conversations.members',
+      'https://slack.com/api/users.info',
+      'https://slack.com/api/users.info',
+      'https://slack.com/api/users.info',
+    ])
+  })
+
+  test('large channel uses conversations.info approximation', async () => {
+    const { fn, calls } = fakeFetch([slackResponse({ ok: true, channel: { num_members: 80 } })])
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      fetchImpl: fn,
+      botUserIdRef: () => 'UBOT',
+      now: () => 30,
+    })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toEqual({
+      humans: 79,
+      bots: 1,
+      fetchedAt: 30,
+      truncated: true,
+    })
+    expect(calls).toHaveLength(1)
+  })
+
+  test('missing-scope style errors return permanent failures', async () => {
+    const { fn } = fakeFetch([slackResponse({ ok: false, error: 'missing_scope' })])
+    const resolver = createSlackMembershipResolver({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toEqual({
+      kind: 'permanent',
+    })
+  })
+
+  test('rate-limit style errors return transient failures', async () => {
+    const { fn } = fakeFetch([slackResponse({ ok: false, error: 'rate_limited' })])
+    const resolver = createSlackMembershipResolver({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toEqual({
+      kind: 'transient',
+    })
   })
 })
 

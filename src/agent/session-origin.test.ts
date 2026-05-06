@@ -356,4 +356,82 @@ describe('renderSessionOrigin', () => {
     })
     expect(out).toContain('"workspace": "@dm"')
   })
+
+  test('channel origin renders exact Slack membership summary', () => {
+    const now = 100_000
+    const out = renderSessionOrigin(
+      {
+        kind: 'channel',
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        thread: null,
+        membership: { humans: 12, bots: 35, fetchedAt: now, truncated: false },
+      },
+      now,
+    )
+
+    expect(out).toContain('This channel has 47 members: 12 humans, 35 bots.')
+    expect(out).toContain('The 10 most recent speakers are listed below.')
+    expect(out).not.toContain('guild members')
+  })
+
+  test('channel origin renders Discord guild-level caveat for exact counts', () => {
+    const now = 100_000
+    const out = renderSessionOrigin(
+      {
+        kind: 'channel',
+        adapter: 'discord-bot',
+        workspace: 'G0',
+        chat: 'C0',
+        thread: null,
+        membership: { humans: 12, bots: 35, fetchedAt: now, truncated: false },
+      },
+      now,
+    )
+
+    expect(out).toContain('This channel has 47 members: 12 humans, 35 bots.')
+    expect(out).toContain('this is the count of guild members')
+  })
+
+  test('channel origin renders large-channel truncated summary', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+      membership: { humans: 195, bots: 5, fetchedAt: 0, truncated: true },
+    })
+
+    expect(out).toContain('approximately 200 members (about 195 humans, 5 bots')
+    expect(out).toContain('exceeds the 50-member cap')
+  })
+
+  test('channel origin adds Discord caveat to truncated summaries', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: 'G0',
+      chat: 'C0',
+      thread: null,
+      membership: { humans: 195, bots: 5, fetchedAt: 0, truncated: true },
+    })
+
+    expect(out).toContain('approximately 200 members')
+    expect(out).toContain('private channels with permission overwrites')
+  })
+
+  test('channel origin omits member summary when membership is missing', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    })
+
+    expect(out).not.toContain('This channel has')
+    expect(out).not.toContain('members:')
+  })
 })
