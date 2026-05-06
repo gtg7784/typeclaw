@@ -131,6 +131,30 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('watermark')
   })
 
+  test('declares a separate trailing watermark marker (not stamped on the last fragment)', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/<!-- watermark source=.+ entry=.+ -->/)
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/last marker|trailing watermark|after.*fragments/)
+  })
+
+  test('forbids stamping every fragment with the same "latest evaluated" entry id (the winky bug)', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/per-fragment|each fragment.*own entry|do not stamp every fragment/i)
+  })
+
+  test('explains that fragment entry= is the evidence anchor, not the latest evaluated entry', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/anchors.*evidence|specific.*entry that anchors/i)
+  })
+
+  test('explains that the watermark entry= is the latest evaluated entry, regardless of fragment anchors', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/latest.*entry.*evaluated|regardless.*anchored/i)
+  })
+
+  test('requires exactly one watermark marker per run (never zero, never multiple)', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/exactly one.*watermark|one watermark per run/i)
+  })
+
   test('forbids quoting credential values verbatim and explains why', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toMatch(/never quote secret values|never quote credential values/i)
@@ -282,7 +306,7 @@ describe('memoryLoggerSubagent', () => {
     expect(runSessionCalls[0]!.userPrompt!).toContain('watermrk')
   })
 
-  test('handler instructs the subagent to advance the watermark even when nothing is worth remembering', async () => {
+  test('handler instructs the subagent to write a trailing watermark marker on every run', async () => {
     const agentDir = makeAgentDir()
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
@@ -292,7 +316,23 @@ describe('memoryLoggerSubagent', () => {
       agentDir,
     )
 
-    expect(runSessionCalls[0]!.userPrompt!.toLowerCase()).toMatch(/bare watermark|advance the watermark/)
+    const prompt = runSessionCalls[0]!.userPrompt!
+    expect(prompt).toMatch(/<!-- watermark source=ses_abc entry=<latestEntryId> -->/)
+    expect(prompt.toLowerCase()).toMatch(/regardless of how many fragments|trailing watermark/)
+  })
+
+  test('handler instructs the subagent that each fragment carries its own evidence-anchor entry id', async () => {
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+
+    const { runSessionCalls } = await invokeWith(
+      { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+      agentDir,
+    )
+
+    const prompt = runSessionCalls[0]!.userPrompt!
+    expect(prompt.toLowerCase()).toMatch(/per-fragment provenance|specific transcript entry that anchors/i)
   })
 
   test('handler points the subagent at MEMORY.md so it can read existing memory first', async () => {

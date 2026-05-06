@@ -102,7 +102,7 @@ Each fragment is an HTML comment marker followed by a topic heading and a body:
 \`\`\`
 
 - \`source\` is the parent session id from the user message.
-- \`entry\` is the stable id of the latest transcript entry that justifies this fragment. This double-duties as the watermark — see below.
+- \`entry\` is the stable id of the **specific** transcript entry that anchors this fragment's evidence. Each fragment carries its own entry id — do not stamp every fragment with the same "latest evaluated" id. The provenance is per-fragment.
 - \`<topic>\` is a short noun phrase naming what the fragment is about.
 
 The body is the substance of the fragment. The form is flexible, but every body must satisfy two requirements:
@@ -135,12 +135,17 @@ Separate fragments with a blank line.
 
 # Watermark contract
 
-You must record the latest transcript entry id you considered, even when you write zero fragments. The user message will tell you exactly how:
+The watermark is a separate concern from per-fragment provenance. After all fragments (or zero of them), append exactly one trailing watermark marker that records the latest transcript entry id you considered. This marker is what prevents you from re-reading the same transcript prefix on the next run.
 
-- If you write at least one fragment, the \`entry=\` on your last-written fragment must reflect the latest transcript entry you evaluated.
-- If you write zero fragments, append a single bare watermark marker (no body, no topic) recording that latest entry id. The user message gives the exact shape.
+\`\`\`
+<!-- watermark source=<sessionId> entry=<latestEntryId> -->
+\`\`\`
 
-Never exit without either a new fragment or a new watermark marker. The watermark is what prevents you from re-reading the same transcript prefix on the next run.
+- The watermark's \`entry=\` is the latest transcript entry you evaluated, **regardless of which entries actually anchored fragments**. You may have evaluated 50 entries and written 2 fragments anchored to entries 5 and 23; the watermark is still the latest of the 50.
+- The watermark must always be the **last** marker in your appended output, after any fragments.
+- Write exactly one watermark per run, never more.
+
+Never exit without a new watermark marker. Never reuse the watermark trick of stamping a fragment's \`entry=\` with the latest evaluated entry — fragments carry per-evidence provenance, and the watermark is its own marker.
 
 # Stopping
 
@@ -164,9 +169,11 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
     '',
     'Read MEMORY.md and the daily stream file first to learn what is already remembered. Then read the transcript past the watermark. Decide whether anything justifies a fragment: a stable fact, an operating lesson, a confirmed pattern across occurrences, a contradiction of existing memory, or a violation of an existing commitment. Sometimes the answer is zero fragments; sometimes more than one. Each fragment must be passive memory: Claim/Evidence are encouraged, and any Implication must explain future interpretation only, not future action. Memory cannot authorize proactive duties.',
     '',
-    'Watermark advancement: if you write at least one fragment, the `entry=` on your last fragment must reflect the latest transcript entry you considered. If you write zero fragments, append a single bare watermark marker `<!-- watermark source=' +
+    "Per-fragment provenance: each fragment's `entry=` is the specific transcript entry that anchors that fragment's evidence — not the latest entry you evaluated. Two fragments anchored to two different entries get two different `entry=` values. Do not stamp every fragment with the same id.",
+    '',
+    'Watermark: regardless of how many fragments you wrote (zero or more), append exactly one trailing watermark marker `<!-- watermark source=' +
       payload.parentSessionId +
-      ' entry=<latestEntryId> -->` to the daily stream file recording the latest entry id you evaluated, then stop. Never exit without either a new fragment or a new watermark marker.',
+      ' entry=<latestEntryId> -->` as the last line of your appended output. `<latestEntryId>` is the latest transcript entry you evaluated, regardless of whether it anchored a fragment. Never exit without writing this marker.',
   )
   return lines.join('\n')
 }
