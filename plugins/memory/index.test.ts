@@ -92,15 +92,15 @@ describe('memory plugin shape', () => {
 
   test('registers the dreaming cron job with the default schedule when dreaming is not configured', async () => {
     const { exports } = await bootMemoryPlugin(agentDir, { idleMs: 5000 })
-    expect(exports.cronJobs?.dreaming?.schedule).toBe('0 4 * * *')
+    expect(exports.cronJobs?.dreaming?.schedule).toBe('0 */2 * * *')
   })
 
   test('default config injects an idleMs of 10 seconds and a default dreaming schedule', async () => {
     const { exports: noDream } = await bootMemoryPlugin(agentDir, {})
-    expect(noDream.cronJobs?.dreaming?.schedule).toBe('0 4 * * *')
+    expect(noDream.cronJobs?.dreaming?.schedule).toBe('0 */2 * * *')
 
     const { exports: withDream } = await bootMemoryPlugin(agentDir, { dreaming: {} })
-    expect(withDream.cronJobs?.dreaming?.schedule).toBe('0 4 * * *')
+    expect(withDream.cronJobs?.dreaming?.schedule).toBe('0 */2 * * *')
   })
 
   test('rejects invalid cron expression in dreaming.schedule', async () => {
