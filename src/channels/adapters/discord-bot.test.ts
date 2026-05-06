@@ -7,6 +7,7 @@ import type { DiscordBotClient, DiscordFile, DiscordMessage } from './agent-mess
 import { DiscordIntent } from './agent-messenger-shim'
 import {
   createDiscordHistoryCallback,
+  createDiscordMembershipResolver,
   createOutboundCallback,
   createTypingCallback,
   DISCORD_BOT_INTENTS,
@@ -160,6 +161,113 @@ describe('createTypingCallback', () => {
     })
     await cb({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })
     expect(calls).toHaveLength(0)
+  })
+})
+
+describe('createDiscordMembershipResolver', () => {
+  type FetchCall = { url: string; init: RequestInit }
+
+  function fakeFetch(responses: Response[]): { fn: typeof fetch; calls: FetchCall[] } {
+    const calls: FetchCall[] = []
+    const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      calls.push({ url, init: init ?? {} })
+      return responses.shift() ?? new Response(null, { status: 500 })
+    }) as unknown as typeof fetch
+    return { fn, calls }
+  }
+
+  function jsonResponse(value: unknown, status = 200): Response {
+    return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
+  }
+
+  function silentLogger() {
+    return { info: () => {}, warn: () => {}, error: () => {} }
+  }
+
+  test('DM short-circuits without hitting Discord', async () => {
+    const { fn, calls } = fakeFetch([])
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      fetchImpl: fn,
+      now: () => 42,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: '@dm', chat: 'd1', thread: null })).resolves.toEqual({
+      humans: 1,
+      bots: 1,
+      fetchedAt: 42,
+      truncated: false,
+    })
+    expect(calls).toHaveLength(0)
+  })
+
+  test('small guild enumerates members for an exact bot/human split', async () => {
+    const { fn, calls } = fakeFetch([
+      jsonResponse({ approximate_member_count: 3 }),
+      jsonResponse([{ user: { id: 'u1' } }, { user: { id: 'b1', bot: true } }, { user: { id: 'u2', bot: false } }]),
+    ])
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      fetchImpl: fn,
+      now: () => 100,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      humans: 2,
+      bots: 1,
+      fetchedAt: 100,
+      truncated: false,
+    })
+    expect(calls[0]!.url).toBe('https://discord.com/api/v10/guilds/g1/preview')
+    expect(calls[1]!.url).toBe('https://discord.com/api/v10/guilds/g1/members?limit=100')
+  })
+
+  test('large guild uses preview approximation and skips enumeration', async () => {
+    const { fn, calls } = fakeFetch([jsonResponse({ approximate_member_count: 75 })])
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      fetchImpl: fn,
+      botUserIdRef: () => 'bot-id',
+      now: () => 200,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      humans: 74,
+      bots: 1,
+      fetchedAt: 200,
+      truncated: true,
+    })
+    expect(calls).toHaveLength(1)
+  })
+
+  test('403 from member fetch falls back to truncated preview count', async () => {
+    const { fn } = fakeFetch([jsonResponse({ approximate_member_count: 10 }), new Response(null, { status: 403 })])
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      fetchImpl: fn,
+      now: () => 300,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      humans: 10,
+      bots: 0,
+      fetchedAt: 300,
+      truncated: true,
+    })
+  })
+
+  test('403 from guild preview is a permanent resolver failure', async () => {
+    const { fn } = fakeFetch([new Response(null, { status: 403 })])
+    const resolver = createDiscordMembershipResolver({ token: 'tok', logger: silentLogger(), fetchImpl: fn })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      kind: 'permanent',
+    })
   })
 })
 
