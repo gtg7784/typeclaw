@@ -11,6 +11,7 @@ import {
 } from '@mariozechner/pi-coding-agent'
 import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import type { Static, TSchema } from '@sinclair/typebox'
+import { Type } from '@sinclair/typebox'
 import { z } from 'zod'
 
 import type {
@@ -24,6 +25,8 @@ import type {
   ToolResult,
 } from '@/plugin'
 
+import { ACKNOWLEDGE_GUARDS, checkNonWorkspaceWriteGuard } from '../../plugins/guard/policy'
+
 type AnyAgentTool =
   | typeof piReadTool
   | typeof piBashTool
@@ -32,6 +35,15 @@ type AnyAgentTool =
   | typeof piGrepTool
   | typeof piFindTool
   | typeof piLsTool
+
+const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
+  Type.Object(
+    {
+      nonWorkspaceWrite: Type.Optional(Type.Boolean()),
+    },
+    { additionalProperties: false },
+  ),
+)
 
 const BUILTIN_TOOL_MAP: Record<string, AnyAgentTool> = {
   bash: piBashTool,
@@ -133,6 +145,7 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
 ): ToolDefinition<TParams, TDetails, TState> {
   return piDefineTool({
     ...tool,
+    parameters: withGuardAcknowledgements(tool.name, tool.parameters),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const mutableArgs = params as Record<string, unknown>
       const blockResult = await opts.hooks.runToolBefore({
@@ -144,6 +157,15 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
+      const guardResult = await checkNonWorkspaceWriteGuard({
+        tool: tool.name,
+        args: mutableArgs,
+        agentDir: opts.agentDir,
+      })
+      if (guardResult !== undefined) {
+        throw new Error(`blocked: ${guardResult.reason}`)
+      }
+      stripGuardAcknowledgements(mutableArgs)
 
       const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx)
       const hookResult: ToolResult = {
@@ -170,6 +192,7 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
 ): AgentTool<TParams, TDetails> {
   return {
     ...tool,
+    parameters: withGuardAcknowledgements(tool.name, tool.parameters),
     async execute(toolCallId, params, signal, onUpdate) {
       const mutableArgs = params as Record<string, unknown>
       const blockResult = await opts.hooks.runToolBefore({
@@ -181,6 +204,15 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
+      const guardResult = await checkNonWorkspaceWriteGuard({
+        tool: tool.name,
+        args: mutableArgs,
+        agentDir: opts.agentDir,
+      })
+      if (guardResult !== undefined) {
+        throw new Error(`blocked: ${guardResult.reason}`)
+      }
+      stripGuardAcknowledgements(mutableArgs)
 
       const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate)
       const hookResult: ToolResult = {
@@ -207,4 +239,24 @@ function errorResult(message: string) {
     details: { error: true, message },
     isError: true,
   }
+}
+
+function withGuardAcknowledgements<TParams extends TSchema>(toolName: string, parameters: TParams): TParams {
+  if (toolName !== 'write' && toolName !== 'edit') return parameters
+
+  const schema = parameters as Record<string, unknown>
+  const properties = schema.properties
+  if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return parameters
+
+  return {
+    ...schema,
+    properties: {
+      ...(properties as Record<string, unknown>),
+      [ACKNOWLEDGE_GUARDS]: ACKNOWLEDGE_GUARDS_SCHEMA,
+    },
+  } as unknown as TParams
+}
+
+function stripGuardAcknowledgements(args: Record<string, unknown>): void {
+  delete args[ACKNOWLEDGE_GUARDS]
 }
