@@ -152,17 +152,26 @@ export function createBroker(opts: BrokerOptions): Broker {
 
   const installForwarder = async (port: number, bindAddr: BindAddr): Promise<void> => {
     if (forwarders.has(port)) return
-    if (!shouldForward({ policy: opts.policy, port })) return
+    if (!shouldForward({ policy: opts.policy, port })) {
+      // Policy excluded the port. Tell the container so it can stop waiting
+      // (e.g. the agent-browser plugin's bind-with-forward retry loop). Without
+      // this, the container would block on the forward-result timeout for
+      // every policy-denied port.
+      if (ws) ws.send({ type: 'port-forward-result', port, ok: false, reason: 'policy excluded' })
+      return
+    }
     try {
       const listener = await listenHost(hostBind, port, {
         onConnection: (sock) => handleHostConnection(port, sock),
       })
       forwarders.set(port, { port, bindAddr, listener, streams: new Map() })
       emit({ kind: 'port-forward-opened', containerName: opts.containerName, port, bindAddr })
+      if (ws) ws.send({ type: 'port-forward-result', port, ok: true, hostPort: listener.port })
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
       log(`forward bind ${port}: ${reason}`)
       emit({ kind: 'port-forward-failed', containerName: opts.containerName, port, reason })
+      if (ws) ws.send({ type: 'port-forward-result', port, ok: false, reason })
     }
   }
 

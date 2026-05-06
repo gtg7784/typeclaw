@@ -16,9 +16,12 @@ export {
   type ContainerBroker,
   type ContainerBrokerLogEvent,
   type ContainerBrokerOptions,
+  type ForwardResultEvent,
   type UpstreamConnection,
   type UpstreamHandlers,
 } from './container-server'
+export { __resetForwardResultBus, publishForwardResult, subscribeForwardResult } from './forward-result-bus'
+export { bindWithForward, type BindFactory, type BindResult, type BindWithForwardOptions } from './bind-with-forward'
 export {
   createBroker,
   type Broker,
