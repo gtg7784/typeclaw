@@ -1019,7 +1019,7 @@ describe('createSlackHistoryCallback', () => {
 })
 
 describe('slack-bot createOutboundCallback', () => {
-  type PostCall = { channel: string; text: string; options?: { thread_ts?: string } }
+  type PostCall = { channel: string; text: string; options?: { thread_ts?: string; blocks?: unknown[] } }
   type UploadCall = {
     channel: string
     bytes: number
@@ -1081,7 +1081,7 @@ describe('slack-bot createOutboundCallback', () => {
   const tag = async (_w: string, _c: string) => 'team=T0 channel=C0'
   const fakeRead = async (_path: string) => Buffer.from('test-bytes')
 
-  test('text-only path posts via postMessage and never calls uploadFile', async () => {
+  test('text-only path sends a markdown block with the GFM text', async () => {
     // given
     const { client, posts, uploads } = makeFakeClient()
     const cb = createOutboundCallback({
@@ -1096,10 +1096,36 @@ describe('slack-bot createOutboundCallback', () => {
     // then
     expect(result.ok).toBe(true)
     expect(uploads).toHaveLength(0)
-    expect(posts).toEqual([{ channel: 'C0', text: 'hello', options: undefined }])
+    expect(posts).toEqual([
+      {
+        channel: 'C0',
+        text: 'hello',
+        options: { blocks: [{ type: 'markdown', text: 'hello' }] },
+      },
+    ])
   })
 
-  test('threaded text-only post forwards thread_ts to postMessage', async () => {
+  test('text-only path preserves GitHub-flavored markdown verbatim in the block payload', async () => {
+    // given
+    const { client, posts } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    const gfm = '## Heading\n\nI checked the **deployment** logs.\n\n| col | val |\n|-----|-----|\n| a   | 1   |'
+    // when
+    await cb(makeMsg({ text: gfm }))
+    // then
+    expect(posts).toHaveLength(1)
+    const post = posts[0]!
+    expect(post.text).toBe(gfm)
+    expect(post.options?.blocks).toEqual([{ type: 'markdown', text: gfm }])
+  })
+
+  test('threaded text-only post forwards thread_ts alongside the markdown block', async () => {
     const { client, posts } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
@@ -1109,7 +1135,62 @@ describe('slack-bot createOutboundCallback', () => {
       readFile: fakeRead,
     })
     await cb(makeMsg({ text: 'hello', thread: '1700.000100' }))
-    expect(posts).toEqual([{ channel: 'C0', text: 'hello', options: { thread_ts: '1700.000100' } }])
+    expect(posts).toEqual([
+      {
+        channel: 'C0',
+        text: 'hello',
+        options: {
+          thread_ts: '1700.000100',
+          blocks: [{ type: 'markdown', text: 'hello' }],
+        },
+      },
+    ])
+  })
+
+  test('oversize text splits into multiple posts; subsequent chunks thread under the first', async () => {
+    // given
+    const { client, posts } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    const para = 'word '.repeat(2400).trim()
+    const huge = `${para}\n\n${para}\n\n${para}`
+    // when
+    const result = await cb(makeMsg({ text: huge }))
+    // then
+    expect(result.ok).toBe(true)
+    expect(posts.length).toBeGreaterThan(1)
+    expect(posts[0]!.options?.thread_ts).toBeUndefined()
+    for (let i = 1; i < posts.length; i++) {
+      expect(posts[i]!.options?.thread_ts).toBe('ts1')
+    }
+    for (const post of posts) {
+      const blocks = post.options?.blocks
+      expect(Array.isArray(blocks)).toBe(true)
+      expect(blocks?.length).toBe(1)
+    }
+  })
+
+  test('oversize text in an existing thread keeps every chunk on that thread', async () => {
+    const { client, posts } = makeFakeClient()
+    const cb = createOutboundCallback({
+      client,
+      configRef: permissive,
+      logger: silentLogger(),
+      formatChannelTag: tag,
+      readFile: fakeRead,
+    })
+    const para = 'word '.repeat(2400).trim()
+    const huge = `${para}\n\n${para}\n\n${para}`
+    await cb(makeMsg({ text: huge, thread: '1700.000100' }))
+    expect(posts.length).toBeGreaterThan(1)
+    for (const post of posts) {
+      expect(post.options?.thread_ts).toBe('1700.000100')
+    }
   })
 
   test('text+single-attachment folds text into initial_comment and never calls postMessage', async () => {

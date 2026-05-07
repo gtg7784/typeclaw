@@ -1,0 +1,1 @@
+export { chunkMarkdown } from './chunk'
