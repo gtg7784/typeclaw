@@ -162,4 +162,36 @@ describe('isAllowed', () => {
     expect(isAllowed(['channel:C0DEPLOY'], 'T0WIDGET', 'C0DEPLOY')).toBe(true)
     expect(isAllowed(['channel:C0DEPLOY'], 'T0ACME', 'C0OTHER')).toBe(false)
   })
+
+  test('"tg:*" matches every Telegram chat (workspace=telegram) but no other adapter', () => {
+    expect(isAllowed(['tg:*'], 'telegram', '-1001234567890')).toBe(true)
+    expect(isAllowed(['tg:*'], 'telegram', '42')).toBe(true)
+    expect(isAllowed(['tg:*'], 'g1', 'c1')).toBe(false)
+    expect(isAllowed(['tg:*'], '@dm', 'd1')).toBe(false)
+  })
+
+  test('"tg:C" scopes to a single Telegram chat by signed numeric id', () => {
+    expect(isAllowed(['tg:-1001234567890'], 'telegram', '-1001234567890')).toBe(true)
+    expect(isAllowed(['tg:-1001234567890'], 'telegram', '42')).toBe(false)
+  })
+
+  test('"channel:C" with a negative numeric id matches a Telegram supergroup', () => {
+    expect(isAllowed(['channel:-1001234567890'], 'telegram', '-1001234567890')).toBe(true)
+    expect(isAllowed(['channel:-1001234567890'], 'telegram', '-1009999999999')).toBe(false)
+  })
+})
+
+describe('channelsSchema — telegram-bot', () => {
+  test('parses a telegram-bot config with tg: allow rules', () => {
+    const parsed = channelsSchema.parse({
+      'telegram-bot': { allow: ['tg:*', 'tg:-1001234567890', 'channel:-1001234567890'] },
+    })
+    expect(parsed['telegram-bot']?.allow).toHaveLength(3)
+    expect(parsed['telegram-bot']?.enabled).toBe(true)
+  })
+
+  test('rejects malformed tg: allow rules', () => {
+    expect(() => channelsSchema.parse({ 'telegram-bot': { allow: ['tg:'] } })).toThrow()
+    expect(() => channelsSchema.parse({ 'telegram-bot': { allow: ['tg:abc'] } })).toThrow()
+  })
 })
