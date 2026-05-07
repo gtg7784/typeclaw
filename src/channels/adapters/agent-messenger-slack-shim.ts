@@ -5,6 +5,14 @@
 // DELETE WHEN: agent-messenger publishes `dist/platforms/slackbot/
 // index.d.ts`. Drop this file and import directly from
 // 'agent-messenger/slackbot' in adapters/slack-bot.ts.
+//
+// We also extend `postMessage` to accept Slack `blocks`, which the upstream
+// signature does not expose. The blocks path bypasses the upstream method
+// and reaches the underlying `@slack/web-api` `WebClient` via the upstream
+// instance's private `client` field — fragile, but isolated to one method
+// here. The alternative was either taking a direct `@slack/web-api`
+// dependency (currently transitive) or upstreaming a PR; both are heavier
+// than this localized cast.
 
 import { SlackBotClient as RawClient, SlackBotListener as RawListener } from 'agent-messenger/slackbot'
 
@@ -118,10 +126,18 @@ export type SlackFile = {
   channels?: string[]
 }
 
+// `blocks` is opaque to us; we just forward it. Slack's API accepts any
+// JSON-shaped block array — typing it as unknown[] avoids importing
+// @slack/types and keeps the shim's external surface small.
+export type SlackPostMessageOptions = {
+  thread_ts?: string
+  blocks?: unknown[]
+}
+
 export interface SlackBotClient {
   login(credentials?: { token: string }): Promise<this>
   testAuth(): Promise<SlackTestAuth>
-  postMessage(channel: string, text: string, options?: { thread_ts?: string }): Promise<SlackPostedMessage>
+  postMessage(channel: string, text: string, options?: SlackPostMessageOptions): Promise<SlackPostedMessage>
   setAssistantStatus(channel: string, threadTs: string, status: string): Promise<void>
   uploadFile(
     channel: string,
@@ -142,7 +158,58 @@ export interface SlackBotListener {
   ): this
 }
 
-export const SlackBotClient = RawClient as unknown as new () => SlackBotClient
+// Subclass that overrides `postMessage` to support blocks. When blocks are
+// supplied, we bypass the upstream method (which doesn't forward blocks)
+// and call the underlying @slack/web-api WebClient.chat.postMessage
+// directly via the private `client` field. Without blocks, we delegate to
+// the upstream method to inherit its retry-on-rate-limit behavior.
+class ExtendedSlackBotClient extends (RawClient as unknown as new () => SlackBotClient) {
+  override async postMessage(
+    channel: string,
+    text: string,
+    options?: SlackPostMessageOptions,
+  ): Promise<SlackPostedMessage> {
+    if (options?.blocks === undefined) {
+      const passthrough = options?.thread_ts !== undefined ? { thread_ts: options.thread_ts } : undefined
+      return await super.postMessage(channel, text, passthrough)
+    }
+
+    type RawWebClient = {
+      chat: {
+        postMessage: (args: { channel: string; text: string; thread_ts?: string; blocks?: unknown[] }) => Promise<{
+          ok?: boolean
+          error?: string
+          ts?: string
+          message?: { text?: string; type?: string; user?: string; thread_ts?: string }
+        }>
+      }
+    }
+    const raw = this as unknown as { client: RawWebClient | null }
+    if (raw.client === null) {
+      throw new Error('SlackBotClient.postMessage with blocks: not authenticated')
+    }
+    const args: { channel: string; text: string; thread_ts?: string; blocks?: unknown[] } = {
+      channel,
+      text,
+      blocks: options.blocks,
+    }
+    if (options.thread_ts !== undefined) args.thread_ts = options.thread_ts
+    const response = await raw.client.chat.postMessage(args)
+    if (response.ok !== true) {
+      throw new Error(response.error ?? 'slack postMessage with blocks failed')
+    }
+    const msg = response.message
+    return {
+      ts: response.ts ?? '',
+      text: msg?.text ?? text,
+      type: msg?.type ?? 'message',
+      ...(msg?.user !== undefined ? { user: msg.user } : {}),
+      ...(msg?.thread_ts !== undefined ? { thread_ts: msg.thread_ts } : {}),
+    }
+  }
+}
+
+export const SlackBotClient = ExtendedSlackBotClient as unknown as new () => SlackBotClient
 export const SlackBotListener = RawListener as unknown as new (
   client: SlackBotClient,
   options: { appToken: string; debugReconnects?: boolean },

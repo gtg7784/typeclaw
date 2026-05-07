@@ -20,6 +20,7 @@ import type {
   TypingCallback,
   TypingTarget,
 } from '@/channels/types'
+import { chunkMarkdown } from '@/markdown'
 
 import {
   SlackBotClient,
@@ -501,6 +502,27 @@ async function readAttachmentBuffer(path: string): Promise<Buffer> {
   return await readFile(path)
 }
 
+// Slack's `markdown` block (introduced March 2026) accepts standard
+// GitHub-flavored Markdown and renders it correctly — the agent no longer
+// needs to translate `**bold**` → `*bold*`, tables, headings, etc. by hand.
+// We send every text-only message as a `markdown` block, with `text` set
+// to the original GFM as the notification fallback (Slack truncates that
+// for previews; raw GFM artifacts there are acceptable).
+//
+// The cumulative payload limit on `markdown` blocks is 12,000 characters.
+// We allow 11,500 to leave headroom for the block envelope and split with
+// `chunkMarkdown` so structural blocks (tables, code fences) survive the
+// split intact. Multi-chunk messages thread under the first chunk: chunks
+// 2..N reuse the first chunk's `ts` as `thread_ts` so a long reply
+// surfaces as one threaded conversation in the Slack UI.
+export const SLACK_MARKDOWN_BLOCK_LIMIT = 11_500
+
+type MarkdownBlock = { type: 'markdown'; text: string }
+
+function buildMarkdownBlock(text: string): MarkdownBlock {
+  return { type: 'markdown', text }
+}
+
 export function createOutboundCallback(deps: {
   client: Pick<SlackBotClient, 'postMessage' | 'uploadFile'>
   configRef: () => ChannelAdapterConfig
@@ -531,13 +553,23 @@ export function createOutboundCallback(deps: {
     )
 
     if (attachments.length === 0) {
+      const chunks = chunkMarkdown(text, SLACK_MARKDOWN_BLOCK_LIMIT)
+      const explicitThread = msg.thread !== undefined && msg.thread !== null ? msg.thread : null
+      let threadTs: string | null = explicitThread
       try {
-        const sent = await client.postMessage(
-          msg.chat,
-          text,
-          msg.thread !== undefined && msg.thread !== null ? { thread_ts: msg.thread } : undefined,
-        )
-        logger.info(`[slack-bot] sent ts=${sent.ts} ${tag}`)
+        for (let i = 0; i < chunks.length; i++) {
+          const chunk = chunks[i]!
+          const options: { thread_ts?: string; blocks?: unknown[] } = { blocks: [buildMarkdownBlock(chunk)] }
+          if (threadTs !== null) options.thread_ts = threadTs
+          const sent = await client.postMessage(msg.chat, chunk, options)
+          logger.info(
+            `[slack-bot] sent ts=${sent.ts} ${tag} chunk=${i + 1}/${chunks.length} blocks=markdown len=${chunk.length}`,
+          )
+          // Anchor follow-up chunks to the first message so a long reply
+          // surfaces as one threaded conversation rather than a stream of
+          // top-level posts.
+          if (threadTs === null && chunks.length > 1) threadTs = sent.ts
+        }
         if (typingTracker) await typingTracker.clearAfterSend(msg.chat, msg.thread)
         return { ok: true }
       } catch (err) {
