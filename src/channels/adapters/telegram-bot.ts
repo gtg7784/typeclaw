@@ -16,6 +16,7 @@ import type {
 } from '@/channels/types'
 
 import { classifyInbound, type InboundDropReason, TELEGRAM_WORKSPACE } from './telegram-bot-classify'
+import { toTelegramMarkdownV2 } from './telegram-bot-format'
 
 export const TELEGRAM_API_BASE = 'https://api.telegram.org'
 
@@ -27,13 +28,15 @@ export const TELEGRAM_API_BASE = 'https://api.telegram.org'
 // log line, making "agent missed an edit" invisible.
 const TELEGRAM_ALLOWED_UPDATES = ['message', 'channel_post']
 
-// Outbound is sent as plain text by default. Picking `parse_mode: 'HTML'`
-// would require us to escape every `<`, `>`, `&` in the agent's text or
-// Telegram returns `Bad Request: can't parse entities`. Picking
-// `MarkdownV2` is even stricter (every `. ! ( ) _ * [ ] ~` etc.). Until a
-// Telegram-aware formatter exists, plain text is the only mode that
-// can't reject a valid string. Operators who want HTML can add a future
-// flag; the SDK type still accepts the option for direct callers.
+// Outbound is rendered through `toTelegramMarkdownV2` and sent with
+// `parse_mode: 'MarkdownV2'`. The formatter takes the model's common
+// Markdown (`**bold**`, `*italic*`, `` `code` ``, fenced blocks,
+// `[label](url)`) and emits MarkdownV2 with every reserved char escaped
+// in the right region (outside-entity vs `code`/`pre` vs link-url),
+// guaranteeing Telegram's parser will never reject the output. See
+// `telegram-bot-format.ts` for the exact rules. Plain text — no
+// formatting markers — round-trips through the formatter unchanged
+// modulo escaped specials, so this is a safe default with no opt-out.
 
 export type TelegramBotAdapterLogger = {
   info: (msg: string) => void
@@ -256,9 +259,10 @@ export function createOutboundCallback(deps: {
     }
 
     try {
-      const sendOptions: { message_thread_id?: number } = {}
+      const rendered = toTelegramMarkdownV2(text)
+      const sendOptions: { message_thread_id?: number; parse_mode: 'MarkdownV2' } = { parse_mode: 'MarkdownV2' }
       if (threadId !== undefined) sendOptions.message_thread_id = threadId
-      const sent = await client.sendMessage(msg.chat, text, sendOptions)
+      const sent = await client.sendMessage(msg.chat, rendered, sendOptions)
       logger.info(`[telegram-bot] sent message_id=${sent.message_id} ${tag}`)
       return { ok: true }
     } catch (err) {
