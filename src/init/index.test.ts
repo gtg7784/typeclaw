@@ -970,13 +970,13 @@ describe('writeDockerAssets', () => {
     await writeDockerAssets(root)
 
     const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
-    // Common cache-optimization mistake: mounting ~/.cache/agent-browser
+    // Common cache-optimization mistake: mounting ~/.agent-browser/browsers
     // would make rebuilds faster but ship a broken image, because cache
     // mounts are excluded from the final image. The Chrome for Testing
-    // binary lives at ~/.cache/agent-browser/<version>/chrome and the
-    // runtime calls into it directly; if it disappears, the agent's
+    // binary lives at ~/.agent-browser/browsers/chrome-<version>/chrome and
+    // the runtime calls into it directly; if it disappears, the agent's
     // browser tool fails to launch on every container start.
-    expect(dockerfile).not.toMatch(/--mount=type=cache,target=[^\s]*\.cache\/agent-browser/)
+    expect(dockerfile).not.toMatch(/--mount=type=cache,target=[^\s]*\.agent-browser\/browsers/)
   })
 
   test('Dockerfile registers the GitHub CLI apt repo in a layer separate from the package install', async () => {

@@ -38,8 +38,8 @@ export function buildDockerfile(config: DockerfileConfig = defaultConfig()): str
 # package manager caches (.deb files, bun's tarball cache) where we want
 # fast rebuilds without bloating the runtime image. Cache mounts are
 # explicitly NOT used for tool output that the runtime needs (e.g. the
-# Chrome for Testing binary at \`~/.cache/agent-browser\`); those go through
-# normal layers so they ship with the image.
+# Chrome for Testing binary under \`~/.agent-browser/browsers/\`); those go
+# through normal layers so they ship with the image.
 
 FROM oven/bun:1-slim
 
@@ -102,10 +102,10 @@ RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \\
     bun install -g agent-browser
 
 # Layer 5 (heavy, amd64 only): download the pinned Chrome for Testing build
-# into ~/.cache/agent-browser and apt-install the libs it needs. NO cache
-# mount on ~/.cache/agent-browser: the runtime needs the binary in the
-# image, and cache mounts are excluded from the final image. The apt-cache
-# mounts ARE used for the --with-deps system libs install.
+# into ~/.agent-browser/browsers/ and apt-install the libs it needs. NO
+# cache mount on ~/.agent-browser/browsers/: the runtime needs the binary
+# in the image, and cache mounts are excluded from the final image. The
+# apt-cache mounts ARE used for the --with-deps system libs install.
 # Kept last so it benefits from every layer above being cached, and so
 # changes to git or the apt base don't invalidate hundreds of MB of Chrome
 # state.
