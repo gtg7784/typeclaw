@@ -113,6 +113,45 @@ describe('HookBus session.idle / session.start / session.end', () => {
   })
 })
 
+describe('HookBus session.idle per-handler timeout', () => {
+  test('a hung handler is bounded; the offending plugin is named; later handlers still run', async () => {
+    // given a bus where the first session.idle handler never resolves and
+    // the second is observable. the per-handler timeout is a test seam so
+    // the timeout fires in milliseconds instead of the production 25s.
+    const errors: { plugin: string; message: string }[] = []
+    const recordLogger = (pluginName: string) => ({
+      info: () => {},
+      warn: () => {},
+      error: (m: string) => errors.push({ plugin: pluginName, message: m }),
+    })
+    const bus = createHookBus({ idleHandlerTimeoutMs: 30 })
+    bus.registerAll('hung-plugin', '/agent', recordLogger('hung-plugin'), {
+      'session.idle': () => new Promise(() => {}),
+    })
+    let secondRan = false
+    bus.registerAll('healthy-plugin', '/agent', recordLogger('healthy-plugin'), {
+      'session.idle': () => {
+        secondRan = true
+      },
+    })
+
+    // when the chain runs
+    const start = Date.now()
+    await bus.runSessionIdle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 })
+    const elapsed = Date.now() - start
+
+    // then the chain returned within the per-handler ceiling, the offending
+    // plugin's logger received the timeout error with attribution, and the
+    // healthy plugin still got to run
+    expect(elapsed).toBeLessThan(500)
+    expect(secondRan).toBe(true)
+    const hungError = errors.find((e) => e.plugin === 'hung-plugin')
+    expect(hungError?.message).toMatch(/plugin hung-plugin session\.idle timed out after 30ms/)
+    // the healthy plugin must not have been blamed
+    expect(errors.find((e) => e.plugin === 'healthy-plugin')).toBeUndefined()
+  })
+})
+
 describe('HookBus unregisterAll', () => {
   test('removes hooks for a single plugin and leaves others intact', () => {
     const bus = createHookBus()
