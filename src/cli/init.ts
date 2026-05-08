@@ -1,6 +1,7 @@
 import { cancel, confirm, intro, isCancel, note, password, select, spinner } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
+import type { DockerAvailability } from '@/container'
 import { findAgentDir, isDirectoryNonEmpty, isHatched, runInit, type InitStep, type InitStepEvent } from '@/init'
 
 export const init = defineCommand({
@@ -170,6 +171,7 @@ export const init = defineCommand({
     //   - cron.json scaffolding — Phase 9
     //   - compose.yml registration in $HOME/.typeclaw — Phase 12
     let hatchingOk = false
+    let preflightFailure: Extract<DockerAvailability, { ok: false }> | null = null
     try {
       await runInit({
         cwd,
@@ -177,12 +179,22 @@ export const init = defineCommand({
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
         ...(telegramBotToken !== undefined ? { telegramBotToken } : {}),
-        onProgress: reportProgress((ok) => {
-          hatchingOk = ok
-        }),
+        onProgress: reportProgress(
+          (ok) => {
+            hatchingOk = ok
+          },
+          (result) => {
+            preflightFailure = result
+          },
+        ),
       })
     } catch (error) {
       console.error(error)
+      process.exit(1)
+    }
+
+    if (preflightFailure !== null) {
+      note(preflightFailureGuidance(preflightFailure).join('\n'), 'Docker check failed')
       process.exit(1)
     }
 
@@ -192,7 +204,10 @@ export const init = defineCommand({
   },
 })
 
-function reportProgress(onHatchingDone: (ok: boolean) => void): (event: InitStepEvent) => void {
+function reportProgress(
+  onHatchingDone: (ok: boolean) => void,
+  onPreflightFail: (result: Extract<DockerAvailability, { ok: false }>) => void,
+): (event: InitStepEvent) => void {
   const spinners: Partial<Record<InitStepEvent['step'], ReturnType<typeof spinner>>> = {}
 
   return (event) => {
@@ -213,6 +228,14 @@ function reportProgress(onHatchingDone: (ok: boolean) => void): (event: InitStep
     if (!s) return
 
     switch (event.step) {
+      case 'preflight':
+        if (event.result.ok) {
+          s.stop('Docker is reachable.')
+        } else {
+          s.error(preflightFailureSummary(event.result))
+          onPreflightFail(event.result)
+        }
+        break
       case 'scaffold':
         s.stop('Egg laid. 🥚')
         break
@@ -237,6 +260,33 @@ function reportProgress(onHatchingDone: (ok: boolean) => void): (event: InitStep
   }
 }
 
+function preflightFailureSummary(result: Extract<DockerAvailability, { ok: false }>): string {
+  if (result.reason === 'binary-missing') return 'Docker is not installed.'
+  return 'Docker is installed but the daemon is not reachable.'
+}
+
+function preflightFailureGuidance(result: Extract<DockerAvailability, { ok: false }>): string[] {
+  if (result.reason === 'binary-missing') {
+    return [
+      'TypeClaw runs every agent inside its own Docker container, so Docker is required.',
+      '',
+      'Install one of:',
+      '  • Docker Desktop — https://docs.docker.com/get-docker/',
+      '  • OrbStack (macOS, lighter) — https://orbstack.dev',
+      '',
+      'Then re-run `typeclaw init`.',
+    ]
+  }
+  return [
+    'The docker CLI is on $PATH, but the daemon refused the connection:',
+    '',
+    `  ${result.detail}`,
+    '',
+    'Start Docker Desktop / OrbStack (or `sudo systemctl start docker` on Linux),',
+    'then re-run `typeclaw init`.',
+  ]
+}
+
 // Hatching launches the container and foregrounds the TUI, so it steals stdin
 // and cannot share the spinner lifecycle with the other steps. Print plain
 // lines instead.
@@ -253,6 +303,7 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
 }
 
 const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
+  preflight: 'Checking Docker...',
   scaffold: 'Laying the egg...',
   install: 'Installing dependencies with bun...',
   dockerfile: 'Writing Dockerfile...',

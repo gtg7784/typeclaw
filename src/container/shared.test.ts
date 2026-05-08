@@ -3,7 +3,14 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { containerNameFromCwd, imageTagFromCwd, waitForRemoval } from './shared'
+import {
+  checkDockerAvailable,
+  containerNameFromCwd,
+  DOCKER_NOT_FOUND_STDERR,
+  type DockerExec,
+  imageTagFromCwd,
+  waitForRemoval,
+} from './shared'
 
 let root: string
 
@@ -81,5 +88,67 @@ describe('waitForRemoval', () => {
     })
 
     expect(result).toBe(false)
+  })
+})
+
+describe('checkDockerAvailable', () => {
+  test('returns ok when docker info exits 0', async () => {
+    const exec: DockerExec = async () => ({ exitCode: 0, stdout: '29.4.0\n', stderr: '' })
+
+    const result = await checkDockerAvailable(exec)
+
+    expect(result).toEqual({ ok: true })
+  })
+
+  test('classifies as binary-missing when stderr is the ENOENT sentinel', async () => {
+    const exec: DockerExec = async () => ({ exitCode: -1, stdout: '', stderr: DOCKER_NOT_FOUND_STDERR })
+
+    const result = await checkDockerAvailable(exec)
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'binary-missing',
+      detail: DOCKER_NOT_FOUND_STDERR,
+    })
+  })
+
+  test('classifies any other non-zero exit as daemon-down', async () => {
+    const exec: DockerExec = async () => ({
+      exitCode: 1,
+      stdout: '',
+      stderr: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n',
+    })
+
+    const result = await checkDockerAvailable(exec)
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'daemon-down',
+      detail: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?',
+    })
+  })
+
+  test('falls back to a synthetic detail when stderr is empty on non-zero exit', async () => {
+    const exec: DockerExec = async () => ({ exitCode: 7, stdout: '', stderr: '   ' })
+
+    const result = await checkDockerAvailable(exec)
+
+    expect(result).toEqual({
+      ok: false,
+      reason: 'daemon-down',
+      detail: 'docker info exited with code 7',
+    })
+  })
+
+  test('passes the right args to the exec stub', async () => {
+    const calls: string[][] = []
+    const exec: DockerExec = async (args) => {
+      calls.push(args)
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    await checkDockerAvailable(exec)
+
+    expect(calls).toEqual([['info', '--format', '{{.ServerVersion}}']])
   })
 })
