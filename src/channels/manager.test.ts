@@ -295,3 +295,89 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
     expect(fake.stopCalls).toBe(1)
   })
 })
+
+describe('channel manager — telegram adapter lifecycle', () => {
+  test('starts telegram adapter and forwards TELEGRAM_BOT_TOKEN to it', async () => {
+    cfg['telegram-bot'] = enabledAdapterCfg()
+    const fake = makeFakeAdapter()
+    let captured: { token?: string; configRef?: () => unknown } | undefined
+    const env: NodeJS.ProcessEnv = { TELEGRAM_BOT_TOKEN: 'tg-tok-abc' }
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env,
+      createTelegramAdapter: (opts) => {
+        captured = opts
+        return fake
+      },
+    })
+
+    await mgr.start()
+    expect(fake.startCalls).toBe(1)
+    // Mutation guard: a refactor that swapped TELEGRAM_BOT_TOKEN for the
+    // wrong env var (or hardcoded a string) would still pass any test
+    // that didn't capture the actual token passed to the adapter.
+    expect(captured?.token).toBe('tg-tok-abc')
+    expect(typeof captured?.configRef).toBe('function')
+
+    await mgr.stop()
+    expect(fake.stopCalls).toBe(1)
+  })
+
+  test('does not start telegram adapter when TELEGRAM_BOT_TOKEN is missing', async () => {
+    cfg['telegram-bot'] = enabledAdapterCfg()
+    const fake = makeFakeAdapter()
+    const env: NodeJS.ProcessEnv = {}
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env,
+      createTelegramAdapter: () => fake,
+    })
+
+    await mgr.start()
+    expect(fake.startCalls).toBe(0)
+
+    await mgr.stop()
+  })
+
+  test('stops telegram adapter when TELEGRAM_BOT_TOKEN is removed from env on reload', async () => {
+    cfg['telegram-bot'] = enabledAdapterCfg()
+    const fake = makeFakeAdapter()
+    const env: NodeJS.ProcessEnv = { TELEGRAM_BOT_TOKEN: 'tg-tok' }
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env,
+      createTelegramAdapter: () => fake,
+    })
+
+    await mgr.start()
+    delete env.TELEGRAM_BOT_TOKEN
+
+    const result = await mgr.reload()
+    expect(result.stopped).toContain('telegram-bot')
+    expect(fake.stopCalls).toBe(1)
+  })
+
+  test('reports token rotation (not stop) when TELEGRAM_BOT_TOKEN value changes but is still present', async () => {
+    cfg['telegram-bot'] = enabledAdapterCfg()
+    const fake = makeFakeAdapter()
+    const env: NodeJS.ProcessEnv = { TELEGRAM_BOT_TOKEN: 'tg-tok-1' }
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env,
+      createTelegramAdapter: () => fake,
+    })
+
+    await mgr.start()
+
+    env.TELEGRAM_BOT_TOKEN = 'tg-tok-2'
+
+    const result = await mgr.reload()
+    expect(result.stopped).not.toContain('telegram-bot')
+    expect(result.restartRequired).toContain('telegram-bot (token rotation)')
+    expect(fake.stopCalls).toBe(0)
+  })
+})

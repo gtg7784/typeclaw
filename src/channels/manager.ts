@@ -1,5 +1,6 @@
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
+import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
 import { createChannelRouter, type ChannelRouter, type CreateSessionForChannel } from './router'
 import { ADAPTER_IDS, type AdapterId, type ChannelAdapterConfig, type ChannelsConfig } from './schema'
 
@@ -40,6 +41,7 @@ export type ChannelManagerOptions = {
   // Test seams: let fake adapters replace the real adapter wiring per id.
   createDiscordAdapter?: typeof createDiscordBotAdapter
   createSlackAdapter?: typeof createSlackBotAdapter
+  createTelegramAdapter?: typeof createTelegramBotAdapter
 }
 
 export type ChannelManager = {
@@ -49,11 +51,12 @@ export type ChannelManager = {
   reload: () => Promise<{ started: string[]; stopped: string[]; restartRequired: string[] }>
 }
 
-type AnyAdapter = DiscordBotAdapter | SlackBotAdapter
+type AnyAdapter = DiscordBotAdapter | SlackBotAdapter | TelegramBotAdapter
 
 // Token signature is the comparison key for token-rotation detection on
-// reload. Discord uses a single bot token; Slack needs both a bot token and
-// an app-level token (Socket Mode), so the signature concatenates both.
+// reload. Discord and Telegram each use a single bot token; Slack needs both
+// a bot token and an app-level token (Socket Mode), so the signature
+// concatenates both.
 type AdapterEntry = {
   adapter: AnyAdapter
   tokenSignature: string
@@ -71,6 +74,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   })
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createSlackAdapter = options.createSlackAdapter ?? createSlackBotAdapter
+  const createTelegramAdapter = options.createTelegramAdapter ?? createTelegramBotAdapter
 
   const live = new Map<AdapterId, AdapterEntry>()
 
@@ -109,6 +113,16 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         appToken,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
+      })
+    }
+    if (name === 'telegram-bot') {
+      const token = env.TELEGRAM_BOT_TOKEN
+      if (token === undefined || token.trim() === '') return null
+      return createTelegramAdapter({
+        router,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
+        token,
+        logger,
       })
     }
     return null
@@ -209,6 +223,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
 const TOKEN_ENV: Record<AdapterId, readonly string[]> = {
   'discord-bot': ['DISCORD_BOT_TOKEN'],
   'slack-bot': ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
+  'telegram-bot': ['TELEGRAM_BOT_TOKEN'],
 }
 
 function describe(err: unknown): string {
