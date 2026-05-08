@@ -149,15 +149,22 @@ export const KakaoCredentialManager = RawCredentialManager as unknown as new (
   configDir?: string,
 ) => KakaoCredentialManager
 
-// Per the SDK source: KakaoChat.type === 0 is 1:1 (dm), 1 is normal group,
-// 2 is open chat / multi-channel group. Types we don't recognize fall back
-// to 'unknown' which the resolver maps to `@kakao-group` (the safest
-// catch-all for engagement: groups require explicit @ to engage).
-export function classifyKakaoChatType(rawType: number): KakaoChatType {
-  if (rawType === 0) return 'dm'
-  if (rawType === 1) return 'group'
-  if (rawType === 2) return 'open'
-  return 'unknown'
+// LOCO type codes that denote OpenChat-style chats (1:1 OpenChat, multi
+// OpenChat, etc.) sourced from reverse-engineered LOCO clients. Member
+// count CANNOT substitute here — 1:1 OpenChats exist and are semantically
+// distinct from normal DMs (different identity, different policy, etc.).
+const OPEN_CHAT_TYPE_CODES: ReadonlySet<number> = new Set([2, 13, 14, 15, 16])
+
+// REGRESSION GUARD: an earlier implementation hard-coded `0=dm, 1=group,
+// 2=open` on the raw type number. Modern KakaoTalk uses codes like `11`
+// for normal DMs and `10` for normal groups, so the old mapping silently
+// classified every real DM as 'unknown' → bucket `@kakao-group`, making
+// `kakao:dm/*` allow rules unmatchable. Do not "simplify" back to a pure
+// type-code mapping without verifying against a real KakaoTalk session.
+export function classifyKakaoChat(chat: Pick<KakaoChat, 'type' | 'active_members'>): KakaoChatType {
+  if (OPEN_CHAT_TYPE_CODES.has(chat.type)) return 'open'
+  if (chat.active_members <= 2) return 'dm'
+  return 'group'
 }
 
 export function kakaoWorkspaceForType(type: KakaoChatType): '@kakao-dm' | '@kakao-group' | '@kakao-open' {

@@ -3,9 +3,13 @@ import { describe, expect, test } from 'bun:test'
 import type { KakaoChat, KakaoTalkClient } from './agent-messenger-kakaotalk-shim'
 import { createKakaoChannelResolver } from './kakaotalk-channel-resolver'
 
+// Modern KakaoTalk LOCO type codes — t=11 for normal 1:1 DMs and t=10 for
+// normal groups. The earlier `t=0/1/2` fixtures matched a stale assumption
+// and let the previous classifier pass even though it misclassified every
+// real-world DM as `@kakao-group`.
 const dmChat = (id: string, name: string): KakaoChat => ({
   chat_id: id,
-  type: 0,
+  type: 11,
   display_name: name,
   active_members: 2,
   unread_count: 0,
@@ -14,7 +18,7 @@ const dmChat = (id: string, name: string): KakaoChat => ({
 
 const groupChat = (id: string, name: string): KakaoChat => ({
   chat_id: id,
-  type: 1,
+  type: 10,
   display_name: name,
   active_members: 5,
   unread_count: 0,
