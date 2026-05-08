@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { dockerfileSchema } from '@/config/config'
 
-import { buildDockerfile } from './dockerfile'
+import { buildDockerfile, CHROME_RUNTIME_APT_PACKAGES_AMD64 } from './dockerfile'
 
 // Layer ordering, cache-mount preservation, and on-disk write behavior are
 // covered by integration tests in src/init/index.test.ts. This file only
@@ -104,5 +104,50 @@ describe('buildDockerfile feature toggles', () => {
   test('rejects version strings containing whitespace or "=" (apt-injection guard)', () => {
     expect(() => dockerfileSchema.parse({ gh: '2.40.0 curl' })).toThrow(/must not contain whitespace/)
     expect(() => dockerfileSchema.parse({ tmux: '3.3a=evil' })).toThrow(/must not contain whitespace/)
+  })
+})
+
+function amd64ElseBranchPackages(out: string): string[] {
+  const m = out.match(/else \\\n\s+apt-get install -y --no-install-recommends \\\n\s+([^\n]+); \\\n\s+fi/)
+  if (!m || !m[1]) throw new Error('amd64 else-branch apt-get install line not found')
+  return m[1].split(/\s+/).filter(Boolean)
+}
+
+function arm64IfBranchPackages(out: string): string[] {
+  const m = out.match(
+    /if \[ "\$TARGETARCH" = "arm64" \]; then \\\n\s+apt-get install -y --no-install-recommends ([^\n]+); \\\n\s+else/,
+  )
+  if (!m || !m[1]) throw new Error('arm64 if-branch apt-get install line not found')
+  return m[1].split(/\s+/).filter(Boolean)
+}
+
+describe('Chrome runtime deps (amd64)', () => {
+  test('amd64 branch installs libglib2.0-0t64 — without it Chrome dies on launch with `libglib-2.0.so.0: cannot open shared object file`', () => {
+    expect(amd64ElseBranchPackages(buildDockerfile())).toContain('libglib2.0-0t64')
+  })
+
+  test('amd64 branch installs the full Playwright-tested chromium dep set (regression guard against silent drops on agent-browser refactors)', () => {
+    const pkgs = amd64ElseBranchPackages(buildDockerfile())
+    for (const p of CHROME_RUNTIME_APT_PACKAGES_AMD64) expect(pkgs).toContain(p)
+  })
+
+  test('amd64 branch does not install fonts (the reported failure is linker-level, not glyph rendering; CJK fonts cost ~50MB+ for no launch impact)', () => {
+    const pkgs = amd64ElseBranchPackages(buildDockerfile())
+    expect(pkgs.some((p) => p.startsWith('fonts-'))).toBe(false)
+  })
+
+  test('arm64 branch installs chromium only — Chrome runtime libs are unnecessary when chromium pulls its own deps via apt', () => {
+    const pkgs = arm64IfBranchPackages(buildDockerfile())
+    expect(pkgs).toContain('chromium')
+    for (const p of CHROME_RUNTIME_APT_PACKAGES_AMD64) expect(pkgs).not.toContain(p)
+  })
+
+  test('Chrome runtime deps are installed in Layer 2 (before agent-browser CLI install in Layer 4), not only via the Layer 5 --with-deps backstop', () => {
+    const out = buildDockerfile()
+    const layer2Idx = out.indexOf('libglib2.0-0t64')
+    const layer4Idx = out.indexOf('bun install -g agent-browser')
+    expect(layer2Idx).toBeGreaterThan(-1)
+    expect(layer4Idx).toBeGreaterThan(-1)
+    expect(layer2Idx).toBeLessThan(layer4Idx)
   })
 })

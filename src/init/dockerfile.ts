@@ -8,6 +8,48 @@ export const DOCKERFILE = 'Dockerfile'
 // the package set is self-documenting at a glance.
 const BASELINE_APT_PACKAGES = ['git', 'ca-certificates', 'curl', 'gnupg'] as const
 
+// Shared-library runtime deps Chrome for Testing needs to launch on amd64
+// Debian trixie (base of `oven/bun:1-slim`). `agent-browser install
+// --with-deps` (v0.27.0) is supposed to install these but silently no-ops:
+// its hardcoded list omits `libglib2.0-0t64`, so Chrome dies on launch
+// with `libglib-2.0.so.0: cannot open shared object file` even though the
+// binary download and `--with-deps` both exit 0. We install the full
+// Playwright-tested chromium dep set here in Layer 2 so the bug doesn't
+// recur if upstream omits another package; Layer 5 still calls
+// `--with-deps` as a no-op-on-cache-hit backstop for future deps.
+//
+// Package list mirrors Playwright's `debian13-x64` chromium deps in
+// nativeDeps.ts (https://github.com/microsoft/playwright). t64-suffixed
+// names are the trixie-renamed variants from the 64-bit time_t ABI
+// transition; SONAMEs (libglib-2.0.so.0 etc.) are unchanged. Packages
+// without t64 here have no t64 sibling on trixie — verified against
+// packages.debian.org/trixie. Fonts are intentionally omitted: the
+// reported failure is launch-time linker errors, not rendering glyphs;
+// font packages (esp. fonts-noto-cjk) cost ~50MB+ for no launch impact.
+export const CHROME_RUNTIME_APT_PACKAGES_AMD64 = [
+  'libasound2t64',
+  'libatk-bridge2.0-0t64',
+  'libatk1.0-0t64',
+  'libatspi2.0-0t64',
+  'libcairo2',
+  'libcups2t64',
+  'libdbus-1-3',
+  'libdrm2',
+  'libgbm1',
+  'libglib2.0-0t64',
+  'libnspr4',
+  'libnss3',
+  'libpango-1.0-0',
+  'libx11-6',
+  'libxcb1',
+  'libxcomposite1',
+  'libxdamage1',
+  'libxext6',
+  'libxfixes3',
+  'libxkbcommon0',
+  'libxrandr2',
+] as const
+
 type AptFeature = {
   toAptArgs: (toggle: DockerfileFeatureToggle) => string[]
 }
@@ -38,8 +80,8 @@ export function buildDockerfile(config: DockerfileConfig = defaultConfig()): str
 # package manager caches (.deb files, bun's tarball cache) where we want
 # fast rebuilds without bloating the runtime image. Cache mounts are
 # explicitly NOT used for tool output that the runtime needs (e.g. the
-# Chrome for Testing binary at \`~/.cache/agent-browser\`); those go through
-# normal layers so they ship with the image.
+# Chrome for Testing binary under \`~/.agent-browser/browsers/\`); those go
+# through normal layers so they ship with the image.
 
 FROM oven/bun:1-slim
 
@@ -82,6 +124,9 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
       ${aptArgs.join(' ')} \\
  && if [ "$TARGETARCH" = "arm64" ]; then \\
       apt-get install -y --no-install-recommends chromium; \\
+    else \\
+      apt-get install -y --no-install-recommends \\
+        ${CHROME_RUNTIME_APT_PACKAGES_AMD64.join(' ')}; \\
     fi
 
 # Layer 3 (stable, arm64 only): point agent-browser at the apt-installed
@@ -102,13 +147,16 @@ RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \\
     bun install -g agent-browser
 
 # Layer 5 (heavy, amd64 only): download the pinned Chrome for Testing build
-# into ~/.cache/agent-browser and apt-install the libs it needs. NO cache
-# mount on ~/.cache/agent-browser: the runtime needs the binary in the
-# image, and cache mounts are excluded from the final image. The apt-cache
-# mounts ARE used for the --with-deps system libs install.
-# Kept last so it benefits from every layer above being cached, and so
-# changes to git or the apt base don't invalidate hundreds of MB of Chrome
-# state.
+# into ~/.agent-browser/browsers/. NO cache mount on that path: the runtime
+# needs the binary in the image, and cache mounts are excluded from the
+# final image. The system shared libraries Chrome needs at runtime were
+# already installed in Layer 2 above (CHROME_RUNTIME_APT_PACKAGES_AMD64);
+# we still pass --with-deps as a defense-in-depth backstop so a future
+# agent-browser bump that adds new deps installs them automatically. The
+# apt-cache mounts make that backstop a near-no-op when Layer 2 already
+# satisfied everything. Kept last so it benefits from every layer above
+# being cached, and so changes to git or the apt base don't invalidate
+# hundreds of MB of Chrome state.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\
     if [ "$TARGETARCH" != "arm64" ]; then \\
