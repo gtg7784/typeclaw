@@ -102,6 +102,25 @@ describe('security plugin wiring', () => {
     expect(result).toBeUndefined()
   })
 
+  test('tool.before blocks session_search for credential keywords', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(
+      toolEvent('session_search', { query: 'password OR token OR api_key OR secret OR credit' }),
+      hookContext('/agent'),
+    )
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('sessionSearchSecrets')
+  })
+
+  test('tool.before allows benign session_search', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(
+      toolEvent('session_search', { query: 'what did we decide about the new homepage' }),
+      hookContext('/agent'),
+    )
+    expect(result).toBeUndefined()
+  })
+
   test('tool.before allows ordinary bash', async () => {
     const hook = await toolBeforeHook()
     const result = await hook(toolEvent('bash', { command: 'bun test' }), hookContext('/agent'))
@@ -125,6 +144,15 @@ describe('security plugin wiring', () => {
     expect(
       await hook(
         toolEvent('webfetch', { url: 'http://127.0.0.1/dev', acknowledgeGuards: { ssrf: true } }),
+        hookContext('/agent'),
+      ),
+    ).toBeUndefined()
+    expect(
+      await hook(
+        toolEvent('session_search', {
+          query: 'password',
+          acknowledgeGuards: { sessionSearchSecrets: true },
+        }),
         hookContext('/agent'),
       ),
     ).toBeUndefined()
