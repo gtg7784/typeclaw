@@ -86,6 +86,16 @@ export const SESSION_GC_INTERVAL_MS = 60 * 1000
 // instead of awaiting the same dead promise forever.
 export const ENSURE_LIVE_TIMEOUT_MS = 30_000
 
+// Per-callback ceilings inside the ensureLive chain. The outer watchdog
+// catches the worst case, but per-step timeouts give better log
+// attribution (which step hung) AND graceful degradation: a hung name
+// resolver still lets engagement run on IDs alone, a hung history fetch
+// still lets the agent answer without prefetched context. Both paths
+// loop over registered callbacks and currently `await` each unbounded.
+// 5s matches Discord's median REST p99 with comfortable headroom.
+export const RESOLVE_CHANNEL_NAMES_TIMEOUT_MS = 5_000
+export const FETCH_HISTORY_TIMEOUT_MS = 5_000
+
 // Two-axis loop guard for peer-bot conversation. Peer bots route into
 // engagement under the SAME rules as humans, so a small ring (A→B→C→A) or
 // a fast cascade can otherwise ping-pong without bound. The guard trips
@@ -277,12 +287,19 @@ export type CreateChannelRouterOptions = {
   // Test seam: override the ensureLive watchdog ceiling so the timeout path
   // is exercisable in <100ms instead of the 30s production default.
   ensureLiveTimeoutMs?: number
+  // Test seam: per-callback ceiling for channel name resolvers; mirrors the
+  // ensureLive seam so timeout paths can be exercised quickly in tests.
+  resolveChannelNamesTimeoutMs?: number
+  // Test seam: per-callback ceiling for history fetches.
+  fetchHistoryTimeoutMs?: number
 }
 
 export function createChannelRouter(options: CreateChannelRouterOptions): ChannelRouter {
   const logger = options.logger ?? consoleLogger
   const now = options.now ?? Date.now
   const ensureLiveTimeoutMs = options.ensureLiveTimeoutMs ?? ENSURE_LIVE_TIMEOUT_MS
+  const resolveChannelNamesTimeoutMs = options.resolveChannelNamesTimeoutMs ?? RESOLVE_CHANNEL_NAMES_TIMEOUT_MS
+  const fetchHistoryTimeoutMs = options.fetchHistoryTimeoutMs ?? FETCH_HISTORY_TIMEOUT_MS
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
@@ -368,7 +385,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const merged: ResolvedChannelNames = {}
     for (const resolver of snapshot) {
       try {
-        const result = await resolver(key)
+        const result = await raceWithTimeout(
+          resolver(key),
+          resolveChannelNamesTimeoutMs,
+          `[channels] ${channelKeyId(key)}: name resolver`,
+        )
         if (result.chatName !== undefined && merged.chatName === undefined) merged.chatName = result.chatName
         if (result.workspaceName !== undefined && merged.workspaceName === undefined) {
           merged.workspaceName = result.workspaceName
@@ -1085,9 +1106,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const snapshot = Array.from(callbacks)
     let lastError: FetchHistoryResult & { ok: false } = { ok: false, error: 'history-not-supported' }
     for (const cb of snapshot) {
-      const result = await cb(args)
-      if (result.ok) return result
-      lastError = result
+      try {
+        const result = await raceWithTimeout(cb(args), fetchHistoryTimeoutMs, `[channels] ${adapter} history fetch`)
+        if (result.ok) return result
+        lastError = result
+      } catch (err) {
+        logger.warn(`[channels] history fetch threw for ${adapter}: ${describe(err)}`)
+        lastError = { ok: false, error: 'history-not-supported' }
+      }
     }
     return lastError
   }

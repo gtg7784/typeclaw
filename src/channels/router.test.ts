@@ -1709,6 +1709,46 @@ describe('ChannelRouter channel name resolver', () => {
 
     expect(calls).toBe(1)
   })
+
+  test('a hung name resolver times out without dragging ensureLive past the per-callback ceiling', async () => {
+    // given a name resolver that never resolves (production failure mode:
+    // Discord REST stuck during a gateway-disconnect storm)
+    const dir = await tempDir()
+    const logs: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      resolveChannelNamesTimeoutMs: 50,
+      logger: {
+        info: (m) => logs.push(`info:${m}`),
+        warn: (m) => logs.push(`warn:${m}`),
+        error: (m) => logs.push(`error:${m}`),
+      },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_after_timeout',
+          dispose: async () => {
+            fake.dispose()
+          },
+        }
+      },
+    })
+    router.registerChannelNameResolver('discord-bot', () => new Promise(() => {}))
+
+    // when an inbound triggers ensureLive
+    const start = Date.now()
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    const elapsed = Date.now() - start
+
+    // then ensureLive completes without the resolved name (graceful
+    // degradation), the timeout is logged, and the session is created
+    expect(elapsed).toBeLessThan(500)
+    expect(router.liveCount()).toBe(1)
+    expect(logs.some((l) => l.includes('name resolver threw') && l.includes('timed out after 50ms'))).toBe(true)
+  })
 })
 
 describe('ChannelRouter peer-bot loop guard', () => {
@@ -1989,6 +2029,36 @@ describe('ChannelRouter history dispatch', () => {
 
     expect(discordCalls).toBe(1)
     expect(slackCalls).toBe(0)
+  })
+
+  test('a hung history callback times out and degrades to history-not-supported', async () => {
+    // given a fetchHistory callback that never resolves (production failure
+    // mode: same root cause as the hung name resolver — REST stuck inside
+    // the cold-start chain). Without the timeout, prefetchChannelContext
+    // would block ensureLive forever even on a known-existing channel.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      fetchHistoryTimeoutMs: 50,
+      logger: {
+        info: (m) => logs.push(`info:${m}`),
+        warn: (m) => logs.push(`warn:${m}`),
+        error: (m) => logs.push(`error:${m}`),
+      },
+    })
+    router.registerHistory('discord-bot', () => new Promise(() => {}))
+
+    // when fetchHistory is invoked
+    const start = Date.now()
+    const result = await router.fetchHistory('discord-bot', { chat: 'c1', thread: null, limit: 1 })
+    const elapsed = Date.now() - start
+
+    // then it returns the not-supported degraded result and logs the timeout
+    expect(elapsed).toBeLessThan(500)
+    expect(result.ok).toBe(false)
+    expect(logs.some((l) => l.includes('history fetch threw') && l.includes('timed out after 50ms'))).toBe(true)
   })
 })
 
