@@ -116,8 +116,31 @@ export type KakaoStoredAccount = {
   device_type: 'pc' | 'tablet'
 }
 
+export type KakaoPendingLoginState = {
+  device_uuid: string
+  device_type: 'pc' | 'tablet'
+  email: string
+  created_at: string
+}
+
+export type KakaoAccountToPersist = {
+  account_id: string
+  user_id: string
+  oauth_token: string
+  refresh_token?: string
+  device_uuid: string
+  device_type: 'pc' | 'tablet'
+  auth_method: 'login' | 'extract'
+  created_at: string
+  updated_at: string
+}
+
 export interface KakaoCredentialManager {
-  getAccount(id?: string): Promise<KakaoStoredAccount | null>
+  getAccount(id?: string): Promise<(KakaoStoredAccount & { auth_method?: 'login' | 'extract' }) | null>
+  setAccount(account: KakaoAccountToPersist): Promise<void>
+  setCurrentAccount(id: string): Promise<void>
+  loadPendingLogin(): Promise<KakaoPendingLoginState | null>
+  clearPendingLogin(): Promise<void>
 }
 
 export const KakaoTalkClient = RawClient as unknown as new () => KakaoTalkClient
