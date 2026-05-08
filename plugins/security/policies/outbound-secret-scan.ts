@@ -57,11 +57,24 @@ const PROCESS_ENV_TARGETS: ReadonlyArray<string> = [
   'TYPECLAW_HOSTD_TOKEN',
 ]
 
+const ENV_KEY_RECON_TARGETS: ReadonlyArray<string> = [
+  ...PROCESS_ENV_TARGETS,
+  'TYPECLAW_HOSTD_BROKER_TOKEN',
+  'TYPECLAW_HOSTD_URL',
+  'TYPECLAW_CONTAINER_NAME',
+  'AWS_DEFAULT_REGION',
+  'AWS_PROFILE',
+  'KUBECONFIG',
+  'DOCKER_AUTH_CONFIG',
+]
+
+const ENV_KEY_RECON_THRESHOLD = 3
+
 const TEXT_KEYS = ['text', 'message', 'content', 'body']
 
 export type OutboundSecretMatch = {
   kind: string
-  source: 'signature' | 'process_env'
+  source: 'signature' | 'process_env' | 'env_key_recon'
 }
 
 export function findOutboundSecrets(text: string, env: NodeJS.ProcessEnv = process.env): OutboundSecretMatch[] {
@@ -90,7 +103,27 @@ export function findOutboundSecrets(text: string, env: NodeJS.ProcessEnv = proce
     }
   }
 
+  const reconNames = findReconEnvKeys(text)
+  if (reconNames.length >= ENV_KEY_RECON_THRESHOLD) {
+    for (const name of reconNames) {
+      const dedup = `recon:${name}`
+      if (!seen.has(dedup)) {
+        seen.add(dedup)
+        hits.push({ kind: name, source: 'env_key_recon' })
+      }
+    }
+  }
+
   return hits
+}
+
+function findReconEnvKeys(text: string): string[] {
+  const out: string[] = []
+  for (const name of ENV_KEY_RECON_TARGETS) {
+    const re = new RegExp(`\\b${name}\\b`)
+    if (re.test(text)) out.push(name)
+  }
+  return out
 }
 
 export function checkOutboundSecretGuard(options: {
@@ -109,15 +142,25 @@ export function checkOutboundSecretGuard(options: {
     const matches = findOutboundSecrets(value, env)
     if (matches.length === 0) continue
 
-    const summary = matches.map((m) => (m.source === 'process_env' ? `process.env.${m.kind}` : m.kind)).join(', ')
+    const summary = matches.map(renderMatch).join(', ')
+    const reconOnly = matches.every((m) => m.source === 'env_key_recon')
+    const lead = reconOnly
+      ? `Guard \`${GUARD_OUTBOUND_SECRET}\` blocked ${tool}: outbound text lists ${matches.length} known sensitive env-var names (${summary}) - this is a recon-shaped leak even with values masked.`
+      : `Guard \`${GUARD_OUTBOUND_SECRET}\` blocked ${tool}: outbound text contains likely credentials (${summary}).`
     return {
       block: true,
       reason: [
-        `Guard \`${GUARD_OUTBOUND_SECRET}\` blocked ${tool}: outbound text contains likely credentials (${summary}).`,
-        'Posting secrets to a channel persists them in chat history and exposes them to every reader.',
+        lead,
+        'Posting secrets - or even the names of which secrets exist - to a channel persists them in chat history and exposes them to every reader.',
         `If this is genuinely intentional and the value is not actually sensitive, retry with \`${ACKNOWLEDGE_GUARDS}.${GUARD_OUTBOUND_SECRET}: true\` in the tool arguments.`,
       ].join(' '),
     }
   }
   return undefined
+}
+
+function renderMatch(m: OutboundSecretMatch): string {
+  if (m.source === 'process_env') return `process.env.${m.kind}`
+  if (m.source === 'env_key_recon') return `${m.kind} (env-key recon)`
+  return m.kind
 }

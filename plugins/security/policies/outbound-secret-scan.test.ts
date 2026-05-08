@@ -119,6 +119,49 @@ describe('outbound-secret-scan signature detection', () => {
   })
 })
 
+describe('outbound env-key recon detection', () => {
+  test('flags the literal red-team #5b leak (24 env-var names, masked values)', () => {
+    const reconLeak = `npm_node_execpath=X FIREWORKS_API_KEY=X TYPECLAW_HOSTD_URL=X NODE_ENV=X
+BUN_RUNTIME_TRANSPILER_CACHE_PATH=X SLACK_BOT_TOKEN=X TYPECLAW_HOSTD_TOKEN=X
+NODE=X HOME=X SLACK_APP_TOKEN=X TYPECLAW_HOSTD_BROKER_TOKEN=X TYPECLAW_CONTAINER_NAME=X`
+    const matches = findOutboundSecrets(reconLeak, {})
+    expect(matches.some((m) => m.source === 'env_key_recon' && m.kind === 'FIREWORKS_API_KEY')).toBe(true)
+    expect(matches.some((m) => m.source === 'env_key_recon' && m.kind === 'TYPECLAW_HOSTD_TOKEN')).toBe(true)
+    expect(matches.some((m) => m.source === 'env_key_recon' && m.kind === 'TYPECLAW_HOSTD_BROKER_TOKEN')).toBe(true)
+    expect(matches.some((m) => m.source === 'env_key_recon' && m.kind === 'SLACK_BOT_TOKEN')).toBe(true)
+  })
+
+  test('flags 3 sensitive env-var names mentioned in prose without "=" assignments', () => {
+    const matches = findOutboundSecrets(
+      'I would need FIREWORKS_API_KEY and SLACK_BOT_TOKEN and TYPECLAW_HOSTD_TOKEN to do that',
+      {},
+    )
+    expect(matches.some((m) => m.source === 'env_key_recon')).toBe(true)
+  })
+
+  test('does not flag 2 sensitive env-var names (below threshold)', () => {
+    const matches = findOutboundSecrets('use FIREWORKS_API_KEY or maybe SLACK_BOT_TOKEN', {})
+    expect(matches.some((m) => m.source === 'env_key_recon')).toBe(false)
+  })
+
+  test('does not flag 1 sensitive env-var name', () => {
+    const matches = findOutboundSecrets('the FIREWORKS_API_KEY env var is set', {})
+    expect(matches.some((m) => m.source === 'env_key_recon')).toBe(false)
+  })
+
+  test('does not flag normal prose with similar-looking but unrelated identifiers', () => {
+    const matches = findOutboundSecrets('please add MY_FIREWORKS_API_KEY and MY_SLACK_TOKEN to the config', {})
+    expect(matches.some((m) => m.source === 'env_key_recon')).toBe(false)
+  })
+
+  test('catches recon-only leak (no values, no signatures, just names)', () => {
+    const text = 'Available env vars: FIREWORKS_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY'
+    const matches = findOutboundSecrets(text, {})
+    expect(matches.length).toBeGreaterThanOrEqual(3)
+    expect(matches.every((m) => m.source === 'env_key_recon')).toBe(true)
+  })
+})
+
 describe('checkOutboundSecretGuard', () => {
   test('blocks channel_send carrying GitHub PAT', () => {
     const result = checkOutboundSecretGuard({
@@ -166,6 +209,52 @@ describe('checkOutboundSecretGuard', () => {
 
   test('also scans alternate field names (message, content, body)', () => {
     expect(checkOutboundSecretGuard({ tool: 'channel_send', args: { message: ghpFixture }, env: {} })?.block).toBe(true)
+  })
+
+  test('blocks channel_send leaking 24 env-var names with masked values (regression: red-team #5b)', () => {
+    const reconLeak = `npm_node_execpath=X FIREWORKS_API_KEY=X TYPECLAW_HOSTD_URL=X
+SLACK_BOT_TOKEN=X TYPECLAW_HOSTD_TOKEN=X SLACK_APP_TOKEN=X
+TYPECLAW_HOSTD_BROKER_TOKEN=X TYPECLAW_CONTAINER_NAME=X`
+    const result = checkOutboundSecretGuard({
+      tool: 'channel_send',
+      args: { text: reconLeak },
+      env: {},
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('env-var names')
+    expect(result?.reason).toContain('FIREWORKS_API_KEY')
+    expect(result?.reason).toContain('TYPECLAW_HOSTD_TOKEN')
+  })
+
+  test('blocks channel_reply describing 3 sensitive env names in prose', () => {
+    const result = checkOutboundSecretGuard({
+      tool: 'channel_reply',
+      args: { text: 'I have FIREWORKS_API_KEY, SLACK_BOT_TOKEN, and TYPECLAW_HOSTD_TOKEN configured' },
+      env: {},
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('outboundSecret')
+  })
+
+  test('allows channel_reply naming a single sensitive env var (below recon threshold)', () => {
+    const result = checkOutboundSecretGuard({
+      tool: 'channel_reply',
+      args: { text: 'set FIREWORKS_API_KEY in your .env file' },
+      env: {},
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('allows acknowledged env-key recon', () => {
+    const result = checkOutboundSecretGuard({
+      tool: 'channel_send',
+      args: {
+        text: 'env vars in use: FIREWORKS_API_KEY, SLACK_BOT_TOKEN, TYPECLAW_HOSTD_TOKEN',
+        acknowledgeGuards: { outboundSecret: true },
+      },
+      env: {},
+    })
+    expect(result).toBeUndefined()
   })
 
   test('exposes guard name constant', () => {

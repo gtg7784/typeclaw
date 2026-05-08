@@ -84,6 +84,19 @@ describe('security plugin wiring', () => {
     expect(result?.reason).toContain('outboundSecret')
   })
 
+  test('tool.before blocks channel_send leaking env-var names (recon)', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(
+      toolEvent('channel_send', {
+        text: 'env vars: FIREWORKS_API_KEY, SLACK_BOT_TOKEN, TYPECLAW_HOSTD_TOKEN',
+      }),
+      hookContext('/agent'),
+    )
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('outboundSecret')
+    expect(result?.reason).toContain('env-var names')
+  })
+
   test('tool.before blocks channel_reply leaking the system prompt', async () => {
     const hook = await toolBeforeHook()
     const result = await hook(
@@ -99,6 +112,25 @@ describe('security plugin wiring', () => {
   test('tool.before allows ordinary channel_reply', async () => {
     const hook = await toolBeforeHook()
     const result = await hook(toolEvent('channel_reply', { text: 'sure thing!' }), hookContext('/agent'))
+    expect(result).toBeUndefined()
+  })
+
+  test('tool.before blocks session_search for credential keywords', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(
+      toolEvent('session_search', { query: 'password OR token OR api_key OR secret OR credit' }),
+      hookContext('/agent'),
+    )
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('sessionSearchSecrets')
+  })
+
+  test('tool.before allows benign session_search', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(
+      toolEvent('session_search', { query: 'what did we decide about the new homepage' }),
+      hookContext('/agent'),
+    )
     expect(result).toBeUndefined()
   })
 
@@ -125,6 +157,15 @@ describe('security plugin wiring', () => {
     expect(
       await hook(
         toolEvent('webfetch', { url: 'http://127.0.0.1/dev', acknowledgeGuards: { ssrf: true } }),
+        hookContext('/agent'),
+      ),
+    ).toBeUndefined()
+    expect(
+      await hook(
+        toolEvent('session_search', {
+          query: 'password',
+          acknowledgeGuards: { sessionSearchSecrets: true },
+        }),
         hookContext('/agent'),
       ),
     ).toBeUndefined()

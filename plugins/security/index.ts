@@ -4,6 +4,7 @@ import { checkOutboundSecretGuard } from './policies/outbound-secret-scan'
 import { applyPromptInjectionDefense } from './policies/prompt-injection'
 import { checkSecretExfilBashGuard } from './policies/secret-exfil-bash'
 import { checkSecretExfilReadGuard } from './policies/secret-exfil-read'
+import { checkSessionSearchSecretsGuard } from './policies/session-search-secrets'
 import { checkSsrfGuard } from './policies/ssrf'
 import { checkSystemPromptLeakGuard } from './policies/system-prompt-leak'
 
@@ -18,6 +19,7 @@ export default definePlugin({
           checkSecretExfilBashGuard({ tool: event.tool, args: event.args }),
           checkSecretExfilReadGuard({ tool: event.tool, args: event.args }),
           checkSsrfGuard({ tool: event.tool, args: event.args }),
+          checkSessionSearchSecretsGuard({ tool: event.tool, args: event.args }),
           checkSystemPromptLeakGuard({ tool: event.tool, args: event.args }),
           checkOutboundSecretGuard({ tool: event.tool, args: event.args }),
         ]
