@@ -11,6 +11,15 @@ import type {
   ToolBeforeResult,
 } from './types'
 
+// Per-handler ceiling for session.idle. The channels-side router wraps the
+// whole chain at SESSION_IDLE_TIMEOUT_MS = 30s; this inner bound fires
+// first so the offending plugin gets named in the logs instead of the
+// chain-level timeout swallowing attribution. A handler that legitimately
+// needs longer (large transcript replay, dreaming subagent) is rare — and
+// `setTimeout`-driven plugins like memory-logger normally return in
+// milliseconds. 25s leaves headroom under the chain watchdog.
+export const IDLE_HANDLER_TIMEOUT_MS = 25_000
+
 export type RegisteredHook<K extends keyof Hooks> = {
   pluginName: string
   agentDir: string
@@ -30,6 +39,13 @@ export type HookBus = {
   count: (name: keyof Hooks) => number
 }
 
+export type CreateHookBusOptions = {
+  // Test seam: per-handler ceiling for session.idle invocations. Lets the
+  // timeout path be exercised in tens of milliseconds instead of the 25s
+  // production default.
+  idleHandlerTimeoutMs?: number
+}
+
 type Registries = {
   'session.start': RegisteredHook<'session.start'>[]
   'session.end': RegisteredHook<'session.end'>[]
@@ -39,7 +55,8 @@ type Registries = {
   'tool.after': RegisteredHook<'tool.after'>[]
 }
 
-export function createHookBus(): HookBus {
+export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
+  const idleHandlerTimeoutMs = options.idleHandlerTimeoutMs ?? IDLE_HANDLER_TIMEOUT_MS
   const r: Registries = {
     'session.start': [],
     'session.end': [],
@@ -96,7 +113,11 @@ export function createHookBus(): HookBus {
     async runSessionIdle(event) {
       for (const reg of r['session.idle']) {
         try {
-          await reg.handler(event, ctx(reg))
+          await raceWithTimeout(
+            Promise.resolve(reg.handler(event, ctx(reg))),
+            idleHandlerTimeoutMs,
+            `plugin ${reg.pluginName} session.idle`,
+          )
         } catch (err) {
           reportHookError(reg, 'session.idle', err)
         }
@@ -152,4 +173,16 @@ export function createHookBus(): HookBus {
 function reportHookError(reg: { logger: PluginLogger }, hook: keyof Hooks, err: unknown): void {
   const message = err instanceof Error ? err.message : String(err)
   reg.logger.error(`hook ${hook} threw: ${message}`)
+}
+
+async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+  })
+  try {
+    return await Promise.race([work, timeout])
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+  }
 }

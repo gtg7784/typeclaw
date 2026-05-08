@@ -96,6 +96,19 @@ export const ENSURE_LIVE_TIMEOUT_MS = 30_000
 export const RESOLVE_CHANNEL_NAMES_TIMEOUT_MS = 5_000
 export const FETCH_HISTORY_TIMEOUT_MS = 5_000
 
+// Watchdog over the whole session.idle hook chain. The drain loop awaits
+// `fireSessionIdle` between turns; a single hung plugin handler (e.g. a
+// memory-logger awaiting a network call that never resolves) wedges the
+// loop with `live.draining` stuck `true`, which means subsequent mention
+// inbounds enqueue silently and never fire. Observe-decisions still log
+// because engagement runs in `route()` before the draining check, so the
+// symptom from logs alone is "thread receives observed lines forever
+// after the last `prompted elapsed_ms=...`". Bounding the chain here
+// matches the ensureLive watchdog (30s) so a misbehaving plugin
+// degrades the current turn instead of bricking the channel until
+// container restart. Per-handler attribution lives in plugin/hooks.ts.
+export const SESSION_IDLE_TIMEOUT_MS = 30_000
+
 // Two-axis loop guard for peer-bot conversation. Peer bots route into
 // engagement under the SAME rules as humans, so a small ring (A→B→C→A) or
 // a fast cascade can otherwise ping-pong without bound. The guard trips
@@ -292,6 +305,9 @@ export type CreateChannelRouterOptions = {
   resolveChannelNamesTimeoutMs?: number
   // Test seam: per-callback ceiling for history fetches.
   fetchHistoryTimeoutMs?: number
+  // Test seam: bound the session.idle hook chain so the timeout path is
+  // exercisable in tens of milliseconds instead of the 30s default.
+  sessionIdleTimeoutMs?: number
 }
 
 export function createChannelRouter(options: CreateChannelRouterOptions): ChannelRouter {
@@ -300,6 +316,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const ensureLiveTimeoutMs = options.ensureLiveTimeoutMs ?? ENSURE_LIVE_TIMEOUT_MS
   const resolveChannelNamesTimeoutMs = options.resolveChannelNamesTimeoutMs ?? RESOLVE_CHANNEL_NAMES_TIMEOUT_MS
   const fetchHistoryTimeoutMs = options.fetchHistoryTimeoutMs ?? FETCH_HISTORY_TIMEOUT_MS
+  const sessionIdleTimeoutMs = options.sessionIdleTimeoutMs ?? SESSION_IDLE_TIMEOUT_MS
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
@@ -746,13 +763,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const fireSessionIdle = async (live: LiveSession): Promise<void> => {
     if (!live.hooks) return
+    const work = live.hooks.runSessionIdle({
+      sessionId: live.sessionId,
+      parentTranscriptPath: live.getTranscriptPath?.(),
+      idleMs: 0,
+      origin: buildLiveOrigin(live),
+    })
     try {
-      await live.hooks.runSessionIdle({
-        sessionId: live.sessionId,
-        parentTranscriptPath: live.getTranscriptPath?.(),
-        idleMs: 0,
-        origin: buildLiveOrigin(live),
-      })
+      await raceWithTimeout(work, sessionIdleTimeoutMs, `[channels] ${live.keyId} session.idle`)
     } catch (err) {
       logger.warn(`[channels] session.idle hook threw for ${live.keyId}: ${describe(err)}`)
     }

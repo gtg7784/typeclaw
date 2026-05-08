@@ -1621,6 +1621,71 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
     expect(events).toEqual(['idle:ses_fake_1:-', 'end:ses_fake_1'])
     expect(sessions[0]!.disposed).toBe(1)
   })
+
+  test('a hung session.idle hook does not wedge the drain loop forever', async () => {
+    // given a session.idle hook that never resolves (production failure
+    // mode: a plugin handler awaiting a network call that hangs). Without
+    // the watchdog, `live.draining` would stay `true` and every subsequent
+    // mention would silently enqueue forever. The test seam shortens the
+    // chain ceiling so the path is exercisable in milliseconds.
+    const dir = await tempDir()
+    const sessions: FakeSession[] = []
+    const logs: string[] = []
+    const hooks: HookBus = {
+      registerAll: () => {},
+      unregisterAll: () => {},
+      runSessionStart: async () => {},
+      runSessionEnd: async () => {},
+      runSessionIdle: () => new Promise(() => {}),
+      runSessionPrompt: async () => {},
+      runToolBefore: async () => undefined,
+      runToolAfter: async () => {},
+      count: () => 0,
+    }
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      sessionIdleTimeoutMs: 30,
+      logger: {
+        info: (m) => logs.push(`info:${m}`),
+        warn: (m) => logs.push(`warn:${m}`),
+        error: (m) => logs.push(`error:${m}`),
+      },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        sessions.push(fake)
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: `ses_fake_${sessions.length}`,
+          dispose: async () => {
+            fake.dispose()
+          },
+          hooks,
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+
+    // when a first message engages the bot and a second arrives after the
+    // idle-hook watchdog should have fired
+    const start = Date.now()
+    await router.route(inbound({ text: 'first' }))
+    await router.__testing!.flushDebounce(KEY)
+    await router.route(inbound({ externalMessageId: 'm2', text: 'second' }))
+    await router.__testing!.flushDebounce(KEY)
+    const elapsed = Date.now() - start
+
+    // then both prompts ran (the second is the real proof — without the
+    // watchdog the drain loop would still be parked inside the hung idle
+    // hook and `live.draining` would block enqueue from firing a new drain),
+    // the run completed within the watchdog window, and a warning naming
+    // the timeout was emitted so an operator can attribute the hang
+    expect(sessions[0]!.prompts).toHaveLength(2)
+    expect(elapsed).toBeLessThan(2000)
+    const idleWarn = logs.find((l) => l.includes('warn:[channels]') && l.includes('session.idle hook threw'))
+    expect(idleWarn).toBeDefined()
+    expect(idleWarn).toMatch(/session\.idle timed out after 30ms/)
+  })
 })
 
 describe('ChannelRouter channel name resolver', () => {
