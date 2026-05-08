@@ -4,7 +4,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { config, configSchema, type Config } from '@/config'
-import { start } from '@/container'
+import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
 import { createTui } from '@/tui'
 
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
@@ -34,9 +34,11 @@ export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason
 export type DockerAssetsResult = { ok: true; devMode: boolean } | { ok: false; reason: string }
 export type HatchingResult = { ok: true } | { ok: false; reason: string }
 
-export type InitStep = 'scaffold' | 'install' | 'dockerfile' | 'git' | 'hatching'
+export type InitStep = 'preflight' | 'scaffold' | 'install' | 'dockerfile' | 'git' | 'hatching'
 
 export type InitStepEvent =
+  | { step: 'preflight'; phase: 'start' }
+  | { step: 'preflight'; phase: 'done'; result: DockerAvailability }
   | { step: 'scaffold'; phase: 'start' }
   | { step: 'scaffold'; phase: 'done' }
   | { step: 'install'; phase: 'start' }
@@ -62,6 +64,7 @@ export type InitOptions = {
   telegramAllowAll?: boolean
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
+  dockerExec?: DockerExec
 }
 
 export async function runInit({
@@ -76,8 +79,19 @@ export async function runInit({
   telegramAllowAll = true,
   onProgress,
   runHatching = defaultRunHatching,
+  dockerExec,
 }: InitOptions): Promise<void> {
   const emit = onProgress ?? (() => {})
+
+  // Docker preflight runs BEFORE any scaffolding so a missing-binary or
+  // daemon-down failure leaves the user's directory untouched. Without this
+  // gate, init would lay the egg, write the Dockerfile, init git, and then
+  // fail at hatching with a raw "Executable not found in $PATH: docker" —
+  // leaving a half-initialized agent folder the user has to clean up by hand.
+  emit({ step: 'preflight', phase: 'start' })
+  const preflight = await checkDockerAvailable(dockerExec)
+  emit({ step: 'preflight', phase: 'done', result: preflight })
+  if (!preflight.ok) return
 
   const wantsDiscord = discordBotToken !== undefined && discordBotToken !== ''
   const wantsSlack = slackBotToken !== undefined && slackBotToken !== ''

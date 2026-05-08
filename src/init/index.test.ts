@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import * as z from 'zod'
 
 import { configSchema, dockerfileSchema } from '@/config/config'
+import type { DockerExec } from '@/container'
 
 import { buildDockerfile } from './dockerfile'
 import { buildGitignore } from './gitignore'
@@ -36,6 +37,11 @@ beforeEach(async () => {
 
 const okHatch: HatchRunner = async () => ({ ok: true }) as HatchingResult
 
+// Default exec stub for tests: pretends docker is installed and the daemon
+// is reachable. Tests that exercise the preflight failure path override this
+// with their own DockerExec to simulate ENOENT or daemon-down conditions.
+const okDocker: DockerExec = async () => ({ exitCode: 0, stdout: '29.4.0\n', stderr: '' })
+
 function captureHatch(): { runner: HatchRunner; calls: Array<{ cwd: string; port: number }> } {
   const calls: Array<{ cwd: string; port: number }> = []
   const runner: HatchRunner = async (options) => {
@@ -60,9 +66,17 @@ describe('runInit', () => {
   test('runs scaffold, install, dockerfile, git, and hatching steps in order', async () => {
     const events: InitStepEvent[] = []
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
 
     expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
+      'preflight:start',
+      'preflight:done',
       'scaffold:start',
       'scaffold:done',
       'install:start',
@@ -86,7 +100,7 @@ describe('runInit', () => {
       return { ok: true }
     }
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching, dockerExec: okDocker })
 
     expect(seenAt).toEqual([{ hasGit: true, hasDockerfile: true }])
   })
@@ -94,7 +108,7 @@ describe('runInit', () => {
   test('hatching receives the init cwd and the configured port', async () => {
     const { runner, calls } = captureHatch()
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: runner })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: runner, dockerExec: okDocker })
 
     expect(calls).toHaveLength(1)
     expect(calls[0]?.cwd).toBe(root)
@@ -105,7 +119,13 @@ describe('runInit', () => {
     const runHatching: HatchRunner = async () => ({ ok: false, reason: 'simulated boom' })
     const events: InitStepEvent[] = []
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching, onProgress: (e) => events.push(e) })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
 
     const hatchDone = events.find((e) => e.step === 'hatching' && e.phase === 'done')
     if (!(hatchDone && hatchDone.step === 'hatching' && hatchDone.phase === 'done')) {
@@ -115,7 +135,7 @@ describe('runInit', () => {
   })
 
   test('produces an initialized agent folder (config, secrets, markdown, git repo)', async () => {
-    await runInit({ cwd: root, apiKey: 'fw_integration_key', runHatching: okHatch })
+    await runInit({ cwd: root, apiKey: 'fw_integration_key', runHatching: okHatch, dockerExec: okDocker })
 
     expect(isInitialized(root)).toBe(true)
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_integration_key\n')
@@ -125,7 +145,7 @@ describe('runInit', () => {
   })
 
   test('git step sees scaffolded files (step ordering)', async () => {
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, dockerExec: okDocker })
 
     const tracked = (await runGit(root, ['ls-files'])).split('\n')
     expect(tracked).toContain('typeclaw.json')
@@ -145,7 +165,13 @@ describe('runInit', () => {
   test('dockerfile step writes Dockerfile and reports devMode via event', async () => {
     const events: InitStepEvent[] = []
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
 
     expect(existsSync(join(root, 'Dockerfile'))).toBe(true)
 
@@ -157,7 +183,13 @@ describe('runInit', () => {
   })
 
   test('Dockerfile installs git so agents can use it at runtime', async () => {
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: () => {} })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      dockerExec: okDocker,
+      onProgress: () => {},
+    })
 
     const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
     expect(dockerfile).toMatch(/apt-get[\s\S]+install[\s\S]+\bgit\b/)
@@ -166,7 +198,13 @@ describe('runInit', () => {
   test('emits git done event with skipped: false when repo is freshly initialized', async () => {
     const events: InitStepEvent[] = []
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
 
     const gitDone = events.find((e) => e.step === 'git' && e.phase === 'done')
     if (!(gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok)) {
@@ -179,7 +217,13 @@ describe('runInit', () => {
     await mkdir(join(root, '.git'))
     const events: InitStepEvent[] = []
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
 
     const gitDone = events.find((e) => e.step === 'git' && e.phase === 'done')
     if (!(gitDone && gitDone.step === 'git' && gitDone.phase === 'done' && gitDone.result.ok)) {
@@ -195,7 +239,13 @@ describe('runInit', () => {
     const events: InitStepEvent[] = []
 
     // when
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
 
     // then: dockerfile failed softly, git and hatching still ran
     const dockerDone = events.find((e) => e.step === 'dockerfile' && e.phase === 'done')
@@ -212,7 +262,7 @@ describe('runInit', () => {
   })
 
   test('works without onProgress callback', async () => {
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, dockerExec: okDocker })
 
     expect(isInitialized(root)).toBe(true)
   })
@@ -220,16 +270,24 @@ describe('runInit', () => {
   test('is idempotent: re-running after a failed hatching re-runs all steps without crashing', async () => {
     // given: a prior run where hatching failed (e.g. docker daemon was down).
     const failingHatch: HatchRunner = async () => ({ ok: false, reason: 'docker build failed' })
-    await runInit({ cwd: root, apiKey: 'fw_first_key', runHatching: failingHatch })
+    await runInit({ cwd: root, apiKey: 'fw_first_key', runHatching: failingHatch, dockerExec: okDocker })
     expect(isInitialized(root)).toBe(true)
     expect(await isHatched(root)).toBe(false)
 
     // when: the user retries `typeclaw init` with a working setup.
     const events: InitStepEvent[] = []
-    await runInit({ cwd: root, apiKey: 'fw_second_key', runHatching: okHatch, onProgress: (e) => events.push(e) })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_second_key',
+      runHatching: okHatch,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
 
     // then: every step ran again, and git step reports skipped because the repo already exists.
     expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
+      'preflight:start',
+      'preflight:done',
       'scaffold:start',
       'scaffold:done',
       'install:start',
@@ -247,6 +305,101 @@ describe('runInit', () => {
     }
     expect(gitDone.result.skipped).toBe(true)
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_second_key\n')
+  })
+
+  test('aborts before scaffolding when docker binary is missing', async () => {
+    // given: an exec stub that simulates Bun.spawn's ENOENT path
+    // (defaultDockerExec catches the throw and returns this exact stderr).
+    const missingDocker: DockerExec = async () => ({
+      exitCode: -1,
+      stdout: '',
+      stderr: 'docker: command not found in $PATH',
+    })
+    const events: InitStepEvent[] = []
+
+    // when
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      dockerExec: missingDocker,
+      onProgress: (e) => events.push(e),
+    })
+
+    // then: only the preflight step ran; nothing else.
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual(['preflight:start', 'preflight:done'])
+    const preflightDone = events.find((e) => e.step === 'preflight' && e.phase === 'done')
+    if (!(preflightDone && preflightDone.step === 'preflight' && preflightDone.phase === 'done')) {
+      throw new Error('expected preflight:done')
+    }
+    expect(preflightDone.result).toEqual({
+      ok: false,
+      reason: 'binary-missing',
+      detail: 'docker: command not found in $PATH',
+    })
+
+    // then: nothing was written to disk — the agent folder must look exactly
+    // as it did before runInit was called, so the user can re-run init after
+    // installing docker without manual cleanup.
+    expect(isInitialized(root)).toBe(false)
+    expect(existsSync(join(root, '.env'))).toBe(false)
+    expect(existsSync(join(root, 'package.json'))).toBe(false)
+    expect(existsSync(join(root, 'Dockerfile'))).toBe(false)
+    expect(existsSync(join(root, '.git'))).toBe(false)
+    expect(existsSync(join(root, 'AGENTS.md'))).toBe(false)
+    expect(existsSync(join(root, 'workspace'))).toBe(false)
+    expect(existsSync(join(root, 'packages'))).toBe(false)
+  })
+
+  test('aborts before scaffolding when docker daemon is unreachable', async () => {
+    const daemonDown: DockerExec = async () => ({
+      exitCode: 1,
+      stdout: '',
+      stderr: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n',
+    })
+    const events: InitStepEvent[] = []
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      dockerExec: daemonDown,
+      onProgress: (e) => events.push(e),
+    })
+
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual(['preflight:start', 'preflight:done'])
+    const preflightDone = events.find((e) => e.step === 'preflight' && e.phase === 'done')
+    if (!(preflightDone && preflightDone.step === 'preflight' && preflightDone.phase === 'done')) {
+      throw new Error('expected preflight:done')
+    }
+    expect(preflightDone.result.ok).toBe(false)
+    if (preflightDone.result.ok) throw new Error('unreachable')
+    expect(preflightDone.result.reason).toBe('daemon-down')
+    expect(preflightDone.result.detail).toContain('Cannot connect to the Docker daemon')
+
+    expect(isInitialized(root)).toBe(false)
+  })
+
+  test('hatching is not invoked when preflight fails', async () => {
+    const missingDocker: DockerExec = async () => ({
+      exitCode: -1,
+      stdout: '',
+      stderr: 'docker: command not found in $PATH',
+    })
+    let hatchingInvoked = false
+    const trackingHatch: HatchRunner = async () => {
+      hatchingInvoked = true
+      return { ok: true }
+    }
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: trackingHatch,
+      dockerExec: missingDocker,
+    })
+
+    expect(hatchingInvoked).toBe(false)
   })
 })
 

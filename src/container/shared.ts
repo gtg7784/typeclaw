@@ -10,16 +10,58 @@ export type DockerExec = (
 export const defaultDockerExec: DockerExec = async (args, options) => {
   const bun = getBun()
   if (!bun) return { exitCode: -1, stdout: '', stderr: 'bun runtime not available' }
-  const proc = bun.spawn({
-    cmd: ['docker', ...args],
-    cwd: options?.cwd,
-    stdout: options?.inheritStdio ? 'inherit' : 'pipe',
-    stderr: options?.inheritStdio ? 'inherit' : 'pipe',
-  })
-  const exitCode = await proc.exited
-  const stdout = options?.inheritStdio ? '' : await new Response(proc.stdout).text()
-  const stderr = options?.inheritStdio ? '' : await new Response(proc.stderr).text()
-  return { exitCode, stdout, stderr }
+  // Bun.spawn throws synchronously with code 'ENOENT' when docker isn't on
+  // $PATH (rather than returning a non-zero exit). Two overloads (pipe vs
+  // inherit) so each spawn call site has the literal stdout/stderr type
+  // attached — that's what lets `new Response(proc.stdout)` typecheck on
+  // the piped path.
+  if (options?.inheritStdio) {
+    try {
+      const proc = bun.spawn({ cmd: ['docker', ...args], cwd: options.cwd, stdout: 'inherit', stderr: 'inherit' })
+      return { exitCode: await proc.exited, stdout: '', stderr: '' }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+        return { exitCode: -1, stdout: '', stderr: DOCKER_NOT_FOUND_STDERR }
+      }
+      throw error
+    }
+  }
+  try {
+    const proc = bun.spawn({ cmd: ['docker', ...args], cwd: options?.cwd, stdout: 'pipe', stderr: 'pipe' })
+    const exitCode = await proc.exited
+    const stdout = await new Response(proc.stdout).text()
+    const stderr = await new Response(proc.stderr).text()
+    return { exitCode, stdout, stderr }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      return { exitCode: -1, stdout: '', stderr: DOCKER_NOT_FOUND_STDERR }
+    }
+    throw error
+  }
+}
+
+// Sentinel stderr from defaultDockerExec when Bun.spawn throws ENOENT.
+// checkDockerAvailable matches on this exact string to distinguish
+// "binary missing" from "daemon down".
+export const DOCKER_NOT_FOUND_STDERR = 'docker: command not found in $PATH'
+
+export type DockerAvailability = { ok: true } | { ok: false; reason: 'binary-missing' | 'daemon-down'; detail: string }
+
+// `docker info --format {{.ServerVersion}}` is the probe of choice because it
+// requires both the client AND a reachable daemon. `docker --version` would
+// miss the "Docker Desktop installed but not running" case, which is the
+// common failure mode on macOS.
+export async function checkDockerAvailable(exec: DockerExec = defaultDockerExec): Promise<DockerAvailability> {
+  const result = await exec(['info', '--format', '{{.ServerVersion}}'])
+  if (result.exitCode === 0) return { ok: true }
+  if (result.stderr === DOCKER_NOT_FOUND_STDERR) {
+    return { ok: false, reason: 'binary-missing', detail: result.stderr }
+  }
+  return {
+    ok: false,
+    reason: 'daemon-down',
+    detail: result.stderr.trim() || `docker info exited with code ${result.exitCode}`,
+  }
 }
 
 export function containerNameFromCwd(cwd: string): string {
