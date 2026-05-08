@@ -1,12 +1,7 @@
 import { TelegramBotClient, TelegramBotListener } from 'agent-messenger/telegrambot'
 import type { TelegramBotUser, TelegramMessage } from 'agent-messenger/telegrambot'
 
-import {
-  MEMBERSHIP_ENUMERATION_CAP,
-  type MembershipResolver,
-  type MembershipResolverFailure,
-  type MembershipResolverResult,
-} from '@/channels/membership'
+import type { MembershipResolver, MembershipResolverFailure, MembershipResolverResult } from '@/channels/membership'
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type {
@@ -24,14 +19,21 @@ import { classifyInbound, type InboundDropReason, TELEGRAM_WORKSPACE } from './t
 
 export const TELEGRAM_API_BASE = 'https://api.telegram.org'
 
-const TELEGRAM_ALLOWED_UPDATES = ['message', 'edited_message', 'channel_post', 'edited_channel_post']
+// Only subscribe to update kinds the adapter actually classifies. Edits
+// (`edited_message`, `edited_channel_post`) are deliberately omitted so
+// Telegram does not deliver them — discord-bot.ts and slack-bot.ts also
+// skip edits today, and quietly receiving them via `allowedUpdates` would
+// advance the SDK's offset past the edit without any classification or
+// log line, making "agent missed an edit" invisible.
+const TELEGRAM_ALLOWED_UPDATES = ['message', 'channel_post']
 
-// HTML is the default outbound `parse_mode`: agents naturally produce
-// markdown-y text and MarkdownV2's strict escaping rules (every `.`, `!`,
-// `(`, `)`, `_`, `*`, `[`, `]`, `~`, etc.) would crash a meaningful
-// fraction of replies. HTML's escaping is limited to `<`, `>`, `&`, which
-// the formatter handles before send.
-export const TELEGRAM_DEFAULT_PARSE_MODE = 'HTML' as const
+// Outbound is sent as plain text by default. Picking `parse_mode: 'HTML'`
+// would require us to escape every `<`, `>`, `&` in the agent's text or
+// Telegram returns `Bad Request: can't parse entities`. Picking
+// `MarkdownV2` is even stricter (every `. ! ( ) _ * [ ] ~` etc.). Until a
+// Telegram-aware formatter exists, plain text is the only mode that
+// can't reject a valid string. Operators who want HTML can add a future
+// flag; the SDK type still accepts the option for direct callers.
 
 export type TelegramBotAdapterLogger = {
   info: (msg: string) => void
@@ -59,9 +61,6 @@ export type TelegramBotAdapter = {
 }
 
 export function createTypingCallback(deps: {
-  client: Pick<TelegramBotClient, 'setMessageReaction'> & {
-    sendChatAction?: (chatId: string | number, action: string) => Promise<unknown>
-  }
   token: string
   configRef: () => ChannelAdapterConfig
   logger: TelegramBotAdapterLogger
@@ -81,9 +80,8 @@ export function createTypingCallback(deps: {
     if (!isAllowed(config.allow, target.workspace, target.chat)) return
     const tag = formatChannelTag ? await formatChannelTag(target.chat) : `chat=${target.chat}`
     const body: Record<string, unknown> = { chat_id: target.chat, action: 'typing' }
-    if (target.thread !== null && target.thread !== undefined) {
-      body.message_thread_id = Number(target.thread)
-    }
+    const threadId = parseThreadId(target.thread)
+    if (threadId !== undefined) body.message_thread_id = threadId
     try {
       const response = await fetchImpl(`${TELEGRAM_API_BASE}/bot${token}/sendChatAction`, {
         method: 'POST',
@@ -160,16 +158,20 @@ export function createTelegramMembershipResolver(deps: {
       const total = Math.max(0, Math.floor(count))
       // Telegram's Bot API does not expose a per-member listing for groups
       // beyond `getChatAdministrators`, so we cannot split humans from
-      // bots cheaply. For chats above the enumeration cap we return the
-      // raw count as humans (bots=0) and mark it truncated; for smaller
-      // chats we still cannot enumerate, so the same shape applies. The
-      // engagement layer treats "many participants" as an overall room
-      // size and the bot/human split is informational at that scale.
+      // bots cheaply. We KNOW the bot itself is a member of any group it
+      // received a message from, so report `bots: 1` and put the rest in
+      // `humans` — that is the minimal honest split. Returning `bots: 0`
+      // would falsely suggest the agent is alone with humans and break
+      // engagement's bot-loop suppression heuristics. We always set
+      // `truncated: true` for groups so engagement treats the count as
+      // approximate rather than authoritative.
+      const bots = 1
+      const humans = Math.max(0, total - bots)
       return {
-        humans: total,
-        bots: 0,
+        humans,
+        bots,
         fetchedAt: now(),
-        truncated: total > MEMBERSHIP_ENUMERATION_CAP,
+        truncated: true,
       }
     } catch (err) {
       deps.logger.warn(`[telegram-bot] membership chat=${key.chat} failed: ${describe(err)}`)
@@ -212,12 +214,24 @@ export function createOutboundCallback(deps: {
     // the file the user is meant to read). Failure on any upload aborts:
     // the file is the load-bearing piece, the text post is best-effort
     // after every upload succeeds.
+    //
+    // Forum-topic asymmetry: agent-messenger's `sendDocument` does not
+    // accept `message_thread_id`, so when the session is in a forum
+    // topic the file lands in the chat root while the text post below
+    // does carry the topic id. Mirror discord-bot.ts:389-394's warning
+    // so the gap shows up in operator triage.
     const threadId = parseThreadId(msg.thread)
     for (const attachment of attachments) {
       const path = resolvePath ? resolvePath(attachment.path) : attachment.path
       try {
         const sent = await client.sendDocument(msg.chat, path)
         logger.info(`[telegram-bot] uploaded message_id=${sent.message_id} ${tag}`)
+        if (threadId !== undefined) {
+          logger.warn(
+            `[telegram-bot] uploaded file landed in chat root, not topic ${threadId}: ` +
+              'agent-messenger sendDocument does not accept message_thread_id',
+          )
+        }
       } catch (err) {
         const message = describe(err)
         logger.error(`[telegram-bot] sendDocument failed for ${path}: ${message}`)
@@ -230,9 +244,7 @@ export function createOutboundCallback(deps: {
     }
 
     try {
-      const sendOptions: { parse_mode: 'HTML'; message_thread_id?: number } = {
-        parse_mode: TELEGRAM_DEFAULT_PARSE_MODE,
-      }
+      const sendOptions: { message_thread_id?: number } = {}
       if (threadId !== undefined) sendOptions.message_thread_id = threadId
       const sent = await client.sendMessage(msg.chat, text, sendOptions)
       logger.info(`[telegram-bot] sent message_id=${sent.message_id} ${tag}`)
@@ -262,9 +274,17 @@ type TelegramFileResponse = {
 // `api.telegram.org/file/bot<TOKEN>/<file_path>`. `ref` here is the
 // `file_id` carried in the inbound classifier's `[Telegram message with
 // document: ... file_id=<id>]` summary; the agent passes it back through
-// the `channel_fetch_attachment` tool. We refuse non-file_id refs so the
-// bot token is never sent to attacker-controlled URLs (parity with the
-// Discord adapter's host-allowlist check).
+// the `channel_fetch_attachment` tool.
+//
+// SSRF boundary: `ref` is `encodeURIComponent`'d into a query parameter
+// of a fixed `api.telegram.org/bot<TOKEN>/getFile?file_id=...` URL, so
+// no `ref` value can redirect the request off-platform. We reject empty
+// strings to fail fast with a clear error and `://` to catch the
+// obvious "agent passed a URL" mistake before round-tripping it to
+// Telegram, which would return a useless 400. We do NOT block `/` —
+// real Telegram file_ids never contain it, but if a future SDK encodes
+// extra metadata that does, we want the call to reach Telegram and
+// surface the real error rather than ours.
 export function createFetchAttachmentCallback(deps: {
   token: string
   logger: TelegramBotAdapterLogger
@@ -273,7 +293,7 @@ export function createFetchAttachmentCallback(deps: {
   const { token, logger } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
   return async ({ ref, filename }) => {
-    if (ref === '' || ref.includes('/') || ref.includes('://')) {
+    if (ref === '' || ref.includes('://')) {
       return { ok: false, error: `invalid Telegram file_id: ${ref}` }
     }
     let metaResponse: Response
@@ -356,7 +376,6 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
   }
 
   const typingCallback = createTypingCallback({
-    client,
     token: options.token,
     configRef: options.configRef,
     logger,
@@ -420,6 +439,24 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
         throw err
       }
 
+      // Preflight `getMe()` so an invalid token surfaces here as a thrown
+      // error instead of silently emitting `'error'` from inside the
+      // listener and leaving us in `started=true` with a dead poller. The
+      // listener itself calls `getMe()` internally on `start()` but
+      // catches the failure and returns normally — see
+      // node_modules/agent-messenger/dist/src/platforms/telegrambot/listener.js
+      // around the `try { this.cachedUser = await getMe() }` block.
+      try {
+        botUser = await client.getMe()
+        const handle = botUser.username !== undefined ? `@${botUser.username}` : botUser.first_name
+        logger.info(`[telegram-bot] authenticated as ${handle} (${botUser.id})`)
+      } catch (err) {
+        started = false
+        botUser = null
+        logger.error(`[telegram-bot] getMe failed (likely invalid token): ${describe(err)}`)
+        throw err
+      }
+
       listener = new TelegramBotListener(client, {
         timeoutSeconds: 30,
         allowedUpdates: TELEGRAM_ALLOWED_UPDATES,
@@ -427,8 +464,6 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       })
       listener.on('connected', (info) => {
         botUser = info.user
-        const handle = info.user.username !== undefined ? `@${info.user.username}` : info.user.first_name
-        logger.info(`[telegram-bot] connected as ${handle} (${info.user.id})`)
       })
       listener.on('disconnected', () => {
         logger.warn('[telegram-bot] disconnected; SDK will reconnect with backoff')
@@ -466,13 +501,20 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       options.router.unregisterChannelNameResolver('telegram-bot', channelResolver)
       options.router.unregisterFetchAttachment('telegram-bot', fetchAttachmentCallback)
       options.router.unregisterMembership('telegram-bot', membershipResolver)
+      // Stop the listener BEFORE waiting for inflight handlers. The SDK's
+      // `stop()` aborts the in-flight `getUpdates` long-poll and
+      // increments its generation counter so any pending dispatch is
+      // dropped. Doing this before the wait bounds the drain: nothing
+      // new can land in `handleMessage()`, so `inflightInbounds` only
+      // decreases.
+      listener?.stop()
+      listener = null
+      botUser = null
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)
         })
       }
-      listener?.stop()
-      listener = null
     },
 
     isConnected(): boolean {

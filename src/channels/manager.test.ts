@@ -297,19 +297,28 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
 })
 
 describe('channel manager — telegram adapter lifecycle', () => {
-  test('starts telegram adapter when TELEGRAM_BOT_TOKEN is set', async () => {
+  test('starts telegram adapter and forwards TELEGRAM_BOT_TOKEN to it', async () => {
     cfg['telegram-bot'] = enabledAdapterCfg()
     const fake = makeFakeAdapter()
-    const env: NodeJS.ProcessEnv = { TELEGRAM_BOT_TOKEN: 'tg-tok' }
+    let captured: { token?: string; configRef?: () => unknown } | undefined
+    const env: NodeJS.ProcessEnv = { TELEGRAM_BOT_TOKEN: 'tg-tok-abc' }
     const mgr = createChannelManager({
       agentDir,
       channelsConfigRef: () => cfg,
       env,
-      createTelegramAdapter: () => fake,
+      createTelegramAdapter: (opts) => {
+        captured = opts
+        return fake
+      },
     })
 
     await mgr.start()
     expect(fake.startCalls).toBe(1)
+    // Mutation guard: a refactor that swapped TELEGRAM_BOT_TOKEN for the
+    // wrong env var (or hardcoded a string) would still pass any test
+    // that didn't capture the actual token passed to the adapter.
+    expect(captured?.token).toBe('tg-tok-abc')
+    expect(typeof captured?.configRef).toBe('function')
 
     await mgr.stop()
     expect(fake.stopCalls).toBe(1)

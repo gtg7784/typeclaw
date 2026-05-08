@@ -72,21 +72,28 @@ describe('telegram-bot createFetchAttachmentCallback', () => {
     expect(fetchCalled).toBe(false)
   })
 
-  test('refuses refs containing forward slashes (would inject path components into the download URL)', async () => {
-    let fetchCalled = false
+  test('refs with slashes still hit api.telegram.org/getFile (encodeURIComponent contains them)', async () => {
+    const seen: string[] = []
     const cb = createFetchAttachmentCallback({
       token: 'T',
       logger: silentLogger(),
-      fetchImpl: fakeFetch(() => {
-        fetchCalled = true
-        return new Response('', { status: 200 })
+      fetchImpl: fakeFetch((url) => {
+        seen.push(url)
+        return new Response(JSON.stringify({ ok: false, description: 'Bad Request: invalid file_id' }), {
+          status: 400,
+          headers: { 'content-type': 'application/json' },
+        })
       }),
     })
 
     const result = await cb({ ref: '../../etc/passwd' })
 
+    // Critical SSRF property: even with `..` and `/` in ref, the request
+    // is dispatched to api.telegram.org with the value URI-encoded as a
+    // query parameter — never as a path component. Telegram echoes the
+    // garbage back as a 400, surfaced to us as a structured error.
+    expect(seen[0]).toBe('https://api.telegram.org/botT/getFile?file_id=..%2F..%2Fetc%2Fpasswd')
     expect(result.ok).toBe(false)
-    expect(fetchCalled).toBe(false)
   })
 
   test('refuses empty refs without dispatching a fetch', async () => {
