@@ -603,6 +603,24 @@ describe('scaffold', () => {
     expect(cfg.channels?.['discord-bot']?.allow).toEqual(['*'])
     expect(cfg.channels?.['slack-bot']?.allow).toEqual([])
   })
+
+  test('writes channels.telegram-bot with allow=["*"] when withTelegram and telegramAllowAll default', async () => {
+    await scaffold(root, { withTelegram: true })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, { allow: string[] }>
+    }
+    expect(cfg.channels?.['telegram-bot']?.allow).toEqual(['*'])
+  })
+
+  test('writes channels.telegram-bot with allow=[] when telegramAllowAll=false (operator declined consent)', async () => {
+    await scaffold(root, { withTelegram: true, telegramAllowAll: false })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, { allow: string[] }>
+    }
+    expect(cfg.channels?.['telegram-bot']?.allow).toEqual([])
+  })
 })
 
 describe('initGitRepo', () => {
@@ -884,5 +902,19 @@ describe('writeSecrets', () => {
     await writeSecrets(root, { fireworksApiKey: 'fw_new' })
 
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_new\n')
+  })
+
+  test('appends TELEGRAM_BOT_TOKEN when telegramBotToken is provided', async () => {
+    await writeSecrets(root, { fireworksApiKey: 'fw_test', telegramBotToken: '1234567890:ABCdef' })
+
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe(
+      'FIREWORKS_API_KEY=fw_test\nTELEGRAM_BOT_TOKEN=1234567890:ABCdef\n',
+    )
+  })
+
+  test('omits TELEGRAM_BOT_TOKEN when telegramBotToken is empty string', async () => {
+    await writeSecrets(root, { fireworksApiKey: 'fw_test', telegramBotToken: '' })
+
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_test\n')
   })
 })
