@@ -939,6 +939,122 @@ describe('start (composition)', () => {
     expect(headAfterSecond).toBe(headAfterFirst)
   })
 
+  test('auto-commits bun.lock drift on start (e.g. after a typeclaw CLI upgrade rewrote it)', async () => {
+    // given: a migrated agent folder where the user already ran `bun install`
+    // and bun.lock is now dirty (typical after upgrading the typeclaw CLI)
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1,"workspaces":{}}\n')
+    await runGit(root, ['add', '.gitignore', 'package.json', 'packages/.gitkeep', 'bun.lock'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    // and: bun.lock now drifts (simulating a post-upgrade rewrite)
+    await writeFile(
+      join(root, 'bun.lock'),
+      '{"lockfileVersion":1,"workspaces":{"":{"dependencies":{"typeclaw":"^0.2.0"}}}}\n',
+    )
+    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+
+    // then
+    expect(result.ok).toBe(true)
+    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfter).not.toBe(headBefore)
+    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
+    expect(subjects).toContain('Update dependencies')
+    const filesInCommit = (await runGit(root, ['show', '--name-only', '--format=', 'HEAD'])).split('\n').sort()
+    expect(filesInCommit).toEqual(['bun.lock'])
+  })
+
+  test('auto-commits package.json and bun.lock atomically when both drift', async () => {
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1}\n')
+    await runGit(root, ['add', '.gitignore', 'package.json', 'packages/.gitkeep', 'bun.lock'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    // and: both files drift (e.g., user manually bumped typeclaw and re-ran bun install)
+    await writePackageJson(root, { typeclaw: '^0.2.0' })
+    await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1,"deps":"new"}\n')
+    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+
+    expect(result.ok).toBe(true)
+    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfter).not.toBe(headBefore)
+    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
+    expect(subjects).toContain('Update dependencies')
+    // and: a single atomic commit covers both files (not two separate commits)
+    const filesInCommit = (await runGit(root, ['show', '--name-only', '--format=', 'HEAD'])).split('\n').sort()
+    expect(filesInCommit).toEqual(['bun.lock', 'package.json'])
+  })
+
+  test('does not commit dependency files when they are clean', async () => {
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1}\n')
+    await runGit(root, ['add', '.gitignore', 'package.json', 'packages/.gitkeep', 'bun.lock'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+
+    expect(result.ok).toBe(true)
+    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfter).toBe(headBefore)
+  })
+
+  test('skips dependency auto-commit silently when the agent folder is not a git repo', async () => {
+    // given: a non-git agent folder with drifted bun.lock
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1,"deps":"new"}\n')
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+
+    expect(result.ok).toBe(true)
+    expect(existsSync(join(root, '.git'))).toBe(false)
+  })
+
+  test('separates the workspaces migration commit from the dependency drift commit when both apply', async () => {
+    // given: a pre-migration agent folder (no `workspaces` field) with a bun.lock that
+    // also drifted independently
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJsonPreMigration(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1}\n')
+    await runGit(root, ['add', '.gitignore', 'package.json', 'bun.lock'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    // and: bun.lock drifts (user upgraded typeclaw, re-ran bun install)
+    await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1,"deps":"new"}\n')
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+
+    expect(result.ok).toBe(true)
+    // then: two distinct commits exist with the right messages and file scopes
+    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
+    expect(subjects[0]).toBe('Update dependencies')
+    expect(subjects[1]).toBe('Enable bun workspaces (packages/*)')
+    const headFiles = (await runGit(root, ['show', '--name-only', '--format=', 'HEAD'])).split('\n').sort()
+    expect(headFiles).toEqual(['bun.lock'])
+    const prevFiles = (await runGit(root, ['show', '--name-only', '--format=', 'HEAD~1'])).split('\n').sort()
+    expect(prevFiles).toEqual(['package.json', 'packages/.gitkeep'])
+  })
+
   test('can register through the current hostd without drift respawn during daemon-owned restart', async () => {
     const previousHome = process.env.TYPECLAW_HOME
     const home = await mkdtemp(join(tmpdir(), 'typeclaw-current-hostd-'))
