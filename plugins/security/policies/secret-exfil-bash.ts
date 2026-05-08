@@ -4,6 +4,43 @@ export const GUARD_SECRET_EXFIL_BASH = 'secretExfilBash'
 
 const DANGEROUS_COMMAND_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string }> = [
   { pattern: /(^|[\s;|&(`$])(env|printenv)([\s;|&)`]|$)/, label: 'env / printenv (full environment dump)' },
+  // Interpreter-mediated env dumps: node/bun/deno reading process.env, python
+  // reading os.environ, ruby reading ENV, perl reading %ENV. Each interpreter
+  // has multiple invocation flags (-e, -c, --eval, etc.) and each language has
+  // multiple ways to spell the same dump. We match the interpreter token plus
+  // any later mention of the language's env object - shell parsing is not
+  // worth the false-positive risk so we let the substring catch wrap, pipe,
+  // and quote variants too.
+  {
+    pattern: /\b(?:node|bun|deno)\b[\s\S]{0,200}\bprocess\.env\b/,
+    label: 'node/bun/deno process.env dump',
+  },
+  {
+    pattern: /\bpython3?\b[\s\S]{0,200}\bos\.environ\b/,
+    label: 'python os.environ dump',
+  },
+  { pattern: /\bruby\b[\s\S]{0,200}\bENV\b/, label: 'ruby ENV dump' },
+  { pattern: /\bperl\b[\s\S]{0,200}%ENV\b/, label: 'perl %ENV dump' },
+  // awk has a built-in ENVIRON hash. The canonical exfil one-liner is
+  // `awk 'BEGIN{for (k in ENVIRON) print k"="ENVIRON[k]}'`, which evades the
+  // env/printenv match above because the dangerous token is `ENVIRON`, not
+  // `env`. Anchor on the awk command + the ENVIRON identifier in the same
+  // command-line.
+  { pattern: /\bawk\b[\s\S]{0,200}\bENVIRON\b/, label: 'awk ENVIRON dump' },
+  // Shell builtins that print or list env-var names. `compgen -e` lists
+  // exported names, `declare -p`/`-x` prints them with values, `export -p`
+  // does the same. None of these contain the word `env` so the env/printenv
+  // pattern misses all of them.
+  { pattern: /(^|[\s;|&(`$])compgen\s+-[A-Za-z]*e/, label: 'compgen -e (env-var name listing)' },
+  {
+    pattern: /(^|[\s;|&(`$])declare\s+-[A-Za-z]*[pPx]/,
+    label: 'declare -p / -x (exported env-var dump)',
+  },
+  { pattern: /(^|[\s;|&(`$])export\s+-p\b/, label: 'export -p (exported env-var dump)' },
+  // `set` in POSIX mode dumps env vars; `set -o posix; set` is the canonical
+  // exfil. We avoid blocking bare `set` (false-positive nightmare on
+  // `set -e` / `set -euo pipefail`) and require the posix-mode opt-in.
+  { pattern: /set\s+-o\s+posix[\s\S]{0,40}(?:^|[\s;|&(`])set(?:[\s;|&)`]|$)/m, label: 'set -o posix; set (env dump)' },
   {
     pattern: /(cat|less|more|head|tail|bat|xxd|od|hexdump|strings)\s+[^\n;|&`]*\.env(\s|$|[;|&`])/,
     label: 'reading .env file',

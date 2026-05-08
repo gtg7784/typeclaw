@@ -21,6 +21,143 @@ describe('secret-exfil-bash guard', () => {
     expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'echo hi && env' } })?.block).toBe(true)
   })
 
+  test('blocks awk ENVIRON dump (regression: red-team #5b leaked all env keys)', () => {
+    const result = checkSecretExfilBashGuard({
+      tool: 'bash',
+      args: { command: `awk 'BEGIN{for(k in ENVIRON) print k"="ENVIRON[k]}'` },
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('awk ENVIRON')
+  })
+
+  test('blocks awk ENVIRON dump with -F or other flags before BEGIN', () => {
+    expect(
+      checkSecretExfilBashGuard({
+        tool: 'bash',
+        args: { command: `awk -F: 'BEGIN{for (k in ENVIRON) print k}'` },
+      })?.block,
+    ).toBe(true)
+  })
+
+  test('blocks node -e process.env dump', () => {
+    const result = checkSecretExfilBashGuard({
+      tool: 'bash',
+      args: { command: `node -e "console.log(JSON.stringify(process.env))"` },
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('process.env')
+  })
+
+  test('blocks bun -e process.env dump', () => {
+    expect(
+      checkSecretExfilBashGuard({
+        tool: 'bash',
+        args: { command: `bun -e 'console.log(process.env)'` },
+      })?.block,
+    ).toBe(true)
+  })
+
+  test('blocks deno eval process.env dump', () => {
+    expect(
+      checkSecretExfilBashGuard({
+        tool: 'bash',
+        args: { command: `deno eval 'console.log(Deno.env.toObject()); console.log(process.env)'` },
+      })?.block,
+    ).toBe(true)
+  })
+
+  test('blocks python -c os.environ dump', () => {
+    const result = checkSecretExfilBashGuard({
+      tool: 'bash',
+      args: { command: `python -c "import os; print(dict(os.environ))"` },
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('os.environ')
+  })
+
+  test('blocks python3 os.environ dump', () => {
+    expect(
+      checkSecretExfilBashGuard({
+        tool: 'bash',
+        args: { command: `python3 -c 'import os; print(os.environ)'` },
+      })?.block,
+    ).toBe(true)
+  })
+
+  test('blocks ruby ENV dump', () => {
+    expect(
+      checkSecretExfilBashGuard({
+        tool: 'bash',
+        args: { command: `ruby -e "puts ENV.to_h.inspect"` },
+      })?.block,
+    ).toBe(true)
+  })
+
+  test('blocks perl %ENV dump', () => {
+    expect(
+      checkSecretExfilBashGuard({
+        tool: 'bash',
+        args: { command: `perl -e 'print "$_=$ENV{$_}\\n" for keys %ENV'` },
+      })?.block,
+    ).toBe(true)
+  })
+
+  test('blocks compgen -e (env var name listing)', () => {
+    const result = checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'compgen -e' } })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('compgen -e')
+  })
+
+  test('blocks compgen with combined flags including -e', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'compgen -ev' } })?.block).toBe(true)
+  })
+
+  test('blocks declare -p (full env-var dump)', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'declare -p' } })?.block).toBe(true)
+  })
+
+  test('blocks declare -x (exported env-var dump)', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'declare -x' } })?.block).toBe(true)
+  })
+
+  test('blocks declare -px (combined flags)', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'declare -px' } })?.block).toBe(true)
+  })
+
+  test('blocks export -p (exported env-var dump)', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'export -p' } })?.block).toBe(true)
+  })
+
+  test('blocks set -o posix; set (POSIX env dump)', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'set -o posix; set' } })?.block).toBe(true)
+  })
+
+  test('blocks set -o posix && set (compound form)', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'set -o posix && set' } })?.block).toBe(true)
+  })
+
+  test('does not block awk for non-env work', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: `awk '{print $1}' file.txt` } })).toBeUndefined()
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: `awk 'BEGIN{print "hello"}'` } })).toBeUndefined()
+  })
+
+  test('does not block node/bun/python without env access', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'node -e "console.log(1+1)"' } })).toBeUndefined()
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'bun build src/index.ts' } })).toBeUndefined()
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'python -c "print(1+1)"' } })).toBeUndefined()
+  })
+
+  test('does not block bare set / declare / compgen / export forms (false-positive guard)', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'set -e' } })).toBeUndefined()
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'set -euo pipefail' } })).toBeUndefined()
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'set' } })).toBeUndefined()
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'declare foo=bar' } })).toBeUndefined()
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'declare -a arr' } })).toBeUndefined()
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'compgen -c' } })).toBeUndefined()
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'compgen -A function' } })).toBeUndefined()
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'export FOO=bar' } })).toBeUndefined()
+  })
+
   test('does not block "environment" variable name as a value', () => {
     expect(
       checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'echo "set the environment up"' } }),
