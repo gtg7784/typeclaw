@@ -34,13 +34,17 @@ export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason
 export type DockerAssetsResult = { ok: true; devMode: boolean } | { ok: false; reason: string }
 export type HatchingResult = { ok: true } | { ok: false; reason: string }
 
-export type InitStep = 'preflight' | 'scaffold' | 'install' | 'dockerfile' | 'git' | 'hatching'
+export type InitStep = 'preflight' | 'scaffold' | 'kakaotalk-auth' | 'install' | 'dockerfile' | 'git' | 'hatching'
+
+export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
 
 export type InitStepEvent =
   | { step: 'preflight'; phase: 'start' }
   | { step: 'preflight'; phase: 'done'; result: DockerAvailability }
   | { step: 'scaffold'; phase: 'start' }
   | { step: 'scaffold'; phase: 'done' }
+  | { step: 'kakaotalk-auth'; phase: 'start' }
+  | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
   | { step: 'install'; phase: 'start' }
   | { step: 'install'; phase: 'done'; result: InstallResult }
   | { step: 'dockerfile'; phase: 'start' }
@@ -52,6 +56,8 @@ export type InitStepEvent =
 
 export type HatchRunner = (options: { cwd: string; port: number }) => Promise<HatchingResult>
 
+export type KakaotalkAuthRunner = (options: { cwd: string }) => Promise<KakaotalkAuthResult>
+
 export type InitOptions = {
   cwd: string
   apiKey: string
@@ -62,6 +68,9 @@ export type InitOptions = {
   slackAllowAll?: boolean
   telegramBotToken?: string
   telegramAllowAll?: boolean
+  withKakaotalk?: boolean
+  kakaotalkAllowAll?: boolean
+  runKakaotalkAuth?: KakaotalkAuthRunner
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
   dockerExec?: DockerExec
@@ -77,6 +86,9 @@ export async function runInit({
   slackAllowAll = true,
   telegramBotToken,
   telegramAllowAll = true,
+  withKakaotalk = false,
+  kakaotalkAllowAll = false,
+  runKakaotalkAuth,
   onProgress,
   runHatching = defaultRunHatching,
   dockerExec,
@@ -104,6 +116,8 @@ export async function runInit({
     slackAllowAll,
     withTelegram: wantsTelegram,
     telegramAllowAll,
+    withKakaotalk,
+    kakaotalkAllowAll,
   })
   await writeSecrets(cwd, {
     fireworksApiKey: apiKey,
@@ -113,6 +127,21 @@ export async function runInit({
     telegramBotToken,
   })
   emit({ step: 'scaffold', phase: 'done' })
+
+  if (withKakaotalk && runKakaotalkAuth !== undefined) {
+    emit({ step: 'kakaotalk-auth', phase: 'start' })
+    const result = await runKakaotalkAuth({ cwd })
+    emit({ step: 'kakaotalk-auth', phase: 'done', result })
+    if (!result.ok) {
+      // Abort the rest of the pipeline. Continuing would leave the agent
+      // folder with `channels.kakaotalk` in typeclaw.json but no credentials
+      // file, which `typeclaw start` later treats as "missing credentials,
+      // skip adapter" — confusing the user about whether KakaoTalk works.
+      // The user can re-run `typeclaw init` after fixing the auth issue;
+      // the scaffold/Dockerfile work above is idempotent.
+      throw new Error(`KakaoTalk authentication failed: ${result.reason}`)
+    }
+  }
 
   emit({ step: 'install', phase: 'start' })
   const install = await runBunInstall(cwd)
@@ -238,6 +267,8 @@ export type ScaffoldOptions = {
   slackAllowAll?: boolean
   withTelegram?: boolean
   telegramAllowAll?: boolean
+  withKakaotalk?: boolean
+  kakaotalkAllowAll?: boolean
 }
 
 export async function scaffold(root: string, options: ScaffoldOptions = {}): Promise<void> {
@@ -266,6 +297,13 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   if (options.withDiscord) channels['discord-bot'] = { allow: options.discordAllowAll === false ? [] : ['*'] }
   if (options.withSlack) channels['slack-bot'] = { allow: options.slackAllowAll === false ? [] : ['*'] }
   if (options.withTelegram) channels['telegram-bot'] = { allow: options.telegramAllowAll === false ? [] : ['*'] }
+  if (options.withKakaotalk) {
+    // KakaoTalk involves a personal account, so we default to a tighter
+    // allow list (DMs only) than Slack/Discord/Telegram which scope to a
+    // workspace the user explicitly admitted the bot into. The user can
+    // broaden to `kakao:*` later by editing typeclaw.json.
+    channels.kakaotalk = { allow: options.kakaotalkAllowAll === true ? ['kakao:*'] : ['kakao:dm/*'] }
+  }
   if (Object.keys(channels).length > 0) config.channels = channels
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 

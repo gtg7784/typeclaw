@@ -1,8 +1,17 @@
-import { cancel, confirm, intro, isCancel, note, password, select, spinner } from '@clack/prompts'
+import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import type { DockerAvailability } from '@/container'
-import { findAgentDir, isDirectoryNonEmpty, isHatched, runInit, type InitStep, type InitStepEvent } from '@/init'
+import {
+  findAgentDir,
+  isDirectoryNonEmpty,
+  isHatched,
+  runInit,
+  type InitStep,
+  type InitStepEvent,
+  type KakaotalkAuthResult,
+} from '@/init'
+import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 
 export const init = defineCommand({
   meta: {
@@ -57,6 +66,7 @@ export const init = defineCommand({
         { value: 'slack', label: 'Slack' },
         { value: 'discord', label: 'Discord' },
         { value: 'telegram', label: 'Telegram' },
+        { value: 'kakaotalk', label: 'KakaoTalk' },
         { value: 'none', label: 'Skip — no channel right now' },
       ],
       initialValue: 'slack' as const,
@@ -70,6 +80,8 @@ export const init = defineCommand({
     let slackBotToken: string | undefined
     let slackAppToken: string | undefined
     let telegramBotToken: string | undefined
+    let kakaotalkEmail: string | undefined
+    let kakaotalkPassword: string | undefined
 
     if (channelChoice === 'discord') {
       note(
@@ -89,6 +101,38 @@ export const init = defineCommand({
         process.exit(0)
       }
       discordBotToken = token
+    }
+
+    if (channelChoice === 'kakaotalk') {
+      note(
+        [
+          'KakaoTalk authentication uses a personal account, registered as a',
+          'tablet sub-device. Messages will be sent and received under this',
+          'account. Use a non-primary account if possible.',
+          '',
+          'After you submit the password, KakaoTalk may ask you to confirm a',
+          'passcode on your phone. Watch the screen for the code.',
+        ].join('\n'),
+        'About to log in to KakaoTalk',
+      )
+      const email = await text({
+        message: 'KakaoTalk email',
+        validate: (value) => (value && value.length > 0 ? undefined : 'Email is required'),
+      })
+      if (isCancel(email)) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+      const pwd = await password({
+        message: 'KakaoTalk password',
+        validate: (value) => (value && value.length > 0 ? undefined : 'Password is required'),
+      })
+      if (isCancel(pwd)) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+      kakaotalkEmail = email
+      kakaotalkPassword = pwd
     }
 
     if (channelChoice === 'slack') {
@@ -217,6 +261,7 @@ export const init = defineCommand({
     //   - git backup (url + PAT) — Phase 10
     //   - cron.json scaffolding — Phase 9
     //   - compose.yml registration in $HOME/.typeclaw — Phase 12
+    const wantsKakaotalk = kakaotalkEmail !== undefined && kakaotalkPassword !== undefined
     let hatchingOk = false
     let preflightFailure: Extract<DockerAvailability, { ok: false }> | null = null
     try {
@@ -226,6 +271,20 @@ export const init = defineCommand({
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
         ...(telegramBotToken !== undefined ? { telegramBotToken } : {}),
+        ...(wantsKakaotalk
+          ? {
+              withKakaotalk: true,
+              runKakaotalkAuth: ({ cwd: agentDir }) =>
+                runKakaotalkBootstrap({
+                  email: kakaotalkEmail!,
+                  password: kakaotalkPassword!,
+                  agentDir,
+                  callbacks: {
+                    onPasscode: (code) => log.info(`Confirm this passcode on your phone: ${code}`),
+                  },
+                }),
+            }
+          : {}),
         onProgress: reportProgress(
           (ok) => {
             hatchingOk = ok
@@ -286,6 +345,9 @@ function reportProgress(
       case 'scaffold':
         s.stop('Egg laid. 🥚')
         break
+      case 'kakaotalk-auth':
+        s.stop(reportKakaotalkAuth(event.result))
+        break
       case 'install':
         s.stop(event.result.ok ? 'Dependencies installed.' : `Skipped bun install: ${event.result.reason}`)
         break
@@ -334,6 +396,11 @@ function preflightFailureGuidance(result: Extract<DockerAvailability, { ok: fals
   ]
 }
 
+function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
+  if (result.ok) return 'KakaoTalk credentials saved to workspace/.agent-messenger/.'
+  return `KakaoTalk login failed: ${result.reason}`
+}
+
 // Hatching launches the container and foregrounds the TUI, so it steals stdin
 // and cannot share the spinner lifecycle with the other steps. Print plain
 // lines instead.
@@ -352,6 +419,7 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
 const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
   preflight: 'Checking Docker...',
   scaffold: 'Laying the egg...',
+  'kakaotalk-auth': 'Logging in to KakaoTalk...',
   install: 'Installing dependencies with bun...',
   dockerfile: 'Writing Dockerfile...',
   git: 'Initializing git repository...',

@@ -1,4 +1,9 @@
+import { createHash } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
+import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
 import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
 import { createChannelRouter, type ChannelRouter, type CreateSessionForChannel } from './router'
@@ -40,6 +45,7 @@ export type ChannelManagerOptions = {
   createSessionForChannel?: CreateSessionForChannel
   // Test seams: let fake adapters replace the real adapter wiring per id.
   createDiscordAdapter?: typeof createDiscordBotAdapter
+  createKakaotalkAdapter?: typeof createKakaotalkAdapter
   createSlackAdapter?: typeof createSlackBotAdapter
   createTelegramAdapter?: typeof createTelegramBotAdapter
 }
@@ -51,15 +57,18 @@ export type ChannelManager = {
   reload: () => Promise<{ started: string[]; stopped: string[]; restartRequired: string[] }>
 }
 
-type AnyAdapter = DiscordBotAdapter | SlackBotAdapter | TelegramBotAdapter
+type AnyAdapter = DiscordBotAdapter | KakaotalkAdapter | SlackBotAdapter | TelegramBotAdapter
 
-// Token signature is the comparison key for token-rotation detection on
-// reload. Discord and Telegram each use a single bot token; Slack needs both
-// a bot token and an app-level token (Socket Mode), so the signature
-// concatenates both.
+// Credential signature is the comparison key for credential-rotation
+// detection on reload. Discord and Telegram each use a single bot token;
+// Slack needs both a bot token and an app-level token (Socket Mode);
+// KakaoTalk authenticates via a credentials file under
+// AGENT_MESSENGER_CONFIG_DIR (workspace/), so its signature is the file's
+// content hash. The "credential" naming (vs "token") generalizes across the
+// env-var-based adapters and KakaoTalk's file-based credential pathway.
 type AdapterEntry = {
   adapter: AnyAdapter
-  tokenSignature: string
+  credentialSignature: string
 }
 
 export function createChannelManager(options: ChannelManagerOptions): ChannelManager {
@@ -73,12 +82,14 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     ...(options.createSessionForChannel ? { createSessionForChannel: options.createSessionForChannel } : {}),
   })
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
+  const createKakaotalk = options.createKakaotalkAdapter ?? createKakaotalkAdapter
   const createSlackAdapter = options.createSlackAdapter ?? createSlackBotAdapter
   const createTelegramAdapter = options.createTelegramAdapter ?? createTelegramBotAdapter
 
   const live = new Map<AdapterId, AdapterEntry>()
 
-  const buildTokenSignature = (name: AdapterId): { signature: string; missing: string[] } => {
+  const buildCredentialSignature = (name: AdapterId): { signature: string; missing: string[] } => {
+    if (name === 'kakaotalk') return buildKakaotalkSignature(options.agentDir, env)
     const requiredEnvs = TOKEN_ENV[name]
     const parts: string[] = []
     const missing: string[] = []
@@ -115,6 +126,15 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         selfAliasesRef: () => router.getSelfAliases(),
       })
     }
+    if (name === 'kakaotalk') {
+      return createKakaotalk({
+        router,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
+        logger,
+        selfAliasesRef: () => router.getSelfAliases(),
+        credentialsDir: resolveKakaoConfigDir(options.agentDir, env),
+      })
+    }
     if (name === 'telegram-bot') {
       const token = env.TELEGRAM_BOT_TOKEN
       if (token === undefined || token.trim() === '') return null
@@ -133,9 +153,9 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       logger.info(`[channels] adapter "${name}" is disabled; skipping`)
       return false
     }
-    const { signature, missing } = buildTokenSignature(name)
+    const { signature, missing } = buildCredentialSignature(name)
     if (missing.length > 0) {
-      logger.error(`[channels] adapter "${name}" requires ${missing.join(', ')} in .env; skipping`)
+      logger.error(`[channels] adapter "${name}" missing credentials: ${missing.join(', ')}; skipping`)
       return false
     }
     const adapter = buildAdapter(name, cfg)
@@ -145,7 +165,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     }
     try {
       await adapter.start()
-      live.set(name, { adapter, tokenSignature: signature })
+      live.set(name, { adapter, credentialSignature: signature })
       logger.info(`[channels] adapter "${name}" started`)
       return true
     } catch (err) {
@@ -200,17 +220,21 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
           const ok = await startAdapter(name, desired)
           if (ok) started.push(name)
         } else {
-          const { signature, missing } = buildTokenSignature(name)
+          const { signature, missing } = buildCredentialSignature(name)
           if (missing.length > 0) {
-            // Required token envs disappeared from .env. Continuing to use the
-            // in-memory token would silently honor a credential the operator
-            // explicitly removed, so stop the adapter instead of waiting for
-            // a manual restart.
-            logger.warn(`[channels] adapter "${name}" missing ${missing.join(', ')} after reload; stopping`)
+            // Required credentials disappeared (env vars removed from .env, or
+            // KakaoTalk credentials file deleted). Continuing to use the
+            // in-memory credentials would silently honor a credential the
+            // operator explicitly removed, so stop the adapter instead of
+            // waiting for a manual restart.
+            logger.warn(
+              `[channels] adapter "${name}" missing credentials after reload (${missing.join(', ')}); stopping`,
+            )
             await stopAdapter(name)
             stopped.push(name)
-          } else if (signature !== current.tokenSignature) {
-            restartRequired.push(`${name} (token rotation)`)
+          } else if (signature !== current.credentialSignature) {
+            const reason = name === 'kakaotalk' ? 'credential rotation' : 'token rotation'
+            restartRequired.push(`${name} (${reason})`)
           }
         }
       }
@@ -220,10 +244,47 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   }
 }
 
-const TOKEN_ENV: Record<AdapterId, readonly string[]> = {
+// Token-based adapters only. KakaoTalk's credentials live in a file under
+// AGENT_MESSENGER_CONFIG_DIR (workspace/.agent-messenger/), not in env, so
+// it goes through buildKakaotalkSignature instead.
+const TOKEN_ENV: Record<Exclude<AdapterId, 'kakaotalk'>, readonly string[]> = {
   'discord-bot': ['DISCORD_BOT_TOKEN'],
   'slack-bot': ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
   'telegram-bot': ['TELEGRAM_BOT_TOKEN'],
+}
+
+const KAKAO_DEFAULT_SUBDIR = '.agent-messenger'
+const KAKAO_CREDENTIALS_FILE = 'kakaotalk-credentials.json'
+
+function resolveKakaoConfigDir(agentDir: string, env: NodeJS.ProcessEnv): string {
+  const override = env.AGENT_MESSENGER_CONFIG_DIR
+  if (override !== undefined && override.trim() !== '') return override
+  return join(agentDir, 'workspace', KAKAO_DEFAULT_SUBDIR)
+}
+
+function resolveKakaoCredentialsPath(agentDir: string, env: NodeJS.ProcessEnv): string {
+  return join(resolveKakaoConfigDir(agentDir, env), KAKAO_CREDENTIALS_FILE)
+}
+
+function buildKakaotalkSignature(agentDir: string, env: NodeJS.ProcessEnv): { signature: string; missing: string[] } {
+  const path = resolveKakaoCredentialsPath(agentDir, env)
+  if (!existsSync(path)) {
+    return { signature: '', missing: [`kakaotalk credentials file at ${path}`] }
+  }
+  try {
+    // Content hash, not mtime+size: KakaoTalk's credential file is small
+    // (a few hundred bytes of JSON) and is rewritten on every OAuth token
+    // refresh. Hashing avoids two failure modes mtime+size could miss:
+    //   (a) a refresh that produces byte-identical content (rare but
+    //       possible when nothing actually rotated) — we correctly skip;
+    //   (b) a refresh that lands on the same mtime due to FS resolution
+    //       (some host filesystems quantize to seconds).
+    const buf = readFileSync(path)
+    const digest = createHash('sha256').update(buf).digest('hex')
+    return { signature: `${path}@sha256:${digest}`, missing: [] }
+  } catch (err) {
+    return { signature: '', missing: [`kakaotalk credentials file at ${path} (${describe(err)})`] }
+  }
 }
 
 function describe(err: unknown): string {

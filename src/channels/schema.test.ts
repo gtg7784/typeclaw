@@ -179,6 +179,67 @@ describe('isAllowed', () => {
     expect(isAllowed(['channel:-1001234567890'], 'telegram', '-1001234567890')).toBe(true)
     expect(isAllowed(['channel:-1001234567890'], 'telegram', '-1009999999999')).toBe(false)
   })
+
+  test('"kakao:*" admits every KakaoTalk bucket', () => {
+    expect(isAllowed(['kakao:*'], '@kakao-dm', '12345')).toBe(true)
+    expect(isAllowed(['kakao:*'], '@kakao-group', '67890')).toBe(true)
+    expect(isAllowed(['kakao:*'], '@kakao-open', '11111')).toBe(true)
+  })
+
+  test('"kakao:dm/*" admits only 1:1 chats', () => {
+    expect(isAllowed(['kakao:dm/*'], '@kakao-dm', '12345')).toBe(true)
+    expect(isAllowed(['kakao:dm/*'], '@kakao-group', '12345')).toBe(false)
+    expect(isAllowed(['kakao:dm/*'], '@kakao-open', '12345')).toBe(false)
+  })
+
+  test('"kakao:group/*" admits only group chats', () => {
+    expect(isAllowed(['kakao:group/*'], '@kakao-group', '12345')).toBe(true)
+    expect(isAllowed(['kakao:group/*'], '@kakao-dm', '12345')).toBe(false)
+    expect(isAllowed(['kakao:group/*'], '@kakao-open', '12345')).toBe(false)
+  })
+
+  test('"kakao:open/*" admits only open chats', () => {
+    expect(isAllowed(['kakao:open/*'], '@kakao-open', '12345')).toBe(true)
+    expect(isAllowed(['kakao:open/*'], '@kakao-dm', '12345')).toBe(false)
+    expect(isAllowed(['kakao:open/*'], '@kakao-group', '12345')).toBe(false)
+  })
+
+  test('"kakao:<id>" admits only that chat regardless of bucket', () => {
+    expect(isAllowed(['kakao:12345'], '@kakao-dm', '12345')).toBe(true)
+    expect(isAllowed(['kakao:12345'], '@kakao-group', '12345')).toBe(true)
+    expect(isAllowed(['kakao:12345'], '@kakao-dm', '99999')).toBe(false)
+  })
+
+  test('kakao rules do not admit non-kakao workspaces', () => {
+    expect(isAllowed(['kakao:*'], 'T0ACME', '12345')).toBe(false)
+    expect(isAllowed(['kakao:*'], '@dm', '12345')).toBe(false)
+    expect(isAllowed(['kakao:dm/*'], 'g1', '12345')).toBe(false)
+    expect(isAllowed(['kakao:*'], 'telegram', '12345')).toBe(false)
+  })
+
+  test('non-kakao rules never admit kakao workspaces — including global "*"', () => {
+    expect(isAllowed(['dm:*'], '@kakao-dm', '12345')).toBe(false)
+    expect(isAllowed(['team:*'], '@kakao-group', '12345')).toBe(false)
+    expect(isAllowed(['guild:*'], '@kakao-group', '12345')).toBe(false)
+    expect(isAllowed(['im:*'], '@kakao-dm', '12345')).toBe(false)
+    expect(isAllowed(['tg:*'], '@kakao-dm', '12345')).toBe(false)
+    // Privacy footgun prevention: `*` was the catch-all for Slack/Discord/
+    // Telegram before KakaoTalk landed, but we deliberately don't extend
+    // it to kakao workspaces because users with `*` configured for their
+    // bots didn't sign up for the bot to read their personal KakaoTalk
+    // chats.
+    expect(isAllowed(['*'], '@kakao-dm', '12345')).toBe(false)
+    expect(isAllowed(['*'], '@kakao-group', '67890')).toBe(false)
+    expect(isAllowed(['*'], '@kakao-open', '11111')).toBe(false)
+  })
+
+  test('kakao rules never admit non-kakao workspaces', () => {
+    expect(isAllowed(['kakao:*'], 'T0ACME', 'C0CHANNEL')).toBe(false)
+    expect(isAllowed(['kakao:*'], 'g1', 'c1')).toBe(false)
+    expect(isAllowed(['kakao:*'], '@dm', 'd1')).toBe(false)
+    expect(isAllowed(['kakao:dm/*'], '@dm', 'd1')).toBe(false)
+    expect(isAllowed(['kakao:*'], 'telegram', '-100123')).toBe(false)
+  })
 })
 
 describe('channelsSchema — telegram-bot', () => {
@@ -193,5 +254,29 @@ describe('channelsSchema — telegram-bot', () => {
   test('rejects malformed tg: allow rules', () => {
     expect(() => channelsSchema.parse({ 'telegram-bot': { allow: ['tg:'] } })).toThrow()
     expect(() => channelsSchema.parse({ 'telegram-bot': { allow: ['tg:abc'] } })).toThrow()
+  })
+})
+
+describe('channelsSchema — kakaotalk', () => {
+  test('parses a kakaotalk config alongside slack/discord', () => {
+    const parsed = channelsSchema.parse({
+      kakaotalk: { allow: ['kakao:dm/*'] },
+    })
+    expect(parsed.kakaotalk?.allow).toEqual(['kakao:dm/*'])
+    expect(parsed.kakaotalk?.enabled).toBe(true)
+  })
+
+  test('accepts every documented kakao allow rule shape', () => {
+    const parsed = channelsSchema.parse({
+      kakaotalk: { allow: ['kakao:*', 'kakao:dm/*', 'kakao:group/*', 'kakao:open/*', 'kakao:12345'] },
+    })
+    expect(parsed.kakaotalk?.allow).toHaveLength(5)
+  })
+
+  test('rejects malformed kakao allow rules', () => {
+    expect(() => channelsSchema.parse({ kakaotalk: { allow: ['kakao:'] } })).toThrow()
+    expect(() => channelsSchema.parse({ kakaotalk: { allow: ['kakao:abc'] } })).toThrow()
+    expect(() => channelsSchema.parse({ kakaotalk: { allow: ['kakao:dm'] } })).toThrow()
+    expect(() => channelsSchema.parse({ kakaotalk: { allow: ['kakao:foo/*'] } })).toThrow()
   })
 })
