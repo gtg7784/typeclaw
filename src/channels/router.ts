@@ -434,10 +434,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const promise = (async () => {
       await ensureLoaded()
       const record = mappings ? findRecord(mappings, key) : undefined
+      const phase = record?.sessionId === undefined ? 'cold-start' : 'rehydrate'
+      logger.info(`[channels] ${keyId}: ensureLive begin (${phase})`)
       const participants = (record?.participants ?? []) as ChannelParticipant[]
       const membershipFetch = warmMembership(key)
       const resolvedNames = await resolveChannelNames(key)
+      logger.info(`[channels] ${keyId}: ensureLive resolved-names`)
       const membership = await membershipForPrompt(key, membershipFetch)
+      logger.info(`[channels] ${keyId}: ensureLive resolved-membership`)
       const origin: SessionOrigin = {
         kind: 'channel',
         adapter: key.adapter,
@@ -459,6 +463,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         participants,
         origin,
       })
+      logger.info(`[channels] ${keyId}: ensureLive session-created sessionId=${created.sessionId}`)
 
       const transcriptPath = created.getTranscriptPath?.()
       const persistedRecord: ChannelSessionRecord = {
@@ -523,9 +528,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const adapterConfig = options.configForAdapter(key.adapter)
         if (adapterConfig) {
           await prefetchChannelContext(live, adapterConfig, triggeringMessageId)
+          logger.info(`[channels] ${keyId}: ensureLive prefetched-context`)
         }
       }
 
+      logger.info(`[channels] ${keyId}: ensureLive done (${phase})`)
       return live
     })()
 

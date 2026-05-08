@@ -192,6 +192,56 @@ describe('ChannelRouter session lifecycle', () => {
     expect(router.liveCount()).toBe(1)
   })
 
+  test('emits ordered ensureLive phase logs bracketing each await', async () => {
+    // given a fresh router and a captured log buffer
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router } = makeRouter(dir, { logs })
+
+    // when a first inbound triggers cold-start ensureLive
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    // then phase logs appear in order: begin → resolved-names → resolved-membership
+    //   → session-created → done. The bracketing is what makes a stuck phase
+    //   visible from logs alone (begin without done == hung at that phase).
+    const phaseLogs = logs
+      .filter((l) => l.startsWith('info:[channels]') && l.includes('ensureLive'))
+      .map((l) => l.replace(/^.*ensureLive /, ''))
+    const beginIdx = phaseLogs.findIndex((p) => p.startsWith('begin'))
+    const namesIdx = phaseLogs.findIndex((p) => p.startsWith('resolved-names'))
+    const membershipIdx = phaseLogs.findIndex((p) => p.startsWith('resolved-membership'))
+    const createdIdx = phaseLogs.findIndex((p) => p.startsWith('session-created'))
+    const doneIdx = phaseLogs.findIndex((p) => p.startsWith('done'))
+    expect(beginIdx).toBeGreaterThanOrEqual(0)
+    expect(namesIdx).toBeGreaterThan(beginIdx)
+    expect(membershipIdx).toBeGreaterThan(namesIdx)
+    expect(createdIdx).toBeGreaterThan(membershipIdx)
+    expect(doneIdx).toBeGreaterThan(createdIdx)
+    expect(phaseLogs[beginIdx]).toContain('cold-start')
+    expect(phaseLogs[doneIdx]).toContain('cold-start')
+  })
+
+  test('rehydrate path logs `ensureLive begin (rehydrate)` after restart', async () => {
+    // given a persisted mapping from a prior run
+    const dir = await tempDir()
+    const firstRun = makeRouter(dir)
+    await firstRun.router.route(inbound())
+    await firstRun.router.__testing!.flushDebounce(KEY)
+    await firstRun.router.stop()
+
+    // when a fresh router (simulating restart) handles a new inbound for the same channel
+    const logs: string[] = []
+    const secondRun = makeRouter(dir, { logs })
+    await secondRun.router.route(inbound({ externalMessageId: 'm-rehydrate' }))
+    await secondRun.router.__testing!.flushDebounce(KEY)
+
+    // then the begin and done logs both flag the rehydrate path
+    const phaseLogs = logs.filter((l) => l.includes('ensureLive'))
+    expect(phaseLogs.some((l) => l.includes('begin (rehydrate)'))).toBe(true)
+    expect(phaseLogs.some((l) => l.includes('done (rehydrate)'))).toBe(true)
+  })
+
   test('persists the (4-tuple → sessionId) mapping to channels/sessions.json', async () => {
     const dir = await tempDir()
     const { router } = makeRouter(dir)
