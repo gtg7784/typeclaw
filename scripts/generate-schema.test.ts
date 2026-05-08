@@ -14,10 +14,17 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 describe('typeclaw.schema.json', () => {
   test('checked-in typeclaw.schema.json matches the merged (core + bundled plugin) schema (drift guard)', async () => {
     const checkedIn = JSON.parse(await readFile(join(repoRoot, 'typeclaw.schema.json'), 'utf8'))
-    const generated = z.toJSONSchema(buildConfigSchemaWithBundledPlugins(coreConfigSchema), {
-      io: 'input',
-      reused: 'inline',
-    })
+    // The on-disk file is what generate-schema.ts writes via JSON.stringify, which
+    // drops Zod's `~standard` symbol/internals. Compare apples to apples by
+    // round-tripping the generated schema through the same serialization path.
+    const generated = JSON.parse(
+      JSON.stringify(
+        z.toJSONSchema(buildConfigSchemaWithBundledPlugins(coreConfigSchema), {
+          io: 'input',
+          reused: 'inline',
+        }),
+      ),
+    )
 
     expect(checkedIn).toEqual(generated)
   })
