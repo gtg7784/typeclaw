@@ -1,12 +1,12 @@
 import { z } from 'zod'
 
-export const ADAPTER_IDS = ['discord-bot', 'slack-bot', 'telegram-bot'] as const
+export const ADAPTER_IDS = ['discord-bot', 'kakaotalk', 'slack-bot', 'telegram-bot'] as const
 
 export type AdapterId = (typeof ADAPTER_IDS)[number]
 
 const allowRuleSchema = z.string().min(1).refine(isValidAllowRule, {
   message:
-    'allow rule must be one of: *, guild:*, guild:<id>, guild:<id>/<channel>, team:*, team:<id>, team:<id>/<channel>, tg:*, tg:<chat_id>, channel:<id>, dm:*, dm:<id>, im:*, im:<id>',
+    'allow rule must be one of: *, guild:*, guild:<id>, guild:<id>/<channel>, team:*, team:<id>, team:<id>/<channel>, tg:*, tg:<chat_id>, channel:<id>, dm:*, dm:<id>, im:*, im:<id>, kakao:*, kakao:<chat>, kakao:dm/*, kakao:group/*, kakao:open/*',
 })
 
 const engagementTriggerSchema = z.enum(['mention', 'reply', 'dm'])
@@ -102,6 +102,7 @@ const adapterSchema = z.object({
 export const channelsSchema = z
   .object({
     'discord-bot': adapterSchema.optional(),
+    kakaotalk: adapterSchema.optional(),
     'slack-bot': adapterSchema.optional(),
     'telegram-bot': adapterSchema.optional(),
   })
@@ -115,9 +116,11 @@ export type ChannelsConfig = z.infer<typeof channelsSchema>
 // Discord IDs are numeric snowflakes; Slack IDs start with a single uppercase
 // letter (T for teams, C/D/G for channels) followed by alphanumerics; Telegram
 // chat IDs are signed integers (negative for groups, `-100…` for supergroups
-// and channels). All shapes are accepted on every adapter so the allow list
-// stays declarative — the runtime ensures only the right adapter ever sees
-// its own IDs.
+// and channels); KakaoTalk chat IDs are LOCO-protocol decimal integers
+// (large enough to need BigInt at the protocol layer, but rendered as plain
+// decimal strings here). All shapes are accepted on every adapter so the
+// allow list stays declarative — the runtime ensures only the right adapter
+// ever sees its own IDs.
 const RULE_PATTERNS = [
   /^\*$/,
   // Discord
@@ -137,6 +140,18 @@ const RULE_PATTERNS = [
   // identified by its absolute id.
   /^tg:\*$/,
   /^tg:-?[0-9]+$/,
+  // KakaoTalk: a single workspace per logged-in account, so the rules scope
+  // by chat-type (1:1 / group / open) rather than by workspace. `kakao:*`
+  // admits every chat the account can see; `kakao:dm/*`, `kakao:group/*`,
+  // `kakao:open/*` admit one chat-type bucket; `kakao:<chat-id>` admits a
+  // single chat. The runtime classifies each chat into a bucket based on
+  // KakaoChat.type at chat-resolver time and surfaces the bucket via the
+  // workspace coordinate.
+  /^kakao:\*$/,
+  /^kakao:dm\/\*$/,
+  /^kakao:group\/\*$/,
+  /^kakao:open\/\*$/,
+  /^kakao:[0-9]+$/,
   // Shared (channel ids are unique on both platforms)
   /^channel:[A-Z0-9]+$/,
   /^channel:-?[0-9]+$/,
@@ -169,16 +184,39 @@ export function isAllowed(rules: readonly AllowRule[], workspace: string, chat: 
 // `dm:C`           → Discord DM channel C only
 // `im:*`           → every Slack DM (im channel)
 // `im:D`           → Slack DM channel D only
+// `kakao:*`            → every KakaoTalk chat the account is in
+// `kakao:dm/*`         → every KakaoTalk 1:1 chat
+// `kakao:group/*`      → every KakaoTalk group chat
+// `kakao:open/*`       → every KakaoTalk open chat
+// `kakao:<id>`         → KakaoTalk chat with the given numeric chat_id
 //
-// `guild:`/`dm:`, `team:`/`im:`, and `tg:` identify which adapter the rule
-// was written for, but the matcher applies any rule that the
+// `guild:`/`dm:`, `team:`/`im:`, `tg:`, and `kakao:` identify which adapter
+// the rule was written for, but the matcher applies any rule that the
 // (workspace, chat) pair satisfies. That keeps the adapter-side coupling at
 // the schema/UX layer (Slack users write `team:`, Discord users write
-// `guild:`, Telegram users write `tg:`) without bloating the matching logic.
-// Telegram has no workspace concept; the adapter pins workspace to
-// `'telegram'` so `tg:*` only ever admits Telegram chats.
+// `guild:`, Telegram users write `tg:`, KakaoTalk users write `kakao:`)
+// without bloating the matching logic. Telegram has no workspace concept;
+// the adapter pins workspace to `'telegram'` so `tg:*` only ever admits
+// Telegram chats. KakaoTalk uses `@kakao-dm` / `@kakao-group` / `@kakao-open`
+// as workspace coordinates so the bucket-* rules are pure prefix matches
+// against `workspace`.
 function matchRule(rule: string, workspace: string, chat: string): boolean {
+  // KakaoTalk workspaces require an explicit `kakao:*` rule. The global
+  // `*` catch-all is intentionally NOT extended to admit kakao chats:
+  // KakaoTalk authenticates as a personal user account, so a user who
+  // wrote `'*'` for their Slack/Discord bot doesn't expect that rule
+  // to also expose every personal KakaoTalk DM and group they're in.
+  // To admit kakao chats, the user must write `kakao:*` (or a narrower
+  // bucket rule) explicitly. Adapter-specific non-kakao rules
+  // (`team:*`, `guild:*`, `dm:*`, `im:*`) likewise never admit kakao
+  // workspaces — the matcher returns false before evaluating them.
+  if (KAKAO_WORKSPACES.has(workspace)) {
+    if (rule.startsWith('kakao:')) return matchKakaoRule(rule.slice(6), workspace, chat)
+    return false
+  }
+
   if (rule === '*') return true
+  if (rule.startsWith('kakao:')) return false
 
   if (workspace === '@dm') {
     if (rule === 'dm:*' || rule === 'im:*') return true
@@ -210,4 +248,15 @@ function matchRule(rule: string, workspace: string, chat: string): boolean {
     return body.slice(0, slash) === workspace && body.slice(slash + 1) === chat
   }
   return false
+}
+
+const KAKAO_WORKSPACES = new Set(['@kakao-dm', '@kakao-group', '@kakao-open'])
+
+function matchKakaoRule(body: string, workspace: string, chat: string): boolean {
+  if (!KAKAO_WORKSPACES.has(workspace)) return false
+  if (body === '*') return true
+  if (body === 'dm/*') return workspace === '@kakao-dm'
+  if (body === 'group/*') return workspace === '@kakao-group'
+  if (body === 'open/*') return workspace === '@kakao-open'
+  return body === chat
 }

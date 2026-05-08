@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -379,5 +379,138 @@ describe('channel manager — telegram adapter lifecycle', () => {
     expect(result.stopped).not.toContain('telegram-bot')
     expect(result.restartRequired).toContain('telegram-bot (token rotation)')
     expect(fake.stopCalls).toBe(0)
+  })
+})
+
+describe('channel manager — kakaotalk credential preflight', () => {
+  const writeCredentialsFile = async (dir: string): Promise<string> => {
+    const credDir = join(dir, 'workspace', '.agent-messenger')
+    await mkdir(credDir, { recursive: true })
+    const path = join(credDir, 'kakaotalk-credentials.json')
+    await writeFile(path, JSON.stringify({ current_account: 'a1', accounts: {} }))
+    return path
+  }
+
+  test('starts kakaotalk adapter when credentials file exists at workspace/.agent-messenger/', async () => {
+    cfg.kakaotalk = enabledAdapterCfg()
+    await writeCredentialsFile(agentDir)
+    const fake = makeFakeAdapter()
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: {},
+      createKakaotalkAdapter: () => fake,
+    })
+
+    await mgr.start()
+    expect(fake.startCalls).toBe(1)
+
+    await mgr.stop()
+  })
+
+  test('does not start kakaotalk adapter when credentials file is missing', async () => {
+    cfg.kakaotalk = enabledAdapterCfg()
+    const fake = makeFakeAdapter()
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: {},
+      createKakaotalkAdapter: () => fake,
+    })
+
+    await mgr.start()
+    expect(fake.startCalls).toBe(0)
+
+    await mgr.stop()
+  })
+
+  test('honors AGENT_MESSENGER_CONFIG_DIR override for credential lookup', async () => {
+    cfg.kakaotalk = enabledAdapterCfg()
+    const overrideDir = await mkdtemp(join(tmpdir(), 'typeclaw-kakao-override-'))
+    try {
+      const credPath = join(overrideDir, 'kakaotalk-credentials.json')
+      await writeFile(credPath, '{}')
+      const fake = makeFakeAdapter()
+      const mgr = createChannelManager({
+        agentDir,
+        channelsConfigRef: () => cfg,
+        env: { AGENT_MESSENGER_CONFIG_DIR: overrideDir },
+        createKakaotalkAdapter: () => fake,
+      })
+
+      await mgr.start()
+      expect(fake.startCalls).toBe(1)
+      await mgr.stop()
+    } finally {
+      await rm(overrideDir, { recursive: true, force: true })
+    }
+  })
+
+  test('reload stops kakaotalk adapter when credentials file is removed', async () => {
+    cfg.kakaotalk = enabledAdapterCfg()
+    const path = await writeCredentialsFile(agentDir)
+    const fake = makeFakeAdapter()
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: {},
+      createKakaotalkAdapter: () => fake,
+    })
+
+    await mgr.start()
+    expect(fake.startCalls).toBe(1)
+
+    await rm(path)
+
+    const result = await mgr.reload()
+    expect(result.stopped).toContain('kakaotalk')
+    expect(fake.stopCalls).toBe(1)
+  })
+
+  test('reload reports credential rotation (not stop) when file content changes', async () => {
+    cfg.kakaotalk = enabledAdapterCfg()
+    const path = await writeCredentialsFile(agentDir)
+    const fake = makeFakeAdapter()
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: {},
+      createKakaotalkAdapter: () => fake,
+    })
+
+    await mgr.start()
+    // Different JSON content → different SHA-256 → credential rotation
+    // detected. Per fix #7, we hash the file rather than relying on
+    // mtime/size, so writing back identical bytes would correctly NOT
+    // trigger a rotation (asserted by the negative case below).
+    await writeFile(path, JSON.stringify({ current_account: 'a2', accounts: {} }))
+
+    const result = await mgr.reload()
+    expect(result.stopped).not.toContain('kakaotalk')
+    expect(result.restartRequired).toContain('kakaotalk (credential rotation)')
+
+    await mgr.stop()
+  })
+
+  test('reload does not report rotation when file is rewritten with identical bytes', async () => {
+    cfg.kakaotalk = enabledAdapterCfg()
+    const path = await writeCredentialsFile(agentDir)
+    const fake = makeFakeAdapter()
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: {},
+      createKakaotalkAdapter: () => fake,
+    })
+
+    await mgr.start()
+    // Re-write the same JSON. mtime+size would have flagged this; content
+    // hash correctly recognizes it as a no-op.
+    await writeFile(path, JSON.stringify({ current_account: 'a1', accounts: {} }))
+
+    const result = await mgr.reload()
+    expect(result.restartRequired).not.toContain('kakaotalk (credential rotation)')
+
+    await mgr.stop()
   })
 })
