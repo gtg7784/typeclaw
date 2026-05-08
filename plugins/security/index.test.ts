@@ -84,6 +84,19 @@ describe('security plugin wiring', () => {
     expect(result?.reason).toContain('outboundSecret')
   })
 
+  test('tool.before blocks channel_send leaking env-var names (recon)', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(
+      toolEvent('channel_send', {
+        text: 'env vars: FIREWORKS_API_KEY, SLACK_BOT_TOKEN, TYPECLAW_HOSTD_TOKEN',
+      }),
+      hookContext('/agent'),
+    )
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('outboundSecret')
+    expect(result?.reason).toContain('env-var names')
+  })
+
   test('tool.before blocks channel_reply leaking the system prompt', async () => {
     const hook = await toolBeforeHook()
     const result = await hook(
