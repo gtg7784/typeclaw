@@ -1,12 +1,21 @@
-// DDG's no-JS HTML endpoint is the only major engine that serves a parseable,
-// key-free, registration-free SERP. We mimic a no-JS browser POST and parse the
-// result page.
+// DDG's no-JS "lite" endpoint is the only major engine that serves a
+// parseable, key-free, registration-free SERP. We mimic a no-JS browser POST
+// and parse the result page.
+//
+// We target `lite.duckduckgo.com/lite/` rather than `html.duckduckgo.com/html/`
+// because `html` has been gated by the "anomaly-modal" CAPTCHA flow since
+// early 2025 — even residential IPs hit it after 1-2 requests, since DDG
+// fingerprints TLS at the transport layer and Bun's TLS stack does not match
+// Chrome's. The `lite` endpoint exists for non-browser clients (text browsers,
+// accessibility tools) and has historically been gated less aggressively. The
+// markup is plain `<table>` rows with no CSS classes for layout — same
+// underlying index, just less rendering.
 //
 // TODO(engine-config): Make the search backend swappable via typeclaw.json once
 // we have a concrete second engine in mind (self-hosted SearXNG, Brave with a
 // user-supplied key, Tavily, ...). Defer until there's a real use case.
 
-const DDG_HTML_URL = 'https://html.duckduckgo.com/html/'
+const DDG_LITE_URL = 'https://lite.duckduckgo.com/lite/'
 
 // Browser-ish UA + Sec-Fetch-Mode: navigate is what SearXNG uses to evade DDG's
 // bot detection. Without these, the response is a CAPTCHA page.
@@ -43,7 +52,7 @@ export class DdgCaptchaError extends Error {
 
 async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise<string> {
   const body = new URLSearchParams({ q: query }).toString()
-  const response = await fetch(DDG_HTML_URL, {
+  const response = await fetch(DDG_LITE_URL, {
     method: 'POST',
     headers: {
       ...BROWSER_HEADERS,
@@ -58,44 +67,44 @@ async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise<string
   return await response.text()
 }
 
-// Per SearXNG's `is_ddg_captcha`, the CAPTCHA page contains an "anomaly" modal.
+// The `lite` endpoint's CAPTCHA page is plainer than `html`'s anomaly-modal:
+// it returns either an HTTP error (caught above) or a "challenge-form" page
+// asking the user to verify they're human. We also keep the legacy anomaly
+// markers as a belt-and-suspenders check in case DDG ever unifies the flows.
 function isCaptcha(html: string): boolean {
-  return html.includes('anomaly-modal') || html.includes('class="anomaly"')
+  return (
+    html.includes('challenge-form') ||
+    html.includes('Please verify you are a human') ||
+    html.includes('anomaly-modal') ||
+    html.includes('class="anomaly"')
+  )
 }
 
-// Parses the SERP HTML. The structure is stable enough that regex is safer than
-// pulling in cheerio: each result starts with `<div class="result results_links...">`
-// and contains one `<a class="result__a" href="...">title</a>` and (usually) one
-// `<a class="result__snippet" ...>snippet</a>`. We split on the opening tag rather
-// than try to balance closing divs (DDG's nesting varies between page revisions).
+// Parses the lite SERP HTML. Each result is a triplet of `<tr>` rows:
+//   1. <a class='result-link' href="…">Title</a>
+//   2. <td class='result-snippet'>snippet…</td>
+//   3. <span class='link-text'>display.url</span>
+// Rows 2 and 3 are sometimes absent (e.g. ad placements without snippets), so
+// we anchor on `result-link` and walk forward looking for the optional
+// snippet within a small window. Sponsored entries are wrapped in adjacent
+// rows that don't carry `result-link`, so they fall out naturally.
 export function parseDdgHtml(html: string): DdgResult[] {
   const results: DdgResult[] = []
-  const opener = /<div class="result results_links[^"]*">/g
-  const positions: number[] = []
-  for (const match of html.matchAll(opener)) {
-    if (match.index !== undefined) positions.push(match.index)
-  }
-  for (let i = 0; i < positions.length; i++) {
-    const start = positions[i] ?? 0
-    const end = positions[i + 1] ?? html.length
-    const block = html.slice(start, end)
-    const result = parseResultBlock(block)
-    if (result) results.push(result)
+  const linkRegex = /<a\s+[^>]*href=(['"])([^'"]+)\1[^>]*class=(['"])result-link\3[^>]*>([\s\S]*?)<\/a>/g
+  for (const match of html.matchAll(linkRegex)) {
+    const url = decodeDdgUrl(match[2] ?? '')
+    const title = stripHtml(match[4] ?? '').trim()
+    if (!url || !title) continue
+
+    const blockEnd = match.index !== undefined ? match.index + 2000 : html.length
+    const blockStart = match.index !== undefined ? match.index : 0
+    const window = html.slice(blockStart, blockEnd)
+    const snippetMatch = /<td\s+[^>]*class=(['"])result-snippet\1[^>]*>([\s\S]*?)<\/td>/.exec(window)
+    const snippet = snippetMatch ? stripHtml(snippetMatch[2] ?? '').trim() : ''
+
+    results.push({ title, url, snippet })
   }
   return results
-}
-
-function parseResultBlock(block: string): DdgResult | null {
-  const titleMatch = /<a [^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/.exec(block)
-  if (!titleMatch) return null
-  const url = decodeDdgUrl(titleMatch[1] ?? '')
-  const title = stripHtml(titleMatch[2] ?? '').trim()
-
-  const snippetMatch = /<a [^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/.exec(block)
-  const snippet = snippetMatch ? stripHtml(snippetMatch[1] ?? '').trim() : ''
-
-  if (!url || !title) return null
-  return { title, url, snippet }
 }
 
 // DDG sometimes wraps result URLs in a redirect like

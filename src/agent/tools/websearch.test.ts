@@ -25,12 +25,8 @@ afterEach(() => {
 const ctx = {} as Parameters<typeof websearchTool.execute>[4]
 
 const MINIMAL_DDG_HTML = `
-<div class="result results_links results_links_deep web-result ">
-  <h2 class="result__title">
-    <a rel="nofollow" class="result__a" href="https://example.com/">Example Domain</a>
-  </h2>
-  <a class="result__snippet" href="https://example.com/">Example snippet text.</a>
-</div>
+<tr><td><a rel="nofollow" href="https://example.com/" class='result-link'>Example Domain</a></td></tr>
+<tr><td class='result-snippet'>Example snippet text.</td></tr>
 `
 
 describe('websearch tool: web (DuckDuckGo)', () => {
@@ -43,7 +39,7 @@ describe('websearch tool: web (DuckDuckGo)', () => {
 
     // then
     expect(fetchCalls).toHaveLength(1)
-    expect(fetchCalls[0]?.url).toBe('https://html.duckduckgo.com/html/')
+    expect(fetchCalls[0]?.url).toBe('https://lite.duckduckgo.com/lite/')
     expect(fetchCalls[0]?.init?.method).toBe('POST')
     expect(fetchCalls[0]?.init?.body).toBe('q=example')
 
@@ -60,7 +56,8 @@ describe('websearch tool: web (DuckDuckGo)', () => {
 
   test('returns a clear error when DuckDuckGo serves a CAPTCHA page', async () => {
     // given
-    fetchResponse = () => new Response('<div class="anomaly-modal">…</div>', { status: 200 })
+    fetchResponse = () =>
+      new Response('<form id="challenge-form">Please verify you are a human</form>', { status: 200 })
 
     // when
     const result = await websearchTool.execute('id', { query: 'spam' }, undefined, undefined, ctx)
@@ -102,9 +99,12 @@ describe('websearch tool: web (DuckDuckGo)', () => {
   test('respects the limit parameter', async () => {
     // given: 3 results in the SERP, ask for 2
     const html = `
-      <div class="result results_links results_links_deep web-result "><h2 class="result__title"><a class="result__a" href="https://a/">A</a></h2><a class="result__snippet" href="https://a/">a</a></div>
-      <div class="result results_links results_links_deep web-result "><h2 class="result__title"><a class="result__a" href="https://b/">B</a></h2><a class="result__snippet" href="https://b/">b</a></div>
-      <div class="result results_links results_links_deep web-result "><h2 class="result__title"><a class="result__a" href="https://c/">C</a></h2><a class="result__snippet" href="https://c/">c</a></div>
+      <tr><td><a href="https://a/" class='result-link'>A</a></td></tr>
+      <tr><td class='result-snippet'>a</td></tr>
+      <tr><td><a href="https://b/" class='result-link'>B</a></td></tr>
+      <tr><td class='result-snippet'>b</td></tr>
+      <tr><td><a href="https://c/" class='result-link'>C</a></td></tr>
+      <tr><td class='result-snippet'>c</td></tr>
     `
     fetchResponse = () => new Response(html, { status: 200 })
 

@@ -3,29 +3,34 @@ import { describe, expect, test } from 'bun:test'
 import { parseDdgHtml } from './ddg'
 
 const REAL_RESULT_HTML = `
-<div id="links" class="results">
-<div class="result results_links results_links_deep web-result ">
-  <div class="links_main">
-    <h2 class="result__title">
-      <a rel="nofollow" class="result__a" href="https://bun.sh/">Bun &mdash; A fast all-in-one JavaScript runtime</a>
-    </h2>
-    <div class="result__extras">
-      <div class="result__extras__url">
-        <a class="result__url" href="https://bun.sh/">bun.sh</a>
-      </div>
-    </div>
-    <a class="result__snippet" href="https://bun.sh/"><b>Bun</b> is a fast, all-in-one JavaScript &amp; <b>TypeScript</b> &#x27;toolkit&#x27;.</a>
-  </div>
-</div>
-<div class="result results_links results_links_deep web-result ">
-  <div class="links_main">
-    <h2 class="result__title">
-      <a rel="nofollow" class="result__a" href="https://github.com/oven-sh/bun">oven-sh/bun</a>
-    </h2>
-    <a class="result__snippet" href="https://github.com/oven-sh/bun">Incredibly fast JavaScript runtime.</a>
-  </div>
-</div>
-</div>
+<html><body><table>
+  <tr><td>1.&nbsp;</td>
+    <td>
+      <a rel="nofollow" href="https://bun.sh/" class='result-link'>Bun &mdash; A fast all-in-one JavaScript runtime</a>
+    </td>
+  </tr>
+  <tr>
+    <td class='result-snippet'>
+      <b>Bun</b> is a fast, all-in-one JavaScript &amp; <b>TypeScript</b> &#x27;toolkit&#x27;.
+    </td>
+  </tr>
+  <tr>
+    <td>&nbsp;</td>
+    <td>
+      <span class='link-text'>bun.sh</span>
+    </td>
+  </tr>
+  <tr><td>2.&nbsp;</td>
+    <td>
+      <a rel="nofollow" href="https://github.com/oven-sh/bun" class='result-link'>oven-sh/bun</a>
+    </td>
+  </tr>
+  <tr>
+    <td class='result-snippet'>
+      Incredibly fast JavaScript runtime.
+    </td>
+  </tr>
+</table></body></html>
 `
 
 describe('parseDdgHtml', () => {
@@ -54,12 +59,8 @@ describe('parseDdgHtml', () => {
   test('strips inline highlight tags and decodes HTML entities in titles and snippets', () => {
     // given
     const html = `
-      <div class="result results_links results_links_deep web-result ">
-        <h2 class="result__title">
-          <a rel="nofollow" class="result__a" href="https://example.com/">Foo &amp; Bar &lt;v2&gt;</a>
-        </h2>
-        <a class="result__snippet" href="https://example.com/">A &quot;quoted&quot; <b>snippet</b> with &#39;apostrophe&#39;.</a>
-      </div>
+      <tr><td><a rel="nofollow" href="https://example.com/" class='result-link'>Foo &amp; Bar &lt;v2&gt;</a></td></tr>
+      <tr><td class='result-snippet'>A &quot;quoted&quot; <b>snippet</b> with &#39;apostrophe&#39;.</td></tr>
     `
 
     // when
@@ -73,12 +74,8 @@ describe('parseDdgHtml', () => {
   test('unwraps DDG redirect URLs (//duckduckgo.com/l/?uddg=...)', () => {
     // given
     const html = `
-      <div class="result results_links results_links_deep web-result ">
-        <h2 class="result__title">
-          <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freal.example%2Fpath&rut=abc">Real Site</a>
-        </h2>
-        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freal.example%2Fpath">snippet</a>
-      </div>
+      <tr><td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Freal.example%2Fpath&rut=abc" class='result-link'>Real Site</a></td></tr>
+      <tr><td class='result-snippet'>snippet</td></tr>
     `
 
     // when
@@ -88,17 +85,10 @@ describe('parseDdgHtml', () => {
     expect(results[0]?.url).toBe('https://real.example/path')
   })
 
-  test('skips blocks with no title (defensive against malformed responses)', () => {
-    // given
+  test('keeps results that have no snippet (snippet is optional in lite SERPs)', () => {
+    // given: a single result with no following result-snippet row
     const html = `
-      <div class="result results_links results_links_deep web-result ">
-        <a class="result__snippet" href="https://example.com/">snippet only</a>
-      </div>
-      <div class="result results_links results_links_deep web-result ">
-        <h2 class="result__title">
-          <a rel="nofollow" class="result__a" href="https://valid.example/">Valid</a>
-        </h2>
-      </div>
+      <tr><td><a rel="nofollow" href="https://valid.example/" class='result-link'>Valid</a></td></tr>
     `
 
     // when
@@ -107,5 +97,27 @@ describe('parseDdgHtml', () => {
     // then
     expect(results).toHaveLength(1)
     expect(results[0]?.title).toBe('Valid')
+    expect(results[0]?.url).toBe('https://valid.example/')
+    expect(results[0]?.snippet).toBe('')
+  })
+
+  test('skips snippet rows that have no preceding result-link (defensive against malformed responses)', () => {
+    // given
+    const html = `
+      <tr><td class='result-snippet'>orphan snippet with no link</td></tr>
+      <tr><td><a rel="nofollow" href="https://valid.example/" class='result-link'>Valid</a></td></tr>
+      <tr><td class='result-snippet'>real snippet</td></tr>
+    `
+
+    // when
+    const results = parseDdgHtml(html)
+
+    // then
+    expect(results).toHaveLength(1)
+    expect(results[0]).toEqual({
+      title: 'Valid',
+      url: 'https://valid.example/',
+      snippet: 'real snippet',
+    })
   })
 })
