@@ -47,11 +47,23 @@ const consoleLogger: TelegramBotAdapterLogger = {
   error: (m) => console.error(m),
 }
 
+// Test seams for `createTelegramBotAdapter`. Production callers omit these
+// and the real SDK constructors are used; tests inject fakes to drive
+// listener events deterministically (especially the silent-startup and
+// inflight-during-stop paths that the real SDK doesn't expose hooks for).
+export type TelegramBotClientFactory = () => TelegramBotClient
+export type TelegramBotListenerFactory = (
+  client: TelegramBotClient,
+  options: ConstructorParameters<typeof TelegramBotListener>[1],
+) => TelegramBotListener
+
 export type TelegramBotAdapterOptions = {
   router: ChannelRouter
   configRef: () => ChannelAdapterConfig
   token: string
   logger?: TelegramBotAdapterLogger
+  createClient?: TelegramBotClientFactory
+  createListener?: TelegramBotListenerFactory
 }
 
 export type TelegramBotAdapter = {
@@ -355,7 +367,10 @@ export function createFetchAttachmentCallback(deps: {
 
 export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): TelegramBotAdapter {
   const logger = options.logger ?? consoleLogger
-  const client = new TelegramBotClient()
+  const createClient = options.createClient ?? (() => new TelegramBotClient())
+  const createListener =
+    options.createListener ?? ((client, listenerOptions) => new TelegramBotListener(client, listenerOptions))
+  const client = createClient()
   let listener: TelegramBotListener | null = null
   let botUser: TelegramBotUser | null = null
   let started = false
@@ -395,6 +410,12 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
 
   const handleMessage = async (event: TelegramMessage): Promise<void> => {
     inflightInbounds++
+    // Snapshot bot identity at dispatch time. `botUser` is module-level
+    // mutable state and `stop()` may null it concurrently with our awaits
+    // below; without this snapshot, an inbound that was already dispatched
+    // before `stop()` arrived could resume with `botUser=null` and drop
+    // as `pre_connect`, losing a legitimate message.
+    const botSnapshot = botUser
     try {
       const tag = await formatChannelTag(String(event.chat.id))
       const fromLabel = event.from?.username ?? event.from?.first_name ?? String(event.from?.id ?? '?')
@@ -403,7 +424,7 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
         `[telegram-bot] inbound message_id=${event.message_id} author=${fromLabel} ${tag} text_len=${text.length}`,
       )
 
-      const verdict = classifyInbound(event, options.configRef(), botUser)
+      const verdict = classifyInbound(event, options.configRef(), botSnapshot)
       if (verdict.kind === 'drop') {
         logger.info(
           `[telegram-bot] dropped message_id=${event.message_id} reason=${verdict.reason}${dropHint(verdict.reason)}`,
@@ -457,19 +478,36 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
         throw err
       }
 
-      listener = new TelegramBotListener(client, {
+      listener = createListener(client, {
         timeoutSeconds: 30,
         allowedUpdates: TELEGRAM_ALLOWED_UPDATES,
         dropPendingUpdates: true,
       })
+      // Track whether the listener emitted `connected` during start(). The
+      // SDK's `start()` returns normally even when `deleteWebhook` or
+      // (less importantly, since we already preflighted) `getMe` fails
+      // internally — see
+      // node_modules/agent-messenger/dist/src/platforms/telegrambot/listener.js
+      // lines 36-60 (try/catch around each setup step that emits 'error'
+      // and returns rather than throwing). Without this flag, a failed
+      // startup leaves us with `started=true`, callbacks registered, and
+      // a dead poller. We use the SDK's own `connected` event as the
+      // single source of truth for "the listener is actually running".
+      let listenerConnected = false
+      let listenerStartupError: Error | null = null
       listener.on('connected', (info) => {
+        listenerConnected = true
         botUser = info.user
       })
       listener.on('disconnected', () => {
         logger.warn('[telegram-bot] disconnected; SDK will reconnect with backoff')
       })
       listener.on('error', (err) => {
-        logger.error(`[telegram-bot] listener error: ${describe(err)}`)
+        const error = err instanceof Error ? err : new Error(String(err))
+        if (!listenerConnected && listenerStartupError === null) {
+          listenerStartupError = error
+        }
+        logger.error(`[telegram-bot] listener error: ${describe(error)}`)
       })
       listener.on('message', (event) => {
         void handleMessage(event)
@@ -484,12 +522,28 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       options.router.registerFetchAttachment('telegram-bot', fetchAttachmentCallback)
       options.router.registerMembership('telegram-bot', membershipResolver)
 
+      const rollbackStart = (reason: string, cause: Error): never => {
+        options.router.unregisterOutbound('telegram-bot', outboundCallback)
+        options.router.unregisterTyping('telegram-bot', typingCallback)
+        options.router.unregisterChannelNameResolver('telegram-bot', channelResolver)
+        options.router.unregisterFetchAttachment('telegram-bot', fetchAttachmentCallback)
+        options.router.unregisterMembership('telegram-bot', membershipResolver)
+        listener?.stop()
+        listener = null
+        botUser = null
+        started = false
+        logger.error(`[telegram-bot] ${reason}: ${describe(cause)}`)
+        throw cause
+      }
+
       try {
         await listener.start()
       } catch (err) {
-        started = false
-        logger.error(`[telegram-bot] listener start failed: ${describe(err)}`)
-        throw err
+        rollbackStart('listener start threw', err instanceof Error ? err : new Error(String(err)))
+      }
+      if (!listenerConnected) {
+        const cause = listenerStartupError ?? new Error('listener.start() returned without emitting connected')
+        rollbackStart('listener start failed silently', cause)
       }
     },
 
@@ -509,12 +563,16 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
       // decreases.
       listener?.stop()
       listener = null
-      botUser = null
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)
         })
       }
+      // Null `botUser` only AFTER inflight handlers have drained.
+      // `handleMessage` snapshots `botUser` at dispatch time so this is
+      // belt-and-suspenders, but freeing the reference here keeps
+      // `isConnected()` honest after stop completes.
+      botUser = null
     },
 
     isConnected(): boolean {
