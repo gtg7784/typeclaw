@@ -1,5 +1,6 @@
 import { definePlugin } from '@/plugin'
 
+import { checkGitExfilGuard } from './policies/git-exfil'
 import { checkOutboundSecretGuard } from './policies/outbound-secret-scan'
 import { applyPromptInjectionDefense } from './policies/prompt-injection'
 import { checkSecretExfilBashGuard } from './policies/secret-exfil-bash'
@@ -17,6 +18,7 @@ export default definePlugin({
       'tool.before': async (event) => {
         const checks = [
           checkSecretExfilBashGuard({ tool: event.tool, args: event.args }),
+          checkGitExfilGuard({ tool: event.tool, args: event.args }),
           checkSecretExfilReadGuard({ tool: event.tool, args: event.args }),
           checkSsrfGuard({ tool: event.tool, args: event.args }),
           checkSessionSearchSecretsGuard({ tool: event.tool, args: event.args }),

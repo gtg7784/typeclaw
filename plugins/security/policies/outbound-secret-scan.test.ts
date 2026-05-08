@@ -18,6 +18,7 @@ const googleFixture = 'AI' + 'za' + 'X'.repeat(35)
 const stripeFixture = 'sk_' + 'live' + '_' + 'X'.repeat(28)
 const awsKeyFixture = 'AKIA' + 'X'.repeat(16)
 const fireworksFixture = 'fw_' + 'Z'.repeat(24)
+const githubPatFineGrainedFixture = 'github_pat_' + '11' + 'A'.repeat(20) + '_' + 'X'.repeat(60)
 
 describe('outbound-secret-scan signature detection', () => {
   test('detects AWS access key id', () => {
@@ -41,6 +42,11 @@ describe('outbound-secret-scan signature detection', () => {
   test('detects GitHub OAuth token (gho_)', () => {
     const matches = findOutboundSecrets(ghoFixture, {})
     expect(matches.some((m) => m.kind === 'github_oauth_token')).toBe(true)
+  })
+
+  test('detects GitHub fine-grained PAT (github_pat_11...)', () => {
+    const matches = findOutboundSecrets(`token: ${githubPatFineGrainedFixture}`, {})
+    expect(matches.some((m) => m.kind === 'github_fine_grained_pat')).toBe(true)
   })
 
   test('detects Slack user token', () => {

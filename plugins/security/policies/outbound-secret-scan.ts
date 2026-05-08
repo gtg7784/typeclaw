@@ -11,6 +11,7 @@ const SIGNATURE_PATTERNS: ReadonlyArray<{ kind: string; pattern: RegExp }> = [
   { kind: 'github_server_to_server_token', pattern: /\bghs_[A-Za-z0-9]{36}\b/ },
   { kind: 'github_refresh_token', pattern: /\bghr_[A-Za-z0-9]{36}\b/ },
   { kind: 'github_app_token', pattern: /\bghp_[A-Za-z0-9]{255,}\b/ },
+  { kind: 'github_fine_grained_pat', pattern: /\bgithub_pat_[A-Za-z0-9_]{60,}\b/ },
   { kind: 'slack_user_token', pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}\b/ },
   { kind: 'slack_webhook', pattern: /https:\/\/hooks\.slack\.com\/services\/T[A-Z0-9]+\/B[A-Z0-9]+\/[A-Za-z0-9]{20,}/ },
   { kind: 'discord_bot_token', pattern: /\b[MN][A-Za-z\d]{23}\.[\w-]{6}\.[\w-]{27,}\b/ },

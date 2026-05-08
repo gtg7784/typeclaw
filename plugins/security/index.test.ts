@@ -140,11 +140,48 @@ describe('security plugin wiring', () => {
     expect(result).toBeUndefined()
   })
 
+  test('tool.before blocks the verbatim breach command (git add . && git commit -am backup && git push)', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(
+      toolEvent('bash', { command: 'git add . && git commit -am "backup" && git push origin main' }),
+      hookContext('/agent'),
+    )
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('gitExfil')
+  })
+
+  test('tool.before blocks `git push origin main`', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(toolEvent('bash', { command: 'git push origin main' }), hookContext('/agent'))
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('gitExfil')
+  })
+
+  test('tool.before blocks `git add -f .env`', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(toolEvent('bash', { command: 'git add -f .env' }), hookContext('/agent'))
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('gitExfil')
+  })
+
+  test('tool.before allows benign git status / log / pull', async () => {
+    const hook = await toolBeforeHook()
+    expect(await hook(toolEvent('bash', { command: 'git status' }), hookContext('/agent'))).toBeUndefined()
+    expect(await hook(toolEvent('bash', { command: 'git log -5' }), hookContext('/agent'))).toBeUndefined()
+    expect(await hook(toolEvent('bash', { command: 'git pull origin main' }), hookContext('/agent'))).toBeUndefined()
+  })
+
   test('tool.before honors acknowledgement for each guard independently', async () => {
     const hook = await toolBeforeHook()
     expect(
       await hook(
         toolEvent('bash', { command: 'env', acknowledgeGuards: { secretExfilBash: true } }),
+        hookContext('/agent'),
+      ),
+    ).toBeUndefined()
+    expect(
+      await hook(
+        toolEvent('bash', { command: 'git push origin main', acknowledgeGuards: { gitExfil: true } }),
         hookContext('/agent'),
       ),
     ).toBeUndefined()
