@@ -2,6 +2,7 @@
 
 import { defineCommand, runMain } from 'citty'
 
+import { channelCommand } from './channel'
 import { composeCommand } from './compose'
 import { hostdCommand } from './hostd'
 import { init } from './init'
@@ -32,6 +33,7 @@ const main = defineCommand({
     logs: logsCommand,
     shell: shellCommand,
     compose: composeCommand,
+    channel: channelCommand,
     _hostd: hostdCommand,
   },
 })
