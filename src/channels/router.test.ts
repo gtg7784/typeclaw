@@ -106,6 +106,7 @@ function makeRouter(
     factoryCalls?: SessionFactoryArgs[]
     transcriptPathFor?: (sessionId: string) => string | undefined
     configuredAliases?: () => readonly string[]
+    ensureLiveTimeoutMs?: number
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -115,6 +116,7 @@ function makeRouter(
     agentDir,
     configForAdapter: () => options.config ?? baseConfig,
     ...(options.configuredAliases !== undefined ? { configuredAliases: options.configuredAliases } : {}),
+    ...(options.ensureLiveTimeoutMs !== undefined ? { ensureLiveTimeoutMs: options.ensureLiveTimeoutMs } : {}),
     now: () => nowRef.value,
     logger: {
       info: (m) => options.logs?.push(`info:${m}`),
@@ -190,6 +192,56 @@ describe('ChannelRouter session lifecycle', () => {
 
     expect(sessions).toHaveLength(1)
     expect(router.liveCount()).toBe(1)
+  })
+
+  test('emits ordered ensureLive phase logs bracketing each await', async () => {
+    // given a fresh router and a captured log buffer
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router } = makeRouter(dir, { logs })
+
+    // when a first inbound triggers cold-start ensureLive
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    // then phase logs appear in order: begin → resolved-names → resolved-membership
+    //   → session-created → done. The bracketing is what makes a stuck phase
+    //   visible from logs alone (begin without done == hung at that phase).
+    const phaseLogs = logs
+      .filter((l) => l.startsWith('info:[channels]') && l.includes('ensureLive'))
+      .map((l) => l.replace(/^.*ensureLive /, ''))
+    const beginIdx = phaseLogs.findIndex((p) => p.startsWith('begin'))
+    const namesIdx = phaseLogs.findIndex((p) => p.startsWith('resolved-names'))
+    const membershipIdx = phaseLogs.findIndex((p) => p.startsWith('resolved-membership'))
+    const createdIdx = phaseLogs.findIndex((p) => p.startsWith('session-created'))
+    const doneIdx = phaseLogs.findIndex((p) => p.startsWith('done'))
+    expect(beginIdx).toBeGreaterThanOrEqual(0)
+    expect(namesIdx).toBeGreaterThan(beginIdx)
+    expect(membershipIdx).toBeGreaterThan(namesIdx)
+    expect(createdIdx).toBeGreaterThan(membershipIdx)
+    expect(doneIdx).toBeGreaterThan(createdIdx)
+    expect(phaseLogs[beginIdx]).toContain('cold-start')
+    expect(phaseLogs[doneIdx]).toContain('cold-start')
+  })
+
+  test('rehydrate path logs `ensureLive begin (rehydrate)` after restart', async () => {
+    // given a persisted mapping from a prior run
+    const dir = await tempDir()
+    const firstRun = makeRouter(dir)
+    await firstRun.router.route(inbound())
+    await firstRun.router.__testing!.flushDebounce(KEY)
+    await firstRun.router.stop()
+
+    // when a fresh router (simulating restart) handles a new inbound for the same channel
+    const logs: string[] = []
+    const secondRun = makeRouter(dir, { logs })
+    await secondRun.router.route(inbound({ externalMessageId: 'm-rehydrate' }))
+    await secondRun.router.__testing!.flushDebounce(KEY)
+
+    // then the begin and done logs both flag the rehydrate path
+    const phaseLogs = logs.filter((l) => l.includes('ensureLive'))
+    expect(phaseLogs.some((l) => l.includes('begin (rehydrate)'))).toBe(true)
+    expect(phaseLogs.some((l) => l.includes('done (rehydrate)'))).toBe(true)
   })
 
   test('persists the (4-tuple → sessionId) mapping to channels/sessions.json', async () => {
@@ -346,6 +398,84 @@ describe('ChannelRouter session lifecycle', () => {
   })
 })
 
+describe('ChannelRouter ensureLive watchdog', () => {
+  test('hung session factory rejects after the timeout instead of awaiting forever', async () => {
+    // given a factory that never resolves (simulates a hung Discord REST chain
+    // inside createForChannel — the production failure mode that bricked the
+    // bot for 2 days when a previously-evicted channel got a new inbound
+    // during a gateway-disconnect storm)
+    const dir = await tempDir()
+    const logs: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      ensureLiveTimeoutMs: 50,
+      logger: {
+        info: (m) => logs.push(`info:${m}`),
+        warn: (m) => logs.push(`warn:${m}`),
+        error: (m) => logs.push(`error:${m}`),
+      },
+      createSessionForChannel: () => new Promise(() => {}),
+    })
+
+    // when the route promise resolves (the adapter's outer catch is responsible
+    // for swallowing the thrown timeout in production; here we observe the
+    // throw directly to assert the watchdog actually fired)
+    const start = Date.now()
+    await expect(router.route(inbound())).rejects.toThrow(/ensureLive timed out after 50ms/)
+    const elapsed = Date.now() - start
+
+    // then we returned within the watchdog window (production-relevant: the
+    // adapter's outer catch sees the timeout error promptly and decrements
+    // its inflight counter, instead of sitting forever)
+    expect(elapsed).toBeLessThan(500)
+    expect(logs.some((l) => l.includes('error:[channels]') && l.includes('ensureLive failed'))).toBe(true)
+  })
+
+  test('after a watchdog timeout, the next inbound retries instead of awaiting the dead promise', async () => {
+    // given a factory that hangs the FIRST call but resolves the second.
+    // This is the diagnostic that proves the `creating` map entry was evicted
+    // — the original bug had every subsequent message await the same dead
+    // promise from the first hung call (commit message reproduces from logs).
+    const dir = await tempDir()
+    const logs: string[] = []
+    let callCount = 0
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      ensureLiveTimeoutMs: 50,
+      logger: {
+        info: (m) => logs.push(`info:${m}`),
+        warn: (m) => logs.push(`warn:${m}`),
+        error: (m) => logs.push(`error:${m}`),
+      },
+      createSessionForChannel: async () => {
+        callCount++
+        if (callCount === 1) await new Promise(() => {})
+        const fake = new FakeSession()
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: `ses_retry_${callCount}`,
+          dispose: async () => {
+            fake.dispose()
+          },
+        }
+      },
+    })
+
+    // when first inbound times out, then a second inbound arrives
+    await expect(router.route(inbound())).rejects.toThrow(/ensureLive timed out/)
+    expect(logs.some((l) => l.includes('ensureLive failed'))).toBe(true)
+    await router.route(inbound({ externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the factory was called twice (proving the creating-map entry was
+    // evicted on timeout) and the second call succeeded into a live session
+    expect(callCount).toBe(2)
+    expect(router.liveCount()).toBe(1)
+  })
+})
+
 describe('ChannelRouter engagement and prompt composition', () => {
   test('engaging inbound is delivered to session.prompt with attribution', async () => {
     const dir = await tempDir()
@@ -439,6 +569,32 @@ describe('ChannelRouter engagement and prompt composition', () => {
     await router.route(inbound({ isBotMention: false }))
     await router.__testing!.flushDebounce(KEY)
     expect(sessions[0]!.prompts).toHaveLength(0)
+  })
+
+  test('logs an `observed id=...` line when engagement decides observe', async () => {
+    // given a 2-human channel under strict trigger so a non-mention observes
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router } = makeRouter(dir, {
+      config: {
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      },
+      logs,
+    })
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when a non-mention from a different author arrives (must observe)
+    logs.length = 0
+    await router.route(inbound({ isBotMention: false, externalMessageId: 'm-observed' }))
+
+    // then exactly one observed log is emitted with the inbound message id
+    const observedLogs = logs.filter((l) => l.includes('observed id='))
+    expect(observedLogs).toHaveLength(1)
+    expect(observedLogs[0]).toContain('id=m-observed')
   })
 
   test('solo-human channel: plain message engages without mention/reply/dm', async () => {
@@ -1553,6 +1709,46 @@ describe('ChannelRouter channel name resolver', () => {
 
     expect(calls).toBe(1)
   })
+
+  test('a hung name resolver times out without dragging ensureLive past the per-callback ceiling', async () => {
+    // given a name resolver that never resolves (production failure mode:
+    // Discord REST stuck during a gateway-disconnect storm)
+    const dir = await tempDir()
+    const logs: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      resolveChannelNamesTimeoutMs: 50,
+      logger: {
+        info: (m) => logs.push(`info:${m}`),
+        warn: (m) => logs.push(`warn:${m}`),
+        error: (m) => logs.push(`error:${m}`),
+      },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_after_timeout',
+          dispose: async () => {
+            fake.dispose()
+          },
+        }
+      },
+    })
+    router.registerChannelNameResolver('discord-bot', () => new Promise(() => {}))
+
+    // when an inbound triggers ensureLive
+    const start = Date.now()
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    const elapsed = Date.now() - start
+
+    // then ensureLive completes without the resolved name (graceful
+    // degradation), the timeout is logged, and the session is created
+    expect(elapsed).toBeLessThan(500)
+    expect(router.liveCount()).toBe(1)
+    expect(logs.some((l) => l.includes('name resolver threw') && l.includes('timed out after 50ms'))).toBe(true)
+  })
 })
 
 describe('ChannelRouter peer-bot loop guard', () => {
@@ -1833,6 +2029,36 @@ describe('ChannelRouter history dispatch', () => {
 
     expect(discordCalls).toBe(1)
     expect(slackCalls).toBe(0)
+  })
+
+  test('a hung history callback times out and degrades to history-not-supported', async () => {
+    // given a fetchHistory callback that never resolves (production failure
+    // mode: same root cause as the hung name resolver — REST stuck inside
+    // the cold-start chain). Without the timeout, prefetchChannelContext
+    // would block ensureLive forever even on a known-existing channel.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      fetchHistoryTimeoutMs: 50,
+      logger: {
+        info: (m) => logs.push(`info:${m}`),
+        warn: (m) => logs.push(`warn:${m}`),
+        error: (m) => logs.push(`error:${m}`),
+      },
+    })
+    router.registerHistory('discord-bot', () => new Promise(() => {}))
+
+    // when fetchHistory is invoked
+    const start = Date.now()
+    const result = await router.fetchHistory('discord-bot', { chat: 'c1', thread: null, limit: 1 })
+    const elapsed = Date.now() - start
+
+    // then it returns the not-supported degraded result and logs the timeout
+    expect(elapsed).toBeLessThan(500)
+    expect(result.ok).toBe(false)
+    expect(logs.some((l) => l.includes('history fetch threw') && l.includes('timed out after 50ms'))).toBe(true)
   })
 })
 

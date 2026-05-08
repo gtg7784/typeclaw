@@ -75,6 +75,27 @@ export const MAX_TYPING_HEARTBEAT_MS = 2 * 60 * 1000
 export const SESSION_IDLE_MS = 30 * 60 * 1000
 export const SESSION_GC_INTERVAL_MS = 60 * 1000
 
+// Watchdog ceiling for ensureLive's full async chain (resolve names →
+// fetch membership → open session manager → persist mapping → prefetch
+// history). A legitimate cold-start completes in well under a second;
+// values above ~10s are always either a hung Discord REST call or a
+// rate-limited retry storm. 30s leaves headroom for slow disks or a
+// truly large transcript replay without making operator-noticed hangs
+// indistinguishable from normal latency. On timeout the throw evicts
+// the `creating` map entry so the next inbound retries from scratch
+// instead of awaiting the same dead promise forever.
+export const ENSURE_LIVE_TIMEOUT_MS = 30_000
+
+// Per-callback ceilings inside the ensureLive chain. The outer watchdog
+// catches the worst case, but per-step timeouts give better log
+// attribution (which step hung) AND graceful degradation: a hung name
+// resolver still lets engagement run on IDs alone, a hung history fetch
+// still lets the agent answer without prefetched context. Both paths
+// loop over registered callbacks and currently `await` each unbounded.
+// 5s matches Discord's median REST p99 with comfortable headroom.
+export const RESOLVE_CHANNEL_NAMES_TIMEOUT_MS = 5_000
+export const FETCH_HISTORY_TIMEOUT_MS = 5_000
+
 // Two-axis loop guard for peer-bot conversation. Peer bots route into
 // engagement under the SAME rules as humans, so a small ring (A→B→C→A) or
 // a fast cascade can otherwise ping-pong without bound. The guard trips
@@ -263,11 +284,22 @@ export type CreateChannelRouterOptions = {
   logger?: RouterLogger
   // Test seam: clock for sticky/debounce/participants. Defaults to Date.now.
   now?: () => number
+  // Test seam: override the ensureLive watchdog ceiling so the timeout path
+  // is exercisable in <100ms instead of the 30s production default.
+  ensureLiveTimeoutMs?: number
+  // Test seam: per-callback ceiling for channel name resolvers; mirrors the
+  // ensureLive seam so timeout paths can be exercised quickly in tests.
+  resolveChannelNamesTimeoutMs?: number
+  // Test seam: per-callback ceiling for history fetches.
+  fetchHistoryTimeoutMs?: number
 }
 
 export function createChannelRouter(options: CreateChannelRouterOptions): ChannelRouter {
   const logger = options.logger ?? consoleLogger
   const now = options.now ?? Date.now
+  const ensureLiveTimeoutMs = options.ensureLiveTimeoutMs ?? ENSURE_LIVE_TIMEOUT_MS
+  const resolveChannelNamesTimeoutMs = options.resolveChannelNamesTimeoutMs ?? RESOLVE_CHANNEL_NAMES_TIMEOUT_MS
+  const fetchHistoryTimeoutMs = options.fetchHistoryTimeoutMs ?? FETCH_HISTORY_TIMEOUT_MS
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
@@ -353,7 +385,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const merged: ResolvedChannelNames = {}
     for (const resolver of snapshot) {
       try {
-        const result = await resolver(key)
+        const result = await raceWithTimeout(
+          resolver(key),
+          resolveChannelNamesTimeoutMs,
+          `[channels] ${channelKeyId(key)}: name resolver`,
+        )
         if (result.chatName !== undefined && merged.chatName === undefined) merged.chatName = result.chatName
         if (result.workspaceName !== undefined && merged.workspaceName === undefined) {
           merged.workspaceName = result.workspaceName
@@ -434,10 +470,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const promise = (async () => {
       await ensureLoaded()
       const record = mappings ? findRecord(mappings, key) : undefined
+      const phase = record?.sessionId === undefined ? 'cold-start' : 'rehydrate'
+      logger.info(`[channels] ${keyId}: ensureLive begin (${phase})`)
       const participants = (record?.participants ?? []) as ChannelParticipant[]
       const membershipFetch = warmMembership(key)
       const resolvedNames = await resolveChannelNames(key)
+      logger.info(`[channels] ${keyId}: ensureLive resolved-names`)
       const membership = await membershipForPrompt(key, membershipFetch)
+      logger.info(`[channels] ${keyId}: ensureLive resolved-membership`)
       const origin: SessionOrigin = {
         kind: 'channel',
         adapter: key.adapter,
@@ -459,6 +499,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         participants,
         origin,
       })
+      logger.info(`[channels] ${keyId}: ensureLive session-created sessionId=${created.sessionId}`)
 
       const transcriptPath = created.getTranscriptPath?.()
       const persistedRecord: ChannelSessionRecord = {
@@ -523,15 +564,26 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const adapterConfig = options.configForAdapter(key.adapter)
         if (adapterConfig) {
           await prefetchChannelContext(live, adapterConfig, triggeringMessageId)
+          logger.info(`[channels] ${keyId}: ensureLive prefetched-context`)
         }
       }
 
+      logger.info(`[channels] ${keyId}: ensureLive done (${phase})`)
       return live
     })()
 
     creating.set(keyId, promise)
     try {
-      return await promise
+      return await raceWithTimeout(promise, ensureLiveTimeoutMs, `[channels] ${keyId} ensureLive`)
+    } catch (err) {
+      // The orphaned `promise` may still settle eventually; that's OK because
+      // the only side effect it produces post-timeout is a `liveSessions.set`,
+      // which the next inbound's existence-check short-circuit at the top of
+      // ensureLive will treat as a usable warm session — strictly better than
+      // a permanent silent drop. The caller (route() in this file, ultimately
+      // the adapter's outer catch) sees the timeout error and logs it.
+      logger.error(`[channels] ${keyId}: ensureLive failed: ${describe(err)}`)
+      throw err
     } finally {
       creating.delete(keyId)
     }
@@ -884,6 +936,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     })
 
     if (decision === 'observe') {
+      // Log every observe so an unanswered mention is diagnosable from logs
+      // alone instead of "routed but no prompting" silence. The bracketed
+      // shape mirrors `prompting batch=` so log scraping can pair them.
+      logger.info(`[channels] ${live.keyId} observed id=${event.externalMessageId}`)
       observe(live, event)
       return
     }
@@ -1050,9 +1106,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const snapshot = Array.from(callbacks)
     let lastError: FetchHistoryResult & { ok: false } = { ok: false, error: 'history-not-supported' }
     for (const cb of snapshot) {
-      const result = await cb(args)
-      if (result.ok) return result
-      lastError = result
+      try {
+        const result = await raceWithTimeout(cb(args), fetchHistoryTimeoutMs, `[channels] ${adapter} history fetch`)
+        if (result.ok) return result
+        lastError = result
+      } catch (err) {
+        logger.warn(`[channels] history fetch threw for ${adapter}: ${describe(err)}`)
+        lastError = { ok: false, error: 'history-not-supported' }
+      }
     }
     return lastError
   }
@@ -1427,6 +1488,26 @@ async function withMembershipTimeout(
   })
   try {
     return await Promise.race([promise, timeout])
+  } finally {
+    if (timer !== null) clearTimeout(timer)
+  }
+}
+
+// Throwing variant of the membership timeout pattern: races the work against
+// a deadline and rejects with a descriptive error on miss. Used wherever a
+// hung registered callback (Discord/Slack/Telegram REST) would otherwise
+// leave an awaiting caller stuck forever and there is no graceful-
+// degradation value the caller could substitute (contrast withMembershipTimeout,
+// which returns null because engagement can run on a stale membership reading).
+// The helper owns timer lifetime so callers cannot leak timers on a fast
+// resolution.
+async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+  })
+  try {
+    return await Promise.race([work, timeout])
   } finally {
     if (timer !== null) clearTimeout(timer)
   }
