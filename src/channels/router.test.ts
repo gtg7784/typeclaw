@@ -106,6 +106,7 @@ function makeRouter(
     factoryCalls?: SessionFactoryArgs[]
     transcriptPathFor?: (sessionId: string) => string | undefined
     configuredAliases?: () => readonly string[]
+    ensureLiveTimeoutMs?: number
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -115,6 +116,7 @@ function makeRouter(
     agentDir,
     configForAdapter: () => options.config ?? baseConfig,
     ...(options.configuredAliases !== undefined ? { configuredAliases: options.configuredAliases } : {}),
+    ...(options.ensureLiveTimeoutMs !== undefined ? { ensureLiveTimeoutMs: options.ensureLiveTimeoutMs } : {}),
     now: () => nowRef.value,
     logger: {
       info: (m) => options.logs?.push(`info:${m}`),
@@ -393,6 +395,84 @@ describe('ChannelRouter session lifecycle', () => {
     const { router, sessions } = makeRouter(dir)
     await Promise.all([router.route(inbound()), router.route(inbound({ externalMessageId: 'm2' }))])
     expect(sessions).toHaveLength(1)
+  })
+})
+
+describe('ChannelRouter ensureLive watchdog', () => {
+  test('hung session factory rejects after the timeout instead of awaiting forever', async () => {
+    // given a factory that never resolves (simulates a hung Discord REST chain
+    // inside createForChannel — the production failure mode that bricked the
+    // bot for 2 days when a previously-evicted channel got a new inbound
+    // during a gateway-disconnect storm)
+    const dir = await tempDir()
+    const logs: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      ensureLiveTimeoutMs: 50,
+      logger: {
+        info: (m) => logs.push(`info:${m}`),
+        warn: (m) => logs.push(`warn:${m}`),
+        error: (m) => logs.push(`error:${m}`),
+      },
+      createSessionForChannel: () => new Promise(() => {}),
+    })
+
+    // when the route promise resolves (the adapter's outer catch is responsible
+    // for swallowing the thrown timeout in production; here we observe the
+    // throw directly to assert the watchdog actually fired)
+    const start = Date.now()
+    await expect(router.route(inbound())).rejects.toThrow(/ensureLive timed out after 50ms/)
+    const elapsed = Date.now() - start
+
+    // then we returned within the watchdog window (production-relevant: the
+    // adapter's outer catch sees the timeout error promptly and decrements
+    // its inflight counter, instead of sitting forever)
+    expect(elapsed).toBeLessThan(500)
+    expect(logs.some((l) => l.includes('error:[channels]') && l.includes('ensureLive failed'))).toBe(true)
+  })
+
+  test('after a watchdog timeout, the next inbound retries instead of awaiting the dead promise', async () => {
+    // given a factory that hangs the FIRST call but resolves the second.
+    // This is the diagnostic that proves the `creating` map entry was evicted
+    // — the original bug had every subsequent message await the same dead
+    // promise from the first hung call (commit message reproduces from logs).
+    const dir = await tempDir()
+    const logs: string[] = []
+    let callCount = 0
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      ensureLiveTimeoutMs: 50,
+      logger: {
+        info: (m) => logs.push(`info:${m}`),
+        warn: (m) => logs.push(`warn:${m}`),
+        error: (m) => logs.push(`error:${m}`),
+      },
+      createSessionForChannel: async () => {
+        callCount++
+        if (callCount === 1) await new Promise(() => {})
+        const fake = new FakeSession()
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: `ses_retry_${callCount}`,
+          dispose: async () => {
+            fake.dispose()
+          },
+        }
+      },
+    })
+
+    // when first inbound times out, then a second inbound arrives
+    await expect(router.route(inbound())).rejects.toThrow(/ensureLive timed out/)
+    expect(logs.some((l) => l.includes('ensureLive failed'))).toBe(true)
+    await router.route(inbound({ externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the factory was called twice (proving the creating-map entry was
+    // evicted on timeout) and the second call succeeded into a live session
+    expect(callCount).toBe(2)
+    expect(router.liveCount()).toBe(1)
   })
 })
 
