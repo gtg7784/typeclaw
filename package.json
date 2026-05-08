@@ -17,7 +17,8 @@
     "src",
     "scripts",
     "typeclaw.schema.json",
-    "cron.schema.json"
+    "cron.schema.json",
+    "!**/*.test.ts"
   ],
   "type": "module",
   "exports": {
