@@ -509,3 +509,224 @@ export async function writeSecrets(
 function ignoreExists(error: NodeJS.ErrnoException): void {
   if (error.code !== 'EEXIST') throw error
 }
+
+// ----------------------------------------------------------------------------
+// `typeclaw channel add`
+//
+// `runAddChannel` is the post-init counterpart to `runInit`'s channel-related
+// steps. It is intentionally a separate pipeline rather than a mode switch on
+// `runInit` because the two have opposite file semantics:
+//
+//   - `runInit` creates a fresh agent folder. Writes overwrite by design
+//     (typeclaw.json, .env), and idempotency comes from `wx`-flag guards on
+//     never-rewritten files (markdown stubs, cron.json, package.json).
+//
+//   - `runAddChannel` mutates an already-initialized agent folder. It MUST
+//     preserve the user's existing channel config and existing .env values.
+//     The only writes are an additive merge of one new channel adapter and
+//     an append of that adapter's env vars.
+//
+// Sharing one function would pile mode flags on every helper and turn the
+// "is this overwrite or merge?" question into a runtime branch the test
+// suite would have to cover for both behaviors. The mass of independent
+// scaffold-test cases above demonstrates how easy it is to lose a single
+// behavior under a mode flag.
+
+export type ChannelKind = 'discord-bot' | 'slack-bot' | 'telegram-bot' | 'kakaotalk'
+
+// Public adapter names match the typeclaw.json `channels.*` keys exactly.
+// The CLI takes these as the optional positional arg, the picker shows
+// these labels, and they're the keys we use to detect "already configured"
+// when reading typeclaw.json.
+export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = ['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk']
+
+export type AddChannelStep = 'kakaotalk-auth' | 'config' | 'secrets'
+
+export type AddChannelStepEvent =
+  | { step: 'config'; phase: 'start' }
+  | { step: 'config'; phase: 'done' }
+  | { step: 'kakaotalk-auth'; phase: 'start' }
+  | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
+  | { step: 'secrets'; phase: 'start' }
+  | { step: 'secrets'; phase: 'done' }
+
+// Discriminated union per channel so the type system enforces "you must pass
+// the right credentials for the channel you're adding". The CLI builds these
+// from prompts; tests build them inline.
+export type AddChannelOptions = {
+  cwd: string
+  allowAll?: boolean
+  onProgress?: (event: AddChannelStepEvent) => void
+} & (
+  | { channel: 'discord-bot'; discordBotToken: string }
+  | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
+  | { channel: 'telegram-bot'; telegramBotToken: string }
+  | { channel: 'kakaotalk'; runKakaotalkAuth: KakaotalkAuthRunner }
+)
+
+export async function runAddChannel(options: AddChannelOptions): Promise<void> {
+  const emit = options.onProgress ?? (() => {})
+
+  // Order: kakaotalk-auth (if applicable) -> config -> secrets.
+  //
+  // We run KakaoTalk auth FIRST so a failed login leaves typeclaw.json and
+  // .env untouched. The runtime treats `channels.kakaotalk` without a
+  // credentials file as "missing credentials, skip adapter", which silently
+  // drops messages — the same trap `runInit` already guards against. Aborting
+  // before any file write means the user's next `typeclaw channel add
+  // kakaotalk` retry has no half-applied state to clean up.
+  if (options.channel === 'kakaotalk') {
+    emit({ step: 'kakaotalk-auth', phase: 'start' })
+    const result = await options.runKakaotalkAuth({ cwd: options.cwd })
+    emit({ step: 'kakaotalk-auth', phase: 'done', result })
+    if (!result.ok) throw new Error(`KakaoTalk authentication failed: ${result.reason}`)
+  }
+
+  emit({ step: 'config', phase: 'start' })
+  await mergeChannelIntoConfig(options.cwd, options.channel, options.allowAll ?? defaultAllowAll(options.channel))
+  emit({ step: 'config', phase: 'done' })
+
+  emit({ step: 'secrets', phase: 'start' })
+  await appendChannelSecrets(options.cwd, channelSecretsFromOptions(options))
+  emit({ step: 'secrets', phase: 'done' })
+}
+
+// `channel add` mirrors `runInit`'s allow defaults: workspace-scoped adapters
+// (discord/slack/telegram) default to `*` because the bot only sees what the
+// operator invited it into, while KakaoTalk uses a personal account and
+// defaults to DMs only.
+function defaultAllowAll(channel: ChannelKind): boolean {
+  return channel !== 'kakaotalk'
+}
+
+function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
+  switch (options.channel) {
+    case 'discord-bot':
+      return { DISCORD_BOT_TOKEN: options.discordBotToken }
+    case 'slack-bot':
+      return { SLACK_BOT_TOKEN: options.slackBotToken, SLACK_APP_TOKEN: options.slackAppToken }
+    case 'telegram-bot':
+      return { TELEGRAM_BOT_TOKEN: options.telegramBotToken }
+    case 'kakaotalk':
+      // Credentials live in workspace/.agent-messenger/, not .env.
+      return {}
+  }
+}
+
+type ChannelSecrets = Record<string, string>
+
+// Returns the set of channel keys already present in typeclaw.json. Used by
+// the CLI's picker to hide already-configured adapters and to reject explicit
+// re-adds with a clear error rather than silently merging.
+export async function readConfiguredChannels(cwd: string): Promise<Set<ChannelKind>> {
+  const path = join(cwd, CONFIG_FILE)
+  let raw: string
+  try {
+    raw = await readFile(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return new Set()
+    throw error
+  }
+  const parsed = JSON.parse(raw) as { channels?: Record<string, unknown> }
+  const channels = parsed.channels ?? {}
+  const present = new Set<ChannelKind>()
+  for (const kind of CHANNEL_KINDS) {
+    if (kind in channels) present.add(kind)
+  }
+  return present
+}
+
+async function mergeChannelIntoConfig(cwd: string, channel: ChannelKind, allowAll: boolean): Promise<void> {
+  const path = join(cwd, CONFIG_FILE)
+  let parsed: Record<string, unknown>
+  try {
+    const raw = await readFile(path, 'utf8')
+    parsed = JSON.parse(raw) as Record<string, unknown>
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        `${CONFIG_FILE} not found at ${cwd}. Run \`typeclaw init\` before adding channels, or run this command from inside an agent folder.`,
+      )
+    }
+    throw error
+  }
+
+  const existingChannels =
+    typeof parsed.channels === 'object' && parsed.channels !== null && !Array.isArray(parsed.channels)
+      ? (parsed.channels as Record<string, unknown>)
+      : {}
+
+  if (channel in existingChannels) {
+    // Defense in depth — the CLI already filters configured channels out of
+    // the picker and rejects them as the positional arg. Hitting this branch
+    // means a programmatic caller passed a duplicate; better to fail loudly
+    // than silently overwrite the user's existing allow list.
+    throw new Error(`Channel "${channel}" is already configured in ${CONFIG_FILE}.`)
+  }
+
+  parsed.channels = {
+    ...existingChannels,
+    [channel]: { allow: buildAllow(channel, allowAll) },
+  }
+
+  await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`)
+}
+
+function buildAllow(channel: ChannelKind, allowAll: boolean): string[] {
+  if (channel === 'kakaotalk') return allowAll ? ['kakao:*'] : ['kakao:dm/*']
+  return allowAll ? ['*'] : []
+}
+
+// Appends only keys that are not already present in .env. We never rewrite
+// existing values: if the user has `SLACK_BOT_TOKEN=` left over from a manual
+// edit, we surface that as a hard error rather than overwrite the user's
+// hand-rolled value.
+//
+// `.env` parsing is intentionally line-based and dumb (matching dotenv's
+// minimum surface): trim, skip blanks/comments, split on the first `=`. We do
+// not unquote values because we only check for key presence.
+async function appendChannelSecrets(cwd: string, secrets: ChannelSecrets): Promise<void> {
+  if (Object.keys(secrets).length === 0) return
+
+  const path = join(cwd, SECRETS_FILE)
+  let existing: string
+  try {
+    existing = await readFile(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(
+        `${SECRETS_FILE} not found at ${cwd}. Run \`typeclaw init\` before adding channels, or run this command from inside an agent folder.`,
+      )
+    }
+    throw error
+  }
+
+  const presentKeys = parseEnvKeys(existing)
+  for (const key of Object.keys(secrets)) {
+    if (presentKeys.has(key)) {
+      throw new Error(
+        `${key} is already set in ${SECRETS_FILE}. Remove it before re-adding the channel, or edit the value by hand.`,
+      )
+    }
+  }
+
+  // Ensure exactly one trailing newline before our appended block so the
+  // resulting file remains POSIX-clean even if the user's editor stripped it.
+  const trailingNewline = existing.endsWith('\n') || existing === '' ? '' : '\n'
+  const appended = Object.entries(secrets)
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n')
+  await writeFile(path, `${existing}${trailingNewline}${appended}\n`)
+}
+
+function parseEnvKeys(content: string): Set<string> {
+  const keys = new Set<string>()
+  for (const rawLine of content.split('\n')) {
+    const line = rawLine.trim()
+    if (line === '' || line.startsWith('#')) continue
+    const eq = line.indexOf('=')
+    if (eq <= 0) continue
+    keys.add(line.slice(0, eq).trim())
+  }
+  return keys
+}

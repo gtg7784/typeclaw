@@ -1,0 +1,248 @@
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { type AddChannelStepEvent, readConfiguredChannels, runAddChannel, scaffold, writeSecrets } from './index'
+
+let root: string
+
+beforeEach(async () => {
+  root = await mkdtemp(join(tmpdir(), 'typeclaw-add-channel-'))
+  await scaffold(root)
+  await writeSecrets(root, { fireworksApiKey: 'fw_existing' })
+})
+
+afterEach(async () => {
+  await rm(root, { recursive: true, force: true })
+})
+
+async function readConfig(): Promise<{ channels?: Record<string, { allow: string[] }>; [k: string]: unknown }> {
+  return JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+    channels?: Record<string, { allow: string[] }>
+  }
+}
+
+async function readEnv(): Promise<string> {
+  return readFile(join(root, '.env'), 'utf8')
+}
+
+describe('runAddChannel', () => {
+  test('adds discord-bot to typeclaw.json with allow=["*"] by default', async () => {
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-token-x' })
+
+    const cfg = await readConfig()
+    expect(cfg.channels?.['discord-bot']?.allow).toEqual(['*'])
+  })
+
+  test('adds discord-bot with allow=[] when allowAll=false', async () => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'discord-bot',
+      discordBotToken: 'discord-token-x',
+      allowAll: false,
+    })
+
+    const cfg = await readConfig()
+    expect(cfg.channels?.['discord-bot']?.allow).toEqual([])
+  })
+
+  test('appends DISCORD_BOT_TOKEN to .env without disturbing FIREWORKS_API_KEY', async () => {
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-token-x' })
+
+    const env = await readEnv()
+    expect(env).toContain('FIREWORKS_API_KEY=fw_existing')
+    expect(env).toContain('DISCORD_BOT_TOKEN=discord-token-x')
+  })
+
+  test('adds slack-bot with both bot+app tokens to .env', async () => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'slack-bot',
+      slackBotToken: 'xoxb-bot',
+      slackAppToken: 'xapp-app',
+    })
+
+    const cfg = await readConfig()
+    expect(cfg.channels?.['slack-bot']?.allow).toEqual(['*'])
+    const env = await readEnv()
+    expect(env).toContain('SLACK_BOT_TOKEN=xoxb-bot')
+    expect(env).toContain('SLACK_APP_TOKEN=xapp-app')
+  })
+
+  test('adds telegram-bot to typeclaw.json + .env', async () => {
+    await runAddChannel({ cwd: root, channel: 'telegram-bot', telegramBotToken: '123:tg-secret' })
+
+    const cfg = await readConfig()
+    expect(cfg.channels?.['telegram-bot']?.allow).toEqual(['*'])
+    const env = await readEnv()
+    expect(env).toContain('TELEGRAM_BOT_TOKEN=123:tg-secret')
+  })
+
+  test('adds kakaotalk with kakao:dm/* allow by default and runs auth runner', async () => {
+    const authCalls: string[] = []
+    await runAddChannel({
+      cwd: root,
+      channel: 'kakaotalk',
+      runKakaotalkAuth: async ({ cwd }) => {
+        authCalls.push(cwd)
+        return { ok: true }
+      },
+    })
+
+    expect(authCalls).toEqual([root])
+    const cfg = await readConfig()
+    expect(cfg.channels?.kakaotalk?.allow).toEqual(['kakao:dm/*'])
+    expect(await readEnv()).toBe('FIREWORKS_API_KEY=fw_existing\n')
+  })
+
+  test('kakaotalk with allowAll=true broadens allow to kakao:*', async () => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'kakaotalk',
+      runKakaotalkAuth: async () => ({ ok: true }),
+      allowAll: true,
+    })
+
+    const cfg = await readConfig()
+    expect(cfg.channels?.kakaotalk?.allow).toEqual(['kakao:*'])
+  })
+
+  test('aborts and leaves typeclaw.json + .env untouched when kakaotalk auth fails', async () => {
+    const beforeConfig = await readFile(join(root, 'typeclaw.json'), 'utf8')
+    const beforeEnv = await readEnv()
+
+    await expect(
+      runAddChannel({
+        cwd: root,
+        channel: 'kakaotalk',
+        runKakaotalkAuth: async () => ({ ok: false, reason: 'bad password' }),
+      }),
+    ).rejects.toThrow(/bad password/)
+
+    expect(await readFile(join(root, 'typeclaw.json'), 'utf8')).toBe(beforeConfig)
+    expect(await readEnv()).toBe(beforeEnv)
+  })
+
+  test('preserves an existing channel when adding a different one', async () => {
+    await runAddChannel({ cwd: root, channel: 'slack-bot', slackBotToken: 'xoxb-x', slackAppToken: 'xapp-x' })
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-x' })
+
+    const cfg = await readConfig()
+    expect(cfg.channels?.['slack-bot']?.allow).toEqual(['*'])
+    expect(cfg.channels?.['discord-bot']?.allow).toEqual(['*'])
+    const env = await readEnv()
+    expect(env).toContain('SLACK_BOT_TOKEN=xoxb-x')
+    expect(env).toContain('SLACK_APP_TOKEN=xapp-x')
+    expect(env).toContain('DISCORD_BOT_TOKEN=discord-x')
+  })
+
+  test('preserves arbitrary unrelated keys in typeclaw.json (does not strip user fields)', async () => {
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
+    cfg.mounts = [{ source: '~/data', target: '/data' }]
+    cfg.idleMs = 60_000
+    await writeFile(join(root, 'typeclaw.json'), `${JSON.stringify(cfg, null, 2)}\n`)
+
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-x' })
+
+    const after = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
+    expect(after.mounts).toEqual([{ source: '~/data', target: '/data' }])
+    expect(after.idleMs).toBe(60_000)
+  })
+
+  test('rejects re-adding an already-configured channel', async () => {
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-first' })
+
+    await expect(
+      runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-second' }),
+    ).rejects.toThrow(/already configured/i)
+
+    const env = await readEnv()
+    expect(env).toContain('DISCORD_BOT_TOKEN=discord-first')
+    expect(env).not.toContain('DISCORD_BOT_TOKEN=discord-second')
+  })
+
+  test('rejects when an env var the channel needs already exists (does not overwrite user secrets)', async () => {
+    await writeFile(join(root, '.env'), 'FIREWORKS_API_KEY=fw_existing\nDISCORD_BOT_TOKEN=keep-me\n')
+
+    await expect(runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'overwrite-me' })).rejects.toThrow(
+      /DISCORD_BOT_TOKEN/,
+    )
+
+    const env = await readEnv()
+    expect(env).toContain('DISCORD_BOT_TOKEN=keep-me')
+    expect(env).not.toContain('overwrite-me')
+  })
+
+  test('throws a helpful error when run from a non-initialized directory', async () => {
+    const empty = await mkdtemp(join(tmpdir(), 'typeclaw-add-empty-'))
+    try {
+      await expect(runAddChannel({ cwd: empty, channel: 'discord-bot', discordBotToken: 'x' })).rejects.toThrow(
+        /typeclaw\.json not found/,
+      )
+    } finally {
+      await rm(empty, { recursive: true, force: true })
+    }
+  })
+
+  test('emits config + secrets events in order for a non-kakaotalk channel', async () => {
+    const events: AddChannelStepEvent[] = []
+    await runAddChannel({
+      cwd: root,
+      channel: 'telegram-bot',
+      telegramBotToken: '123:t',
+      onProgress: (e) => events.push(e),
+    })
+
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
+      'config:start',
+      'config:done',
+      'secrets:start',
+      'secrets:done',
+    ])
+  })
+
+  test('emits kakaotalk-auth before config + secrets when adding kakaotalk', async () => {
+    const events: AddChannelStepEvent[] = []
+    await runAddChannel({
+      cwd: root,
+      channel: 'kakaotalk',
+      runKakaotalkAuth: async () => ({ ok: true }),
+      onProgress: (e) => events.push(e),
+    })
+
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
+      'kakaotalk-auth:start',
+      'kakaotalk-auth:done',
+      'config:start',
+      'config:done',
+      'secrets:start',
+      'secrets:done',
+    ])
+  })
+})
+
+describe('readConfiguredChannels', () => {
+  test('returns empty set when no channels are configured', async () => {
+    const present = await readConfiguredChannels(root)
+    expect(present.size).toBe(0)
+  })
+
+  test('returns the set of configured channel keys', async () => {
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'd' })
+    await runAddChannel({ cwd: root, channel: 'telegram-bot', telegramBotToken: '1:t' })
+
+    const present = await readConfiguredChannels(root)
+    expect([...present].sort()).toEqual(['discord-bot', 'telegram-bot'])
+  })
+
+  test('returns empty set when typeclaw.json is missing', async () => {
+    const empty = await mkdtemp(join(tmpdir(), 'typeclaw-add-noconfig-'))
+    try {
+      const present = await readConfiguredChannels(empty)
+      expect(present.size).toBe(0)
+    } finally {
+      await rm(empty, { recursive: true, force: true })
+    }
+  })
+})
