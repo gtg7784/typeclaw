@@ -93,7 +93,7 @@ function buildOutbound(over: Partial<OutboundMessage> = {}): OutboundMessage {
 }
 
 describe('telegram-bot createOutboundCallback', () => {
-  test('sends plain text by default with NO parse_mode (HTML/MarkdownV2 reject too many strings)', async () => {
+  test("sends as MarkdownV2 with every reserved char escaped (so Telegram's parser never rejects)", async () => {
     const fake = fakeClient()
     const cb = createOutboundCallback({
       client: fake.client,
@@ -106,11 +106,34 @@ describe('telegram-bot createOutboundCallback', () => {
 
     expect(result.ok).toBe(true)
     expect(fake.sendMessageCalls).toHaveLength(1)
-    expect(fake.sendMessageCalls[0]?.text).toBe('a < b & c > d (with) raw . ! _ * special chars')
-    // Mutation guard: if a refactor re-introduces parse_mode: 'HTML' as a
-    // default, this assertion fails. The whole point of the v2 fix was
-    // that raw `<` / `&` would crash Telegram's HTML parser.
-    expect(fake.sendMessageCalls[0]?.options).toEqual({})
+    expect(fake.sendMessageCalls[0]?.text).toBe('a < b & c \\> d \\(with\\) raw \\. \\! \\_ \\* special chars')
+    // Mutation guard: if a refactor flips back to plain text or to
+    // HTML mode, this fails. MarkdownV2 is the chosen default because
+    // it lets the agent's `**bold**` / `*italic*` / `` `code` `` actually
+    // render — see the formatter at `./telegram-bot-format.ts`.
+    expect(fake.sendMessageCalls[0]?.options).toEqual({ parse_mode: 'MarkdownV2' })
+  })
+
+  test('renders agent Markdown (**bold**, *italic*, `code`) into MarkdownV2 entities', async () => {
+    const fake = fakeClient()
+    const cb = createOutboundCallback({
+      client: fake.client,
+      configRef: () => baseConfig,
+      logger: silentLogger(),
+      formatChannelTag: async () => 'chat=-100123',
+    })
+
+    const result = await cb(
+      buildOutbound({
+        text: 'Ha! See, **yours** works perfectly. *Bold*, *italic*, `code`—all rendered nice.',
+      }),
+    )
+
+    expect(result.ok).toBe(true)
+    expect(fake.sendMessageCalls[0]?.text).toBe(
+      'Ha\\! See, *yours* works perfectly\\. _Bold_, _italic_, `code`—all rendered nice\\.',
+    )
+    expect(fake.sendMessageCalls[0]?.options).toEqual({ parse_mode: 'MarkdownV2' })
   })
 
   test('forwards a numeric thread id as message_thread_id when the session is in a forum topic', async () => {
@@ -125,7 +148,7 @@ describe('telegram-bot createOutboundCallback', () => {
     const result = await cb(buildOutbound({ thread: '42' }))
 
     expect(result.ok).toBe(true)
-    expect(fake.sendMessageCalls[0]?.options).toEqual({ message_thread_id: 42 })
+    expect(fake.sendMessageCalls[0]?.options).toEqual({ message_thread_id: 42, parse_mode: 'MarkdownV2' })
   })
 
   test('drops invalid thread ids silently rather than passing NaN', async () => {
@@ -140,7 +163,7 @@ describe('telegram-bot createOutboundCallback', () => {
     const result = await cb(buildOutbound({ thread: 'not-a-number' }))
 
     expect(result.ok).toBe(true)
-    expect(fake.sendMessageCalls[0]?.options).toEqual({})
+    expect(fake.sendMessageCalls[0]?.options).toEqual({ parse_mode: 'MarkdownV2' })
   })
 
   test('uploads each attachment via sendDocument BEFORE posting text', async () => {
