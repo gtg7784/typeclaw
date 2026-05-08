@@ -58,6 +58,8 @@ export type InitOptions = {
   slackBotToken?: string
   slackAppToken?: string
   slackAllowAll?: boolean
+  telegramBotToken?: string
+  telegramAllowAll?: boolean
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
 }
@@ -70,6 +72,8 @@ export async function runInit({
   slackBotToken,
   slackAppToken,
   slackAllowAll = true,
+  telegramBotToken,
+  telegramAllowAll = true,
   onProgress,
   runHatching = defaultRunHatching,
 }: InitOptions): Promise<void> {
@@ -77,14 +81,23 @@ export async function runInit({
 
   const wantsDiscord = discordBotToken !== undefined && discordBotToken !== ''
   const wantsSlack = slackBotToken !== undefined && slackBotToken !== ''
+  const wantsTelegram = telegramBotToken !== undefined && telegramBotToken !== ''
   emit({ step: 'scaffold', phase: 'start' })
   await scaffold(cwd, {
     withDiscord: wantsDiscord,
     discordAllowAll,
     withSlack: wantsSlack,
     slackAllowAll,
+    withTelegram: wantsTelegram,
+    telegramAllowAll,
   })
-  await writeSecrets(cwd, { fireworksApiKey: apiKey, discordBotToken, slackBotToken, slackAppToken })
+  await writeSecrets(cwd, {
+    fireworksApiKey: apiKey,
+    discordBotToken,
+    slackBotToken,
+    slackAppToken,
+    telegramBotToken,
+  })
   emit({ step: 'scaffold', phase: 'done' })
 
   emit({ step: 'install', phase: 'start' })
@@ -209,6 +222,8 @@ export type ScaffoldOptions = {
   discordAllowAll?: boolean
   withSlack?: boolean
   slackAllowAll?: boolean
+  withTelegram?: boolean
+  telegramAllowAll?: boolean
 }
 
 export async function scaffold(root: string, options: ScaffoldOptions = {}): Promise<void> {
@@ -236,6 +251,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   const channels: Record<string, { allow: string[] }> = {}
   if (options.withDiscord) channels['discord-bot'] = { allow: options.discordAllowAll === false ? [] : ['*'] }
   if (options.withSlack) channels['slack-bot'] = { allow: options.slackAllowAll === false ? [] : ['*'] }
+  if (options.withTelegram) channels['telegram-bot'] = { allow: options.telegramAllowAll === false ? [] : ['*'] }
   if (Object.keys(channels).length > 0) config.channels = channels
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 
@@ -404,8 +420,8 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
 // TODO: generalize to arbitrary provider secrets and switch to secrets.json
 // (per TypeClaw.md spec) once the provider registry exists. Currently hardcoded
 // to FIREWORKS_API_KEY in .env to match src/agent/auth.ts. Optional channel
-// adapter tokens (DISCORD_BOT_TOKEN, SLACK_BOT_TOKEN, SLACK_APP_TOKEN) are
-// appended when provided.
+// adapter tokens (DISCORD_BOT_TOKEN, SLACK_BOT_TOKEN, SLACK_APP_TOKEN,
+// TELEGRAM_BOT_TOKEN) are appended when provided.
 export async function writeSecrets(
   root: string,
   {
@@ -413,11 +429,13 @@ export async function writeSecrets(
     discordBotToken,
     slackBotToken,
     slackAppToken,
+    telegramBotToken,
   }: {
     fireworksApiKey: string
     discordBotToken?: string
     slackBotToken?: string
     slackAppToken?: string
+    telegramBotToken?: string
   },
 ): Promise<void> {
   const lines = [`FIREWORKS_API_KEY=${fireworksApiKey}`]
@@ -429,6 +447,9 @@ export async function writeSecrets(
   }
   if (slackAppToken !== undefined && slackAppToken !== '') {
     lines.push(`SLACK_APP_TOKEN=${slackAppToken}`)
+  }
+  if (telegramBotToken !== undefined && telegramBotToken !== '') {
+    lines.push(`TELEGRAM_BOT_TOKEN=${telegramBotToken}`)
   }
   await writeFile(join(root, SECRETS_FILE), `${lines.join('\n')}\n`)
 }

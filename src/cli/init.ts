@@ -55,6 +55,7 @@ export const init = defineCommand({
       options: [
         { value: 'slack', label: 'Slack' },
         { value: 'discord', label: 'Discord' },
+        { value: 'telegram', label: 'Telegram' },
         { value: 'none', label: 'Skip — no channel right now' },
       ],
       initialValue: 'slack' as const,
@@ -67,6 +68,7 @@ export const init = defineCommand({
     let discordBotToken: string | undefined
     let slackBotToken: string | undefined
     let slackAppToken: string | undefined
+    let telegramBotToken: string | undefined
 
     if (channelChoice === 'discord') {
       note(
@@ -129,6 +131,40 @@ export const init = defineCommand({
       slackAppToken = appToken
     }
 
+    if (channelChoice === 'telegram') {
+      note(
+        [
+          'Open Telegram and message @BotFather.',
+          '/newbot → pick a name and username, copy the HTTP API token',
+          '  (looks like 1234567890:ABCdef...).',
+          'In @BotFather: /setprivacy → Disable, so the bot can see group messages.',
+        ].join('\n'),
+        'Get a Telegram bot token',
+      )
+      const token = await password({
+        message: 'Telegram bot token',
+        validate: (value) =>
+          value && value.length > 0
+            ? /^\d+:/.test(value)
+              ? undefined
+              : 'Bot token must look like "<digits>:<secret>" (from @BotFather)'
+            : 'Token is required',
+      })
+      if (isCancel(token)) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+      telegramBotToken = token
+      note(
+        [
+          'Open https://t.me/<your_bot_username> (the username you picked in /newbot, ends in "bot").',
+          'Tap Start in the chat — the agent will reply once it hatches.',
+          'For groups: add the bot to the group, then @mention it or reply to its messages.',
+        ].join('\n'),
+        'Send your first message',
+      )
+    }
+
     // TODO: add remaining wizard steps from TypeClaw.md once their runtime lands:
     //   - git backup (url + PAT) — Phase 10
     //   - cron.json scaffolding — Phase 9
@@ -140,6 +176,7 @@ export const init = defineCommand({
         apiKey,
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
+        ...(telegramBotToken !== undefined ? { telegramBotToken } : {}),
         onProgress: reportProgress((ok) => {
           hatchingOk = ok
         }),
