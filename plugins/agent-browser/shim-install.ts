@@ -1,4 +1,13 @@
-import { lstatSync, readFileSync, readlinkSync, renameSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 
 import { REAL_BIN_ENV } from './shim'
@@ -17,6 +26,11 @@ export type InstallShimOptions = {
 
 export type ShimFs = {
   lstat: (path: string) => { isSymbolicLink: () => boolean } | null
+  // statExists follows symlinks: a broken symlink (link entry exists, target
+  // does not) returns false. This is the discriminator we need to skip
+  // installation when the host bind-mount surfaces dangling node_modules/.bin
+  // entries inside the container — see installShim's upstream guard.
+  statExists: (path: string) => boolean
   readlink: (path: string) => string
   readFile: (path: string) => string
   rename: (from: string, to: string) => void
@@ -41,7 +55,23 @@ export function installShim(opts: InstallShimOptions = {}): InstallShimResult {
   const stat = fs.lstat(binPath)
   if (stat === null) return { kind: 'no-upstream', binPath }
 
-  if (isAlreadyShim(binPath, fs)) return { kind: 'already-installed', binPath }
+  if (isAlreadyShim(binPath, fs)) {
+    if (fs.statExists(stashTarget)) return { kind: 'already-installed', binPath }
+    // Wrapper survived a container restart but the image-owned stash did not
+    // (STASH_ROOT lives outside the bind-mount). The wrapper now points at a
+    // non-existent stashTarget, so executing it would ENOENT. Drop it and
+    // report no-upstream — there is nothing valid here to preserve, and the
+    // global-path shim (if it exists) stands on its own.
+    fs.unlink(binPath)
+    return { kind: 'no-upstream', binPath }
+  }
+
+  // Bind-mounted node_modules/.bin entries can be dangling symlinks inside
+  // the container (host ran bun install; the container image did not). lstat
+  // alone passes for those. Follow the link with statExists before mutating
+  // anything — otherwise we'd stash a broken symlink and write a wrapper
+  // pointing at a target that never resolves.
+  if (!fs.statExists(binPath)) return { kind: 'no-upstream', binPath }
 
   const realBin = resolveCurrentTarget(binPath, stat, fs)
   fs.mkdirp(stashDir)
@@ -105,6 +135,14 @@ function defaultFs(): ShimFs {
         return lstatSync(path)
       } catch {
         return null
+      }
+    },
+    statExists: (path) => {
+      try {
+        statSync(path)
+        return true
+      } catch {
+        return false
       }
     },
     readlink: readlinkSync,

@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { resolve as resolvePath } from 'node:path'
 
 import { installShim, type ShimFs } from './shim-install'
 
@@ -15,6 +16,7 @@ class FakeFs {
         if (!file) return null
         return { isSymbolicLink: () => file.kind === 'symlink' }
       },
+      statExists: (path) => this.resolveLink(path, 0) !== null,
       readlink: (path) => {
         const file = this.files.get(path)
         if (!file || file.kind !== 'symlink') throw new Error(`not a symlink: ${path}`)
@@ -49,6 +51,20 @@ class FakeFs {
       },
     }
   }
+
+  // Models POSIX stat() symlink-following: walks the chain and reports
+  // whether it terminates at a real file. Bounded to break cycles, matching
+  // the kernel's ELOOP behavior.
+  private resolveLink(path: string, depth: number): FakeFile | null {
+    if (depth > 32) return null
+    const file = this.files.get(path)
+    if (!file) return null
+    if (file.kind !== 'symlink') return file
+    const target = file.target.startsWith('/')
+      ? file.target
+      : resolvePath(path.split('/').slice(0, -1).join('/') || '/', file.target)
+    return this.resolveLink(target, depth + 1)
+  }
 }
 
 describe('installShim', () => {
@@ -57,6 +73,11 @@ describe('installShim', () => {
     fake.files.set('/usr/local/bin/agent-browser', {
       kind: 'symlink',
       target: '../../../root/.bun/install/global/node_modules/agent-browser/bin/agent-browser.js',
+    })
+    fake.files.set('/root/.bun/install/global/node_modules/agent-browser/bin/agent-browser.js', {
+      kind: 'file',
+      data: '#!/usr/bin/env node\n',
+      mode: 0o755,
     })
 
     const result = installShim({
@@ -93,7 +114,9 @@ describe('installShim', () => {
   test('per-binPath stash directory keeps global and local installs from colliding', () => {
     const fake = new FakeFs()
     fake.files.set('/usr/local/bin/agent-browser', { kind: 'symlink', target: '/global/real' })
+    fake.files.set('/global/real', { kind: 'file', data: 'global-bin', mode: 0o755 })
     fake.files.set('/agent/node_modules/.bin/agent-browser', { kind: 'symlink', target: '/local/real' })
+    fake.files.set('/local/real', { kind: 'file', data: 'local-bin', mode: 0o755 })
 
     const global = installShim({ binPath: '/usr/local/bin/agent-browser', shimEntry: '/x/shim.ts', fs: fake.fs() })
     const local = installShim({
@@ -124,6 +147,11 @@ describe('installShim', () => {
       kind: 'symlink',
       target: '../agent-browser/bin/agent-browser.js',
     })
+    fake.files.set('/agent/node_modules/agent-browser/bin/agent-browser.js', {
+      kind: 'file',
+      data: '#!/usr/bin/env node\n',
+      mode: 0o755,
+    })
 
     const first = installShim({
       binPath: '/agent/node_modules/.bin/agent-browser',
@@ -152,6 +180,7 @@ describe('installShim', () => {
       kind: 'symlink',
       target: '/some/upstream/bin',
     })
+    fake.files.set('/some/upstream/bin', { kind: 'file', data: 'real', mode: 0o755 })
 
     installShim({ binPath: '/usr/local/bin/agent-browser', shimEntry: '/x/shim.ts', fs: fake.fs() })
     fake.events.length = 0
@@ -169,5 +198,65 @@ describe('installShim', () => {
 
     expect(result.kind).toBe('no-upstream')
     expect(fake.events).toEqual([])
+  })
+
+  test('returns no-upstream when binPath is a dangling symlink, leaving the filesystem untouched', () => {
+    // Reproduces the production bug: host bun install creates
+    // /agent/node_modules/.bin/agent-browser pointing into a node_modules
+    // tree that doesn't exist inside the container. lstat sees the link
+    // entry and used to proceed; now we follow the link and bail.
+    const fake = new FakeFs()
+    fake.files.set('/agent/node_modules/.bin/agent-browser', {
+      kind: 'symlink',
+      target: '../agent-browser/bin/agent-browser.js',
+    })
+
+    const result = installShim({
+      binPath: '/agent/node_modules/.bin/agent-browser',
+      shimEntry: '/x/shim.ts',
+      fs: fake.fs(),
+    })
+
+    expect(result.kind).toBe('no-upstream')
+    expect(fake.events).toEqual([])
+    const entry = fake.files.get('/agent/node_modules/.bin/agent-browser')
+    if (!entry || entry.kind !== 'symlink') throw new Error('original symlink was mutated')
+    expect(entry.target).toBe('../agent-browser/bin/agent-browser.js')
+  })
+
+  test('self-heals stale wrapper when stash target is missing', () => {
+    // Container restart wipes the image-owned STASH_ROOT but leaves the
+    // bind-mounted wrapper intact. Without self-heal, isAlreadyShim would
+    // short-circuit and the wrapper would ENOENT every invocation forever.
+    const fake = new FakeFs()
+    fake.files.set('/agent/node_modules/.bin/agent-browser', {
+      kind: 'symlink',
+      target: '../agent-browser/bin/agent-browser.js',
+    })
+    fake.files.set('/agent/node_modules/agent-browser/bin/agent-browser.js', {
+      kind: 'file',
+      data: '#!/usr/bin/env node\n',
+      mode: 0o755,
+    })
+
+    const first = installShim({
+      binPath: '/agent/node_modules/.bin/agent-browser',
+      shimEntry: '/x/shim.ts',
+      fs: fake.fs(),
+    })
+    if (first.kind !== 'installed') throw new Error('expected initial install to succeed')
+
+    fake.files.delete(first.stashTarget)
+    fake.events.length = 0
+
+    const second = installShim({
+      binPath: '/agent/node_modules/.bin/agent-browser',
+      shimEntry: '/x/shim.ts',
+      fs: fake.fs(),
+    })
+
+    expect(second.kind).toBe('no-upstream')
+    expect(fake.events).toEqual(['unlink:/agent/node_modules/.bin/agent-browser'])
+    expect(fake.files.has('/agent/node_modules/.bin/agent-browser')).toBe(false)
   })
 })
