@@ -15,6 +15,8 @@ import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import { containerNameFromCwd, defaultDockerExec, type DockerExec, getBun, imageTagFromCwd } from './shared'
 
 const PACKAGE_FILE = 'package.json'
+const BUN_LOCK_FILE = 'bun.lock'
+const DEPENDENCY_FILES = [PACKAGE_FILE, BUN_LOCK_FILE] as const
 const CONFIG_FILE = 'typeclaw.json'
 const ENV_FILE = '.env'
 const COMPOSE_PROJECT = 'typeclaw'
@@ -122,6 +124,13 @@ export async function start({
     if (pkgRefresh.changed) {
       await commitSystemFile(cwd, pkgRefresh.files, 'Enable bun workspaces (packages/*)')
     }
+    // Catch dependency drift not covered by the migration commit above:
+    // upgrading the global typeclaw CLI causes `bun install` to rewrite
+    // bun.lock, and future template changes could nudge package.json past
+    // workspaces. Both files are tracked, so without this they'd surface as
+    // dirty working tree on every `typeclaw start`. Atomic commit so reviewers
+    // see bun.lock alongside its triggering package.json change.
+    await commitSystemFile(cwd, DEPENDENCY_FILES, 'Update dependencies')
 
     if (state.exists) {
       // Container is stopped/exited/being-removed but still holds the name.
