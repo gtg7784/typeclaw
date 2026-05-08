@@ -884,6 +884,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     })
 
     if (decision === 'observe') {
+      // Log every observe so an unanswered mention is diagnosable from logs
+      // alone instead of "routed but no prompting" silence. The bracketed
+      // shape mirrors `prompting batch=` so log scraping can pair them.
+      logger.info(`[channels] ${live.keyId} observed id=${event.externalMessageId}`)
       observe(live, event)
       return
     }

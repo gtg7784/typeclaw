@@ -441,6 +441,32 @@ describe('ChannelRouter engagement and prompt composition', () => {
     expect(sessions[0]!.prompts).toHaveLength(0)
   })
 
+  test('logs an `observed id=...` line when engagement decides observe', async () => {
+    // given a 2-human channel under strict trigger so a non-mention observes
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router } = makeRouter(dir, {
+      config: {
+        allow: ['*'],
+        engagement: { trigger: ['mention'], stickiness: 'off' },
+        enabled: true,
+        history: defaultHistoryConfig(),
+      },
+      logs,
+    })
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // when a non-mention from a different author arrives (must observe)
+    logs.length = 0
+    await router.route(inbound({ isBotMention: false, externalMessageId: 'm-observed' }))
+
+    // then exactly one observed log is emitted with the inbound message id
+    const observedLogs = logs.filter((l) => l.includes('observed id='))
+    expect(observedLogs).toHaveLength(1)
+    expect(observedLogs[0]).toContain('id=m-observed')
+  })
+
   test('solo-human channel: plain message engages without mention/reply/dm', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
