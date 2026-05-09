@@ -284,6 +284,214 @@ describe('createKakaotalkAdapter — outbound', () => {
   })
 })
 
+describe('createKakaotalkAdapter — KICKOUT recovery', () => {
+  test('auto-restarts the listener once when KICKOUT arrives within the post-init window', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const logs: Array<{ level: string; msg: string }> = []
+    let nowMs = 1_000_000
+    const recoveryTasks: Array<{ fn: () => void; delay: number }> = []
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+      logger: {
+        info: (msg) => logs.push({ level: 'info', msg }),
+        warn: (msg) => logs.push({ level: 'warn', msg }),
+        error: (msg) => logs.push({ level: 'error', msg }),
+      },
+      now: () => nowMs,
+      scheduleRecovery: (fn, delay) => {
+        recoveryTasks.push({ fn, delay })
+      },
+    })
+
+    await adapter.start()
+    expect(listener.startCalls).toBe(1)
+
+    listener.emit('connected', { userId: '999' })
+    expect(adapter.isConnected()).toBe(true)
+
+    // 5 seconds later — well within the 30s post-init window — the SDK
+    // emits the KICKOUT error.
+    nowMs += 5_000
+    listener.emit('error', new Error('Session kicked — another device logged in'))
+
+    expect(adapter.isConnected()).toBe(false)
+    expect(recoveryTasks).toHaveLength(1)
+    expect(recoveryTasks[0]?.delay).toBeGreaterThan(0)
+    expect(logs.some((l) => l.level === 'warn' && l.msg.includes('Auto-restarting'))).toBe(true)
+
+    recoveryTasks[0]?.fn()
+    expect(listener.startCalls).toBe(2)
+
+    await adapter.stop()
+    await router.stop()
+  })
+
+  test('does NOT auto-recover when KICKOUT arrives outside the post-init window', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const logs: Array<{ level: string; msg: string }> = []
+    let nowMs = 1_000_000
+    const recoveryTasks: Array<{ fn: () => void; delay: number }> = []
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+      logger: {
+        info: (msg) => logs.push({ level: 'info', msg }),
+        warn: (msg) => logs.push({ level: 'warn', msg }),
+        error: (msg) => logs.push({ level: 'error', msg }),
+      },
+      now: () => nowMs,
+      scheduleRecovery: (fn, delay) => {
+        recoveryTasks.push({ fn, delay })
+      },
+    })
+
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    // 5 minutes later — long past the post-init window. This is a real
+    // cross-device kick; we must NOT loop-fight.
+    nowMs += 5 * 60 * 1000
+    listener.emit('error', new Error('Session kicked — another device logged in'))
+
+    expect(adapter.isConnected()).toBe(false)
+    expect(recoveryTasks).toHaveLength(0)
+    expect(listener.startCalls).toBe(1)
+    expect(
+      logs.some(
+        (l) => l.level === 'error' && l.msg.includes('DEAD after KICKOUT') && l.msg.includes('typeclaw restart'),
+      ),
+    ).toBe(true)
+
+    await adapter.stop()
+    await router.stop()
+  })
+
+  test('only attempts auto-recovery once per start() lifecycle', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    let nowMs = 1_000_000
+    const recoveryTasks: Array<{ fn: () => void; delay: number }> = []
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+      now: () => nowMs,
+      scheduleRecovery: (fn, delay) => {
+        recoveryTasks.push({ fn, delay })
+      },
+    })
+
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    nowMs += 1_000
+    listener.emit('error', new Error('Session kicked — another device logged in'))
+    expect(recoveryTasks).toHaveLength(1)
+
+    // Pretend the recovery ran and we reconnected, then got kicked again
+    // immediately. The second KICKOUT must NOT re-arm recovery.
+    recoveryTasks[0]?.fn()
+    listener.emit('connected', { userId: '999' })
+    nowMs += 1_000
+    listener.emit('error', new Error('Session kicked — another device logged in'))
+
+    expect(recoveryTasks).toHaveLength(1)
+
+    await adapter.stop()
+    await router.stop()
+  })
+
+  test('non-KICKOUT errors do not trigger recovery and do not flip connected', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const recoveryTasks: Array<{ fn: () => void; delay: number }> = []
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+      scheduleRecovery: (fn, delay) => {
+        recoveryTasks.push({ fn, delay })
+      },
+    })
+
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+    expect(adapter.isConnected()).toBe(true)
+
+    listener.emit('error', new Error('socket closed unexpectedly'))
+
+    expect(recoveryTasks).toHaveLength(0)
+    // Generic errors don't flip connected — the SDK's own reconnect path
+    // owns disconnection state via the 'disconnected' event.
+    expect(adapter.isConnected()).toBe(true)
+
+    await adapter.stop()
+    await router.stop()
+  })
+})
+
+describe('createKakaotalkAdapter — drop hint', () => {
+  test('not_in_allow_list hint suggests bucket-specific patterns', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({
+      agentDir,
+      configForAdapter: () => adapterCfg({ allow: ['kakao:dm/*'] }),
+    })
+    const logs: string[] = []
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg({ allow: ['kakao:dm/*'] }),
+      client,
+      listenerFactory: () => listener,
+      logger: {
+        info: (m) => logs.push(m),
+        warn: () => {},
+        error: () => {},
+      },
+    })
+    // Group chat (5 members → group bucket regardless of LOCO type code).
+    client.chats = [
+      { chat_id: '222', type: 10, display_name: 'Team', active_members: 5, unread_count: 0, last_message: null },
+    ]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', {
+      type: 'MSG',
+      chat_id: '222',
+      log_id: 'L99',
+      author_id: 1,
+      message: 'hi',
+      message_type: 1,
+      sent_at: Date.now(),
+    })
+
+    await new Promise((r) => setTimeout(r, 0))
+
+    const drop = logs.find((m) => m.includes('reason=not_in_allow_list'))
+    expect(drop).toBeDefined()
+    expect(drop).toContain('kakao:group/*')
+    expect(drop).toContain('kakao:222')
+
+    await adapter.stop()
+    await router.stop()
+  })
+})
+
 describe('createKakaotalkAdapter — inbound classification', () => {
   test('drops self_author when author equals authenticated user_id', async () => {
     const client = new FakeClient()

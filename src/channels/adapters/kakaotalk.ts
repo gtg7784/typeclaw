@@ -48,7 +48,22 @@ export type KakaotalkAdapterOptions = {
   credentialsDir?: string
   client?: KakaoTalkClient
   listenerFactory?: (client: KakaoTalkClient) => KakaoTalkListener
+  // Test seam for KICKOUT auto-recovery. Production uses Date.now and
+  // setTimeout. Tests inject deterministic clocks/schedulers so they can
+  // assert the recovery semantics without real-time waits.
+  now?: () => number
+  scheduleRecovery?: (fn: () => void, delayMs: number) => void
 }
+
+// LOCO server emits KICKOUT when the same device_uuid logs in elsewhere.
+// During the post-init handoff (init authenticates → leaves a session
+// briefly → first container start re-logs in with the same UUID) we
+// kick OURSELVES, then a one-shot auto-restart resolves it. Outside that
+// window, we treat KICKOUT as a real cross-device login and stay dead so
+// we don't loop-fight the other device. 30s is the empirical post-init
+// window; widen if init grows slower bootstrap steps.
+const KICKOUT_RECOVERY_WINDOW_MS = 30_000
+const KICKOUT_RECOVERY_DELAY_MS = 2_000
 
 export type KakaotalkAdapter = {
   start: () => Promise<void>
@@ -177,10 +192,18 @@ function clampLimit(requested: number, max: number): number {
 export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): KakaotalkAdapter {
   const logger = options.logger ?? consoleLogger
   const client = options.client ?? new KakaoTalkClient()
+  const now = options.now ?? Date.now
+  const scheduleRecovery =
+    options.scheduleRecovery ??
+    ((fn: () => void, delayMs: number): void => {
+      setTimeout(fn, delayMs)
+    })
   let listener: KakaoTalkListener | null = null
   let selfUserId: string | null = null
   let connected = false
   let started = false
+  let lastConnectedAt: number | null = null
+  let kickoutRecoveryAttempted = false
   let inflightInbounds = 0
   let stopWaiters: Array<() => void> = []
 
@@ -231,7 +254,10 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         ...(options.selfAliasesRef ? { selfAliases: options.selfAliasesRef() } : {}),
       })
       if (verdict.kind === 'drop') {
-        logger.info(`[kakaotalk] dropped log_id=${event.log_id} reason=${verdict.reason}${dropHint(verdict.reason)}`)
+        const bucket = channelResolver.lookupChat(event.chat_id)?.workspace ?? null
+        logger.info(
+          `[kakaotalk] dropped log_id=${event.log_id} reason=${verdict.reason}${dropHint(verdict.reason, bucket, event.chat_id)}`,
+        )
         return
       }
 
@@ -257,6 +283,8 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
     async start(): Promise<void> {
       if (started) return
       started = true
+      lastConnectedAt = null
+      kickoutRecoveryAttempted = false
       try {
         if (options.credentialsDir !== undefined) {
           // Explicit credential path: read the file ourselves and pass the
@@ -306,8 +334,10 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       }
 
       listener = options.listenerFactory ? options.listenerFactory(client) : new KakaoTalkListener(client)
+      const activeListener = listener
       listener.on('connected', (info) => {
         connected = true
+        lastConnectedAt = now()
         logger.info(`[kakaotalk] connected (user_id=${info.userId})`)
       })
       listener.on('disconnected', () => {
@@ -316,6 +346,35 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       })
       listener.on('error', (err) => {
         logger.error(`[kakaotalk] listener error: ${describe(err)}`)
+        if (!isKickoutError(err)) return
+        // KICKOUT is fatal at the SDK layer: it sets running=false, closes
+        // the session, and skips scheduleReconnect. Without intervention
+        // the adapter goes silent indefinitely. We have to recover here
+        // or surface the dead-listener state to the user explicitly.
+        connected = false
+        const elapsed = lastConnectedAt === null ? Infinity : now() - lastConnectedAt
+        const withinPostInitWindow = elapsed <= KICKOUT_RECOVERY_WINDOW_MS
+        if (!started || kickoutRecoveryAttempted || !withinPostInitWindow) {
+          logger.error(
+            '[kakaotalk] session is DEAD after KICKOUT and will not auto-recover. ' +
+              'Likely cause: another device or process is logged into this KakaoTalk account ' +
+              'with the same device_uuid. Run `typeclaw restart` once you have ensured no other ' +
+              'session is using these credentials, or re-run `typeclaw init` to mint a new device_uuid.',
+          )
+          return
+        }
+        kickoutRecoveryAttempted = true
+        logger.warn(
+          `[kakaotalk] KICKOUT received ${Math.round(elapsed)}ms after connect — likely the post-init session handoff. Auto-restarting listener once in ${KICKOUT_RECOVERY_DELAY_MS}ms.`,
+        )
+        scheduleRecovery(() => {
+          if (!started || listener !== activeListener) return
+          activeListener.start().catch((retryErr) => {
+            logger.error(
+              `[kakaotalk] KICKOUT auto-recovery failed: ${describe(retryErr)}. Run \`typeclaw restart\` to retry.`,
+            )
+          })
+        }, KICKOUT_RECOVERY_DELAY_MS)
       })
       listener.on('message', (event) => {
         void handleMessageEvent(event)
@@ -366,6 +425,8 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       }
       selfUserId = null
       connected = false
+      lastConnectedAt = null
+      kickoutRecoveryAttempted = false
     },
 
     isConnected(): boolean {
@@ -378,10 +439,14 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-function dropHint(reason: InboundDropReason): string {
+function dropHint(
+  reason: InboundDropReason,
+  bucket: '@kakao-dm' | '@kakao-group' | '@kakao-open' | null,
+  chatId: string,
+): string {
   switch (reason) {
     case 'not_in_allow_list':
-      return ' (extend channels.kakaotalk.allow in typeclaw.json to admit this chat)'
+      return ` (add ${suggestedAllowPattern(bucket, chatId)} to channels.kakaotalk.allow to admit this chat)`
     case 'unknown_chat':
       return ' (chat not in cache; resolver refresh may be lagging)'
     case 'empty_text':
@@ -389,4 +454,16 @@ function dropHint(reason: InboundDropReason): string {
     case 'self_author':
       return ''
   }
+}
+
+function suggestedAllowPattern(bucket: '@kakao-dm' | '@kakao-group' | '@kakao-open' | null, chatId: string): string {
+  if (bucket === '@kakao-dm') return `"kakao:dm/*" or "kakao:${chatId}"`
+  if (bucket === '@kakao-group') return `"kakao:group/*" or "kakao:${chatId}"`
+  if (bucket === '@kakao-open') return `"kakao:open/*" or "kakao:${chatId}"`
+  return `"kakao:${chatId}"`
+}
+
+function isKickoutError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return err.message.includes('kicked') || err.message.includes('KICKOUT')
 }

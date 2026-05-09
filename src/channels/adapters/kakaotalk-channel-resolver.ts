@@ -1,7 +1,7 @@
 import type { ChannelKey, ChannelNameResolver, ResolvedChannelNames } from '@/channels/types'
 
 import {
-  classifyKakaoChatType,
+  classifyKakaoChat,
   kakaoWorkspaceForType,
   type KakaoChat,
   type KakaoTalkClient,
@@ -63,7 +63,7 @@ export function createKakaoChannelResolver(options: KakaoChannelResolverOptions)
   }
 
   const ingest = (chat: KakaoChat, expiresAt: number): void => {
-    const kind = classifyKakaoChatType(chat.type)
+    const kind = classifyKakaoChat(chat)
     const workspace = kakaoWorkspaceForType(kind)
     cache.set(chat.chat_id, {
       workspace,
