@@ -521,6 +521,67 @@ describe('per-agent spawn serialization', () => {
     expect(spawned).toHaveLength(1)
     expect((spawned[0]!.payload as { parentSessionId: string }).parentSessionId).toBe('ses_b')
   })
+
+  test('a hanging spawn does not wedge the chain; subsequent fires recover after the timeout', async () => {
+    // given a config where spawnTimeoutMs is short enough to fire in the
+    // test window. without the spawn-side timeout, a non-settling
+    // spawnSubagent would wedge spawnChain forever and every subsequent
+    // session.end would block on the dead chain — silently coalescing all
+    // future cron fires per the production failure mode.
+    const spawned: SpawnCall[] = []
+    const parsed = memoryPlugin.configSchema!.safeParse({
+      idleMs: 60_000,
+      bufferBytes: 0,
+      spawnTimeoutMs: 30,
+    })
+    if (!parsed.success) throw new Error('config invalid')
+    const { logger, logs } = makeCapturingLogger()
+    let firstCall = true
+    const ctx = createPluginContext({
+      name: 'memory',
+      version: undefined,
+      agentDir,
+      config: parsed.data,
+      logger,
+      spawnSubagent: async (name, payload) => {
+        const startedAt = Date.now()
+        if (firstCall) {
+          firstCall = false
+          await new Promise<void>(() => {})
+          return
+        }
+        spawned.push({ name, payload, startedAt, finishedAt: Date.now() })
+      },
+      isBooted: () => true,
+    })
+    const exports = await memoryPlugin.plugin(ctx)
+    const hookCtx = { agentDir, pluginName: 'memory', logger }
+
+    // when two sessions fire end-to-end while the first spawn hangs forever
+    await exports.hooks!['session.idle']!(
+      { sessionId: 'ses_a', parentTranscriptPath: '/tmp/a.jsonl', idleMs: 0 },
+      hookCtx,
+    )
+    await exports.hooks!['session.idle']!(
+      { sessionId: 'ses_b', parentTranscriptPath: '/tmp/b.jsonl', idleMs: 0 },
+      hookCtx,
+    )
+
+    const start = Date.now()
+    await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, hookCtx)
+    await exports.hooks!['session.end']!({ sessionId: 'ses_b' } as SessionEndEvent, hookCtx)
+    const elapsed = Date.now() - start
+
+    // then the hung spawn timed out within the configured ceiling, the
+    // failure was logged with attribution, and the next spawn ran to
+    // completion
+    expect(elapsed).toBeLessThan(2000)
+    expect(spawned).toHaveLength(1)
+    expect((spawned[0]!.payload as { parentSessionId: string }).parentSessionId).toBe('ses_b')
+    expect(logs.error.some((m) => m.includes('memory-logger spawn failed') && m.includes('timed out after 30ms'))).toBe(
+      true,
+    )
+  })
 })
 
 describe('lifecycle logging', () => {
