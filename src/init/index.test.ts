@@ -135,7 +135,13 @@ describe('runInit', () => {
   })
 
   test('produces an initialized agent folder (config, secrets, markdown, git repo)', async () => {
-    await runInit({ cwd: root, apiKey: 'fw_integration_key', runHatching: okHatch, dockerExec: okDocker })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_integration_key',
+      model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+      runHatching: okHatch,
+      dockerExec: okDocker,
+    })
 
     expect(isInitialized(root)).toBe(true)
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_integration_key\n')
@@ -270,7 +276,13 @@ describe('runInit', () => {
   test('is idempotent: re-running after a failed hatching re-runs all steps without crashing', async () => {
     // given: a prior run where hatching failed (e.g. docker daemon was down).
     const failingHatch: HatchRunner = async () => ({ ok: false, reason: 'docker build failed' })
-    await runInit({ cwd: root, apiKey: 'fw_first_key', runHatching: failingHatch, dockerExec: okDocker })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_first_key',
+      model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+      runHatching: failingHatch,
+      dockerExec: okDocker,
+    })
     expect(isInitialized(root)).toBe(true)
     expect(await isHatched(root)).toBe(false)
 
@@ -279,6 +291,7 @@ describe('runInit', () => {
     await runInit({
       cwd: root,
       apiKey: 'fw_second_key',
+      model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
       runHatching: okHatch,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
@@ -538,7 +551,7 @@ describe('scaffold', () => {
     expect(raw.endsWith('\n')).toBe(true)
     expect(JSON.parse(raw)).toEqual({
       $schema: './node_modules/typeclaw/typeclaw.schema.json',
-      model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+      model: 'openai/gpt-5.4-nano',
     })
   })
 
@@ -799,7 +812,7 @@ describe('initGitRepo', () => {
 
   test('respects .gitignore (does not track .env)', async () => {
     await scaffold(root)
-    await writeSecrets(root, { fireworksApiKey: 'fw_test' })
+    await writeSecrets(root, { apiKey: 'fw_test', model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
 
     await initGitRepo(root)
 
@@ -1044,21 +1057,40 @@ describe('writeDockerAssets', () => {
 })
 
 describe('writeSecrets', () => {
-  test('writes FIREWORKS_API_KEY to .env', async () => {
-    await writeSecrets(root, { fireworksApiKey: 'fw_test_abc123' })
+  test('writes OPENAI_API_KEY to .env when model is an OpenAI model', async () => {
+    await writeSecrets(root, { apiKey: 'sk-test_abc123', model: 'openai/gpt-5.4-nano' })
+
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe('OPENAI_API_KEY=sk-test_abc123\n')
+  })
+
+  test('writes FIREWORKS_API_KEY to .env when model is a Fireworks model', async () => {
+    await writeSecrets(root, {
+      apiKey: 'fw_test_abc123',
+      model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+    })
 
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_test_abc123\n')
   })
 
+  test('defaults to OPENAI_API_KEY when model is omitted (matches DEFAULT_MODEL_REF)', async () => {
+    await writeSecrets(root, { apiKey: 'sk-default' })
+
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe('OPENAI_API_KEY=sk-default\n')
+  })
+
   test('overwrites an existing .env', async () => {
     await writeFile(join(root, '.env'), 'OLD=1\n')
-    await writeSecrets(root, { fireworksApiKey: 'fw_new' })
+    await writeSecrets(root, { apiKey: 'fw_new', model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
 
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_new\n')
   })
 
   test('appends TELEGRAM_BOT_TOKEN when telegramBotToken is provided', async () => {
-    await writeSecrets(root, { fireworksApiKey: 'fw_test', telegramBotToken: '1234567890:ABCdef' })
+    await writeSecrets(root, {
+      apiKey: 'fw_test',
+      model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+      telegramBotToken: '1234567890:ABCdef',
+    })
 
     expect(await readFile(join(root, '.env'), 'utf8')).toBe(
       'FIREWORKS_API_KEY=fw_test\nTELEGRAM_BOT_TOKEN=1234567890:ABCdef\n',
@@ -1066,7 +1098,11 @@ describe('writeSecrets', () => {
   })
 
   test('omits TELEGRAM_BOT_TOKEN when telegramBotToken is empty string', async () => {
-    await writeSecrets(root, { fireworksApiKey: 'fw_test', telegramBotToken: '' })
+    await writeSecrets(root, {
+      apiKey: 'fw_test',
+      model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+      telegramBotToken: '',
+    })
 
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_test\n')
   })

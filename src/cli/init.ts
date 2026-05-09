@@ -1,6 +1,7 @@
 import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
+import { KNOWN_PROVIDERS, type KnownModelRef, type KnownProviderId } from '@/config/providers'
 import type { DockerAvailability } from '@/container'
 import {
   findAgentDir,
@@ -12,6 +13,7 @@ import {
   type KakaotalkAuthResult,
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
+import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
 
 export const init = defineCommand({
   meta: {
@@ -47,12 +49,11 @@ export const init = defineCommand({
 
     intro('Initializing TypeClaw...')
 
-    // TODO: provider/model selection. For now we assume Fireworks + Kimi K2.5 Turbo
-    // because that's the only provider wired up in src/agent/auth.ts and src/config.
-    // Expand to a provider picker (OpenAI, Anthropic, Fireworks, ...) once the
-    // provider abstraction lands (see TypeClaw.md Phase 4).
+    const selectedModel = await pickModel()
+    const provider = KNOWN_PROVIDERS[selectedModel.providerId]
+
     const apiKey = await password({
-      message: 'Put your Fireworks API key',
+      message: `Put your ${provider.name} API key (will be saved to .env as ${provider.apiKeyEnv})`,
       validate: (value) => (value && value.length > 0 ? undefined : 'API key is required'),
     })
     if (isCancel(apiKey)) {
@@ -268,6 +269,7 @@ export const init = defineCommand({
       await runInit({
         cwd,
         apiKey,
+        model: selectedModel.ref,
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
         ...(telegramBotToken !== undefined ? { telegramBotToken } : {}),
@@ -414,6 +416,68 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
   } else {
     console.error(`Hatching failed: ${event.result.reason}`)
   }
+}
+
+// Two-step provider+model picker. We split it because most users have a key
+// for exactly one provider — asking them to scroll through a flat list of
+// every (provider, model) pair would surface options they can't use.
+async function pickModel(): Promise<ModelOption> {
+  const s = spinner()
+  s.start('Loading model catalog from models.dev...')
+  const { options, source, warning } = await fetchModelOptions()
+  if (source === 'curated') {
+    s.stop(`Using built-in catalog (models.dev unavailable: ${warning ?? 'unknown'})`)
+  } else {
+    s.stop('Loaded model catalog.')
+  }
+
+  const providers = uniqueProviders(options)
+  const providerChoice = await select({
+    message: 'Pick an LLM provider',
+    options: providers.map((id) => ({ value: id, label: KNOWN_PROVIDERS[id].name })),
+    initialValue: providers[0],
+  })
+  if (isCancel(providerChoice)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+
+  const candidates = options.filter((o) => o.providerId === providerChoice)
+  const modelChoice = await select<KnownModelRef>({
+    message: `Pick a ${KNOWN_PROVIDERS[providerChoice].name} model`,
+    options: candidates.map((o) => ({
+      value: o.ref,
+      label: o.modelName,
+      hint: formatModelHint(o),
+    })),
+    initialValue: candidates[0]?.ref,
+  })
+  if (isCancel(modelChoice)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+
+  const picked = candidates.find((o) => o.ref === modelChoice)
+  if (!picked) throw new Error(`Internal error: picked model ${modelChoice} not in candidates`)
+  return picked
+}
+
+function uniqueProviders(options: ModelOption[]): KnownProviderId[] {
+  const seen = new Set<KnownProviderId>()
+  const out: KnownProviderId[] = []
+  for (const o of options) {
+    if (seen.has(o.providerId)) continue
+    seen.add(o.providerId)
+    out.push(o.providerId)
+  }
+  return out
+}
+
+function formatModelHint(o: ModelOption): string {
+  const parts: string[] = []
+  if (o.contextWindow !== null) parts.push(`${(o.contextWindow / 1000).toFixed(0)}K ctx`)
+  if (o.reasoning) parts.push('reasoning')
+  return parts.join(' · ')
 }
 
 const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {

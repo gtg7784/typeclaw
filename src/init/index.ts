@@ -4,6 +4,7 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { config, configSchema, type Config } from '@/config'
+import { DEFAULT_MODEL_REF, KNOWN_PROVIDERS, providerForModelRef, type KnownModelRef } from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
 import { createTui } from '@/tui'
 
@@ -61,6 +62,9 @@ export type KakaotalkAuthRunner = (options: { cwd: string }) => Promise<Kakaotal
 export type InitOptions = {
   cwd: string
   apiKey: string
+  // Selected `provider/model` ref written into typeclaw.json. Defaults to
+  // DEFAULT_MODEL_REF when callers (or older test fixtures) omit it.
+  model?: KnownModelRef
   discordBotToken?: string
   discordAllowAll?: boolean
   slackBotToken?: string
@@ -79,6 +83,7 @@ export type InitOptions = {
 export async function runInit({
   cwd,
   apiKey,
+  model = DEFAULT_MODEL_REF,
   discordBotToken,
   discordAllowAll = true,
   slackBotToken,
@@ -110,6 +115,7 @@ export async function runInit({
   const wantsTelegram = telegramBotToken !== undefined && telegramBotToken !== ''
   emit({ step: 'scaffold', phase: 'start' })
   await scaffold(cwd, {
+    model,
     withDiscord: wantsDiscord,
     discordAllowAll,
     withSlack: wantsSlack,
@@ -120,7 +126,8 @@ export async function runInit({
     kakaotalkAllowAll,
   })
   await writeSecrets(cwd, {
-    fireworksApiKey: apiKey,
+    model,
+    apiKey,
     discordBotToken,
     slackBotToken,
     slackAppToken,
@@ -261,6 +268,7 @@ export async function isHatched(dir: string): Promise<boolean> {
 }
 
 export type ScaffoldOptions = {
+  model?: KnownModelRef
   withDiscord?: boolean
   discordAllowAll?: boolean
   withSlack?: boolean
@@ -281,9 +289,6 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   // immediately populated, so packages/ is the only one that needs this.
   await writeFile(join(root, PACKAGES_DIR, GITKEEP_FILE), '', { flag: 'wx' }).catch(ignoreExists)
 
-  // TODO: hardcoded model. Mirror src/config/index.ts until the config loader
-  // and provider registry exist (TypeClaw.md Phase 1 + Phase 4).
-  //
   // Only fields without sensible defaults elsewhere are emitted. `mounts`
   // defaults to `[]` in configSchema, and the bundled memory plugin owns its
   // own defaults in plugins/memory/index.ts — re-emitting either here would
@@ -291,7 +296,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   // truth.
   const config: Record<string, unknown> = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
-    model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+    model: options.model ?? DEFAULT_MODEL_REF,
   }
   const channels: Record<string, { allow: string[] }> = {}
   if (options.withDiscord) channels['discord-bot'] = { allow: options.discordAllowAll === false ? [] : ['*'] }
@@ -469,28 +474,31 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
   }
 }
 
-// TODO: generalize to arbitrary provider secrets and switch to secrets.json
-// (per TypeClaw.md spec) once the provider registry exists. Currently hardcoded
-// to FIREWORKS_API_KEY in .env to match src/agent/auth.ts. Optional channel
-// adapter tokens (DISCORD_BOT_TOKEN, SLACK_BOT_TOKEN, SLACK_APP_TOKEN,
-// TELEGRAM_BOT_TOKEN) are appended when provided.
+// Writes the LLM provider's API key (under its provider-specific env var,
+// e.g. OPENAI_API_KEY or FIREWORKS_API_KEY) plus any channel adapter tokens.
+// The provider env var is resolved from KNOWN_PROVIDERS via the model ref,
+// so adding a new provider only requires touching providers.ts.
 export async function writeSecrets(
   root: string,
   {
-    fireworksApiKey,
+    model = DEFAULT_MODEL_REF,
+    apiKey,
     discordBotToken,
     slackBotToken,
     slackAppToken,
     telegramBotToken,
   }: {
-    fireworksApiKey: string
+    model?: KnownModelRef
+    apiKey: string
     discordBotToken?: string
     slackBotToken?: string
     slackAppToken?: string
     telegramBotToken?: string
   },
 ): Promise<void> {
-  const lines = [`FIREWORKS_API_KEY=${fireworksApiKey}`]
+  const providerId = providerForModelRef(model)
+  const apiKeyEnv = KNOWN_PROVIDERS[providerId].apiKeyEnv
+  const lines = [`${apiKeyEnv}=${apiKey}`]
   if (discordBotToken !== undefined && discordBotToken !== '') {
     lines.push(`DISCORD_BOT_TOKEN=${discordBotToken}`)
   }
