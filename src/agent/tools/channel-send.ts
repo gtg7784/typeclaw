@@ -1,7 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
-import type { ChannelRouter } from '@/channels/router'
+import { isNoReplySignal, type ChannelRouter } from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 
 import { renderOutboundEcho } from './channel-reply'
@@ -178,18 +178,18 @@ function threadMismatchHint(
   )
 }
 
-// Blocks a specific misuse: the model tried to send the literal string
-// `NO_REPLY` as a channel message. `NO_REPLY` is the silent-turn signal —
-// it belongs in the model's *visible response* when no channel tool is
-// called (see session-origin.ts and router.ts validateChannelTurn), NOT
-// in the body of a sent message. We short-circuit BEFORE router.send so
-// the literal "NO_REPLY" never reaches the chat. Detection mirrors the
-// router's exact-after-trim semantics. Returns the error message to use
-// in the denial, or '' if the text is fine (including when text is
-// undefined — an attachments-only send can't be misusing the signal).
+// Blocks a specific misuse: the model tried to send a silent-turn signal
+// (e.g. `NO_REPLY`, `(NO_REPLY)`) as a channel message. Those forms belong
+// in the model's *visible response* when no channel tool is called (see
+// session-origin.ts and router.ts validateChannelTurn), NOT in the body of
+// a sent message. We short-circuit BEFORE router.send so the signal never
+// reaches the chat. Detection delegates to `isNoReplySignal` so the router
+// and both tools stay in lockstep. Empty/undefined text is fine — that
+// means "attachments-only send", not a signal.
 function noReplyMisuseError(text: string | undefined): string {
   if (text === undefined) return ''
-  if (text.trim() !== 'NO_REPLY') return ''
+  if (text.trim() === '') return ''
+  if (!isNoReplySignal(text)) return ''
   return (
     '`NO_REPLY` is the silent-turn signal, not a message body. ' +
     'To stay silent, end your turn with `NO_REPLY` as your entire visible response and NO channel tool call. ' +

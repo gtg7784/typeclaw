@@ -1,7 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
-import type { ChannelRouter } from '@/channels/router'
+import { isNoReplySignal, type ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 
 export type ChannelReplyOrigin = {
@@ -155,13 +155,15 @@ export function renderOutboundEcho(
   return '(empty)'
 }
 
-// Mirror of the same guard used by channel_send. Blocks the literal
-// `NO_REPLY` from being sent as a message body — same misuse, same denial,
-// regardless of which sending tool the model picked. Returns '' when text
-// is undefined (attachments-only reply, can't be misusing the signal).
+// Mirror of the same guard used by channel_send. Blocks any silent-turn
+// signal (per `isNoReplySignal`) from being sent as a message body — same
+// misuse, same denial, regardless of which sending tool the model picked.
+// Returns '' when text is undefined (attachments-only reply, can't be
+// misusing the signal) or when text is non-empty and not a signal.
 function noReplyMisuseError(text: string | undefined): string {
   if (text === undefined) return ''
-  if (text.trim() !== 'NO_REPLY') return ''
+  if (text.trim() === '') return ''
+  if (!isNoReplySignal(text)) return ''
   return (
     '`NO_REPLY` is the silent-turn signal, not a message body. ' +
     'To stay silent, end your turn with `NO_REPLY` as your entire visible response and NO channel tool call. ' +

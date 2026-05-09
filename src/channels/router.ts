@@ -1224,7 +1224,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const assistantText = latestAssistantText(live.session)
     if (assistantText === null) return
 
-    if (assistantText.trim() === 'NO_REPLY') {
+    if (isNoReplySignal(assistantText)) {
       logger.info(`[channels] ${live.keyId} no_reply`)
       return
     }
@@ -1544,6 +1544,21 @@ function visibleAssistantText(message: AssistantMessage): string {
     .filter((block) => block.type === 'text')
     .map((block) => block.text)
     .join('')
+}
+
+// Lenient on purpose: distilled / smaller models routinely drift off the
+// documented `NO_REPLY` form. We additionally accept `(NO_REPLY)` (Claude-style
+// hedging) and empty visible text (e.g. Kimi-distilled models that emit only a
+// thinking block and end the turn) — without the empty case we'd recover an
+// empty string into the chat. The prompt contract still teaches the strict
+// literal; this just widens what we accept. Shared with channel_send /
+// channel_reply so all three call sites stay in lockstep.
+export function isNoReplySignal(text: string): boolean {
+  const trimmed = text.trim()
+  if (trimmed === '') return true
+  if (trimmed === 'NO_REPLY') return true
+  if (trimmed === '(NO_REPLY)') return true
+  return false
 }
 
 function describe(err: unknown): string {
