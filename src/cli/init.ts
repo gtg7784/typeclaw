@@ -477,9 +477,16 @@ async function collectLLMAuth(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId
 function buildOAuthCallbacks(providerName: string) {
   return {
     onAuth: (url: string, instructions?: string) => {
-      const lines = [`Open this URL in your browser to authorize ${providerName}:`, '', url]
-      if (instructions) lines.push('', instructions)
-      note(lines.join('\n'), 'Browser login')
+      // Don't put the URL inside note(): clack wraps long lines with the box
+      // border `│` on each wrapped segment, which corrupts the URL when the
+      // user copy-pastes it. Keep instructional text in the box, but print
+      // the URL itself as a bare console.log line that any terminal will
+      // hyperlink intact.
+      const preamble = [`Open this URL in your browser to authorize ${providerName}.`]
+      if (instructions) preamble.push('', instructions)
+      note(preamble.join('\n'), 'Browser login')
+      console.log(url)
+      console.log('')
     },
     onProgress: (message: string) => {
       log.info(message)
