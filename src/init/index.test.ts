@@ -26,6 +26,7 @@ import {
   writeDockerAssets,
   writeSecrets,
 } from './index'
+import { makeFakeOAuthLoginRunner } from './oauth-login'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
 
@@ -413,6 +414,83 @@ describe('runInit', () => {
     })
 
     expect(hatchingInvoked).toBe(false)
+  })
+
+  test('OAuth path: emits oauth-login step, omits API key from .env, calls login runner with chosen model', async () => {
+    const calls: Array<{ cwd: string; model: string; providerId: string }> = []
+    const fakeLogin = makeFakeOAuthLoginRunner({
+      onCalled: (opts) => {
+        calls.push({ cwd: opts.cwd, model: opts.model, providerId: opts.providerId })
+      },
+    })
+    const events: InitStepEvent[] = []
+
+    await runInit({
+      cwd: root,
+      model: 'openai-codex/gpt-5.2-codex',
+      llmAuth: { kind: 'oauth', runLogin: fakeLogin },
+      runHatching: okHatch,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
+
+    expect(calls).toEqual([{ cwd: root, model: 'openai-codex/gpt-5.2-codex', providerId: 'openai-codex' }])
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
+      'preflight:start',
+      'preflight:done',
+      'oauth-login:start',
+      'oauth-login:done',
+      'scaffold:start',
+      'scaffold:done',
+      'install:start',
+      'install:done',
+      'dockerfile:start',
+      'dockerfile:done',
+      'git:start',
+      'git:done',
+      'hatching:start',
+      'hatching:done',
+    ])
+    // .env should be empty (no LLM key, no channel tokens) under OAuth.
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe('')
+  })
+
+  test('OAuth path: aborts before scaffold when login fails (no half-init folder)', async () => {
+    const fakeLogin = makeFakeOAuthLoginRunner({ result: { ok: false, reason: 'browser closed' } })
+
+    await expect(
+      runInit({
+        cwd: root,
+        model: 'openai-codex/gpt-5.2-codex',
+        llmAuth: { kind: 'oauth', runLogin: fakeLogin },
+        runHatching: okHatch,
+        dockerExec: okDocker,
+      }),
+    ).rejects.toThrow(/OAuth login failed: browser closed/)
+
+    // Scaffold-side artifacts must not exist.
+    expect(existsSync(join(root, 'typeclaw.json'))).toBe(false)
+    expect(existsSync(join(root, '.env'))).toBe(false)
+  })
+
+  test('OAuth path: skips oauth-login step on api-key path', async () => {
+    const events: InitStepEvent[] = []
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
+
+    expect(events.some((e) => e.step === 'oauth-login')).toBe(false)
+  })
+
+  test('throws when neither apiKey nor llmAuth is provided', async () => {
+    await expect(runInit({ cwd: root, runHatching: okHatch, dockerExec: okDocker })).rejects.toThrow(
+      /requires either `llmAuth` or `apiKey`/,
+    )
   })
 })
 

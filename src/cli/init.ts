@@ -1,7 +1,13 @@
 import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
-import { KNOWN_PROVIDERS, type KnownModelRef, type KnownProviderId } from '@/config/providers'
+import {
+  KNOWN_PROVIDERS,
+  supportsApiKey as providerSupportsApiKey,
+  supportsOAuth as providerSupportsOAuth,
+  type KnownModelRef,
+  type KnownProviderId,
+} from '@/config/providers'
 import type { DockerAvailability } from '@/container'
 import {
   findAgentDir,
@@ -11,9 +17,11 @@ import {
   type InitStep,
   type InitStepEvent,
   type KakaotalkAuthResult,
+  type LLMAuth,
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
+import { makeOAuthLoginRunner } from '@/init/oauth-login'
 
 export const init = defineCommand({
   meta: {
@@ -52,14 +60,7 @@ export const init = defineCommand({
     const selectedModel = await pickModel()
     const provider = KNOWN_PROVIDERS[selectedModel.providerId]
 
-    const apiKey = await password({
-      message: `Put your ${provider.name} API key (will be saved to .env as ${provider.apiKeyEnv})`,
-      validate: (value) => (value && value.length > 0 ? undefined : 'API key is required'),
-    })
-    if (isCancel(apiKey)) {
-      cancel('Aborted.')
-      process.exit(0)
-    }
+    const llmAuth = await collectLLMAuth(provider)
 
     const channelChoice = await select({
       message: 'Pick a channel to wire (you can add more later by editing typeclaw.json + .env)',
@@ -268,7 +269,7 @@ export const init = defineCommand({
     try {
       await runInit({
         cwd,
-        apiKey,
+        llmAuth,
         model: selectedModel.ref,
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
@@ -350,6 +351,9 @@ function reportProgress(
       case 'kakaotalk-auth':
         s.stop(reportKakaotalkAuth(event.result))
         break
+      case 'oauth-login':
+        s.stop(event.result.ok ? 'Logged in.' : `OAuth login failed: ${event.result.reason}`)
+        break
       case 'install':
         s.stop(event.result.ok ? 'Dependencies installed.' : `Skipped bun install: ${event.result.reason}`)
         break
@@ -418,6 +422,76 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
   }
 }
 
+// Resolves how the user wants to authenticate to the chosen provider:
+// - api-key only (e.g. Fireworks): prompt for the key, write to .env.
+// - oauth only (e.g. openai-codex): run the browser flow inline, write
+//   auth.json. No API key prompt at all.
+// - both supported (no providers ship this today, but Anthropic will when
+//   wired): ask "API key or OAuth?" first, then dispatch to the chosen path.
+async function collectLLMAuth(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]): Promise<LLMAuth> {
+  const supportsApiKey = providerSupportsApiKey(provider)
+  const supportsOAuth = providerSupportsOAuth(provider)
+
+  let method: 'api-key' | 'oauth'
+  if (supportsApiKey && supportsOAuth) {
+    const choice = await select<'api-key' | 'oauth'>({
+      message: `How do you want to authenticate to ${provider.name}?`,
+      options: [
+        { value: 'api-key', label: 'API key', hint: `saved to .env as ${provider.apiKeyEnv}` },
+        { value: 'oauth', label: 'OAuth (browser login)', hint: 'saved to auth.json' },
+      ],
+      initialValue: 'api-key',
+    })
+    if (isCancel(choice)) {
+      cancel('Aborted.')
+      process.exit(0)
+    }
+    method = choice
+  } else if (supportsOAuth) {
+    method = 'oauth'
+  } else {
+    method = 'api-key'
+  }
+
+  if (method === 'api-key') {
+    const apiKey = await password({
+      message: `Put your ${provider.name} API key (will be saved to .env as ${provider.apiKeyEnv})`,
+      validate: (value) => (value && value.length > 0 ? undefined : 'API key is required'),
+    })
+    if (isCancel(apiKey)) {
+      cancel('Aborted.')
+      process.exit(0)
+    }
+    return { kind: 'api-key', apiKey }
+  }
+
+  return { kind: 'oauth', runLogin: makeOAuthLoginRunner(buildOAuthCallbacks(provider.name)) }
+}
+
+// Wraps the OAuth lifecycle into the same clack idiom the rest of the wizard
+// uses: a spinner over the "waiting for login" period, with onAuth printing
+// the URL the user needs to open and onPrompt falling back to a `text`
+// prompt for the manual code path. The spinner is started by onAuth and
+// stopped by the caller (runInit) — we don't try to manage it here because
+// the spinner lifecycle has to span emit('start') -> emit('done').
+function buildOAuthCallbacks(providerName: string) {
+  return {
+    onAuth: (url: string, instructions?: string) => {
+      const lines = [`Open this URL in your browser to authorize ${providerName}:`, '', url]
+      if (instructions) lines.push('', instructions)
+      note(lines.join('\n'), 'Browser login')
+    },
+    onProgress: (message: string) => {
+      log.info(message)
+    },
+    onPrompt: async (message: string, placeholder?: string): Promise<string | null> => {
+      const value = await text({ message, ...(placeholder !== undefined ? { placeholder } : {}) })
+      if (isCancel(value)) return null
+      return value
+    },
+  }
+}
+
 // Two-step provider+model picker. We split it because most users have a key
 // for exactly one provider — asking them to scroll through a flat list of
 // every (provider, model) pair would surface options they can't use.
@@ -482,6 +556,7 @@ function formatModelHint(o: ModelOption): string {
 
 const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
   preflight: 'Checking Docker...',
+  'oauth-login': 'Waiting for browser login...',
   scaffold: 'Laying the egg...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   install: 'Installing dependencies with bun...',

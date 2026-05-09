@@ -11,6 +11,7 @@ import { createTui } from '@/tui'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { HATCHING_PROMPT } from './hatching'
+import type { OAuthLoginRunner, OAuthLoginResult } from './oauth-login'
 import { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 
 export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
@@ -35,13 +36,23 @@ export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason
 export type DockerAssetsResult = { ok: true; devMode: boolean } | { ok: false; reason: string }
 export type HatchingResult = { ok: true } | { ok: false; reason: string }
 
-export type InitStep = 'preflight' | 'scaffold' | 'kakaotalk-auth' | 'install' | 'dockerfile' | 'git' | 'hatching'
+export type InitStep =
+  | 'preflight'
+  | 'oauth-login'
+  | 'scaffold'
+  | 'kakaotalk-auth'
+  | 'install'
+  | 'dockerfile'
+  | 'git'
+  | 'hatching'
 
 export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
 
 export type InitStepEvent =
   | { step: 'preflight'; phase: 'start' }
   | { step: 'preflight'; phase: 'done'; result: DockerAvailability }
+  | { step: 'oauth-login'; phase: 'start' }
+  | { step: 'oauth-login'; phase: 'done'; result: OAuthLoginResult }
   | { step: 'scaffold'; phase: 'start' }
   | { step: 'scaffold'; phase: 'done' }
   | { step: 'kakaotalk-auth'; phase: 'start' }
@@ -59,12 +70,23 @@ export type HatchRunner = (options: { cwd: string; port: number }) => Promise<Ha
 
 export type KakaotalkAuthRunner = (options: { cwd: string }) => Promise<KakaotalkAuthResult>
 
+// Discriminated by `kind` so the type system enforces "you can't pass an
+// API key to an OAuth provider, and you can't pass an OAuth runner to an
+// API-key provider". Optional model defaults to DEFAULT_MODEL_REF, which is
+// an OpenAI api-key provider — so test fixtures that omit both fields keep
+// working under the api-key path.
+export type LLMAuth = { kind: 'api-key'; apiKey: string } | { kind: 'oauth'; runLogin: OAuthLoginRunner }
+
 export type InitOptions = {
   cwd: string
-  apiKey: string
   // Selected `provider/model` ref written into typeclaw.json. Defaults to
   // DEFAULT_MODEL_REF when callers (or older test fixtures) omit it.
   model?: KnownModelRef
+  // How the agent will authenticate to the LLM provider. When omitted,
+  // defaults to the api-key path with `apiKey` (legacy field, still
+  // supported for backwards compat with the old `runInit` signature).
+  llmAuth?: LLMAuth
+  apiKey?: string
   discordBotToken?: string
   discordAllowAll?: boolean
   slackBotToken?: string
@@ -83,6 +105,7 @@ export type InitOptions = {
 export async function runInit({
   cwd,
   apiKey,
+  llmAuth,
   model = DEFAULT_MODEL_REF,
   discordBotToken,
   discordAllowAll = true,
@@ -110,6 +133,29 @@ export async function runInit({
   emit({ step: 'preflight', phase: 'done', result: preflight })
   if (!preflight.ok) return
 
+  // Resolve the auth contract: explicit `llmAuth` wins; otherwise, fall back
+  // to the legacy `apiKey` field (api-key path). Throwing here instead of
+  // proceeding with bad data prevents writing a half-initialized agent
+  // folder for a doomed config.
+  const resolvedAuth = resolveLLMAuth(llmAuth, apiKey)
+
+  // OAuth login runs BEFORE scaffold so a failed/aborted browser flow leaves
+  // the user's directory untouched (same rationale as the docker preflight).
+  // Same trap as kakaotalk-auth: scaffold-then-fail-auth would leave
+  // typeclaw.json without working credentials and the runtime would silently
+  // refuse to boot. The login itself doesn't need the agent folder to exist
+  // — pi-ai's OAuth helper just needs a writable path for auth.json, which
+  // we create on demand inside scaffold().
+  if (resolvedAuth.kind === 'oauth') {
+    emit({ step: 'oauth-login', phase: 'start' })
+    await mkdir(cwd, { recursive: true })
+    const result = await resolvedAuth.runLogin({ cwd, model })
+    emit({ step: 'oauth-login', phase: 'done', result })
+    if (!result.ok) {
+      throw new Error(`OAuth login failed: ${result.reason}`)
+    }
+  }
+
   const wantsDiscord = discordBotToken !== undefined && discordBotToken !== ''
   const wantsSlack = slackBotToken !== undefined && slackBotToken !== ''
   const wantsTelegram = telegramBotToken !== undefined && telegramBotToken !== ''
@@ -125,9 +171,12 @@ export async function runInit({
     withKakaotalk,
     kakaotalkAllowAll,
   })
+  // Only write the LLM API key on the api-key path. OAuth providers persist
+  // their credentials to auth.json (via the OAuth login step above); writing
+  // an empty FIREWORKS_API_KEY/OPENAI_API_KEY would just confuse users.
   await writeSecrets(cwd, {
     model,
-    apiKey,
+    apiKey: resolvedAuth.kind === 'api-key' ? resolvedAuth.apiKey : undefined,
     discordBotToken,
     slackBotToken,
     slackAppToken,
@@ -489,7 +538,9 @@ export async function writeSecrets(
     telegramBotToken,
   }: {
     model?: KnownModelRef
-    apiKey: string
+    // Omitted on the OAuth path — credentials live in auth.json instead. The
+    // .env file still gets written for any channel adapter tokens.
+    apiKey?: string
     discordBotToken?: string
     slackBotToken?: string
     slackAppToken?: string
@@ -498,7 +549,10 @@ export async function writeSecrets(
 ): Promise<void> {
   const providerId = providerForModelRef(model)
   const apiKeyEnv = KNOWN_PROVIDERS[providerId].apiKeyEnv
-  const lines = [`${apiKeyEnv}=${apiKey}`]
+  const lines: string[] = []
+  if (apiKey !== undefined && apiKeyEnv !== null) {
+    lines.push(`${apiKeyEnv}=${apiKey}`)
+  }
   if (discordBotToken !== undefined && discordBotToken !== '') {
     lines.push(`DISCORD_BOT_TOKEN=${discordBotToken}`)
   }
@@ -511,7 +565,16 @@ export async function writeSecrets(
   if (telegramBotToken !== undefined && telegramBotToken !== '') {
     lines.push(`TELEGRAM_BOT_TOKEN=${telegramBotToken}`)
   }
-  await writeFile(join(root, SECRETS_FILE), `${lines.join('\n')}\n`)
+  // Always write .env even when empty so existing callers that read it
+  // post-init (channel `add`, runtime startup) don't ENOENT-crash.
+  const body = lines.length > 0 ? `${lines.join('\n')}\n` : ''
+  await writeFile(join(root, SECRETS_FILE), body)
+}
+
+function resolveLLMAuth(llmAuth: LLMAuth | undefined, apiKey: string | undefined): LLMAuth {
+  if (llmAuth) return llmAuth
+  if (apiKey !== undefined) return { kind: 'api-key', apiKey }
+  throw new Error('runInit requires either `llmAuth` or `apiKey`')
 }
 
 function ignoreExists(error: NodeJS.ErrnoException): void {

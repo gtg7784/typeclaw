@@ -518,25 +518,33 @@ Do **not** invent plugin blocks; their existence is determined by the plugins li
 
 The model registry currently has these entries:
 
-| `model` value                                          | Display name    | Provider  | Notes                                                                        |
-| ------------------------------------------------------ | --------------- | --------- | ---------------------------------------------------------------------------- |
-| `openai/gpt-5.4-nano`                                  | GPT-5.4 nano    | OpenAI    | Default. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context. |
-| `openai/gpt-5.4-mini`                                  | GPT-5.4 mini    | OpenAI    | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.          |
-| `openai/gpt-5.4`                                       | GPT-5.4         | OpenAI    | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.         |
-| `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.6 Turbo | Fireworks | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context.       |
+| `model` value                                          | Display name       | Provider     | Auth                | Notes                                                                            |
+| ------------------------------------------------------ | ------------------ | ------------ | ------------------- | -------------------------------------------------------------------------------- |
+| `openai/gpt-5.4-nano`                                  | GPT-5.4 nano       | OpenAI       | API key             | Default. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.     |
+| `openai/gpt-5.4-mini`                                  | GPT-5.4 mini       | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.              |
+| `openai/gpt-5.4`                                       | GPT-5.4            | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.             |
+| `openai-codex/gpt-5.2-codex`                           | GPT-5.2 Codex      | OpenAI Codex | OAuth (ChatGPT P/P) | Requires OAuth login at init. Persisted to `auth.json`. Reasoning, 272K context. |
+| `openai-codex/gpt-5.1-codex-max`                       | GPT-5.1 Codex Max  | OpenAI Codex | OAuth (ChatGPT P/P) | Requires OAuth login at init. Persisted to `auth.json`. Reasoning, 272K context. |
+| `openai-codex/gpt-5.1-codex-mini`                      | GPT-5.1 Codex Mini | OpenAI Codex | OAuth (ChatGPT P/P) | Requires OAuth login at init. Persisted to `auth.json`. Reasoning, 272K context. |
+| `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.6 Turbo    | Fireworks    | API key             | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context.           |
 
 **Do not write any other value into `model`.** The schema enum will reject the file at load, and the runtime will refuse to boot the agent process. If the user names a model that isn't in this table — "use Claude", "switch to o3" — be honest:
 
-> "My registry has OpenAI's GPT-5.4 family and Fireworks' Kimi K2.6 Turbo. Other providers (Anthropic, etc.) aren't wired up yet — that needs a typeclaw release, not a config edit."
+> "My registry has OpenAI's GPT-5.4 family (API key), the Codex family via ChatGPT subscription (OAuth), and Fireworks' Kimi K2.6 Turbo. Other providers (Anthropic, etc.) aren't wired up yet — that needs a typeclaw release, not a config edit."
 
 Do **not** edit `typeclaw.json` to a model the registry doesn't know, even if the user insists. That bricks the agent on next restart.
 
 ## Provider credentials
 
-`typeclaw.json` does **not** hold API keys. Credentials live in `./.env` (gitignored). The required env var depends on which provider's model you've selected:
+`typeclaw.json` does **not** hold API keys or OAuth tokens. Credentials live in two gitignored files:
 
-- `OPENAI_API_KEY` — required for any `openai/...` model.
-- `FIREWORKS_API_KEY` — required for any `fireworks/...` model.
+- **`./.env`** (API key providers): the env var depends on which provider's model you've selected.
+  - `OPENAI_API_KEY` — required for any `openai/...` model.
+  - `FIREWORKS_API_KEY` — required for any `fireworks/...` model.
+- **`./auth.json`** (OAuth providers): structured JSON file managed by `pi-coding-agent`'s `AuthStorage`. Contains refresh + access tokens. The container refreshes tokens on its own with file locking; the host writes once at `typeclaw init` time when the user picks "OAuth (browser login)".
+  - `openai-codex/...` models — credentials persisted as `{ "openai-codex": { "type": "oauth", ... } }`.
+
+If a user wants to switch from API key to OAuth (or vice versa) for a provider that supports both, the easiest path is to delete the relevant entry from `.env` / `auth.json` and re-run `typeclaw init` from inside the agent folder — it'll prompt for the auth method again.
 
 If the user wants to rotate or change the key, edit `.env`, not `typeclaw.json`. After editing `.env`, the same restart rule applies: `typeclaw restart` on the host stage.
 

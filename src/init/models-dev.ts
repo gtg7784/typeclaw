@@ -9,6 +9,10 @@ const REQUEST_TIMEOUT_MS = 10_000
 // helper in this file works in OUR namespace.
 const PROVIDER_TO_MODELS_DEV: Record<KnownProviderId, string> = {
   openai: 'openai',
+  // openai-codex models live under the `openai` namespace on models.dev too
+  // (Codex is a backend, not a separate provider in their taxonomy). Curated
+  // entries are surfaced regardless of upstream membership.
+  'openai-codex': 'openai',
   fireworks: 'fireworks-ai',
 }
 

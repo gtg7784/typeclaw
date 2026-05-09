@@ -11,6 +11,7 @@ describe('getAuth', () => {
   let prevOpenai: string | undefined
   let prevFireworks: string | undefined
   let prevNodeEnv: string | undefined
+  let prevCwd: string
   let cwd: string
 
   beforeEach(async () => {
@@ -20,6 +21,10 @@ describe('getAuth', () => {
     delete process.env.OPENAI_API_KEY
     delete process.env.FIREWORKS_API_KEY
     cwd = await mkdtemp(join(tmpdir(), 'typeclaw-auth-'))
+    // Pin process.cwd() to the tmpdir so AuthStorage.create() writes its
+    // auth.json under the test scratch dir instead of polluting the repo.
+    prevCwd = process.cwd()
+    process.chdir(cwd)
     resetAuthForTesting()
   })
 
@@ -32,6 +37,7 @@ describe('getAuth', () => {
     else process.env.NODE_ENV = prevNodeEnv
     resetAuthForTesting()
     __resetConfigForTesting()
+    process.chdir(prevCwd)
     await rm(cwd, { recursive: true, force: true })
   })
 
@@ -60,7 +66,7 @@ describe('getAuth', () => {
     expect(auth.modelRegistry).toBeDefined()
   })
 
-  test('falls back to a dummy key when the provider env var is missing under NODE_ENV=test', async () => {
+  test('falls back to a dummy in-memory storage when the provider env var is missing under NODE_ENV=test', async () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
     reloadConfig(cwd)
     process.env.NODE_ENV = 'test'

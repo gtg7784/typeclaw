@@ -1,11 +1,24 @@
-import type { Model } from '@mariozechner/pi-ai'
+import type { Api, Model } from '@mariozechner/pi-ai'
 
+// Authentication mechanism a provider supports. `api-key` reads a static key
+// from .env (the original path); `oauth` runs a browser flow at init time and
+// stores rotating credentials in auth.json. The CLI picker uses this to ask
+// "API key or OAuth?" only when both are wired up.
+export type AuthMethod = 'api-key' | 'oauth'
+
+// `apiKeyEnv` and `oauthProviderId` are both always present on the literal
+// to keep `as const satisfies` narrowing easy on the consumer side; entries
+// that don't apply to a given provider are set to `null` rather than omitted.
+// Consumers check `auth.includes('api-key')` / `auth.includes('oauth')` to
+// decide which field to consult.
 type KnownProvider = {
   id: string
   name: string
   baseUrl: string
-  apiKeyEnv: string
-  models: Record<string, Model<'openai-completions'> | Model<'openai-responses'>>
+  auth: ReadonlyArray<AuthMethod>
+  apiKeyEnv: string | null
+  oauthProviderId: string | null
+  models: Record<string, Model<Api>>
 }
 
 // Curated allowlist of providers + models that are wired into the agent
@@ -21,9 +34,12 @@ type KnownProvider = {
 // Models" section). `setRuntimeApiKey(provider, key)` keys off the `provider`
 // field, so it MUST match the outer provider id.
 //
-// Adding a new provider: add a top-level entry. `apiKeyEnv` is the .env var
-// `typeclaw init` writes and `agent/auth.ts` reads at boot, so make it
-// match the upstream provider's standard env var (e.g. `OPENAI_API_KEY`).
+// Adding a new provider: add a top-level entry. Set `auth` to the supported
+// methods. For `api-key` providers, `apiKeyEnv` is the .env var typeclaw
+// writes at init and reads at boot (match the upstream provider's standard,
+// e.g. `OPENAI_API_KEY`). For `oauth` providers, `oauthProviderId` MUST match
+// a pi-ai OAuth provider id exactly, otherwise `authStorage.login()` will
+// throw "Unknown OAuth provider".
 export const KNOWN_PROVIDERS = {
   openai: {
     id: 'openai',
@@ -32,7 +48,9 @@ export const KNOWN_PROVIDERS = {
     // store it explicitly so the init wizard can show users which endpoint
     // their key will hit.
     baseUrl: 'https://api.openai.com/v1',
+    auth: ['api-key'],
     apiKeyEnv: 'OPENAI_API_KEY',
+    oauthProviderId: null,
     models: {
       // Default. Cheap, fast, broadly available across OpenAI account tiers.
       'gpt-5.4-nano': {
@@ -73,11 +91,61 @@ export const KNOWN_PROVIDERS = {
       },
     },
   },
+  // ChatGPT Plus/Pro subscription via the OAuth Codex backend. No API key
+  // path here on purpose — the Codex backend is OAuth-only upstream.
+  'openai-codex': {
+    id: 'openai-codex',
+    name: 'OpenAI Codex (ChatGPT Plus/Pro)',
+    baseUrl: 'https://chatgpt.com/backend-api',
+    auth: ['oauth'],
+    apiKeyEnv: null,
+    oauthProviderId: 'openai-codex',
+    models: {
+      'gpt-5.2-codex': {
+        id: 'gpt-5.2-codex',
+        name: 'GPT-5.2 Codex',
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+      },
+      'gpt-5.1-codex-max': {
+        id: 'gpt-5.1-codex-max',
+        name: 'GPT-5.1 Codex Max',
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+      },
+      'gpt-5.1-codex-mini': {
+        id: 'gpt-5.1-codex-mini',
+        name: 'GPT-5.1 Codex Mini',
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+      },
+    },
+  },
   fireworks: {
     id: 'fireworks',
     name: 'Fireworks',
     baseUrl: 'https://api.fireworks.ai/inference/v1',
+    auth: ['api-key'],
     apiKeyEnv: 'FIREWORKS_API_KEY',
+    oauthProviderId: null,
     models: {
       // Kept available even though models.dev hasn't indexed it yet —
       // Fireworks ships this router as an alias to the latest k2.6 weights.
@@ -119,8 +187,24 @@ export function listKnownModelRefs(): KnownModelRef[] {
 export const DEFAULT_MODEL_REF: KnownModelRef = 'openai/gpt-5.4-nano'
 
 export function providerForModelRef(ref: KnownModelRef): KnownProviderId {
-  // KnownModelRef is `${provider}/${modelId}`, but model IDs themselves can
-  // contain '/' (Fireworks), so split on the FIRST slash only.
-  const slash = ref.indexOf('/')
-  return ref.slice(0, slash) as KnownProviderId
+  // KnownModelRef is `${provider}/${modelId}`, but provider IDs themselves can
+  // contain '-' and model IDs can contain '/' (Fireworks). We split on the
+  // first slash that follows a registered provider id.
+  for (const providerId of Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]) {
+    if (ref.startsWith(`${providerId}/`)) return providerId
+  }
+  throw new Error(`Unknown provider in model ref: ${ref}`)
+}
+
+// `as const satisfies` narrows each entry's `auth` to a tuple of its specific
+// literal values, which makes `provider.auth.includes('oauth')` fail to
+// compile on api-key-only entries (because TS thinks the array can never
+// contain 'oauth'). These accessors widen the membership check back to
+// AuthMethod so consumers can branch without per-provider casts.
+export function supportsApiKey(provider: { auth: ReadonlyArray<AuthMethod> }): boolean {
+  return (provider.auth as ReadonlyArray<AuthMethod>).includes('api-key')
+}
+
+export function supportsOAuth(provider: { auth: ReadonlyArray<AuthMethod> }): boolean {
+  return (provider.auth as ReadonlyArray<AuthMethod>).includes('oauth')
 }

@@ -14,6 +14,7 @@ export function buildGitignore(config: GitignoreConfig = { append: [] }): string
 # like node_modules/ — reproducible from source, not part of agent state.
 .env
 .env.local
+auth.json
 node_modules/
 packages/*/node_modules/
 workspace/
