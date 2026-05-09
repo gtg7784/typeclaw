@@ -43,7 +43,7 @@ You yourself cannot run `typeclaw restart` — that is a host-stage command and 
 | ------------- | -------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `$schema`     | no       | string           | Path to `typeclaw.schema.json` for editor autocompletion. Scaffolded as `./node_modules/typeclaw/typeclaw.schema.json`. Leave it alone unless the user moves it.                                                                                                                                                                                                                                                                   |
 | `port`        | no       | integer          | 1–65535. Defaults to `8973` (T9 spelling of "TYPE"). Change only if the default collides with something on the user's host. **Restart-required.**                                                                                                                                                                                                                                                                                  |
-| `model`       | no       | string           | Must be one of the values listed in the **Allowed models** section below. Defaults to `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`. **Live-reloadable.**                                                                                                                                                                                                                                                                 |
+| `model`       | no       | string           | Must be one of the values listed in the **Allowed models** section below. Defaults to `openai/gpt-5.4-nano`. **Live-reloadable.**                                                                                                                                                                                                                                                                                                  |
 | `mounts`      | no       | array of objects | Host directories bind-mounted into your container. Defaults to `[]` (no host paths exposed). Omitted from scaffolded `typeclaw.json` — add it only when the user wants host paths exposed. See **Mounts** section below. **Restart-required.**                                                                                                                                                                                     |
 | `plugins`     | no       | array of strings | Plugin package names loaded at server boot. Defaults to `[]`. **Restart-required.** Plugin-owned config blocks live alongside as additional top-level keys; see **Plugin config blocks**.                                                                                                                                                                                                                                          |
 | `alias`       | no       | array of strings | Additional names the agent answers to in channel engagement, on top of the implicit `basename(agentDir)`. Each entry is a non-empty trimmed string matched case-insensitively as a substring of the inbound text. Defaults to `[]`. Hatching populates this with the agent's chosen name. See **Alias** section below. **Live-reloadable.**                                                                                        |
@@ -61,7 +61,7 @@ A scaffolded `typeclaw.json` looks like:
 ```json
 {
   "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
-  "model": "fireworks/accounts/fireworks/routers/kimi-k2p6-turbo"
+  "model": "openai/gpt-5.4-nano"
 }
 ```
 
@@ -93,7 +93,7 @@ Example with mounts:
 ```json
 {
   "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
-  "model": "fireworks/accounts/fireworks/routers/kimi-k2p6-turbo",
+  "model": "openai/gpt-5.4-nano",
   "mounts": [
     { "name": "typeclaw", "path": "~/workspace/typeclaw", "description": "the typeclaw source repo" },
     { "name": "notes", "path": "~/notes", "readOnly": true, "description": "personal notes (read-only)" }
@@ -306,7 +306,7 @@ Default (no `portForward` field at all): forward every LISTEN.
 ```json
 {
   "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
-  "model": "fireworks/accounts/fireworks/routers/kimi-k2p6-turbo"
+  "model": "openai/gpt-5.4-nano"
 }
 ```
 
@@ -516,23 +516,36 @@ Do **not** invent plugin blocks; their existence is determined by the plugins li
 
 ## Allowed models
 
-Today, the model registry contains exactly **one** entry:
+The model registry currently has these entries:
 
-| `model` value                                          | Display name    | Provider  | Notes                                                                  |
-| ------------------------------------------------------ | --------------- | --------- | ---------------------------------------------------------------------- |
-| `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.5 Turbo | Fireworks | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context. |
+| `model` value                                          | Display name    | Provider     | Auth                | Notes                                                                                 |
+| ------------------------------------------------------ | --------------- | ------------ | ------------------- | ------------------------------------------------------------------------------------- |
+| `openai/gpt-5.4-nano`                                  | GPT-5.4 nano    | OpenAI       | API key             | Default. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.          |
+| `openai/gpt-5.4-mini`                                  | GPT-5.4 mini    | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.                   |
+| `openai/gpt-5.4`                                       | GPT-5.4         | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.                  |
+| `openai/gpt-5.5`                                       | GPT-5.5         | OpenAI       | API key             | Flagship. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.        |
+| `openai-codex/gpt-5.4-mini`                            | GPT-5.4 mini    | OpenAI Codex | OAuth (ChatGPT P/P) | Cheaper Codex tier. Requires OAuth login at init. Persisted to `auth.json`. 272K ctx. |
+| `openai-codex/gpt-5.4`                                 | GPT-5.4         | OpenAI Codex | OAuth (ChatGPT P/P) | Codex mid-tier. Requires OAuth login at init. Persisted to `auth.json`. 272K context. |
+| `openai-codex/gpt-5.5`                                 | GPT-5.5         | OpenAI Codex | OAuth (ChatGPT P/P) | Flagship Codex. Requires OAuth login at init. Persisted to `auth.json`. 272K context. |
+| `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.6 Turbo | Fireworks    | API key             | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context.                |
 
-**Do not write any other value into `model`.** The schema enum will reject the file at load, and the runtime will refuse to boot the agent process. If the user names a model that isn't in this table — "switch me to GPT-5", "use Claude" — be honest:
+**Do not write any other value into `model`.** The schema enum will reject the file at load, and the runtime will refuse to boot the agent process. If the user names a model that isn't in this table — "use Claude", "switch to o3" — be honest:
 
-> "Right now my registry only has Kimi K2.5 Turbo on Fireworks. More providers are planned but not wired up yet. If you want a different model, that needs a typeclaw release, not a config edit."
+> "My registry has OpenAI's GPT-5.4 / 5.5 family (API key), the same family via ChatGPT subscription (OAuth Codex), and Fireworks' Kimi K2.6 Turbo. Other providers (Anthropic, etc.) aren't wired up yet — that needs a typeclaw release, not a config edit."
 
 Do **not** edit `typeclaw.json` to a model the registry doesn't know, even if the user insists. That bricks the agent on next restart.
 
 ## Provider credentials
 
-`typeclaw.json` does **not** hold API keys. Credentials live in `./.env` (gitignored). For the only currently-supported model:
+`typeclaw.json` does **not** hold API keys or OAuth tokens. Credentials live in two gitignored files:
 
-- `FIREWORKS_API_KEY` — required for any `fireworks/...` model.
+- **`./.env`** (API key providers): the env var depends on which provider's model you've selected.
+  - `OPENAI_API_KEY` — required for any `openai/...` model.
+  - `FIREWORKS_API_KEY` — required for any `fireworks/...` model.
+- **`./auth.json`** (OAuth providers): structured JSON file managed by `pi-coding-agent`'s `AuthStorage`. Contains refresh + access tokens. The container refreshes tokens on its own with file locking; the host writes once at `typeclaw init` time when the user picks "OAuth (browser login)".
+  - `openai-codex/...` models — credentials persisted as `{ "openai-codex": { "type": "oauth", ... } }`.
+
+If a user wants to switch from API key to OAuth (or vice versa) for a provider that supports both, the easiest path is to delete the relevant entry from `.env` / `auth.json` and re-run `typeclaw init` from inside the agent folder — it'll prompt for the auth method again.
 
 If the user wants to rotate or change the key, edit `.env`, not `typeclaw.json`. After editing `.env`, the same restart rule applies: `typeclaw restart` on the host stage.
 
@@ -604,7 +617,7 @@ Never echo, log, or commit values from `.env`. `.env` is gitignored by default �
 
 1. **Read `typeclaw.json`.** Don't guess from prior conversation — the user may have changed it since you last looked.
 2. Report the `model` field verbatim, plus the human-readable name from the **Allowed models** table.
-3. If `model` is missing from the file, say so and report the default (`fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` → Kimi K2.5 Turbo).
+3. If `model` is missing from the file, say so and report the default (`openai/gpt-5.4-nano` → GPT-5.4 nano).
 
 ## When the user says "switch to <model>"
 

@@ -7,7 +7,13 @@ import { z } from 'zod'
 
 import { channelsSchema } from '@/channels/schema'
 
-import { KNOWN_PROVIDERS, listKnownModelRefs, type KnownModelRef, type KnownProviderId } from './providers'
+import {
+  DEFAULT_MODEL_REF,
+  KNOWN_PROVIDERS,
+  listKnownModelRefs,
+  type KnownModelRef,
+  type KnownProviderId,
+} from './providers'
 
 const CONFIG_FILE = 'typeclaw.json'
 
@@ -102,7 +108,7 @@ export const configSchema = z
   .object({
     $schema: z.string().optional(),
     port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
-    model: z.enum(knownModelRefs).default('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'), // FIXME: TEMP default
+    model: z.enum(knownModelRefs).default(DEFAULT_MODEL_REF),
     // Defaults to `[]` so the field can be omitted from `typeclaw.json` (no
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.
@@ -124,7 +130,7 @@ export const configSchema = z
 
 export type Config = z.infer<typeof configSchema>
 
-export function resolveModel(ref: KnownModelRef): Model<'openai-completions'> {
+export function resolveModel(ref: KnownModelRef): Model<'openai-completions'> | Model<'openai-responses'> {
   // Model IDs can contain '/', so split only on the first separator.
   const slash = ref.indexOf('/')
   const providerId = ref.slice(0, slash) as KnownProviderId

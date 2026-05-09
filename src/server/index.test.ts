@@ -195,6 +195,117 @@ describe('createServer tool event forwarding', () => {
     expect(msg.error).toBe(true)
     ws.close()
   })
+
+  test('forwards assistant message_end with stopReason=error as a TUI error event (LLM-side failures like billing/rate-limit do not throw)', async () => {
+    const session = createFakeSession()
+    const { url } = await startWithSession(session)
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    session.emit({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        api: 'openai-responses',
+        provider: 'openai',
+        model: 'gpt-5.4-nano',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'error',
+        errorMessage: 'Your account is not active, please check your billing details on our website.',
+        timestamp: Date.now(),
+      },
+    } as unknown as SessionEvent)
+
+    const msg = await waitFor((m) => m.type === 'error')
+    if (msg.type !== 'error') throw new Error('unreachable')
+    expect(msg.message).toBe('Your account is not active, please check your billing details on our website.')
+    ws.close()
+  })
+
+  test('falls back to a generic message when stopReason=error has no errorMessage', async () => {
+    const session = createFakeSession()
+    const { url } = await startWithSession(session)
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    session.emit({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        stopReason: 'error',
+        errorMessage: undefined,
+      },
+    } as unknown as SessionEvent)
+
+    const msg = await waitFor((m) => m.type === 'error')
+    if (msg.type !== 'error') throw new Error('unreachable')
+    expect(msg.message).toBe('LLM call failed')
+    ws.close()
+  })
+
+  test('does not surface an error event for non-assistant message_end (user/toolResult)', async () => {
+    const session = createFakeSession()
+    const { url } = await startWithSession(session)
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    let errorSeen = false
+    ws.addEventListener('message', (e) => {
+      const m = JSON.parse(String(e.data)) as ServerMessage
+      if (m.type === 'error') errorSeen = true
+    })
+
+    session.emit({
+      type: 'message_end',
+      message: { role: 'user', content: 'hello', timestamp: Date.now() },
+    } as unknown as SessionEvent)
+
+    // Sentinel: emit a tool_start so we have something to await on; if an
+    // error were fired for the user message it would arrive before this.
+    session.emit({ type: 'tool_execution_start', toolCallId: 'sentinel', toolName: 'Read', args: {} })
+    await waitFor((m) => m.type === 'tool_start')
+
+    expect(errorSeen).toBe(false)
+    ws.close()
+  })
+
+  test('does not surface an error event for stopReason=aborted (TUI shows abort feedback elsewhere)', async () => {
+    const session = createFakeSession()
+    const { url } = await startWithSession(session)
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    let errorSeen = false
+    ws.addEventListener('message', (e) => {
+      const m = JSON.parse(String(e.data)) as ServerMessage
+      if (m.type === 'error') errorSeen = true
+    })
+
+    session.emit({
+      type: 'message_end',
+      message: {
+        role: 'assistant',
+        content: [],
+        stopReason: 'aborted',
+        errorMessage: 'Request was aborted',
+      },
+    } as unknown as SessionEvent)
+
+    session.emit({ type: 'tool_execution_start', toolCallId: 'sentinel-2', toolName: 'Read', args: {} })
+    await waitFor((m) => m.type === 'tool_start')
+
+    expect(errorSeen).toBe(false)
+    ws.close()
+  })
 })
 
 describe('createServer abort handling (no stream — fallback path)', () => {

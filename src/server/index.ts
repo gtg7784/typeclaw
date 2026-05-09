@@ -274,6 +274,16 @@ function forwardSessionEvents(ws: Ws, session: AgentSession): void {
           send(ws, { type: 'text_delta', delta: event.assistantMessageEvent.delta })
         }
         break
+      case 'message_end':
+        // pi-coding-agent encodes upstream LLM failures (billing, rate limit,
+        // network, malformed response, etc.) in the assistant message itself
+        // rather than throwing — `stopReason: 'error'` with a populated
+        // `errorMessage`. Without this branch the user sees an empty turn
+        // because no text deltas were ever emitted, which looks like a freeze.
+        // The server's existing try/catch around `session.prompt()` only
+        // catches throws, so it never sees these.
+        forwardAssistantError(ws, event.message)
+        break
       case 'tool_execution_start':
         toolStartedAt.set(event.toolCallId, Date.now())
         send(ws, {
@@ -299,6 +309,18 @@ function forwardSessionEvents(ws: Ws, session: AgentSession): void {
       }
     }
   })
+}
+
+function forwardAssistantError(ws: Ws, message: unknown): void {
+  if (typeof message !== 'object' || message === null) return
+  const m = message as { role?: string; stopReason?: string; errorMessage?: string }
+  if (m.role !== 'assistant') return
+  if (m.stopReason !== 'error' && m.stopReason !== 'aborted') return
+  // 'aborted' is fired when the user hits Escape — don't surface it as an
+  // error message because the TUI already shows abort feedback elsewhere.
+  if (m.stopReason === 'aborted') return
+  const text = typeof m.errorMessage === 'string' && m.errorMessage.length > 0 ? m.errorMessage : 'LLM call failed'
+  send(ws, { type: 'error', message: text })
 }
 
 function enqueuePrompt(ws: Ws, state: SessionState, msg: StreamMessage): void {

@@ -26,6 +26,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.production.local
 .env.local
 
+# Test artifacts: AuthStorage.create() writes auth.json to process.cwd().
+# Tests chdir to a tmpdir, but defense in depth — never check this in.
+auth.json
+
 # caches
 .eslintcache
 .cache

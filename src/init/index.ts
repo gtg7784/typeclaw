@@ -4,12 +4,14 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { config, configSchema, type Config } from '@/config'
+import { DEFAULT_MODEL_REF, KNOWN_PROVIDERS, providerForModelRef, type KnownModelRef } from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
 import { createTui } from '@/tui'
 
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { HATCHING_PROMPT } from './hatching'
+import type { OAuthLoginRunner, OAuthLoginResult } from './oauth-login'
 import { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 
 export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
@@ -34,13 +36,23 @@ export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason
 export type DockerAssetsResult = { ok: true; devMode: boolean } | { ok: false; reason: string }
 export type HatchingResult = { ok: true } | { ok: false; reason: string }
 
-export type InitStep = 'preflight' | 'scaffold' | 'kakaotalk-auth' | 'install' | 'dockerfile' | 'git' | 'hatching'
+export type InitStep =
+  | 'preflight'
+  | 'oauth-login'
+  | 'scaffold'
+  | 'kakaotalk-auth'
+  | 'install'
+  | 'dockerfile'
+  | 'git'
+  | 'hatching'
 
 export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
 
 export type InitStepEvent =
   | { step: 'preflight'; phase: 'start' }
   | { step: 'preflight'; phase: 'done'; result: DockerAvailability }
+  | { step: 'oauth-login'; phase: 'start' }
+  | { step: 'oauth-login'; phase: 'done'; result: OAuthLoginResult }
   | { step: 'scaffold'; phase: 'start' }
   | { step: 'scaffold'; phase: 'done' }
   | { step: 'kakaotalk-auth'; phase: 'start' }
@@ -58,9 +70,23 @@ export type HatchRunner = (options: { cwd: string; port: number }) => Promise<Ha
 
 export type KakaotalkAuthRunner = (options: { cwd: string }) => Promise<KakaotalkAuthResult>
 
+// Discriminated by `kind` so the type system enforces "you can't pass an
+// API key to an OAuth provider, and you can't pass an OAuth runner to an
+// API-key provider". Optional model defaults to DEFAULT_MODEL_REF, which is
+// an OpenAI api-key provider — so test fixtures that omit both fields keep
+// working under the api-key path.
+export type LLMAuth = { kind: 'api-key'; apiKey: string } | { kind: 'oauth'; runLogin: OAuthLoginRunner }
+
 export type InitOptions = {
   cwd: string
-  apiKey: string
+  // Selected `provider/model` ref written into typeclaw.json. Defaults to
+  // DEFAULT_MODEL_REF when callers (or older test fixtures) omit it.
+  model?: KnownModelRef
+  // How the agent will authenticate to the LLM provider. When omitted,
+  // defaults to the api-key path with `apiKey` (legacy field, still
+  // supported for backwards compat with the old `runInit` signature).
+  llmAuth?: LLMAuth
+  apiKey?: string
   discordBotToken?: string
   discordAllowAll?: boolean
   slackBotToken?: string
@@ -79,6 +105,8 @@ export type InitOptions = {
 export async function runInit({
   cwd,
   apiKey,
+  llmAuth,
+  model = DEFAULT_MODEL_REF,
   discordBotToken,
   discordAllowAll = true,
   slackBotToken,
@@ -105,11 +133,35 @@ export async function runInit({
   emit({ step: 'preflight', phase: 'done', result: preflight })
   if (!preflight.ok) return
 
+  // Resolve the auth contract: explicit `llmAuth` wins; otherwise, fall back
+  // to the legacy `apiKey` field (api-key path). Throwing here instead of
+  // proceeding with bad data prevents writing a half-initialized agent
+  // folder for a doomed config.
+  const resolvedAuth = resolveLLMAuth(llmAuth, apiKey)
+
+  // OAuth login runs BEFORE scaffold so a failed/aborted browser flow leaves
+  // the user's directory untouched (same rationale as the docker preflight).
+  // Same trap as kakaotalk-auth: scaffold-then-fail-auth would leave
+  // typeclaw.json without working credentials and the runtime would silently
+  // refuse to boot. The login itself doesn't need the agent folder to exist
+  // — pi-ai's OAuth helper just needs a writable path for auth.json, which
+  // we create on demand inside scaffold().
+  if (resolvedAuth.kind === 'oauth') {
+    emit({ step: 'oauth-login', phase: 'start' })
+    await mkdir(cwd, { recursive: true })
+    const result = await resolvedAuth.runLogin({ cwd, model })
+    emit({ step: 'oauth-login', phase: 'done', result })
+    if (!result.ok) {
+      throw new Error(`OAuth login failed: ${result.reason}`)
+    }
+  }
+
   const wantsDiscord = discordBotToken !== undefined && discordBotToken !== ''
   const wantsSlack = slackBotToken !== undefined && slackBotToken !== ''
   const wantsTelegram = telegramBotToken !== undefined && telegramBotToken !== ''
   emit({ step: 'scaffold', phase: 'start' })
   await scaffold(cwd, {
+    model,
     withDiscord: wantsDiscord,
     discordAllowAll,
     withSlack: wantsSlack,
@@ -119,8 +171,12 @@ export async function runInit({
     withKakaotalk,
     kakaotalkAllowAll,
   })
+  // Only write the LLM API key on the api-key path. OAuth providers persist
+  // their credentials to auth.json (via the OAuth login step above); writing
+  // an empty FIREWORKS_API_KEY/OPENAI_API_KEY would just confuse users.
   await writeSecrets(cwd, {
-    fireworksApiKey: apiKey,
+    model,
+    apiKey: resolvedAuth.kind === 'api-key' ? resolvedAuth.apiKey : undefined,
     discordBotToken,
     slackBotToken,
     slackAppToken,
@@ -261,6 +317,7 @@ export async function isHatched(dir: string): Promise<boolean> {
 }
 
 export type ScaffoldOptions = {
+  model?: KnownModelRef
   withDiscord?: boolean
   discordAllowAll?: boolean
   withSlack?: boolean
@@ -281,9 +338,6 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   // immediately populated, so packages/ is the only one that needs this.
   await writeFile(join(root, PACKAGES_DIR, GITKEEP_FILE), '', { flag: 'wx' }).catch(ignoreExists)
 
-  // TODO: hardcoded model. Mirror src/config/index.ts until the config loader
-  // and provider registry exist (TypeClaw.md Phase 1 + Phase 4).
-  //
   // Only fields without sensible defaults elsewhere are emitted. `mounts`
   // defaults to `[]` in configSchema, and the bundled memory plugin owns its
   // own defaults in plugins/memory/index.ts — re-emitting either here would
@@ -291,7 +345,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   // truth.
   const config: Record<string, unknown> = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
-    model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+    model: options.model ?? DEFAULT_MODEL_REF,
   }
   const channels: Record<string, { allow: string[] }> = {}
   if (options.withDiscord) channels['discord-bot'] = { allow: options.discordAllowAll === false ? [] : ['*'] }
@@ -469,28 +523,36 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
   }
 }
 
-// TODO: generalize to arbitrary provider secrets and switch to secrets.json
-// (per TypeClaw.md spec) once the provider registry exists. Currently hardcoded
-// to FIREWORKS_API_KEY in .env to match src/agent/auth.ts. Optional channel
-// adapter tokens (DISCORD_BOT_TOKEN, SLACK_BOT_TOKEN, SLACK_APP_TOKEN,
-// TELEGRAM_BOT_TOKEN) are appended when provided.
+// Writes the LLM provider's API key (under its provider-specific env var,
+// e.g. OPENAI_API_KEY or FIREWORKS_API_KEY) plus any channel adapter tokens.
+// The provider env var is resolved from KNOWN_PROVIDERS via the model ref,
+// so adding a new provider only requires touching providers.ts.
 export async function writeSecrets(
   root: string,
   {
-    fireworksApiKey,
+    model = DEFAULT_MODEL_REF,
+    apiKey,
     discordBotToken,
     slackBotToken,
     slackAppToken,
     telegramBotToken,
   }: {
-    fireworksApiKey: string
+    model?: KnownModelRef
+    // Omitted on the OAuth path — credentials live in auth.json instead. The
+    // .env file still gets written for any channel adapter tokens.
+    apiKey?: string
     discordBotToken?: string
     slackBotToken?: string
     slackAppToken?: string
     telegramBotToken?: string
   },
 ): Promise<void> {
-  const lines = [`FIREWORKS_API_KEY=${fireworksApiKey}`]
+  const providerId = providerForModelRef(model)
+  const apiKeyEnv = KNOWN_PROVIDERS[providerId].apiKeyEnv
+  const lines: string[] = []
+  if (apiKey !== undefined && apiKeyEnv !== null) {
+    lines.push(`${apiKeyEnv}=${apiKey}`)
+  }
   if (discordBotToken !== undefined && discordBotToken !== '') {
     lines.push(`DISCORD_BOT_TOKEN=${discordBotToken}`)
   }
@@ -503,7 +565,16 @@ export async function writeSecrets(
   if (telegramBotToken !== undefined && telegramBotToken !== '') {
     lines.push(`TELEGRAM_BOT_TOKEN=${telegramBotToken}`)
   }
-  await writeFile(join(root, SECRETS_FILE), `${lines.join('\n')}\n`)
+  // Always write .env even when empty so existing callers that read it
+  // post-init (channel `add`, runtime startup) don't ENOENT-crash.
+  const body = lines.length > 0 ? `${lines.join('\n')}\n` : ''
+  await writeFile(join(root, SECRETS_FILE), body)
+}
+
+function resolveLLMAuth(llmAuth: LLMAuth | undefined, apiKey: string | undefined): LLMAuth {
+  if (llmAuth) return llmAuth
+  if (apiKey !== undefined) return { kind: 'api-key', apiKey }
+  throw new Error('runInit requires either `llmAuth` or `apiKey`')
 }
 
 function ignoreExists(error: NodeJS.ErrnoException): void {

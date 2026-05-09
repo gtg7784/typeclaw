@@ -10,7 +10,7 @@ let root: string
 beforeEach(async () => {
   root = await mkdtemp(join(tmpdir(), 'typeclaw-add-channel-'))
   await scaffold(root)
-  await writeSecrets(root, { fireworksApiKey: 'fw_existing' })
+  await writeSecrets(root, { apiKey: 'fw_existing', model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
 })
 
 afterEach(async () => {
