@@ -20,7 +20,6 @@ This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` 
 | -------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `memory.idleMs`            | `10000`            | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`.                                                                                                   |
 | `memory.bufferBytes`       | `100000`           | Size-based ceiling: spawns `memory-logger` when the transcript grows by this many bytes since the last run, even during continuous activity. `0` disables. Minimum `10000` when non-zero. |
-| `memory.spawnTimeoutMs`    | `60000`            | Per-spawn ceiling on `memory-logger`. A non-settling spawn rejects after this window so the plugin's serialized chain (`spawnChain`) cannot wedge across sessions. Minimum `1`.           |
 | `memory.dreaming`          | `{}` (cron job on) | Dreaming cron job is always registered. Override `schedule` to change when it fires.                                                                                                      |
 | `memory.dreaming.schedule` | `"0 4 * * *"`      | Five-field cron expression. Applies whether `memory.dreaming` is omitted, empty, or explicitly set. Second-level schedules are rejected to avoid noisy no-op dreaming loops.              |
 

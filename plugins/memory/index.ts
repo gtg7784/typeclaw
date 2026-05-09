@@ -18,10 +18,16 @@ const DEFAULT_DREAMING_SCHEDULE = '0 4 * * *'
 // Hard ceiling on a single memory-logger spawn. The chain serializes spawns
 // per agent, so a non-settling spawn would otherwise wedge every subsequent
 // fire — including the session.end hook path that gates cron consumer's
-// inFlight cleanup. 60s matches END_HANDLER_TIMEOUT_MS so the inner spawn
-// rejects before the outer hook ceiling fires, surfacing attribution to the
-// memory plugin's logger instead of a generic hook timeout.
-const SPAWN_TIMEOUT_MS = 60_000
+// inFlight cleanup. Set strictly below END_HANDLER_TIMEOUT_MS so the inner
+// spawn rejects first and the memory plugin's logger gets the attribution
+// instead of the generic hook ceiling.
+//
+// The bound detaches the orphaned spawn from the chain; it does not cancel
+// the underlying subagent session. ctx.spawnSubagent returns Promise<void>
+// with no handle, and pi-coding-agent's session.prompt accepts no
+// AbortSignal, so the half-open LLM stream stays alive until the OS reaps
+// it. The chain advances and cron resumes; the network defect is upstream.
+const SPAWN_TIMEOUT_MS = 50_000
 
 function isValidCronExpression(schedule: string): boolean {
   try {
@@ -62,6 +68,10 @@ const memoryConfigSchema = z
         message: `memory.bufferBytes must be 0 (disabled) or >= ${MIN_BUFFER_BYTES}`,
       })
       .default(DEFAULT_BUFFER_BYTES),
+    // Test seam: per-spawn ceiling for memory-logger. Operators have no
+    // reason to tune this; it exists so the wedge-recovery test can fire
+    // the timeout in milliseconds instead of the production 50s. Kept
+    // undocumented for users.
     spawnTimeoutMs: z.number().int().min(1).default(SPAWN_TIMEOUT_MS),
     dreaming: dreamingConfigSchema.optional(),
   })
