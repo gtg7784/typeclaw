@@ -34,7 +34,7 @@ describe('startAgent + plugin loading', () => {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -62,7 +62,7 @@ describe('startAgent + plugin loading', () => {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -86,7 +86,7 @@ describe('startAgent + plugin loading', () => {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -134,7 +134,7 @@ export default {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -157,7 +157,7 @@ export default {
     agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-e2e-'))
     await writeFile(
       join(agentDir, 'typeclaw.json'),
-      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo' }),
+      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
     )
 
     running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
@@ -177,7 +177,7 @@ export default {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -208,7 +208,7 @@ export default {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
         plugins: ['./plugin.ts'],
       }),
     )
@@ -288,7 +288,7 @@ export default {
     await writeFile(
       join(agentDir, 'typeclaw.json'),
       JSON.stringify({
-        model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+        model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
         plugins: ['./plugin.ts'],
         plugin: { magicNumber: 7 },
       }),

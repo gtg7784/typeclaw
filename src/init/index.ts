@@ -291,7 +291,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   // truth.
   const config: Record<string, unknown> = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
-    model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+    model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
   }
   const channels: Record<string, { allow: string[] }> = {}
   if (options.withDiscord) channels['discord-bot'] = { allow: options.discordAllowAll === false ? [] : ['*'] }

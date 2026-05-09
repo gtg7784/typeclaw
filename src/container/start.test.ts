@@ -62,7 +62,7 @@ type ScaffoldedConfig = {
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
   const config = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
-    model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo',
+    model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
     mounts: overrides.mounts ?? [],
     ...(overrides.dockerfile ? { dockerfile: overrides.dockerfile } : {}),
     ...(overrides.gitignore ? { gitignore: overrides.gitignore } : {}),
@@ -384,7 +384,7 @@ describe('planStart mounts', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeFile(
       join(root, 'typeclaw.json'),
-      `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo' })}\n`,
+      `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })}\n`,
     )
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })

@@ -102,7 +102,7 @@ export const configSchema = z
   .object({
     $schema: z.string().optional(),
     port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
-    model: z.enum(knownModelRefs).default('fireworks/accounts/fireworks/routers/kimi-k2p5-turbo'), // FIXME: TEMP default
+    model: z.enum(knownModelRefs).default('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'), // FIXME: TEMP default
     // Defaults to `[]` so the field can be omitted from `typeclaw.json` (no
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.

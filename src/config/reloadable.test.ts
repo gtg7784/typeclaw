@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { __resetConfigForTesting, configSchema, FIELD_EFFECTS, getConfig } from './config'
 import { createConfigReloadable } from './reloadable'
 
-const VALID_MODEL_A = 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo'
+const VALID_MODEL_A = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
 
 describe('createConfigReloadable', () => {
   let cwd: string

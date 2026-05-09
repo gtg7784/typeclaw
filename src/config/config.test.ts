@@ -16,7 +16,7 @@ import {
 
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 
-const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p5-turbo'
+const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
 
 describe('configSchema', () => {
   test('defaults mounts to [] when omitted (predating the field is fine)', () => {

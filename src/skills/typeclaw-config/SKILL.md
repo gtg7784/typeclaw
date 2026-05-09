@@ -43,7 +43,7 @@ You yourself cannot run `typeclaw restart` — that is a host-stage command and 
 | ------------- | -------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `$schema`     | no       | string           | Path to `typeclaw.schema.json` for editor autocompletion. Scaffolded as `./node_modules/typeclaw/typeclaw.schema.json`. Leave it alone unless the user moves it.                                                                                                                                                                                                                                                                   |
 | `port`        | no       | integer          | 1–65535. Defaults to `8973` (T9 spelling of "TYPE"). Change only if the default collides with something on the user's host. **Restart-required.**                                                                                                                                                                                                                                                                                  |
-| `model`       | no       | string           | Must be one of the values listed in the **Allowed models** section below. Defaults to `fireworks/accounts/fireworks/routers/kimi-k2p5-turbo`. **Live-reloadable.**                                                                                                                                                                                                                                                                 |
+| `model`       | no       | string           | Must be one of the values listed in the **Allowed models** section below. Defaults to `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo`. **Live-reloadable.**                                                                                                                                                                                                                                                                 |
 | `mounts`      | no       | array of objects | Host directories bind-mounted into your container. Defaults to `[]` (no host paths exposed). Omitted from scaffolded `typeclaw.json` — add it only when the user wants host paths exposed. See **Mounts** section below. **Restart-required.**                                                                                                                                                                                     |
 | `plugins`     | no       | array of strings | Plugin package names loaded at server boot. Defaults to `[]`. **Restart-required.** Plugin-owned config blocks live alongside as additional top-level keys; see **Plugin config blocks**.                                                                                                                                                                                                                                          |
 | `alias`       | no       | array of strings | Additional names the agent answers to in channel engagement, on top of the implicit `basename(agentDir)`. Each entry is a non-empty trimmed string matched case-insensitively as a substring of the inbound text. Defaults to `[]`. Hatching populates this with the agent's chosen name. See **Alias** section below. **Live-reloadable.**                                                                                        |
@@ -61,7 +61,7 @@ A scaffolded `typeclaw.json` looks like:
 ```json
 {
   "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
-  "model": "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo"
+  "model": "fireworks/accounts/fireworks/routers/kimi-k2p6-turbo"
 }
 ```
 
@@ -93,7 +93,7 @@ Example with mounts:
 ```json
 {
   "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
-  "model": "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo",
+  "model": "fireworks/accounts/fireworks/routers/kimi-k2p6-turbo",
   "mounts": [
     { "name": "typeclaw", "path": "~/workspace/typeclaw", "description": "the typeclaw source repo" },
     { "name": "notes", "path": "~/notes", "readOnly": true, "description": "personal notes (read-only)" }
@@ -306,7 +306,7 @@ Default (no `portForward` field at all): forward every LISTEN.
 ```json
 {
   "$schema": "./node_modules/typeclaw/typeclaw.schema.json",
-  "model": "fireworks/accounts/fireworks/routers/kimi-k2p5-turbo"
+  "model": "fireworks/accounts/fireworks/routers/kimi-k2p6-turbo"
 }
 ```
 
@@ -520,7 +520,7 @@ Today, the model registry contains exactly **one** entry:
 
 | `model` value                                          | Display name    | Provider  | Notes                                                                  |
 | ------------------------------------------------------ | --------------- | --------- | ---------------------------------------------------------------------- |
-| `fireworks/accounts/fireworks/routers/kimi-k2p5-turbo` | Kimi K2.5 Turbo | Fireworks | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context. |
+| `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.5 Turbo | Fireworks | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context. |
 
 **Do not write any other value into `model`.** The schema enum will reject the file at load, and the runtime will refuse to boot the agent process. If the user names a model that isn't in this table — "switch me to GPT-5", "use Claude" — be honest:
 
@@ -604,7 +604,7 @@ Never echo, log, or commit values from `.env`. `.env` is gitignored by default �
 
 1. **Read `typeclaw.json`.** Don't guess from prior conversation — the user may have changed it since you last looked.
 2. Report the `model` field verbatim, plus the human-readable name from the **Allowed models** table.
-3. If `model` is missing from the file, say so and report the default (`fireworks/accounts/fireworks/routers/kimi-k2p5-turbo` → Kimi K2.5 Turbo).
+3. If `model` is missing from the file, say so and report the default (`fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` → Kimi K2.5 Turbo).
 
 ## When the user says "switch to <model>"
 
