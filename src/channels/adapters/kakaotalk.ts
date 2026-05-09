@@ -55,15 +55,30 @@ export type KakaotalkAdapterOptions = {
   scheduleRecovery?: (fn: () => void, delayMs: number) => void
 }
 
-// LOCO server emits KICKOUT when the same device_uuid logs in elsewhere.
-// During the post-init handoff (init authenticates → leaves a session
-// briefly → first container start re-logs in with the same UUID) we
-// kick OURSELVES, then a one-shot auto-restart resolves it. Outside that
-// window, we treat KICKOUT as a real cross-device login and stay dead so
-// we don't loop-fight the other device. 30s is the empirical post-init
-// window; widen if init grows slower bootstrap steps.
-const KICKOUT_RECOVERY_WINDOW_MS = 30_000
-const KICKOUT_RECOVERY_DELAY_MS = 2_000
+// LOCO emits KICKOUT when the same device_uuid logs in elsewhere. Three
+// shapes converge on this one signal:
+//   1. Init handoff — `typeclaw init` left a brief session that the
+//      container's re-login kicks. One delayed reconnect resolves it.
+//   2. Ghost session — a previous run's LOCO connection is still
+//      half-alive server-side and ping-pongs with our reconnect for
+//      ~1-2 minutes until it times out. Old one-shot recovery
+//      reconnected once, got kicked again, and died — the bug this
+//      state machine exists to fix.
+//   3. Real conflict — another device or process holds the same
+//      device_uuid. Our retries can't win this fight; we should give up
+//      cleanly so the user notices and intervenes.
+// One signal, three shapes: we always try to recover, but with a
+// strictly bounded budget. Within an episode we allow KICKOUT_RECOVERY_
+// _DELAYS_MS.length retries spaced by the listed delays; an episode is
+// declared successful only after the reconnect stays connected for
+// SUCCESS_MS (bare `connected` is too weak — ghost ping-pong reconnects
+// for seconds before getting kicked again). Past the budget or the
+// MAX_ELAPSED cap we let the session die. After a successful episode
+// the state resets, so a fresh KICKOUT hours later gets a fresh
+// episode rather than being permanently locked out.
+const KICKOUT_RECOVERY_SUCCESS_MS = 60_000
+const KICKOUT_RECOVERY_MAX_ELAPSED_MS = 5 * 60_000
+const KICKOUT_RECOVERY_DELAYS_MS: readonly number[] = [2_000, 10_000, 60_000]
 
 export type KakaotalkAdapter = {
   start: () => Promise<void>
@@ -203,9 +218,19 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
   let connected = false
   let started = false
   let lastConnectedAt: number | null = null
-  let kickoutRecoveryAttempted = false
   let inflightInbounds = 0
   let stopWaiters: Array<() => void> = []
+
+  type RecoveryEpisode = {
+    startedAt: number
+    attemptCount: number
+    pendingStabilityCheck: boolean
+  }
+  let recoveryEpisode: RecoveryEpisode | null = null
+
+  const resetRecoveryEpisode = (): void => {
+    recoveryEpisode = null
+  }
 
   const channelResolver = createKakaoChannelResolver({ client, logger })
   const authorResolver = createKakaoAuthorResolver({ client })
@@ -284,7 +309,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       if (started) return
       started = true
       lastConnectedAt = null
-      kickoutRecoveryAttempted = false
+      resetRecoveryEpisode()
       try {
         if (options.credentialsDir !== undefined) {
           // Explicit credential path: read the file ourselves and pass the
@@ -335,10 +360,27 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
 
       listener = options.listenerFactory ? options.listenerFactory(client) : new KakaoTalkListener(client)
       const activeListener = listener
+      const scheduleStabilityCheck = (): void => {
+        if (recoveryEpisode === null) return
+        if (recoveryEpisode.pendingStabilityCheck) return
+        recoveryEpisode.pendingStabilityCheck = true
+        const expectedConnectedAt = lastConnectedAt
+        scheduleRecovery(() => {
+          if (recoveryEpisode === null) return
+          recoveryEpisode.pendingStabilityCheck = false
+          if (!started || listener !== activeListener) return
+          if (!connected || lastConnectedAt !== expectedConnectedAt) return
+          logger.info(
+            `[kakaotalk] KICKOUT recovery episode succeeded after ${recoveryEpisode.attemptCount} attempt(s); session is stable.`,
+          )
+          resetRecoveryEpisode()
+        }, KICKOUT_RECOVERY_SUCCESS_MS)
+      }
       listener.on('connected', (info) => {
         connected = true
         lastConnectedAt = now()
         logger.info(`[kakaotalk] connected (user_id=${info.userId})`)
+        if (recoveryEpisode !== null) scheduleStabilityCheck()
       })
       listener.on('disconnected', () => {
         connected = false
@@ -347,34 +389,46 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       listener.on('error', (err) => {
         logger.error(`[kakaotalk] listener error: ${describe(err)}`)
         if (!isKickoutError(err)) return
-        // KICKOUT is fatal at the SDK layer: it sets running=false, closes
-        // the session, and skips scheduleReconnect. Without intervention
-        // the adapter goes silent indefinitely. We have to recover here
-        // or surface the dead-listener state to the user explicitly.
+        // KICKOUT closes the SDK session and skips scheduleReconnect, so
+        // without intervention the adapter goes silent. We must either
+        // start/continue a recovery episode or surface the dead state.
         connected = false
-        const elapsed = lastConnectedAt === null ? Infinity : now() - lastConnectedAt
-        const withinPostInitWindow = elapsed <= KICKOUT_RECOVERY_WINDOW_MS
-        if (!started || kickoutRecoveryAttempted || !withinPostInitWindow) {
+        if (!started) return
+        const tNow = now()
+        if (recoveryEpisode === null) {
+          recoveryEpisode = { startedAt: tNow, attemptCount: 0, pendingStabilityCheck: false }
+        }
+        const episode = recoveryEpisode
+        const elapsedInEpisode = tNow - episode.startedAt
+        const nextAttemptIndex = episode.attemptCount
+        const delayMs = KICKOUT_RECOVERY_DELAYS_MS[nextAttemptIndex]
+        if (delayMs === undefined || elapsedInEpisode + delayMs > KICKOUT_RECOVERY_MAX_ELAPSED_MS) {
+          const reason =
+            delayMs === undefined
+              ? `${KICKOUT_RECOVERY_DELAYS_MS.length} attempt(s) exhausted`
+              : `${Math.round(KICKOUT_RECOVERY_MAX_ELAPSED_MS / 1000)}s recovery budget exhausted`
           logger.error(
-            '[kakaotalk] session is DEAD after KICKOUT and will not auto-recover. ' +
-              'Likely cause: another device or process is logged into this KakaoTalk account ' +
-              'with the same device_uuid. Run `typeclaw restart` once you have ensured no other ' +
-              'session is using these credentials, or re-run `typeclaw init` to mint a new device_uuid.',
+            `[kakaotalk] session is DEAD after KICKOUT — ${reason}. ` +
+              'Likely a real cross-device login is fighting our session. ' +
+              'Stop the other client, then run `typeclaw restart`. ' +
+              'If the conflict persists, re-run `typeclaw init` to mint a new device_uuid.',
           )
+          resetRecoveryEpisode()
           return
         }
-        kickoutRecoveryAttempted = true
+        episode.attemptCount = nextAttemptIndex + 1
         logger.warn(
-          `[kakaotalk] KICKOUT received ${Math.round(elapsed)}ms after connect — likely the post-init session handoff. Auto-restarting listener once in ${KICKOUT_RECOVERY_DELAY_MS}ms.`,
+          `[kakaotalk] KICKOUT during recovery episode (attempt ${episode.attemptCount}/${KICKOUT_RECOVERY_DELAYS_MS.length}, episode_elapsed=${Math.round(elapsedInEpisode)}ms); reconnecting in ${delayMs}ms.`,
         )
         scheduleRecovery(() => {
           if (!started || listener !== activeListener) return
+          if (recoveryEpisode !== episode) return
           activeListener.start().catch((retryErr) => {
             logger.error(
               `[kakaotalk] KICKOUT auto-recovery failed: ${describe(retryErr)}. Run \`typeclaw restart\` to retry.`,
             )
           })
-        }, KICKOUT_RECOVERY_DELAY_MS)
+        }, delayMs)
       })
       listener.on('message', (event) => {
         void handleMessageEvent(event)
@@ -426,7 +480,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       selfUserId = null
       connected = false
       lastConnectedAt = null
-      kickoutRecoveryAttempted = false
+      resetRecoveryEpisode()
     },
 
     isConnected(): boolean {
