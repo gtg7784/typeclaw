@@ -69,12 +69,15 @@ export function createScheduler({
     const job = currentEnabled(id)
     if (!job) return
 
-    const nextFire = computeNextFire(job, clock.now())
-    if (nextFire === null) return
+    const result = computeNextFire(job, clock.now())
+    if (!result.ok) {
+      logger.warn(`[cron] ${id} not scheduled: invalid schedule "${job.schedule}"${tzSuffix(job)}: ${result.reason}`)
+      return
+    }
 
     cancel(id)
 
-    const delay = Math.max(0, nextFire - clock.now())
+    const delay = Math.max(0, result.nextFire - clock.now())
     const handle = clock.setTimeout(() => {
       handles.delete(id)
       if (!started) return
@@ -177,14 +180,21 @@ function jobPayload(job: CronJob): unknown {
   return job.command
 }
 
-function computeNextFire(job: CronJob, now: number): number | null {
+type ComputeNextFireResult = { ok: true; nextFire: number } | { ok: false; reason: string }
+
+function computeNextFire(job: CronJob, now: number): ComputeNextFireResult {
   try {
     const expr = CronExpressionParser.parse(job.schedule, {
       currentDate: new Date(now),
       ...(job.timezone ? { tz: job.timezone } : {}),
     })
-    return expr.next().getTime()
-  } catch {
-    return null
+    return { ok: true, nextFire: expr.next().getTime() }
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    return { ok: false, reason }
   }
+}
+
+function tzSuffix(job: CronJob): string {
+  return job.timezone ? ` (timezone "${job.timezone}")` : ''
 }

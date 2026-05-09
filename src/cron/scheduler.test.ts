@@ -533,3 +533,115 @@ describe('Scheduler.replaceJobs', () => {
     sched.stop()
   })
 })
+
+describe('schedule failure surfacing', () => {
+  function createCapturingLogger(): SchedulerLogger & { warns: string[]; errors: string[] } {
+    const warns: string[] = []
+    const errors: string[] = []
+    return {
+      info: () => {},
+      warn: (m) => warns.push(m),
+      error: (m) => errors.push(m),
+      warns,
+      errors,
+    }
+  }
+
+  test('logs a warning naming the job id and parse error when schedule cannot be parsed', () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const logger = createCapturingLogger()
+    const scheduler = createScheduler({
+      jobs: [promptJob('broken', 'not a real schedule')],
+      onFire: recorder.onFire,
+      clock,
+      logger,
+    })
+
+    scheduler.start()
+
+    expect(logger.warns).toHaveLength(1)
+    expect(logger.warns[0]).toContain('broken')
+    expect(logger.warns[0]).toMatch(/schedule|parse|invalid/i)
+
+    scheduler.stop()
+  })
+
+  test('logs a warning when timezone is unresolvable at runtime', () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const logger = createCapturingLogger()
+    const scheduler = createScheduler({
+      jobs: [promptJob('bad-tz', '* * * * *', { timezone: 'Not/A_Real_Zone' })],
+      onFire: recorder.onFire,
+      clock,
+      logger,
+    })
+
+    scheduler.start()
+
+    expect(logger.warns).toHaveLength(1)
+    expect(logger.warns[0]).toContain('bad-tz')
+    expect(logger.warns[0]).toContain('Not/A_Real_Zone')
+  })
+
+  test('a single broken schedule does not block sibling jobs from firing', async () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const logger = createCapturingLogger()
+    const scheduler = createScheduler({
+      jobs: [promptJob('broken', 'not a real schedule'), promptJob('healthy', '* * * * *')],
+      onFire: recorder.onFire,
+      clock,
+      logger,
+    })
+
+    scheduler.start()
+    await clock.advance(60 * 1000 + 100)
+
+    expect(recorder.fires.map((c) => c.id)).toEqual(['healthy'])
+    expect(logger.warns.some((w) => w.includes('broken'))).toBe(true)
+
+    scheduler.stop()
+  })
+
+  test('replaceJobs warns when an added job has an unparseable schedule', () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const logger = createCapturingLogger()
+    const scheduler = createScheduler({
+      jobs: [promptJob('healthy', '* * * * *')],
+      onFire: recorder.onFire,
+      clock,
+      logger,
+    })
+    scheduler.start()
+    expect(logger.warns).toHaveLength(0)
+
+    scheduler.replaceJobs([promptJob('healthy', '* * * * *'), promptJob('broken', 'not a real schedule')])
+
+    expect(logger.warns.some((w) => w.includes('broken'))).toBe(true)
+
+    scheduler.stop()
+  })
+
+  test('warning is emitted only once per scheduling attempt, not on every reload of an unchanged broken job', () => {
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const logger = createCapturingLogger()
+    const scheduler = createScheduler({
+      jobs: [promptJob('broken', 'not a real schedule')],
+      onFire: recorder.onFire,
+      clock,
+      logger,
+    })
+    scheduler.start()
+    const warnsAfterStart = logger.warns.length
+
+    scheduler.replaceJobs([promptJob('broken', 'not a real schedule')])
+
+    expect(logger.warns.length).toBe(warnsAfterStart)
+
+    scheduler.stop()
+  })
+})
