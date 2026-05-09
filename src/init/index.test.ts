@@ -427,14 +427,14 @@ describe('runInit', () => {
 
     await runInit({
       cwd: root,
-      model: 'openai-codex/gpt-5.3-codex',
+      model: 'openai-codex/gpt-5.5',
       llmAuth: { kind: 'oauth', runLogin: fakeLogin },
       runHatching: okHatch,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
     })
 
-    expect(calls).toEqual([{ cwd: root, model: 'openai-codex/gpt-5.3-codex', providerId: 'openai-codex' }])
+    expect(calls).toEqual([{ cwd: root, model: 'openai-codex/gpt-5.5', providerId: 'openai-codex' }])
     expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
       'preflight:start',
       'preflight:done',
@@ -461,7 +461,7 @@ describe('runInit', () => {
     await expect(
       runInit({
         cwd: root,
-        model: 'openai-codex/gpt-5.3-codex',
+        model: 'openai-codex/gpt-5.5',
         llmAuth: { kind: 'oauth', runLogin: fakeLogin },
         runHatching: okHatch,
         dockerExec: okDocker,

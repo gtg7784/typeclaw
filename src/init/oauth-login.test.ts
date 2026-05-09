@@ -24,7 +24,7 @@ describe('makeFakeOAuthLoginRunner', () => {
       },
     })
 
-    const result = await runner({ cwd: root, model: 'openai-codex/gpt-5.3-codex' })
+    const result = await runner({ cwd: root, model: 'openai-codex/gpt-5.5' })
 
     expect(result).toEqual({ ok: true })
     expect(calls).toEqual([{ providerId: 'openai-codex', cwd: root }])
@@ -33,7 +33,7 @@ describe('makeFakeOAuthLoginRunner', () => {
   test('passes through a configured failure result', async () => {
     const runner = makeFakeOAuthLoginRunner({ result: { ok: false, reason: 'simulated cancel' } })
 
-    const result = await runner({ cwd: root, model: 'openai-codex/gpt-5.3-codex' })
+    const result = await runner({ cwd: root, model: 'openai-codex/gpt-5.5' })
 
     expect(result).toEqual({ ok: false, reason: 'simulated cancel' })
   })
