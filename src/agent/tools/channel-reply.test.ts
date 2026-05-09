@@ -335,6 +335,21 @@ describe('createChannelReplyTool', () => {
       expect(calls).toHaveLength(1)
       expect(result.details).toEqual({ ok: true })
     })
+
+    test('blocks the parenthesized "(NO_REPLY)" form (mirrors router lenience)', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, { text: '(NO_REPLY)' })
+      expect(calls).toHaveLength(0)
+      expect(result.details).toMatchObject({ ok: false })
+      expect((result.details as { error: string }).error).toContain('silent-turn signal')
+    })
   })
 })
 

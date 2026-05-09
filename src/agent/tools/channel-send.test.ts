@@ -409,5 +409,24 @@ describe('createChannelSendTool', () => {
       expect(calls).toHaveLength(1)
       expect(result.details).toEqual({ ok: true })
     })
+
+    test('blocks the parenthesized "(NO_REPLY)" form (mirrors router lenience)', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelSendTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+      })
+      const result = await runTool(tool, {
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        text: '(NO_REPLY)',
+      })
+      expect(calls).toHaveLength(0)
+      expect(result.details).toMatchObject({ ok: false })
+      expect((result.details as { error: string }).error).toContain('silent-turn signal')
+    })
   })
 })

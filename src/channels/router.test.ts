@@ -47,6 +47,10 @@ class FakeSession {
   setAssistantText(text: string): void {
     this.leafEntry = messageEntry(assistantMessage(text))
   }
+
+  setAssistantMessage(message: AssistantMessage): void {
+    this.leafEntry = messageEntry(message)
+  }
 }
 
 async function tempDir(): Promise<string> {
@@ -916,6 +920,66 @@ describe('ChannelRouter channel-turn protocol', () => {
 
     expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
     expect(logs.some((m) => m.includes('blocked assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('allows (NO_REPLY) with parens as a silent-turn signal', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'just FYI' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('(NO_REPLY)')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+    expect(sent).toHaveLength(0)
+  })
+
+  test('allows empty visible text (thinking-only response) as a silent-turn signal', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'just FYI' }))
+    sessions[0]!.onPrompt = () => {
+      // given: assistant message with only a thinking block, no visible text
+      // (e.g. Kimi-distilled models that end the turn after thinking)
+      sessions[0]!.setAssistantMessage({
+        role: 'assistant',
+        content: [{ type: 'thinking', thinking: 'no need to respond' }],
+        api: 'openai-completions',
+        provider: 'openai',
+        model: 'test-model',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'stop',
+        timestamp: 1000,
+      })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+    expect(sent).toHaveLength(0)
   })
 
   test('recovers visible assistant text when no channel tool sent a message', async () => {
