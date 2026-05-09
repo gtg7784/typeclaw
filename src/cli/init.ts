@@ -508,7 +508,7 @@ async function pickModel(): Promise<ModelOption> {
   const providers = uniqueProviders(options)
   const providerChoice = await select({
     message: 'Pick an LLM provider',
-    options: providers.map((id) => ({ value: id, label: KNOWN_PROVIDERS[id].name })),
+    options: providers.map((id) => ({ value: id, label: KNOWN_PROVIDERS[id].name, hint: providerAuthHint(id) })),
     initialValue: providers[0],
   })
   if (isCancel(providerChoice)) {
@@ -552,6 +552,15 @@ function formatModelHint(o: ModelOption): string {
   if (o.contextWindow !== null) parts.push(`${(o.contextWindow / 1000).toFixed(0)}K ctx`)
   if (o.reasoning) parts.push('reasoning')
   return parts.join(' · ')
+}
+
+function providerAuthHint(id: KnownProviderId): string {
+  const provider = KNOWN_PROVIDERS[id]
+  const apiKey = providerSupportsApiKey(provider)
+  const oauth = providerSupportsOAuth(provider)
+  if (apiKey && oauth) return 'API key or OAuth'
+  if (oauth) return 'OAuth login'
+  return 'API key'
 }
 
 const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
