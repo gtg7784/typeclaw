@@ -152,6 +152,45 @@ describe('HookBus session.idle per-handler timeout', () => {
   })
 })
 
+describe('HookBus session.end per-handler timeout', () => {
+  test('a hung handler is bounded; the offending plugin is named; later handlers still run', async () => {
+    // given a bus where the first session.end handler never resolves and
+    // the second is observable. without this timeout, cron consumer's
+    // runPrompt finally block awaits runSessionEnd forever, leaving inFlight
+    // permanently populated and silently coalescing every future cron fire.
+    const errors: { plugin: string; message: string }[] = []
+    const recordLogger = (pluginName: string) => ({
+      info: () => {},
+      warn: () => {},
+      error: (m: string) => errors.push({ plugin: pluginName, message: m }),
+    })
+    const bus = createHookBus({ endHandlerTimeoutMs: 30 })
+    bus.registerAll('hung-plugin', '/agent', recordLogger('hung-plugin'), {
+      'session.end': () => new Promise(() => {}),
+    })
+    let secondRan = false
+    bus.registerAll('healthy-plugin', '/agent', recordLogger('healthy-plugin'), {
+      'session.end': () => {
+        secondRan = true
+      },
+    })
+
+    // when the chain runs
+    const start = Date.now()
+    await bus.runSessionEnd({ sessionId: 's1' })
+    const elapsed = Date.now() - start
+
+    // then the chain returned within the per-handler ceiling, the offending
+    // plugin's logger received the timeout error with attribution, and the
+    // healthy plugin still got to run
+    expect(elapsed).toBeLessThan(500)
+    expect(secondRan).toBe(true)
+    const hungError = errors.find((e) => e.plugin === 'hung-plugin')
+    expect(hungError?.message).toMatch(/plugin hung-plugin session\.end timed out after 30ms/)
+    expect(errors.find((e) => e.plugin === 'healthy-plugin')).toBeUndefined()
+  })
+})
+
 describe('HookBus unregisterAll', () => {
   test('removes hooks for a single plugin and leaves others intact', () => {
     const bus = createHookBus()

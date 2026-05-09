@@ -20,6 +20,15 @@ import type {
 // milliseconds. 25s leaves headroom under the chain watchdog.
 export const IDLE_HANDLER_TIMEOUT_MS = 25_000
 
+// Per-handler ceiling for session.end. Cron consumer's runPrompt and the
+// subagent runner both await session.hooks.runSessionEnd inside their
+// finally blocks — a hung handler wedges inFlight forever, so the next
+// scheduler fire is silently coalesced and the cron job appears dead.
+// The memory plugin's session.end awaits a serialized memory-logger chain
+// that can stall on a half-open LLM stream; 60s is generous headroom for
+// legitimate transcript flush while still bounding the failure mode.
+export const END_HANDLER_TIMEOUT_MS = 60_000
+
 export type RegisteredHook<K extends keyof Hooks> = {
   pluginName: string
   agentDir: string
@@ -44,6 +53,8 @@ export type CreateHookBusOptions = {
   // timeout path be exercised in tens of milliseconds instead of the 25s
   // production default.
   idleHandlerTimeoutMs?: number
+  // Test seam: per-handler ceiling for session.end invocations.
+  endHandlerTimeoutMs?: number
 }
 
 type Registries = {
@@ -57,6 +68,7 @@ type Registries = {
 
 export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
   const idleHandlerTimeoutMs = options.idleHandlerTimeoutMs ?? IDLE_HANDLER_TIMEOUT_MS
+  const endHandlerTimeoutMs = options.endHandlerTimeoutMs ?? END_HANDLER_TIMEOUT_MS
   const r: Registries = {
     'session.start': [],
     'session.end': [],
@@ -103,7 +115,11 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
     async runSessionEnd(event) {
       for (const reg of r['session.end']) {
         try {
-          await reg.handler(event, ctx(reg))
+          await raceWithTimeout(
+            Promise.resolve(reg.handler(event, ctx(reg))),
+            endHandlerTimeoutMs,
+            `plugin ${reg.pluginName} session.end`,
+          )
         } catch (err) {
           reportHookError(reg, 'session.end', err)
         }

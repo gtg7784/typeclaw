@@ -15,6 +15,20 @@ const DEFAULT_BUFFER_BYTES = 100_000
 const MIN_BUFFER_BYTES = 10_000
 const DEFAULT_DREAMING_SCHEDULE = '0 4 * * *'
 
+// Hard ceiling on a single memory-logger spawn. The chain serializes spawns
+// per agent, so a non-settling spawn would otherwise wedge every subsequent
+// fire — including the session.end hook path that gates cron consumer's
+// inFlight cleanup. Set strictly below END_HANDLER_TIMEOUT_MS so the inner
+// spawn rejects first and the memory plugin's logger gets the attribution
+// instead of the generic hook ceiling.
+//
+// The bound detaches the orphaned spawn from the chain; it does not cancel
+// the underlying subagent session. ctx.spawnSubagent returns Promise<void>
+// with no handle, and pi-coding-agent's session.prompt accepts no
+// AbortSignal, so the half-open LLM stream stays alive until the OS reaps
+// it. The chain advances and cron resumes; the network defect is upstream.
+const SPAWN_TIMEOUT_MS = 50_000
+
 function isValidCronExpression(schedule: string): boolean {
   try {
     CronExpressionParser.parse(schedule).next()
@@ -54,15 +68,21 @@ const memoryConfigSchema = z
         message: `memory.bufferBytes must be 0 (disabled) or >= ${MIN_BUFFER_BYTES}`,
       })
       .default(DEFAULT_BUFFER_BYTES),
+    // Test seam: per-spawn ceiling for memory-logger. Operators have no
+    // reason to tune this; it exists so the wedge-recovery test can fire
+    // the timeout in milliseconds instead of the production 50s. Kept
+    // undocumented for users.
+    spawnTimeoutMs: z.number().int().min(1).default(SPAWN_TIMEOUT_MS),
     dreaming: dreamingConfigSchema.optional(),
   })
-  .default({ idleMs: DEFAULT_IDLE_MS, bufferBytes: DEFAULT_BUFFER_BYTES })
+  .default({ idleMs: DEFAULT_IDLE_MS, bufferBytes: DEFAULT_BUFFER_BYTES, spawnTimeoutMs: SPAWN_TIMEOUT_MS })
 
 export default definePlugin({
   configSchema: memoryConfigSchema,
   plugin: async (ctx) => {
     const idleMs = ctx.config.idleMs
     const bufferBytes = ctx.config.bufferBytes
+    const spawnTimeoutMs = ctx.config.spawnTimeoutMs
     const dreamingSchedule = ctx.config.dreaming?.schedule ?? DEFAULT_DREAMING_SCHEDULE
 
     const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -95,7 +115,7 @@ export default definePlugin({
           bytesAtLastRun.set(sessionId, currentSize)
           ctx.logger.info(`memory-logger spawn ${sessionId} reason=${reason} transcript_bytes=${currentSize}`)
           try {
-            await ctx.spawnSubagent('memory-logger', payload)
+            await raceSpawn(ctx.spawnSubagent('memory-logger', payload), spawnTimeoutMs)
           } catch (err) {
             ctx.logger.error(`memory-logger spawn failed: ${err instanceof Error ? err.message : String(err)}`)
           }
@@ -197,5 +217,17 @@ async function readSize(path: string): Promise<number> {
     return s.size
   } catch {
     return 0
+  }
+}
+
+async function raceSpawn(work: Promise<void>, ms: number): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`memory-logger spawn timed out after ${ms}ms`)), ms)
+  })
+  try {
+    await Promise.race([work, timeout])
+  } finally {
+    if (timer !== null) clearTimeout(timer)
   }
 }
