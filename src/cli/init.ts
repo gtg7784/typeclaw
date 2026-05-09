@@ -359,7 +359,7 @@ function reportProgress(
         break
       case 'dockerfile':
         if (event.result.ok) {
-          s.stop(event.result.devMode ? 'Dockerfile + compose.yml written (dev mode).' : 'Dockerfile written.')
+          s.stop(event.result.devMode ? 'Dockerfile written (dev mode).' : 'Dockerfile written.')
         } else {
           s.stop(`Skipped Dockerfile: ${event.result.reason}`)
         }
