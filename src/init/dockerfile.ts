@@ -8,6 +8,33 @@ export const DOCKERFILE = 'Dockerfile'
 // the package set is self-documenting at a glance.
 const BASELINE_APT_PACKAGES = ['git', 'ca-certificates', 'curl', 'gnupg'] as const
 
+// curl-impersonate is the only currently-working way to query DuckDuckGo from
+// a non-browser client on residential IPs in 2026. DDG fingerprints incoming
+// requests at the TLS handshake (JA3/JA4) and HTTP/2 SETTINGS-frame layer
+// before any HTTP headers are read; Bun's native fetch cannot match Chrome's
+// fingerprint (upstream Bun issue #11368, open) so requests get gated behind
+// 202 anomaly-modal responses, escalating to interactive duck-picker
+// challenges. See `src/agent/tools/ddg.ts` for the runtime invocation.
+//
+// Pinned to lexiforest's actively-maintained fork (Chrome 136+ profiles in
+// v1.5.6, May 2026), NOT the original `lwthiker/curl-impersonate` whose last
+// release v0.6.1 (March 2024) carries Chrome ≤116 profiles — two years stale
+// and useless against current DDG fingerprinting. Bumping: replace the
+// version + sha256 constants below and run `typeclaw start --build` in any
+// agent folder per the AGENTS.md "owns the Dockerfile" rule. Verify the new
+// release ships the wrapper named in CURL_IMPERSONATE_PROFILE; lexiforest
+// regenerates the bundled wrappers on Chrome major bumps and occasionally
+// drops older ones.
+export const CURL_IMPERSONATE_VERSION = 'v1.5.6'
+export const CURL_IMPERSONATE_SHA256_AMD64 = 'b60344f63b9ed8806f0e9f7fd357d9f6c9a82aca279ed1e9e257d544885dcbde'
+export const CURL_IMPERSONATE_SHA256_ARM64 = '6766bc67fd3e8e2313875f32b36b5a3fab02beffe77e5f1cf7fc5da99731d403'
+// Wrapper symlink shipped in the v1.5.6 tarball. The tarball lays out
+// curl_chrome136 → curl_chrome alongside the canonical `curl-impersonate`
+// binary; we invoke the version-pinned wrapper so a future release that
+// drops chrome136 fails loudly at search time instead of silently regressing
+// the impersonation to whatever `curl_chrome` resolves to.
+export const CURL_IMPERSONATE_PROFILE = 'chrome136'
+
 // Shared-library runtime deps Chrome for Testing needs to launch on amd64
 // Debian trixie (base of `oven/bun:1-slim`). `agent-browser install
 // --with-deps` (v0.27.0) is supposed to install these but silently no-ops:
@@ -128,6 +155,23 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
       apt-get install -y --no-install-recommends \\
         ${CHROME_RUNTIME_APT_PACKAGES_AMD64.join(' ')}; \\
     fi
+
+# Layer 2.5 (stable): install pinned curl-impersonate (lexiforest fork) for
+# the websearch tool. Required to evade DDG's TLS/HTTP2 fingerprinting on
+# residential IPs — see src/init/dockerfile.ts and src/agent/tools/ddg.ts
+# for the full rationale. Placed after Layer 2 so curl + ca-certificates +
+# tar (already in baseline) are present, and before agent-browser so a
+# version bump there doesn't invalidate this layer. The tarball is ~2 MB
+# compressed, ~6 MB extracted — negligible compared to the Chrome layer.
+RUN ARCH_TARBALL="$(if [ "$TARGETARCH" = "arm64" ]; then echo aarch64-linux-gnu; else echo x86_64-linux-gnu; fi)" \\
+ && ARCH_SHA="$(if [ "$TARGETARCH" = "arm64" ]; then echo ${CURL_IMPERSONATE_SHA256_ARM64}; else echo ${CURL_IMPERSONATE_SHA256_AMD64}; fi)" \\
+ && cd /tmp \\
+ && curl -fsSL -o curl-impersonate.tar.gz \\
+      "https://github.com/lexiforest/curl-impersonate/releases/download/${CURL_IMPERSONATE_VERSION}/curl-impersonate-${CURL_IMPERSONATE_VERSION}.\${ARCH_TARBALL}.tar.gz" \\
+ && echo "\${ARCH_SHA}  curl-impersonate.tar.gz" | sha256sum -c - \\
+ && tar -xzf curl-impersonate.tar.gz -C /usr/local/bin/ \\
+ && rm curl-impersonate.tar.gz \\
+ && /usr/local/bin/curl_${CURL_IMPERSONATE_PROFILE} --version > /dev/null
 
 # Layer 3 (stable, arm64 only): point agent-browser at the apt-installed
 # chromium via its global config (~/.agent-browser/config.json — lowest-

@@ -2,7 +2,14 @@ import { describe, expect, test } from 'bun:test'
 
 import { dockerfileSchema } from '@/config/config'
 
-import { buildDockerfile, CHROME_RUNTIME_APT_PACKAGES_AMD64 } from './dockerfile'
+import {
+  buildDockerfile,
+  CHROME_RUNTIME_APT_PACKAGES_AMD64,
+  CURL_IMPERSONATE_PROFILE,
+  CURL_IMPERSONATE_SHA256_AMD64,
+  CURL_IMPERSONATE_SHA256_ARM64,
+  CURL_IMPERSONATE_VERSION,
+} from './dockerfile'
 
 // Layer ordering, cache-mount preservation, and on-disk write behavior are
 // covered by integration tests in src/init/index.test.ts. This file only
@@ -149,5 +156,45 @@ describe('Chrome runtime deps (amd64)', () => {
     expect(layer2Idx).toBeGreaterThan(-1)
     expect(layer4Idx).toBeGreaterThan(-1)
     expect(layer2Idx).toBeLessThan(layer4Idx)
+  })
+})
+
+describe('curl-impersonate layer', () => {
+  test('embeds the pinned version in the release URL — bumping a constant is a deliberate, reviewable change, not a moving "latest" target', () => {
+    const out = buildDockerfile()
+    expect(out).toContain(
+      `https://github.com/lexiforest/curl-impersonate/releases/download/${CURL_IMPERSONATE_VERSION}/curl-impersonate-${CURL_IMPERSONATE_VERSION}.`,
+    )
+  })
+
+  test('verifies the tarball sha256 — every reviewer can trace the constant to the layer that enforces it, and a tampered binary would fail the build', () => {
+    const out = buildDockerfile()
+    expect(out).toContain(CURL_IMPERSONATE_SHA256_AMD64)
+    expect(out).toContain(CURL_IMPERSONATE_SHA256_ARM64)
+    expect(out).toContain('sha256sum -c -')
+  })
+
+  test('branches by TARGETARCH so the same Dockerfile produces correct binaries on amd64 and arm64', () => {
+    const out = buildDockerfile()
+    expect(out).toMatch(/TARGETARCH.*arm64.*aarch64-linux-gnu/s)
+    expect(out).toContain('x86_64-linux-gnu')
+  })
+
+  test('extracts to /usr/local/bin (on $PATH) and smoke-tests the wrapper at build time so a missing profile fails the build, not the first search', () => {
+    const out = buildDockerfile()
+    expect(out).toContain('tar -xzf curl-impersonate.tar.gz -C /usr/local/bin/')
+    expect(out).toContain(`/usr/local/bin/curl_${CURL_IMPERSONATE_PROFILE} --version`)
+  })
+
+  test('curl-impersonate layer is between Layer 2 (apt) and Layer 4 (agent-browser) so an agent-browser bump does not invalidate it and the apt baseline (curl, ca-certificates, tar) is satisfied', () => {
+    const out = buildDockerfile()
+    const aptIdx = out.indexOf('libglib2.0-0t64') // marker for Layer 2's else-branch (last apt thing in that block)
+    const curlImpersonateIdx = out.indexOf('curl-impersonate.tar.gz')
+    const agentBrowserIdx = out.indexOf('bun install -g agent-browser')
+    expect(aptIdx).toBeGreaterThan(-1)
+    expect(curlImpersonateIdx).toBeGreaterThan(-1)
+    expect(agentBrowserIdx).toBeGreaterThan(-1)
+    expect(aptIdx).toBeLessThan(curlImpersonateIdx)
+    expect(curlImpersonateIdx).toBeLessThan(agentBrowserIdx)
   })
 })

@@ -1,32 +1,45 @@
 // DDG's no-JS "lite" endpoint is the only major engine that serves a
-// parseable, key-free, registration-free SERP. We mimic a no-JS browser POST
-// and parse the result page.
+// parseable, key-free, registration-free SERP. We POST a query and parse the
+// resulting <table> markup.
 //
 // We target `lite.duckduckgo.com/lite/` rather than `html.duckduckgo.com/html/`
-// because `html` has been gated by the "anomaly-modal" CAPTCHA flow since
-// early 2025 — even residential IPs hit it after 1-2 requests, since DDG
-// fingerprints TLS at the transport layer and Bun's TLS stack does not match
-// Chrome's. The `lite` endpoint exists for non-browser clients (text browsers,
-// accessibility tools) and has historically been gated less aggressively. The
-// markup is plain `<table>` rows with no CSS classes for layout — same
-// underlying index, just less rendering.
+// because `html` is gated by the interactive "duck picker" CAPTCHA after a
+// single bad fingerprint match. `lite` exists for non-browser clients (text
+// browsers, accessibility tools) and historically gates less aggressively —
+// but as of 2026 it ALSO fingerprints at the TLS layer (JA3/JA4) and the
+// HTTP/2 SETTINGS frame, well before any HTTP header is read. Bun's native
+// fetch cannot match Chrome's handshake (upstream issue #11368), so requests
+// from `fetch()` get gated regardless of headers, body shape, or pacing —
+// confirmed empirically over a multi-hour session against a single home IP
+// where real Chromium succeeded continuously while every fetch variant got
+// 202 anomaly-modal or HTTP-200-with-anomaly responses.
 //
-// TODO(engine-config): Make the search backend swappable via typeclaw.json once
-// we have a concrete second engine in mind (self-hosted SearXNG, Brave with a
-// user-supplied key, Tavily, ...). Defer until there's a real use case.
+// The fix is to shell out to `curl-impersonate` (lexiforest fork), which
+// replays Chrome's exact TLS handshake + HTTP/2 settings + header ordering.
+// The binary is installed by the typeclaw Dockerfile (see
+// src/init/dockerfile.ts CURL_IMPERSONATE_* constants) at /usr/local/bin/
+// and invoked via the version-pinned wrapper `curl_chrome136`.
+//
+// Why no `-H` overrides: curl_chrome136 already sends the full Chrome 136
+// header set with correct ordering, sec-ch-ua values, etc. Adding our own
+// headers would corrupt the impersonation. The previous code's
+// BROWSER_HEADERS const has been removed for the same reason.
+
+import { spawn } from 'bun'
 
 const DDG_LITE_URL = 'https://lite.duckduckgo.com/lite/'
+const CURL_IMPERSONATE_BINARY = 'curl_chrome136'
+const REQUEST_TIMEOUT_SECONDS = 30
 
-// Browser-ish UA + Sec-Fetch-Mode: navigate is what SearXNG uses to evade DDG's
-// bot detection. Without these, the response is a CAPTCHA page.
-const BROWSER_HEADERS: Record<string, string> = {
-  'User-Agent':
-    'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
-  Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Sec-Fetch-Dest': 'document',
-  'Sec-Fetch-Mode': 'navigate',
-  'Sec-Fetch-Site': 'same-origin',
+let curlBinary = CURL_IMPERSONATE_BINARY
+
+// Test-only seam: lets ddg.test.ts and websearch.test.ts point the spawn
+// at a fake `curl_chrome136` script in a tmpdir so we exercise the real
+// Bun.spawn path without depending on a curl-impersonate install on the
+// test host. Production code never calls this — the const-import default
+// above is what production sees.
+export function _setCurlBinaryForTest(binary: string | null): void {
+  curlBinary = binary ?? CURL_IMPERSONATE_BINARY
 }
 
 export type DdgResult = {
@@ -50,21 +63,47 @@ export class DdgCaptchaError extends Error {
   }
 }
 
-async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise<string> {
-  const body = new URLSearchParams({ q: query }).toString()
-  const response = await fetch(DDG_LITE_URL, {
-    method: 'POST',
-    headers: {
-      ...BROWSER_HEADERS,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body,
-    signal,
+export async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise<string> {
+  const proc = spawn({
+    cmd: [
+      curlBinary,
+      '--silent',
+      '--show-error',
+      '--fail-with-body',
+      '--compressed',
+      '--max-time',
+      String(REQUEST_TIMEOUT_SECONDS),
+      '-X',
+      'POST',
+      '--data-urlencode',
+      `q=${query}`,
+      DDG_LITE_URL,
+    ],
+    stdout: 'pipe',
+    stderr: 'pipe',
   })
-  if (!response.ok) {
-    throw new Error(`DuckDuckGo HTTP ${response.status} ${response.statusText}`)
+
+  const onAbort = () => proc.kill()
+  signal?.addEventListener('abort', onAbort, { once: true })
+
+  try {
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    if (signal?.aborted) {
+      throw new Error('aborted')
+    }
+    if (exitCode !== 0) {
+      const detail = stderr.trim() || 'no stderr'
+      throw new Error(`curl-impersonate exited ${exitCode}: ${detail}`)
+    }
+    return stdout
+  } finally {
+    signal?.removeEventListener('abort', onAbort)
   }
-  return await response.text()
 }
 
 // The `lite` endpoint's CAPTCHA page is plainer than `html`'s anomaly-modal:

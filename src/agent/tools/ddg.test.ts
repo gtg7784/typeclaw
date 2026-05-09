@@ -1,6 +1,9 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import { parseDdgHtml } from './ddg'
+import { _setCurlBinaryForTest, fetchDdgHtml, parseDdgHtml } from './ddg'
 
 const REAL_RESULT_HTML = `
 <html><body><table>
@@ -119,5 +122,88 @@ describe('parseDdgHtml', () => {
       url: 'https://valid.example/',
       snippet: 'real snippet',
     })
+  })
+})
+
+describe('fetchDdgHtml', () => {
+  // We test the curl-impersonate spawn path against a fake binary in a
+  // tmpdir. AGENTS.md §5 prefers real implementations with controlled inputs
+  // over mocks, so we hand-roll a shell script that stands in for
+  // curl_chrome136 — this exercises the actual `spawn` codepath, including
+  // exit-code handling, stdout/stderr piping, and abort propagation.
+  let scratchDir: string
+
+  beforeEach(() => {
+    scratchDir = mkdtempSync(join(tmpdir(), 'ddg-fetch-test-'))
+  })
+
+  afterEach(() => {
+    _setCurlBinaryForTest(null)
+    rmSync(scratchDir, { recursive: true, force: true })
+  })
+
+  function installFakeBinary(script: string): void {
+    const path = join(scratchDir, 'fake-curl')
+    writeFileSync(path, `#!/bin/sh\n${script}\n`, 'utf8')
+    chmodSync(path, 0o755)
+    _setCurlBinaryForTest(path)
+  }
+
+  test('returns stdout verbatim on exit 0', async () => {
+    // given: fake binary that prints a fixed HTML body
+    installFakeBinary("printf '<html>hello world</html>'")
+
+    // when
+    const html = await fetchDdgHtml('ignored')
+
+    // then
+    expect(html).toBe('<html>hello world</html>')
+  })
+
+  test('rejects with stderr detail when the binary exits non-zero', async () => {
+    // given
+    installFakeBinary('echo "boom" >&2; exit 7')
+
+    // when / then
+    await expect(fetchDdgHtml('q')).rejects.toThrow(/curl-impersonate exited 7/)
+    await expect(fetchDdgHtml('q')).rejects.toThrow(/boom/)
+  })
+
+  test('reports "no stderr" when the binary fails silently', async () => {
+    // given
+    installFakeBinary('exit 1')
+
+    // when / then
+    await expect(fetchDdgHtml('q')).rejects.toThrow(/exited 1.*no stderr/)
+  })
+
+  test('passes query as POST form data with --data-urlencode', async () => {
+    // given: fake binary records argv to a side file then prints empty body
+    const argvFile = join(scratchDir, 'argv.txt')
+    installFakeBinary(`printf '%s\\n' "$@" > ${argvFile}; printf ''`)
+
+    // when
+    await fetchDdgHtml('hello world')
+
+    // then
+    const argv = (await Bun.file(argvFile).text()).split('\n')
+    expect(argv).toContain('-X')
+    expect(argv).toContain('POST')
+    expect(argv).toContain('--data-urlencode')
+    expect(argv).toContain('q=hello world')
+    expect(argv).toContain('https://lite.duckduckgo.com/lite/')
+  })
+
+  test('aborts when the AbortSignal fires', async () => {
+    // given: fake binary sleeps long enough that we always abort first
+    installFakeBinary('sleep 30')
+    const controller = new AbortController()
+
+    // when
+    const promise = fetchDdgHtml('q', controller.signal)
+    setTimeout(() => controller.abort(), 50)
+
+    // then
+    await expect(promise).rejects.toThrow()
   })
 })
