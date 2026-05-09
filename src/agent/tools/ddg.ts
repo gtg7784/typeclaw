@@ -64,6 +64,13 @@ export class DdgCaptchaError extends Error {
 }
 
 export async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise<string> {
+  // SIGKILL on abort, not the default SIGTERM. The wrapper script invokes
+  // curl-impersonate as a subprocess, and SIGTERM to the wrapper does not
+  // reliably propagate to the inner curl on Linux — the inner process can
+  // hold the stdout pipe open until `--max-time` expires (30s), turning a
+  // 50ms abort into a 30s hang. SIGKILL terminates the wrapper immediately;
+  // the inner curl gets cleaned up when its parent dies and Bun's stream
+  // teardown closes the pipes.
   const proc = spawn({
     cmd: [
       curlBinary,
@@ -83,7 +90,7 @@ export async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise
     stderr: 'pipe',
   })
 
-  const onAbort = () => proc.kill()
+  const onAbort = () => proc.kill('SIGKILL')
   signal?.addEventListener('abort', onAbort, { once: true })
 
   try {
