@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
+import { _setCurlBinaryForTest } from './ddg'
 import { websearchTool } from './websearch'
 
 type FetchInput = Parameters<typeof fetch>[0]
@@ -29,20 +33,42 @@ const MINIMAL_DDG_HTML = `
 <tr><td class='result-snippet'>Example snippet text.</td></tr>
 `
 
+// The DuckDuckGo source talks to curl-impersonate via Bun.spawn rather than
+// fetch. We install a fake binary at a tmpdir path and point ddg.ts at it
+// via _setCurlBinaryForTest, so these end-to-end tests exercise the real
+// spawn codepath plus the websearchTool's success/error orchestration
+// without depending on a real network or a real curl_chrome136 install.
 describe('websearch tool: web (DuckDuckGo)', () => {
-  test('hits DuckDuckGo HTML endpoint with POST and returns formatted results', async () => {
+  let scratchDir: string
+
+  beforeEach(() => {
+    scratchDir = mkdtempSync(join(tmpdir(), 'websearch-test-'))
+  })
+
+  afterEach(() => {
+    _setCurlBinaryForTest(null)
+    rmSync(scratchDir, { recursive: true, force: true })
+  })
+
+  function installFakeBinary(script: string): void {
+    const path = join(scratchDir, 'fake-curl')
+    writeFileSync(path, `#!/bin/sh\n${script}\n`, 'utf8')
+    chmodSync(path, 0o755)
+    _setCurlBinaryForTest(path)
+  }
+
+  function installFakePrintingBinary(body: string): void {
+    installFakeBinary(`cat <<'TYPECLAW_EOF'\n${body}\nTYPECLAW_EOF`)
+  }
+
+  test('parses DuckDuckGo HTML and returns formatted results', async () => {
     // given
-    fetchResponse = () => new Response(MINIMAL_DDG_HTML, { status: 200 })
+    installFakePrintingBinary(MINIMAL_DDG_HTML)
 
     // when
     const result = await websearchTool.execute('id', { query: 'example' }, undefined, undefined, ctx)
 
     // then
-    expect(fetchCalls).toHaveLength(1)
-    expect(fetchCalls[0]?.url).toBe('https://lite.duckduckgo.com/lite/')
-    expect(fetchCalls[0]?.init?.method).toBe('POST')
-    expect(fetchCalls[0]?.init?.body).toBe('q=example')
-
     const text = result.content[0]?.type === 'text' ? result.content[0].text : ''
     expect(text).toContain('Search results for "example" (web, 1)')
     expect(text).toContain('Example Domain')
@@ -55,9 +81,8 @@ describe('websearch tool: web (DuckDuckGo)', () => {
   })
 
   test('returns a clear error when DuckDuckGo serves a CAPTCHA page', async () => {
-    // given
-    fetchResponse = () =>
-      new Response('<form id="challenge-form">Please verify you are a human</form>', { status: 200 })
+    // given: stdout contains the challenge-form marker isCaptcha checks for
+    installFakePrintingBinary('<form id="challenge-form">Please verify you are a human</form>')
 
     // when
     const result = await websearchTool.execute('id', { query: 'spam' }, undefined, undefined, ctx)
@@ -68,11 +93,9 @@ describe('websearch tool: web (DuckDuckGo)', () => {
     expect((result.details as { error?: boolean }).error).toBe(true)
   })
 
-  test('returns a clear error on network failure (does not throw)', async () => {
-    // given
-    fetchResponse = () => {
-      throw new Error('ECONNREFUSED')
-    }
+  test('returns a clear error on spawn failure (does not throw)', async () => {
+    // given: fake binary that exits non-zero with a known stderr signature
+    installFakeBinary('echo "ECONNREFUSED" >&2; exit 1')
 
     // when
     const result = await websearchTool.execute('id', { query: 'x' }, undefined, undefined, ctx)
@@ -85,7 +108,7 @@ describe('websearch tool: web (DuckDuckGo)', () => {
 
   test('returns a "no results" message when DuckDuckGo returns an empty SERP', async () => {
     // given
-    fetchResponse = () => new Response('<html><body>nothing</body></html>', { status: 200 })
+    installFakePrintingBinary('<html><body>nothing</body></html>')
 
     // when
     const result = await websearchTool.execute('id', { query: 'zzznoresults' }, undefined, undefined, ctx)
@@ -106,7 +129,7 @@ describe('websearch tool: web (DuckDuckGo)', () => {
       <tr><td><a href="https://c/" class='result-link'>C</a></td></tr>
       <tr><td class='result-snippet'>c</td></tr>
     `
-    fetchResponse = () => new Response(html, { status: 200 })
+    installFakePrintingBinary(html)
 
     // when
     const result = await websearchTool.execute('id', { query: 'q', limit: 2 }, undefined, undefined, ctx)
