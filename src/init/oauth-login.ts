@@ -1,7 +1,6 @@
 import { join } from 'node:path'
 
-import { AuthStorage } from '@mariozechner/pi-coding-agent'
-
+import { createAuthStorageForAgent } from '@/auth'
 import {
   KNOWN_PROVIDERS,
   providerForModelRef,
@@ -40,7 +39,7 @@ export function makeOAuthLoginRunner(callbacks: OAuthCallbacks): OAuthLoginRunne
     }
 
     try {
-      const authStorage = AuthStorage.create(join(cwd, 'auth.json'))
+      const authStorage = createAuthStorageForAgent(join(cwd, 'auth.json'))
       await authStorage.login(provider.oauthProviderId, {
         onAuth: (info) => callbacks.onAuth(info.url, info.instructions),
         onProgress: callbacks.onProgress,

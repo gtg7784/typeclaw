@@ -2,6 +2,7 @@ import { join } from 'node:path'
 
 import { AuthStorage, ModelRegistry } from '@mariozechner/pi-coding-agent'
 
+import { createAuthStorageForAgent } from '@/auth'
 import { getConfig } from '@/config'
 import {
   KNOWN_PROVIDERS,
@@ -48,7 +49,7 @@ export function getAuth(): Auth {
     return cached
   }
 
-  const authStorage = AuthStorage.create(authJsonPath())
+  const authStorage = createAuthStorageForAgent(authJsonPath())
 
   if (supportsApiKey(provider) && provider.apiKeyEnv) {
     const envKey = process.env[provider.apiKeyEnv]

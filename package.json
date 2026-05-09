@@ -18,6 +18,7 @@
     "scripts",
     "typeclaw.schema.json",
     "cron.schema.json",
+    "auth.schema.json",
     "!**/*.test.ts"
   ],
   "type": "module",
@@ -53,6 +54,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "@types/jsdom": "^28.0.1",
+    "@types/proper-lockfile": "^4.1.4",
     "@types/turndown": "^5.0.6",
     "@types/ws": "^8.18.1",
     "@typescript/native-preview": "^7.0.0-dev.20260416.1",
