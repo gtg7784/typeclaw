@@ -518,19 +518,21 @@ Do **not** invent plugin blocks; their existence is determined by the plugins li
 
 The model registry currently has these entries:
 
-| `model` value                                          | Display name       | Provider     | Auth                | Notes                                                                            |
-| ------------------------------------------------------ | ------------------ | ------------ | ------------------- | -------------------------------------------------------------------------------- |
-| `openai/gpt-5.4-nano`                                  | GPT-5.4 nano       | OpenAI       | API key             | Default. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.     |
-| `openai/gpt-5.4-mini`                                  | GPT-5.4 mini       | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.              |
-| `openai/gpt-5.4`                                       | GPT-5.4            | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.             |
-| `openai-codex/gpt-5.2-codex`                           | GPT-5.2 Codex      | OpenAI Codex | OAuth (ChatGPT P/P) | Requires OAuth login at init. Persisted to `auth.json`. Reasoning, 272K context. |
-| `openai-codex/gpt-5.1-codex-max`                       | GPT-5.1 Codex Max  | OpenAI Codex | OAuth (ChatGPT P/P) | Requires OAuth login at init. Persisted to `auth.json`. Reasoning, 272K context. |
-| `openai-codex/gpt-5.1-codex-mini`                      | GPT-5.1 Codex Mini | OpenAI Codex | OAuth (ChatGPT P/P) | Requires OAuth login at init. Persisted to `auth.json`. Reasoning, 272K context. |
-| `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.6 Turbo    | Fireworks    | API key             | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context.           |
+| `model` value                                          | Display name        | Provider     | Auth                | Notes                                                                                 |
+| ------------------------------------------------------ | ------------------- | ------------ | ------------------- | ------------------------------------------------------------------------------------- |
+| `openai/gpt-5.4-nano`                                  | GPT-5.4 nano        | OpenAI       | API key             | Default. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.          |
+| `openai/gpt-5.4-mini`                                  | GPT-5.4 mini        | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.                   |
+| `openai/gpt-5.4`                                       | GPT-5.4             | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.                  |
+| `openai/gpt-5.5`                                       | GPT-5.5             | OpenAI       | API key             | Flagship. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.        |
+| `openai-codex/gpt-5.4`                                 | GPT-5.4             | OpenAI Codex | OAuth (ChatGPT P/P) | Codex flagship. Requires OAuth login at init. Persisted to `auth.json`. 272K context. |
+| `openai-codex/gpt-5.4-mini`                            | GPT-5.4 mini        | OpenAI Codex | OAuth (ChatGPT P/P) | Cheaper Codex tier. Requires OAuth login at init. Persisted to `auth.json`. 272K ctx. |
+| `openai-codex/gpt-5.3-codex`                           | GPT-5.3 Codex       | OpenAI Codex | OAuth (ChatGPT P/P) | Code-tuned. Requires OAuth login at init. Persisted to `auth.json`. 272K context.     |
+| `openai-codex/gpt-5.3-codex-spark`                     | GPT-5.3 Codex Spark | OpenAI Codex | OAuth (ChatGPT P/P) | Lightweight Codex variant. Requires OAuth login at init. 128K context, free tier.     |
+| `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.6 Turbo     | Fireworks    | API key             | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context.                |
 
 **Do not write any other value into `model`.** The schema enum will reject the file at load, and the runtime will refuse to boot the agent process. If the user names a model that isn't in this table — "use Claude", "switch to o3" — be honest:
 
-> "My registry has OpenAI's GPT-5.4 family (API key), the Codex family via ChatGPT subscription (OAuth), and Fireworks' Kimi K2.6 Turbo. Other providers (Anthropic, etc.) aren't wired up yet — that needs a typeclaw release, not a config edit."
+> "My registry has OpenAI's GPT-5.4 / 5.5 family (API key), the GPT-5.4 / 5.3 Codex family via ChatGPT subscription (OAuth), and Fireworks' Kimi K2.6 Turbo. Other providers (Anthropic, etc.) aren't wired up yet — that needs a typeclaw release, not a config edit."
 
 Do **not** edit `typeclaw.json` to a model the registry doesn't know, even if the user insists. That bricks the agent on next restart.
 

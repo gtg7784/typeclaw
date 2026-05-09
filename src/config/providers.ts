@@ -51,8 +51,12 @@ export const KNOWN_PROVIDERS = {
     auth: ['api-key'],
     apiKeyEnv: 'OPENAI_API_KEY',
     oauthProviderId: null,
+    // Costs and context windows mirror models.dev as of 2026-05-10. When
+    // refreshing, also rerun `scripts/generate-schema.ts` so typeclaw.schema.json
+    // picks up new enum values.
     models: {
-      // Default. Cheap, fast, broadly available across OpenAI account tiers.
+      // Default. Cheapest tool-calling reasoning model in the family;
+      // available on every paid OpenAI account tier.
       'gpt-5.4-nano': {
         id: 'gpt-5.4-nano',
         name: 'GPT-5.4 nano',
@@ -61,7 +65,7 @@ export const KNOWN_PROVIDERS = {
         baseUrl: 'https://api.openai.com/v1',
         reasoning: true,
         input: ['text', 'image'],
-        cost: { input: 0.05, output: 0.4, cacheRead: 0.005, cacheWrite: 0 },
+        cost: { input: 0.2, output: 1.25, cacheRead: 0.02, cacheWrite: 0 },
         contextWindow: 400000,
         maxTokens: 128000,
       },
@@ -73,7 +77,7 @@ export const KNOWN_PROVIDERS = {
         baseUrl: 'https://api.openai.com/v1',
         reasoning: true,
         input: ['text', 'image'],
-        cost: { input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0 },
+        cost: { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
         contextWindow: 400000,
         maxTokens: 128000,
       },
@@ -85,7 +89,19 @@ export const KNOWN_PROVIDERS = {
         baseUrl: 'https://api.openai.com/v1',
         reasoning: true,
         input: ['text', 'image'],
-        cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
+        cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+        contextWindow: 1050000,
+        maxTokens: 128000,
+      },
+      'gpt-5.5': {
+        id: 'gpt-5.5',
+        name: 'GPT-5.5',
+        api: 'openai-responses',
+        provider: 'openai',
+        baseUrl: 'https://api.openai.com/v1',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
         contextWindow: 1050000,
         maxTokens: 128000,
       },
@@ -93,6 +109,12 @@ export const KNOWN_PROVIDERS = {
   },
   // ChatGPT Plus/Pro subscription via the OAuth Codex backend. No API key
   // path here on purpose — the Codex backend is OAuth-only upstream.
+  //
+  // The model lineup is intersected with pi-ai's `openai-codex` provider
+  // bucket (see node_modules/@mariozechner/pi-ai/dist/models.generated.js):
+  // only models that ChatGPT exposes through `chatgpt.com/backend-api` work
+  // here. Notably `gpt-5.5` is api-key-only as of 2026-05-10 (not in pi-ai's
+  // codex bucket); add it here when pi-ai picks it up upstream.
   'openai-codex': {
     id: 'openai-codex',
     name: 'OpenAI Codex (ChatGPT Plus/Pro)',
@@ -101,9 +123,33 @@ export const KNOWN_PROVIDERS = {
     apiKeyEnv: null,
     oauthProviderId: 'openai-codex',
     models: {
-      'gpt-5.2-codex': {
-        id: 'gpt-5.2-codex',
-        name: 'GPT-5.2 Codex',
+      'gpt-5.4': {
+        id: 'gpt-5.4',
+        name: 'GPT-5.4',
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+      },
+      'gpt-5.4-mini': {
+        id: 'gpt-5.4-mini',
+        name: 'GPT-5.4 mini',
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+      },
+      'gpt-5.3-codex': {
+        id: 'gpt-5.3-codex',
+        name: 'GPT-5.3 Codex',
         api: 'openai-codex-responses',
         provider: 'openai-codex',
         baseUrl: 'https://chatgpt.com/backend-api',
@@ -113,28 +159,16 @@ export const KNOWN_PROVIDERS = {
         contextWindow: 272000,
         maxTokens: 128000,
       },
-      'gpt-5.1-codex-max': {
-        id: 'gpt-5.1-codex-max',
-        name: 'GPT-5.1 Codex Max',
+      'gpt-5.3-codex-spark': {
+        id: 'gpt-5.3-codex-spark',
+        name: 'GPT-5.3 Codex Spark',
         api: 'openai-codex-responses',
         provider: 'openai-codex',
         baseUrl: 'https://chatgpt.com/backend-api',
         reasoning: true,
-        input: ['text', 'image'],
-        cost: { input: 1.25, output: 10, cacheRead: 0.125, cacheWrite: 0 },
-        contextWindow: 272000,
-        maxTokens: 128000,
-      },
-      'gpt-5.1-codex-mini': {
-        id: 'gpt-5.1-codex-mini',
-        name: 'GPT-5.1 Codex Mini',
-        api: 'openai-codex-responses',
-        provider: 'openai-codex',
-        baseUrl: 'https://chatgpt.com/backend-api',
-        reasoning: true,
-        input: ['text', 'image'],
-        cost: { input: 0.25, output: 2, cacheRead: 0.025, cacheWrite: 0 },
-        contextWindow: 272000,
+        input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128000,
         maxTokens: 128000,
       },
     },
