@@ -64,13 +64,17 @@ export class DdgCaptchaError extends Error {
 }
 
 export async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise<string> {
-  // SIGKILL on abort, not the default SIGTERM. The wrapper script invokes
-  // curl-impersonate as a subprocess, and SIGTERM to the wrapper does not
-  // reliably propagate to the inner curl on Linux — the inner process can
-  // hold the stdout pipe open until `--max-time` expires (30s), turning a
-  // 50ms abort into a 30s hang. SIGKILL terminates the wrapper immediately;
-  // the inner curl gets cleaned up when its parent dies and Bun's stream
-  // teardown closes the pipes.
+  // Spawn detached so the child becomes the leader of its own process group.
+  // The curl-impersonate wrappers (curl_chrome136 et al.) are bash scripts
+  // that call the real curl-impersonate binary WITHOUT `exec` — meaning the
+  // wrapper is the parent and curl-impersonate is its child. On a plain
+  // SIGKILL to the wrapper PID, the curl child becomes orphaned and keeps
+  // the stdout pipe open until --max-time fires (30s default), turning a
+  // 50ms abort into a 30s hang. process.kill(-pid) addresses the negative
+  // PID, which signals the entire process group, killing both the wrapper
+  // and the inner curl atomically. detached: true is what makes the child
+  // the pgid leader so -pid is well-defined; without it, the child shares
+  // our pgid and we'd nuke our own process.
   const proc = spawn({
     cmd: [
       curlBinary,
@@ -88,9 +92,16 @@ export async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise
     ],
     stdout: 'pipe',
     stderr: 'pipe',
+    detached: true,
   })
 
-  const onAbort = () => proc.kill('SIGKILL')
+  const onAbort = () => {
+    try {
+      process.kill(-proc.pid, 'SIGKILL')
+    } catch {
+      proc.kill('SIGKILL')
+    }
+  }
   signal?.addEventListener('abort', onAbort, { once: true })
 
   try {
