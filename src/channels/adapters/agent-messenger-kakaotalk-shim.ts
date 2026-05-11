@@ -195,8 +195,4 @@ export function classifyKakaoChat(chat: Pick<KakaoChat, 'type' | 'active_members
   return 'group'
 }
 
-export function kakaoWorkspaceForType(type: KakaoChatType): '@kakao-dm' | '@kakao-group' | '@kakao-open' {
-  if (type === 'dm') return '@kakao-dm'
-  if (type === 'open') return '@kakao-open'
-  return '@kakao-group'
-}
+export { kakaoWorkspaceForType } from './kakaotalk-channel-resolver'

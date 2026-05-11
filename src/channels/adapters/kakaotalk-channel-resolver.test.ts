@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { KakaoChat, KakaoTalkClient } from './agent-messenger-kakaotalk-shim'
-import { createKakaoChannelResolver } from './kakaotalk-channel-resolver'
+import { createKakaoChannelResolver, kakaoWorkspaceForType } from './kakaotalk-channel-resolver'
 
 // Modern KakaoTalk LOCO type codes — t=11 for normal 1:1 DMs and t=10 for
 // normal groups. The earlier `t=0/1/2` fixtures matched a stale assumption
@@ -110,5 +110,17 @@ describe('createKakaoChannelResolver', () => {
     now += 200
     await resolver.refresh()
     expect(resolver.lookupChat('111')).toEqual({ workspace: '@kakao-group', isDm: false })
+  })
+})
+
+describe('kakaoWorkspaceForType', () => {
+  test('maps each KakaoChatKind to its workspace label', () => {
+    expect(kakaoWorkspaceForType('dm')).toBe('@kakao-dm')
+    expect(kakaoWorkspaceForType('group')).toBe('@kakao-group')
+    expect(kakaoWorkspaceForType('open')).toBe('@kakao-open')
+  })
+
+  test('falls back to @kakao-group for unknown', () => {
+    expect(kakaoWorkspaceForType('unknown')).toBe('@kakao-group')
   })
 })

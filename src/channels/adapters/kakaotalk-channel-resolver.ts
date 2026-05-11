@@ -1,16 +1,19 @@
-import type { ChannelKey, ChannelNameResolver, ResolvedChannelNames } from '@/channels/types'
+import { classifyKakaoChat, type KakaoChat, type KakaoChatKind, type KakaoTalkClient } from 'agent-messenger/kakaotalk'
 
-import {
-  classifyKakaoChat,
-  kakaoWorkspaceForType,
-  type KakaoChat,
-  type KakaoTalkClient,
-} from './agent-messenger-kakaotalk-shim'
+import type { ChannelKey, ChannelNameResolver, ResolvedChannelNames } from '@/channels/types'
 
 const DEFAULT_TTL_MS = 5 * 60 * 1000
 
+export type KakaoWorkspace = '@kakao-dm' | '@kakao-group' | '@kakao-open'
+
+export function kakaoWorkspaceForType(kind: KakaoChatKind): KakaoWorkspace {
+  if (kind === 'dm') return '@kakao-dm'
+  if (kind === 'open') return '@kakao-open'
+  return '@kakao-group'
+}
+
 export type KakaoChatLookupValue = {
-  workspace: '@kakao-dm' | '@kakao-group' | '@kakao-open'
+  workspace: KakaoWorkspace
   isDm: boolean
 }
 
@@ -28,7 +31,7 @@ export type KakaoChannelResolverOptions = {
 }
 
 type Entry = {
-  workspace: '@kakao-dm' | '@kakao-group' | '@kakao-open'
+  workspace: KakaoWorkspace
   isDm: boolean
   chatName: string | null
   expiresAt: number
