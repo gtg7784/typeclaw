@@ -146,7 +146,7 @@ export async function runInit({
   // Same trap as kakaotalk-auth: scaffold-then-fail-auth would leave
   // typeclaw.json without working credentials and the runtime would silently
   // refuse to boot. The login itself doesn't need the agent folder to exist
-  // — pi-ai's OAuth helper just needs a writable path for auth.json, which
+  // — pi-ai's OAuth helper just needs a writable path for secrets.json, which
   // we create on demand inside scaffold().
   if (resolvedAuth.kind === 'oauth') {
     emit({ step: 'oauth-login', phase: 'start' })
@@ -174,7 +174,7 @@ export async function runInit({
     kakaotalkAllowAll,
   })
   // Only write the LLM API key on the api-key path. OAuth providers persist
-  // their credentials to auth.json (via the OAuth login step above); writing
+  // their credentials to secrets.json (via the OAuth login step above); writing
   // an empty FIREWORKS_API_KEY/OPENAI_API_KEY would just confuse users.
   await writeSecrets(cwd, {
     model,
@@ -521,7 +521,7 @@ export async function writeSecrets(
     telegramBotToken,
   }: {
     model?: KnownModelRef
-    // Omitted on the OAuth path — credentials live in auth.json instead. The
+    // Omitted on the OAuth path — credentials live in secrets.json instead. The
     // .env file still gets written for any channel adapter tokens.
     apiKey?: string
     discordBotToken?: string

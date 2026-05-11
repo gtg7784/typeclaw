@@ -2,7 +2,7 @@ import type { Api, Model } from '@mariozechner/pi-ai'
 
 // Authentication mechanism a provider supports. `api-key` reads a static key
 // from .env (the original path); `oauth` runs a browser flow at init time and
-// stores rotating credentials in auth.json. The CLI picker uses this to ask
+// stores rotating credentials in secrets.json. The CLI picker uses this to ask
 // "API key or OAuth?" only when both are wired up.
 export type AuthMethod = 'api-key' | 'oauth'
 

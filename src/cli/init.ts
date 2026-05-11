@@ -436,7 +436,7 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
 // Resolves how the user wants to authenticate to the chosen provider:
 // - api-key only (e.g. Fireworks): prompt for the key, write to .env.
 // - oauth only (e.g. openai-codex): run the browser flow inline, write
-//   auth.json. No API key prompt at all.
+//   secrets.json. No API key prompt at all.
 // - both supported (no providers ship this today, but Anthropic will when
 //   wired): ask "API key or OAuth?" first, then dispatch to the chosen path.
 async function collectLLMAuth(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]): Promise<LLMAuth> {

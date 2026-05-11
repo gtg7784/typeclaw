@@ -524,9 +524,9 @@ The model registry currently has these entries:
 | `openai/gpt-5.4-mini`                                  | GPT-5.4 mini    | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.                   |
 | `openai/gpt-5.4`                                       | GPT-5.4         | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.                  |
 | `openai/gpt-5.5`                                       | GPT-5.5         | OpenAI       | API key             | Flagship. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.        |
-| `openai-codex/gpt-5.4-mini`                            | GPT-5.4 mini    | OpenAI Codex | OAuth (ChatGPT P/P) | Cheaper Codex tier. Requires OAuth login at init. Persisted to `auth.json`. 272K ctx. |
-| `openai-codex/gpt-5.4`                                 | GPT-5.4         | OpenAI Codex | OAuth (ChatGPT P/P) | Codex mid-tier. Requires OAuth login at init. Persisted to `auth.json`. 272K context. |
-| `openai-codex/gpt-5.5`                                 | GPT-5.5         | OpenAI Codex | OAuth (ChatGPT P/P) | Flagship Codex. Requires OAuth login at init. Persisted to `auth.json`. 272K context. |
+| `openai-codex/gpt-5.4-mini`                            | GPT-5.4 mini    | OpenAI Codex | OAuth (ChatGPT P/P) | Cheaper Codex tier. Requires OAuth login at init. Persisted to `secrets.json`. 272K ctx. |
+| `openai-codex/gpt-5.4`                                 | GPT-5.4         | OpenAI Codex | OAuth (ChatGPT P/P) | Codex mid-tier. Requires OAuth login at init. Persisted to `secrets.json`. 272K context. |
+| `openai-codex/gpt-5.5`                                 | GPT-5.5         | OpenAI Codex | OAuth (ChatGPT P/P) | Flagship Codex. Requires OAuth login at init. Persisted to `secrets.json`. 272K context. |
 | `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.6 Turbo | Fireworks    | API key             | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context.                |
 
 **Do not write any other value into `model`.** The schema enum will reject the file at load, and the runtime will refuse to boot the agent process. If the user names a model that isn't in this table — "use Claude", "switch to o3" — be honest:
@@ -542,10 +542,10 @@ Do **not** edit `typeclaw.json` to a model the registry doesn't know, even if th
 - **`./.env`** (API key providers): the env var depends on which provider's model you've selected.
   - `OPENAI_API_KEY` — required for any `openai/...` model.
   - `FIREWORKS_API_KEY` — required for any `fireworks/...` model.
-- **`./auth.json`** (OAuth providers): structured JSON file managed by `pi-coding-agent`'s `AuthStorage`. Contains refresh + access tokens. The container refreshes tokens on its own with file locking; the host writes once at `typeclaw init` time when the user picks "OAuth (browser login)".
-  - `openai-codex/...` models — credentials persisted as `{ "openai-codex": { "type": "oauth", ... } }`.
+- **`./secrets.json`** (OAuth providers): structured JSON file managed by `pi-coding-agent`'s `AuthStorage`, wrapped by `SecretsBackend`. Contains refresh + access tokens. The container refreshes tokens on its own with file locking; the host writes once at `typeclaw init` time when the user picks "OAuth (browser login)". (Pre-rename agent folders may carry the file as `auth.json`; it is migrated to `secrets.json` on the next agent boot.)
+  - `openai-codex/...` models — credentials persisted under the `llm` slice as `{ "llm": { "openai-codex": { "type": "oauth", ... } } }`.
 
-If a user wants to switch from API key to OAuth (or vice versa) for a provider that supports both, the easiest path is to delete the relevant entry from `.env` / `auth.json` and re-run `typeclaw init` from inside the agent folder — it'll prompt for the auth method again.
+If a user wants to switch from API key to OAuth (or vice versa) for a provider that supports both, the easiest path is to delete the relevant entry from `.env` / `secrets.json` and re-run `typeclaw init` from inside the agent folder — it'll prompt for the auth method again.
 
 If the user wants to rotate or change the key, edit `.env`, not `typeclaw.json`. After editing `.env`, the same restart rule applies: `typeclaw restart` on the host stage.
 
