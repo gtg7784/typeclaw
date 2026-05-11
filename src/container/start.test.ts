@@ -1545,6 +1545,111 @@ describe('start (composition)', () => {
     if (!result.ok) expect(result.reason).toMatch(/exists but is not running/)
     expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
   })
+
+  test('retries docker run when Docker returns "container name is already in use" despite inspect reporting gone (split-state race)', async () => {
+    // given: a fresh start. The preflight `docker inspect` reports the
+    // container is gone, so start() proceeds straight to `docker run`. But
+    // Docker's name-reservation table has not finished draining a prior
+    // removal, so the first two `docker run` attempts fail with the exact
+    // user-visible conflict error from typeclaw compose restart. The third
+    // attempt succeeds.
+    //
+    // Without the retry, the test fails with the production error string
+    // verbatim — that's the mutation check.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    let runAttempts = 0
+    const conflictStderr =
+      'docker: Error response from daemon: Conflict. The container name "/anderson" is already in use by container "e8d39ae0eb16428c58b143b3a8ac60267ae87ce4fc0f2859022183b512287209". You have to remove (or rename) that container to be able to reuse that name.'
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      if (args[0] === 'run') {
+        runAttempts++
+        if (runAttempts <= 2) return { exitCode: 125, stdout: '', stderr: conflictStderr }
+        return { exitCode: 0, stdout: 'fake-id\n', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(runAttempts).toBe(3)
+  })
+
+  test('surfaces the docker run name-conflict error after exhausting retries', async () => {
+    // given: Docker keeps returning the name-conflict error on every
+    // attempt — e.g. a wedged corpse on a sick daemon that no amount of
+    // waiting will fix. start() must eventually give up and surface the
+    // error so the user can act (`docker rm -f <name>` or restart Docker)
+    // instead of silently hanging.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    let runAttempts = 0
+    const conflictStderr =
+      'docker: Error response from daemon: Conflict. The container name "/x" is already in use by container "abc". You have to remove (or rename) that container to be able to reuse that name.'
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      if (args[0] === 'run') {
+        runAttempts++
+        return { exitCode: 125, stdout: '', stderr: conflictStderr }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toMatch(/Conflict.*container name.*is already in use/)
+    expect(runAttempts).toBeGreaterThanOrEqual(2)
+  })
+
+  test('does NOT retry when docker run fails for a non-conflict reason (e.g. image pull error)', async () => {
+    // given: a non-conflict docker run failure. The conflict retry loop
+    // must not shadow the existing fast-fail behavior — the user sees the
+    // error immediately, exactly once.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    let runAttempts = 0
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      if (args[0] === 'run') {
+        runAttempts++
+        return { exitCode: 125, stdout: '', stderr: 'docker: Error response from daemon: image not found' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(runAttempts).toBe(1)
+    if (!result.ok) expect(result.reason).toMatch(/image not found/)
+  })
 })
 
 describe('start (port allocation)', () => {

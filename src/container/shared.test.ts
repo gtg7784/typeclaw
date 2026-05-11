@@ -10,6 +10,7 @@ import {
   DOCKER_NOT_FOUND_STDERR,
   type DockerExec,
   imageTagFromCwd,
+  isContainerNameConflict,
   sanitizeDockerStderr,
   waitForRemoval,
 } from './shared'
@@ -145,6 +146,30 @@ describe('classifyRmStderr', () => {
     expect(classifyRmStderr('Error: No such container: x (removal of container x was already in progress)')).toBe(
       'gone',
     )
+  })
+})
+
+describe('isContainerNameConflict', () => {
+  test('detects the canonical "container name is already in use" error from docker run', () => {
+    const stderr =
+      'docker: Error response from daemon: Conflict. The container name "/anderson" is already in use by container "e8d39ae0eb16428c58b143b3a8ac60267ae87ce4fc0f2859022183b512287209". You have to remove (or rename) that container to be able to reuse that name.\n'
+    expect(isContainerNameConflict(stderr)).toBe(true)
+  })
+
+  test('is case-insensitive', () => {
+    expect(isContainerNameConflict('CONTAINER NAME "/x" IS ALREADY IN USE')).toBe(true)
+  })
+
+  test('returns false for unrelated docker run errors', () => {
+    expect(isContainerNameConflict('docker: Bind for :::8973 failed: port is already allocated')).toBe(false)
+    expect(isContainerNameConflict('permission denied')).toBe(false)
+    expect(isContainerNameConflict('Error response from daemon: image not found')).toBe(false)
+    expect(isContainerNameConflict('')).toBe(false)
+  })
+
+  test('requires BOTH "container name" and "is already in use" — neither alone is sufficient', () => {
+    expect(isContainerNameConflict('container name was rejected')).toBe(false)
+    expect(isContainerNameConflict('port is already in use')).toBe(false)
   })
 })
 

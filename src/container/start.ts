@@ -18,8 +18,10 @@ import {
   containerNameFromCwd,
   defaultDockerExec,
   type DockerExec,
+  type DockerExecResult,
   getBun,
   imageTagFromCwd,
+  isContainerNameConflict,
   sanitizeDockerStderr,
   waitForRemoval,
 } from './shared'
@@ -233,7 +235,7 @@ export async function start({
       built = true
     }
 
-    let run = await exec(plan.runArgs, { cwd })
+    let run = await execRunWithConflictRetry(exec, plan.runArgs, cwd)
 
     // TOCTOU: another process may have grabbed the port between our probe and
     // `docker run`, or the kernel-assigned port may itself have been claimed.
@@ -247,7 +249,7 @@ export async function start({
         hostdControl = hostd.state === 'registered' ? hostd.control : undefined
       }
       plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false, hostdControl })
-      run = await exec(plan.runArgs, { cwd })
+      run = await execRunWithConflictRetry(exec, plan.runArgs, cwd)
     }
 
     if (run.exitCode !== 0) {
@@ -416,6 +418,32 @@ async function inspectContainer(exec: DockerExec, name: string): Promise<Inspect
   const result = await exec(['inspect', '--format', '{{.State.Running}}', name])
   if (result.exitCode !== 0) return { exists: false }
   return { exists: true, running: result.stdout.trim() === 'true' }
+}
+
+// Cumulative budget ~2.7s. Five attempts is enough for the worst OrbStack-
+// under-load drain we've observed (a few hundred ms); the trailing 1200ms
+// step gives headroom for an unusually slow drain without ballooning the
+// budget on the genuinely-stuck case where the user needs to see the error.
+const RUN_RETRY_DELAYS_MS = [100, 200, 400, 800, 1200] as const
+
+// Retries `docker run` on name-conflict responses to handle Docker's split-
+// state race: `docker inspect <name>` can report "no such container" while
+// `docker run --name <same>` still rejects on the name-reservation table.
+// See isContainerNameConflict for the full failure-mode rationale.
+//
+// Only the name-conflict path retries — any other non-zero exit is returned
+// to the caller unchanged so the existing port-conflict TOCTOU retry and
+// permission-denied surfacing keep working without being shadowed by the
+// outer retry loop.
+async function execRunWithConflictRetry(exec: DockerExec, runArgs: string[], cwd: string): Promise<DockerExecResult> {
+  let last = await exec(runArgs, { cwd })
+  for (const delayMs of RUN_RETRY_DELAYS_MS) {
+    if (last.exitCode === 0) return last
+    if (!isContainerNameConflict(last.stderr)) return last
+    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    last = await exec(runArgs, { cwd })
+  }
+  return last
 }
 
 // Idempotent path for `start()`: the named container is already up. Reflect
