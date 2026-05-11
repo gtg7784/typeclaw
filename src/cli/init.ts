@@ -23,6 +23,8 @@ import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
 import { makeOAuthLoginRunner } from '@/init/oauth-login'
 
+import { c, done, errorLine } from './ui'
+
 export const init = defineCommand({
   meta: {
     name: 'init',
@@ -34,13 +36,15 @@ export const init = defineCommand({
     const existingAgent = findAgentDir(cwd)
     if (existingAgent !== null && existingAgent !== cwd) {
       console.error(
-        `Refusing to init: a TypeClaw agent already exists at ${existingAgent}. Nested agents are not supported.`,
+        errorLine(
+          `Refusing to init: a TypeClaw agent already exists at ${existingAgent}. Nested agents are not supported.`,
+        ),
       )
       process.exit(1)
     }
 
     if (await isHatched(cwd)) {
-      console.error(`TypeClaw has already hatched in ${cwd}.`)
+      console.error(errorLine(`TypeClaw has already hatched in ${cwd}.`))
       process.exit(1)
     }
 
@@ -298,7 +302,7 @@ export const init = defineCommand({
         ),
       })
     } catch (error) {
-      console.error(error)
+      console.error(errorLine(error instanceof Error ? error.message : String(error)))
       process.exit(1)
     }
 
@@ -308,7 +312,14 @@ export const init = defineCommand({
     }
 
     if (hatchingOk) {
-      console.log('\nContainer is still running. Run `typeclaw tui` to reattach or `typeclaw stop` to stop.')
+      done({
+        title: c.green('Hatched. Your agent is ready.'),
+        hints: [
+          { label: 'Attach TUI:', command: 'typeclaw tui' },
+          { label: 'Follow logs:', command: 'typeclaw logs -f' },
+          { label: 'Stop:', command: 'typeclaw stop' },
+        ],
+      })
     }
   },
 })
