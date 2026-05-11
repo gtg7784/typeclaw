@@ -1,6 +1,13 @@
 import { isDaemonReachable, send as sendToDaemon } from '@/hostd/client'
 
-import { classifyRmStderr, containerNameFromCwd, defaultDockerExec, type DockerExec, waitForRemoval } from './shared'
+import {
+  classifyRmStderr,
+  containerNameFromCwd,
+  defaultDockerExec,
+  type DockerExec,
+  sanitizeDockerStderr,
+  waitForRemoval,
+} from './shared'
 
 export type StopPlan = {
   containerName: string
@@ -38,7 +45,7 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
         if (kind === null) {
           return {
             ok: false,
-            reason: `docker inspect failed (${inspect.stderr.trim() || 'no stderr'}) and docker rm -f could not recover: ${recover.stderr.trim() || 'no stderr'}`,
+            reason: `docker inspect failed (${sanitizeDockerStderr(inspect.stderr) || 'no stderr'}) and docker rm -f could not recover: ${sanitizeDockerStderr(recover.stderr) || 'no stderr'}`,
           }
         }
         if (kind === 'in-progress' && !(await waitForRemoval(exec, containerName))) {
@@ -59,7 +66,7 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
     if (running) {
       const stopResult = await exec(['stop', containerName], { cwd })
       if (stopResult.exitCode !== 0) {
-        return { ok: false, reason: `docker stop failed: ${stopResult.stderr.trim() || 'no stderr'}` }
+        return { ok: false, reason: `docker stop failed: ${sanitizeDockerStderr(stopResult.stderr) || 'no stderr'}` }
       }
     }
 
@@ -77,7 +84,7 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
     if (rmResult.exitCode !== 0) {
       const kind = classifyRmStderr(rmResult.stderr)
       if (kind === null) {
-        return { ok: false, reason: `docker rm failed: ${rmResult.stderr.trim() || 'no stderr'}` }
+        return { ok: false, reason: `docker rm failed: ${sanitizeDockerStderr(rmResult.stderr) || 'no stderr'}` }
       }
       if (kind === 'in-progress' && !(await waitForRemoval(exec, containerName))) {
         return {
