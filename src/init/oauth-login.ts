@@ -1,6 +1,5 @@
 import { join } from 'node:path'
 
-import { createSecretsStoreForAgent } from '@/secrets'
 import {
   KNOWN_PROVIDERS,
   providerForModelRef,
@@ -8,6 +7,7 @@ import {
   type KnownModelRef,
   type KnownProviderId,
 } from '@/config/providers'
+import { createSecretsStoreForAgent } from '@/secrets'
 
 export type OAuthLoginResult = { ok: true } | { ok: false; reason: string }
 

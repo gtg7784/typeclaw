@@ -2,7 +2,6 @@ import { join } from 'node:path'
 
 import { AuthStorage, ModelRegistry } from '@mariozechner/pi-coding-agent'
 
-import { createSecretsStoreForAgent } from '@/secrets'
 import { getConfig } from '@/config'
 import {
   KNOWN_PROVIDERS,
@@ -11,6 +10,7 @@ import {
   supportsOAuth,
   type KnownProviderId,
 } from '@/config/providers'
+import { createSecretsStoreForAgent } from '@/secrets'
 
 type Auth = {
   authStorage: AuthStorage

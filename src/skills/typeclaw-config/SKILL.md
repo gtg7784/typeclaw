@@ -518,16 +518,16 @@ Do **not** invent plugin blocks; their existence is determined by the plugins li
 
 The model registry currently has these entries:
 
-| `model` value                                          | Display name    | Provider     | Auth                | Notes                                                                                 |
-| ------------------------------------------------------ | --------------- | ------------ | ------------------- | ------------------------------------------------------------------------------------- |
-| `openai/gpt-5.4-nano`                                  | GPT-5.4 nano    | OpenAI       | API key             | Default. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.          |
-| `openai/gpt-5.4-mini`                                  | GPT-5.4 mini    | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.                   |
-| `openai/gpt-5.4`                                       | GPT-5.4         | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.                  |
-| `openai/gpt-5.5`                                       | GPT-5.5         | OpenAI       | API key             | Flagship. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.        |
+| `model` value                                          | Display name    | Provider     | Auth                | Notes                                                                                    |
+| ------------------------------------------------------ | --------------- | ------------ | ------------------- | ---------------------------------------------------------------------------------------- |
+| `openai/gpt-5.4-nano`                                  | GPT-5.4 nano    | OpenAI       | API key             | Default. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.             |
+| `openai/gpt-5.4-mini`                                  | GPT-5.4 mini    | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 400K context.                      |
+| `openai/gpt-5.4`                                       | GPT-5.4         | OpenAI       | API key             | Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.                     |
+| `openai/gpt-5.5`                                       | GPT-5.5         | OpenAI       | API key             | Flagship. Requires `OPENAI_API_KEY` in `.env`. Reasoning model, 1.05M context.           |
 | `openai-codex/gpt-5.4-mini`                            | GPT-5.4 mini    | OpenAI Codex | OAuth (ChatGPT P/P) | Cheaper Codex tier. Requires OAuth login at init. Persisted to `secrets.json`. 272K ctx. |
 | `openai-codex/gpt-5.4`                                 | GPT-5.4         | OpenAI Codex | OAuth (ChatGPT P/P) | Codex mid-tier. Requires OAuth login at init. Persisted to `secrets.json`. 272K context. |
 | `openai-codex/gpt-5.5`                                 | GPT-5.5         | OpenAI Codex | OAuth (ChatGPT P/P) | Flagship Codex. Requires OAuth login at init. Persisted to `secrets.json`. 272K context. |
-| `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.6 Turbo | Fireworks    | API key             | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context.                |
+| `fireworks/accounts/fireworks/routers/kimi-k2p6-turbo` | Kimi K2.6 Turbo | Fireworks    | API key             | Requires `FIREWORKS_API_KEY` in `.env`. Reasoning model, 256K context.                   |
 
 **Do not write any other value into `model`.** The schema enum will reject the file at load, and the runtime will refuse to boot the agent process. If the user names a model that isn't in this table — "use Claude", "switch to o3" — be honest:
 

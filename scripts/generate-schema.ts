@@ -6,10 +6,10 @@ import { fileURLToPath } from 'node:url'
 
 import { z } from 'zod'
 
-import { secretsFileSchema } from '../src/secrets/schema'
 import { configSchema as coreConfigSchema } from '../src/config/config'
 import { cronFileSchema } from '../src/cron/schema'
 import { buildConfigSchemaWithBundledPlugins } from '../src/run/schema-with-plugins'
+import { secretsFileSchema } from '../src/secrets/schema'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
