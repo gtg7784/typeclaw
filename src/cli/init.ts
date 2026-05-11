@@ -449,7 +449,7 @@ async function collectLLMAuth(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId
       message: `How do you want to authenticate to ${provider.name}?`,
       options: [
         { value: 'api-key', label: 'API key', hint: `saved to .env as ${provider.apiKeyEnv}` },
-        { value: 'oauth', label: 'OAuth (browser login)', hint: 'saved to auth.json' },
+        { value: 'oauth', label: 'OAuth (browser login)', hint: 'saved to secrets.json' },
       ],
       initialValue: 'api-key',
     })

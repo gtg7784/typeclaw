@@ -8,7 +8,7 @@ import {
 } from '@mariozechner/pi-coding-agent'
 import lockfile from 'proper-lockfile'
 
-import { type AuthFile, parseAuthFile } from './schema'
+import { type SecretsFile, parseSecretsFile } from './schema'
 
 const SCHEMA_REL = './node_modules/typeclaw/auth.schema.json'
 const FILE_MODE = 0o600
@@ -22,10 +22,10 @@ const ASYNC_LOCK_OPTIONS = {
   stale: 30000,
 } as const
 
-// SubObjectAuthStorageBackend implements pi-coding-agent's AuthStorageBackend
-// contract while keeping TypeClaw in control of the on-disk file shape.
+// SecretsBackend implements pi-coding-agent's AuthStorageBackend contract
+// while keeping TypeClaw in control of the on-disk file shape.
 //
-// Upstream's FileAuthStorageBackend assumes the entire auth.json IS the
+// Upstream's FileAuthStorageBackend assumes the entire file IS the
 // AuthStorageData (a flat Record<string, AuthCredential>). TypeClaw needs the
 // file to also carry version + channels alongside the LLM slice, so we wrap:
 // every withLock cycle reads the full envelope, presents only file.llm to the
@@ -42,8 +42,8 @@ const ASYNC_LOCK_OPTIONS = {
 // We additionally write atomically (temp + rename) for durability — upstream
 // uses plain writeFileSync, but we own a richer envelope and a half-write
 // would leave us with neither the old nor the new shape parseable.
-export class SubObjectAuthStorageBackend implements AuthStorageBackend {
-  constructor(private readonly authPath: string) {}
+export class SecretsBackend implements AuthStorageBackend {
+  constructor(private readonly secretsPath: string) {}
 
   withLock<T>(fn: (current: string | undefined) => { result: T; next?: string }): T {
     this.ensureParentDir()
@@ -73,11 +73,11 @@ export class SubObjectAuthStorageBackend implements AuthStorageBackend {
     let lockCompromisedError: Error | undefined
     const throwIfCompromised = (): void => {
       if (lockCompromised) {
-        throw lockCompromisedError ?? new Error('Auth storage lock was compromised')
+        throw lockCompromisedError ?? new Error('Secrets store lock was compromised')
       }
     }
     try {
-      release = await lockfile.lock(this.authPath, {
+      release = await lockfile.lock(this.secretsPath, {
         ...ASYNC_LOCK_OPTIONS,
         onCompromised: (err: Error) => {
           lockCompromised = true
@@ -110,7 +110,7 @@ export class SubObjectAuthStorageBackend implements AuthStorageBackend {
   }
 
   private ensureParentDir(): void {
-    const dir = dirname(this.authPath)
+    const dir = dirname(this.secretsPath)
     if (!existsSync(dir)) {
       mkdirSync(dir, { recursive: true, mode: DIR_MODE })
     }
@@ -121,17 +121,17 @@ export class SubObjectAuthStorageBackend implements AuthStorageBackend {
   // and so the file is parseable by a third-party reader even before the
   // first credential is written.
   private ensureFileExists(): void {
-    if (existsSync(this.authPath)) return
+    if (existsSync(this.secretsPath)) return
     const seed = newEmptyEnvelope()
-    writeFileSync(this.authPath, stringifyEnvelope(seed), 'utf8')
-    chmodSync(this.authPath, FILE_MODE)
+    writeFileSync(this.secretsPath, stringifyEnvelope(seed), 'utf8')
+    chmodSync(this.secretsPath, FILE_MODE)
   }
 
   private acquireSyncLockWithRetry(): () => void {
     let lastError: unknown
     for (let attempt = 1; attempt <= SYNC_LOCK_RETRIES; attempt++) {
       try {
-        return lockfile.lockSync(this.authPath, { realpath: false })
+        return lockfile.lockSync(this.secretsPath, { realpath: false })
       } catch (error) {
         const code =
           typeof error === 'object' && error !== null && 'code' in error
@@ -147,32 +147,32 @@ export class SubObjectAuthStorageBackend implements AuthStorageBackend {
         }
       }
     }
-    throw (lastError as Error | undefined) ?? new Error('Failed to acquire auth storage lock')
+    throw (lastError as Error | undefined) ?? new Error('Failed to acquire secrets store lock')
   }
 
-  private readEnvelope(): AuthFile {
-    const raw = existsSync(this.authPath) ? readFileSync(this.authPath, 'utf8') : ''
+  private readEnvelope(): SecretsFile {
+    const raw = existsSync(this.secretsPath) ? readFileSync(this.secretsPath, 'utf8') : ''
     if (!raw.trim()) return newEmptyEnvelope()
     let parsed: unknown
     try {
       parsed = JSON.parse(raw)
     } catch (err) {
-      throw new Error(`auth.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}`)
+      throw new Error(`secrets file is not valid JSON: ${err instanceof Error ? err.message : String(err)}`)
     }
-    const result = parseAuthFile(parsed)
+    const result = parseSecretsFile(parsed)
     if (!result.ok) {
-      throw new Error(`auth.json is not a valid TypeClaw auth file: ${result.reason}`)
+      throw new Error(`secrets file is not a valid TypeClaw secrets file: ${result.reason}`)
     }
     return result.file
   }
 
   // Atomic temp+rename, same pattern as src/hostd/daemon.ts:persistRegistration.
   // The temp file lives in the same directory so rename is intra-filesystem.
-  private writeEnvelopeAtomic(envelope: AuthFile): void {
-    const tmp = `${this.authPath}.${process.pid}.${Date.now()}.tmp`
+  private writeEnvelopeAtomic(envelope: SecretsFile): void {
+    const tmp = `${this.secretsPath}.${process.pid}.${Date.now()}.tmp`
     writeFileSync(tmp, stringifyEnvelope(envelope), { encoding: 'utf8', mode: FILE_MODE })
     try {
-      renameSync(tmp, this.authPath)
+      renameSync(tmp, this.secretsPath)
     } catch (err) {
       try {
         unlinkSync(tmp)
@@ -181,27 +181,27 @@ export class SubObjectAuthStorageBackend implements AuthStorageBackend {
       }
       throw err
     }
-    chmodSync(this.authPath, FILE_MODE)
+    chmodSync(this.secretsPath, FILE_MODE)
   }
 }
 
-// createAuthStorageForAgent is the single seam every TypeClaw caller should
-// use to obtain an AuthStorage tied to an agent folder's auth.json. Keeps the
-// upstream constructor (AuthStorage.create) usage isolated to one file so a
-// future change to upstream wiring only touches this module.
-export function createAuthStorageForAgent(authPath: string): AuthStorage {
-  return AuthStorageImpl.fromStorage(new SubObjectAuthStorageBackend(authPath))
+// createSecretsStoreForAgent is the single seam every TypeClaw caller should
+// use to obtain an AuthStorage tied to an agent folder's secrets file. Keeps
+// the upstream constructor (AuthStorage.fromStorage) usage isolated to one
+// module so a future change to upstream wiring only touches this file.
+export function createSecretsStoreForAgent(secretsPath: string): AuthStorage {
+  return AuthStorageImpl.fromStorage(new SecretsBackend(secretsPath))
 }
 
-function newEmptyEnvelope(): AuthFile {
+function newEmptyEnvelope(): SecretsFile {
   return { $schema: SCHEMA_REL, version: 1, llm: {}, channels: {} }
 }
 
-function stringifyEnvelope(envelope: AuthFile): string {
+function stringifyEnvelope(envelope: SecretsFile): string {
   return `${JSON.stringify(envelope, null, 2)}\n`
 }
 
-function mergeLlmIntoEnvelope(envelope: AuthFile, nextLlmJson: string): AuthFile {
+function mergeLlmIntoEnvelope(envelope: SecretsFile, nextLlmJson: string): SecretsFile {
   let parsed: unknown
   try {
     parsed = JSON.parse(nextLlmJson)
@@ -216,7 +216,7 @@ function mergeLlmIntoEnvelope(envelope: AuthFile, nextLlmJson: string): AuthFile
   return {
     ...envelope,
     $schema: envelope.$schema ?? SCHEMA_REL,
-    llm: parsed as AuthFile['llm'],
+    llm: parsed as SecretsFile['llm'],
   }
 }
 

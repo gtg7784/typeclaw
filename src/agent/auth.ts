@@ -2,7 +2,7 @@ import { join } from 'node:path'
 
 import { AuthStorage, ModelRegistry } from '@mariozechner/pi-coding-agent'
 
-import { createAuthStorageForAgent } from '@/auth'
+import { createSecretsStoreForAgent } from '@/secrets'
 import { getConfig } from '@/config'
 import {
   KNOWN_PROVIDERS,
@@ -21,10 +21,10 @@ const TEST_DUMMY_API_KEY = 'test_dummy_key'
 
 // In container stage, /agent is the bind-mounted agent folder; in host stage
 // (only used by `typeclaw init` itself), it falls back to process.cwd(). The
-// host writes auth.json at init time and the container reads + refreshes it
-// at runtime — both paths point at the same file on the host filesystem.
-function authJsonPath(): string {
-  return join(process.cwd(), 'auth.json')
+// host writes secrets.json at init time and the container reads + refreshes
+// it at runtime — both paths point at the same file on the host filesystem.
+function secretsJsonPath(): string {
+  return join(process.cwd(), 'secrets.json')
 }
 
 let cached: Auth | null = null
@@ -49,7 +49,7 @@ export function getAuth(): Auth {
     return cached
   }
 
-  const authStorage = createAuthStorageForAgent(authJsonPath())
+  const authStorage = createSecretsStoreForAgent(secretsJsonPath())
 
   // Persist the .env API key into auth.json so the file is the single
   // source of truth for credentials. Upstream pi-ai's `getEnvApiKey()` only
