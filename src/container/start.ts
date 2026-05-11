@@ -65,13 +65,12 @@ export type StartOptions = {
   reuseCurrentHostDaemon?: boolean
   ensureDeps?: (cwd: string) => Promise<EnsureDepsResult>
   // Post-`docker run` verifier. `docker run -d` returns exit 0 the moment the
-  // container is created, even if its entrypoint crashes milliseconds later;
-  // with `--rm`, Docker then auto-removes the corpse, so `typeclaw logs`
-  // reports "not found" against a start() that claimed success. The default
-  // verifier polls `docker inspect` for 1.5s and converts crashes (or
-  // unrecoverable daemon errors) into start failures. Pass a custom function
-  // to override the wait window or to bypass verification entirely (e.g. a
-  // no-op `async () => ({ ok: true })` for unit tests that don't care).
+  // container is created, even if its entrypoint crashes milliseconds later.
+  // The default verifier polls `docker inspect` for 1.5s and converts crashes
+  // (or unrecoverable daemon errors) into start failures, with the crashed
+  // container's `docker logs` captured into the failure reason. Pass a custom
+  // function to override the wait window or to bypass verification entirely
+  // (e.g. a no-op `async () => ({ ok: true })` for unit tests that don't care).
   verifyRunning?: VerifyRunningFn
 }
 
@@ -152,11 +151,12 @@ export async function start({
     await commitSystemFile(cwd, DEPENDENCY_FILES, 'Update dependencies')
 
     if (state.exists) {
-      // Container is stopped/exited/being-removed but still holds the name.
-      // This typically means a previous `--rm` cleanup hasn't finished, or a
-      // prior crash left a corpse. Force-remove so `docker run --name <same>`
-      // doesn't fail with a name conflict. Tolerate "no such container" since
-      // the daemon may finish auto-removal between inspect and rm.
+      // Container holds the name but is not running. Without `--rm`, this is
+      // now the normal post-stop / post-crash state: the corpse stays around
+      // for `docker logs` so users can debug a crashed agent. Force-remove
+      // before `docker run --name <same>` so the new launch doesn't collide
+      // on the name. Tolerate "no such container" because the user (or an
+      // out-of-band cleanup) may have removed it between our inspect and rm.
       const rm = await exec(['rm', '-f', containerName])
       if (rm.exitCode !== 0 && !rm.stderr.toLowerCase().includes('no such container')) {
         return {
@@ -250,7 +250,12 @@ export async function planStart({
   const devSourcePath = await detectDevSource(cwd)
   const mounts = await loadMounts(cwd)
 
-  const runArgs = ['run', '-d', '--name', containerName, '--rm', '-p', `127.0.0.1:${hostPort}:${CONTAINER_PORT}`]
+  // No `--rm`: a crashed container's logs MUST survive past exit so users can
+  // debug the failure. `typeclaw stop` removes the container explicitly, and
+  // the start() preflight force-removes any lingering corpse before the next
+  // launch — so the only state Docker ever sees in `docker ps -a` is either
+  // a running container or one the user has not started again yet.
+  const runArgs = ['run', '-d', '--name', containerName, '-p', `127.0.0.1:${hostPort}:${CONTAINER_PORT}`]
 
   if (hostdControl) {
     runArgs.push('--add-host', HOST_GATEWAY_ALIAS)

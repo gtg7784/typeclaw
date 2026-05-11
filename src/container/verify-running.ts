@@ -132,9 +132,14 @@ export function buildCrashReason(name: string, failure: Extract<VerifyRunningRes
   if (failure.mode === 'daemon-error') {
     return `Could not verify container ${name} stayed running: ${failure.detail}`
   }
+  // We don't pass `--rm` to `docker run`, so a `removed` outcome means an
+  // external process (the user, docker prune, a CI cleanup) removed the
+  // container during our 1.5s verify window. Surface this distinctly from the
+  // ordinary `exited` crash because the logs are gone and the user needs to
+  // know why instead of chasing a phantom application bug.
   const headline =
     failure.mode === 'removed'
-      ? `Container ${name} exited and was auto-removed by Docker (--rm) immediately after start.`
+      ? `Container ${name} disappeared during start verification (an external process removed it).`
       : `Container ${name} stopped running immediately after start (state: ${failure.status}).`
   if (failure.logs.ok) {
     if (failure.logs.text.length === 0) return `${headline} Container produced no logs.`

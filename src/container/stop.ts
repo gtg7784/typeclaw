@@ -1,6 +1,6 @@
 import { isDaemonReachable, send as sendToDaemon } from '@/hostd/client'
 
-import { containerExists, containerNameFromCwd, getBun, waitForRemoval } from './shared'
+import { containerNameFromCwd, defaultDockerExec, type DockerExec } from './shared'
 
 export type StopPlan = {
   containerName: string
@@ -8,10 +8,12 @@ export type StopPlan = {
 
 export type StopResult = { ok: true; containerName: string; running: boolean } | { ok: false; reason: string }
 
-export async function stop({ cwd }: { cwd: string }): Promise<StopResult> {
-  const bun = getBun()
-  if (!bun) return { ok: false, reason: 'bun runtime not available' }
+export type StopOptions = {
+  cwd: string
+  exec?: DockerExec
+}
 
+export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Promise<StopResult> {
   const { containerName } = planStop(cwd)
 
   if (await isDaemonReachable()) {
@@ -19,28 +21,34 @@ export async function stop({ cwd }: { cwd: string }): Promise<StopResult> {
   }
 
   try {
-    if (!(await containerExists(containerName))) {
+    const inspect = await exec(['inspect', '--format', '{{.State.Running}}', containerName], { cwd })
+    if (inspect.exitCode !== 0) {
       return { ok: true, containerName, running: false }
     }
+    const running = inspect.stdout.trim() === 'true'
 
-    const dockerStop = bun.spawn({ cmd: ['docker', 'stop', containerName], cwd, stdout: 'pipe', stderr: 'pipe' })
-    if ((await dockerStop.exited) !== 0) {
-      const stderr = await new Response(dockerStop.stderr).text()
-      return { ok: false, reason: `docker stop failed: ${stderr.trim() || 'no stderr'}` }
-    }
-
-    // `docker stop` returns when the container's main process exits, but with
-    // `--rm` the daemon then removes the container asynchronously. Block until
-    // removal completes so a subsequent `docker run --name <same>` (e.g. from
-    // `typeclaw restart`) does not race the auto-removal and fail.
-    if (!(await waitForRemoval(containerName))) {
-      return {
-        ok: false,
-        reason: `Stopped ${containerName}, but Docker did not remove it within 10s. Try again or run \`docker rm -f ${containerName}\`.`,
+    // Only call `docker stop` when the container is actually running. A stopped
+    // corpse from a prior crash is left around by design (no `--rm`), and
+    // `docker stop` on an exited container would still succeed but emit a
+    // noisy warning to stderr — skip it.
+    if (running) {
+      const stopResult = await exec(['stop', containerName], { cwd })
+      if (stopResult.exitCode !== 0) {
+        return { ok: false, reason: `docker stop failed: ${stopResult.stderr.trim() || 'no stderr'}` }
       }
     }
 
-    return { ok: true, containerName, running: true }
+    // Containers run without `--rm`, so `docker stop` only stops them — the
+    // record stays in `docker ps -a` until we remove it explicitly. Remove now
+    // so a subsequent `docker run --name <same>` (e.g. from `typeclaw restart`)
+    // does not collide on the name. Tolerate "no such container" because the
+    // user may have removed it out-of-band between inspect and rm.
+    const rmResult = await exec(['rm', containerName], { cwd })
+    if (rmResult.exitCode !== 0 && !rmResult.stderr.toLowerCase().includes('no such container')) {
+      return { ok: false, reason: `docker rm failed: ${rmResult.stderr.trim() || 'no stderr'}` }
+    }
+
+    return { ok: true, containerName, running }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }

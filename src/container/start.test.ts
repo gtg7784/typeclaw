@@ -105,7 +105,7 @@ describe('planStart', () => {
 
     expect(plan.runArgs[0]).toBe('run')
     expect(plan.runArgs).toContain('-d')
-    expect(plan.runArgs).toContain('--rm')
+    expect(plan.runArgs).not.toContain('--rm')
     expect(plan.runArgs).toContain('--name')
     expect(plan.runArgs).toContain(plan.containerName)
     expect(plan.runArgs).toContain('-p')
@@ -1340,7 +1340,7 @@ describe('start (composition)', () => {
   })
 
   test('force-removes a stale stopped container with the same name and proceeds to docker run', async () => {
-    // given: a previous --rm cleanup left a stopped container holding the name
+    // given: a previous crash or `typeclaw stop` left a stopped container holding the name
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({
@@ -1565,14 +1565,15 @@ describe('start (post-run verification composition)', () => {
         ensureDeps: noEnsureDeps,
         verifyRunning: async () => ({
           ok: false,
-          mode: 'removed',
+          mode: 'exited',
+          status: 'exited',
           logs: { ok: true, text: 'Cannot find package "missing"' },
         }),
       })
 
       expect(result.ok).toBe(false)
       if (result.ok) throw new Error('expected failure')
-      expect(result.reason).toMatch(/exited and was auto-removed/)
+      expect(result.reason).toMatch(/stopped running immediately after start/)
       expect(result.reason).toContain('Cannot find package "missing"')
       expect(daemon.registered()).not.toContain(basename(root))
     } finally {

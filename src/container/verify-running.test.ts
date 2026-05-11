@@ -155,7 +155,7 @@ describe('createVerifyRunning', () => {
     expect(calls.some((c) => c.args[0] === 'logs')).toBe(true)
   })
 
-  test('classifies a missing container as removed (auto-cleaned by --rm)', async () => {
+  test('classifies a missing container as removed (anomaly: external process removed it during verify)', async () => {
     const { exec } = scriptedExec({
       inspect: [inspectMissing],
       logs: [{ exitCode: 1, stdout: '', stderr: 'Error: No such container: logs' }],
@@ -269,7 +269,7 @@ describe('buildCrashReason', () => {
 
     const reason = buildCrashReason('agent', failure)
 
-    expect(reason).toContain('exited and was auto-removed')
+    expect(reason).toContain('disappeared during start verification')
     expect(reason).toContain('error: bad config')
   })
 

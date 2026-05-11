@@ -3,7 +3,8 @@ import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { planStop } from './stop'
+import type { DockerExec, DockerExecResult } from './shared'
+import { planStop, stop } from './stop'
 
 let root: string
 
@@ -21,5 +22,119 @@ describe('planStop', () => {
     await mkdir(folder)
 
     expect(planStop(folder)).toEqual({ containerName: 'coder' })
+  })
+})
+
+type ContainerScenario = { exists: false } | { exists: true; running: boolean }
+
+type FakeOptions = {
+  scenario: ContainerScenario
+  stopFails?: boolean
+  rmStderr?: string
+  rmExitCode?: number
+}
+
+function fakeDockerExec(options: FakeOptions): { exec: DockerExec; calls: string[][] } {
+  const calls: string[][] = []
+  let scenario = options.scenario
+  const exec: DockerExec = async (args): Promise<DockerExecResult> => {
+    calls.push(args)
+    if (args[0] === 'inspect') {
+      if (!scenario.exists) return { exitCode: 1, stdout: '', stderr: 'Error: No such container: x' }
+      return { exitCode: 0, stdout: `${scenario.running}\n`, stderr: '' }
+    }
+    if (args[0] === 'stop') {
+      if (options.stopFails) return { exitCode: 1, stdout: '', stderr: 'docker stop failed' }
+      if (scenario.exists) scenario = { exists: true, running: false }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    if (args[0] === 'rm') {
+      const exitCode = options.rmExitCode ?? 0
+      const stderr = options.rmStderr ?? ''
+      if (exitCode === 0) scenario = { exists: false }
+      return { exitCode, stdout: '', stderr }
+    }
+    return { exitCode: 0, stdout: '', stderr: '' }
+  }
+  return { exec, calls }
+}
+
+describe('stop (composition)', () => {
+  test('returns ok with running=false when the container does not exist', async () => {
+    const { exec, calls } = fakeDockerExec({ scenario: { exists: false } })
+
+    const result = await stop({ cwd: root, exec })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.running).toBe(false)
+    expect(calls.find((c) => c[0] === 'stop')).toBeUndefined()
+    expect(calls.find((c) => c[0] === 'rm')).toBeUndefined()
+  })
+
+  test('calls docker stop THEN docker rm when the container is running', async () => {
+    const { exec, calls } = fakeDockerExec({ scenario: { exists: true, running: true } })
+
+    const result = await stop({ cwd: root, exec })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.running).toBe(true)
+    const stopIdx = calls.findIndex((c) => c[0] === 'stop')
+    const rmIdx = calls.findIndex((c) => c[0] === 'rm')
+    expect(stopIdx).toBeGreaterThanOrEqual(0)
+    expect(rmIdx).toBeGreaterThan(stopIdx)
+  })
+
+  test('skips docker stop but still issues docker rm when the container exists in stopped state (post-crash corpse)', async () => {
+    const { exec, calls } = fakeDockerExec({ scenario: { exists: true, running: false } })
+
+    const result = await stop({ cwd: root, exec })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.running).toBe(false)
+    expect(calls.find((c) => c[0] === 'stop')).toBeUndefined()
+    expect(calls.find((c) => c[0] === 'rm')).toBeDefined()
+  })
+
+  test('tolerates "no such container" from docker rm (user removed it out-of-band)', async () => {
+    const { exec } = fakeDockerExec({
+      scenario: { exists: true, running: true },
+      rmExitCode: 1,
+      rmStderr: 'Error: No such container: vanished',
+    })
+
+    const result = await stop({ cwd: root, exec })
+
+    expect(result.ok).toBe(true)
+  })
+
+  test('surfaces a clear error when docker rm fails for a non-recoverable reason', async () => {
+    const { exec } = fakeDockerExec({
+      scenario: { exists: true, running: false },
+      rmExitCode: 1,
+      rmStderr: 'permission denied',
+    })
+
+    const result = await stop({ cwd: root, exec })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/docker rm failed.*permission denied/)
+  })
+
+  test('surfaces a clear error when docker stop itself fails (does not proceed to rm)', async () => {
+    const { exec, calls } = fakeDockerExec({
+      scenario: { exists: true, running: true },
+      stopFails: true,
+    })
+
+    const result = await stop({ cwd: root, exec })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/docker stop failed/)
+    expect(calls.find((c) => c[0] === 'rm')).toBeUndefined()
   })
 })
