@@ -74,6 +74,12 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
 // behavior without going through the real kernel via `findFreePort`.
 const deterministicAllocator = async (preferred: number): Promise<number> => (preferred > 0 ? preferred : 8973)
 
+// Bypasses the real `ensureDepsInstalled` for tests that don't care about
+// dep installation. The default `ensureDeps` in `start()` would spawn
+// `bun install` against the tmpdir, which is irrelevant to most of these
+// tests and would slow each one by ~hundreds of ms.
+const noEnsureDeps = async (): Promise<{ ok: true; installed: false }> => ({ ok: true, installed: false })
+
 function labelValue(runArgs: string[], key: string): string | undefined {
   for (let i = 0; i < runArgs.length - 1; i++) {
     if (runArgs[i] === '--label' && runArgs[i + 1]?.startsWith(`${key}=`)) {
@@ -718,7 +724,13 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when: up runs WITHOUT --build
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     // then: the Dockerfile on disk was refreshed even though docker build never ran
     expect(result.ok).toBe(true)
@@ -735,7 +747,13 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     // then
     expect(result.ok).toBe(true)
@@ -751,7 +769,13 @@ describe('start (composition)', () => {
     await writeTypeclawConfig(root, { gitignore: { append: ['scratch/', '*.local.log'] } })
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     expect(result.ok).toBe(true)
     const onDisk = await readFile(join(root, '.gitignore'), 'utf8')
@@ -771,6 +795,7 @@ describe('start (composition)', () => {
       forceBuild: true,
       exec,
       allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
     })
 
     expect(result.ok).toBe(true)
@@ -792,6 +817,7 @@ describe('start (composition)', () => {
       forceBuild: true,
       exec,
       allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
     })
 
     expect(result.ok).toBe(true)
@@ -815,6 +841,7 @@ describe('start (composition)', () => {
       forceBuild: true,
       exec,
       allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
     })
 
     expect(result.ok).toBe(true)
@@ -835,7 +862,13 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when: start runs (refresh will rewrite .gitignore, commit should land it)
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     // then: HEAD advanced and the new commit exists with the expected subject
     expect(result.ok).toBe(true)
@@ -858,7 +891,13 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when: start runs (Dockerfile is rewritten on disk, .gitignore is unchanged)
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     // then: HEAD did not move (no Dockerfile commit, no .gitignore commit)
     expect(result.ok).toBe(true)
@@ -880,7 +919,13 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     // then: no new commits were created
     expect(result.ok).toBe(true)
@@ -901,7 +946,13 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when: start runs (refreshPackageJson should inject workspaces and create .gitkeep)
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     // then: a new commit landed with the migration
     expect(result.ok).toBe(true)
@@ -928,12 +979,24 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // first start: migrates
-    const first = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const first = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
     expect(first.ok).toBe(true)
     const headAfterFirst = await runGit(root, ['rev-parse', 'HEAD'])
 
     // second start: no-op
-    const second = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const second = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
     expect(second.ok).toBe(true)
     const headAfterSecond = await runGit(root, ['rev-parse', 'HEAD'])
     expect(headAfterSecond).toBe(headAfterFirst)
@@ -958,7 +1021,13 @@ describe('start (composition)', () => {
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     // then
     expect(result.ok).toBe(true)
@@ -968,6 +1037,55 @@ describe('start (composition)', () => {
     expect(subjects).toContain('Update dependencies')
     const filesInCommit = (await runGit(root, ['show', '--name-only', '--format=', 'HEAD'])).split('\n').sort()
     expect(filesInCommit).toEqual(['bun.lock'])
+  })
+
+  test('calls ensureDeps with the agent folder before docker run', async () => {
+    // given: a fresh agent folder
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when: start runs with a recording ensureDeps
+    const ensureCalls: string[] = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (dir) => {
+        ensureCalls.push(dir)
+        return { ok: true, installed: false }
+      },
+    })
+
+    // then: ensureDeps received the agent folder, AND it ran before docker run
+    expect(result.ok).toBe(true)
+    expect(ensureCalls).toEqual([root])
+    const runIndex = calls.findIndex((c) => c.args[0] === 'run')
+    expect(runIndex).toBeGreaterThanOrEqual(0)
+  })
+
+  test('aborts start (no docker run) when ensureDeps reports failure', async () => {
+    // given: ensureDeps reports drift it could not resolve (e.g. bun install failed)
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async () => ({ ok: false, reason: 'lockfile permission denied' }),
+    })
+
+    // then: start returned failure carrying the upstream reason
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toContain('lockfile permission denied')
+    // and: no docker run ever happened (bind-mounted node_modules would be broken)
+    expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
   })
 
   test('auto-commits package.json and bun.lock atomically when both drift', async () => {
@@ -984,7 +1102,13 @@ describe('start (composition)', () => {
     const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     expect(result.ok).toBe(true)
     const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
@@ -1007,7 +1131,13 @@ describe('start (composition)', () => {
     const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     expect(result.ok).toBe(true)
     const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
@@ -1022,7 +1152,13 @@ describe('start (composition)', () => {
     await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1,"deps":"new"}\n')
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     expect(result.ok).toBe(true)
     expect(existsSync(join(root, '.git'))).toBe(false)
@@ -1042,7 +1178,13 @@ describe('start (composition)', () => {
     await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1,"deps":"new"}\n')
     const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     expect(result.ok).toBe(true)
     // then: two distinct commits exist with the right messages and file scopes
@@ -1074,6 +1216,7 @@ describe('start (composition)', () => {
         allocatePort: deterministicAllocator,
         cliEntry: '/nonexistent/newer-cli.ts',
         reuseCurrentHostDaemon: true,
+        ensureDeps: noEnsureDeps,
       })
 
       expect(result.ok).toBe(true)
@@ -1093,7 +1236,13 @@ describe('start (composition)', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     expect(result.ok).toBe(true)
     expect(calls.find((c) => c.args[0] === 'build')).toBeUndefined()
@@ -1111,7 +1260,13 @@ describe('start (composition)', () => {
     })
 
     // when
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     // then: success with alreadyRunning=true, no docker side effects, no template churn
     expect(result.ok).toBe(true)
@@ -1143,7 +1298,13 @@ describe('start (composition)', () => {
       return { exitCode: 0, stdout: '', stderr: '' }
     }
 
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toMatch(/published host port could not be resolved/)
@@ -1159,7 +1320,13 @@ describe('start (composition)', () => {
     })
 
     // when
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     // then: rm was issued before run, and run proceeded
     expect(result.ok).toBe(true)
@@ -1177,7 +1344,13 @@ describe('start (composition)', () => {
       container: { exists: true, running: false, rmFails: true, rmStderr: 'Error: No such container: x' },
     })
 
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     expect(result.ok).toBe(true)
     expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
@@ -1191,7 +1364,13 @@ describe('start (composition)', () => {
       container: { exists: true, running: false, rmFails: true, rmStderr: 'permission denied' },
     })
 
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     expect(result.ok).toBe(false)
     if (!result.ok) expect(result.reason).toMatch(/exists but is not running/)
@@ -1209,7 +1388,7 @@ describe('start (port allocation)', () => {
     const allocatePort = async () => 51234
 
     // when
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort, ensureDeps: noEnsureDeps })
 
     // then: docker run gets `-p 127.0.0.1:<hostPort>:8973`, NOT `-p 8973:8973`
     expect(result.ok).toBe(true)
@@ -1227,7 +1406,13 @@ describe('start (port allocation)', () => {
     const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
     // when
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     // then
     expect(result.ok).toBe(true)
@@ -1265,7 +1450,7 @@ describe('start (port allocation)', () => {
     const allocatePort = async (): Promise<number> => ports.shift() ?? 0
 
     // when
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort })
+    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort, ensureDeps: noEnsureDeps })
 
     // then: the second run got a different host port and succeeded
     expect(result.ok).toBe(true)
@@ -1291,7 +1476,13 @@ describe('start (port allocation)', () => {
       return { exitCode: 0, stdout: '', stderr: '' }
     }
 
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort: deterministicAllocator })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+    })
 
     expect(result.ok).toBe(false)
     expect(runAttempts).toBe(1)
