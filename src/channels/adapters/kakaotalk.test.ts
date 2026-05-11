@@ -3,21 +3,20 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { createChannelRouter } from '@/channels/router'
-import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
-
 import type {
   KakaoChat,
   KakaoMember,
   KakaoMessage,
   KakaoProfile,
   KakaoSendResult,
-  KakaoTalkClient,
-  KakaoTalkListener,
   KakaoTalkListenerEventMap,
   KakaoTalkPushMessageEvent,
-} from './agent-messenger-kakaotalk-shim'
-import { createKakaotalkAdapter } from './kakaotalk'
+} from 'agent-messenger/kakaotalk'
+
+import { createChannelRouter } from '@/channels/router'
+import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
+
+import { createKakaotalkAdapter, type KakaoTalkClient, type KakaoTalkListener } from './kakaotalk'
 
 type EventKey = keyof KakaoTalkListenerEventMap
 
@@ -67,7 +66,10 @@ class FakeClient implements KakaoTalkClient {
   profileResult: KakaoProfile = {
     user_id: '999',
     nickname: 'Self',
+    profile_image_url: null,
+    original_profile_image_url: null,
     status_message: null,
+    account_display_id: null,
   }
   chats: KakaoChat[] = []
   membersByChat: Map<string, KakaoMember[]> = new Map()
