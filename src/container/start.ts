@@ -8,6 +8,7 @@ import { send as sendToDaemon } from '@/hostd/client'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
+import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
 
@@ -61,6 +62,7 @@ export type StartOptions = {
   // Hostd's supervisor restart callback already runs inside the daemon process.
   // Reusing that daemon avoids a self-shutdown when disk source has drifted.
   reuseCurrentHostDaemon?: boolean
+  ensureDeps?: (cwd: string) => Promise<EnsureDepsResult>
 }
 
 export type HostDaemonStatus =
@@ -93,6 +95,7 @@ export async function start({
   allocatePort = findFreePort,
   cliEntry,
   reuseCurrentHostDaemon = false,
+  ensureDeps = (dir) => ensureDepsInstalled({ cwd: dir }),
 }: StartOptions): Promise<StartResult> {
   try {
     const containerName = containerNameFromCwd(cwd)
@@ -124,12 +127,17 @@ export async function start({
     if (pkgRefresh.changed) {
       await commitSystemFile(cwd, pkgRefresh.files, 'Enable bun workspaces (packages/*)')
     }
-    // Catch dependency drift not covered by the migration commit above:
-    // upgrading the global typeclaw CLI causes `bun install` to rewrite
-    // bun.lock, and future template changes could nudge package.json past
-    // workspaces. Both files are tracked, so without this they'd surface as
-    // dirty working tree on every `typeclaw start`. Atomic commit so reviewers
-    // see bun.lock alongside its triggering package.json change.
+    // Run `bun install` BEFORE the dependency-drift commit so the lockfile
+    // changes the install produces are caught by the same commit. Without
+    // this, upgrading the typeclaw CLI to a version that adds a new dep
+    // (e.g. a new transitive dep that needs hoisting) leaves the agent's
+    // node_modules/ partially populated. The container then crashes with
+    // `Cannot find package 'x'` because the agent folder is bind-mounted into
+    // /agent and the container has no node_modules of its own.
+    const deps = await ensureDeps(cwd)
+    if (!deps.ok) {
+      return { ok: false, reason: `dependency install failed: ${deps.reason}` }
+    }
     await commitSystemFile(cwd, DEPENDENCY_FILES, 'Update dependencies')
 
     if (state.exists) {
