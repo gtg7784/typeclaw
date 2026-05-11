@@ -64,7 +64,7 @@ export function classifyInbound(
       text,
       externalMessageId: event.log_id,
       authorId: String(event.author_id),
-      authorName: String(event.author_id),
+      authorName: event.author_name ?? String(event.author_id),
       authorIsBot: false,
       isBotMention: aliasMatched,
       replyToBotMessageId: null,

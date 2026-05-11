@@ -30,6 +30,7 @@ const event = (overrides: Partial<KakaoTalkPushMessageEvent> = {}): KakaoTalkPus
   chat_id: '111',
   log_id: 'L1',
   author_id: 222,
+  author_name: null,
   message: 'hello',
   message_type: 1,
   sent_at: 1_730_000_000_000,

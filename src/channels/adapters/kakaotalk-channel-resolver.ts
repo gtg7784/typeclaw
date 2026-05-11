@@ -30,7 +30,7 @@ export type KakaoChannelResolverOptions = {
 type Entry = {
   workspace: '@kakao-dm' | '@kakao-group' | '@kakao-open'
   isDm: boolean
-  displayName: string | null
+  chatName: string | null
   expiresAt: number
 }
 
@@ -68,7 +68,7 @@ export function createKakaoChannelResolver(options: KakaoChannelResolverOptions)
     cache.set(chat.chat_id, {
       workspace,
       isDm: kind === 'dm',
-      displayName: chat.display_name,
+      chatName: chat.title ?? chat.display_name,
       expiresAt,
     })
   }
@@ -79,7 +79,7 @@ export function createKakaoChannelResolver(options: KakaoChannelResolverOptions)
     const fresh = cache.get(key.chat)
     if (fresh === undefined) return {}
     const result: ResolvedChannelNames = {}
-    if (fresh.displayName !== null && fresh.displayName !== '') result.chatName = fresh.displayName
+    if (fresh.chatName !== null && fresh.chatName !== '') result.chatName = fresh.chatName
     return result
   }
 

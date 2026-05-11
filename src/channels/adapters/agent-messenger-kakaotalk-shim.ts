@@ -18,10 +18,16 @@ export type KakaoChat = {
   chat_id: string
   type: number
   display_name: string | null
+  // Always null on our default getChats() path — populating it costs one
+  // CHATINFO call per chat (plus one INFOLINK per untitled open chat),
+  // which we don't pay at refresh time. display_name covers channel-tag
+  // rendering well enough that the extra round trips aren't justified.
+  title: string | null
   active_members: number
   unread_count: number
   last_message: {
     author_id: number
+    author_name: string | null
     message: string
     sent_at: number
   } | null
@@ -31,8 +37,27 @@ export type KakaoMessage = {
   log_id: string
   type: number
   author_id: number
+  // Free resolution covers only the chat-list's "display members" (~5 per
+  // room); larger groups need an explicit getMembers() call to fill in
+  // the rest. createKakaoAuthorResolver handles that fallback.
+  author_name: string | null
   message: string
   sent_at: number
+}
+
+export type KakaoMember = {
+  user_id: string
+  nickname: string
+  profile_image_url: string | null
+  full_profile_image_url: string | null
+  original_profile_image_url: string | null
+  status_message: string | null
+  country_iso: string | null
+  user_type: number | null
+  open_token: number | null
+  open_profile_link_id: string | null
+  // Bitfield: 1=OWNER, 2=NONE, 4=MANAGER, 8=BOT. Null on normal chats.
+  open_permission: number | null
 }
 
 export type KakaoSendResult = {
@@ -54,6 +79,7 @@ export type KakaoTalkPushMessageEvent = {
   chat_id: string
   log_id: string
   author_id: number
+  author_name: string | null
   message: string
   message_type: number
   sent_at: number
@@ -91,6 +117,8 @@ export interface KakaoTalkClient {
   getMessages(chatId: string, options?: { count?: number; from?: string }): Promise<KakaoMessage[]>
   sendMessage(chatId: string, text: string): Promise<KakaoSendResult>
   getProfile(): Promise<KakaoProfile>
+  getMembers(chatId: string): Promise<KakaoMember[]>
+  lookupAuthorName(chatId: string, authorId: number): string | null
   close(): void
 }
 

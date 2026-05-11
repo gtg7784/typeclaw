@@ -178,7 +178,7 @@ export function createKakaoHistoryCallback(deps: {
       const mapped: ChannelHistoryMessage[] = await Promise.all(
         messages.map(async (m) => {
           const authorId = String(m.author_id)
-          const authorName = await authorResolver.resolve(authorId, args.chat)
+          const authorName = m.author_name ?? (await authorResolver.resolve(authorId, args.chat)) ?? authorId
           return {
             externalMessageId: m.log_id,
             authorId,
@@ -233,7 +233,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
   }
 
   const channelResolver = createKakaoChannelResolver({ client, logger })
-  const authorResolver = createKakaoAuthorResolver({ client })
+  const authorResolver = createKakaoAuthorResolver({ client, logger })
 
   const formatChannelTag = async (workspace: string, chat: string): Promise<string> => {
     const names = await channelResolver
@@ -286,8 +286,12 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         return
       }
 
-      const authorName = await authorResolver.resolve(verdict.payload.authorId, verdict.payload.chat)
-      const enriched = { ...verdict.payload, authorName }
+      const inlineName = event.author_name
+      const resolvedName = inlineName ?? (await authorResolver.resolve(verdict.payload.authorId, verdict.payload.chat))
+      const enriched = {
+        ...verdict.payload,
+        authorName: resolvedName ?? verdict.payload.authorId,
+      }
       logger.info(
         `[kakaotalk] routed log_id=${event.log_id} ${inboundTag} mention=${enriched.isBotMention} dm=${enriched.isDm}`,
       )
