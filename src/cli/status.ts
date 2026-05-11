@@ -1,3 +1,5 @@
+import { styleText } from 'node:util'
+
 import { defineCommand } from 'citty'
 
 import { status as containerStatus, type ContainerStatus } from '@/container'
@@ -58,94 +60,110 @@ export function parseStatusResult(value: unknown): StatusResult | null {
 
 export type FormatOptions = { useColor?: boolean }
 
-const ANSI = {
-  reset: '\x1b[0m',
-  bold: '\x1b[1m',
-  dim: '\x1b[2m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  red: '\x1b[31m',
-  cyan: '\x1b[36m',
+type ColorFn = (s: string) => string
+type Palette = {
+  bold: ColorFn
+  dim: ColorFn
+  green: ColorFn
+  yellow: ColorFn
+  red: ColorFn
+  cyan: ColorFn
+}
+
+const identity: ColorFn = (s) => s
+const NO_PALETTE: Palette = {
+  bold: identity,
+  dim: identity,
+  green: identity,
+  yellow: identity,
+  red: identity,
+  cyan: identity,
+}
+
+const COLOR_PALETTE: Palette = {
+  bold: (s) => styleText('bold', s),
+  dim: (s) => styleText('dim', s),
+  green: (s) => styleText('green', s),
+  yellow: (s) => styleText('yellow', s),
+  red: (s) => styleText('red', s),
+  cyan: (s) => styleText('cyan', s),
 }
 
 export function formatStatus(report: StatusReport, opts: FormatOptions = {}): string {
   const useColor = opts.useColor ?? false
-  const style = useColor ? ANSI : (Object.fromEntries(Object.keys(ANSI).map((k) => [k, ''])) as typeof ANSI)
+  const p: Palette = useColor ? COLOR_PALETTE : NO_PALETTE
 
   const lines: string[] = []
-  appendContainerSection(lines, report, style)
+  appendContainerSection(lines, report, p)
   lines.push('')
-  appendHostdSection(lines, report, style)
+  appendHostdSection(lines, report, p)
   lines.push('')
-  appendForwardingSection(lines, report, style)
+  appendForwardingSection(lines, report, p)
   while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
   return lines.join('\n')
 }
 
-function appendContainerSection(lines: string[], report: StatusReport, s: typeof ANSI): void {
-  const c = report.container
-  lines.push(`${s.bold}Container${s.reset}  ${c.containerName}`)
+function appendContainerSection(lines: string[], report: StatusReport, p: Palette): void {
+  const container = report.container
+  lines.push(`${p.bold('Container')}  ${container.containerName}`)
   lines.push(row('cwd', report.cwd))
-  lines.push(row('image', c.imageTag))
+  lines.push(row('image', container.imageTag))
 
-  if (c.kind === 'missing') {
-    lines.push(row('state', badge(s, 'missing', s.dim)))
+  if (container.kind === 'missing') {
+    lines.push(row('state', p.dim('missing')))
     return
   }
 
-  const stateLabel = c.kind === 'running' ? badge(s, 'running', s.green) : badge(s, 'stopped', s.yellow)
+  const stateLabel = container.kind === 'running' ? p.green('running') : p.yellow('stopped')
   lines.push(row('state', stateLabel))
-  lines.push(row('id', shortId(c.containerId)))
+  lines.push(row('id', shortId(container.containerId)))
 
-  if (c.kind === 'running') {
-    const port = c.hostPort === null ? `${s.dim}unknown${s.reset}` : formatHostMapping(c.hostBindAddr, c.hostPort, s)
+  if (container.kind === 'running') {
+    const port =
+      container.hostPort === null ? p.dim('unknown') : formatHostMapping(container.hostBindAddr, container.hostPort, p)
     lines.push(row('port', port))
   }
 }
 
-function appendHostdSection(lines: string[], report: StatusReport, s: typeof ANSI): void {
-  lines.push(`${s.bold}Host daemon${s.reset}`)
+function appendHostdSection(lines: string[], report: StatusReport, p: Palette): void {
+  lines.push(p.bold('Host daemon'))
 
   switch (report.hostd.kind) {
     case 'unreachable':
-      lines.push(row('state', badge(s, 'unreachable', s.dim)))
-      lines.push(`  ${s.dim}Daemon is not running. \`typeclaw start\` will spawn one.${s.reset}`)
+      lines.push(row('state', p.dim('unreachable')))
+      lines.push(`  ${p.dim('Daemon is not running. `typeclaw start` will spawn one.')}`)
       return
     case 'not-registered':
-      lines.push(row('state', badge(s, 'not registered', s.yellow)))
+      lines.push(row('state', p.yellow('not registered')))
       lines.push(row('reason', report.hostd.reason))
       return
     case 'registered':
-      lines.push(row('state', badge(s, 'registered', s.green)))
+      lines.push(row('state', p.green('registered')))
       return
   }
 }
 
-function appendForwardingSection(lines: string[], report: StatusReport, s: typeof ANSI): void {
-  lines.push(`${s.bold}Port forwarding${s.reset}`)
+function appendForwardingSection(lines: string[], report: StatusReport, p: Palette): void {
+  lines.push(p.bold('Port forwarding'))
 
   if (report.hostd.kind !== 'registered') {
-    lines.push(`  ${s.dim}requires the host daemon${s.reset}`)
+    lines.push(`  ${p.dim('requires the host daemon')}`)
     return
   }
 
   const ports = report.hostd.forwardedPorts
   if (ports.length === 0) {
-    lines.push(`  ${s.dim}no ports currently forwarded${s.reset}`)
+    lines.push(`  ${p.dim('no ports currently forwarded')}`)
     return
   }
 
   for (const port of [...ports].sort((a, b) => a - b)) {
-    lines.push(`  ${s.cyan}127.0.0.1:${port}${s.reset} ${s.dim}->${s.reset} container:${port}`)
+    lines.push(`  ${p.cyan(`127.0.0.1:${port}`)} ${p.dim('->')} container:${port}`)
   }
 }
 
 function row(label: string, value: string): string {
   return `  ${label.padEnd(8)}${value}`
-}
-
-function badge(s: typeof ANSI, text: string, color: string): string {
-  return `${color}${text}${s.reset}`
 }
 
 function shortId(id: string): string {
@@ -154,7 +172,7 @@ function shortId(id: string): string {
   return trimmed.slice(0, 12)
 }
 
-function formatHostMapping(bindAddr: string | null, port: number, s: typeof ANSI): string {
+function formatHostMapping(bindAddr: string | null, port: number, p: Palette): string {
   const bind = bindAddr ?? '127.0.0.1'
-  return `${s.cyan}${bind}:${port}${s.reset} ${s.dim}->${s.reset} container:${port}`
+  return `${p.cyan(`${bind}:${port}`)} ${p.dim('->')} container:${port}`
 }

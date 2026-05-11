@@ -121,10 +121,11 @@ describe('formatStatus', () => {
   test('useColor=true wraps section headers with ANSI escapes', () => {
     const out = formatStatus(baseReport(), { useColor: true })
     const ESC = '\u001b'
+    const BOLD = `${ESC}[1m`
 
-    expect(out).toContain(`${ESC}[1mContainer${ESC}[0m`)
-    expect(out).toContain(`${ESC}[1mHost daemon${ESC}[0m`)
-    expect(out).toContain(`${ESC}[1mPort forwarding${ESC}[0m`)
+    expect(out).toContain(`${BOLD}Container`)
+    expect(out).toContain(`${BOLD}Host daemon`)
+    expect(out).toContain(`${BOLD}Port forwarding`)
   })
 
   test('renders empty forwarding hint when daemon omits forwardedPorts (drift)', () => {
