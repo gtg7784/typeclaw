@@ -127,6 +127,30 @@ describe('getAuth', () => {
 
     expect(a).toBe(b)
   })
+
+  test('migrates a legacy auth.json to secrets.json on first getAuth()', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
+    await writeFile(
+      join(cwd, 'auth.json'),
+      JSON.stringify({
+        version: 1,
+        llm: { openai: { type: 'oauth', access: 'a', refresh: 'r', expires: 1 } },
+        channels: {},
+      }),
+    )
+    reloadConfig(cwd)
+    // Force the real-storage branch (the dummy-in-memory path skips
+    // createSecretsStoreForAgent and therefore the migration).
+    process.env.OPENAI_API_KEY = 'sk-migration-test'
+
+    getAuth()
+
+    await expect(readFile(join(cwd, 'auth.json'), 'utf8')).rejects.toThrow()
+    const migrated = JSON.parse(await readFile(join(cwd, 'secrets.json'), 'utf8')) as {
+      llm: Record<string, { type: string }>
+    }
+    expect(migrated.llm.openai?.type).toBe('oauth')
+  })
 })
 
 async function readAuthFile(path: string): Promise<{ llm: Record<string, unknown> }> {

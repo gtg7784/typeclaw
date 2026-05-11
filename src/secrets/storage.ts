@@ -8,6 +8,7 @@ import {
 } from '@mariozechner/pi-coding-agent'
 import lockfile from 'proper-lockfile'
 
+import { migrateLegacyAuthJson } from './migrate'
 import { type SecretsFile, parseSecretsFile } from './schema'
 
 const SCHEMA_REL = './node_modules/typeclaw/auth.schema.json'
@@ -189,7 +190,12 @@ export class SecretsBackend implements AuthStorageBackend {
 // use to obtain an AuthStorage tied to an agent folder's secrets file. Keeps
 // the upstream constructor (AuthStorage.fromStorage) usage isolated to one
 // module so a future change to upstream wiring only touches this file.
+//
+// Performs the one-shot auth.json -> secrets.json rename before opening the
+// backend, so callers never observe the legacy filename even on agents that
+// pre-date the rename.
 export function createSecretsStoreForAgent(secretsPath: string): AuthStorage {
+  migrateLegacyAuthJson(dirname(secretsPath))
   return AuthStorageImpl.fromStorage(new SecretsBackend(secretsPath))
 }
 
