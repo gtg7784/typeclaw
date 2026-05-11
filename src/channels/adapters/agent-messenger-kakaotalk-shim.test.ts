@@ -6,6 +6,7 @@ const chat = (overrides: Partial<KakaoChat>): KakaoChat => ({
   chat_id: '1',
   type: 11,
   display_name: 'Counterparty',
+  title: null,
   active_members: 2,
   unread_count: 0,
   last_message: null,
