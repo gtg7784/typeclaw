@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { KakaoMember, KakaoTalkClient } from './agent-messenger-kakaotalk-shim'
+import type { KakaoMember } from 'agent-messenger/kakaotalk'
+
+import type { KakaoTalkClient } from './kakaotalk'
 import { createKakaoAuthorResolver } from './kakaotalk-author-resolver'
 
 const member = (overrides: Partial<KakaoMember>): KakaoMember => ({

@@ -1,3 +1,16 @@
+import {
+  KakaoCredentialManager,
+  KakaoTalkClient as RealKakaoTalkClient,
+  KakaoTalkListener as RealKakaoTalkListener,
+  type KakaoChat,
+  type KakaoMember,
+  type KakaoMessage,
+  type KakaoProfile,
+  type KakaoSendResult,
+  type KakaoTalkListenerEventMap,
+  type KakaoTalkPushMessageEvent,
+} from 'agent-messenger/kakaotalk'
+
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type {
@@ -11,15 +24,45 @@ import type {
   SendResult,
 } from '@/channels/types'
 
-import {
-  KakaoCredentialManager,
-  KakaoTalkClient,
-  KakaoTalkListener,
-  type KakaoTalkPushMessageEvent,
-} from './agent-messenger-kakaotalk-shim'
 import { createKakaoAuthorResolver, type KakaoAuthorResolver } from './kakaotalk-author-resolver'
 import { createKakaoChannelResolver, type KakaoChannelResolver } from './kakaotalk-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
+
+// Structural duck-type of the upstream KakaoTalkClient class. The upstream
+// type is a class with private fields, and TypeScript treats those
+// nominally — test fakes that match the public surface get rejected.
+// Declaring this as an interface lets fakes satisfy it without inheriting
+// private state. The cast on the const below bridges the runtime class
+// onto this interface; the real upstream class satisfies every method.
+export interface KakaoTalkClient {
+  login(
+    credentials?: { oauthToken: string; userId: string; deviceUuid?: string; deviceType?: 'pc' | 'tablet' },
+    accountId?: string,
+  ): Promise<this>
+  getChats(options?: { all?: boolean; search?: string }): Promise<KakaoChat[]>
+  getMessages(chatId: string, options?: { count?: number; from?: string }): Promise<KakaoMessage[]>
+  sendMessage(chatId: string, text: string): Promise<KakaoSendResult>
+  getProfile(): Promise<KakaoProfile>
+  getMembers(chatId: string): Promise<KakaoMember[]>
+  lookupAuthorName(chatId: string, authorId: number): string | null
+  close(): void
+}
+
+export interface KakaoTalkListener {
+  start(): Promise<void>
+  stop(): void
+  on<K extends keyof KakaoTalkListenerEventMap>(
+    event: K,
+    listener: (...args: KakaoTalkListenerEventMap[K]) => void,
+  ): this
+  off<K extends keyof KakaoTalkListenerEventMap>(
+    event: K,
+    listener: (...args: KakaoTalkListenerEventMap[K]) => void,
+  ): this
+}
+
+const KakaoTalkClient = RealKakaoTalkClient as unknown as new () => KakaoTalkClient
+const KakaoTalkListener = RealKakaoTalkListener as unknown as new (client: KakaoTalkClient) => KakaoTalkListener
 
 export type KakaotalkAdapterLogger = {
   info: (msg: string) => void

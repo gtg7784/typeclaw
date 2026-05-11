@@ -1,4 +1,4 @@
-import type { KakaoTalkClient } from './agent-messenger-kakaotalk-shim'
+import type { KakaoTalkClient } from './kakaotalk'
 
 const DEFAULT_TTL_MS = 5 * 60 * 1000
 

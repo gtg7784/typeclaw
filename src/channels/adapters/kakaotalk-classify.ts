@@ -1,8 +1,8 @@
+import type { KakaoTalkPushMessageEvent } from 'agent-messenger/kakaotalk'
+
 import { matchesAnyAlias } from '@/channels/engagement'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
-
-import type { KakaoTalkPushMessageEvent } from './agent-messenger-kakaotalk-shim'
 
 export type InboundDropReason = 'self_author' | 'empty_text' | 'unknown_chat' | 'not_in_allow_list' | 'pre_connect'
 
