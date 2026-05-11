@@ -10,6 +10,7 @@ dist
 /typeclaw.schema.json
 /cron.schema.json
 /auth.schema.json
+/secrets.schema.json
 
 # code coverage
 coverage
@@ -27,8 +28,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.production.local
 .env.local
 
-# Test artifacts: AuthStorage.create() writes auth.json to process.cwd().
-# Tests chdir to a tmpdir, but defense in depth — never check this in.
+# Test artifacts: secrets store writes secrets.json to process.cwd().
+# Tests chdir to a tmpdir, but defense in depth — never check these in.
+# auth.json is the pre-rename name; still listed for one release as a safety
+# net against pulling pre-migration agent folders into this repo.
+secrets.json
 auth.json
 
 # caches
