@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 
+import type { KakaoTalkPushMessageEvent } from 'agent-messenger/kakaotalk'
+
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 
-import type { KakaoTalkPushMessageEvent } from './agent-messenger-kakaotalk-shim'
 import { classifyInbound, type KakaoChatLookup } from './kakaotalk-classify'
 
 const dmConfig = (): ChannelAdapterConfig => ({

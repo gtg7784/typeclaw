@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { KakaoChat, KakaoTalkClient } from './agent-messenger-kakaotalk-shim'
+import type { KakaoChat } from 'agent-messenger/kakaotalk'
+
+import type { KakaoTalkClient } from './kakaotalk'
 import { createKakaoChannelResolver, kakaoWorkspaceForType } from './kakaotalk-channel-resolver'
 
 // Modern KakaoTalk LOCO type codes — t=11 for normal 1:1 DMs and t=10 for

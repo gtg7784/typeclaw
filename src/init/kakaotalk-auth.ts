@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 
-import { KakaoCredentialManager } from '@/channels/adapters/agent-messenger-kakaotalk-shim'
+import { KakaoCredentialManager } from 'agent-messenger/kakaotalk'
 
 export type KakaotalkBootstrapStatus = { ok: true } | { ok: false; reason: string }
 
