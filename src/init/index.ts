@@ -13,6 +13,9 @@ import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { HATCHING_PROMPT } from './hatching'
 import type { OAuthLoginRunner, OAuthLoginResult } from './oauth-login'
 import { GITKEEP_FILE, PACKAGES_DIR } from './paths'
+import { runBunInstall, type InstallResult } from './run-bun-install'
+
+export { runBunInstall, type InstallResult } from './run-bun-install'
 
 export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 
@@ -31,7 +34,6 @@ const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'] as con
 // initial commit.
 const DIRECTORIES = ['workspace', 'sessions', '.agents/skills', 'mounts', 'packages'] as const
 
-export type InstallResult = { ok: true } | { ok: false; reason: string }
 export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason: string }
 export type DockerAssetsResult = { ok: true; devMode: boolean } | { ok: false; reason: string }
 export type HatchingResult = { ok: true } | { ok: false; reason: string }
@@ -452,25 +454,6 @@ async function readTypeclawConfig(root: string): Promise<Config> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return configSchema.parse({})
     throw error
-  }
-}
-
-export async function runBunInstall(cwd: string): Promise<InstallResult> {
-  const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
-  if (!bun) return { ok: false, reason: 'bun runtime not available' }
-  try {
-    const proc = bun.spawn({
-      cmd: ['bun', 'install'],
-      cwd,
-      stdout: 'pipe',
-      stderr: 'pipe',
-    })
-    const code = await proc.exited
-    if (code === 0) return { ok: true }
-    const stderr = await new Response(proc.stderr).text()
-    return { ok: false, reason: `bun install exited with code ${code}: ${stderr.trim() || 'no stderr'}` }
-  } catch (error) {
-    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
 }
 
