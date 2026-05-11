@@ -34,15 +34,32 @@ type FakeOptions = {
   rmExitCode?: number
   inspectExitCode?: number
   inspectStderr?: string
+  // Models Docker's async removal-drain: after `docker rm` returns with the
+  // "in-progress" stderr (rmExitCode=1, rmStderr matching), the container
+  // does NOT immediately disappear from `docker inspect`. It only transitions
+  // to "no such container" after the inspect probe has been called this
+  // many times (simulating the drain completing). Default 0 — no drain
+  // delay — i.e. inspect reports "gone" the very next call. Set to a
+  // positive integer to exercise waitForRemoval's polling loop; set high
+  // enough to exhaust the configured timeout to exercise the timeout branch.
+  drainAfterInspectCalls?: number
 }
 
 function fakeDockerExec(options: FakeOptions): { exec: DockerExec; calls: string[][] } {
   const calls: string[][] = []
   let scenario = options.scenario
+  let inspectsAfterRm = 0
+  let rmReturned = false
   const exec: DockerExec = async (args): Promise<DockerExecResult> => {
     calls.push(args)
     if (args[0] === 'inspect') {
-      if (options.inspectExitCode !== undefined && options.inspectExitCode !== 0) {
+      if (rmReturned) {
+        inspectsAfterRm += 1
+        if (inspectsAfterRm > (options.drainAfterInspectCalls ?? 0)) {
+          scenario = { exists: false }
+        }
+      }
+      if (options.inspectExitCode !== undefined && options.inspectExitCode !== 0 && !rmReturned) {
         return { exitCode: options.inspectExitCode, stdout: '', stderr: options.inspectStderr ?? '' }
       }
       if (!scenario.exists) return { exitCode: 1, stdout: '', stderr: 'Error: No such container: x' }
@@ -56,6 +73,7 @@ function fakeDockerExec(options: FakeOptions): { exec: DockerExec; calls: string
     if (args[0] === 'rm') {
       const exitCode = options.rmExitCode ?? 0
       const stderr = options.rmStderr ?? ''
+      rmReturned = true
       if (exitCode === 0) scenario = { exists: false }
       return { exitCode, stdout: '', stderr }
     }
@@ -115,23 +133,28 @@ describe('stop (composition)', () => {
     expect(result.ok).toBe(true)
   })
 
-  test('tolerates "removal already in progress" from docker rm (concurrent cleanup raced ahead)', async () => {
-    // given: docker stop succeeded, but between our stop and rm something else
-    // (peer typeclaw stop / OrbStack async cleanup) already started removing
-    // the container. Docker reports "removal of container <name> is already in
-    // progress" — a different failure shape from "no such container" but
-    // functionally equivalent: the name will be free for the next docker run.
-    const { exec } = fakeDockerExec({
+  test('waits for the drain when docker rm returns "removal already in progress" and succeeds', async () => {
+    // given: docker stop succeeded, but rm finds the container is being
+    // removed by something else (peer typeclaw stop / OrbStack async cleanup
+    // / hostd GC). Docker will finish the drain a few hundred ms later.
+    const { exec, calls } = fakeDockerExec({
       scenario: { exists: true, running: true },
       rmExitCode: 1,
       rmStderr: 'Error response from daemon: removal of container vanished is already in progress',
+      drainAfterInspectCalls: 2,
     })
 
     // when
     const result = await stop({ cwd: root, exec })
 
-    // then: stop reports success — `typeclaw restart` should not abort here
+    // then: stop reports success, AND we polled inspect at least until the
+    // container actually disappeared — caller can safely docker run --name
     expect(result.ok).toBe(true)
+    const inspectAfterRm = calls
+      .map((c, i) => ({ c, i }))
+      .filter(({ c }) => c[0] === 'inspect')
+      .filter(({ i }) => i > calls.findIndex((cc) => cc[0] === 'rm'))
+    expect(inspectAfterRm.length).toBeGreaterThanOrEqual(2)
   })
 
   test('surfaces a clear error when docker rm fails for a non-recoverable reason', async () => {
