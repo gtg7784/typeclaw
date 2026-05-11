@@ -11,6 +11,8 @@ import {
 } from '@/compose'
 import { config } from '@/config'
 
+import { c } from './ui'
+
 const startSub = defineCommand({
   meta: { name: 'start', description: 'start every agent in immediate subdirectories of cwd' },
   args: {
@@ -33,17 +35,17 @@ const startSub = defineCommand({
       cliEntry: process.argv[1],
     })
     if (agents.length === 0) {
-      console.log('No typeclaw agents found in immediate subdirectories of cwd.')
+      console.log(c.dim('No typeclaw agents found in immediate subdirectories of cwd.'))
       return
     }
     let failed = 0
     for (const r of results) {
       if (r.ok) {
         const verb = r.data.alreadyRunning ? 'already running' : 'started'
-        console.log(`[${r.name}] ${verb} on host port ${r.data.hostPort}`)
+        console.log(`${c.green('✔')} ${c.bold(`[${r.name}]`)} ${verb} on host port ${c.cyan(String(r.data.hostPort))}`)
       } else {
         failed++
-        console.error(`[${r.name}] failed: ${r.reason}`)
+        console.error(`${c.red('✖')} ${c.bold(`[${r.name}]`)} ${c.red('failed:')} ${r.reason}`)
       }
     }
     summarize(results, 'started', failed)
@@ -56,16 +58,20 @@ const stopSub = defineCommand({
   async run() {
     const { agents, results } = await composeStop(process.cwd())
     if (agents.length === 0) {
-      console.log('No typeclaw agents found in immediate subdirectories of cwd.')
+      console.log(c.dim('No typeclaw agents found in immediate subdirectories of cwd.'))
       return
     }
     let failed = 0
     for (const r of results) {
       if (r.ok) {
-        console.log(r.data.running ? `[${r.name}] stopped` : `[${r.name}] not running`)
+        if (r.data.running) {
+          console.log(`${c.green('✔')} ${c.bold(`[${r.name}]`)} stopped`)
+        } else {
+          console.log(`${c.dim('○')} ${c.bold(`[${r.name}]`)} ${c.dim('not running')}`)
+        }
       } else {
         failed++
-        console.error(`[${r.name}] failed: ${r.reason}`)
+        console.error(`${c.red('✖')} ${c.bold(`[${r.name}]`)} ${c.red('failed:')} ${r.reason}`)
       }
     }
     summarize(results, 'stopped', failed)
@@ -95,16 +101,18 @@ const restartSub = defineCommand({
       cliEntry: process.argv[1],
     })
     if (agents.length === 0) {
-      console.log('No typeclaw agents found in immediate subdirectories of cwd.')
+      console.log(c.dim('No typeclaw agents found in immediate subdirectories of cwd.'))
       return
     }
     let failed = 0
     for (const r of results) {
       if (r.ok) {
-        console.log(`[${r.name}] restarted on host port ${r.data.start.hostPort}`)
+        console.log(
+          `${c.green('✔')} ${c.bold(`[${r.name}]`)} restarted on host port ${c.cyan(String(r.data.start.hostPort))}`,
+        )
       } else {
         failed++
-        console.error(`[${r.name}] failed: ${r.reason}`)
+        console.error(`${c.red('✖')} ${c.bold(`[${r.name}]`)} ${c.red('failed:')} ${r.reason}`)
       }
     }
     summarize(results, 'restarted', failed)
@@ -117,14 +125,14 @@ const psSub = defineCommand({
   async run() {
     const { entries } = await composePs(process.cwd())
     if (entries.length === 0) {
-      console.log('No typeclaw agents found in immediate subdirectories of cwd.')
+      console.log(c.dim('No typeclaw agents found in immediate subdirectories of cwd.'))
       return
     }
     const nameW = entries.reduce((w, e) => Math.max(w, e.name.length), 'NAME'.length)
     const containerW = entries.reduce((w, e) => Math.max(w, e.containerName.length), 'CONTAINER'.length)
-    console.log(`${'NAME'.padEnd(nameW)}  ${'CONTAINER'.padEnd(containerW)}  STATUS`)
+    console.log(`${c.bold('NAME'.padEnd(nameW))}  ${c.bold('CONTAINER'.padEnd(containerW))}  ${c.bold('STATUS')}`)
     for (const e of entries) {
-      console.log(`${e.name.padEnd(nameW)}  ${e.containerName.padEnd(containerW)}  ${labelStatus(e.status)}`)
+      console.log(`${e.name.padEnd(nameW)}  ${e.containerName.padEnd(containerW)}  ${colorStatus(e.status)}`)
     }
   },
 })
@@ -145,9 +153,14 @@ const logsSub = defineCommand({
     process.once('SIGINT', onSig)
     process.once('SIGTERM', onSig)
     try {
+      if (args.follow) {
+        console.log(c.cyan('Streaming logs for all agents...'))
+      } else {
+        console.log(c.dim('Showing logs for all agents.'))
+      }
       const result = await composeLogs({ rootCwd: process.cwd(), follow: args.follow, signal: controller.signal })
       if (result.agents.length === 0) {
-        console.log('No typeclaw agents found in immediate subdirectories of cwd.')
+        console.log(c.dim('No typeclaw agents found in immediate subdirectories of cwd.'))
         return
       }
       if (result.exitCode !== 0) process.exit(result.exitCode)
@@ -172,17 +185,17 @@ export const composeCommand = defineCommand({
   },
 })
 
-function labelStatus(s: AgentStatus): string {
-  if (s === 'running') return 'RUNNING'
-  if (s === 'stopped') return 'STOPPED'
-  return 'NOT CREATED'
+function colorStatus(s: AgentStatus): string {
+  if (s === 'running') return c.green('RUNNING')
+  if (s === 'stopped') return c.dim('STOPPED')
+  return c.yellow('NOT CREATED')
 }
 
 function summarize<T>(results: AgentResult<T>[], verb: string, failed: number): void {
   const ok = results.length - failed
   if (failed === 0) {
-    console.log(`${verb} ${ok}/${results.length}`)
+    console.log(c.green(`${verb} ${ok}/${results.length}`))
   } else {
-    console.error(`${verb} ${ok}/${results.length} (${failed} failed)`)
+    console.error(c.red(`${verb} ${ok}/${results.length} (${failed} failed)`))
   }
 }

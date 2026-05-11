@@ -3,6 +3,8 @@ import { defineCommand } from 'citty'
 import { shell } from '@/container'
 import { findAgentDir } from '@/init'
 
+import { c, errorLine } from './ui'
+
 export const shellCommand = defineCommand({
   meta: {
     name: 'shell',
@@ -18,9 +20,11 @@ export const shellCommand = defineCommand({
   async run({ args }) {
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
 
+    console.log(c.cyan(`Attaching ${args.shell} inside the container...`))
+
     const result = await shell({ cwd, shell: args.shell })
     if (!result.ok) {
-      console.error(result.reason)
+      console.error(errorLine(result.reason))
       process.exit(1)
     }
 

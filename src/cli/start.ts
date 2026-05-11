@@ -4,6 +4,8 @@ import { config, validateConfig } from '@/config'
 import { start } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
+import { errorLine, renderStartSuccess, spinner } from './ui'
+
 export const startCommand = defineCommand({
   meta: {
     name: 'start',
@@ -26,16 +28,18 @@ export const startCommand = defineCommand({
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
 
     if (!isInitialized(cwd)) {
-      console.error('TypeClaw config file not found. Run `typeclaw init` first.')
+      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first.'))
       process.exit(1)
     }
 
     const validated = validateConfig(cwd)
     if (!validated.ok) {
-      console.error(validated.reason)
+      console.error(errorLine(validated.reason))
       process.exit(1)
     }
 
+    const s = spinner()
+    s.start('Starting container...')
     const result = await start({
       cwd,
       preferredHostPort: Number(args.port),
@@ -43,27 +47,11 @@ export const startCommand = defineCommand({
       cliEntry: process.argv[1],
     })
     if (!result.ok) {
-      console.error(result.reason)
+      s.error(result.reason)
       process.exit(1)
     }
+    s.stop(result.alreadyRunning ? 'Already running.' : 'Started.')
 
-    if (result.alreadyRunning) {
-      console.log(`Container ${result.plan.containerName} is already running on host port ${result.hostPort}.`)
-    } else {
-      if (result.built) {
-        console.log(`Built image ${result.plan.imageTag}.`)
-      }
-      console.log(
-        `Container ${result.plan.containerName} started on host port ${result.hostPort} (${result.containerId.slice(0, 12)}).`,
-      )
-      if (result.hostd.state === 'registered') {
-        console.log(`Host daemon active.`)
-      } else if (result.hostd.state === 'unavailable') {
-        console.warn(`Host daemon unavailable: ${result.hostd.reason}`)
-      }
-    }
-    console.log(`Follow logs:  typeclaw logs -f`)
-    console.log(`Attach TUI:   typeclaw tui`)
-    console.log(`Stop:         typeclaw stop`)
+    console.log(renderStartSuccess(result))
   },
 })

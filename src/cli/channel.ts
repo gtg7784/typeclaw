@@ -15,6 +15,8 @@ import {
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 
+import { c, done, errorLine } from './ui'
+
 const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
   'discord-bot': 'Discord',
@@ -38,7 +40,7 @@ const addSub = defineCommand({
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
 
     if (!isInitialized(cwd)) {
-      console.error('TypeClaw config file not found. Run `typeclaw init` first, or cd into an agent folder.')
+      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first, or cd into an agent folder.'))
       process.exit(1)
     }
 
@@ -58,11 +60,11 @@ const addSub = defineCommand({
         onProgress: reportProgress(events),
       })
     } catch (error) {
-      console.error(error instanceof Error ? error.message : String(error))
+      console.error(errorLine(error instanceof Error ? error.message : String(error)))
       process.exit(1)
     }
 
-    await maybePromptRestart(cwd)
+    await maybePromptRestart(cwd, channel)
   },
 })
 
@@ -78,12 +80,14 @@ export const channelCommand = defineCommand({
 
 function validateAdapterArg(adapter: string, configured: Set<ChannelKind>): ChannelKind {
   if (!isChannelKind(adapter)) {
-    console.error(`Unknown adapter "${adapter}". Expected one of: ${CHANNEL_KINDS.join(', ')}.`)
+    console.error(errorLine(`Unknown adapter "${adapter}". Expected one of: ${CHANNEL_KINDS.join(', ')}.`))
     process.exit(1)
   }
   if (configured.has(adapter)) {
     console.error(
-      `${CHANNEL_LABELS[adapter]} ("${adapter}") is already configured in typeclaw.json. Edit the file directly to change its allow list.`,
+      errorLine(
+        `${CHANNEL_LABELS[adapter]} ("${adapter}") is already configured in typeclaw.json. Edit the file directly to change its allow list.`,
+      ),
     )
     process.exit(1)
   }
@@ -97,7 +101,7 @@ function isChannelKind(value: string): value is ChannelKind {
 async function pickChannel(configured: Set<ChannelKind>): Promise<ChannelKind> {
   const available = CHANNEL_KINDS.filter((kind) => !configured.has(kind))
   if (available.length === 0) {
-    console.error('All supported channel adapters are already configured in typeclaw.json. Nothing to add.')
+    console.error(errorLine('All supported channel adapters are already configured in typeclaw.json. Nothing to add.'))
     process.exit(0)
   }
 
@@ -349,10 +353,17 @@ function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
   return `KakaoTalk login failed: ${result.reason}`
 }
 
-async function maybePromptRestart(cwd: string): Promise<void> {
+async function maybePromptRestart(cwd: string, channel: ChannelKind): Promise<void> {
+  const label = CHANNEL_LABELS[channel]
   const current = await status({ cwd }).catch(() => null)
   if (current === null || current.kind !== 'running') {
-    console.log('Channel added. Run `typeclaw start` (or `typeclaw restart`) to apply the change.')
+    done({
+      title: c.green(`${label} channel added.`),
+      hints: [
+        { label: 'Start the agent:', command: 'typeclaw start' },
+        { label: 'Then check status:', command: 'typeclaw status' },
+      ],
+    })
     return
   }
 
@@ -362,19 +373,31 @@ async function maybePromptRestart(cwd: string): Promise<void> {
     initialValue: true,
   })
   if (isCancel(restartNow) || !restartNow) {
-    console.log('Channel added. Run `typeclaw restart` when you want the new channel to come online.')
+    done({
+      title: c.green(`${label} channel added.`),
+      hints: [
+        { label: 'Apply later:', command: 'typeclaw restart' },
+        { label: 'Check status:', command: 'typeclaw status' },
+      ],
+    })
     return
   }
 
   const stopped = await stop({ cwd })
   if (!stopped.ok) {
-    console.error(`Restart failed during stop: ${stopped.reason}`)
+    console.error(errorLine(`Restart failed during stop: ${stopped.reason}`))
     process.exit(1)
   }
   const started = await start({ cwd, preferredHostPort: config.port, cliEntry: process.argv[1] })
   if (!started.ok) {
-    console.error(`Restart failed during start: ${started.reason}`)
+    console.error(errorLine(`Restart failed during start: ${started.reason}`))
     process.exit(1)
   }
-  console.log(`Restarted ${started.plan.containerName} on host port ${started.hostPort}.`)
+  done({
+    title: c.green(`${label} channel added. Restarted ${started.plan.containerName} on host port ${started.hostPort}.`),
+    hints: [
+      { label: 'Attach TUI:', command: 'typeclaw tui' },
+      { label: 'Follow logs:', command: 'typeclaw logs -f' },
+    ],
+  })
 }
