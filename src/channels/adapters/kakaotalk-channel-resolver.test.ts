@@ -7,22 +7,26 @@ import { createKakaoChannelResolver } from './kakaotalk-channel-resolver'
 // normal groups. The earlier `t=0/1/2` fixtures matched a stale assumption
 // and let the previous classifier pass even though it misclassified every
 // real-world DM as `@kakao-group`.
-const dmChat = (id: string, name: string): KakaoChat => ({
+const dmChat = (id: string, name: string, overrides: Partial<KakaoChat> = {}): KakaoChat => ({
   chat_id: id,
   type: 11,
   display_name: name,
+  title: null,
   active_members: 2,
   unread_count: 0,
   last_message: null,
+  ...overrides,
 })
 
-const groupChat = (id: string, name: string): KakaoChat => ({
+const groupChat = (id: string, name: string, overrides: Partial<KakaoChat> = {}): KakaoChat => ({
   chat_id: id,
   type: 10,
   display_name: name,
+  title: null,
   active_members: 5,
   unread_count: 0,
   last_message: null,
+  ...overrides,
 })
 
 const fakeClient = (chats: KakaoChat[]): Pick<KakaoTalkClient, 'getChats'> => ({
