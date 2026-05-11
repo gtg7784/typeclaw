@@ -360,12 +360,14 @@ function slackFailureForError(error: string): MembershipResolverFailure {
   return { kind: 'transient' }
 }
 
-// Direct fetch to Slack's Web API. The shim only exposes postMessage /
-// setAssistantStatus / testAuth, so history calls go through fetch using
-// the same pattern the Discord adapter uses for /typing. Slack uses
-// application/x-www-form-urlencoded for these endpoints; JSON works too
-// when paired with the right Content-Type but URL-encoded is what every
-// client library defaults to and is the most-tested wire format.
+// Direct fetch to Slack's Web API. agent-messenger's SlackBotClient
+// covers postMessage / setAssistantStatus / testAuth / uploadFile /
+// downloadFile but not conversations.history or conversations.replies,
+// so history calls go through fetch using the same pattern the Discord
+// adapter uses for /typing. Slack uses application/x-www-form-urlencoded
+// for these endpoints; JSON works too when paired with the right
+// Content-Type but URL-encoded is what every client library defaults to
+// and is the most-tested wire format.
 export function createSlackHistoryCallback(deps: {
   token: string
   configRef: () => ChannelAdapterConfig
