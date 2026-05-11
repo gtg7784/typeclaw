@@ -1,14 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
+import type { SlackBotClient, SlackFile, SlackMessage } from 'agent-messenger/slackbot'
+
 import { defaultHistoryConfig, isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
 
-import type {
-  SlackBotClient,
-  SlackFile,
-  SlackPostedMessage,
-  SlackSocketAppMentionEvent,
-} from './agent-messenger-slack-shim'
 import {
   createOutboundCallback,
   createSlackHistoryCallback,
@@ -18,7 +14,7 @@ import {
   promoteAppMentionToMessage,
   SLACK_HISTORY_LIMIT_MAX,
 } from './slack-bot'
-import { classifyInbound } from './slack-bot-classify'
+import { classifyInbound, type SlackInboundAppMentionEvent } from './slack-bot-classify'
 
 describe('slack-bot adapter (unit-level pure helpers)', () => {
   test('isAllowed admits a team channel via team:T/C', () => {
@@ -640,7 +636,7 @@ describe('createSlackMembershipResolver', () => {
 })
 
 describe('slack-bot promoteAppMentionToMessage', () => {
-  const baseAppMention: SlackSocketAppMentionEvent = {
+  const baseAppMention: SlackInboundAppMentionEvent = {
     type: 'app_mention',
     channel: 'C0CHANNEL',
     user: 'UALICE',
@@ -1041,7 +1037,7 @@ describe('slack-bot createOutboundCallback', () => {
         postMessage: async (channel, text, options) => {
           posts.push({ channel, text, options })
           if (behavior.postMessage === 'reject') throw new Error('slack_post_failed')
-          return { ts: `ts${posts.length}`, text, type: 'message' } as SlackPostedMessage
+          return { ts: `ts${posts.length}`, text, type: 'message' } as SlackMessage
         },
         uploadFile: async (channel, file, filename, options) => {
           uploads.push({ channel, bytes: file.length, filename, options })

@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
+import type { DiscordBotClient, DiscordFile, DiscordMessage } from 'agent-messenger/discordbot'
+import { DiscordIntent } from 'agent-messenger/discordbot'
+
 import { defaultHistoryConfig, isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
 
-import type { DiscordBotClient, DiscordFile, DiscordMessage } from './agent-messenger-shim'
-import { DiscordIntent } from './agent-messenger-shim'
 import {
   createDiscordHistoryCallback,
   createDiscordMembershipResolver,

@@ -1,3 +1,6 @@
+import { DiscordBotClient, DiscordBotListener } from 'agent-messenger/discordbot'
+import { DiscordIntent, type DiscordGatewayMessageCreateEvent } from 'agent-messenger/discordbot'
+
 import {
   MEMBERSHIP_ENUMERATION_CAP,
   type MembershipResolver,
@@ -21,12 +24,6 @@ import type {
   TypingTarget,
 } from '@/channels/types'
 
-import {
-  DiscordBotClient,
-  DiscordBotListener,
-  DiscordIntent,
-  type DiscordGatewayMessageCreateEvent,
-} from './agent-messenger-shim'
 import { createDiscordChannelResolver } from './discord-bot-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './discord-bot-classify'
 

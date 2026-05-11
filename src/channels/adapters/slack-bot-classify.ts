@@ -1,9 +1,38 @@
+import type { SlackFile, SlackSocketModeAppMentionEvent, SlackSocketModeMessageEvent } from 'agent-messenger/slackbot'
+
 import { matchesAnyAlias } from '@/channels/engagement'
 import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
-import type { SlackFile, SlackSocketMessageEvent } from './agent-messenger-slack-shim'
 import { slackTsToMillis } from './slack-bot-time'
+
+// Upstream's `SlackSocketModeMessageEvent` carries `[key: string]: unknown`
+// for fields it does not type explicitly. Three of those untyped fields are
+// load-bearing for this adapter:
+//   - `parent_user_id`: set on every reply within a thread; identifies the
+//     author of the message the thread is rooted at. Used to decide whether
+//     a reply targets the bot, another human, or an unknown parent.
+//   - `client_msg_id`: client-generated UUID on user-authored messages,
+//     stable across Slack-side resends of the same gesture. Primary dedupe
+//     key for the "one user action surfaces as two events" case.
+//   - `files`: attachments delivered inline on the same message event (Slack
+//     does not fire a separate file_share for messages we receive).
+// Typing them here (rather than reading them via `as` casts at every call
+// site) keeps the classifier readable and makes it the single source of
+// truth for "what Slack actually sends" — anything else reading these
+// fields imports `SlackInboundMessageEvent` from this module.
+export type SlackInboundMessageEvent = SlackSocketModeMessageEvent & {
+  parent_user_id?: string
+  client_msg_id?: string
+  files?: SlackFile[]
+}
+
+// `app_mention` envelopes do not always carry `client_msg_id`, but typing
+// it keeps the promotion to a message-shaped event lossless if Slack
+// starts sending it. Same reasoning as `SlackInboundMessageEvent` above.
+export type SlackInboundAppMentionEvent = SlackSocketModeAppMentionEvent & {
+  client_msg_id?: string
+}
 
 export type InboundDropReason =
   | 'self_author' // event.user === botUserId; we never route our own messages back to ourselves
@@ -37,7 +66,7 @@ export type SlackInboundContext = {
 // InboundDropReason — there is no `default` log path, so the type system
 // forces logging to stay exhaustive.
 export function classifyInbound(
-  event: SlackSocketMessageEvent,
+  event: SlackInboundMessageEvent,
   config: ChannelAdapterConfig,
   context: SlackInboundContext,
 ): InboundClassification {
@@ -166,7 +195,7 @@ function extractMentionedUserIds(text: string): string[] {
   return Array.from(seen)
 }
 
-function inboundText(event: SlackSocketMessageEvent): string {
+function inboundText(event: SlackInboundMessageEvent): string {
   const rawText = event.text ?? ''
   const mediaSummary = summarizeSlackMedia(event)
   if (mediaSummary.length === 0) return rawText
@@ -174,7 +203,7 @@ function inboundText(event: SlackSocketMessageEvent): string {
   return rawText === '' ? summary : `${rawText}\n${summary}`
 }
 
-function summarizeSlackMedia(event: SlackSocketMessageEvent): string[] {
+function summarizeSlackMedia(event: SlackInboundMessageEvent): string[] {
   return (event.files ?? []).map(summarizeSlackFile)
 }
 

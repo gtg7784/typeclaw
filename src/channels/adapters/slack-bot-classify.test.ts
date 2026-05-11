@@ -2,8 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 
-import type { SlackSocketMessageEvent } from './agent-messenger-slack-shim'
-import { classifyInbound } from './slack-bot-classify'
+import { classifyInbound, type SlackInboundMessageEvent } from './slack-bot-classify'
 
 const TEAM_ID = 'T0ACME'
 const BOT_USER_ID = 'UBOT'
@@ -18,7 +17,7 @@ const baseConfig: ChannelAdapterConfig = {
   history: defaultHistoryConfig(),
 }
 
-function buildEvent(overrides: Partial<SlackSocketMessageEvent> = {}): SlackSocketMessageEvent {
+function buildEvent(overrides: Partial<SlackInboundMessageEvent> = {}): SlackInboundMessageEvent {
   return {
     type: 'message',
     channel: 'C0CHANNEL',
