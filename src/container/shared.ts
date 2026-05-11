@@ -81,6 +81,20 @@ export function containerNameFromCwd(cwd: string): string {
   return sanitizeContainerName(basename(resolve(cwd)))
 }
 
+// `docker rm` failures we treat as success because they leave the name free
+// for the next `docker run --name <same>`, which is the post-state every
+// caller is trying to achieve:
+//   - "No such container" — removed out-of-band between our inspect and rm
+//     (peer `typeclaw stop`, manual `docker rm`, or async post-stop cleanup).
+//   - "removal of container … is already in progress" — Docker accepted a
+//     prior remove and is still draining it. start.ts's preflight re-runs
+//     `rm -f` with the same tolerance and Docker serializes, so the name is
+//     free by the time `docker run` fires.
+export function isBenignRmStderr(stderr: string): boolean {
+  const lower = stderr.toLowerCase()
+  return lower.includes('no such container') || lower.includes('removal of container')
+}
+
 export function imageTagFromCwd(cwd: string): string {
   return `typeclaw-${containerNameFromCwd(cwd)}`
 }

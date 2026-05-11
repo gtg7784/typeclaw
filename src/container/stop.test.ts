@@ -115,6 +115,25 @@ describe('stop (composition)', () => {
     expect(result.ok).toBe(true)
   })
 
+  test('tolerates "removal already in progress" from docker rm (concurrent cleanup raced ahead)', async () => {
+    // given: docker stop succeeded, but between our stop and rm something else
+    // (peer typeclaw stop / OrbStack async cleanup) already started removing
+    // the container. Docker reports "removal of container <name> is already in
+    // progress" — a different failure shape from "no such container" but
+    // functionally equivalent: the name will be free for the next docker run.
+    const { exec } = fakeDockerExec({
+      scenario: { exists: true, running: true },
+      rmExitCode: 1,
+      rmStderr: 'Error response from daemon: removal of container vanished is already in progress',
+    })
+
+    // when
+    const result = await stop({ cwd: root, exec })
+
+    // then: stop reports success — `typeclaw restart` should not abort here
+    expect(result.ok).toBe(true)
+  })
+
   test('surfaces a clear error when docker rm fails for a non-recoverable reason', async () => {
     const { exec } = fakeDockerExec({
       scenario: { exists: true, running: false },

@@ -1,6 +1,6 @@
 import { isDaemonReachable, send as sendToDaemon } from '@/hostd/client'
 
-import { containerNameFromCwd, defaultDockerExec, type DockerExec } from './shared'
+import { containerNameFromCwd, defaultDockerExec, type DockerExec, isBenignRmStderr } from './shared'
 
 export type StopPlan = {
   containerName: string
@@ -33,7 +33,7 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
         return { ok: true, containerName, running: false }
       }
       const recover = await exec(['rm', '-f', containerName], { cwd })
-      if (recover.exitCode !== 0 && !recover.stderr.toLowerCase().includes('no such container')) {
+      if (recover.exitCode !== 0 && !isBenignRmStderr(recover.stderr)) {
         return {
           ok: false,
           reason: `docker inspect failed (${inspect.stderr.trim() || 'no stderr'}) and docker rm -f could not recover: ${recover.stderr.trim() || 'no stderr'}`,
@@ -60,10 +60,10 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
     // does not collide on the name. Use `-f` for symmetry with the start.ts
     // preflight and because `docker stop` occasionally returns exit 0 before
     // the container is fully out of `Running` state on OrbStack under load —
-    // bare `docker rm` would then refuse a still-running container. Tolerate
-    // "no such container" because the user may have removed it out-of-band.
+    // bare `docker rm` would then refuse a still-running container. Treat
+    // benign rm failures as success — see isBenignRmStderr for the contract.
     const rmResult = await exec(['rm', '-f', containerName], { cwd })
-    if (rmResult.exitCode !== 0 && !rmResult.stderr.toLowerCase().includes('no such container')) {
+    if (rmResult.exitCode !== 0 && !isBenignRmStderr(rmResult.stderr)) {
       return { ok: false, reason: `docker rm failed: ${rmResult.stderr.trim() || 'no stderr'}` }
     }
 
