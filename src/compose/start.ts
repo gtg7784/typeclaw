@@ -7,24 +7,24 @@ export type AgentResult<T> = { name: string; ok: true; data: T } | { name: strin
 
 export type StartSuccess = Extract<StartResult, { ok: true }>
 
-export type ComposeUpOptions = {
+export type ComposeStartOptions = {
   rootCwd: string
   preferredHostPort: number
   forceBuild?: boolean
   cliEntry?: string
 }
 
-export type ComposeUpResult = {
+export type ComposeStartResult = {
   agents: AgentEntry[]
   results: AgentResult<StartSuccess>[]
 }
 
-export async function composeUp({
+export async function composeStart({
   rootCwd,
   preferredHostPort,
   forceBuild = false,
   cliEntry,
-}: ComposeUpOptions): Promise<ComposeUpResult> {
+}: ComposeStartOptions): Promise<ComposeStartResult> {
   const agents = discoverAgents(rootCwd)
   const results = await Promise.all(
     agents.map(async (agent): Promise<AgentResult<StartSuccess>> => {

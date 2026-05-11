@@ -1,6 +1,12 @@
 export { discoverAgents, type AgentEntry } from './discover'
-export { composeDown, type ComposeDownResult, type StopSuccess } from './down'
 export { colorFor, composeLogs, makeLinePrefixer, type ComposeLogsOptions, type ComposeLogsResult } from './logs'
 export { composePs, type AgentStatus, type AgentStatusEntry, type ComposePsResult } from './ps'
 export { composeRestart, type ComposeRestartOptions, type ComposeRestartResult, type RestartData } from './restart'
-export { composeUp, type AgentResult, type ComposeUpOptions, type ComposeUpResult, type StartSuccess } from './up'
+export {
+  composeStart,
+  type AgentResult,
+  type ComposeStartOptions,
+  type ComposeStartResult,
+  type StartSuccess,
+} from './start'
+export { composeStop, type ComposeStopResult, type StopSuccess } from './stop'
