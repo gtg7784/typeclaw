@@ -34,14 +34,15 @@ type FakeOptions = {
   rmExitCode?: number
   inspectExitCode?: number
   inspectStderr?: string
-  // Models Docker's async removal-drain: after `docker rm` returns with the
-  // "in-progress" stderr (rmExitCode=1, rmStderr matching), the container
+  // Models Docker's async removal-drain after `docker rm`. The container
   // does NOT immediately disappear from `docker inspect`. It only transitions
   // to "no such container" after the inspect probe has been called this
   // many times (simulating the drain completing). Default 0 — no drain
   // delay — i.e. inspect reports "gone" the very next call. Set to a
   // positive integer to exercise waitForRemoval's polling loop; set high
   // enough to exhaust the configured timeout to exercise the timeout branch.
+  // Applies BOTH to the "in-progress" non-zero rm and to the exit-0 rm
+  // (OrbStack/Docker Desktop under load acknowledge the rm before draining).
   drainAfterInspectCalls?: number
 }
 
@@ -74,7 +75,13 @@ function fakeDockerExec(options: FakeOptions): { exec: DockerExec; calls: string
       const exitCode = options.rmExitCode ?? 0
       const stderr = options.rmStderr ?? ''
       rmReturned = true
-      if (exitCode === 0) scenario = { exists: false }
+      // Exit 0 from `docker rm -f` does NOT mean the container is gone on
+      // OrbStack under load — the daemon acknowledges the rm before
+      // draining. Defer the scenario transition to the inspect drain logic
+      // above so tests with drainAfterInspectCalls > 0 model the real race
+      // window. drainAfterInspectCalls === 0 (the default) still flips
+      // scenario on the very next inspect probe, so existing exit-0 tests
+      // continue to see "gone" immediately.
       return { exitCode, stdout: '', stderr }
     }
     return { exitCode: 0, stdout: '', stderr: '' }
@@ -155,6 +162,30 @@ describe('stop (composition)', () => {
       .filter(({ c }) => c[0] === 'inspect')
       .filter(({ i }) => i > calls.findIndex((cc) => cc[0] === 'rm'))
     expect(inspectAfterRm.length).toBeGreaterThanOrEqual(2)
+  })
+
+  test('waits for the drain when docker rm returns exit 0 but the container is still in inspect (OrbStack under load)', async () => {
+    // given: a running container. `docker rm -f` returns exit 0 but Docker
+    // has not yet finished draining — `inspect` still sees the container
+    // for two more probes. This is the canonical OrbStack-under-load
+    // failure mode behind `typeclaw compose restart`'s "Conflict. The
+    // container name is already in use" — stop() returning before the
+    // drain completes lets the subsequent start() race the daemon.
+    const { exec, calls } = fakeDockerExec({
+      scenario: { exists: true, running: true },
+      rmExitCode: 0,
+      drainAfterInspectCalls: 2,
+    })
+
+    // when
+    const result = await stop({ cwd: root, exec })
+
+    // then: stop reports success only AFTER inspect confirmed the name is
+    // free — at least one inspect probe must run between rm and return.
+    expect(result.ok).toBe(true)
+    const rmIdx = calls.findIndex((c) => c[0] === 'rm')
+    const inspectAfterRm = calls.slice(rmIdx + 1).filter((c) => c[0] === 'inspect')
+    expect(inspectAfterRm.length).toBeGreaterThanOrEqual(1)
   })
 
   test('surfaces a clear error when docker rm fails for a non-recoverable reason', async () => {

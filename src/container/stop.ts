@@ -80,6 +80,16 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
     // classifyRmStderr for the benign-failure contract; when 'in-progress',
     // wait for the drain so stop()'s ok-return actually means "name is free"
     // (which compose's restart and any subsequent start() depend on).
+    //
+    // Same waitForRemoval call on the exit-0 path for the same reason as the
+    // start.ts preflight: OrbStack and Docker Desktop under load acknowledge
+    // `rm -f` before the daemon has finished draining the removal, so an
+    // immediate `docker run --name <same>` (from `typeclaw compose restart`,
+    // which fires stop→start sequentially per agent) races the drain and
+    // fails with "Conflict. The container name … is already in use by
+    // container <ID>". stop()'s contract is that the name is free on return,
+    // and the only way to honor that against Docker's async removal is to
+    // poll inspect until the container actually disappears.
     const rmResult = await exec(['rm', '-f', containerName], { cwd })
     if (rmResult.exitCode !== 0) {
       const kind = classifyRmStderr(rmResult.stderr)
@@ -91,6 +101,11 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
           ok: false,
           reason: `Container ${containerName} is still being removed by docker after 10s.`,
         }
+      }
+    } else if (!(await waitForRemoval(exec, containerName))) {
+      return {
+        ok: false,
+        reason: `Container ${containerName} is still being removed by docker after 10s.`,
       }
     }
 

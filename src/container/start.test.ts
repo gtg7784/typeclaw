@@ -740,7 +740,14 @@ function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerSc
         }
         return { exitCode: 1, stdout: '', stderr }
       }
-      containerState = { exists: false }
+      // Exit 0 from `docker rm -f` does NOT mean the name is free under
+      // OrbStack load — the daemon acknowledges the rm before draining. The
+      // inspect block above already advances containerState to "gone" after
+      // drainAfterInspectCalls post-rm probes, so leaving the state alone
+      // here lets exit-0 tests exercise the same drain window the
+      // "in-progress" tests do. drainAfterInspectCalls === 0 (the default
+      // for existing tests) still flips state on the very next inspect, so
+      // the pre-existing happy-path tests continue to see immediate "gone".
       return { exitCode: 0, stdout: '', stderr: '' }
     }
     if (args[0] === 'build') {
@@ -1462,6 +1469,52 @@ describe('start (composition)', () => {
 
     // then: start succeeded, docker run ran AGAINST A GONE CONTAINER, and
     // we made at least one inspect call after rm to verify removal
+    expect(result.ok).toBe(true)
+    const rmIdx = calls.findIndex((c) => c.args[0] === 'rm')
+    const runIdx = calls.findIndex((c) => c.args[0] === 'run')
+    expect(rmIdx).toBeGreaterThanOrEqual(0)
+    expect(runIdx).toBeGreaterThan(rmIdx)
+    const inspectsBetween = calls.slice(rmIdx + 1, runIdx).filter((c) => c.args[0] === 'inspect')
+    expect(inspectsBetween.length).toBeGreaterThanOrEqual(1)
+  })
+
+  test('waits for Docker to finish removal when rm returns exit 0 but container is still draining (OrbStack under load)', async () => {
+    // given: a stopped corpse. The preflight `docker rm -f` returns exit 0
+    // — i.e. Docker acknowledged the request — but the daemon has not yet
+    // finished draining. `inspect` still sees the container for two more
+    // probes after rm. This is the canonical failure mode behind the
+    // user-visible `typeclaw compose restart` bug: stop()'s rm returns 0,
+    // start()'s preflight sees the corpse, start()'s rm returns 0, but
+    // docker run --name fires before the drain completes and hits
+    // "Conflict. The container name is already in use by container <ID>".
+    //
+    // The fake's docker-run path returns the real name-conflict error
+    // when the container is still present, so without the waitForRemoval
+    // on the exit-0 path, this test fails with exactly the user-visible
+    // error message.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      container: {
+        exists: true,
+        running: false,
+        drainAfterInspectCalls: 2,
+      },
+    })
+
+    // when
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    // then: start succeeded (docker run did not race the drain), and we
+    // made at least one inspect call between rm and run to verify removal
     expect(result.ok).toBe(true)
     const rmIdx = calls.findIndex((c) => c.args[0] === 'rm')
     const runIdx = calls.findIndex((c) => c.args[0] === 'run')

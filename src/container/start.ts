@@ -169,6 +169,20 @@ export async function start({
       // still draining a prior removal and we must wait it out before docker
       // run, or we'd hit `Conflict. The container name "/<name>" is already
       // in use` even though our rm "succeeded".
+      //
+      // Even when `docker rm -f` returns exit 0 we MUST wait for the inspect
+      // probe to confirm the name is free. On OrbStack (and occasionally
+      // Docker Desktop) under concurrent load — the canonical case being
+      // `typeclaw compose restart`, which fires N parallel stop→start pairs
+      // — `rm -f` acknowledges the request before the daemon has finished
+      // draining the removal. The container is still listed by `docker ps -a`
+      // (with the same ID Docker reports back in the "Conflict. The container
+      // name … is already in use by container <ID>" error) for tens to
+      // hundreds of milliseconds, and `docker run --name <same>` issued
+      // inside that window deterministically loses the race. waitForRemoval
+      // returns on the first inspect probe in the happy path (one extra
+      // `docker inspect` per start when there was a corpse), so the cost
+      // here is bounded and small.
       const rm = await exec(['rm', '-f', containerName])
       if (rm.exitCode !== 0) {
         const kind = classifyRmStderr(rm.stderr)
@@ -183,6 +197,11 @@ export async function start({
             ok: false,
             reason: `Container ${containerName} is still being removed by docker after 10s; refusing to docker run --name to avoid a name conflict.`,
           }
+        }
+      } else if (!(await waitForRemoval(exec, containerName))) {
+        return {
+          ok: false,
+          reason: `Container ${containerName} is still being removed by docker after 10s; refusing to docker run --name to avoid a name conflict.`,
         }
       }
     }
