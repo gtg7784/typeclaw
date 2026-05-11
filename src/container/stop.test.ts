@@ -32,6 +32,8 @@ type FakeOptions = {
   stopFails?: boolean
   rmStderr?: string
   rmExitCode?: number
+  inspectExitCode?: number
+  inspectStderr?: string
 }
 
 function fakeDockerExec(options: FakeOptions): { exec: DockerExec; calls: string[][] } {
@@ -40,6 +42,9 @@ function fakeDockerExec(options: FakeOptions): { exec: DockerExec; calls: string
   const exec: DockerExec = async (args): Promise<DockerExecResult> => {
     calls.push(args)
     if (args[0] === 'inspect') {
+      if (options.inspectExitCode !== undefined && options.inspectExitCode !== 0) {
+        return { exitCode: options.inspectExitCode, stdout: '', stderr: options.inspectStderr ?? '' }
+      }
       if (!scenario.exists) return { exitCode: 1, stdout: '', stderr: 'Error: No such container: x' }
       return { exitCode: 0, stdout: `${scenario.running}\n`, stderr: '' }
     }
@@ -86,7 +91,7 @@ describe('stop (composition)', () => {
     expect(rmIdx).toBeGreaterThan(stopIdx)
   })
 
-  test('skips docker stop but still issues docker rm when the container exists in stopped state (post-crash corpse)', async () => {
+  test('skips docker stop but still issues docker rm -f when the container exists in stopped state (post-crash corpse)', async () => {
     const { exec, calls } = fakeDockerExec({ scenario: { exists: true, running: false } })
 
     const result = await stop({ cwd: root, exec })
@@ -95,7 +100,7 @@ describe('stop (composition)', () => {
     if (!result.ok) return
     expect(result.running).toBe(false)
     expect(calls.find((c) => c[0] === 'stop')).toBeUndefined()
-    expect(calls.find((c) => c[0] === 'rm')).toBeDefined()
+    expect(calls.find((c) => c[0] === 'rm' && c[1] === '-f')).toBeDefined()
   })
 
   test('tolerates "no such container" from docker rm (user removed it out-of-band)', async () => {
@@ -136,5 +141,52 @@ describe('stop (composition)', () => {
     if (result.ok) throw new Error('expected failure')
     expect(result.reason).toMatch(/docker stop failed/)
     expect(calls.find((c) => c[0] === 'rm')).toBeUndefined()
+  })
+
+  test('force-removes the corpse when docker inspect fails with a non-"no such container" error', async () => {
+    const { exec, calls } = fakeDockerExec({
+      scenario: { exists: true, running: false },
+      inspectExitCode: 1,
+      inspectStderr: 'Error response from daemon: removal of container abc is already in progress',
+    })
+
+    const result = await stop({ cwd: root, exec })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.running).toBe(false)
+    expect(calls.find((c) => c[0] === 'rm' && c[1] === '-f')).toBeDefined()
+  })
+
+  test('short-circuits without docker rm when docker inspect reports the container truly does not exist', async () => {
+    const { exec, calls } = fakeDockerExec({
+      scenario: { exists: false },
+      inspectExitCode: 1,
+      inspectStderr: 'Error: No such container: anderson',
+    })
+
+    const result = await stop({ cwd: root, exec })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.running).toBe(false)
+    expect(calls.find((c) => c[0] === 'rm')).toBeUndefined()
+  })
+
+  test('surfaces a clear error when docker inspect fails AND the recovery docker rm -f also fails', async () => {
+    const { exec } = fakeDockerExec({
+      scenario: { exists: true, running: false },
+      inspectExitCode: 1,
+      inspectStderr: 'Error response from daemon: removal of container abc is already in progress',
+      rmExitCode: 1,
+      rmStderr: 'permission denied',
+    })
+
+    const result = await stop({ cwd: root, exec })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/docker inspect failed/)
+    expect(result.reason).toMatch(/docker rm -f could not recover.*permission denied/)
   })
 })

@@ -23,6 +23,22 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
   try {
     const inspect = await exec(['inspect', '--format', '{{.State.Running}}', containerName], { cwd })
     if (inspect.exitCode !== 0) {
+      // `docker inspect` exits non-zero both when the container does not
+      // exist AND when it exists but is in a transient state docker cannot
+      // inspect (Removal In Progress, Dead, daemon hiccup). Discriminate by
+      // stderr — same approach used for `docker rm` below — and attempt a
+      // force-remove in the latter case so a corpse holding the name does
+      // not collide with the next `docker run --name <same>`.
+      if (inspect.stderr.toLowerCase().includes('no such container')) {
+        return { ok: true, containerName, running: false }
+      }
+      const recover = await exec(['rm', '-f', containerName], { cwd })
+      if (recover.exitCode !== 0 && !recover.stderr.toLowerCase().includes('no such container')) {
+        return {
+          ok: false,
+          reason: `docker inspect failed (${inspect.stderr.trim() || 'no stderr'}) and docker rm -f could not recover: ${recover.stderr.trim() || 'no stderr'}`,
+        }
+      }
       return { ok: true, containerName, running: false }
     }
     const running = inspect.stdout.trim() === 'true'
@@ -41,9 +57,12 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
     // Containers run without `--rm`, so `docker stop` only stops them — the
     // record stays in `docker ps -a` until we remove it explicitly. Remove now
     // so a subsequent `docker run --name <same>` (e.g. from `typeclaw restart`)
-    // does not collide on the name. Tolerate "no such container" because the
-    // user may have removed it out-of-band between inspect and rm.
-    const rmResult = await exec(['rm', containerName], { cwd })
+    // does not collide on the name. Use `-f` for symmetry with the start.ts
+    // preflight and because `docker stop` occasionally returns exit 0 before
+    // the container is fully out of `Running` state on OrbStack under load —
+    // bare `docker rm` would then refuse a still-running container. Tolerate
+    // "no such container" because the user may have removed it out-of-band.
+    const rmResult = await exec(['rm', '-f', containerName], { cwd })
     if (rmResult.exitCode !== 0 && !rmResult.stderr.toLowerCase().includes('no such container')) {
       return { ok: false, reason: `docker rm failed: ${rmResult.stderr.trim() || 'no stderr'}` }
     }
