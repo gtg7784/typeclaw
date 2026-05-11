@@ -1,18 +1,18 @@
 import { defineCommand } from 'citty'
 
 import {
-  composeDown,
   composeLogs,
   composePs,
   composeRestart,
-  composeUp,
+  composeStart,
+  composeStop,
   type AgentResult,
   type AgentStatus,
 } from '@/compose'
 import { config } from '@/config'
 
-const upSub = defineCommand({
-  meta: { name: 'up', description: 'start every agent in immediate subdirectories of cwd' },
+const startSub = defineCommand({
+  meta: { name: 'start', description: 'start every agent in immediate subdirectories of cwd' },
   args: {
     port: {
       type: 'string',
@@ -26,7 +26,7 @@ const upSub = defineCommand({
     },
   },
   async run({ args }) {
-    const { agents, results } = await composeUp({
+    const { agents, results } = await composeStart({
       rootCwd: process.cwd(),
       preferredHostPort: Number(args.port),
       forceBuild: args.build,
@@ -46,15 +46,15 @@ const upSub = defineCommand({
         console.error(`[${r.name}] failed: ${r.reason}`)
       }
     }
-    summarize(results, 'up', failed)
+    summarize(results, 'started', failed)
     if (failed > 0) process.exit(1)
   },
 })
 
-const downSub = defineCommand({
-  meta: { name: 'down', description: 'stop every agent in immediate subdirectories of cwd' },
+const stopSub = defineCommand({
+  meta: { name: 'stop', description: 'stop every agent in immediate subdirectories of cwd' },
   async run() {
-    const { agents, results } = await composeDown(process.cwd())
+    const { agents, results } = await composeStop(process.cwd())
     if (agents.length === 0) {
       console.log('No typeclaw agents found in immediate subdirectories of cwd.')
       return
@@ -164,8 +164,8 @@ export const composeCommand = defineCommand({
     description: 'orchestrate every typeclaw agent in immediate subdirectories of cwd',
   },
   subCommands: {
-    up: upSub,
-    down: downSub,
+    start: startSub,
+    stop: stopSub,
     restart: restartSub,
     ps: psSub,
     logs: logsSub,

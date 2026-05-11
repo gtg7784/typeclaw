@@ -115,7 +115,7 @@ export async function start({
     // Probe container state BEFORE refreshing Dockerfile/.gitignore: when the
     // container is already running, start() is a no-op and must not produce
     // side effects (template writes, .gitignore commits, package.json migration)
-    // that would surprise a user invoking `compose up` against a partially-up
+    // that would surprise a user invoking `compose start` against a partially-up
     // tree.
     const state = await inspectContainer(exec, containerName)
     if (state.exists && state.running) {

@@ -1,16 +1,16 @@
 import { stop, type StopResult } from '@/container'
 
 import { discoverAgents, type AgentEntry } from './discover'
-import type { AgentResult } from './up'
+import type { AgentResult } from './start'
 
 export type StopSuccess = Extract<StopResult, { ok: true }>
 
-export type ComposeDownResult = {
+export type ComposeStopResult = {
   agents: AgentEntry[]
   results: AgentResult<StopSuccess>[]
 }
 
-export async function composeDown(rootCwd: string): Promise<ComposeDownResult> {
+export async function composeStop(rootCwd: string): Promise<ComposeStopResult> {
   const agents = discoverAgents(rootCwd)
   const results = await Promise.all(
     agents.map(async (agent): Promise<AgentResult<StopSuccess>> => {

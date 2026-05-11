@@ -2,8 +2,8 @@ import { validateConfig } from '@/config'
 import { start, stop } from '@/container'
 
 import { discoverAgents, type AgentEntry } from './discover'
-import type { StopSuccess } from './down'
-import type { AgentResult, StartSuccess } from './up'
+import type { AgentResult, StartSuccess } from './start'
+import type { StopSuccess } from './stop'
 
 export type RestartData = { stop: StopSuccess; start: StartSuccess }
 
