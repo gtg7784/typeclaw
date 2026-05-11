@@ -2,7 +2,6 @@ import { join } from 'node:path'
 
 import { AuthStorage, ModelRegistry } from '@mariozechner/pi-coding-agent'
 
-import { createAuthStorageForAgent } from '@/auth'
 import { getConfig } from '@/config'
 import {
   KNOWN_PROVIDERS,
@@ -11,6 +10,7 @@ import {
   supportsOAuth,
   type KnownProviderId,
 } from '@/config/providers'
+import { createSecretsStoreForAgent } from '@/secrets'
 
 type Auth = {
   authStorage: AuthStorage
@@ -21,10 +21,10 @@ const TEST_DUMMY_API_KEY = 'test_dummy_key'
 
 // In container stage, /agent is the bind-mounted agent folder; in host stage
 // (only used by `typeclaw init` itself), it falls back to process.cwd(). The
-// host writes auth.json at init time and the container reads + refreshes it
-// at runtime — both paths point at the same file on the host filesystem.
-function authJsonPath(): string {
-  return join(process.cwd(), 'auth.json')
+// host writes secrets.json at init time and the container reads + refreshes
+// it at runtime — both paths point at the same file on the host filesystem.
+function secretsJsonPath(): string {
+  return join(process.cwd(), 'secrets.json')
 }
 
 let cached: Auth | null = null
@@ -36,7 +36,7 @@ export function getAuth(): Auth {
   const provider = KNOWN_PROVIDERS[providerId]
 
   // Bun sets NODE_ENV=test automatically under `bun test`. The dummy path
-  // bypasses both auth.json and process.env so suites that build sessions
+  // bypasses both secrets.json and process.env so suites that build sessions
   // but never hit the LLM don't need real credentials; production still
   // hard-exits to surface misconfiguration.
   if (process.env.NODE_ENV === 'test' && !hasAnyCredentialInEnv(provider.apiKeyEnv)) {
@@ -49,15 +49,15 @@ export function getAuth(): Auth {
     return cached
   }
 
-  const authStorage = createAuthStorageForAgent(authJsonPath())
+  const authStorage = createSecretsStoreForAgent(secretsJsonPath())
 
-  // Persist the .env API key into auth.json so the file is the single
+  // Persist the .env API key into secrets.json so the file is the single
   // source of truth for credentials. Upstream pi-ai's `getEnvApiKey()` only
   // knows about a hardcoded set of providers (anthropic, openai, etc.) and
   // does NOT know about Fireworks, so `hasAuth("fireworks")` returns false
   // unless a credential is materialized into AuthStorage's data map. Before
   // this migration the code used `setRuntimeApiKey`, which papered over the
-  // gap in-memory but never wrote auth.json — leaving `llm` empty for every
+  // gap in-memory but never wrote secrets.json — leaving `llm` empty for every
   // downstream consumer (rotation, audit, transport over the daemon
   // boundary) that treats the file as authoritative.
   //
@@ -79,7 +79,7 @@ export function getAuth(): Auth {
 
   // OAuth providers persist via `oauth-login.ts` at init time; api-key
   // providers persist via the migration block above. By this point
-  // auth.json is authoritative — a missing entry means the user skipped
+  // secrets.json is authoritative — a missing entry means the user skipped
   // login at init, deleted the file, or never set the provider's env var.
   if (!authStorage.hasAuth(provider.id)) {
     console.error(missingCredentialMessage(providerId))

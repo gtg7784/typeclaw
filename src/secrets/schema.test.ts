@@ -1,10 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
-import { parseAuthFile } from './schema'
+import { parseSecretsFile } from './schema'
 
-describe('parseAuthFile', () => {
+describe('parseSecretsFile', () => {
   test('accepts the new envelope shape', () => {
-    const result = parseAuthFile({
+    const result = parseSecretsFile({
       version: 1,
       llm: { openai: { type: 'api_key', key: 'sk-test' } },
       channels: {},
@@ -18,8 +18,8 @@ describe('parseAuthFile', () => {
   })
 
   test('accepts the new envelope with $schema and missing optional sections', () => {
-    const result = parseAuthFile({
-      $schema: './node_modules/typeclaw/auth.schema.json',
+    const result = parseSecretsFile({
+      $schema: './node_modules/typeclaw/secrets.schema.json',
       version: 1,
     })
 
@@ -30,7 +30,7 @@ describe('parseAuthFile', () => {
   })
 
   test('upgrades legacy flat shape with at least one credential', () => {
-    const result = parseAuthFile({
+    const result = parseSecretsFile({
       openai: { type: 'api_key', key: 'sk-test' },
       'openai-codex': { type: 'oauth', access: 'a', refresh: 'r', expires: 1 },
     })
@@ -43,8 +43,8 @@ describe('parseAuthFile', () => {
     expect(result.file.channels).toEqual({})
   })
 
-  test('upgrades empty object as legacy-empty (freshly created auth.json)', () => {
-    const result = parseAuthFile({})
+  test('upgrades empty object as legacy-empty (freshly created secrets file)', () => {
+    const result = parseSecretsFile({})
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
@@ -52,7 +52,7 @@ describe('parseAuthFile', () => {
   })
 
   test('preserves passthrough fields on OAuth credentials so upstream additions survive', () => {
-    const result = parseAuthFile({
+    const result = parseSecretsFile({
       version: 1,
       llm: {
         'openai-codex': {
@@ -74,7 +74,7 @@ describe('parseAuthFile', () => {
   })
 
   test('rejects malformed credential in legacy shape (api_key missing key)', () => {
-    const result = parseAuthFile({ openai: { type: 'api_key' } })
+    const result = parseSecretsFile({ openai: { type: 'api_key' } })
 
     expect(result.ok).toBe(false)
     if (result.ok) return
@@ -82,7 +82,7 @@ describe('parseAuthFile', () => {
   })
 
   test('rejects wrong version with informative path: message error', () => {
-    const result = parseAuthFile({ version: 2, llm: {} })
+    const result = parseSecretsFile({ version: 2, llm: {} })
 
     expect(result.ok).toBe(false)
     if (result.ok) return
@@ -90,7 +90,7 @@ describe('parseAuthFile', () => {
   })
 
   test('rejects non-object input', () => {
-    const result = parseAuthFile('not a record')
+    const result = parseSecretsFile('not a record')
 
     expect(result.ok).toBe(false)
     if (result.ok) return
@@ -98,13 +98,13 @@ describe('parseAuthFile', () => {
   })
 
   test('rejects array input', () => {
-    const result = parseAuthFile([])
+    const result = parseSecretsFile([])
 
     expect(result.ok).toBe(false)
   })
 
   test('rejects unknown discriminator on legacy credential', () => {
-    const result = parseAuthFile({ openai: { type: 'totally_made_up', key: 'x' } })
+    const result = parseSecretsFile({ openai: { type: 'totally_made_up', key: 'x' } })
 
     expect(result.ok).toBe(false)
   })

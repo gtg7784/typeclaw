@@ -1,6 +1,5 @@
 import { join } from 'node:path'
 
-import { createAuthStorageForAgent } from '@/auth'
 import {
   KNOWN_PROVIDERS,
   providerForModelRef,
@@ -8,6 +7,7 @@ import {
   type KnownModelRef,
   type KnownProviderId,
 } from '@/config/providers'
+import { createSecretsStoreForAgent } from '@/secrets'
 
 export type OAuthLoginResult = { ok: true } | { ok: false; reason: string }
 
@@ -27,9 +27,9 @@ export type OAuthCallbacks = {
 }
 
 // Default runner: real OAuth flow against pi-ai. Tests inject a stub to skip
-// network entirely. The runner's only job is to log in, write to auth.json,
-// and report ok/error — it does NOT update typeclaw.json (the model ref is
-// already chosen by the caller and written by `scaffold`).
+// network entirely. The runner's only job is to log in, write to the secrets
+// file, and report ok/error — it does NOT update typeclaw.json (the model
+// ref is already chosen by the caller and written by `scaffold`).
 export function makeOAuthLoginRunner(callbacks: OAuthCallbacks): OAuthLoginRunner {
   return async ({ cwd, model }) => {
     const providerId = providerForModelRef(model)
@@ -39,8 +39,8 @@ export function makeOAuthLoginRunner(callbacks: OAuthCallbacks): OAuthLoginRunne
     }
 
     try {
-      const authStorage = createAuthStorageForAgent(join(cwd, 'auth.json'))
-      await authStorage.login(provider.oauthProviderId, {
+      const secrets = createSecretsStoreForAgent(join(cwd, 'secrets.json'))
+      await secrets.login(provider.oauthProviderId, {
         onAuth: (info) => callbacks.onAuth(info.url, info.instructions),
         onProgress: callbacks.onProgress,
         onPrompt: async (prompt) => {
@@ -59,7 +59,7 @@ export function makeOAuthLoginRunner(callbacks: OAuthCallbacks): OAuthLoginRunne
 }
 
 // Test seam: lets unit tests assert "OAuth login was invoked with these
-// params" without spinning up a real authStorage / browser callback server.
+// params" without spinning up a real secrets store / browser callback server.
 export type FakeOAuthLoginRunnerOptions = {
   result?: OAuthLoginResult
   onCalled?: (options: { cwd: string; model: KnownModelRef; providerId: KnownProviderId }) => void

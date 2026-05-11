@@ -23,15 +23,15 @@ const llmOAuthCredentialSchema = z
 export const llmCredentialSchema = z.discriminatedUnion('type', [llmApiKeyCredentialSchema, llmOAuthCredentialSchema])
 
 // Map keyed by provider id ("openai", "openai-codex", "fireworks", ...).
-// Exactly the shape pi-coding-agent persists today as the entire auth.json.
+// Exactly the shape pi-coding-agent persists today as the entire secrets file.
 export const llmCredentialsSchema = z.record(z.string(), llmCredentialSchema)
 
-// PR 1 ships an empty channels schema. PR 2 will add discord/slack/telegram
-// blocks. The catchall keeps forward compatibility when a future TypeClaw
-// reads an auth.json written by an even-newer TypeClaw.
+// Empty channels schema today; channel adapter tokens (Slack/Discord/Telegram)
+// will move here in a follow-up plan. The catchall keeps forward compatibility
+// when a future TypeClaw reads a file written by an even-newer TypeClaw.
 export const channelsSchema = z.object({}).catchall(z.unknown())
 
-export const authFileSchema = z.object({
+export const secretsFileSchema = z.object({
   $schema: z.string().optional(),
   version: z.literal(1),
   llm: llmCredentialsSchema.default({}),
@@ -40,11 +40,11 @@ export const authFileSchema = z.object({
 
 export type LlmCredential = z.infer<typeof llmCredentialSchema>
 export type LlmCredentials = z.infer<typeof llmCredentialsSchema>
-export type AuthFile = z.infer<typeof authFileSchema>
+export type SecretsFile = z.infer<typeof secretsFileSchema>
 
-export type ParseAuthResult = { ok: true; file: AuthFile } | { ok: false; reason: string }
+export type ParseSecretsResult = { ok: true; file: SecretsFile } | { ok: false; reason: string }
 
-// parseAuthFile recognises two shapes:
+// parseSecretsFile recognises two shapes:
 //   1. The new envelope: { version: 1, llm: {...}, channels: {...} }
 //   2. The legacy flat shape pi-coding-agent writes today: a top-level
 //      Record<string, AuthCredential>. Treated as { version: 1, llm: <flat>,
@@ -52,10 +52,10 @@ export type ParseAuthResult = { ok: true; file: AuthFile } | { ok: false; reason
 //      next write that goes through this code path.
 //
 // An empty object {} is a legitimate legacy state — a freshly-created
-// auth.json with no providers logged in yet. It upgrades cleanly to the new
-// envelope with empty llm and channels.
-export function parseAuthFile(raw: unknown): ParseAuthResult {
-  const direct = authFileSchema.safeParse(raw)
+// secrets file with no providers logged in yet. It upgrades cleanly to the
+// new envelope with empty llm and channels.
+export function parseSecretsFile(raw: unknown): ParseSecretsResult {
+  const direct = secretsFileSchema.safeParse(raw)
   if (direct.success) return { ok: true, file: direct.data }
 
   const legacy = llmCredentialsSchema.safeParse(raw)
