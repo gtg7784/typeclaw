@@ -4,7 +4,7 @@ export type DockerExecResult = { exitCode: number; stdout: string; stderr: strin
 
 export type DockerExec = (
   args: string[],
-  options?: { cwd?: string; inheritStdio?: boolean },
+  options?: { cwd?: string; inheritStdio?: boolean; signal?: AbortSignal },
 ) => Promise<DockerExecResult>
 
 export const defaultDockerExec: DockerExec = async (args, options) => {
@@ -14,10 +14,17 @@ export const defaultDockerExec: DockerExec = async (args, options) => {
   // $PATH (rather than returning a non-zero exit). Two overloads (pipe vs
   // inherit) so each spawn call site has the literal stdout/stderr type
   // attached — that's what lets `new Response(proc.stdout)` typecheck on
-  // the piped path.
+  // the piped path. `signal` is forwarded to Bun.spawn so callers can bound
+  // long-running docker subcommands (e.g. `docker logs` on a stuck daemon).
   if (options?.inheritStdio) {
     try {
-      const proc = bun.spawn({ cmd: ['docker', ...args], cwd: options.cwd, stdout: 'inherit', stderr: 'inherit' })
+      const proc = bun.spawn({
+        cmd: ['docker', ...args],
+        cwd: options.cwd,
+        stdout: 'inherit',
+        stderr: 'inherit',
+        signal: options.signal,
+      })
       return { exitCode: await proc.exited, stdout: '', stderr: '' }
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
@@ -27,7 +34,13 @@ export const defaultDockerExec: DockerExec = async (args, options) => {
     }
   }
   try {
-    const proc = bun.spawn({ cmd: ['docker', ...args], cwd: options?.cwd, stdout: 'pipe', stderr: 'pipe' })
+    const proc = bun.spawn({
+      cmd: ['docker', ...args],
+      cwd: options?.cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      signal: options?.signal,
+    })
     const exitCode = await proc.exited
     const stdout = await new Response(proc.stdout).text()
     const stderr = await new Response(proc.stderr).text()

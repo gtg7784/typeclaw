@@ -14,6 +14,7 @@ import { refreshPackageJson } from '@/init/packagejson'
 
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import { containerNameFromCwd, defaultDockerExec, type DockerExec, getBun, imageTagFromCwd } from './shared'
+import { buildCrashReason, createVerifyRunning, type VerifyRunningFn } from './verify-running'
 
 const PACKAGE_FILE = 'package.json'
 const BUN_LOCK_FILE = 'bun.lock'
@@ -63,6 +64,15 @@ export type StartOptions = {
   // Reusing that daemon avoids a self-shutdown when disk source has drifted.
   reuseCurrentHostDaemon?: boolean
   ensureDeps?: (cwd: string) => Promise<EnsureDepsResult>
+  // Post-`docker run` verifier. `docker run -d` returns exit 0 the moment the
+  // container is created, even if its entrypoint crashes milliseconds later;
+  // with `--rm`, Docker then auto-removes the corpse, so `typeclaw logs`
+  // reports "not found" against a start() that claimed success. The default
+  // verifier polls `docker inspect` for 1.5s and converts crashes (or
+  // unrecoverable daemon errors) into start failures. Pass a custom function
+  // to override the wait window or to bypass verification entirely (e.g. a
+  // no-op `async () => ({ ok: true })` for unit tests that don't care).
+  verifyRunning?: VerifyRunningFn
 }
 
 export type HostDaemonStatus =
@@ -96,6 +106,7 @@ export async function start({
   cliEntry,
   reuseCurrentHostDaemon = false,
   ensureDeps = (dir) => ensureDepsInstalled({ cwd: dir }),
+  verifyRunning = createVerifyRunning({ exec }),
 }: StartOptions): Promise<StartResult> {
   try {
     const containerName = containerNameFromCwd(cwd)
@@ -204,10 +215,18 @@ export async function start({
       return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
     }
 
+    const containerId = run.stdout.trim()
+
+    const verification = await verifyRunning(containerName)
+    if (!verification.ok) {
+      await cleanupHostDaemonRegistration(containerName, hostd)
+      return { ok: false, reason: buildCrashReason(containerName, verification) }
+    }
+
     return {
       ok: true,
       plan,
-      containerId: run.stdout.trim(),
+      containerId,
       built,
       hostPort,
       hostd: stripHostDaemonControl(hostd),

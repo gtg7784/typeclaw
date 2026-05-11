@@ -80,6 +80,12 @@ const deterministicAllocator = async (preferred: number): Promise<number> => (pr
 // tests and would slow each one by ~hundreds of ms.
 const noEnsureDeps = async (): Promise<{ ok: true; installed: false }> => ({ ok: true, installed: false })
 
+// Bypasses the post-`docker run` verification window so happy-path tests don't
+// pay the production 1.5s wait. Verification has its own dedicated test file
+// (verify-running.test.ts); start.test.ts only proves start() routes a
+// failing verifier into the documented failure response.
+const bypassVerify = { verifyRunning: async () => ({ ok: true as const }) }
+
 function labelValue(runArgs: string[], key: string): string | undefined {
   for (let i = 0; i < runArgs.length - 1; i++) {
     if (runArgs[i] === '--label' && runArgs[i + 1]?.startsWith(`${key}=`)) {
@@ -709,6 +715,7 @@ function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerSc
       return { exitCode: 0, stdout: '', stderr: '' }
     }
     if (args[0] === 'run') {
+      containerState = { exists: true, running: true }
       return { exitCode: 0, stdout: 'fake-container-id-abcdef\n', stderr: '' }
     }
     return { exitCode: 0, stdout: '', stderr: '' }
@@ -730,6 +737,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     // then: the Dockerfile on disk was refreshed even though docker build never ran
@@ -753,6 +761,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     // then
@@ -775,6 +784,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
@@ -796,6 +806,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
@@ -818,6 +829,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
@@ -842,6 +854,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
@@ -868,6 +881,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     // then: HEAD advanced and the new commit exists with the expected subject
@@ -897,6 +911,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     // then: HEAD did not move (no Dockerfile commit, no .gitignore commit)
@@ -925,6 +940,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     // then: no new commits were created
@@ -952,6 +968,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     // then: a new commit landed with the migration
@@ -985,6 +1002,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
     expect(first.ok).toBe(true)
     const headAfterFirst = await runGit(root, ['rev-parse', 'HEAD'])
@@ -996,6 +1014,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
     expect(second.ok).toBe(true)
     const headAfterSecond = await runGit(root, ['rev-parse', 'HEAD'])
@@ -1027,6 +1046,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     // then
@@ -1056,6 +1076,7 @@ describe('start (composition)', () => {
         ensureCalls.push(dir)
         return { ok: true, installed: false }
       },
+      ...bypassVerify,
     })
 
     // then: ensureDeps received the agent folder, AND it ran before docker run
@@ -1108,6 +1129,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
@@ -1137,6 +1159,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
@@ -1158,6 +1181,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
@@ -1184,6 +1208,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
@@ -1217,6 +1242,7 @@ describe('start (composition)', () => {
         cliEntry: '/nonexistent/newer-cli.ts',
         reuseCurrentHostDaemon: true,
         ensureDeps: noEnsureDeps,
+        ...bypassVerify,
       })
 
       expect(result.ok).toBe(true)
@@ -1242,6 +1268,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
@@ -1266,6 +1293,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     // then: success with alreadyRunning=true, no docker side effects, no template churn
@@ -1304,6 +1332,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(false)
@@ -1326,6 +1355,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     // then: rm was issued before run, and run proceeded
@@ -1350,6 +1380,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(true)
@@ -1370,6 +1401,7 @@ describe('start (composition)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(false)
@@ -1388,7 +1420,14 @@ describe('start (port allocation)', () => {
     const allocatePort = async () => 51234
 
     // when
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort, ensureDeps: noEnsureDeps })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
 
     // then: docker run gets `-p 127.0.0.1:<hostPort>:8973`, NOT `-p 8973:8973`
     expect(result.ok).toBe(true)
@@ -1412,6 +1451,7 @@ describe('start (port allocation)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     // then
@@ -1450,7 +1490,14 @@ describe('start (port allocation)', () => {
     const allocatePort = async (): Promise<number> => ports.shift() ?? 0
 
     // when
-    const result = await start({ cwd: root, preferredHostPort: 8973, exec, allocatePort, ensureDeps: noEnsureDeps })
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
 
     // then: the second run got a different host port and succeeded
     expect(result.ok).toBe(true)
@@ -1482,11 +1529,107 @@ describe('start (port allocation)', () => {
       exec,
       allocatePort: deterministicAllocator,
       ensureDeps: noEnsureDeps,
+      ...bypassVerify,
     })
 
     expect(result.ok).toBe(false)
     expect(runAttempts).toBe(1)
     if (!result.ok) expect(result.reason).toMatch(/permission denied/)
+  })
+})
+
+// start.test.ts owns COMPOSITION: that start() invokes the verifier exactly
+// when docker run succeeds, routes a failing verifier into ok:false, and runs
+// cleanup. The behavior of the default verifier (transient statuses, daemon
+// errors, log capture, timeouts) lives in verify-running.test.ts.
+describe('start (post-run verification composition)', () => {
+  test('routes a failing verifier into ok:false with the verifier-supplied reason and runs hostd cleanup', async () => {
+    const previousHome = process.env.TYPECLAW_HOME
+    const home = await mkdtemp(join(tmpdir(), 'typeclaw-crash-hostd-'))
+    let daemon: Daemon | null = null
+    try {
+      process.env.TYPECLAW_HOME = home
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: '^0.1.0' })
+      await writeTypeclawConfig(root)
+      daemon = await startDaemon({ version: 'v', gcIntervalMs: 1_000_000 })
+      const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+      const result = await start({
+        cwd: root,
+        preferredHostPort: 8973,
+        exec,
+        allocatePort: deterministicAllocator,
+        cliEntry: '/nonexistent/cli.ts',
+        reuseCurrentHostDaemon: true,
+        ensureDeps: noEnsureDeps,
+        verifyRunning: async () => ({
+          ok: false,
+          mode: 'removed',
+          logs: { ok: true, text: 'Cannot find package "missing"' },
+        }),
+      })
+
+      expect(result.ok).toBe(false)
+      if (result.ok) throw new Error('expected failure')
+      expect(result.reason).toMatch(/exited and was auto-removed/)
+      expect(result.reason).toContain('Cannot find package "missing"')
+      expect(daemon.registered()).not.toContain(basename(root))
+    } finally {
+      if (daemon) await daemon.stop().catch(() => {})
+      if (previousHome === undefined) delete process.env.TYPECLAW_HOME
+      else process.env.TYPECLAW_HOME = previousHome
+      await rm(home, { recursive: true, force: true })
+    }
+  })
+
+  test('verifier runs AFTER docker run succeeds and BEFORE start returns success', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+    let verifierInvokedAfterRun = false
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      verifyRunning: async () => {
+        const runIdx = calls.findIndex((c) => c.args[0] === 'run')
+        verifierInvokedAfterRun = runIdx >= 0
+        return { ok: true }
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(verifierInvokedAfterRun).toBe(true)
+  })
+
+  test('does not invoke the verifier when docker run fails (no container to verify)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'No such container' }
+      if (args[0] === 'run') return { exitCode: 125, stdout: '', stderr: 'docker run failed for unrelated reason' }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+    let verifierCalled = false
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      verifyRunning: async () => {
+        verifierCalled = true
+        return { ok: true }
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    expect(verifierCalled).toBe(false)
   })
 })
 
