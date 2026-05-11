@@ -1,64 +1,78 @@
-import type { KakaoChat, KakaoTalkClient } from './agent-messenger-kakaotalk-shim'
+import type { KakaoTalkClient } from './agent-messenger-kakaotalk-shim'
 
 const DEFAULT_TTL_MS = 5 * 60 * 1000
 
 export type KakaoAuthorResolver = {
-  resolve: (authorId: string, chatId: string) => Promise<string>
-  prime: (chats: readonly KakaoChat[]) => void
+  resolve: (authorId: string, chatId: string) => Promise<string | null>
 }
 
 export type KakaoAuthorResolverOptions = {
-  client: Pick<KakaoTalkClient, 'getChats'>
+  client: Pick<KakaoTalkClient, 'getMembers'>
   now?: () => number
   ttlMs?: number
+  logger?: { warn: (msg: string) => void }
 }
 
-// KakaoTalk's LOCO protocol surfaces an author_id (numeric user_id) on every
-// inbound message but no display name. Names are only available indirectly
-// through KakaoChat.display_name, which is a comma-joined list of member
-// names for group chats and the counterpart's name for 1:1 chats. We use
-// this best-effort heuristic so the agent sees a human-readable author
-// string rather than a bare numeric id.
+type ChatCacheEntry = {
+  members: Map<string, string>
+  expiresAt: number
+}
+
+// Resolves author IDs to nicknames via LOCO GETMEM (one call per chat per
+// TTL window). Only invoked when the inline `author_name` from the chat-
+// list snapshot is missing — the agent-messenger client already covers
+// "display members" (~5 per chat) for free, and this resolver fills the
+// gap for larger groups and open chats.
 //
-// 1:1 chat: display_name is the other party's name → use it for any
-// author_id that isn't ours.
-// Group/open: we cannot deterministically split "Alice, Bob, Carol" back
-// into per-author entries, so the resolver falls back to the raw
-// author_id. The agent layer can override via configured aliases.
+// Lazy by design: a chat's member list is fetched on the first lookup
+// miss, not eagerly on connect. Most agent folders watch a small handful
+// of chats; prefetching every chat's member list at startup would burn
+// LOCO calls on rooms the agent never sees a message in.
 export function createKakaoAuthorResolver(options: KakaoAuthorResolverOptions): KakaoAuthorResolver {
   const now = options.now ?? Date.now
   const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS
-  const dmCounterpartByChat = new Map<string, { name: string; expiresAt: number }>()
-  let lastRefreshAt = 0
+  const logger = options.logger
+  const cache = new Map<string, ChatCacheEntry>()
+  const inflight = new Map<string, Promise<ChatCacheEntry | null>>()
 
-  const prime = (chats: readonly KakaoChat[]): void => {
-    const expiresAt = now() + ttlMs
-    for (const chat of chats) {
-      if (chat.type === 0 && chat.display_name !== null && chat.display_name !== '') {
-        dmCounterpartByChat.set(chat.chat_id, { name: chat.display_name, expiresAt })
-      }
+  const fetchMembers = (chatId: string): Promise<ChatCacheEntry | null> => {
+    const existing = inflight.get(chatId)
+    if (existing !== undefined) return existing
+    const promise = options.client
+      .getMembers(chatId)
+      .then((members): ChatCacheEntry => {
+        const map = new Map<string, string>()
+        for (const m of members) map.set(m.user_id, m.nickname)
+        const entry: ChatCacheEntry = { members: map, expiresAt: now() + ttlMs }
+        cache.set(chatId, entry)
+        return entry
+      })
+      .catch((err: unknown): null => {
+        // Author resolution is best-effort. Failing here makes the message
+        // render with the raw user_id, which is uglier but still routes.
+        logger?.warn(`[kakaotalk] getMembers(${chatId}) failed: ${describe(err)}`)
+        return null
+      })
+      .finally(() => {
+        inflight.delete(chatId)
+      })
+    inflight.set(chatId, promise)
+    return promise
+  }
+
+  const resolve = async (authorId: string, chatId: string): Promise<string | null> => {
+    const cached = cache.get(chatId)
+    if (cached !== undefined && cached.expiresAt > now()) {
+      return cached.members.get(authorId) ?? null
     }
-    lastRefreshAt = now()
+    const fresh = await fetchMembers(chatId)
+    if (fresh === null) return null
+    return fresh.members.get(authorId) ?? null
   }
 
-  const refresh = async (): Promise<void> => {
-    try {
-      const chats = await options.client.getChats({ all: true })
-      prime(chats)
-    } catch {
-      // Author resolution is best-effort; a network blip falls back to
-      // returning the raw id rather than blocking message routing.
-    }
-  }
+  return { resolve }
+}
 
-  const resolve = async (authorId: string, chatId: string): Promise<string> => {
-    const cached = dmCounterpartByChat.get(chatId)
-    if (cached !== undefined && cached.expiresAt > now()) return cached.name
-    if (now() - lastRefreshAt > ttlMs) await refresh()
-    const fresh = dmCounterpartByChat.get(chatId)
-    if (fresh !== undefined) return fresh.name
-    return authorId
-  }
-
-  return { resolve, prime }
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }

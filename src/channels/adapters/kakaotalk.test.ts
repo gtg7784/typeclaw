@@ -8,6 +8,7 @@ import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/sche
 
 import type {
   KakaoChat,
+  KakaoMember,
   KakaoMessage,
   KakaoProfile,
   KakaoSendResult,
@@ -61,6 +62,7 @@ class FakeClient implements KakaoTalkClient {
   loginCalls = 0
   sendMessageCalls: Array<{ chatId: string; text: string }> = []
   getMessagesCalls: Array<{ chatId: string; opts?: { count?: number; from?: string } }> = []
+  getMembersCalls: string[] = []
   closed = false
   profileResult: KakaoProfile = {
     user_id: '999',
@@ -68,6 +70,9 @@ class FakeClient implements KakaoTalkClient {
     status_message: null,
   }
   chats: KakaoChat[] = []
+  membersByChat: Map<string, KakaoMember[]> = new Map()
+  inlineNamesByChat: Map<string, Map<number, string>> = new Map()
+  getMembersError: Error | null = null
   sendResult: KakaoSendResult = { success: true, status_code: 0, chat_id: '111', log_id: 'L1', sent_at: 0 }
 
   async login(): Promise<this> {
@@ -91,6 +96,16 @@ class FakeClient implements KakaoTalkClient {
 
   async getProfile(): Promise<KakaoProfile> {
     return this.profileResult
+  }
+
+  async getMembers(chatId: string): Promise<KakaoMember[]> {
+    this.getMembersCalls.push(chatId)
+    if (this.getMembersError !== null) throw this.getMembersError
+    return this.membersByChat.get(chatId) ?? []
+  }
+
+  lookupAuthorName(chatId: string, authorId: number): string | null {
+    return this.inlineNamesByChat.get(chatId)?.get(authorId) ?? null
   }
 
   close(): void {
@@ -524,7 +539,15 @@ describe('createKakaotalkAdapter — drop hint', () => {
     })
     // Group chat (5 members → group bucket regardless of LOCO type code).
     client.chats = [
-      { chat_id: '222', type: 10, display_name: 'Team', active_members: 5, unread_count: 0, last_message: null },
+      {
+        chat_id: '222',
+        type: 10,
+        display_name: 'Team',
+        title: null,
+        active_members: 5,
+        unread_count: 0,
+        last_message: null,
+      },
     ]
     await adapter.start()
     listener.emit('connected', { userId: '999' })
@@ -534,6 +557,7 @@ describe('createKakaotalkAdapter — drop hint', () => {
       chat_id: '222',
       log_id: 'L99',
       author_id: 1,
+      author_name: null,
       message: 'hi',
       message_type: 1,
       sent_at: Date.now(),
@@ -545,6 +569,129 @@ describe('createKakaotalkAdapter — drop hint', () => {
     expect(drop).toBeDefined()
     expect(drop).toContain('kakao:group/*')
     expect(drop).toContain('kakao:222')
+
+    await adapter.stop()
+    await router.stop()
+  })
+})
+
+describe('createKakaotalkAdapter — author name resolution', () => {
+  const groupChat = (id: string, members: number): KakaoChat => ({
+    chat_id: id,
+    type: 10,
+    display_name: 'Team',
+    title: null,
+    active_members: members,
+    unread_count: 0,
+    last_message: null,
+  })
+
+  const buildMember = (user_id: string, nickname: string): KakaoMember => ({
+    user_id,
+    nickname,
+    profile_image_url: null,
+    full_profile_image_url: null,
+    original_profile_image_url: null,
+    status_message: null,
+    country_iso: null,
+    user_type: 100,
+    open_token: null,
+    open_profile_link_id: null,
+    open_permission: null,
+  })
+
+  test('uses event.author_name (free PR #187 path) without firing GETMEM', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+    client.chats = [groupChat('111', 4)]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', {
+      type: 'MSG',
+      chat_id: '111',
+      log_id: 'L42',
+      author_id: 222,
+      author_name: 'Alice',
+      message: 'hello',
+      message_type: 1,
+      sent_at: 1_730_000_000_000,
+    })
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(client.getMembersCalls).toHaveLength(0)
+
+    await adapter.stop()
+    await router.stop()
+  })
+
+  test('falls back to GETMEM when event.author_name is null', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+    client.chats = [groupChat('111', 50)]
+    client.membersByChat.set('111', [buildMember('222', 'Bob')])
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', {
+      type: 'MSG',
+      chat_id: '111',
+      log_id: 'L77',
+      author_id: 222,
+      author_name: null,
+      message: 'hi from a non-display member',
+      message_type: 1,
+      sent_at: 1_730_000_000_000,
+    })
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(client.getMembersCalls).toEqual(['111'])
+
+    await adapter.stop()
+    await router.stop()
+  })
+
+  test('does not fire GETMEM for self-author drops', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+    client.chats = [groupChat('111', 50)]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', {
+      type: 'MSG',
+      chat_id: '111',
+      log_id: 'L01',
+      author_id: 999,
+      author_name: null,
+      message: 'self message',
+      message_type: 1,
+      sent_at: 1_730_000_000_000,
+    })
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(client.getMembersCalls).toHaveLength(0)
 
     await adapter.stop()
     await router.stop()
@@ -563,7 +710,15 @@ describe('createKakaotalkAdapter — inbound classification', () => {
       listenerFactory: () => listener,
     })
     client.chats = [
-      { chat_id: '111', type: 0, display_name: 'Other', active_members: 2, unread_count: 0, last_message: null },
+      {
+        chat_id: '111',
+        type: 0,
+        display_name: 'Other',
+        title: null,
+        active_members: 2,
+        unread_count: 0,
+        last_message: null,
+      },
     ]
     await adapter.start()
     listener.emit('connected', { userId: '999' })
@@ -573,6 +728,7 @@ describe('createKakaotalkAdapter — inbound classification', () => {
       chat_id: '111',
       log_id: 'L42',
       author_id: 999,
+      author_name: null,
       message: 'hi',
       message_type: 1,
       sent_at: Date.now(),
