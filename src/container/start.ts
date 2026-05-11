@@ -20,6 +20,7 @@ import {
   type DockerExec,
   getBun,
   imageTagFromCwd,
+  sanitizeDockerStderr,
   waitForRemoval,
 } from './shared'
 import { buildCrashReason, createVerifyRunning, type VerifyRunningFn } from './verify-running'
@@ -174,7 +175,7 @@ export async function start({
         if (kind === null) {
           return {
             ok: false,
-            reason: `Container ${containerName} exists but is not running, and could not be removed: ${rm.stderr.trim() || 'no stderr'}`,
+            reason: `Container ${containerName} exists but is not running, and could not be removed: ${sanitizeDockerStderr(rm.stderr) || 'no stderr'}`,
           }
         }
         if (kind === 'in-progress' && !(await waitForRemoval(exec, containerName))) {
@@ -232,7 +233,7 @@ export async function start({
 
     if (run.exitCode !== 0) {
       await cleanupHostDaemonRegistration(containerName, hostd)
-      return { ok: false, reason: `docker run failed: ${run.stderr.trim() || 'no stderr'}` }
+      return { ok: false, reason: `docker run failed: ${sanitizeDockerStderr(run.stderr) || 'no stderr'}` }
     }
 
     const containerId = run.stdout.trim()
