@@ -56,7 +56,7 @@ describe('secrets.schema.json', () => {
     expect(checkedIn).toEqual(generated)
   })
 
-  test('auth.schema.json is byte-identical to secrets.schema.json (deprecation alias for one release)', async () => {
+  test('auth.schema.json is byte-identical to secrets.schema.json (permanent compatibility alias)', async () => {
     const secrets = await readFile(join(repoRoot, 'secrets.schema.json'), 'utf8')
     const auth = await readFile(join(repoRoot, 'auth.schema.json'), 'utf8')
 

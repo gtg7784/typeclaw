@@ -71,6 +71,29 @@ describe('migrateLegacyAuthJson', () => {
     await expect(readFile(legacy, 'utf8')).rejects.toThrow()
   })
 
+  test('overwrites secrets.json when it is the empty seed envelope and auth.json carries real credentials', async () => {
+    const legacy = join(dir, 'auth.json')
+    const target = join(dir, 'secrets.json')
+    const realPayload = JSON.stringify({
+      version: 1,
+      llm: { openai: { type: 'api_key', key: 'sk-promote' } },
+      channels: {},
+    })
+    const emptyEnvelope = JSON.stringify({
+      $schema: './node_modules/typeclaw/secrets.schema.json',
+      version: 1,
+      llm: {},
+      channels: {},
+    })
+    await writeFile(legacy, realPayload)
+    await writeFile(target, emptyEnvelope)
+
+    migrateLegacyAuthJson(dir)
+
+    expect(await readFile(target, 'utf8')).toBe(realPayload)
+    await expect(readFile(legacy, 'utf8')).rejects.toThrow()
+  })
+
   test('throws when both files exist and both carry real credentials', async () => {
     const legacy = join(dir, 'auth.json')
     const target = join(dir, 'secrets.json')

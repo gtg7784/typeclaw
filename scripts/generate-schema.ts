@@ -13,9 +13,13 @@ import { secretsFileSchema } from '../src/secrets/schema'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-// auth.schema.json is the deprecation alias for secrets.schema.json — kept
-// for one release so editors validating an old agent folder's auth.json (not
-// yet migrated by the in-app rename) still resolve the $schema URL.
+// auth.schema.json is the permanent compatibility alias for secrets.schema.json.
+// Pre-rename `auth.json` files (or migrated `secrets.json` files that still
+// carry the legacy `$schema` URL — `mergeLlmIntoEnvelope` preserves an
+// existing `$schema`, so the legacy pointer survives the file rename) need
+// it to resolve in editors. The alias is tiny and re-emitting it has no
+// maintenance cost, so we keep it indefinitely rather than coordinating a
+// content-rewrite migration for every old agent folder.
 const targets: Array<{ path: string; schema: z.ZodType }> = [
   { path: join(repoRoot, 'typeclaw.schema.json'), schema: buildConfigSchemaWithBundledPlugins(coreConfigSchema) },
   { path: join(repoRoot, 'cron.schema.json'), schema: cronFileSchema },

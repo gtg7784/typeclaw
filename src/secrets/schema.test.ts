@@ -19,7 +19,7 @@ describe('parseSecretsFile', () => {
 
   test('accepts the new envelope with $schema and missing optional sections', () => {
     const result = parseSecretsFile({
-      $schema: './node_modules/typeclaw/auth.schema.json',
+      $schema: './node_modules/typeclaw/secrets.schema.json',
       version: 1,
     })
 
