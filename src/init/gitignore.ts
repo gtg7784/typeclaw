@@ -12,8 +12,12 @@ export function buildGitignore(config: GitignoreConfig = { append: [] }): string
 # start\` (see src/init/dockerfile.ts), so tracking it would only produce
 # noisy "Update Dockerfile" commits whenever the template changes. Treat it
 # like node_modules/ — reproducible from source, not part of agent state.
+#
+# auth.json is the pre-rename name for secrets.json; kept here for one
+# release as a safety net against pulling pre-migration agent folders.
 .env
 .env.local
+secrets.json
 auth.json
 node_modules/
 packages/*/node_modules/

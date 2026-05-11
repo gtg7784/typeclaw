@@ -30,7 +30,7 @@ describe('SecretsBackend', () => {
     expect(parsed['version']).toBe(1)
     expect(parsed['llm']).toEqual({ openai: { type: 'api_key', key: 'sk-test' } })
     expect(parsed['channels']).toEqual({})
-    expect(parsed['$schema']).toBe('./node_modules/typeclaw/auth.schema.json')
+    expect(parsed['$schema']).toBe('./node_modules/typeclaw/secrets.schema.json')
   })
 
   test('legacy flat file is read transparently and upgraded on next write', async () => {

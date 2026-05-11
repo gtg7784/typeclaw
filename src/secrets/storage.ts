@@ -11,7 +11,7 @@ import lockfile from 'proper-lockfile'
 import { migrateLegacyAuthJson } from './migrate'
 import { type SecretsFile, parseSecretsFile } from './schema'
 
-const SCHEMA_REL = './node_modules/typeclaw/auth.schema.json'
+const SCHEMA_REL = './node_modules/typeclaw/secrets.schema.json'
 const FILE_MODE = 0o600
 const DIR_MODE = 0o700
 

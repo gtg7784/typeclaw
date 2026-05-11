@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { configSchema as coreConfigSchema } from '@/config/config'
 import { cronFileSchema } from '@/cron/schema'
 import { buildConfigSchemaWithBundledPlugins } from '@/run/schema-with-plugins'
+import { secretsFileSchema } from '@/secrets/schema'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -44,5 +45,21 @@ describe('cron.schema.json', () => {
     const generated = z.toJSONSchema(cronFileSchema, { io: 'input', reused: 'inline' })
 
     expect(checkedIn).toEqual(generated)
+  })
+})
+
+describe('secrets.schema.json', () => {
+  test('checked-in secrets.schema.json matches the current secretsFileSchema (drift guard)', async () => {
+    const checkedIn = JSON.parse(await readFile(join(repoRoot, 'secrets.schema.json'), 'utf8'))
+    const generated = z.toJSONSchema(secretsFileSchema, { io: 'input', reused: 'inline' })
+
+    expect(checkedIn).toEqual(generated)
+  })
+
+  test('auth.schema.json is byte-identical to secrets.schema.json (deprecation alias for one release)', async () => {
+    const secrets = await readFile(join(repoRoot, 'secrets.schema.json'), 'utf8')
+    const auth = await readFile(join(repoRoot, 'auth.schema.json'), 'utf8')
+
+    expect(auth).toBe(secrets)
   })
 })
