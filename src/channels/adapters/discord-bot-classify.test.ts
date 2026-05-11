@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 
+import type { DiscordGatewayMessageCreateEvent } from 'agent-messenger/discordbot'
+
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 
-import type { DiscordGatewayMessageCreateEvent } from './agent-messenger-shim'
 import { classifyInbound } from './discord-bot-classify'
 
 const BOT_USER_ID = '999'
@@ -54,6 +55,7 @@ describe('classifyInbound — drop paths', () => {
         {
           id: 'a1',
           filename: 'diagram.png',
+          size: 1234,
           url: 'https://cdn.discordapp.com/attachments/c1/a1/diagram.png',
           content_type: 'image/png',
         },
@@ -102,6 +104,7 @@ describe('classifyInbound — drop paths', () => {
         {
           id: 'a1',
           filename: 'diagram.png',
+          size: 1234,
           url: 'https://cdn.discordapp.com/attachments/c1/a1/diagram.png',
           content_type: 'image/png',
         },
@@ -121,8 +124,20 @@ describe('classifyInbound — drop paths', () => {
     const event = buildEvent({
       content: 'two files',
       attachments: [
-        { id: 'a1', filename: 'one.png', url: 'https://cdn.discordapp.com/.../one.png', content_type: 'image/png' },
-        { id: 'a2', filename: 'two.txt', url: 'https://cdn.discordapp.com/.../two.txt', content_type: 'text/plain' },
+        {
+          id: 'a1',
+          filename: 'one.png',
+          size: 1,
+          url: 'https://cdn.discordapp.com/.../one.png',
+          content_type: 'image/png',
+        },
+        {
+          id: 'a2',
+          filename: 'two.txt',
+          size: 2,
+          url: 'https://cdn.discordapp.com/.../two.txt',
+          content_type: 'text/plain',
+        },
       ],
     })
 

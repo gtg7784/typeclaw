@@ -1,3 +1,5 @@
+import { SlackBotClient, SlackBotListener } from 'agent-messenger/slackbot'
+
 import {
   MEMBERSHIP_ENUMERATION_CAP,
   type MembershipResolver,
@@ -22,15 +24,14 @@ import type {
 } from '@/channels/types'
 import { chunkMarkdown } from '@/markdown'
 
-import {
-  SlackBotClient,
-  SlackBotListener,
-  type SlackSocketAppMentionEvent,
-  type SlackSocketMessageEvent,
-} from './agent-messenger-slack-shim'
 import { createSlackAuthorResolver } from './slack-bot-author-resolver'
 import { createSlackChannelResolver } from './slack-bot-channel-resolver'
-import { classifyInbound, type InboundDropReason } from './slack-bot-classify'
+import {
+  classifyInbound,
+  type InboundDropReason,
+  type SlackInboundAppMentionEvent,
+  type SlackInboundMessageEvent,
+} from './slack-bot-classify'
 import { createSlackDedupe } from './slack-bot-dedupe'
 import { slackTsToMillis } from './slack-bot-time'
 
@@ -48,7 +49,7 @@ function formatLabel(name: string | undefined, id: string, prefix = ''): string 
 // promoted event is classified as a regular channel message; the
 // `<@BOT_USER_ID>` substring inside `text` is what makes the classifier
 // mark it as a mention.
-export function promoteAppMentionToMessage(event: SlackSocketAppMentionEvent): SlackSocketMessageEvent {
+export function promoteAppMentionToMessage(event: SlackInboundAppMentionEvent): SlackInboundMessageEvent {
   return {
     type: 'message',
     channel: event.channel,
@@ -700,7 +701,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
   const dedupe = createSlackDedupe()
 
   const handleMessageEvent = async (
-    event: SlackSocketMessageEvent,
+    event: SlackInboundMessageEvent,
     source: 'message' | 'app_mention',
   ): Promise<void> => {
     inflightInbounds++
@@ -799,7 +800,12 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
         // Ack first so Slack stops retrying; failure to ack causes duplicate
         // deliveries within seconds. Then process asynchronously.
         ack()
-        void handleMessageEvent(event, 'message')
+        // Cast at the SDK boundary: upstream types this event with a
+        // `[key: string]: unknown` catchall for fields it does not
+        // declare (parent_user_id, client_msg_id, files). The Slack
+        // wire format does carry them as typed strings/arrays — see
+        // SlackInboundMessageEvent's header comment in slack-bot-classify.
+        void handleMessageEvent(event as SlackInboundMessageEvent, 'message')
       })
       // app_mention is required for mentions in channels where the bot is
       // NOT a member: in that case Slack does not fire a `message` event
@@ -808,7 +814,7 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       // collapses the in-channel double-delivery when both events fire.
       listener.on('app_mention', ({ ack, event }) => {
         ack()
-        void handleMessageEvent(promoteAppMentionToMessage(event), 'app_mention')
+        void handleMessageEvent(promoteAppMentionToMessage(event as SlackInboundAppMentionEvent), 'app_mention')
       })
 
       options.router.registerOutbound('slack-bot', outboundCallback)

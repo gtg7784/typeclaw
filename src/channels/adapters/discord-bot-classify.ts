@@ -1,12 +1,12 @@
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
-import type { InboundMessage } from '@/channels/types'
-
 import type {
-  DiscordGatewayAttachment,
+  DiscordFile,
   DiscordGatewayEmbed,
   DiscordGatewayMessageCreateEvent,
   DiscordGatewayStickerItem,
-} from './agent-messenger-shim'
+} from 'agent-messenger/discordbot'
+
+import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import type { InboundMessage } from '@/channels/types'
 
 export type InboundDropReason =
   | 'self_author' // event.author.id === botUserId; we never route our own messages back to ourselves
@@ -126,7 +126,7 @@ function summarizeDiscordMedia(event: DiscordGatewayMessageCreateEvent): string[
   ]
 }
 
-function summarizeAttachment(attachment: DiscordGatewayAttachment): string {
+function summarizeAttachment(attachment: DiscordFile): string {
   return compactJoin(' ', [
     `attachment: ${attachment.filename}`,
     attachment.content_type === undefined ? undefined : `(${attachment.content_type})`,

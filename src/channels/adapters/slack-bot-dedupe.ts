@@ -1,4 +1,4 @@
-import type { SlackSocketMessageEvent } from './agent-messenger-slack-shim'
+import type { SlackInboundMessageEvent } from './slack-bot-classify'
 
 export const SLACK_DEDUPE_CAPACITY = 256
 
@@ -10,8 +10,8 @@ export type SlackDedupeKeys = {
 }
 
 export type SlackDedupe = {
-  check: (event: Pick<SlackSocketMessageEvent, 'channel' | 'ts' | 'client_msg_id'>) => SlackDedupeMatch | null
-  mark: (event: Pick<SlackSocketMessageEvent, 'channel' | 'ts' | 'client_msg_id'>) => void
+  check: (event: Pick<SlackInboundMessageEvent, 'channel' | 'ts' | 'client_msg_id'>) => SlackDedupeMatch | null
+  mark: (event: Pick<SlackInboundMessageEvent, 'channel' | 'ts' | 'client_msg_id'>) => void
 }
 
 // Two parallel insertion-ordered Sets. `client_msg_id` is the primary key
