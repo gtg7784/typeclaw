@@ -24,4 +24,4 @@ export {
   type StartPlan,
   type StartResult,
 } from './start'
-export { planStop, stop, type StopPlan, type StopResult } from './stop'
+export { planStop, stop, type StopOptions, type StopPlan, type StopResult } from './stop'

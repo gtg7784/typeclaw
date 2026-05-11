@@ -9,7 +9,6 @@ import {
   DOCKER_NOT_FOUND_STDERR,
   type DockerExec,
   imageTagFromCwd,
-  waitForRemoval,
 } from './shared'
 
 let root: string
@@ -51,43 +50,6 @@ describe('imageTagFromCwd', () => {
     await mkdir(folder)
 
     expect(imageTagFromCwd(folder)).toBe('typeclaw-coder')
-  })
-})
-
-describe('waitForRemoval', () => {
-  test('returns true immediately when the container is already gone', async () => {
-    const result = await waitForRemoval('absent', {
-      timeoutMs: 1000,
-      intervalMs: 10,
-      probe: async () => false,
-    })
-
-    expect(result).toBe(true)
-  })
-
-  test('polls until the container disappears, then returns true', async () => {
-    let calls = 0
-    const result = await waitForRemoval('vanishing', {
-      timeoutMs: 1000,
-      intervalMs: 5,
-      probe: async () => {
-        calls += 1
-        return calls < 3
-      },
-    })
-
-    expect(result).toBe(true)
-    expect(calls).toBeGreaterThanOrEqual(3)
-  })
-
-  test('returns false when the container is still present at the deadline', async () => {
-    const result = await waitForRemoval('stuck', {
-      timeoutMs: 50,
-      intervalMs: 5,
-      probe: async () => true,
-    })
-
-    expect(result).toBe(false)
   })
 })
 
