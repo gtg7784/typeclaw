@@ -1,6 +1,6 @@
-import { existsSync } from 'node:fs'
+import { existsSync, realpathSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join, parse as parsePath } from 'node:path'
 
 import { runBunInstall } from './run-bun-install'
 
@@ -17,13 +17,6 @@ export type EnsureDepsOptions = {
   detect?: (cwd: string) => Promise<readonly string[]>
 }
 
-// Walks <cwd>/package.json plus one level of transitive deps via
-// <cwd>/node_modules/<dep>/package.json. The canonical failure we guard
-// against: typeclaw is installed, but its own deps (e.g. agent-messenger,
-// zod) aren't hoisted to the agent folder after a CLI upgrade added them.
-// Direct deps alone wouldn't catch that — typeclaw IS present, but its
-// dependencies field has grown. Deeper drift (dep-of-dep-of-dep missing) is
-// rare and surfaces during `bun install` anyway.
 export async function ensureDepsInstalled(options: EnsureDepsOptions): Promise<EnsureDepsResult> {
   const { cwd } = options
   const install = options.install ?? runBunInstall
@@ -51,22 +44,51 @@ export async function ensureDepsInstalled(options: EnsureDepsOptions): Promise<E
   return { ok: true, installed: true }
 }
 
+// Walks the agent's package.json plus one level of transitive deps. The
+// canonical failure we guard against: typeclaw is installed, but its own
+// deps (e.g. agent-messenger, zod) aren't reachable from the agent folder
+// after a CLI upgrade added them. Direct deps alone wouldn't catch that —
+// typeclaw IS present, but its dependencies field has grown. Deeper drift
+// (dep-of-dep-of-dep missing) is rare and surfaces during `bun install`.
+//
+// Root deps are checked against <cwd>/node_modules/<dep> ONLY (no walk-up):
+// the agent folder is what gets bind-mounted into the container, so a dep
+// satisfied by some ancestor host folder's node_modules would be invisible
+// inside the container. Walking the host filesystem upward here would
+// silently pass the gate and let `docker run` crash later with "Cannot find
+// package", which is the exact failure mode this whole module was added to
+// prevent.
+//
+// Transitive deps are different: they MUST be resolved via Node's algorithm
+// from the parent package's realpath, not lexical-joined against <cwd>.
+// Bun's isolated linker (used for new workspace projects with
+// `configVersion = 1`, which is TypeClaw's scaffold) symlinks
+// node_modules/<dep> into node_modules/.bun/<dep>@<ver>/node_modules/<dep>/
+// and stores that package's own deps as siblings inside the same nested
+// node_modules. A lexical probe at <cwd>/node_modules/<transitive> finds
+// nothing even though the dep is correctly installed and reachable from
+// the parent — that was the original false-positive that aborted
+// `typeclaw start`.
 export async function detectMissingDeps(cwd: string): Promise<readonly string[]> {
   const rootDeps = await readDeclaredDeps(join(cwd, PACKAGE_FILE))
   if (rootDeps.length === 0) return []
 
   const missing = new Set<string>()
+  const installedRootDirs = new Map<string, string>()
   for (const dep of rootDeps) {
-    if (!isInstalled(cwd, dep)) {
+    const dir = resolveDirectDep(cwd, dep)
+    if (dir === null) {
       missing.add(dep)
+    } else {
+      installedRootDirs.set(dep, dir)
     }
   }
 
-  for (const dep of rootDeps) {
+  for (const [dep, parentDir] of installedRootDirs) {
     if (missing.has(dep)) continue
-    const transitive = await readDeclaredDeps(join(cwd, NODE_MODULES, dep, PACKAGE_FILE))
+    const transitive = await readDeclaredDeps(join(parentDir, PACKAGE_FILE))
     for (const t of transitive) {
-      if (!isInstalled(cwd, t)) {
+      if (!resolveTransitiveDep(parentDir, t)) {
         missing.add(t)
       }
     }
@@ -95,9 +117,36 @@ async function readDeclaredDeps(packageJsonPath: string): Promise<readonly strin
   return Object.keys(deps as Record<string, unknown>)
 }
 
-function isInstalled(cwd: string, depName: string): boolean {
-  // Probe via the dep's package.json — NOT the directory — so symlinked
-  // workspace and file:-linked deps (which resolve through a symlink to a
-  // real package.json) count as installed.
-  return existsSync(join(cwd, NODE_MODULES, depName, PACKAGE_FILE))
+function resolveDirectDep(cwd: string, depName: string): string | null {
+  const candidate = join(cwd, NODE_MODULES, depName)
+  if (!existsSync(join(candidate, PACKAGE_FILE))) return null
+  try {
+    return realpathSync(candidate)
+  } catch {
+    return null
+  }
+}
+
+function resolveTransitiveDep(fromDir: string, depName: string): string | null {
+  let dir: string
+  try {
+    dir = realpathSync(fromDir)
+  } catch {
+    return null
+  }
+  const fsRoot = parsePath(dir).root
+  while (true) {
+    const candidate = join(dir, NODE_MODULES, depName)
+    if (existsSync(join(candidate, PACKAGE_FILE))) {
+      try {
+        return realpathSync(candidate)
+      } catch {
+        return null
+      }
+    }
+    if (dir === fsRoot) return null
+    const parent = dirname(dir)
+    if (parent === dir) return null
+    dir = parent
+  }
 }
