@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -81,6 +81,61 @@ describe('detectMissingDeps', () => {
     await writePackageJson(root, { name: 'agent', dependencies: { c: '^1', a: '^1', b: '^1' } })
 
     expect(await detectMissingDeps(root)).toEqual(['a', 'b', 'c'])
+  })
+
+  test("finds a transitive dep that lives next to the parent's realpath, not at cwd/node_modules", async () => {
+    // given: Bun's isolated linker layout. node_modules/typeclaw is a symlink
+    // into .bun/typeclaw@.../node_modules/typeclaw/, and typeclaw's own
+    // transitive deps (zod, etc.) live as siblings in that same .bun nested
+    // node_modules — NOT hoisted to cwd/node_modules/. The old lexical probe
+    // (cwd/node_modules/zod/package.json) reports zod missing here; the
+    // realpath-walking probe finds it.
+    await writePackageJson(root, { name: 'agent', dependencies: { typeclaw: 'file:...' } })
+    const storeDir = join(root, 'node_modules', '.bun', 'typeclaw@x', 'node_modules')
+    await writePackageJson(join(storeDir, 'typeclaw'), {
+      name: 'typeclaw',
+      version: '1.0.0',
+      dependencies: { zod: '^4' },
+    })
+    await writePackageJson(join(storeDir, 'zod'), { name: 'zod', version: '4.0.0' })
+    await symlink(join(storeDir, 'typeclaw'), join(root, 'node_modules', 'typeclaw'))
+
+    expect(await detectMissingDeps(root)).toEqual([])
+  })
+
+  test("still flags a transitive dep that's missing from BOTH cwd and the parent's realpath", async () => {
+    // given: same isolated-linker layout but zod is not installed anywhere.
+    // The walker must reach the filesystem root without finding it and report
+    // it missing.
+    await writePackageJson(root, { name: 'agent', dependencies: { typeclaw: 'file:...' } })
+    const storeDir = join(root, 'node_modules', '.bun', 'typeclaw@x', 'node_modules')
+    await writePackageJson(join(storeDir, 'typeclaw'), {
+      name: 'typeclaw',
+      version: '1.0.0',
+      dependencies: { zod: '^4' },
+    })
+    await symlink(join(storeDir, 'typeclaw'), join(root, 'node_modules', 'typeclaw'))
+
+    expect(await detectMissingDeps(root)).toEqual(['zod'])
+  })
+
+  test('reports a root dep as missing even when an ancestor folder has it installed', async () => {
+    // given: the agent folder is nested inside another node project. The
+    // ancestor has typeclaw installed at ancestor/node_modules/typeclaw, but
+    // the agent folder itself does NOT. Since only the agent folder gets
+    // bind-mounted into the container, finding typeclaw in an ancestor must
+    // NOT satisfy the gate — otherwise `docker run` would later crash with
+    // "Cannot find package 'typeclaw'", which is exactly what this whole
+    // module exists to prevent.
+    const ancestor = root
+    const agentDir = join(ancestor, 'nested', 'agent')
+    await writePackageJson(agentDir, { name: 'agent', dependencies: { typeclaw: '^0.1.0' } })
+    await writePackageJson(join(ancestor, 'node_modules', 'typeclaw'), {
+      name: 'typeclaw',
+      version: '1.0.0',
+    })
+
+    expect(await detectMissingDeps(agentDir)).toEqual(['typeclaw'])
   })
 })
 
