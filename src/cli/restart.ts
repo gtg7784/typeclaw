@@ -4,6 +4,8 @@ import { config, validateConfig } from '@/config'
 import { start, stop } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 
+import { c, errorLine, renderStartSuccess, spinner } from './ui'
+
 export const restartCommand = defineCommand({
   meta: {
     name: 'restart',
@@ -26,25 +28,27 @@ export const restartCommand = defineCommand({
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
 
     if (!isInitialized(cwd)) {
-      console.error('TypeClaw config file not found. Run `typeclaw init` first.')
+      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first.'))
       process.exit(1)
     }
 
     const validated = validateConfig(cwd)
     if (!validated.ok) {
-      console.error(validated.reason)
+      console.error(errorLine(validated.reason))
       process.exit(1)
     }
 
+    const stopSpin = spinner()
+    stopSpin.start('Stopping container...')
     const stopped = await stop({ cwd })
     if (!stopped.ok) {
-      console.error(stopped.reason)
+      stopSpin.error(stopped.reason)
       process.exit(1)
     }
-    if (stopped.running) {
-      console.log(`Stopped ${stopped.containerName}.`)
-    }
+    stopSpin.stop(stopped.running ? `Stopped ${c.cyan(stopped.containerName)}.` : 'Already stopped.')
 
+    const startSpin = spinner()
+    startSpin.start('Starting container...')
     const started = await start({
       cwd,
       preferredHostPort: Number(args.port),
@@ -52,23 +56,11 @@ export const restartCommand = defineCommand({
       cliEntry: process.argv[1],
     })
     if (!started.ok) {
-      console.error(started.reason)
+      startSpin.error(started.reason)
       process.exit(1)
     }
+    startSpin.stop('Started.')
 
-    if (started.built) {
-      console.log(`Built image ${started.plan.imageTag}.`)
-    }
-    console.log(
-      `Container ${started.plan.containerName} started on host port ${started.hostPort} (${started.containerId.slice(0, 12)}).`,
-    )
-    if (started.hostd.state === 'registered') {
-      console.log(`Host daemon active.`)
-    } else if (started.hostd.state === 'unavailable') {
-      console.warn(`Host daemon unavailable: ${started.hostd.reason}`)
-    }
-    console.log(`Follow logs:  typeclaw logs -f`)
-    console.log(`Attach TUI:   typeclaw tui`)
-    console.log(`Stop:         typeclaw stop`)
+    console.log(renderStartSuccess(started))
   },
 })
