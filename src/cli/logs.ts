@@ -3,6 +3,8 @@ import { defineCommand } from 'citty'
 import { logs } from '@/container'
 import { findAgentDir } from '@/init'
 
+import { c, errorLine } from './ui'
+
 export const logsCommand = defineCommand({
   meta: {
     name: 'logs',
@@ -19,9 +21,15 @@ export const logsCommand = defineCommand({
   async run({ args }) {
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
 
+    if (args.follow) {
+      console.log(c.cyan('Streaming container logs...'))
+    } else {
+      console.log(c.dim('Showing container logs.'))
+    }
+
     const result = await logs({ cwd, follow: args.follow })
     if (!result.ok) {
-      console.error(result.reason)
+      console.error(errorLine(result.reason))
       process.exit(1)
     }
 
