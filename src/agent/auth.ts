@@ -51,17 +51,36 @@ export function getAuth(): Auth {
 
   const authStorage = createAuthStorageForAgent(authJsonPath())
 
+  // Persist the .env API key into auth.json so the file is the single
+  // source of truth for credentials. Upstream pi-ai's `getEnvApiKey()` only
+  // knows about a hardcoded set of providers (anthropic, openai, etc.) and
+  // does NOT know about Fireworks, so `hasAuth("fireworks")` returns false
+  // unless a credential is materialized into AuthStorage's data map. Before
+  // this migration the code used `setRuntimeApiKey`, which papered over the
+  // gap in-memory but never wrote auth.json — leaving `llm` empty for every
+  // downstream consumer (rotation, audit, transport over the daemon
+  // boundary) that treats the file as authoritative.
+  //
+  // Policy: never overwrite an existing OAuth credential. The user
+  // explicitly logged in at init, and an unrelated `.env` value must not
+  // silently displace it. Only write when no credential exists, or when an
+  // existing api-key value drifted from the env var (the user rotated the
+  // key in .env and expects the next boot to pick it up).
   if (supportsApiKey(provider) && provider.apiKeyEnv) {
     const envKey = process.env[provider.apiKeyEnv]
     if (envKey) {
-      authStorage.setRuntimeApiKey(provider.id, envKey)
+      const existing = authStorage.get(provider.id)
+      const needsWrite = existing === undefined || (existing.type === 'api_key' && existing.key !== envKey)
+      if (needsWrite) {
+        authStorage.set(provider.id, { type: 'api_key', key: envKey })
+      }
     }
   }
 
-  // OAuth providers persist their credentials to auth.json at init time. The
-  // file is loaded by AuthStorage.create() above, so we just need to verify
-  // something is there before returning — a missing file means the user
-  // skipped login at init or deleted the file.
+  // OAuth providers persist via `oauth-login.ts` at init time; api-key
+  // providers persist via the migration block above. By this point
+  // auth.json is authoritative — a missing entry means the user skipped
+  // login at init, deleted the file, or never set the provider's env var.
   if (!authStorage.hasAuth(provider.id)) {
     console.error(missingCredentialMessage(providerId))
     process.exit(1)
