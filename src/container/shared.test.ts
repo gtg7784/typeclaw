@@ -10,6 +10,7 @@ import {
   DOCKER_NOT_FOUND_STDERR,
   type DockerExec,
   imageTagFromCwd,
+  sanitizeDockerStderr,
   waitForRemoval,
 } from './shared'
 
@@ -191,5 +192,46 @@ describe('waitForRemoval', () => {
     await waitForRemoval(exec, 'anderson', { timeoutMs: 100, intervalMs: 10 })
 
     expect(seen[0]).toEqual(['inspect', '--format', '{{.State.Running}}', 'anderson'])
+  })
+})
+
+describe('sanitizeDockerStderr', () => {
+  test('strips the trailing "Run docker ... --help" line and surrounding blank lines', () => {
+    const stderr =
+      'docker: Error response from daemon: Conflict. The container name "/anderson" is already in use by container "3d54c2b59b822a611703889f0b2e2c5805889653335a99eaaecb4d090dc5e2bf". You have to remove (or rename) that container to be able to reuse that name.\n\nRun \'docker run --help\' for more information\n'
+
+    expect(sanitizeDockerStderr(stderr)).toBe(
+      'Conflict. The container name "/anderson" is already in use by container "3d54c2b59b822a611703889f0b2e2c5805889653335a99eaaecb4d090dc5e2bf". You have to remove (or rename) that container to be able to reuse that name.',
+    )
+  })
+
+  test('handles --help variants for other subcommands (build, stop, rm)', () => {
+    const stderr = "some build error\n\nRun 'docker build --help' for more information\n"
+    expect(sanitizeDockerStderr(stderr)).toBe('some build error')
+  })
+
+  test('collapses internal newlines to "; " so the result fits on one line', () => {
+    const stderr = 'first detail line\nsecond detail line\nthird detail line'
+    expect(sanitizeDockerStderr(stderr)).toBe('first detail line; second detail line; third detail line')
+  })
+
+  test('preserves the daemon error body when it stands alone (no docker: prefix)', () => {
+    const stderr = 'Error response from daemon: removal of container abc is already in progress\n'
+    expect(sanitizeDockerStderr(stderr)).toBe('removal of container abc is already in progress')
+  })
+
+  test('preserves substrings that downstream tests assert on (permission denied, etc.)', () => {
+    expect(sanitizeDockerStderr('permission denied')).toBe('permission denied')
+    expect(sanitizeDockerStderr('docker: permission denied\n')).toBe('permission denied')
+  })
+
+  test('returns empty string for empty / whitespace-only input (callers fall back to their own sentinel)', () => {
+    expect(sanitizeDockerStderr('')).toBe('')
+    expect(sanitizeDockerStderr('   \n\n  ')).toBe('')
+    expect(sanitizeDockerStderr("\n\nRun 'docker run --help' for more information\n")).toBe('')
+  })
+
+  test('leaves an already-clean single-line message untouched', () => {
+    expect(sanitizeDockerStderr('some plain error')).toBe('some plain error')
   })
 })

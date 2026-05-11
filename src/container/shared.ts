@@ -58,6 +58,27 @@ export const defaultDockerExec: DockerExec = async (args, options) => {
 // "binary missing" from "daemon down".
 export const DOCKER_NOT_FOUND_STDERR = 'docker: command not found in $PATH'
 
+// Collapse a multi-line `docker` CLI stderr into a single readable clause
+// suitable for inline `reason:` strings. The motivating case is `compose
+// restart`, which prints one row per agent — raw stderr from a failed
+// `docker run` is 3-5 lines (leading `docker: ` prefix, daemon error body,
+// blank line, "Run 'docker run --help' for more information" tail) and
+// turns each failing row into an ASCII wall. Strip the boilerplate, drop
+// the help-pointer tail (it's noise in a programmatic context — users who
+// hit it can run `docker run --help` themselves), and join any remaining
+// detail lines with "; " so the result fits on the same row as the
+// `✖ [name] failed:` prefix that wraps it.
+export function sanitizeDockerStderr(stderr: string): string {
+  const withoutHelpTail = stderr.replace(/\n*\s*Run '[^']+--help' for more information\s*\n?/g, '')
+  const lines = withoutHelpTail
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .map((line) => line.replace(/^docker:\s*/, '').replace(/^Error response from daemon:\s*/, ''))
+    .filter((line) => line.length > 0)
+  return lines.join('; ')
+}
+
 export type DockerAvailability = { ok: true } | { ok: false; reason: 'binary-missing' | 'daemon-down'; detail: string }
 
 // `docker info --format {{.ServerVersion}}` is the probe of choice because it
