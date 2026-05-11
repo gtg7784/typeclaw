@@ -665,7 +665,21 @@ describe('commitSystemFile', () => {
 
 type RecordedCall = { args: string[]; dockerfileSnapshot: string | null }
 
-type ContainerScenario = { exists: false } | { exists: true; running: boolean; rmFails?: boolean; rmStderr?: string }
+type ContainerScenario =
+  | { exists: false }
+  | {
+      exists: true
+      running: boolean
+      rmFails?: boolean
+      rmStderr?: string
+      // Models Docker's async removal-drain after a `docker rm` that
+      // returned with "removal in progress" stderr: the container keeps
+      // showing up in `inspect` until N post-rm inspect probes have run,
+      // then transitions to "no such container". Default 0 — inspect
+      // reports "gone" the very next call. See stop.test.ts for the
+      // full rationale.
+      drainAfterInspectCalls?: number
+    }
 
 function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerScenario }): {
   exec: DockerExec
@@ -673,6 +687,8 @@ function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerSc
 } {
   const calls: RecordedCall[] = []
   let containerState = scenario.container
+  let rmReturned = false
+  let inspectsAfterRm = 0
   const exec: DockerExec = async (args, options) => {
     let dockerfileSnapshot: string | null = null
     if (options?.cwd) {
@@ -688,6 +704,13 @@ function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerSc
       return { exitCode: scenario.imageExists ? 0 : 1, stdout: '', stderr: '' }
     }
     if (args[0] === 'inspect') {
+      if (rmReturned && containerState.exists) {
+        inspectsAfterRm += 1
+        const drainAfter = containerState.drainAfterInspectCalls ?? 0
+        if (inspectsAfterRm > drainAfter) {
+          containerState = { exists: false }
+        }
+      }
       if (!containerState.exists) return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
       // The idempotent path probes `inspect --format {{.Id}}` after seeing
       // the container is up; mirror that here so the fake stays sufficient.
@@ -702,11 +725,20 @@ function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerSc
       return { exitCode: 0, stdout: '0.0.0.0:8973\n', stderr: '' }
     }
     if (args[0] === 'rm') {
+      rmReturned = true
       if (!containerState.exists) {
         return { exitCode: 1, stdout: '', stderr: 'Error: No such container: x' }
       }
       if (containerState.rmFails) {
-        return { exitCode: 1, stdout: '', stderr: containerState.rmStderr ?? 'rm failed' }
+        const stderr = containerState.rmStderr ?? 'rm failed'
+        // "No such container" rm-failures mean the container is in fact gone
+        // — Docker just learned of it a step before we did. Reflect that in
+        // the fake's state so a subsequent `docker run` sees a free name.
+        // "Removal in progress" leaves the container present (drain pending).
+        if (stderr.toLowerCase().includes('no such container')) {
+          containerState = { exists: false }
+        }
+        return { exitCode: 1, stdout: '', stderr }
       }
       containerState = { exists: false }
       return { exitCode: 0, stdout: '', stderr: '' }
@@ -715,6 +747,13 @@ function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerSc
       return { exitCode: 0, stdout: '', stderr: '' }
     }
     if (args[0] === 'run') {
+      if (containerState.exists) {
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr: `docker: Error response from daemon: Conflict. The container name "/x" is already in use by container "abc".`,
+        }
+      }
       containerState = { exists: true, running: true }
       return { exitCode: 0, stdout: 'fake-container-id-abcdef\n', stderr: '' }
     }
@@ -1387,9 +1426,17 @@ describe('start (composition)', () => {
     expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
   })
 
-  test('tolerates "removal already in progress" from docker rm (concurrent cleanup raced ahead)', async () => {
-    // given: a stopped corpse, and rm fails because docker is already removing
-    // the container — symmetric with stop.ts's tolerance for the same error.
+  test('waits for Docker to finish the in-progress removal before docker run, avoiding a name conflict', async () => {
+    // given: a stopped corpse held by an in-progress async removal. The
+    // preflight rm reports "removal of container x is already in progress",
+    // and inspect keeps reporting the container as still present for two
+    // more probes before the drain completes.
+    //
+    // This test ALSO depends on the fake's docker-run path returning the
+    // real name-conflict error string when the container is still present
+    // — so if start() forgot to wait, docker run would fail with exactly
+    // the user-visible bug ("Conflict. The container name is already in
+    // use") and the test would catch it.
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({
@@ -1399,6 +1446,7 @@ describe('start (composition)', () => {
         running: false,
         rmFails: true,
         rmStderr: 'Error response from daemon: removal of container x is already in progress',
+        drainAfterInspectCalls: 2,
       },
     })
 
@@ -1412,9 +1460,15 @@ describe('start (composition)', () => {
       ...bypassVerify,
     })
 
-    // then: preflight treats it as success and proceeds to docker run
+    // then: start succeeded, docker run ran AGAINST A GONE CONTAINER, and
+    // we made at least one inspect call after rm to verify removal
     expect(result.ok).toBe(true)
-    expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
+    const rmIdx = calls.findIndex((c) => c.args[0] === 'rm')
+    const runIdx = calls.findIndex((c) => c.args[0] === 'run')
+    expect(rmIdx).toBeGreaterThanOrEqual(0)
+    expect(runIdx).toBeGreaterThan(rmIdx)
+    const inspectsBetween = calls.slice(rmIdx + 1, runIdx).filter((c) => c.args[0] === 'inspect')
+    expect(inspectsBetween.length).toBeGreaterThanOrEqual(1)
   })
 
   test('reports a clear error when docker rm fails for a non-recoverable reason', async () => {

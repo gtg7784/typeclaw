@@ -1,6 +1,6 @@
 import { isDaemonReachable, send as sendToDaemon } from '@/hostd/client'
 
-import { containerNameFromCwd, defaultDockerExec, type DockerExec, isBenignRmStderr } from './shared'
+import { classifyRmStderr, containerNameFromCwd, defaultDockerExec, type DockerExec, waitForRemoval } from './shared'
 
 export type StopPlan = {
   containerName: string
@@ -33,10 +33,19 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
         return { ok: true, containerName, running: false }
       }
       const recover = await exec(['rm', '-f', containerName], { cwd })
-      if (recover.exitCode !== 0 && !isBenignRmStderr(recover.stderr)) {
-        return {
-          ok: false,
-          reason: `docker inspect failed (${inspect.stderr.trim() || 'no stderr'}) and docker rm -f could not recover: ${recover.stderr.trim() || 'no stderr'}`,
+      if (recover.exitCode !== 0) {
+        const kind = classifyRmStderr(recover.stderr)
+        if (kind === null) {
+          return {
+            ok: false,
+            reason: `docker inspect failed (${inspect.stderr.trim() || 'no stderr'}) and docker rm -f could not recover: ${recover.stderr.trim() || 'no stderr'}`,
+          }
+        }
+        if (kind === 'in-progress' && !(await waitForRemoval(exec, containerName))) {
+          return {
+            ok: false,
+            reason: `Container ${containerName} is still being removed by docker after 10s.`,
+          }
         }
       }
       return { ok: true, containerName, running: false }
@@ -60,11 +69,22 @@ export async function stop({ cwd, exec = defaultDockerExec }: StopOptions): Prom
     // does not collide on the name. Use `-f` for symmetry with the start.ts
     // preflight and because `docker stop` occasionally returns exit 0 before
     // the container is fully out of `Running` state on OrbStack under load —
-    // bare `docker rm` would then refuse a still-running container. Treat
-    // benign rm failures as success — see isBenignRmStderr for the contract.
+    // bare `docker rm` would then refuse a still-running container. See
+    // classifyRmStderr for the benign-failure contract; when 'in-progress',
+    // wait for the drain so stop()'s ok-return actually means "name is free"
+    // (which compose's restart and any subsequent start() depend on).
     const rmResult = await exec(['rm', '-f', containerName], { cwd })
-    if (rmResult.exitCode !== 0 && !isBenignRmStderr(rmResult.stderr)) {
-      return { ok: false, reason: `docker rm failed: ${rmResult.stderr.trim() || 'no stderr'}` }
+    if (rmResult.exitCode !== 0) {
+      const kind = classifyRmStderr(rmResult.stderr)
+      if (kind === null) {
+        return { ok: false, reason: `docker rm failed: ${rmResult.stderr.trim() || 'no stderr'}` }
+      }
+      if (kind === 'in-progress' && !(await waitForRemoval(exec, containerName))) {
+        return {
+          ok: false,
+          reason: `Container ${containerName} is still being removed by docker after 10s.`,
+        }
+      }
     }
 
     return { ok: true, containerName, running }

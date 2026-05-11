@@ -81,18 +81,53 @@ export function containerNameFromCwd(cwd: string): string {
   return sanitizeContainerName(basename(resolve(cwd)))
 }
 
-// `docker rm` failures we treat as success because they leave the name free
-// for the next `docker run --name <same>`, which is the post-state every
-// caller is trying to achieve:
-//   - "No such container" — removed out-of-band between our inspect and rm
-//     (peer `typeclaw stop`, manual `docker rm`, or async post-stop cleanup).
-//   - "removal of container … is already in progress" — Docker accepted a
-//     prior remove and is still draining it. start.ts's preflight re-runs
-//     `rm -f` with the same tolerance and Docker serializes, so the name is
-//     free by the time `docker run` fires.
-export function isBenignRmStderr(stderr: string): boolean {
+// `docker rm` failures we treat as recoverable. The kind matters for the
+// caller's next step:
+//   - 'gone'        — "No such container". The container is already removed
+//                     (peer `typeclaw stop`, manual `docker rm`, or async
+//                     post-stop cleanup that finished first). The name is
+//                     free to reuse immediately.
+//   - 'in-progress' — "removal of container … is already in progress". Docker
+//                     accepted a prior remove and is still draining it. The
+//                     container is STILL PRESENT in `docker inspect` until
+//                     the drain completes, so a `docker run --name <same>`
+//                     fired right now would collide. Callers that follow
+//                     `rm` with `run` MUST wait for the container to
+//                     actually disappear — see waitForRemoval.
+//   - null          — non-benign failure; surface as an error.
+export type BenignRmKind = 'gone' | 'in-progress' | null
+
+export function classifyRmStderr(stderr: string): BenignRmKind {
   const lower = stderr.toLowerCase()
-  return lower.includes('no such container') || lower.includes('removal of container')
+  if (lower.includes('no such container')) return 'gone'
+  if (lower.includes('removal of container')) return 'in-progress'
+  return null
+}
+
+// Polls `docker inspect` until the named container is gone or the deadline
+// elapses. Required after a `docker rm` that returned "removal of container
+// … is already in progress": Docker has committed to removal but has not
+// finished, so the name is briefly still taken. Without this wait, the
+// caller's subsequent `docker run --name <same>` races the daemon's
+// removal-drain and intermittently fails with a name conflict (the
+// user-visible symptom under `typeclaw compose restart` and any restart of
+// a container that hostd's GC tick raced ahead on). Returns true if the
+// container disappeared before the deadline, false on timeout.
+export async function waitForRemoval(
+  exec: DockerExec,
+  name: string,
+  options: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? 10_000
+  const intervalMs = options.intervalMs ?? 100
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const result = await exec(['inspect', '--format', '{{.State.Running}}', name])
+    if (result.exitCode !== 0) return true
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+  }
+  const final = await exec(['inspect', '--format', '{{.State.Running}}', name])
+  return final.exitCode !== 0
 }
 
 export function imageTagFromCwd(cwd: string): string {

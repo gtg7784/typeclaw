@@ -14,12 +14,13 @@ import { refreshPackageJson } from '@/init/packagejson'
 
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import {
+  classifyRmStderr,
   containerNameFromCwd,
   defaultDockerExec,
   type DockerExec,
   getBun,
   imageTagFromCwd,
-  isBenignRmStderr,
+  waitForRemoval,
 } from './shared'
 import { buildCrashReason, createVerifyRunning, type VerifyRunningFn } from './verify-running'
 
@@ -162,13 +163,25 @@ export async function start({
       // now the normal post-stop / post-crash state: the corpse stays around
       // for `docker logs` so users can debug a crashed agent. Force-remove
       // before `docker run --name <same>` so the new launch doesn't collide
-      // on the name. Treat benign rm failures as success — see
-      // isBenignRmStderr for the contract.
+      // on the name. See classifyRmStderr for the benign-failure contract:
+      // 'gone' means the name is already free; 'in-progress' means Docker is
+      // still draining a prior removal and we must wait it out before docker
+      // run, or we'd hit `Conflict. The container name "/<name>" is already
+      // in use` even though our rm "succeeded".
       const rm = await exec(['rm', '-f', containerName])
-      if (rm.exitCode !== 0 && !isBenignRmStderr(rm.stderr)) {
-        return {
-          ok: false,
-          reason: `Container ${containerName} exists but is not running, and could not be removed: ${rm.stderr.trim() || 'no stderr'}`,
+      if (rm.exitCode !== 0) {
+        const kind = classifyRmStderr(rm.stderr)
+        if (kind === null) {
+          return {
+            ok: false,
+            reason: `Container ${containerName} exists but is not running, and could not be removed: ${rm.stderr.trim() || 'no stderr'}`,
+          }
+        }
+        if (kind === 'in-progress' && !(await waitForRemoval(exec, containerName))) {
+          return {
+            ok: false,
+            reason: `Container ${containerName} is still being removed by docker after 10s; refusing to docker run --name to avoid a name conflict.`,
+          }
         }
       }
     }
