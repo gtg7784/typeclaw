@@ -13,7 +13,14 @@ import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
 
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
-import { containerNameFromCwd, defaultDockerExec, type DockerExec, getBun, imageTagFromCwd } from './shared'
+import {
+  containerNameFromCwd,
+  defaultDockerExec,
+  type DockerExec,
+  getBun,
+  imageTagFromCwd,
+  isBenignRmStderr,
+} from './shared'
 import { buildCrashReason, createVerifyRunning, type VerifyRunningFn } from './verify-running'
 
 const PACKAGE_FILE = 'package.json'
@@ -155,10 +162,10 @@ export async function start({
       // now the normal post-stop / post-crash state: the corpse stays around
       // for `docker logs` so users can debug a crashed agent. Force-remove
       // before `docker run --name <same>` so the new launch doesn't collide
-      // on the name. Tolerate "no such container" because the user (or an
-      // out-of-band cleanup) may have removed it between our inspect and rm.
+      // on the name. Treat benign rm failures as success — see
+      // isBenignRmStderr for the contract.
       const rm = await exec(['rm', '-f', containerName])
-      if (rm.exitCode !== 0 && !rm.stderr.toLowerCase().includes('no such container')) {
+      if (rm.exitCode !== 0 && !isBenignRmStderr(rm.stderr)) {
         return {
           ok: false,
           reason: `Container ${containerName} exists but is not running, and could not be removed: ${rm.stderr.trim() || 'no stderr'}`,

@@ -1387,6 +1387,36 @@ describe('start (composition)', () => {
     expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
   })
 
+  test('tolerates "removal already in progress" from docker rm (concurrent cleanup raced ahead)', async () => {
+    // given: a stopped corpse, and rm fails because docker is already removing
+    // the container — symmetric with stop.ts's tolerance for the same error.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      container: {
+        exists: true,
+        running: false,
+        rmFails: true,
+        rmStderr: 'Error response from daemon: removal of container x is already in progress',
+      },
+    })
+
+    // when
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    // then: preflight treats it as success and proceeds to docker run
+    expect(result.ok).toBe(true)
+    expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
+  })
+
   test('reports a clear error when docker rm fails for a non-recoverable reason', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
