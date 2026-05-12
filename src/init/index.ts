@@ -13,9 +13,9 @@ import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { HATCHING_PROMPT } from './hatching'
 import type { OAuthLoginRunner, OAuthLoginResult } from './oauth-login'
 import { GITKEEP_FILE, PACKAGES_DIR } from './paths'
-import { runBunInstall, type InstallResult } from './run-bun-install'
+import { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
 
-export { runBunInstall, type InstallResult } from './run-bun-install'
+export { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
 
 export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 
@@ -101,6 +101,7 @@ export type InitOptions = {
   runKakaotalkAuth?: KakaotalkAuthRunner
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
+  runBunInstall?: InstallRunner
   dockerExec?: DockerExec
 }
 
@@ -121,6 +122,7 @@ export async function runInit({
   runKakaotalkAuth,
   onProgress,
   runHatching = defaultRunHatching,
+  runBunInstall: installRunner = runBunInstall,
   dockerExec,
 }: InitOptions): Promise<void> {
   const emit = onProgress ?? (() => {})
@@ -202,7 +204,7 @@ export async function runInit({
   }
 
   emit({ step: 'install', phase: 'start' })
-  const install = await runBunInstall(cwd)
+  const install = await installRunner(cwd)
   emit({ step: 'install', phase: 'done', result: install })
 
   emit({ step: 'dockerfile', phase: 'start' })
