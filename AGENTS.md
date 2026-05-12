@@ -1,5 +1,9 @@
 # Agent Guidelines
 
+## Default scope
+
+If the user asks something, it's always about the typeclaw project itself until the user specifies another scope. Don't drift into upstream/downstream projects (agent-messenger, plugins consumed via npm, etc.) just because the conversation mentions them — answer in terms of typeclaw, and only switch scope when the user explicitly redirects you.
+
 ## Pre-commit checks
 
 Before every commit, run all three of these and ensure they pass:
