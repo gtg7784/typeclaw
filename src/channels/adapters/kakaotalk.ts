@@ -8,6 +8,7 @@ import {
   type KakaoProfile,
   type KakaoSendResult,
   type KakaoTalkListenerEventMap,
+  type KakaoTalkPushEmoticonEvent,
   type KakaoTalkPushMessageEvent,
 } from 'agent-messenger/kakaotalk'
 
@@ -24,6 +25,7 @@ import type {
   SendResult,
 } from '@/channels/types'
 
+import { emoticonEventToMessageEvent, formatHistoryText, formatInboundText } from './kakaotalk-attachment'
 import { createKakaoAuthorResolver, type KakaoAuthorResolver } from './kakaotalk-author-resolver'
 import { createKakaoChannelResolver, type KakaoChannelResolver } from './kakaotalk-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
@@ -237,7 +239,7 @@ export function createKakaoHistoryCallback(deps: {
             externalMessageId: m.log_id,
             authorId,
             authorName,
-            text: m.message,
+            text: formatHistoryText(m),
             ts: m.sent_at,
             isBot: selfId !== null && authorId === selfId,
             replyToBotMessageId: null,
@@ -313,6 +315,26 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
   })
 
   const handleMessageEvent = async (event: KakaoTalkPushMessageEvent): Promise<void> => {
+    // Synthesize the displayed text BEFORE classify so attachments
+    // (photo, file, video, ...) survive classifyInbound's empty_text
+    // drop and reach the agent with a `[KakaoTalk message with ...]`
+    // placeholder. For text-only messages this is a no-op —
+    // formatInboundText returns event.message unchanged. See
+    // kakaotalk-attachment.ts for the per-message-type rules.
+    await processInbound({ ...event, message: formatInboundText(event) })
+  }
+
+  const handleEmoticonEvent = async (event: KakaoTalkPushEmoticonEvent): Promise<void> => {
+    // Stickers arrive on a separate listener event in agent-messenger
+    // 2.15.0 and have no `message` field. We wrap them into the same
+    // MSG-shaped payload classifyInbound expects so the engagement /
+    // allow-list / self-author rules apply identically across plain
+    // messages and stickers — there is no second classifier to keep in
+    // sync.
+    await processInbound(emoticonEventToMessageEvent(event))
+  }
+
+  const processInbound = async (event: KakaoTalkPushMessageEvent): Promise<void> => {
     inflightInbounds++
     try {
       if (channelResolver.lookupChat(event.chat_id) === null) {
@@ -324,7 +346,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         event.chat_id,
       )
       logger.info(
-        `[kakaotalk] inbound log_id=${event.log_id} author=${event.author_id} ${inboundTag} text_len=${event.message.length}`,
+        `[kakaotalk] inbound log_id=${event.log_id} author=${event.author_id} ${inboundTag} type=${event.message_type} text_len=${event.message.length}`,
       )
 
       // Ack the message BEFORE classify/route so the sender's unread "1"
@@ -500,6 +522,9 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       listener.on('message', (event) => {
         void handleMessageEvent(event)
       })
+      listener.on('emoticon', (event) => {
+        void handleEmoticonEvent(event)
+      })
       listener.on('member_joined', () => {
         void channelResolver.refresh()
       })
@@ -510,6 +535,18 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       try {
         await listener.start()
       } catch (err) {
+        // Tear down defensively. Handlers (including the new 'emoticon'
+        // one) were already wired before start(), and a partial start can
+        // leave LOCO sockets half-open in the SDK. Without an explicit
+        // stop here, a later adapter.stop() short-circuits on
+        // !started and the listener leaks; with it, the SDK closes its
+        // resources and our handler closures become unreachable.
+        try {
+          listener.stop()
+        } catch {
+          // ignore — best-effort cleanup, the start failure is what we surface
+        }
+        listener = null
         started = false
         logger.error(`[kakaotalk] listener start failed: ${describe(err)}`)
         throw err

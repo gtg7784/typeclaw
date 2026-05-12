@@ -13,7 +13,7 @@ import type {
   KakaoTalkPushMessageEvent,
 } from 'agent-messenger/kakaotalk'
 
-import { createChannelRouter } from '@/channels/router'
+import { createChannelRouter, type ChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig, type KakaotalkAdapterConfig } from '@/channels/schema'
 
 import {
@@ -208,7 +208,7 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     await router.stop()
   })
 
-  test('stop() is a no-op when start() never succeeded', async () => {
+  test('start() failure tears down the half-wired listener defensively so handlers do not leak', async () => {
     const client = new FakeClient()
     const listener = new FakeListener()
     listener.startThrows = new Error('boom')
@@ -221,8 +221,10 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
     })
 
     await expect(adapter.start()).rejects.toThrow()
+    expect(listener.stopCalls).toBe(1)
+
     await adapter.stop()
-    expect(listener.stopCalls).toBe(0)
+    expect(listener.stopCalls).toBe(1)
 
     await router.stop()
   })
@@ -576,6 +578,7 @@ describe('createKakaotalkAdapter — drop hint', () => {
       author_name: null,
       message: 'hi',
       message_type: 1,
+      attachment: null,
       sent_at: Date.now(),
     })
 
@@ -638,6 +641,7 @@ describe('createKakaotalkAdapter — author name resolution', () => {
       author_name: 'Alice',
       message: 'hello',
       message_type: 1,
+      attachment: null,
       sent_at: 1_730_000_000_000,
     })
     await new Promise((r) => setTimeout(r, 10))
@@ -671,6 +675,7 @@ describe('createKakaotalkAdapter — author name resolution', () => {
       author_name: null,
       message: 'hi from a non-display member',
       message_type: 1,
+      attachment: null,
       sent_at: 1_730_000_000_000,
     })
     await new Promise((r) => setTimeout(r, 10))
@@ -703,6 +708,7 @@ describe('createKakaotalkAdapter — author name resolution', () => {
       author_name: null,
       message: 'self message',
       message_type: 1,
+      attachment: null,
       sent_at: 1_730_000_000_000,
     })
     await new Promise((r) => setTimeout(r, 10))
@@ -711,6 +717,236 @@ describe('createKakaotalkAdapter — author name resolution', () => {
 
     await adapter.stop()
     await router.stop()
+  })
+})
+
+describe('createKakaotalkAdapter — inbound attachments and emoticons', () => {
+  // The integration tests below intercept router.route to capture the
+  // synthesized InboundMessage payload the adapter actually routes. The
+  // mutation check matters here: if a future refactor inlines
+  // event.message back into the handler and drops formatInboundText, the
+  // markRead path keeps working but the agent stops seeing attachments —
+  // these assertions are what would catch that regression.
+  type RoutedInbound = Parameters<ChannelRouter['route']>[0]
+
+  const setupCaptured = async (
+    overrides: Partial<{ chatType: number; activeMembers: number }> = {},
+  ): Promise<{
+    client: FakeClient
+    listener: FakeListener
+    router: ChannelRouter
+    adapter: ReturnType<typeof createKakaotalkAdapter>
+    routed: RoutedInbound[]
+    stop: () => Promise<void>
+  }> => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const routed: RoutedInbound[] = []
+    const originalRoute = router.route
+    router.route = async (event) => {
+      routed.push(event)
+    }
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+    client.chats = [
+      {
+        chat_id: '111',
+        type: overrides.chatType ?? 0,
+        display_name: 'Other',
+        title: null,
+        active_members: overrides.activeMembers ?? 2,
+        unread_count: 0,
+        last_message: null,
+      },
+    ]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+    return {
+      client,
+      listener,
+      router,
+      adapter,
+      routed,
+      stop: async () => {
+        await adapter.stop()
+        router.route = originalRoute
+        await router.stop()
+      },
+    }
+  }
+
+  test('routes a photo-with-caption with the attachment summary appended to the caption text', async () => {
+    const ctx = await setupCaptured()
+
+    ctx.listener.emit('message', {
+      type: 'MSG',
+      chat_id: '111',
+      log_id: 'L42',
+      author_id: 111,
+      author_name: 'Alice',
+      message: 'check this out',
+      message_type: 2,
+      attachment: { w: 100, h: 100, mt: 'image/jpeg', url: 'https://example.com/x.jpg' },
+      sent_at: 1_730_000_000_000,
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(ctx.routed).toHaveLength(1)
+    expect(ctx.routed[0]?.text).toBe(
+      'check this out\n[KakaoTalk message with photo 100x100 (image/jpeg) https://example.com/x.jpg]',
+    )
+    expect(ctx.client.markReadCalls[0]?.logId).toBe('L42')
+
+    await ctx.stop()
+  })
+
+  test('routes an attachment-only photo (empty caption) instead of dropping it via empty_text', async () => {
+    const ctx = await setupCaptured()
+
+    ctx.listener.emit('message', {
+      type: 'MSG',
+      chat_id: '111',
+      log_id: 'L43',
+      author_id: 111,
+      author_name: 'Alice',
+      message: '',
+      message_type: 2,
+      attachment: { w: 100, h: 100, mt: 'image/jpeg', url: 'https://example.com/x.jpg' },
+      sent_at: 1_730_000_000_000,
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(ctx.routed).toHaveLength(1)
+    expect(ctx.routed[0]?.text).toBe('[KakaoTalk message with photo 100x100 (image/jpeg) https://example.com/x.jpg]')
+
+    await ctx.stop()
+  })
+
+  test('routes an attachment-only file (no caption) so files survive the empty_text drop', async () => {
+    const ctx = await setupCaptured()
+
+    ctx.listener.emit('message', {
+      type: 'MSG',
+      chat_id: '111',
+      log_id: 'L44',
+      author_id: 111,
+      author_name: 'Alice',
+      message: '',
+      message_type: 18,
+      attachment: { name: 'spec.pdf', mt: 'application/pdf', size: 12345 },
+      sent_at: 1_730_000_000_000,
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(ctx.routed).toHaveLength(1)
+    expect(ctx.routed[0]?.text).toBe('[KakaoTalk message with file spec.pdf (application/pdf) size=12345]')
+
+    await ctx.stop()
+  })
+
+  test('routes an emoticon event with the synthesized sticker text so allow-rules + engagement match plain MSG', async () => {
+    const ctx = await setupCaptured()
+
+    ctx.listener.emit('emoticon', {
+      type: 'EMOTICON',
+      chat_id: '111',
+      log_id: 'L77',
+      author_id: 111,
+      author_name: 'Alice',
+      message_type: 12,
+      emoticon_kind: 'sticker',
+      pack_id: '4412724',
+      sticker_path: '4412724.emot_001.webp',
+      sent_at: 1_730_000_000_000,
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(ctx.routed).toHaveLength(1)
+    expect(ctx.routed[0]?.text).toBe(
+      '[KakaoTalk message with sticker (sticker) pack=4412724 path=4412724.emot_001.webp]',
+    )
+    expect(ctx.routed[0]?.externalMessageId).toBe('L77')
+    expect(ctx.routed[0]?.authorId).toBe('111')
+    expect(ctx.client.markReadCalls[0]?.logId).toBe('L77')
+
+    await ctx.stop()
+  })
+
+  test('drops self-authored stickers so two bots cannot ping-pong via emoticons', async () => {
+    const ctx = await setupCaptured()
+
+    ctx.listener.emit('emoticon', {
+      type: 'EMOTICON',
+      chat_id: '111',
+      log_id: 'L78',
+      author_id: 999,
+      author_name: null,
+      message_type: 12,
+      emoticon_kind: 'sticker',
+      pack_id: '1',
+      sticker_path: '1.emot_001.webp',
+      sent_at: 1_730_000_000_000,
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(ctx.routed).toHaveLength(0)
+    expect(ctx.client.sendMessageCalls).toHaveLength(0)
+
+    await ctx.stop()
+  })
+
+  test('drops self-authored photos for the same self-loop reason as text and stickers', async () => {
+    const ctx = await setupCaptured()
+
+    ctx.listener.emit('message', {
+      type: 'MSG',
+      chat_id: '111',
+      log_id: 'L79',
+      author_id: 999,
+      author_name: null,
+      message: '',
+      message_type: 2,
+      attachment: { w: 50, h: 50, mt: 'image/png', url: 'https://example.com/self.png' },
+      sent_at: 1_730_000_000_000,
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(ctx.routed).toHaveLength(0)
+
+    await ctx.stop()
+  })
+
+  test('drops empty-text MSG events with no attachment (LOCO noise) without inventing a placeholder', async () => {
+    const ctx = await setupCaptured()
+
+    ctx.listener.emit('message', {
+      type: 'MSG',
+      chat_id: '111',
+      log_id: 'L80',
+      author_id: 111,
+      author_name: 'Alice',
+      message: '',
+      message_type: 99,
+      attachment: null,
+      sent_at: 1_730_000_000_000,
+    })
+
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(ctx.routed).toHaveLength(0)
+
+    await ctx.stop()
   })
 })
 
@@ -747,6 +983,7 @@ describe('createKakaotalkAdapter — inbound classification', () => {
       author_name: null,
       message: 'hi',
       message_type: 1,
+      attachment: null,
       sent_at: Date.now(),
     }
     listener.emit('message', event)
@@ -800,6 +1037,7 @@ describe('createKakaotalkAdapter — mark read on every inbound', () => {
     author_name: 'Alice',
     message: 'hello',
     message_type: 1,
+    attachment: null,
     sent_at: 1_730_000_000_000,
   })
 

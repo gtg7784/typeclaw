@@ -34,6 +34,7 @@ const event = (overrides: Partial<KakaoTalkPushMessageEvent> = {}): KakaoTalkPus
   author_name: null,
   message: 'hello',
   message_type: 1,
+  attachment: null,
   sent_at: 1_730_000_000_000,
   ...overrides,
 })

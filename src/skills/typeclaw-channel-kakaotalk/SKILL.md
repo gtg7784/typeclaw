@@ -1,6 +1,6 @@
 ---
 name: typeclaw-channel-kakaotalk
-description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `kakaotalk`. KakaoTalk renders messages as plain text — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and other markdown all appear literally. There is no `@mention` syntax, no message threads, no replies-with-quote, and no file attachments. Read it before composing anything for KakaoTalk so you don't dump markdown into a chat window.
+description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `kakaotalk`. KakaoTalk renders messages as plain text — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and other markdown all appear literally. There is no `@mention` syntax, no message threads, no replies-with-quote, and no outbound file attachments or stickers (inbound attachments and stickers ARE surfaced — see below). Read it before composing anything for KakaoTalk so you don't dump markdown into a chat window.
 ---
 
 # typeclaw-channel-kakaotalk
@@ -21,15 +21,30 @@ If you produce any of the following, KakaoTalk will render it literally and the 
 - **Links with display text** — `[label](url)` becomes the literal string. Send the bare URL on its own; the KakaoTalk client will auto-link it.
 - **Mentions** — there is no `@user` syntax that the protocol surfaces. Address people by name in the message body.
 - **Threads / replies-with-quote** — every message is a top-level chat post. There is no per-message reply UI.
-- **Attachments** — the adapter is text-only. If the user asks you to send a file, say so and offer an alternative (paste a link, summarize the file, ship it via another channel).
+- **Outbound attachments / stickers** — agent-messenger's KakaoTalk SDK exposes no upload API. The adapter is outbound text-only. If the user asks you to send a file or sticker, say so and offer an alternative (paste a link, summarize the file, ship it via another channel).
 
-The adapter logs a warning the first time you try to send attachments and then drops them. The user-visible result is "your message arrived without the file."
+The adapter rejects outbound attachments via `ok: false` rather than partially sending the text — the agent contract is "ok=true means the whole request succeeded", so a silent drop would let you confidently report "I sent your file" when the file never arrived.
 
 ## What KakaoTalk DOES support
 
 - Plain UTF-8 text. Emoji are fine.
 - URLs auto-linkify in the client. Send them bare — `https://example.com/foo`, no markdown wrapping.
 - Newlines render as line breaks. You can use `\n\n` to space paragraphs.
+
+## Inbound attachments and stickers
+
+Even though you cannot SEND attachments or stickers, you DO receive them. The adapter surfaces incoming non-text content by appending a `[KakaoTalk message with ...]` placeholder to the inbound text (same convention as Slack/Discord/Telegram). Examples of what you'll see:
+
+- A photo (with no caption): `[KakaoTalk message with photo 1320x2868 (image/jpeg) https://talk.kakaocdn.net/...]`
+- A photo with a caption: `look at this\n[KakaoTalk message with photo 1320x2868 (image/jpeg) https://...]`
+- A file: `[KakaoTalk message with file spec.pdf (application/pdf) size=12345 https://...]`
+- A video / audio: `[KakaoTalk message with video keys=[...]]` (the SDK leaves the payload opaque for these types, so we list the keys that were present rather than fabricating fields)
+- A sticker / emoticon: `[KakaoTalk message with sticker (sticker) pack=4412724 path=4412724.emot_001.webp]`
+- An animated sticker: `[KakaoTalk message with sticker (sticker_ani) pack=... path=...]`
+
+Treat the placeholder as describing what the user sent. **You cannot fetch the photo bytes or play the audio** — `channel_fetch_attachment` is not wired for KakaoTalk, and the placeholder's fields (dimensions, MIME type, URL, sticker pack id) describe the envelope, NOT the content. Do not describe what a photo "depicts", what a sticker "looks like", or what an audio file "says" — you cannot see, read, or hear any of it. Acknowledge that something was sent ("Got the photo", "Cute sticker") and ask the user to describe it if you need more detail to respond meaningfully.
+
+If the inbound text is JUST a sticker (no accompanying text), the agent still gets a routed event — stickers count as engagement under `reply` and `dm` triggers (group chats with only sticker activity will not trigger `mention` because aliases require text matching).
 
 ## Message length & cadence
 
