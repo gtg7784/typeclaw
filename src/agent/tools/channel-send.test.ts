@@ -26,7 +26,7 @@ function fakeRouter(
     fetchHistory: async () => ({ ok: false, error: 'history-not-supported' }),
     registerFetchAttachment: () => {},
     unregisterFetchAttachment: () => {},
-    fetchAttachment: async () => ({ ok: false, error: 'fetch-attachment-not-supported' }),
+    fetchAttachment: async () => ({ ok: false, error: 'no fetchAttachment callback registered for "slack-bot"' }),
     getSelfAliases: () => [],
     stop: async () => {},
     liveCount: () => 0,

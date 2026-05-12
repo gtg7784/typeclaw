@@ -1155,10 +1155,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   ): Promise<FetchAttachmentResult> => {
     const callbacks = fetchAttachmentCallbacks.get(adapter)
     if (!callbacks || callbacks.size === 0) {
-      return { ok: false, error: 'fetch-attachment-not-supported' }
+      return { ok: false, error: `no fetchAttachment callback registered for "${adapter}"` }
     }
     const snapshot = Array.from(callbacks)
-    let lastError: FetchAttachmentResult & { ok: false } = { ok: false, error: 'fetch-attachment-not-supported' }
+    // Initialized only so TypeScript can prove the variable is assigned
+    // before return. The loop body always overwrites it on the failure
+    // path (we just returned on the success path), so this string is
+    // unreachable at runtime — kept as a clearly-tagged sentinel rather
+    // than a non-null assertion so a future loop refactor that breaks
+    // this invariant surfaces a recognizable error string.
+    let lastError: FetchAttachmentResult & { ok: false } = {
+      ok: false,
+      error: `fetchAttachment for "${adapter}" returned no result (router bug)`,
+    }
     for (const cb of snapshot) {
       const result = await cb(args)
       if (result.ok) return result
