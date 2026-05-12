@@ -115,6 +115,65 @@ describe('createKakaoChannelResolver', () => {
   })
 })
 
+describe('createKakaoChannelResolver — ingestProvisional', () => {
+  test('registers an unknown chat under the strictest bucket (@kakao-group)', () => {
+    const resolver = createKakaoChannelResolver({ client: fakeClient([]) })
+    expect(resolver.lookupChat('468625891988320')).toBeNull()
+
+    resolver.ingestProvisional('468625891988320')
+
+    expect(resolver.lookupChat('468625891988320')).toEqual({ workspace: '@kakao-group', isDm: false })
+  })
+
+  test('is a no-op when a real cache entry already exists', async () => {
+    const resolver = createKakaoChannelResolver({
+      client: fakeClient([dmChat('111', 'Alice')]),
+    })
+    await resolver.refresh()
+    expect(resolver.lookupChat('111')).toEqual({ workspace: '@kakao-dm', isDm: true })
+
+    // ingestProvisional must NOT overwrite the authoritative DM classification
+    // with the provisional @kakao-group fallback — otherwise a flap in
+    // getChats availability could downgrade a known DM to group bucket and
+    // silently change allow-rule semantics.
+    resolver.ingestProvisional('111')
+
+    expect(resolver.lookupChat('111')).toEqual({ workspace: '@kakao-dm', isDm: true })
+  })
+
+  test('subsequent refresh upgrades a provisional entry to its real kind', async () => {
+    let chats: KakaoChat[] = []
+    const resolver = createKakaoChannelResolver({
+      client: { getChats: async () => chats },
+    })
+
+    // Simulates the production failure mode: getChats({all:true}) initially
+    // does not return chat 468625891988320, but a push event from it arrives.
+    resolver.ingestProvisional('468625891988320')
+    expect(resolver.lookupChat('468625891988320')).toEqual({ workspace: '@kakao-group', isDm: false })
+
+    // Later, getChats catches up and starts returning it as a DM.
+    chats = [dmChat('468625891988320', 'Alice')]
+    await resolver.refresh()
+
+    expect(resolver.lookupChat('468625891988320')).toEqual({ workspace: '@kakao-dm', isDm: true })
+  })
+
+  test('respects TTL so provisional entries do not live forever', async () => {
+    let now = 1000
+    const resolver = createKakaoChannelResolver({
+      client: fakeClient([]),
+      now: () => now,
+      ttlMs: 100,
+    })
+    resolver.ingestProvisional('111')
+    expect(resolver.lookupChat('111')).toEqual({ workspace: '@kakao-group', isDm: false })
+
+    now += 200
+    expect(resolver.lookupChat('111')).toBeNull()
+  })
+})
+
 describe('kakaoWorkspaceForType', () => {
   test('maps each KakaoChatKind to its workspace label', () => {
     expect(kakaoWorkspaceForType('dm')).toBe('@kakao-dm')

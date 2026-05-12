@@ -342,6 +342,19 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
     try {
       if (channelResolver.lookupChat(event.chat_id) === null) {
         await channelResolver.refresh()
+        if (channelResolver.lookupChat(event.chat_id) === null) {
+          // The push event itself proves the chat exists, even when
+          // getChats({all:true}) does not surface it (e.g. memo chats,
+          // certain open chats, recently-joined groups that haven't
+          // propagated). Register a provisional @kakao-group entry so the
+          // strictest allow rules still apply, but the message is no longer
+          // silently dropped as unknown_chat. The next real refresh
+          // upgrades the entry if the chat is actually a DM or open chat.
+          channelResolver.ingestProvisional(event.chat_id)
+          logger.warn(
+            `[kakaotalk] provisional chat=${event.chat_id} log_id=${event.log_id} bucket=@kakao-group reason=not_in_getchats`,
+          )
+        }
       }
 
       const inboundTag = await formatChannelTag(
@@ -643,7 +656,7 @@ function dropHint(
     case 'not_in_allow_list':
       return ` (add ${suggestedAllowPattern(bucket, chatId)} to channels.kakaotalk.allow to admit this chat)`
     case 'unknown_chat':
-      return ' (chat not in cache; resolver refresh may be lagging)'
+      return ' (chat not in cache after refresh and provisional registration; check earlier resolver-refresh-failed warnings)'
     case 'empty_text':
     case 'pre_connect':
     case 'self_author':

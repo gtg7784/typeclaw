@@ -21,6 +21,14 @@ export type KakaoChannelResolver = {
   resolve: ChannelNameResolver
   lookupChat: (chatId: string) => KakaoChatLookupValue | null
   refresh: () => Promise<void>
+  // Register a chat we learned about from an inbound push event, used as a
+  // fallback when `refresh()` did not surface it (e.g. memo chats, certain
+  // open chats, or chats whose membership has not yet propagated to
+  // getChats({all:true})). Provisional entries default to @kakao-group —
+  // the strictest bucket, matching the history callback's existing fallback
+  // — so allow-rule enforcement stays strict. A subsequent real refresh
+  // upgrades the entry to its authoritative kind.
+  ingestProvisional: (chatId: string) => void
 }
 
 export type KakaoChannelResolverOptions = {
@@ -97,7 +105,18 @@ export function createKakaoChannelResolver(options: KakaoChannelResolverOptions)
     return { workspace: entry.workspace, isDm: entry.isDm }
   }
 
-  return { resolve, lookupChat, refresh }
+  const ingestProvisional = (chatId: string): void => {
+    const existing = cache.get(chatId)
+    if (existing !== undefined && existing.expiresAt > now()) return
+    cache.set(chatId, {
+      workspace: '@kakao-group',
+      isDm: false,
+      chatName: null,
+      expiresAt: now() + ttlMs,
+    })
+  }
+
+  return { resolve, lookupChat, refresh, ingestProvisional }
 }
 
 function describe(err: unknown): string {
