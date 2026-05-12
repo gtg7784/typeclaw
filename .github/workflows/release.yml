@@ -72,6 +72,17 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Ensure npm CLI supports OIDC trusted publishing
+        # npm trusted publishing requires npm ≥ 11.5.1. Node 24's bundled npm
+        # has been past that threshold since 24.5.0 (Aug 2025), but Node 24.0.x
+        # ships npm 11.3.0 — too old. Pinning to npm@latest sidesteps any
+        # future bundled-npm regression and is a no-op when the bundled
+        # version is already current. A 404 on `npm publish` is the failure
+        # mode this prevents (npm returns 404 when OIDC isn't supported by
+        # the CLI sending the request — confusingly identical to "package
+        # missing").
+        run: npm install -g npm@latest && npm --version
+
       - name: Bump version
         # TypeClaw publishes raw TS sources (no build step), and has no
         # .claude-plugin/plugin.json or skill `version:` frontmatter to sync —
@@ -137,25 +148,30 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/typeclaw-base:cache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/typeclaw-base:cache,mode=max
 
-      - name: Verify base image is pullable
-        # docker/build-push-action exits successfully on registry push
-        # receipt, but there is a small lag on GHCR before a fresh manifest
-        # is globally consistent for anonymous pulls. Retry briefly so we
-        # have a hard "users can pull this" gate before the irreversible
-        # npm publish. Cheap on the happy path (~1 attempt, <5s).
+      - name: Verify base image is anonymously pullable on both platforms
+        # The end-user contract is "an unauthenticated `docker pull` from a
+        # fresh machine resolves both linux/amd64 and linux/arm64 manifests."
+        # The login from the push step must be cleared first — otherwise a
+        # private package could pass verification on a credentialed runner
+        # and then fail on every user's first `typeclaw start`.
+        #
+        # Three checks, each closing a distinct failure mode:
+        #   (a) `imagetools inspect` confirms the manifest list and both
+        #       per-platform manifests exist as a single atomic record.
+        #   (b) `docker pull --platform linux/amd64` proves the amd64 layer
+        #       blobs are actually pullable, not just referenced.
+        #   (c) `docker pull --platform linux/arm64` does the same for arm64.
+        #
+        # No retries: `imagetools inspect` should be immediately consistent
+        # after `build-push-action` exits, and the pulls run from a fresh
+        # connection. If any step fails the image is not safe to release.
         env:
           IMAGE: ghcr.io/${{ github.repository_owner }}/typeclaw-base:${{ inputs.version }}
         run: |
-          for i in 1 2 3 4 5; do
-            if docker pull "$IMAGE" >/dev/null 2>&1; then
-              echo "Pulled $IMAGE on attempt $i"
-              exit 0
-            fi
-            echo "Attempt $i: $IMAGE not yet pullable, retrying..."
-            sleep $((i * 2))
-          done
-          echo "::error::$IMAGE not pullable after 5 attempts; refusing to npm publish a CLI whose base image is unreachable"
-          exit 1
+          docker logout ghcr.io
+          docker buildx imagetools inspect "$IMAGE"
+          docker pull --platform linux/amd64 "$IMAGE"
+          docker pull --platform linux/arm64 "$IMAGE"
 
       - name: Publish to npm
         # Cardinal irreversible step. npm enforces version immutability —

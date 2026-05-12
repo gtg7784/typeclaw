@@ -8,7 +8,7 @@ import { DEFAULT_MODEL_REF, KNOWN_PROVIDERS, providerForModelRef, type KnownMode
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
 import { createTui } from '@/tui'
 
-import { resolveBaseImageVersion } from './cli-version'
+import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { HATCHING_PROMPT } from './hatching'
@@ -388,22 +388,27 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
 const AGENT_BROWSER_VERSION = '^0.26.0'
 
 function buildPackageJson(root: string, name: string): Record<string, unknown> {
-  const typeclawRoot = findTypeclawRoot()
-  // FIXME: temporary dev-stage wiring. Switch to a published version range
-  // (e.g. "typeclaw": "^x.y.z") once typeclaw is released. The `file:` spec is
-  // computed relative to the agent root because `file:` resolves relative to
-  // the consuming package.
-  const fileSpec = typeclawRoot ? `file:${toFileSpec(relative(root, typeclawRoot))}` : 'file:../typeclaw'
   return {
     name,
     private: true,
     type: 'module',
     workspaces: [`${PACKAGES_DIR}/*`],
     dependencies: {
-      typeclaw: fileSpec,
+      typeclaw: resolveTypeclawSpec(root),
       'agent-browser': AGENT_BROWSER_VERSION,
     },
   }
+}
+
+// Prefer the registry-style range (`^X.Y.Z`) when typeclaw is itself an
+// installed package — that's what lets `bun install` in the agent resolve
+// typeclaw from npm. Fall back to `file:` against the local checkout for
+// dev contributors running `bun run src/cli/index.ts init` from the repo.
+function resolveTypeclawSpec(agentRoot: string): string {
+  const scaffoldVersion = resolveScaffoldVersion()
+  if (scaffoldVersion !== null) return scaffoldVersion
+  const typeclawRoot = findTypeclawRoot()
+  return typeclawRoot ? `file:${toFileSpec(relative(agentRoot, typeclawRoot))}` : 'file:../typeclaw'
 }
 
 function toFileSpec(rel: string): string {
@@ -435,10 +440,11 @@ export async function writeDockerAssets(root: string): Promise<DockerAssetsResul
     const devMode = typeclawSpec.startsWith('file:')
 
     const typeclawConfig = await readTypeclawConfig(root)
-    const baseImageVersion = await resolveBaseImageVersion(root)
-    await writeFile(join(root, DOCKERFILE), buildDockerfile(typeclawConfig.dockerfile, { baseImageVersion }), {
-      flag: 'wx',
-    }).catch(ignoreExists)
+    await writeFile(
+      join(root, DOCKERFILE),
+      buildDockerfile(typeclawConfig.dockerfile, { baseImageVersion: resolveBaseImageVersion(root) }),
+      { flag: 'wx' },
+    ).catch(ignoreExists)
 
     return { ok: true, devMode }
   } catch (error) {

@@ -1,70 +1,81 @@
-import { readFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
-import pkg from '../../package.json' with { type: 'json' }
+// Single source of truth for "what version of typeclaw is this agent on,
+// and where does that mean we should pin the base image / write the dep
+// spec." Sync I/O at module load — relative paths are stable in both a dev
+// checkout and a real install, so the parent-walk an earlier draft used
+// was unnecessary side effect. See AGENTS.md "Rules of thumb" for the
+// install-vs-dev distinction this module encodes.
 
 export const GHCR_BASE_IMAGE_REPO = 'ghcr.io/typeclaw/typeclaw-base'
 
-export const CLI_VERSION: string = pkg.version
+const CLI_PACKAGE_JSON_PATH = join(import.meta.dir, '..', '..', 'package.json')
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-
-// Self-locate the CLI's source root by walking up from this file until we hit
-// the package.json that lists "typeclaw" as its name. This lets the dev-mode
-// detector below distinguish a real install (typeclaw shipped via npm into
-// the agent's node_modules) from a file:-spec install (typeclaw symlinked
-// from a local checkout). The latter must NOT pin a versioned base image
-// because the version in the dev tree is the next-to-be-released one and
-// the matching :X.Y.Z tag does not exist on GHCR yet.
-async function findCliRoot(): Promise<string | null> {
-  let dir = __dirname
-  while (true) {
-    try {
-      const raw = await readFile(join(dir, 'package.json'), 'utf8')
-      const parsed = JSON.parse(raw) as { name?: string }
-      if (parsed.name === 'typeclaw') return dir
-    } catch {}
-    const parent = dirname(dir)
-    if (parent === dir) return null
-    dir = parent
-  }
+const cliPkg = JSON.parse(readFileSync(CLI_PACKAGE_JSON_PATH, 'utf8')) as { name?: string; version?: string }
+if (cliPkg.name !== 'typeclaw' || typeof cliPkg.version !== 'string') {
+  throw new Error(`Expected typeclaw package.json at ${CLI_PACKAGE_JSON_PATH}, got name=${cliPkg.name}`)
 }
 
-// The CLI's own source root resolved at module load. Captures whichever
-// package.json shipped alongside this src/ — node_modules/typeclaw for users,
-// the repo root for typeclaw contributors. Memoized so we don't re-walk on
-// every call.
-const cliRoot = await findCliRoot()
+export const CLI_VERSION = cliPkg.version
 
-// True when this looks like a real install of typeclaw — i.e. the agent
-// folder's package.json declares typeclaw with a registry-style dep spec
-// ("^0.1.1", "0.1.1", "latest", etc.). Missing package.json, missing
-// typeclaw dep, or a "file:" / "link:" spec all read as not-installed:
-// either the test/scaffolding doesn't model an installed CLI yet, or
-// typeclaw is symlinked from a local checkout whose version is the next-
-// to-release one (not yet on GHCR). Pinning the versioned base image only
-// when we have positive evidence of a real install avoids the "docker
-// pull 404 on every start" failure mode in dev and tests.
-async function isInstalledAgent(agentDir: string): Promise<boolean> {
+const NODE_MODULES_SEGMENT = `${join('/', 'node_modules', '/')}`
+
+function isInstalledCli(): boolean {
+  return CLI_PACKAGE_JSON_PATH.includes(NODE_MODULES_SEGMENT)
+}
+
+// `^X.Y.Z` when the invoking CLI is itself an installed copy of typeclaw
+// (suitable for writing into a freshly-scaffolded agent's package.json),
+// `null` when the CLI is running from the source repo (caller falls back
+// to `file:` so the agent tracks the local checkout).
+export function resolveScaffoldVersion(): string | null {
+  if (!isInstalledCli()) return null
+  return `^${CLI_VERSION}`
+}
+
+// The version of typeclaw the AGENT will actually run inside the container.
+// Prefers `<agent>/node_modules/typeclaw/package.json#version` because that
+// is what the bind-mount exposes to the container at /agent/node_modules,
+// and we want the base image's CLI version to match the runtime's. Falls
+// back to parsing the agent's `dependencies.typeclaw` spec for fresh inits
+// where `bun install` hasn't run yet, and to `null` when neither maps to
+// a release version (dev mode, ranges, dist-tags, etc.).
+export function resolveBaseImageVersion(agentDir: string): string | null {
+  return readInstalledTypeclawVersion(agentDir) ?? readVersionFromDepSpec(agentDir)
+}
+
+function readInstalledTypeclawVersion(agentDir: string): string | null {
   try {
-    const raw = await readFile(join(agentDir, 'package.json'), 'utf8')
+    const raw = readFileSync(join(agentDir, 'node_modules', 'typeclaw', 'package.json'), 'utf8')
+    const parsed = JSON.parse(raw) as { version?: string }
+    if (typeof parsed.version === 'string' && isReleaseVersion(parsed.version)) return parsed.version
+  } catch {}
+  return null
+}
+
+function readVersionFromDepSpec(agentDir: string): string | null {
+  try {
+    const raw = readFileSync(join(agentDir, 'package.json'), 'utf8')
     const parsed = JSON.parse(raw) as { dependencies?: Record<string, string> }
     const spec = parsed.dependencies?.typeclaw
-    if (typeof spec !== 'string' || spec.length === 0) return false
-    return !spec.startsWith('file:') && !spec.startsWith('link:')
+    if (typeof spec !== 'string') return null
+    return extractReleaseVersionFromSpec(spec)
   } catch {
-    return false
+    return null
   }
 }
 
-// Returns the base image version to pin in the per-agent Dockerfile, or
-// `null` when the per-agent Dockerfile should fall back to inlining the
-// heavy stack (dev mode, missing/incomplete agent package.json, or CLI
-// source not locatable). Callers should pass the result directly to
-// `buildDockerfile(config, { baseImageVersion })`.
-export async function resolveBaseImageVersion(agentDir: string): Promise<string | null> {
-  if (cliRoot === null) return null
-  if (!(await isInstalledAgent(agentDir))) return null
-  return CLI_VERSION
+// Accept only specs that name an exact release version we can map 1:1 to a
+// GHCR tag (`X.Y.Z`, `^X.Y.Z`, `~X.Y.Z`, `=X.Y.Z`). Reject ranges, `latest`,
+// `*`, dist-tags, `workspace:` / `git:` / `portal:` / `npm:` aliases. Being
+// strict here delays versioned pinning rather than silently picking the
+// wrong tag — the installed-typeclaw check above is the primary path.
+function extractReleaseVersionFromSpec(spec: string): string | null {
+  const match = spec.trim().match(/^[\^~=]?(\d+\.\d+\.\d+)$/)
+  return match ? (match[1] ?? null) : null
+}
+
+function isReleaseVersion(version: string): boolean {
+  return /^\d+\.\d+\.\d+$/.test(version)
 }

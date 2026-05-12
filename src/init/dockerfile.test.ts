@@ -272,86 +272,104 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
   })
 })
 
-// The versioned form is what `typeclaw start` writes for installed-style
-// agent folders (package.json declares typeclaw via a registry-style spec).
-// These tests lock the structural invariants of that path: the FROM line
-// must pin the GHCR base image at the requested version, and none of the
-// heavy stack layers (apt baseline, Chrome runtime libs, curl-impersonate,
-// agent-browser, Chrome for Testing) may be duplicated — they already
-// exist in the base image, and re-running them in the per-agent build
-// would silently undo the entire point of pinning.
+// Count of RUN blocks that match a marker pattern. Used by the versioned-
+// form tests to assert structural absence of heavy layers without coupling
+// to specific package names or comment prose.
+function countRunBlocksMatching(out: string, pattern: RegExp): number {
+  return out.split(/\n(?=RUN )/).filter((block) => block.startsWith('RUN ') && pattern.test(block)).length
+}
+
 describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
   test('FROMs ghcr.io/typeclaw/typeclaw-base at the requested version', () => {
+    // given: a versioned build option
     const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })
+
+    // then: the FROM line pins the GHCR base image, not oven/bun
     expect(out).toContain(`FROM ${GHCR_BASE_IMAGE_REPO}:0.1.1`)
     expect(out).not.toContain('FROM oven/bun:1-slim')
   })
 
-  test('FROM tag tracks an arbitrary version string (no hidden coercion)', () => {
+  test('FROM tag is interpolated verbatim with no coercion', () => {
+    // given: an arbitrary version string (the function must not normalize, parse, or rewrite it)
     const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '9.99.99-beta.1' })
+
+    // then: the tag passes through unchanged
     expect(out).toContain(`FROM ${GHCR_BASE_IMAGE_REPO}:9.99.99-beta.1`)
   })
 
-  test('omits the heavy stack — those layers live in the base image', () => {
+  test('omits the heavy stack RUN blocks — those layers live in the base image', () => {
+    // given: a versioned build with default toggles
     const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })
-    // curl-impersonate (Layer 2.5)
-    expect(out).not.toContain('curl-impersonate.tar.gz')
-    expect(out).not.toContain(CURL_IMPERSONATE_VERSION)
-    // agent-browser CLI install (Layer 4)
-    expect(out).not.toContain('bun install -g agent-browser')
-    // Chrome for Testing (Layer 5)
-    expect(out).not.toContain('agent-browser install --with-deps')
-    // arm64 chromium config (Layer 3)
-    expect(out).not.toContain('/root/.agent-browser/config.json')
-    // Chrome runtime libs (Layer 2 else-branch)
-    expect(out).not.toContain('libglib2.0-0t64')
-    // Baseline apt packages (Layer 2 main line) — base image has them
-    expect(out).not.toMatch(/apt-get install -y --no-install-recommends \\\n\s+git ca-certificates curl gnupg/)
+
+    // then: no curl-impersonate download, no agent-browser install, no Chrome download
+    expect(countRunBlocksMatching(out, /curl-impersonate|sha256sum/)).toBe(0)
+    expect(countRunBlocksMatching(out, /bun install -g agent-browser/)).toBe(0)
+    expect(countRunBlocksMatching(out, /agent-browser install --with-deps/)).toBe(0)
+    expect(countRunBlocksMatching(out, /apt-keep-cache|Keep-Downloaded-Packages/)).toBe(0)
+    // and: no apt-get install line that also installs baseline packages
+    expect(out).not.toMatch(/apt-get install[^\n]*\bgit\b[^\n]*\bca-certificates\b/)
   })
 
-  test('with all toggles off: omits the apt install layer entirely (zero-cost per-agent rebuild)', () => {
+  test('with all toggles off: emits no apt install RUN block at all (zero-cost per-agent rebuild)', () => {
+    // given: every toggle disabled, so no per-agent apt work is needed
     const out = buildDockerfile(dockerfileSchema.parse({ tmux: false, gh: false, python: false, ffmpeg: false }), {
       baseImageVersion: '0.1.1',
     })
-    expect(out).not.toContain('apt-get install')
-    expect(out).not.toContain('apt-get update')
+
+    // then: zero apt-get blocks
+    expect(countRunBlocksMatching(out, /apt-get/)).toBe(0)
   })
 
-  test('with toggles on: installs only the toggle-driven packages (no baseline duplication)', () => {
+  test('with toggles on: emits exactly one apt install RUN block containing only toggle packages', () => {
+    // given: gh + tmux enabled, python + ffmpeg disabled
     const out = buildDockerfile(dockerfileSchema.parse({ gh: true, tmux: true, python: false, ffmpeg: false }), {
       baseImageVersion: '0.1.1',
     })
-    const m = out.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+)/)
-    expect(m).not.toBeNull()
-    const pkgs = m![1]!.split(/\s+/).filter(Boolean)
+
+    // then: there's an apt install line with exactly the toggle packages
+    const aptInstallMatch = out.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+)/)
+    expect(aptInstallMatch).not.toBeNull()
+    const pkgs = aptInstallMatch![1]!.split(/\s+/).filter(Boolean)
     expect(pkgs).toEqual(['gh', 'tmux'])
   })
 
-  test('keeps gh keyring bootstrap when gh: true (still per-agent toggle)', () => {
+  test('keeps gh keyring bootstrap when gh is enabled (per-agent toggle, not base-image content)', () => {
+    // when: gh enabled
     const out = buildDockerfile(dockerfileSchema.parse({ gh: true }), { baseImageVersion: '0.1.1' })
-    expect(out).toContain('cli.github.com/packages')
-    expect(out).toContain('githubcli-archive-keyring.gpg')
+
+    // then: the keyring layer is present
+    expect(out).toMatch(/cli\.github\.com\/packages\/githubcli-archive-keyring\.gpg/)
   })
 
-  test('drops gh keyring bootstrap when gh: false', () => {
+  test('drops gh keyring bootstrap when gh is disabled', () => {
+    // when: gh disabled
     const out = buildDockerfile(dockerfileSchema.parse({ gh: false }), { baseImageVersion: '0.1.1' })
-    expect(out).not.toContain('cli.github.com/packages')
+
+    // then: no keyring fetch
+    expect(out).not.toMatch(/cli\.github\.com\/packages/)
   })
 
-  test('keeps ENV vars, custom append lines, and ENTRYPOINT (truly per-agent state)', () => {
+  test('keeps the per-agent tail: ENV vars, append lines, ENTRYPOINT, CMD', () => {
+    // given: a custom append line
     const out = buildDockerfile(dockerfileSchema.parse({ append: ['ENV CUSTOM_TOOL=1'] }), {
       baseImageVersion: '0.1.1',
     })
+
+    // then: every per-agent tail directive is present, in order
     expect(out).toContain('ENV NODE_ENV=production')
     expect(out).toContain('ENV AGENT_MESSENGER_CONFIG_DIR=/agent/workspace/.agent-messenger')
     expect(out).toContain('ENV CUSTOM_TOOL=1')
     expect(out).toContain('ENTRYPOINT ["bun", "run", "typeclaw"]')
     expect(out).toContain('CMD ["run"]')
+    expect(out.indexOf('ENV CUSTOM_TOOL=1')).toBeLessThan(out.indexOf('ENTRYPOINT'))
   })
 
-  test('explicit baseImageVersion: null falls back to the inline (oven/bun:1-slim) form', () => {
+  test('explicit baseImageVersion: null is identical to the default (inline) form', () => {
+    // when: caller explicitly passes null vs omits the option
     const inlineExplicit = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: null })
     const inlineDefault = buildDockerfile(dockerfileSchema.parse({}))
+
+    // then: outputs are byte-identical and use oven/bun (not GHCR base)
     expect(inlineExplicit).toBe(inlineDefault)
     expect(inlineExplicit).toContain('FROM oven/bun:1-slim')
     expect(inlineExplicit).not.toContain(GHCR_BASE_IMAGE_REPO)

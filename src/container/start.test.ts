@@ -5,16 +5,8 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
 import { startDaemon, type Daemon } from '@/hostd/daemon'
-import { CLI_VERSION } from '@/init/cli-version'
 import { buildDockerfile } from '@/init/dockerfile'
 import { buildGitignore } from '@/init/gitignore'
-
-// Mirror what `refreshDockerfile` writes for an installed-style agent
-// folder (package.json declares typeclaw via a registry-style spec).
-// Tests that scaffold such a folder and then assert on the on-disk
-// Dockerfile must compare against THIS form, not the inline form.
-const buildInstalledAgentDockerfile = (config?: Parameters<typeof buildDockerfile>[0]) =>
-  buildDockerfile(config, { baseImageVersion: CLI_VERSION })
 
 import type { DockerExec } from './shared'
 import { commitSystemFile, planStart, refreshDockerfile, refreshGitignore, start } from './start'
@@ -483,6 +475,67 @@ describe('refreshDockerfile', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test("FROMs the GHCR base image at the agent's installed typeclaw version", async () => {
+    // given: an agent with bun install completed — node_modules/typeclaw/package.json declares 0.1.0
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-installed-'))
+    try {
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'test', dependencies: { typeclaw: '^0.1.0' } }))
+      await mkdir(join(dir, 'node_modules', 'typeclaw'), { recursive: true })
+      await writeFile(
+        join(dir, 'node_modules', 'typeclaw', 'package.json'),
+        JSON.stringify({ name: 'typeclaw', version: '0.1.0' }),
+      )
+
+      // when: refreshDockerfile runs
+      await refreshDockerfile(dir)
+
+      // then: the on-disk Dockerfile pins the INSTALLED version, not the spec
+      const written = await readFile(join(dir, 'Dockerfile'), 'utf8')
+      expect(written).toContain('FROM ghcr.io/typeclaw/typeclaw-base:0.1.0')
+      expect(written).not.toContain('FROM oven/bun:1-slim')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('falls back to the dep spec when node_modules has not been populated yet (fresh init)', async () => {
+    // given: a fresh init — package.json declares typeclaw but bun install has not run
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-fresh-'))
+    try {
+      await writeFile(join(dir, 'package.json'), JSON.stringify({ name: 'test', dependencies: { typeclaw: '^0.1.1' } }))
+
+      // when: refreshDockerfile runs
+      await refreshDockerfile(dir)
+
+      // then: spec parser extracts 0.1.1 from "^0.1.1" and pins it
+      const written = await readFile(join(dir, 'Dockerfile'), 'utf8')
+      expect(written).toContain('FROM ghcr.io/typeclaw/typeclaw-base:0.1.1')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('falls back to inline form when the typeclaw dep is a file: spec (dev mode)', async () => {
+    // given: a dev contributor's agent with typeclaw symlinked from a local checkout
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-dev-'))
+    try {
+      await writeFile(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'test', dependencies: { typeclaw: 'file:../typeclaw' } }),
+      )
+
+      // when: refreshDockerfile runs
+      await refreshDockerfile(dir)
+
+      // then: no GHCR pin (dev version doesn't exist on GHCR yet) — inline heavy stack on oven/bun
+      const written = await readFile(join(dir, 'Dockerfile'), 'utf8')
+      expect(written).not.toContain('ghcr.io/typeclaw/typeclaw-base')
+      expect(written).toContain('FROM oven/bun:1-slim')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('refreshGitignore', () => {
@@ -797,7 +850,7 @@ describe('start (composition)', () => {
     // then: the Dockerfile on disk was refreshed even though docker build never ran
     expect(result.ok).toBe(true)
     const onDisk = await readFile(join(root, 'Dockerfile'), 'utf8')
-    expect(onDisk).toBe(buildInstalledAgentDockerfile())
+    expect(onDisk).toBe(buildDockerfile(undefined, { baseImageVersion: '0.1.0' }))
     expect(onDisk).not.toContain('FROM stale')
   })
 
@@ -866,7 +919,7 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     const buildCall = calls.find((c) => c.args[0] === 'build')
     expect(buildCall).toBeDefined()
-    expect(buildCall!.dockerfileSnapshot).toBe(buildInstalledAgentDockerfile())
+    expect(buildCall!.dockerfileSnapshot).toBe(buildDockerfile(undefined, { baseImageVersion: '0.1.0' }))
     expect(buildCall!.dockerfileSnapshot).not.toContain('FROM stale')
   })
 
@@ -973,7 +1026,9 @@ describe('start (composition)', () => {
     const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
     expect(headAfter).toBe(headBefore)
     // and: the Dockerfile on disk is the fresh template
-    expect(await readFile(join(root, 'Dockerfile'), 'utf8')).toBe(buildInstalledAgentDockerfile())
+    expect(await readFile(join(root, 'Dockerfile'), 'utf8')).toBe(
+      buildDockerfile(undefined, { baseImageVersion: '0.1.0' }),
+    )
   })
 
   test('does not commit when the refresh produces no change (clean working tree)', async () => {
