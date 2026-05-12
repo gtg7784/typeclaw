@@ -11,7 +11,7 @@ import {
 } from '@/compose'
 import { config } from '@/config'
 
-import { c } from './ui'
+import { c, spinner } from './ui'
 
 const startSub = defineCommand({
   meta: { name: 'start', description: 'start every agent in immediate subdirectories of cwd' },
@@ -28,27 +28,27 @@ const startSub = defineCommand({
     },
   },
   async run({ args }) {
+    const board = makeBoard('Starting agents')
+    const s = spinner()
     const { agents, results } = await composeStart({
       rootCwd: process.cwd(),
       preferredHostPort: Number(args.port),
       forceBuild: args.build,
       cliEntry: process.argv[1],
+      onProgress: (event) => {
+        if (event.kind === 'agent-start') {
+          board.add(s, event.name, 'starting')
+        } else {
+          board.set(s, event.name, formatStartDone(event.result))
+        }
+      },
     })
     if (agents.length === 0) {
       console.log(c.dim('No typeclaw agents found in immediate subdirectories of cwd.'))
       return
     }
-    let failed = 0
-    for (const r of results) {
-      if (r.ok) {
-        const verb = r.data.alreadyRunning ? 'already running' : 'started'
-        console.log(`${c.green('✔')} ${c.bold(`[${r.name}]`)} ${verb} on host port ${c.cyan(String(r.data.hostPort))}`)
-      } else {
-        failed++
-        console.error(`${c.red('✖')} ${c.bold(`[${r.name}]`)} ${c.red('failed:')} ${r.reason}`)
-      }
-    }
-    summarize(results, 'started', failed)
+    const failed = results.reduce((n, r) => (r.ok ? n : n + 1), 0)
+    board.finish(s, results, 'started', failed)
     if (failed > 0) process.exit(1)
   },
 })
@@ -56,25 +56,24 @@ const startSub = defineCommand({
 const stopSub = defineCommand({
   meta: { name: 'stop', description: 'stop every agent in immediate subdirectories of cwd' },
   async run() {
-    const { agents, results } = await composeStop(process.cwd())
+    const board = makeBoard('Stopping agents')
+    const s = spinner()
+    const { agents, results } = await composeStop({
+      rootCwd: process.cwd(),
+      onProgress: (event) => {
+        if (event.kind === 'agent-start') {
+          board.add(s, event.name, 'stopping')
+        } else {
+          board.set(s, event.name, formatStopDone(event.result))
+        }
+      },
+    })
     if (agents.length === 0) {
       console.log(c.dim('No typeclaw agents found in immediate subdirectories of cwd.'))
       return
     }
-    let failed = 0
-    for (const r of results) {
-      if (r.ok) {
-        if (r.data.running) {
-          console.log(`${c.green('✔')} ${c.bold(`[${r.name}]`)} stopped`)
-        } else {
-          console.log(`${c.dim('○')} ${c.bold(`[${r.name}]`)} ${c.dim('not running')}`)
-        }
-      } else {
-        failed++
-        console.error(`${c.red('✖')} ${c.bold(`[${r.name}]`)} ${c.red('failed:')} ${r.reason}`)
-      }
-    }
-    summarize(results, 'stopped', failed)
+    const failed = results.reduce((n, r) => (r.ok ? n : n + 1), 0)
+    board.finish(s, results, 'stopped', failed)
     if (failed > 0) process.exit(1)
   },
 })
@@ -94,28 +93,29 @@ const restartSub = defineCommand({
     },
   },
   async run({ args }) {
+    const board = makeBoard('Restarting agents')
+    const s = spinner()
     const { agents, results } = await composeRestart({
       rootCwd: process.cwd(),
       preferredHostPort: Number(args.port),
       forceBuild: args.build,
       cliEntry: process.argv[1],
+      onProgress: (event) => {
+        if (event.kind === 'agent-start') {
+          board.add(s, event.name, 'stopping')
+        } else if (event.kind === 'agent-stopped') {
+          board.set(s, event.name, c.dim('starting...'))
+        } else {
+          board.set(s, event.name, formatRestartDone(event.result))
+        }
+      },
     })
     if (agents.length === 0) {
       console.log(c.dim('No typeclaw agents found in immediate subdirectories of cwd.'))
       return
     }
-    let failed = 0
-    for (const r of results) {
-      if (r.ok) {
-        console.log(
-          `${c.green('✔')} ${c.bold(`[${r.name}]`)} restarted on host port ${c.cyan(String(r.data.start.hostPort))}`,
-        )
-      } else {
-        failed++
-        console.error(`${c.red('✖')} ${c.bold(`[${r.name}]`)} ${c.red('failed:')} ${r.reason}`)
-      }
-    }
-    summarize(results, 'restarted', failed)
+    const failed = results.reduce((n, r) => (r.ok ? n : n + 1), 0)
+    board.finish(s, results, 'restarted', failed)
     if (failed > 0) process.exit(1)
   },
 })
@@ -191,11 +191,71 @@ function colorStatus(s: AgentStatus): string {
   return c.yellow('NOT CREATED')
 }
 
-function summarize<T>(results: AgentResult<T>[], verb: string, failed: number): void {
-  const ok = results.length - failed
-  if (failed === 0) {
-    console.log(c.green(`${verb} ${ok}/${results.length}`))
-  } else {
-    console.error(c.red(`${verb} ${ok}/${results.length} (${failed} failed)`))
+// Single clack spinner with a multi-line message body, one line per agent.
+// Concurrent clack spinners can't coexist: each one's render loop writes
+// cursor.to(0) + erase.down() to process.stdout, so they trample each other.
+// Multi-line redraw is safe — clack counts newlines in the previous message
+// and walks the cursor up before erasing (see @clack/prompts spinner.ts).
+type Board = {
+  add: (s: ReturnType<typeof spinner>, name: string, state: string) => void
+  set: (s: ReturnType<typeof spinner>, name: string, state: string) => void
+  finish: <T>(s: ReturnType<typeof spinner>, results: AgentResult<T>[], verb: string, failed: number) => void
+}
+
+function makeBoard(header: string): Board {
+  const order: string[] = []
+  const states = new Map<string, string>()
+  let started = false
+
+  const renderLines = (): string => {
+    const width = order.reduce((w, name) => Math.max(w, name.length), 0)
+    return order.map((name) => `  ${c.bold(name.padEnd(width))}  ${states.get(name) ?? ''}`).join('\n')
   }
+
+  const paint = (s: ReturnType<typeof spinner>): void => {
+    const body = `${header}\n${renderLines()}`
+    if (!started) {
+      started = true
+      s.start(body)
+    } else {
+      s.message(body)
+    }
+  }
+
+  return {
+    add(s, name, state) {
+      order.push(name)
+      states.set(name, c.dim(`${state}...`))
+      paint(s)
+    },
+    set(s, name, state) {
+      states.set(name, state)
+      paint(s)
+    },
+    finish(s, results, verb, failed) {
+      const total = results.length
+      const ok = total - failed
+      const summary = failed === 0 ? `${verb} ${ok}/${total}` : `${verb} ${ok}/${total} (${failed} failed)`
+      const body = `${failed === 0 ? c.green(summary) : c.red(summary)}\n${renderLines()}`
+      if (failed === 0) s.stop(body)
+      else s.error(body)
+    },
+  }
+}
+
+function formatStartDone<T extends { alreadyRunning?: boolean; hostPort: number }>(result: AgentResult<T>): string {
+  if (!result.ok) return `${c.red('✖')} ${c.red('failed:')} ${result.reason}`
+  const verb = result.data.alreadyRunning ? 'already running' : 'started'
+  return `${c.green('✔')} ${verb} on host port ${c.cyan(String(result.data.hostPort))}`
+}
+
+function formatStopDone<T extends { running: boolean }>(result: AgentResult<T>): string {
+  if (!result.ok) return `${c.red('✖')} ${c.red('failed:')} ${result.reason}`
+  if (result.data.running) return `${c.green('✔')} stopped`
+  return `${c.dim('○')} ${c.dim('not running')}`
+}
+
+function formatRestartDone<T extends { start: { hostPort: number } }>(result: AgentResult<T>): string {
+  if (!result.ok) return `${c.red('✖')} ${c.red('failed:')} ${result.reason}`
+  return `${c.green('✔')} restarted on host port ${c.cyan(String(result.data.start.hostPort))}`
 }
