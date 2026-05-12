@@ -76,28 +76,26 @@ jobs:
         # TypeClaw publishes raw TS sources (no build step), and has no
         # .claude-plugin/plugin.json or skill `version:` frontmatter to sync —
         # package.json is the only place a version lives. `--allow-same-version`
-        # makes this idempotent across re-runs.
+        # makes this idempotent across re-runs. Mutates package.json in the
+        # runner only; the bumped value is pushed by `Commit and tag` after
+        # every downstream publish succeeds.
         run: npm version ${{ inputs.version }} --no-git-tag-version --allow-same-version
 
-      - name: Publish to npm
-        # Idempotency guard: if a previous run already published this version,
-        # treat the conflict as success so the rest of the workflow can repair
-        # whatever halted it (image push, git tag, GitHub Release). npm view
-        # returns the version string on success and exits non-zero when the
-        # package@version is missing — so a non-empty stdout means "already
-        # published, skip."
-        run: |
-          if [ -n "$(npm view typeclaw@${{ inputs.version }} version 2>/dev/null || true)" ]; then
-            echo "typeclaw@${{ inputs.version }} already published, skipping npm publish"
-          else
-            npm publish --provenance --access public
-          fi
+      # ─────────────── GHCR base image first, npm second ───────────────
+      # Order matters: a user who `npm install typeclaw@X.Y.Z` and runs
+      # `typeclaw start` writes a per-agent Dockerfile that does
+      # `FROM ghcr.io/typeclaw/typeclaw-base:X.Y.Z` (see src/init/dockerfile.ts).
+      # If `npm publish` ran before the GHCR push, there is a window where
+      # users can install a CLI version whose base image does not yet exist.
+      # Publishing the image first — and verifying it is pullable — closes
+      # that race. The npm publish below remains the cardinal irreversible
+      # step; everything before it must already be in place.
 
       - name: Generate base Dockerfile
         # Same source as base-image.yml (PR validation) — the published base
         # image is a function of src/init/dockerfile.ts at this commit,
-        # tagged with the CLI version so downstream consumers pin by
-        # `ghcr.io/typeclaw/typeclaw-base:${{ inputs.version }}`.
+        # tagged with the CLI version. The per-agent Dockerfile written by
+        # `typeclaw start` pins this exact tag.
         run: bun run scripts/emit-base-dockerfile.ts > base.Dockerfile
 
       - name: Show generated Dockerfile
@@ -123,7 +121,10 @@ jobs:
         # mapping as the single writer for version-named tags. Re-pushing
         # the same content to GHCR is idempotent (no immutability policy
         # exists on GHCR as of 2026, so the second push overwrites with
-        # identical layers and the tag points at the same digest).
+        # identical layers and the tag points at the same digest). Do NOT
+        # add a "skip if exists" guard here: partial-failure recovery
+        # (image pushed, npm publish failed) depends on a re-run re-pushing
+        # the same content so the verify step below has something to pull.
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -136,14 +137,56 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/typeclaw-base:cache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/typeclaw-base:cache,mode=max
 
+      - name: Verify base image is pullable
+        # docker/build-push-action exits successfully on registry push
+        # receipt, but there is a small lag on GHCR before a fresh manifest
+        # is globally consistent for anonymous pulls. Retry briefly so we
+        # have a hard "users can pull this" gate before the irreversible
+        # npm publish. Cheap on the happy path (~1 attempt, <5s).
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/typeclaw-base:${{ inputs.version }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if docker pull "$IMAGE" >/dev/null 2>&1; then
+              echo "Pulled $IMAGE on attempt $i"
+              exit 0
+            fi
+            echo "Attempt $i: $IMAGE not yet pullable, retrying..."
+            sleep $((i * 2))
+          done
+          echo "::error::$IMAGE not pullable after 5 attempts; refusing to npm publish a CLI whose base image is unreachable"
+          exit 1
+
+      - name: Publish to npm
+        # Cardinal irreversible step. npm enforces version immutability —
+        # once typeclaw@X.Y.Z is on the registry, that name is burned
+        # forever. By the time this step runs, the GHCR image at the same
+        # version tag has been pushed AND verified pullable, so any user
+        # who installs typeclaw@X.Y.Z within seconds of this step
+        # completing will succeed at `typeclaw start`.
+        #
+        # Idempotency guard: if a previous run already published this
+        # version, treat the conflict as success so the rest of the
+        # workflow can repair whatever halted it (git tag, GitHub Release).
+        # `npm view` returns the version string on success and exits
+        # non-zero when the package@version is missing — so a non-empty
+        # stdout means "already published, skip."
+        run: |
+          if [ -n "$(npm view typeclaw@${{ inputs.version }} version 2>/dev/null || true)" ]; then
+            echo "typeclaw@${{ inputs.version }} already published, skipping npm publish"
+          else
+            npm publish --provenance --access public
+          fi
+
       - name: Commit and tag
-        # Moved after npm + image publish so a transient failure in either
-        # doesn't leave a published git tag pointing at a half-released
-        # state. Idempotency guards on both tag creation and push handle
-        # re-runs after a tag-step blip: `git tag -f` overwrites a local
-        # tag of the same name (harmless on fresh runners where no local
-        # tag exists), and `git push --force` on the tag is scoped to the
-        # specific tag ref so it cannot rewrite branches or other refs.
+        # Runs after BOTH the GHCR image push and the npm publish so a
+        # transient failure in either does not leave a published git tag
+        # pointing at a half-released state. Idempotency guards on both
+        # tag creation and push handle re-runs after a tag-step blip:
+        # `git tag -f` overwrites a local tag of the same name (harmless
+        # on fresh runners where no local tag exists), and `git push
+        # --force` on the tag is scoped to the specific tag ref so it
+        # cannot rewrite branches or other refs.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
