@@ -204,6 +204,9 @@ describe('channel_fetch_attachment', () => {
 
     const result = await runTool(tool, { ref: 'F1' })
 
-    expect(result.details).toEqual({ ok: false, error: 'fetch-attachment-not-supported' })
+    expect(result.details).toEqual({
+      ok: false,
+      error: 'no fetchAttachment callback registered for "slack-bot"',
+    })
   })
 })

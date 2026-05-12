@@ -29,6 +29,7 @@ import { emoticonEventToMessageEvent, formatHistoryText, formatInboundText } fro
 import { createKakaoAuthorResolver, type KakaoAuthorResolver } from './kakaotalk-author-resolver'
 import { createKakaoChannelResolver, type KakaoChannelResolver } from './kakaotalk-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
+import { createFetchAttachmentCallback } from './kakaotalk-fetch-attachment'
 
 // Inlined locally because agent-messenger/kakaotalk's index does not
 // re-export KakaoMarkReadResult even though client.markRead returns it
@@ -314,6 +315,8 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
     formatChannelTag,
   })
 
+  const fetchAttachmentCallback = createFetchAttachmentCallback({ logger })
+
   const handleMessageEvent = async (event: KakaoTalkPushMessageEvent): Promise<void> => {
     // Synthesize the displayed text BEFORE classify so attachments
     // (photo, file, video, ...) survive classifyInbound's empty_text
@@ -560,6 +563,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       options.router.registerOutbound('kakaotalk', outboundCallback)
       options.router.registerChannelNameResolver('kakaotalk', channelResolver.resolve)
       options.router.registerHistory('kakaotalk', historyCallback)
+      options.router.registerFetchAttachment('kakaotalk', fetchAttachmentCallback)
     },
 
     async stop(): Promise<void> {
@@ -568,6 +572,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       options.router.unregisterOutbound('kakaotalk', outboundCallback)
       options.router.unregisterChannelNameResolver('kakaotalk', channelResolver.resolve)
       options.router.unregisterHistory('kakaotalk', historyCallback)
+      options.router.unregisterFetchAttachment('kakaotalk', fetchAttachmentCallback)
       if (inflightInbounds > 0) {
         await new Promise<void>((resolve) => {
           stopWaiters.push(resolve)
