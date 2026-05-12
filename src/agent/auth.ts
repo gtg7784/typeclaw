@@ -10,7 +10,7 @@ import {
   supportsOAuth,
   type KnownProviderId,
 } from '@/config/providers'
-import { createSecretsStoreForAgent } from '@/secrets'
+import { createSecretsStoreForAgent, stripEnvKey } from '@/secrets'
 
 type Auth = {
   authStorage: AuthStorage
@@ -70,9 +70,15 @@ export function getAuth(): Auth {
     const envKey = process.env[provider.apiKeyEnv]
     if (envKey) {
       const existing = authStorage.get(provider.id)
-      const needsWrite = existing === undefined || (existing.type === 'api_key' && existing.key !== envKey)
-      if (needsWrite) {
-        authStorage.set(provider.id, { type: 'api_key', key: envKey })
+      const apiKeyOwned = existing === undefined || existing.type === 'api_key'
+      if (apiKeyOwned) {
+        if (existing === undefined || existing.key !== envKey) {
+          authStorage.set(provider.id, { type: 'api_key', key: envKey })
+        }
+        // secrets.json is now authoritative for this provider's api-key credential.
+        // Strip the value from `.env` so the next boot does not silently revive a
+        // stale or rotated-away key, and so users have a single place to edit.
+        stripEnvKey(join(process.cwd(), '.env'), provider.apiKeyEnv)
       }
     }
   }

@@ -128,6 +128,62 @@ describe('getAuth', () => {
     expect(a).toBe(b)
   })
 
+  test('strips the api-key env var from .env after persisting to secrets.json', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
+    )
+    await writeFile(join(cwd, '.env'), 'FIREWORKS_API_KEY=fw_from_env\nUNRELATED=keep-me\n')
+    reloadConfig(cwd)
+    process.env.FIREWORKS_API_KEY = 'fw_from_env'
+
+    getAuth()
+
+    const file = await readSecretsFile(join(cwd, 'secrets.json'))
+    expect(file.llm).toEqual({ fireworks: { type: 'api_key', key: 'fw_from_env' } })
+    expect(await readFile(join(cwd, '.env'), 'utf8')).toBe('UNRELATED=keep-me\n')
+  })
+
+  test('strips the api-key env var from .env on rotation', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
+    )
+    await writeFile(
+      join(cwd, 'secrets.json'),
+      JSON.stringify({ version: 1, llm: { fireworks: { type: 'api_key', key: 'fw_old' } }, channels: {} }),
+    )
+    await writeFile(join(cwd, '.env'), 'FIREWORKS_API_KEY=fw_rotated\n')
+    reloadConfig(cwd)
+    process.env.FIREWORKS_API_KEY = 'fw_rotated'
+
+    getAuth()
+
+    expect(await readFile(join(cwd, '.env'), 'utf8')).toBe('')
+  })
+
+  test('does not touch .env when an OAuth credential already owns the provider slot', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
+    const oauthCredential = {
+      type: 'oauth' as const,
+      access_token: 'tok',
+      refresh_token: 'refresh',
+      expires_at: Date.now() + 1_000_000,
+    }
+    await writeFile(
+      join(cwd, 'secrets.json'),
+      JSON.stringify({ version: 1, llm: { openai: oauthCredential }, channels: {} }),
+    )
+    const envBefore = 'OPENAI_API_KEY=sk-leave-me\n'
+    await writeFile(join(cwd, '.env'), envBefore)
+    reloadConfig(cwd)
+    process.env.OPENAI_API_KEY = 'sk-leave-me'
+
+    getAuth()
+
+    expect(await readFile(join(cwd, '.env'), 'utf8')).toBe(envBefore)
+  })
+
   test('migrates a legacy auth.json to secrets.json on first getAuth()', async () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
     await writeFile(

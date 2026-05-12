@@ -11,3 +11,5 @@ export {
 } from './schema'
 
 export { createSecretsStoreForAgent, SecretsBackend } from './storage'
+
+export { stripEnvKey } from './env'
