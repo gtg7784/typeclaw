@@ -135,6 +135,14 @@ function summarizeFile(attachment: Record<string, unknown> | null): string {
 
 function summarizeGeneric(label: string, attachment: Record<string, unknown> | null): string {
   if (attachment === null) return label
+  // Prefer a dereferenceable URL over a keys-only preview: the agent uses
+  // the URL as the `ref` for channel_fetch_attachment, so making it visible
+  // in the placeholder is what turns video/audio/multiphoto from
+  // "described" into "fetchable". When the SDK hands us an opaque payload
+  // with no `url` (the documented case for these types), fall back to
+  // listing the available keys so we never lie about what arrived.
+  const url = stringField(attachment, 'url')
+  if (url !== null) return `${label} (${attachmentKeysSummary(attachment)}) ${url}`
   return `${label} ${attachmentKeysSummary(attachment)}`
 }
 

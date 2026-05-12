@@ -1,6 +1,6 @@
 ---
 name: typeclaw-channel-kakaotalk
-description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `kakaotalk`. KakaoTalk renders messages as plain text — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and other markdown all appear literally. There is no `@mention` syntax, no message threads, no replies-with-quote, and no outbound file attachments or stickers (inbound attachments and stickers ARE surfaced — see below). Read it before composing anything for KakaoTalk so you don't dump markdown into a chat window.
+description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `kakaotalk`, AND before calling `channel_fetch_attachment` against a KakaoTalk URL. KakaoTalk renders messages as plain text — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and other markdown all appear literally. There is no `@mention` syntax, no message threads, no replies-with-quote, and no outbound file attachments or stickers. Inbound photos / files / video / audio CAN be downloaded via `channel_fetch_attachment` (the placeholder text includes the URL); inbound stickers are metadata-only and cannot be fetched. URLs expire ~3 days after the message arrives. Read this skill before composing or fetching anything on KakaoTalk.
 ---
 
 # typeclaw-channel-kakaotalk
@@ -38,11 +38,19 @@ Even though you cannot SEND attachments or stickers, you DO receive them. The ad
 - A photo (with no caption): `[KakaoTalk message with photo 1320x2868 (image/jpeg) https://talk.kakaocdn.net/...]`
 - A photo with a caption: `look at this\n[KakaoTalk message with photo 1320x2868 (image/jpeg) https://...]`
 - A file: `[KakaoTalk message with file spec.pdf (application/pdf) size=12345 https://...]`
-- A video / audio: `[KakaoTalk message with video keys=[...]]` (the SDK leaves the payload opaque for these types, so we list the keys that were present rather than fabricating fields)
+- A video / audio (with a usable URL): `[KakaoTalk message with video (keys=[dur,url]) https://talk.kakaocdn.net/...]`. The SDK leaves video / audio / multiphoto payloads opaque, so we list the keys that were present alongside the URL when one exists; when no URL is present the placeholder is just `[KakaoTalk message with video keys=[...]]` and there is nothing for you to fetch.
 - A sticker / emoticon: `[KakaoTalk message with sticker (sticker) pack=4412724 path=4412724.emot_001.webp]`
 - An animated sticker: `[KakaoTalk message with sticker (sticker_ani) pack=... path=...]`
 
-Treat the placeholder as describing what the user sent. **You cannot fetch the photo bytes or play the audio** — `channel_fetch_attachment` is not wired for KakaoTalk, and the placeholder's fields (dimensions, MIME type, URL, sticker pack id) describe the envelope, NOT the content. Do not describe what a photo "depicts", what a sticker "looks like", or what an audio file "says" — you cannot see, read, or hear any of it. Acknowledge that something was sent ("Got the photo", "Cute sticker") and ask the user to describe it if you need more detail to respond meaningfully.
+### Fetching attachment bytes
+
+For photos, files, and any video / audio / multiphoto whose placeholder includes a `https://...kakaocdn.net/...` URL, call `channel_fetch_attachment` with that URL as the `ref` to download the bytes. The adapter validates the host (only `*.kakaocdn.net` is accepted — you cannot use this tool as a generic web fetcher) and returns the raw buffer plus mimetype.
+
+Use this when you actually need to look at the content — e.g. the user sends a screenshot and asks "what's in this?". The download lands in your inbox directory and you can pass it to a vision-capable inspection tool or read it directly depending on the file type.
+
+**Expiry caveat**: KakaoCDN URLs are pre-signed with an `expires=` timestamp baked into the query string — empirically ~3 days after the message arrived. Fetch promptly. If the URL has expired you will get a `403` error with the hint _"likely an expired pre-signed URL; ask the sender to re-share"_ — relay that to the user verbatim rather than guessing the cause.
+
+**Stickers cannot be fetched** as bytes through this tool. The sticker placeholder carries `pack=` and `path=` identifiers (KakaoTalk sticker pack metadata), not a downloadable URL. Treat stickers as descriptive metadata only — acknowledge them ("cute sticker") without trying to "see" them.
 
 If the inbound text is JUST a sticker (no accompanying text), the agent still gets a routed event — stickers count as engagement under `reply` and `dm` triggers (group chats with only sticker activity will not trigger `mention` because aliases require text matching).
 

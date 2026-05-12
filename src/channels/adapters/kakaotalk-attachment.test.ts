@@ -86,23 +86,28 @@ describe('formatInboundText', () => {
     expect(text).toBe('[KakaoTalk message with file keys=[other,weirdField]]')
   })
 
-  test('video (type=3) renders the generic shape with a keys preview', () => {
+  test('video (type=3) surfaces the url alongside the keys preview so the agent has a fetchable ref', () => {
     const text = formatInboundText({
       message: '',
       message_type: 3,
       attachment: { url: 'https://example.com/v.mp4', dur: 5000 },
     })
-    expect(text).toBe('[KakaoTalk message with video keys=[dur,url]]')
+    expect(text).toBe('[KakaoTalk message with video (keys=[dur,url]) https://example.com/v.mp4]')
   })
 
-  test('audio (type=5) renders the generic shape', () => {
+  test('audio (type=5) surfaces the url alongside the keys preview', () => {
     const text = formatInboundText({ message: '', message_type: 5, attachment: { url: 'https://example.com/a.m4a' } })
-    expect(text).toBe('[KakaoTalk message with audio keys=[url]]')
+    expect(text).toBe('[KakaoTalk message with audio (keys=[url]) https://example.com/a.m4a]')
   })
 
-  test('multiphoto (type=27) renders the generic shape', () => {
+  test('multiphoto (type=27) without a url falls back to a keys-only preview', () => {
     const text = formatInboundText({ message: '', message_type: 27, attachment: { kl: ['a', 'b', 'c'] } })
     expect(text).toBe('[KakaoTalk message with multiphoto keys=[kl]]')
+  })
+
+  test('video without a url falls back to a keys-only preview rather than fabricating a ref', () => {
+    const text = formatInboundText({ message: '', message_type: 3, attachment: { dur: 5000 } })
+    expect(text).toBe('[KakaoTalk message with video keys=[dur]]')
   })
 
   test('unknown non-text type with empty message returns empty text so classifyInbound can drop it as noise', () => {
