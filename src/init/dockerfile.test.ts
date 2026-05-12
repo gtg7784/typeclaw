@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { dockerfileSchema } from '@/config/config'
 
 import {
+  buildBaseDockerfile,
   buildDockerfile,
   CHROME_RUNTIME_APT_PACKAGES_AMD64,
   CURL_IMPERSONATE_PROFILE,
@@ -196,5 +197,76 @@ describe('curl-impersonate layer', () => {
     expect(agentBrowserIdx).toBeGreaterThan(-1)
     expect(aptIdx).toBeLessThan(curlImpersonateIdx)
     expect(curlImpersonateIdx).toBeLessThan(agentBrowserIdx)
+  })
+})
+
+// The base image (ghcr.io/typeclaw/typeclaw-base) and the per-agent
+// Dockerfile (emitted by `typeclaw start`) MUST agree on every toolchain
+// version, library path, and binary location. When they don't, the
+// per-agent Dockerfile's eventual FROM line inherits a base whose contents
+// don't match what buildDockerfile() assumes, and the agent fails at
+// runtime in subtle ways: websearch silently regresses when curl-impersonate
+// is the wrong version, Chrome fails to launch when a runtime lib is
+// missing, etc. These tests lock the structural invariant that both
+// outputs share the same toolchain pins, install paths, and Layer 0 cache
+// trick — so a new toolchain pin in buildDockerfile() that does not also
+// appear in buildBaseDockerfile() fails CI.
+describe('base ↔ per-agent Dockerfile drift guard', () => {
+  test('base Dockerfile pins the same curl-impersonate version, sha256s, and profile as the per-agent Dockerfile', () => {
+    const base = buildBaseDockerfile()
+    expect(base).toContain(CURL_IMPERSONATE_VERSION)
+    expect(base).toContain(CURL_IMPERSONATE_SHA256_AMD64)
+    expect(base).toContain(CURL_IMPERSONATE_SHA256_ARM64)
+    expect(base).toContain(`/usr/local/bin/curl_${CURL_IMPERSONATE_PROFILE} --version`)
+  })
+
+  test('base Dockerfile installs the full Playwright-tested chromium runtime dep set on amd64 — same list the per-agent Dockerfile depends on Chrome to find at launch time', () => {
+    const base = buildBaseDockerfile()
+    for (const p of CHROME_RUNTIME_APT_PACKAGES_AMD64) {
+      expect(base).toContain(p)
+    }
+  })
+
+  test('base Dockerfile installs the agent-browser CLI to the same global location the per-agent Dockerfile expects', () => {
+    const base = buildBaseDockerfile()
+    expect(base).toContain('bun install -g agent-browser')
+  })
+
+  test('base Dockerfile downloads Chrome for Testing on amd64 — without it the per-agent image would FROM a base that lacks the browser binary and `agent-browser install` would have to redo it', () => {
+    const base = buildBaseDockerfile()
+    expect(base).toContain('agent-browser install --with-deps')
+  })
+
+  test('base Dockerfile points agent-browser at the apt chromium on arm64 (no Chrome for Testing download path on that arch)', () => {
+    const base = buildBaseDockerfile()
+    expect(base).toContain('/root/.agent-browser/config.json')
+    expect(base).toContain('/usr/bin/chromium')
+  })
+
+  test('base Dockerfile omits gh keyring bootstrap — toggle-driven layers live in the per-agent Dockerfile so typeclaw.json toggles do not force a base-image rebuild', () => {
+    const base = buildBaseDockerfile()
+    expect(base).not.toContain('cli.github.com/packages')
+    expect(base).not.toContain('githubcli-archive-keyring.gpg')
+  })
+
+  test('base Dockerfile main apt-get install line installs only the baseline packages (no gh/python/tmux/ffmpeg)', () => {
+    const base = buildBaseDockerfile()
+    const match = base.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+?) \\\n/)
+    if (!match || !match[1]) throw new Error('main apt-get install line not found in base Dockerfile')
+    const pkgs = match[1].split(/\s+/).filter(Boolean)
+    expect(pkgs).toEqual(['git', 'ca-certificates', 'curl', 'gnupg'])
+  })
+
+  test('base Dockerfile uses the same BuildKit syntax pragma and base image as the per-agent Dockerfile so layer caching across the two is possible', () => {
+    const base = buildBaseDockerfile()
+    expect(base).toContain('# syntax=docker/dockerfile:1.7')
+    expect(base).toContain('FROM oven/bun:1-slim')
+    expect(base).toContain('WORKDIR /agent')
+  })
+
+  test('base Dockerfile preserves the apt-keep-cache trick from Layer 0 — without it, cache mounts on /var/cache/apt are useless', () => {
+    const base = buildBaseDockerfile()
+    expect(base).toContain('docker-clean')
+    expect(base).toContain('Keep-Downloaded-Packages "true"')
   })
 })
