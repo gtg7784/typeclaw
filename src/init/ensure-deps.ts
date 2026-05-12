@@ -2,7 +2,7 @@ import { existsSync, realpathSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, join, parse as parsePath } from 'node:path'
 
-import { runBunInstall } from './run-bun-install'
+import { type InstallRunner, runBunInstall } from './run-bun-install'
 
 const PACKAGE_FILE = 'package.json'
 const NODE_MODULES = 'node_modules'
@@ -13,7 +13,7 @@ export type EnsureDepsResult =
 
 export type EnsureDepsOptions = {
   cwd: string
-  install?: (cwd: string) => Promise<{ ok: true } | { ok: false; reason: string }>
+  install?: InstallRunner
   detect?: (cwd: string) => Promise<readonly string[]>
 }
 

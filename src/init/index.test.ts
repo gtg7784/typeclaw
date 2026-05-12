@@ -18,6 +18,7 @@ import {
   type HatchRunner,
   initGitRepo,
   type InitStepEvent,
+  type InstallRunner,
   isDirectoryNonEmpty,
   isHatched,
   isInitialized,
@@ -42,6 +43,16 @@ const okHatch: HatchRunner = async () => ({ ok: true }) as HatchingResult
 // is reachable. Tests that exercise the preflight failure path override this
 // with their own DockerExec to simulate ENOENT or daemon-down conditions.
 const okDocker: DockerExec = async () => ({ exitCode: 0, stdout: '29.4.0\n', stderr: '' })
+
+// Default install stub for tests: pretends `bun install` succeeded without
+// shelling out. The real installer fans 500+ HTTP requests at npm with no
+// lockfile, which both wastes ~5s per test and exposes us to the Bun 1.3.x
+// isolated-linker fetch deadlock (oven-sh/bun#26341). The runInit pipeline
+// tests verify composition — step ordering, event emission, failure
+// propagation — not the install primitive itself, so we never need a real
+// install here. Tests that exercise the failure path override this with their
+// own InstallRunner.
+const okInstall: InstallRunner = async () => ({ ok: true })
 
 function captureHatch(): { runner: HatchRunner; calls: Array<{ cwd: string; port: number }> } {
   const calls: Array<{ cwd: string; port: number }> = []
@@ -71,6 +82,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
     })
@@ -101,7 +113,7 @@ describe('runInit', () => {
       return { ok: true }
     }
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching, dockerExec: okDocker })
+    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching, runBunInstall: okInstall, dockerExec: okDocker })
 
     expect(seenAt).toEqual([{ hasGit: true, hasDockerfile: true }])
   })
@@ -109,7 +121,13 @@ describe('runInit', () => {
   test('hatching receives the init cwd and the configured port', async () => {
     const { runner, calls } = captureHatch()
 
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: runner, dockerExec: okDocker })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: runner,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
 
     expect(calls).toHaveLength(1)
     expect(calls[0]?.cwd).toBe(root)
@@ -124,6 +142,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
     })
@@ -141,6 +160,7 @@ describe('runInit', () => {
       apiKey: 'fw_integration_key',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
     })
 
@@ -152,7 +172,13 @@ describe('runInit', () => {
   })
 
   test('git step sees scaffolded files (step ordering)', async () => {
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, dockerExec: okDocker })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
 
     const tracked = (await runGit(root, ['ls-files'])).split('\n')
     expect(tracked).toContain('typeclaw.json')
@@ -176,6 +202,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
     })
@@ -194,6 +221,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
       onProgress: () => {},
     })
@@ -209,6 +237,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
     })
@@ -228,6 +257,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
     })
@@ -250,6 +280,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
     })
@@ -269,7 +300,13 @@ describe('runInit', () => {
   })
 
   test('works without onProgress callback', async () => {
-    await runInit({ cwd: root, apiKey: 'fw_test_key', runHatching: okHatch, dockerExec: okDocker })
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
 
     expect(isInitialized(root)).toBe(true)
   })
@@ -282,6 +319,7 @@ describe('runInit', () => {
       apiKey: 'fw_first_key',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
       runHatching: failingHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
     })
     expect(isInitialized(root)).toBe(true)
@@ -294,6 +332,7 @@ describe('runInit', () => {
       apiKey: 'fw_second_key',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
     })
@@ -336,6 +375,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: missingDocker,
       onProgress: (e) => events.push(e),
     })
@@ -377,6 +417,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: daemonDown,
       onProgress: (e) => events.push(e),
     })
@@ -410,6 +451,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching: trackingHatch,
+      runBunInstall: okInstall,
       dockerExec: missingDocker,
     })
 
@@ -430,6 +472,7 @@ describe('runInit', () => {
       model: 'openai-codex/gpt-5.5',
       llmAuth: { kind: 'oauth', runLogin: fakeLogin },
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
     })
@@ -464,6 +507,7 @@ describe('runInit', () => {
         model: 'openai-codex/gpt-5.5',
         llmAuth: { kind: 'oauth', runLogin: fakeLogin },
         runHatching: okHatch,
+        runBunInstall: okInstall,
         dockerExec: okDocker,
       }),
     ).rejects.toThrow(/OAuth login failed: browser closed/)
@@ -480,6 +524,7 @@ describe('runInit', () => {
       cwd: root,
       apiKey: 'fw_test_key',
       runHatching: okHatch,
+      runBunInstall: okInstall,
       dockerExec: okDocker,
       onProgress: (e) => events.push(e),
     })
@@ -488,9 +533,9 @@ describe('runInit', () => {
   })
 
   test('throws when neither apiKey nor llmAuth is provided', async () => {
-    await expect(runInit({ cwd: root, runHatching: okHatch, dockerExec: okDocker })).rejects.toThrow(
-      /requires either `llmAuth` or `apiKey`/,
-    )
+    await expect(
+      runInit({ cwd: root, runHatching: okHatch, runBunInstall: okInstall, dockerExec: okDocker }),
+    ).rejects.toThrow(/requires either `llmAuth` or `apiKey`/)
   })
 })
 
