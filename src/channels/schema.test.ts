@@ -76,9 +76,12 @@ describe('channelsSchema', () => {
 })
 
 describe('isAllowed', () => {
-  test('"*" matches every guild channel and every DM', () => {
+  test('"*" matches every guild channel, every DM, and every KakaoTalk chat', () => {
     expect(isAllowed(['*'], 'g1', 'c1')).toBe(true)
     expect(isAllowed(['*'], '@dm', 'd1')).toBe(true)
+    expect(isAllowed(['*'], '@kakao-dm', '12345')).toBe(true)
+    expect(isAllowed(['*'], '@kakao-group', '67890')).toBe(true)
+    expect(isAllowed(['*'], '@kakao-open', '11111')).toBe(true)
   })
 
   test('"guild:*" matches any guild channel but no DMs', () => {
@@ -217,20 +220,12 @@ describe('isAllowed', () => {
     expect(isAllowed(['kakao:*'], 'telegram', '12345')).toBe(false)
   })
 
-  test('non-kakao rules never admit kakao workspaces — including global "*"', () => {
+  test('adapter-specific non-kakao rules never admit kakao workspaces', () => {
     expect(isAllowed(['dm:*'], '@kakao-dm', '12345')).toBe(false)
     expect(isAllowed(['team:*'], '@kakao-group', '12345')).toBe(false)
     expect(isAllowed(['guild:*'], '@kakao-group', '12345')).toBe(false)
     expect(isAllowed(['im:*'], '@kakao-dm', '12345')).toBe(false)
     expect(isAllowed(['tg:*'], '@kakao-dm', '12345')).toBe(false)
-    // Privacy footgun prevention: `*` was the catch-all for Slack/Discord/
-    // Telegram before KakaoTalk landed, but we deliberately don't extend
-    // it to kakao workspaces because users with `*` configured for their
-    // bots didn't sign up for the bot to read their personal KakaoTalk
-    // chats.
-    expect(isAllowed(['*'], '@kakao-dm', '12345')).toBe(false)
-    expect(isAllowed(['*'], '@kakao-group', '67890')).toBe(false)
-    expect(isAllowed(['*'], '@kakao-open', '11111')).toBe(false)
   })
 
   test('kakao rules never admit non-kakao workspaces', () => {
