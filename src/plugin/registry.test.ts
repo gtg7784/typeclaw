@@ -17,6 +17,7 @@ function makeOptions(pluginName: string, ex: PluginExports) {
     registry: emptyRegistry(),
     hooks: createHookBus(),
     agentDir: '/tmp',
+    pluginConfig: undefined,
   }
 }
 
@@ -46,6 +47,21 @@ describe('registerContributions', () => {
     expect(opts.registry.cronJobs[0]?.globalId).toBe('__plugin_p1_nightly')
     expect(opts.registry.skills.map((s) => s.localName)).toEqual(['howto'])
     expect(opts.registry.skillsDirs.map((d) => d.path)).toEqual(['/abs/skills'])
+  })
+
+  test('records doctor checks, rejects duplicates within a plugin', () => {
+    const opts = makeOptions('memory', {
+      doctorChecks: {
+        'dir-writable': {
+          description: 'memory/ is writable',
+          run: async () => ({ status: 'ok', message: 'ok' }),
+        },
+      },
+    })
+    registerContributions(opts)
+    expect(opts.registry.doctorChecks.map((c) => `${c.pluginName}.${c.checkName}`)).toEqual(['memory.dir-writable'])
+
+    expect(() => registerContributions(opts)).toThrow(/doctor check "dir-writable" already registered/)
   })
 
   test('rejects duplicate tool name across plugins', () => {
@@ -106,10 +122,17 @@ describe('discardRegistrationsBy', () => {
         skills: { sk1: { description: '', content: '' } },
         skillsDirs: ['/p1/skills'],
         hooks: { 'session.start': () => {} },
+        doctorChecks: {
+          ping: {
+            description: 'always ok',
+            run: async () => ({ status: 'ok', message: 'ok' }),
+          },
+        },
       },
       registry,
       hooks,
       agentDir: '/tmp',
+      pluginConfig: undefined,
     })
     registerContributions({
       pluginName: 'p2',
@@ -121,6 +144,7 @@ describe('discardRegistrationsBy', () => {
       registry,
       hooks,
       agentDir: '/tmp',
+      pluginConfig: undefined,
     })
 
     expect(hooks.count('session.start')).toBe(1)
@@ -133,6 +157,7 @@ describe('discardRegistrationsBy', () => {
     expect(registry.cronJobs).toEqual([])
     expect(registry.skills).toEqual([])
     expect(registry.skillsDirs).toEqual([])
+    expect(registry.doctorChecks).toEqual([])
     expect(hooks.count('session.start')).toBe(0)
     expect(hooks.count('session.end')).toBe(1)
   })

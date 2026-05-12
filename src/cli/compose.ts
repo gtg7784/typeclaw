@@ -1,7 +1,17 @@
 import { defineCommand } from 'citty'
 
-import { composeLogs, composeRestart, composeStart, composeStatus, composeStop, type AgentResult } from '@/compose'
+import {
+  composeDoctor,
+  composeLogs,
+  composeRestart,
+  composeStart,
+  composeStatus,
+  composeStop,
+  type AgentResult,
+  type ComposeDoctorReport,
+} from '@/compose'
 import { config } from '@/config'
+import { formatJson, formatReport } from '@/doctor'
 
 import { formatComposeStatus } from './compose-status'
 import { c, spinner } from './ui'
@@ -156,6 +166,41 @@ const logsSub = defineCommand({
   },
 })
 
+const doctorSub = defineCommand({
+  meta: { name: 'doctor', description: 'diagnose every agent in immediate subdirectories of cwd' },
+  args: {
+    verbose: { type: 'boolean', alias: 'v', default: false, description: 'show check details' },
+    json: { type: 'boolean', default: false, description: 'emit the report as JSON' },
+    fix: {
+      type: 'boolean',
+      default: false,
+      description: 'attempt auto-fixes per agent and commit changes in each agent folder',
+    },
+    only: { type: 'string', description: 'comma-separated category filter' },
+    shallow: {
+      type: 'boolean',
+      default: false,
+      description: 'run cross-agent checks only; skip per-agent doctor runs',
+    },
+  },
+  async run({ args }) {
+    const only = args.only
+      ? args.only
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s.length > 0)
+      : undefined
+    const report = await composeDoctor({
+      rootCwd: process.cwd(),
+      fix: args.fix,
+      shallow: args.shallow,
+      ...(only !== undefined ? { only } : {}),
+    })
+    emitComposeDoctor(report, { verbose: args.verbose, json: args.json })
+    if (!report.ok) process.exit(1)
+  },
+})
+
 export const composeCommand = defineCommand({
   meta: {
     name: 'compose',
@@ -167,6 +212,7 @@ export const composeCommand = defineCommand({
     restart: restartSub,
     status: statusSub,
     logs: logsSub,
+    doctor: doctorSub,
   },
 })
 
@@ -237,4 +283,49 @@ function formatStopDone<T extends { running: boolean }>(result: AgentResult<T>):
 function formatRestartDone<T extends { start: { hostPort: number } }>(result: AgentResult<T>): string {
   if (!result.ok) return `${c.red('✖')} ${c.red('failed:')} ${result.reason}`
   return `${c.green('✔')} restarted on host port ${c.cyan(String(result.data.start.hostPort))}`
+}
+
+function emitComposeDoctor(report: ComposeDoctorReport, opts: { verbose: boolean; json: boolean }): void {
+  if (opts.json) {
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`)
+    return
+  }
+  const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined
+  const sectionHead = useColor ? c.bold : (s: string) => s
+
+  process.stdout.write(`${sectionHead('compose doctor')}  ${c.dim(report.rootCwd)}\n\n`)
+
+  process.stdout.write(`${sectionHead('Cross-agent checks')}\n`)
+  for (const check of report.crossChecks) {
+    const marker = checkMarker(check.status)
+    process.stdout.write(`  ${marker} ${check.message} ${c.dim(`(${check.name})`)}\n`)
+    if (opts.verbose && check.details !== undefined) {
+      for (const d of check.details) process.stdout.write(`      ${c.dim(`• ${d}`)}\n`)
+    }
+  }
+  process.stdout.write('\n')
+
+  for (const agent of report.agents) {
+    process.stdout.write(`${sectionHead(`Agent: ${agent.entry.name}`)}  ${c.dim(agent.entry.cwd)}\n`)
+    process.stdout.write(
+      `${opts.json ? formatJson(agent.result.final ?? agent.result.initial) : formatReport(agent.result.initial, { useColor, verbose: opts.verbose })}\n\n`,
+    )
+  }
+
+  process.stdout.write(
+    `${report.ok ? c.green('●') : c.red('●')} compose doctor ${report.ok ? 'passed' : 'found issues'}\n`,
+  )
+}
+
+function checkMarker(status: 'ok' | 'warning' | 'error' | 'info'): string {
+  switch (status) {
+    case 'ok':
+      return c.green('✓')
+    case 'warning':
+      return c.yellow('!')
+    case 'error':
+      return c.red('✗')
+    case 'info':
+      return c.cyan('i')
+  }
 }

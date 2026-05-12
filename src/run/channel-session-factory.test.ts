@@ -33,7 +33,7 @@ function makeFakeSessionFactory(sessionDir: string): SessionFactory {
 
 function makeEmptyRuntime(): PluginRuntime {
   return createPluginRuntime({
-    registry: { tools: [], subagents: [], cronJobs: [], skills: [], skillsDirs: [] } as never,
+    registry: { tools: [], subagents: [], cronJobs: [], skills: [], skillsDirs: [], doctorChecks: [] } as never,
     hooks: {} as never,
     subagents: { byName: new Map(), all: [] } as never,
     pluginSubagentByShim: new WeakMap(),
@@ -45,7 +45,7 @@ function makeEmptyRuntime(): PluginRuntime {
 
 function makeRuntimeWithPlugin(): PluginRuntime {
   return createPluginRuntime({
-    registry: { tools: [], subagents: [], cronJobs: [], skills: [], skillsDirs: [] } as never,
+    registry: { tools: [], subagents: [], cronJobs: [], skills: [], skillsDirs: [], doctorChecks: [] } as never,
     hooks: {} as never,
     subagents: { byName: new Map(), all: [] } as never,
     pluginSubagentByShim: new WeakMap(),

@@ -164,6 +164,51 @@ export type PluginExports = {
   skills?: Record<string, PluginSkill>
   skillsDirs?: string[]
   hooks?: Hooks
+  doctorChecks?: Record<string, PluginDoctorCheck>
+}
+
+// `typeclaw doctor` plugin extension surface. Each check is read-only by
+// default; declaring `fix.apply` opts the check into `typeclaw doctor --fix`,
+// where the host serializes plugin fixes, validates their `changedPaths`
+// against the agent folder, and commits the union of all fixes in a single
+// commit.
+export type PluginDoctorCheck = {
+  description: string
+  category?: string
+  run: (ctx: PluginDoctorContext) => Promise<PluginCheckResult>
+}
+
+export type PluginDoctorContext = {
+  readonly pluginName: string
+  readonly agentDir: string
+  readonly config: unknown
+  readonly logger: PluginLogger
+}
+
+export type PluginCheckStatus = 'ok' | 'warning' | 'error'
+
+export type PluginCheckResult = {
+  status: PluginCheckStatus
+  message: string
+  details?: string[]
+  fix?: PluginFixSuggestion
+}
+
+export type PluginFixSuggestion = {
+  description: string
+  // When omitted, the fix is advisory-only. `typeclaw doctor --fix` only
+  // attempts to remediate checks whose suggestion includes an `apply`.
+  apply?: (ctx: PluginDoctorContext) => Promise<PluginFixResult>
+}
+
+export type PluginFixResult = {
+  // One-line description that appears in the commit body as a bullet.
+  summary: string
+  // POSIX paths relative to agentDir; the host validates each one stays
+  // inside agentDir before `git add`ing. Absolute paths and `..` segments
+  // are rejected to keep plugin fixes from staging files outside the agent
+  // folder. Empty array is valid (e.g. a fix that only logs).
+  changedPaths: string[]
 }
 
 export type DefinedPlugin<TConfig = never> = {

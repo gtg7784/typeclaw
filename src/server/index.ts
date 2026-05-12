@@ -6,6 +6,7 @@ import {
   type CreateSessionOptions,
   type CreateSessionResult,
 } from '@/agent'
+import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
 import type { SessionOrigin } from '@/agent/session-origin'
 import type { ChannelRouter } from '@/channels/router'
 import type { HookBus } from '@/plugin'
@@ -187,6 +188,16 @@ export function createServer({
 
           if (msg.type === 'reload') {
             await handleReload(ws, reloadAll, reloadRegistry, msg.scope)
+            return
+          }
+
+          if (msg.type === 'doctor') {
+            await handleDoctor(ws, msg.requestId, pluginRuntime, agentDir)
+            return
+          }
+
+          if (msg.type === 'doctor_fix') {
+            await handleDoctorFix(ws, msg.requestId, msg.checkId, pluginRuntime, agentDir)
             return
           }
 
@@ -391,6 +402,61 @@ function pushQueueState(ws: Ws, state: SessionState): void {
     ts: q.ts,
   }))
   send(ws, { type: 'queue_state', pending })
+}
+
+async function handleDoctor(
+  ws: Ws,
+  requestId: string,
+  pluginRuntime: PluginRuntime | undefined,
+  agentDir: string | undefined,
+): Promise<void> {
+  if (pluginRuntime === undefined || agentDir === undefined) {
+    send(ws, { type: 'doctor_result', requestId, checks: [] })
+    return
+  }
+  const snapshot = pluginRuntime.get()
+  if (snapshot === undefined) {
+    send(ws, { type: 'doctor_result', requestId, checks: [] })
+    return
+  }
+  try {
+    const checks = await runPluginDoctorChecks({ registry: snapshot.registry, agentDir })
+    send(ws, { type: 'doctor_result', requestId, checks })
+  } catch (err) {
+    send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
+  }
+}
+
+async function handleDoctorFix(
+  ws: Ws,
+  requestId: string,
+  checkId: string,
+  pluginRuntime: PluginRuntime | undefined,
+  agentDir: string | undefined,
+): Promise<void> {
+  if (pluginRuntime === undefined || agentDir === undefined) {
+    send(ws, {
+      type: 'doctor_fix_result',
+      requestId,
+      result: { ok: false, checkId, error: 'plugin runtime not configured' },
+    })
+    return
+  }
+  const snapshot = pluginRuntime.get()
+  if (snapshot === undefined) {
+    send(ws, {
+      type: 'doctor_fix_result',
+      requestId,
+      result: { ok: false, checkId, error: 'plugin runtime not configured' },
+    })
+    return
+  }
+  const outcome = await runPluginDoctorFix({ registry: snapshot.registry, agentDir, checkId })
+  const result =
+    outcome.ok === true
+      ? { ok: true as const, checkId, summary: outcome.summary, changedPaths: outcome.changedPaths }
+      : { ok: false as const, checkId, error: outcome.error }
+  send(ws, { type: 'doctor_fix_result', requestId, result })
 }
 
 async function handleReload(
