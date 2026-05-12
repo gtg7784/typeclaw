@@ -125,6 +125,35 @@ export function classifyRmStderr(stderr: string): BenignRmKind {
   return null
 }
 
+// Detects Docker's name-conflict response from `docker run --name <X>`:
+//   docker: Error response from daemon: Conflict. The container name
+//   "/<X>" is already in use by container "<id>". You have to remove
+//   (or rename) that container to be able to reuse that name.
+//
+// This is the user-visible failure mode behind `typeclaw compose restart`
+// even after stop()/start()'s preflight already waited for `docker inspect`
+// to report the container gone. Docker maintains TWO pieces of state for a
+// container name: the container record (visible to `inspect` / `ps -a`) and
+// a separate name-reservation entry checked by `docker run --name`. Under
+// load — most reliably reproduced on OrbStack with N parallel agents
+// restarting via `Promise.all` — those two drain at different times. The
+// container record drops first; the name reservation lingers tens to
+// hundreds of ms longer. `waitForRemoval` polls the container record, so
+// it can return "gone" while `docker run --name <same>` still loses on the
+// reservation.
+//
+// The robust signal is the operation we actually need to succeed: probe by
+// running `docker run` itself and retry on conflict. classifyRmStderr
+// covers `docker rm`'s benign cases; this helper covers `docker run`'s.
+//
+// Matches case-insensitively on the canonical phrasing across Docker
+// Engine, Docker Desktop, and OrbStack. The (or rename) clause is the
+// most stable substring across vendor message variants.
+export function isContainerNameConflict(stderr: string): boolean {
+  const lower = stderr.toLowerCase()
+  return lower.includes('container name') && lower.includes('is already in use')
+}
+
 // Polls `docker inspect` until the named container is gone or the deadline
 // elapses. Required after a `docker rm` that returned "removal of container
 // … is already in progress": Docker has committed to removal but has not
@@ -134,6 +163,11 @@ export function classifyRmStderr(stderr: string): BenignRmKind {
 // user-visible symptom under `typeclaw compose restart` and any restart of
 // a container that hostd's GC tick raced ahead on). Returns true if the
 // container disappeared before the deadline, false on timeout.
+//
+// NOTE: `inspect` reporting "gone" is necessary but NOT sufficient for
+// `docker run --name <same>` to succeed — Docker's name-reservation table
+// drains independently. waitForRemoval is the fast path; the retry on
+// `docker run` (see isContainerNameConflict) is the safety net.
 export async function waitForRemoval(
   exec: DockerExec,
   name: string,
