@@ -11,17 +11,17 @@ This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` 
   "memory": {
     "idleMs": 10000,
     "bufferBytes": 100000,
-    "dreaming": { "schedule": "0 4 * * *" }
+    "dreaming": { "schedule": "*/30 * * * *" }
   }
 }
 ```
 
-| Field                      | Default            | Effect                                                                                                                                                                                    |
-| -------------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `memory.idleMs`            | `10000`            | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`.                                                                                                   |
-| `memory.bufferBytes`       | `100000`           | Size-based ceiling: spawns `memory-logger` when the transcript grows by this many bytes since the last run, even during continuous activity. `0` disables. Minimum `10000` when non-zero. |
-| `memory.dreaming`          | `{}` (cron job on) | Dreaming cron job is always registered. Override `schedule` to change when it fires.                                                                                                      |
-| `memory.dreaming.schedule` | `"0 4 * * *"`      | Five-field cron expression. Applies whether `memory.dreaming` is omitted, empty, or explicitly set. Second-level schedules are rejected to avoid noisy no-op dreaming loops.              |
+| Field                      | Default            | Effect                                                                                                                                                                                                                                                                                                                                                             |
+| -------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `memory.idleMs`            | `10000`            | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`.                                                                                                                                                                                                                                                                            |
+| `memory.bufferBytes`       | `100000`           | Size-based ceiling: spawns `memory-logger` when the transcript grows by this many bytes since the last run, even during continuous activity. `0` disables. Minimum `10000` when non-zero.                                                                                                                                                                          |
+| `memory.dreaming`          | `{}` (cron job on) | Dreaming cron job is always registered. Override `schedule` to change when it fires.                                                                                                                                                                                                                                                                               |
+| `memory.dreaming.schedule` | `"*/30 * * * *"`   | Five-field cron expression. Defaults to every 30 minutes; fires short-circuit with zero LLM cost when nothing sits past the watermark, so frequent no-op fires are cheap and let sporadic agents still consolidate while alive (`src/cron/scheduler.ts` has no catchup for missed fires). Second-level schedules are rejected to avoid noisy no-op dreaming loops. |
 
 All fields are **restart-required** — the plugin reads them once at boot.
 

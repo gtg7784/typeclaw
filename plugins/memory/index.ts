@@ -13,7 +13,12 @@ import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-l
 const DEFAULT_IDLE_MS = 10_000
 const DEFAULT_BUFFER_BYTES = 100_000
 const MIN_BUFFER_BYTES = 10_000
-const DEFAULT_DREAMING_SCHEDULE = '0 4 * * *'
+// 30-minute default. Fires short-circuit before any LLM call when nothing
+// sits past the watermark (`dreaming.ts` handler returns when
+// `snapshots.undreamed.length === 0`), so frequent no-op fires are cheap.
+// The scheduler has no catchup for missed fires; a daily default would starve
+// sporadic agents entirely. Operators can override via `memory.dreaming.schedule`.
+const DEFAULT_DREAMING_SCHEDULE = '*/30 * * * *'
 
 // Hard ceiling on a single memory-logger spawn. The chain serializes spawns
 // per agent, so a non-settling spawn would otherwise wedge every subsequent
