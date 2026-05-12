@@ -996,6 +996,51 @@ describe('createKakaotalkAdapter — inbound classification', () => {
     await adapter.stop()
     await router.stop()
   })
+
+  test('routes a message from a chat that getChats omits under @kakao-group instead of dropping unknown_chat', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const logs: string[] = []
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+      logger: {
+        info: (m) => logs.push(m),
+        warn: (m) => logs.push(m),
+        error: (m) => logs.push(m),
+      },
+    })
+    client.chats = []
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', {
+      type: 'MSG',
+      chat_id: '468625891988320',
+      log_id: 'L3838',
+      author_id: 24228244,
+      author_name: 'Alice',
+      message: 'hi',
+      message_type: 1,
+      attachment: null,
+      sent_at: 1_730_000_000_000,
+    })
+    await new Promise((r) => setTimeout(r, 10))
+
+    const dropped = logs.find((m) => m.includes('reason=unknown_chat'))
+    expect(dropped).toBeUndefined()
+    const routed = logs.find((m) => m.includes('routed log_id=L3838'))
+    expect(routed).toBeDefined()
+    expect(routed).toContain('bucket=@kakao-group')
+    const provisional = logs.find((m) => m.includes('provisional chat=468625891988320'))
+    expect(provisional).toBeDefined()
+
+    await adapter.stop()
+    await router.stop()
+  })
 })
 
 describe('createKakaotalkAdapter — mark read on every inbound', () => {
