@@ -1,6 +1,6 @@
 {
   "name": "typeclaw",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "homepage": "https://github.com/typeclaw/typeclaw#readme",
   "bugs": {
     "url": "https://github.com/typeclaw/typeclaw/issues"
@@ -16,6 +16,7 @@
   "files": [
     "src",
     "scripts",
+    "tsconfig.json",
     "typeclaw.schema.json",
     "cron.schema.json",
     "secrets.schema.json",
