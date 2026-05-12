@@ -1,6 +1,6 @@
 export { discoverAgents, type AgentEntry } from './discover'
 export { colorFor, composeLogs, makeLinePrefixer, type ComposeLogsOptions, type ComposeLogsResult } from './logs'
-export { composePs, type AgentStatus, type AgentStatusEntry, type ComposePsResult } from './ps'
+export { composeStatus, type AgentRuntimeState, type AgentStatusEntry, type ComposeStatusResult } from './status'
 export {
   composeRestart,
   type ComposeRestartEvent,

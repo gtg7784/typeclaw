@@ -1,16 +1,9 @@
 import { defineCommand } from 'citty'
 
-import {
-  composeLogs,
-  composePs,
-  composeRestart,
-  composeStart,
-  composeStop,
-  type AgentResult,
-  type AgentStatus,
-} from '@/compose'
+import { composeLogs, composeRestart, composeStart, composeStatus, composeStop, type AgentResult } from '@/compose'
 import { config } from '@/config'
 
+import { formatComposeStatus } from './compose-status'
 import { c, spinner } from './ui'
 
 const startSub = defineCommand({
@@ -120,20 +113,12 @@ const restartSub = defineCommand({
   },
 })
 
-const psSub = defineCommand({
-  meta: { name: 'ps', description: 'show status of every agent in immediate subdirectories of cwd' },
+const statusSub = defineCommand({
+  meta: { name: 'status', description: 'show status of every agent in immediate subdirectories of cwd' },
   async run() {
-    const { entries } = await composePs(process.cwd())
-    if (entries.length === 0) {
-      console.log(c.dim('No typeclaw agents found in immediate subdirectories of cwd.'))
-      return
-    }
-    const nameW = entries.reduce((w, e) => Math.max(w, e.name.length), 'NAME'.length)
-    const containerW = entries.reduce((w, e) => Math.max(w, e.containerName.length), 'CONTAINER'.length)
-    console.log(`${c.bold('NAME'.padEnd(nameW))}  ${c.bold('CONTAINER'.padEnd(containerW))}  ${c.bold('STATUS')}`)
-    for (const e of entries) {
-      console.log(`${e.name.padEnd(nameW)}  ${e.containerName.padEnd(containerW)}  ${colorStatus(e.status)}`)
-    }
+    const result = await composeStatus(process.cwd())
+    const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined
+    process.stdout.write(`${formatComposeStatus(result, { useColor })}\n`)
   },
 })
 
@@ -180,16 +165,10 @@ export const composeCommand = defineCommand({
     start: startSub,
     stop: stopSub,
     restart: restartSub,
-    ps: psSub,
+    status: statusSub,
     logs: logsSub,
   },
 })
-
-function colorStatus(s: AgentStatus): string {
-  if (s === 'running') return c.green('RUNNING')
-  if (s === 'stopped') return c.dim('STOPPED')
-  return c.yellow('NOT CREATED')
-}
 
 // Single clack spinner with a multi-line message body, one line per agent.
 // Concurrent clack spinners can't coexist: each one's render loop writes
