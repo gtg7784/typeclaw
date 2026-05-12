@@ -127,10 +127,9 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       })
     }
     if (name === 'kakaotalk') {
-      const kakaoFallback = { ...cfg, autoMarkRead: false }
       return createKakaotalk({
         router,
-        configRef: () => options.channelsConfigRef()[name] ?? kakaoFallback,
+        configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
         credentialsDir: resolveKakaoConfigDir(options.agentDir, env),

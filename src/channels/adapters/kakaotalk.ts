@@ -327,6 +327,15 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         `[kakaotalk] inbound log_id=${event.log_id} author=${event.author_id} ${inboundTag} text_len=${event.message.length}`,
       )
 
+      // Ack the message BEFORE classify/route so the sender's unread "1"
+      // (노란숫자) clears even when we drop the message (self-author,
+      // not-in-allow, empty text, etc.). The receiver of a kakao adapter is
+      // expected to behave like a "read it as soon as it arrives" client —
+      // the agent has observed the bytes, so the user should see the read
+      // acknowledgement regardless of what we decide to do with the message
+      // downstream. Open-chat skip is enforced inside markReadIfSupported.
+      markReadIfSupported({ client, event, channelResolver, logger })
+
       const verdict = classifyInbound(event, options.configRef(), {
         selfUserId,
         lookupChat: (id) => channelResolver.lookupChat(id),
@@ -350,9 +359,6 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         `[kakaotalk] routed log_id=${event.log_id} ${inboundTag} mention=${enriched.isBotMention} dm=${enriched.isDm}`,
       )
       await options.router.route(enriched)
-      if (options.configRef().autoMarkRead) {
-        autoMarkRead({ client, event, channelResolver, logger })
-      }
     } catch (err) {
       logger.error(`[kakaotalk] handleInbound failed: ${describe(err)}`)
     } finally {
@@ -554,7 +560,7 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-function autoMarkRead(deps: {
+function markReadIfSupported(deps: {
   client: Pick<KakaoTalkClient, 'markRead'>
   event: KakaoTalkPushMessageEvent
   channelResolver: Pick<KakaoChannelResolver, 'lookupChat'>
@@ -568,7 +574,7 @@ function autoMarkRead(deps: {
     // surface linkId today, so rather than send a doomed ack we skip and
     // log once. Wiring linkId through the resolver is a follow-up.
     logger.info(
-      `[kakaotalk] auto-mark-read skipped chat=${event.chat_id} log=${event.log_id} reason=open_chat_link_id_unsupported`,
+      `[kakaotalk] mark-read skipped chat=${event.chat_id} log=${event.log_id} reason=open_chat_link_id_unsupported`,
     )
     return
   }
@@ -576,12 +582,12 @@ function autoMarkRead(deps: {
     (result) => {
       if (!result.success) {
         logger.warn(
-          `[kakaotalk] auto-mark-read non-success status_code=${result.status_code} chat=${event.chat_id} log=${event.log_id}`,
+          `[kakaotalk] mark-read non-success status_code=${result.status_code} chat=${event.chat_id} log=${event.log_id}`,
         )
       }
     },
     (err) => {
-      logger.warn(`[kakaotalk] auto-mark-read failed: ${describe(err)} chat=${event.chat_id} log=${event.log_id}`)
+      logger.warn(`[kakaotalk] mark-read failed: ${describe(err)} chat=${event.chat_id} log=${event.log_id}`)
     },
   )
 }

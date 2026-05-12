@@ -99,21 +99,20 @@ const adapterSchema = z.object({
   enabled: z.boolean().default(true),
 })
 
-// KakaoTalk adds `autoMarkRead`: when true, after the adapter delivers an
-// inbound message to the router it fires a LOCO NOTIREAD ack so the sender's
-// unread "1" (노란숫자) clears. Off by default — auto-acking every received
-// message is a distinct behavioral fingerprint vs a human, and KakaoTalk's
-// abuse detection may flag accounts that ack rapidly and unconditionally.
-// Enable only on dedicated agent accounts you can afford to lose. Lives on
-// the KakaoTalk slot only so other adapters' config shape is unchanged.
-const kakaotalkAdapterSchema = adapterSchema.extend({
-  autoMarkRead: z.boolean().default(false),
-})
-
+// KakaoTalk uses the same shape as every other adapter. There used to be an
+// `autoMarkRead` opt-in here; the adapter now fires a LOCO NOTIREAD ack on
+// every inbound MSG event unconditionally (see kakaotalk.ts) so the sender's
+// unread "1" (노란숫자) clears as soon as the agent observes the message.
+// Existing configs with `autoMarkRead: <bool>` continue to parse — Zod's
+// default `.object()` strips unknown keys silently — but the field has no
+// effect. Risk note: auto-acking every received message is a distinct
+// behavioral fingerprint vs a human, so KakaoTalk's abuse detection may
+// flag accounts that ack rapidly and unconditionally. Run typeclaw with the
+// kakaotalk adapter only on dedicated agent accounts you can afford to lose.
 export const channelsSchema = z
   .object({
     'discord-bot': adapterSchema.optional(),
-    kakaotalk: kakaotalkAdapterSchema.optional(),
+    kakaotalk: adapterSchema.optional(),
     'slack-bot': adapterSchema.optional(),
     'telegram-bot': adapterSchema.optional(),
   })
@@ -122,7 +121,7 @@ export const channelsSchema = z
 export type AllowRule = string
 export type EngagementConfig = z.infer<typeof engagementSchema>
 export type ChannelAdapterConfig = z.infer<typeof adapterSchema>
-export type KakaotalkAdapterConfig = z.infer<typeof kakaotalkAdapterSchema>
+export type KakaotalkAdapterConfig = ChannelAdapterConfig
 export type ChannelsConfig = z.infer<typeof channelsSchema>
 
 // Discord IDs are numeric snowflakes; Slack IDs start with a single uppercase

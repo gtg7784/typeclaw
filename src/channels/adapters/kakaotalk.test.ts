@@ -137,7 +137,6 @@ const adapterCfg = (over: Partial<KakaotalkAdapterConfig> = {}): KakaotalkAdapte
     stickiness: { perReply: { window: 300_000 } },
   },
   history: defaultHistoryConfig(),
-  autoMarkRead: false,
   ...over,
 })
 
@@ -762,7 +761,7 @@ describe('createKakaotalkAdapter — inbound classification', () => {
   })
 })
 
-describe('createKakaotalkAdapter — auto mark read', () => {
+describe('createKakaotalkAdapter — mark read on every inbound', () => {
   const dmChat = (id: string): KakaoChat => ({
     chat_id: id,
     type: 0,
@@ -804,37 +803,7 @@ describe('createKakaotalkAdapter — auto mark read', () => {
     sent_at: 1_730_000_000_000,
   })
 
-  test('fires markRead after route resolves when autoMarkRead is true', async () => {
-    const client = new FakeClient()
-    const listener = new FakeListener()
-    const cfg = adapterCfg({ autoMarkRead: true })
-    const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
-    const logs: string[] = []
-    const adapter = createKakaotalkAdapter({
-      router,
-      configRef: () => cfg,
-      client,
-      listenerFactory: () => listener,
-      logger: {
-        info: (m) => logs.push(m),
-        warn: (m) => logs.push(m),
-        error: (m) => logs.push(m),
-      },
-    })
-    client.chats = [dmChat('111')]
-    await adapter.start()
-    listener.emit('connected', { userId: '999' })
-
-    listener.emit('message', accepted('111', 'L42'))
-    await new Promise((r) => setTimeout(r, 50))
-
-    expect(client.markReadCalls).toEqual([{ chatId: '111', logId: 'L42' }])
-
-    await adapter.stop()
-    await router.stop()
-  })
-
-  test('does not fire markRead when autoMarkRead is false (default)', async () => {
+  test('fires markRead for a routed inbound', async () => {
     const client = new FakeClient()
     const listener = new FakeListener()
     const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
@@ -849,22 +818,21 @@ describe('createKakaotalkAdapter — auto mark read', () => {
     listener.emit('connected', { userId: '999' })
 
     listener.emit('message', accepted('111', 'L42'))
-    await new Promise((r) => setTimeout(r, 10))
+    await new Promise((r) => setTimeout(r, 50))
 
-    expect(client.markReadCalls).toHaveLength(0)
+    expect(client.markReadCalls).toEqual([{ chatId: '111', logId: 'L42' }])
 
     await adapter.stop()
     await router.stop()
   })
 
-  test('does not fire markRead for dropped messages even when autoMarkRead is true', async () => {
+  test('still fires markRead when classification drops the message (self-author, not-in-allow, etc.)', async () => {
     const client = new FakeClient()
     const listener = new FakeListener()
-    const cfg = adapterCfg({ autoMarkRead: true })
-    const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
     const adapter = createKakaotalkAdapter({
       router,
-      configRef: () => cfg,
+      configRef: () => adapterCfg(),
       client,
       listenerFactory: () => listener,
     })
@@ -872,10 +840,14 @@ describe('createKakaotalkAdapter — auto mark read', () => {
     await adapter.start()
     listener.emit('connected', { userId: '999' })
 
+    // authorId 999 matches the fake profile's user_id → self_author drop.
+    // The contract changed: we still want the unread "1" to clear, so
+    // markRead must fire even though the message never reaches the router.
     listener.emit('message', accepted('111', 'L42', 999))
-    await new Promise((r) => setTimeout(r, 10))
+    await new Promise((r) => setTimeout(r, 50))
 
-    expect(client.markReadCalls).toHaveLength(0)
+    expect(client.markReadCalls).toEqual([{ chatId: '111', logId: 'L42' }])
+    expect(client.sendMessageCalls).toHaveLength(0)
 
     await adapter.stop()
     await router.stop()
@@ -884,7 +856,7 @@ describe('createKakaotalkAdapter — auto mark read', () => {
   test('skips markRead for open-chat bucket (linkId not yet wired through resolver)', async () => {
     const client = new FakeClient()
     const listener = new FakeListener()
-    const cfg = adapterCfg({ allow: ['kakao:open/*'], autoMarkRead: true })
+    const cfg = adapterCfg({ allow: ['kakao:open/*'] })
     const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
     const logs: string[] = []
     const adapter = createKakaotalkAdapter({
@@ -906,9 +878,7 @@ describe('createKakaotalkAdapter — auto mark read', () => {
     await new Promise((r) => setTimeout(r, 50))
 
     expect(client.markReadCalls).toHaveLength(0)
-    const skipped = logs.find(
-      (m) => m.includes('auto-mark-read skipped') && m.includes('open_chat_link_id_unsupported'),
-    )
+    const skipped = logs.find((m) => m.includes('mark-read skipped') && m.includes('open_chat_link_id_unsupported'))
     expect(skipped).toBeDefined()
 
     await adapter.stop()
@@ -919,7 +889,7 @@ describe('createKakaotalkAdapter — auto mark read', () => {
     const client = new FakeClient()
     const listener = new FakeListener()
     client.markReadError = new Error('LOCO packet timeout')
-    const cfg = adapterCfg({ allow: ['kakao:group/*'], autoMarkRead: true })
+    const cfg = adapterCfg({ allow: ['kakao:group/*'] })
     const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
     const logs: string[] = []
     const adapter = createKakaotalkAdapter({
@@ -941,7 +911,7 @@ describe('createKakaotalkAdapter — auto mark read', () => {
     await new Promise((r) => setTimeout(r, 50))
 
     expect(client.markReadCalls).toHaveLength(1)
-    const failure = logs.find((m) => m.includes('auto-mark-read failed') && m.includes('LOCO packet timeout'))
+    const failure = logs.find((m) => m.includes('mark-read failed') && m.includes('LOCO packet timeout'))
     expect(failure).toBeDefined()
 
     await adapter.stop()
@@ -952,7 +922,7 @@ describe('createKakaotalkAdapter — auto mark read', () => {
     const client = new FakeClient()
     const listener = new FakeListener()
     client.markReadResult = { success: false, status_code: -500, chat_id: '222', watermark: 'L11' }
-    const cfg = adapterCfg({ allow: ['kakao:group/*'], autoMarkRead: true })
+    const cfg = adapterCfg({ allow: ['kakao:group/*'] })
     const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
     const logs: string[] = []
     const adapter = createKakaotalkAdapter({
@@ -973,7 +943,7 @@ describe('createKakaotalkAdapter — auto mark read', () => {
     listener.emit('message', accepted('222', 'L11'))
     await new Promise((r) => setTimeout(r, 50))
 
-    const nonSuccess = logs.find((m) => m.includes('auto-mark-read non-success') && m.includes('status_code=-500'))
+    const nonSuccess = logs.find((m) => m.includes('mark-read non-success') && m.includes('status_code=-500'))
     expect(nonSuccess).toBeDefined()
 
     await adapter.stop()
