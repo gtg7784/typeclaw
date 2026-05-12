@@ -130,21 +130,23 @@ export function classifyRmStderr(stderr: string): BenignRmKind {
 //   "/<X>" is already in use by container "<id>". You have to remove
 //   (or rename) that container to be able to reuse that name.
 //
-// This is the user-visible failure mode behind `typeclaw compose restart`
-// even after stop()/start()'s preflight already waited for `docker inspect`
-// to report the container gone. Docker maintains TWO pieces of state for a
-// container name: the container record (visible to `inspect` / `ps -a`) and
-// a separate name-reservation entry checked by `docker run --name`. Under
-// load — most reliably reproduced on OrbStack with N parallel agents
-// restarting via `Promise.all` — those two drain at different times. The
-// container record drops first; the name reservation lingers tens to
-// hundreds of ms longer. `waitForRemoval` polls the container record, so
-// it can return "gone" while `docker run --name <same>` still loses on the
-// reservation.
+// The dominant cause of this error in `typeclaw compose restart` is NOT a
+// transient name-reservation drain (PR #121's hypothesis) but a concrete
+// corpse left behind by an earlier `docker run` in the same start() call
+// that failed AFTER Docker created the container record. The canonical
+// path: compose restart fires N agents in parallel via Promise.all; they
+// race for the preferred host port; the loser's `docker run -p <busy>:...`
+// fails with "port is already allocated", and depending on the daemon
+// version Docker may have already created the container record before the
+// port bind failed. start()'s port-TOCTOU retry then re-runs `docker run`
+// with a fresh ephemeral port but the SAME --name, and hits this conflict
+// against the corpse from the previous attempt. The corpse is stable —
+// sleep-only retries cannot make it go away.
 //
-// The robust signal is the operation we actually need to succeed: probe by
-// running `docker run` itself and retry on conflict. classifyRmStderr
-// covers `docker rm`'s benign cases; this helper covers `docker run`'s.
+// The fix is destructive: when this error fires for a non-running same-name
+// container, force-remove it before retrying. See cleanupRunCorpse for the
+// safety contract (only force-remove containers that are NOT running, so a
+// concurrent legitimate start of the same name is never killed).
 //
 // Matches case-insensitively on the canonical phrasing across Docker
 // Engine, Docker Desktop, and OrbStack. The (or rename) clause is the
@@ -152,6 +154,54 @@ export function classifyRmStderr(stderr: string): BenignRmKind {
 export function isContainerNameConflict(stderr: string): boolean {
   const lower = stderr.toLowerCase()
   return lower.includes('container name') && lower.includes('is already in use')
+}
+
+// Result of probing whether a previous `docker run --name <X>` left a corpse
+// blocking the next run:
+//   - 'gone'     — no container with that name. Safe to `docker run --name`.
+//   - 'removed'  — corpse existed and was force-removed (and waitForRemoval
+//                  confirmed it disappeared). Safe to `docker run --name`.
+//   - 'running'  — a container with that name is currently RUNNING. We did
+//                  NOT remove it. Caller must NOT proceed with `docker run
+//                  --name <same>`: that would either fail again or imply a
+//                  concurrent legitimate start that we should not kill.
+//   - 'stuck'    — corpse existed but did not disappear within waitForRemoval
+//                  budget. Caller should surface a clear error rather than
+//                  loop forever.
+export type CorpseCleanupOutcome = 'gone' | 'removed' | 'running' | 'stuck'
+
+// Inspects the named container; if a non-running corpse is holding the
+// name (the failure mode behind `typeclaw compose restart`'s persistent
+// Conflict errors), force-removes it and waits for the removal to drain.
+// Explicitly refuses to touch a RUNNING container so that a concurrent
+// legitimate start of the same name (or a foreign-but-named container the
+// user wants kept alive) is never killed by this cleanup path. Errors from
+// the rm itself are folded into 'stuck' so the caller can surface a single
+// "still here" reason rather than chase docker stderr variants.
+//
+// The rm is keyed on the container ID we read from the same inspect call,
+// NOT on the name. This closes the TOCTOU window where another process
+// could create a live container with the same name between our inspect
+// (saw a non-running corpse with ID A) and our rm: removing by name would
+// kill the new live container with ID B, but removing by ID A targets the
+// specific corpse we measured. If ID A is already gone by the time rm
+// fires (e.g. a concurrent cleanup beat us), the rm returns "No such
+// container" which classifyRmStderr folds into 'gone'. waitForRemoval
+// is still keyed on name because that's what the caller's next
+// `docker run --name <name>` will actually collide on.
+export async function cleanupRunCorpse(exec: DockerExec, name: string): Promise<CorpseCleanupOutcome> {
+  const probe = await exec(['inspect', '--format', '{{.Id}}|{{.State.Running}}', name])
+  if (probe.exitCode !== 0) return 'gone'
+  const [id = '', running = ''] = probe.stdout.trim().split('|')
+  if (running === 'true') return 'running'
+  if (id === '') return 'stuck'
+  const rm = await exec(['rm', '-f', id])
+  if (rm.exitCode !== 0) {
+    const kind = classifyRmStderr(rm.stderr)
+    if (kind === 'gone') return 'gone'
+    if (kind === null) return 'stuck'
+  }
+  return (await waitForRemoval(exec, name)) ? 'removed' : 'stuck'
 }
 
 // Polls `docker inspect` until the named container is gone or the deadline
