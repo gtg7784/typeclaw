@@ -67,5 +67,5 @@ In channel sessions, the agent rarely goes idle long enough to trip the timer be
 - `dreaming-state.test.ts` — fail-open semantics on malformed state.
 - `watermark.test.ts` — marker parsing.
 - `append-tool.test.ts` — append-only semantics.
-- `plugins/guard/policies/skill-authoring.test.ts` — runtime skill authoring guard: path sandboxing, name validation, YAML frontmatter, and write/edit final-content validation.
+- `src/bundled-plugins/guard/policies/skill-authoring.test.ts` — runtime skill authoring guard: path sandboxing, name validation, YAML frontmatter, and write/edit final-content validation.
 - `load-memory.test.ts` — memory section rendering, undreamed-tail filtering, watermark stripping.
