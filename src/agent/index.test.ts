@@ -148,7 +148,10 @@ describe('createResourceLoader', () => {
       cronJobs: [],
       skills: [],
       skillsDirs: [
-        { pluginName: 'agent-browser', path: join(import.meta.dir, '..', '..', 'plugins', 'agent-browser', 'skills') },
+        {
+          pluginName: 'agent-browser',
+          path: join(import.meta.dir, '..', 'bundled-plugins', 'agent-browser', 'skills'),
+        },
       ],
     }
 

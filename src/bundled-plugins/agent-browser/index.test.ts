@@ -19,7 +19,7 @@ describe('agent-browser plugin', () => {
   test('contributes the agent-browser skill directory and no hooks/tools', async () => {
     const exports = await bootPlugin('/agent')
 
-    expect(exports.skillsDirs).toEqual([expect.stringContaining('plugins/agent-browser/skills')])
+    expect(exports.skillsDirs).toEqual([expect.stringContaining('bundled-plugins/agent-browser/skills')])
     expect(exports.tools).toBeUndefined()
     expect(exports.hooks).toBeUndefined()
   })

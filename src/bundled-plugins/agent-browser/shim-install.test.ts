@@ -82,7 +82,7 @@ describe('installShim', () => {
 
     const result = installShim({
       binPath: '/usr/local/bin/agent-browser',
-      shimEntry: '/agent/node_modules/typeclaw/plugins/agent-browser/shim.ts',
+      shimEntry: '/agent/node_modules/typeclaw/src/bundled-plugins/agent-browser/shim.ts',
       fs: fake.fs(),
     })
 
@@ -107,7 +107,9 @@ describe('installShim', () => {
     expect(wrapper.mode).toBe(0o755)
     expect(wrapper.data).toContain('TYPECLAW_AGENT_BROWSER_REAL_BIN')
     expect(wrapper.data).toContain(result.stashTarget)
-    expect(wrapper.data).toContain('exec bun run /agent/node_modules/typeclaw/plugins/agent-browser/shim.ts')
+    expect(wrapper.data).toContain(
+      'exec bun run /agent/node_modules/typeclaw/src/bundled-plugins/agent-browser/shim.ts',
+    )
     expect(wrapper.data).toContain('# typeclaw-agent-browser-shim')
   })
 

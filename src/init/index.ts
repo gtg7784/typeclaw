@@ -342,7 +342,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
 
   // Only fields without sensible defaults elsewhere are emitted. `mounts`
   // defaults to `[]` in configSchema, and the bundled memory plugin owns its
-  // own defaults in plugins/memory/index.ts — re-emitting either here would
+  // own defaults in src/bundled-plugins/memory/index.ts — re-emitting either here would
   // be duplicate noise the user has to maintain in sync with the source of
   // truth.
   const config: Record<string, unknown> = {

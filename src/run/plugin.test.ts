@@ -167,7 +167,7 @@ export default {
     expect(skillDirs).toContainEqual(
       expect.objectContaining({
         pluginName: 'agent-browser',
-        path: expect.stringContaining('plugins/agent-browser/skills'),
+        path: expect.stringContaining('bundled-plugins/agent-browser/skills'),
       }),
     )
   })

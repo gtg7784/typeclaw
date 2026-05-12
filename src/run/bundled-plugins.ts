@@ -1,9 +1,8 @@
+import agentBrowserPlugin from '@/bundled-plugins/agent-browser'
+import guardPlugin from '@/bundled-plugins/guard'
+import memoryPlugin from '@/bundled-plugins/memory'
+import securityPlugin from '@/bundled-plugins/security'
 import type { ResolvedPlugin } from '@/plugin'
-
-import agentBrowserPlugin from '../../plugins/agent-browser'
-import guardPlugin from '../../plugins/guard'
-import memoryPlugin from '../../plugins/memory'
-import securityPlugin from '../../plugins/security'
 
 // Consumed by both `startAgent` (auto-loaded before user plugins) AND
 // `scripts/generate-schema.ts` (each entry's `defined.configSchema` is merged

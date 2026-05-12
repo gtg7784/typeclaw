@@ -242,5 +242,5 @@ When the user says "write me a skill for X" or you decide a recurring procedure 
 
 - **Plugin authoring** (`definePlugin`, contributing tools/subagents/cron jobs, plugin-owned config blocks) — see `typeclaw-plugins`. Plugins are code; skills are markdown.
 - **Cron-driven skill installation** — if the user wants `bunx skills update` to run on a schedule, that's an `exec` cron job; see `typeclaw-cron`.
-- **Authoring muscle-memory skills directly** — that is the dreaming subagent's job, not yours. The layer is documented under "Memory skills" above so you know where the files come from and that you must not edit them; how dreaming decides what to promote lives in the dreaming subagent's own system prompt (`plugins/memory/dreaming.ts`).
+- **Authoring muscle-memory skills directly** — that is the dreaming subagent's job, not yours. The layer is documented under "Memory skills" above so you know where the files come from and that you must not edit them; how dreaming decides what to promote lives in the dreaming subagent's own system prompt (`src/bundled-plugins/memory/dreaming.ts`).
 - **The `skills` CLI's own internals** — schema details, alternate install modes, registry implementation. Defer to `bunx skills --help` and the upstream README at https://github.com/vercel-labs/skills.

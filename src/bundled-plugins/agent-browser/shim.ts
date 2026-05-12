@@ -6,7 +6,7 @@
 // here — the dashboard subcommand transparently gets its --port rewritten
 // onto the agent-process-owned proxy's upstream port, every other subcommand
 // passes through unchanged. The proxy itself lives in the long-lived agent
-// process (see plugins/agent-browser/index.ts); the shim does NOT own its
+// process (see src/bundled-plugins/agent-browser/index.ts); the shim does NOT own its
 // lifecycle, because `agent-browser dashboard start` daemonizes upstream and
 // returns immediately — a shim-owned proxy would die the moment start exits.
 

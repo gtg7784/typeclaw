@@ -14,6 +14,11 @@ import type { Static, TSchema } from '@sinclair/typebox'
 import { Type } from '@sinclair/typebox'
 import { z } from 'zod'
 
+import {
+  ACKNOWLEDGE_GUARDS,
+  checkNonWorkspaceWriteGuard,
+  checkSkillAuthoringGuard,
+} from '@/bundled-plugins/guard/policy'
 import type {
   BuiltinToolRef,
   ContentPart,
@@ -24,8 +29,6 @@ import type {
   ToolContext,
   ToolResult,
 } from '@/plugin'
-
-import { ACKNOWLEDGE_GUARDS, checkNonWorkspaceWriteGuard, checkSkillAuthoringGuard } from '../../plugins/guard/policy'
 
 type AnyAgentTool =
   | typeof piReadTool

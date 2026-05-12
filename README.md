@@ -45,7 +45,7 @@ The bundled `memory` plugin turns lived experience into reusable knowledge. No m
 2. **Dream.** On a cron schedule (default 4am), a `dreaming` subagent consolidates daily streams into `MEMORY.md`, and — when it spots a procedure worth remembering — writes it as **muscle memory**: a new skill at `memory/skills/<name>/SKILL.md`.
 3. **Apply.** Tomorrow's prompt sees the updated `MEMORY.md`. Muscle-memory skills sit alongside bundled and user-installed ones, loaded on demand. Every dream is `git commit -m Dream`'d, so growth is auditable.
 
-See [`plugins/memory/README.md`](./plugins/memory/README.md) for the full contract.
+See [`src/bundled-plugins/memory/README.md`](./src/bundled-plugins/memory/README.md) for the full contract.
 
 ## Install
 
