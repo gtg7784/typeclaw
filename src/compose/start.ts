@@ -7,11 +7,16 @@ export type AgentResult<T> = { name: string; ok: true; data: T } | { name: strin
 
 export type StartSuccess = Extract<StartResult, { ok: true }>
 
+export type ComposeStartEvent =
+  | { kind: 'agent-start'; name: string }
+  | { kind: 'agent-done'; name: string; result: AgentResult<StartSuccess> }
+
 export type ComposeStartOptions = {
   rootCwd: string
   preferredHostPort: number
   forceBuild?: boolean
   cliEntry?: string
+  onProgress?: (event: ComposeStartEvent) => void
 }
 
 export type ComposeStartResult = {
@@ -24,20 +29,34 @@ export async function composeStart({
   preferredHostPort,
   forceBuild = false,
   cliEntry,
+  onProgress,
 }: ComposeStartOptions): Promise<ComposeStartResult> {
   const agents = discoverAgents(rootCwd)
   const results = await Promise.all(
     agents.map(async (agent): Promise<AgentResult<StartSuccess>> => {
-      const validated = validateConfig(agent.cwd)
-      if (!validated.ok) return { name: agent.name, ok: false, reason: validated.reason }
-      try {
-        const data = await start({ cwd: agent.cwd, preferredHostPort, forceBuild, cliEntry })
-        if (!data.ok) return { name: agent.name, ok: false, reason: data.reason }
-        return { name: agent.name, ok: true, data }
-      } catch (error) {
-        return { name: agent.name, ok: false, reason: error instanceof Error ? error.message : String(error) }
-      }
+      onProgress?.({ kind: 'agent-start', name: agent.name })
+      const result = await runOne(agent.name, agent.cwd, preferredHostPort, forceBuild, cliEntry)
+      onProgress?.({ kind: 'agent-done', name: agent.name, result })
+      return result
     }),
   )
   return { agents, results }
+}
+
+async function runOne(
+  name: string,
+  cwd: string,
+  preferredHostPort: number,
+  forceBuild: boolean,
+  cliEntry: string | undefined,
+): Promise<AgentResult<StartSuccess>> {
+  const validated = validateConfig(cwd)
+  if (!validated.ok) return { name, ok: false, reason: validated.reason }
+  try {
+    const data = await start({ cwd, preferredHostPort, forceBuild, cliEntry })
+    if (!data.ok) return { name, ok: false, reason: data.reason }
+    return { name, ok: true, data }
+  } catch (error) {
+    return { name, ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
 }
