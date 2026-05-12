@@ -12,7 +12,7 @@ import {
 } from 'agent-messenger/kakaotalk'
 
 import type { ChannelRouter } from '@/channels/router'
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import { isAllowed, type ChannelAdapterConfig, type KakaotalkAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
   FetchHistoryArgs,
@@ -28,6 +28,16 @@ import { createKakaoAuthorResolver, type KakaoAuthorResolver } from './kakaotalk
 import { createKakaoChannelResolver, type KakaoChannelResolver } from './kakaotalk-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
 
+// Inlined locally because agent-messenger/kakaotalk's index does not
+// re-export KakaoMarkReadResult even though client.markRead returns it
+// (agent-messenger 2.14.0). Upstream re-export fix is independent.
+export interface KakaoMarkReadResult {
+  success: boolean
+  status_code: number
+  chat_id: string
+  watermark: string
+}
+
 // Structural duck-type of the upstream KakaoTalkClient class. The upstream
 // type is a class with private fields, and TypeScript treats those
 // nominally — test fakes that match the public surface get rejected.
@@ -42,6 +52,7 @@ export interface KakaoTalkClient {
   getChats(options?: { all?: boolean; search?: string }): Promise<KakaoChat[]>
   getMessages(chatId: string, options?: { count?: number; from?: string }): Promise<KakaoMessage[]>
   sendMessage(chatId: string, text: string): Promise<KakaoSendResult>
+  markRead(chatId: string, logId: string, opts?: { linkId?: string }): Promise<KakaoMarkReadResult>
   getProfile(): Promise<KakaoProfile>
   getMembers(chatId: string): Promise<KakaoMember[]>
   lookupAuthorName(chatId: string, authorId: number): string | null
@@ -78,7 +89,7 @@ const consoleLogger: KakaotalkAdapterLogger = {
 
 export type KakaotalkAdapterOptions = {
   router: ChannelRouter
-  configRef: () => ChannelAdapterConfig
+  configRef: () => KakaotalkAdapterConfig
   logger?: KakaotalkAdapterLogger
   selfAliasesRef?: () => readonly string[]
   // When set, the adapter loads KakaoTalk credentials from this directory
@@ -339,6 +350,9 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         `[kakaotalk] routed log_id=${event.log_id} ${inboundTag} mention=${enriched.isBotMention} dm=${enriched.isDm}`,
       )
       await options.router.route(enriched)
+      if (options.configRef().autoMarkRead) {
+        autoMarkRead({ client, event, channelResolver, logger })
+      }
     } catch (err) {
       logger.error(`[kakaotalk] handleInbound failed: ${describe(err)}`)
     } finally {
@@ -538,6 +552,38 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
 
 function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+function autoMarkRead(deps: {
+  client: Pick<KakaoTalkClient, 'markRead'>
+  event: KakaoTalkPushMessageEvent
+  channelResolver: Pick<KakaoChannelResolver, 'lookupChat'>
+  logger: KakaotalkAdapterLogger
+}): void {
+  const { client, event, channelResolver, logger } = deps
+  const bucket = channelResolver.lookupChat(event.chat_id)?.workspace
+  if (bucket === '@kakao-open') {
+    // Open chats require the LOCO `li` (linkId) field on NOTIREAD; without
+    // it the server returns a non-success status. The resolver does not
+    // surface linkId today, so rather than send a doomed ack we skip and
+    // log once. Wiring linkId through the resolver is a follow-up.
+    logger.info(
+      `[kakaotalk] auto-mark-read skipped chat=${event.chat_id} log=${event.log_id} reason=open_chat_link_id_unsupported`,
+    )
+    return
+  }
+  client.markRead(event.chat_id, event.log_id).then(
+    (result) => {
+      if (!result.success) {
+        logger.warn(
+          `[kakaotalk] auto-mark-read non-success status_code=${result.status_code} chat=${event.chat_id} log=${event.log_id}`,
+        )
+      }
+    },
+    (err) => {
+      logger.warn(`[kakaotalk] auto-mark-read failed: ${describe(err)} chat=${event.chat_id} log=${event.log_id}`)
+    },
+  )
 }
 
 function dropHint(

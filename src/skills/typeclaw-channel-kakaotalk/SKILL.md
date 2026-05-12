@@ -61,6 +61,19 @@ If you find yourself NOT receiving messages you expect to, the most likely cause
 
 The init wizard's default is `kakao:dm/*` because group chats with personal accounts are sensitive — every member sees every reply. Only broaden the allow list when the user explicitly asks.
 
+## Auto mark read (opt-in)
+
+If `channels.kakaotalk.autoMarkRead` is `true` in `typeclaw.json`, the adapter sends a LOCO `NOTIREAD` ack to KakaoTalk after every inbound message it delivers to the router. The sender's unread "1" (노란숫자) clears in their client as soon as you receive it. Off by default.
+
+Trade-off you should know about before enabling it:
+
+- Auto-acking every received message is a distinct behavioral fingerprint compared to a human. A human reads messages when they open the chat; this setting acks every received message instantly, even ones you never reply to. KakaoTalk's abuse detection may flag accounts that ack rapidly and unconditionally. Enable only on dedicated agent accounts you can afford to lose.
+- Dropped messages (your own self-sent, empty text, sender not in `allow`) are not acked — only routed messages.
+- Open chats (오픈채팅) are skipped: the LOCO `NOTIREAD` packet needs a `linkId` for open chats and the adapter doesn't surface it yet. Unread counters in open chats will not decrement even with `autoMarkRead: true`.
+- The phone's home-screen OS unread badge may lag until the phone client foregrounds; the in-chat counter and other participants' indicators update immediately. KakaoTalk client quirk, not a typeclaw bug.
+
+If a markRead call fails (network blip, non-success status from the server, container shutdown), it is logged at warn level and silently moves on — message delivery is never blocked by an ack failure.
+
 ## Self-loop guard
 
 The adapter drops every inbound where `event.author_id` equals the logged-in account's `user_id`. Two typeclaw agents talking to each other through KakaoTalk would otherwise loop indefinitely (KakaoTalk has no bot-flag, so neither side can detect the other is automated). Do not try to defeat this guard.
