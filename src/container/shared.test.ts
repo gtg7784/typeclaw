@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import {
   checkDockerAvailable,
   classifyRmStderr,
+  cleanupRunCorpse,
   containerNameFromCwd,
   DOCKER_NOT_FOUND_STDERR,
   type DockerExec,
@@ -217,6 +218,127 @@ describe('waitForRemoval', () => {
     await waitForRemoval(exec, 'anderson', { timeoutMs: 100, intervalMs: 10 })
 
     expect(seen[0]).toEqual(['inspect', '--format', '{{.State.Running}}', 'anderson'])
+  })
+})
+
+describe('cleanupRunCorpse', () => {
+  test('returns "gone" when inspect reports no such container (no rm issued)', async () => {
+    let rmIssued = false
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      if (args[0] === 'rm') {
+        rmIssued = true
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    expect(await cleanupRunCorpse(exec, 'x')).toBe('gone')
+    expect(rmIssued).toBe(false)
+  })
+
+  test('returns "removed" after force-removing a non-running corpse and waiting for the drain', async () => {
+    // The probe uses `{{.Id}}|{{.State.Running}}` so cleanupRunCorpse can
+    // issue rm by ID (closes the TOCTOU window where a peer might create
+    // a different live container with the same name between probe and rm).
+    let rmCalls = 0
+    let inspectCalls = 0
+    let rmDone = false
+    let rmTarget: string | undefined
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') {
+        inspectCalls++
+        if (!rmDone) return { exitCode: 0, stdout: 'corpse-id-abc|false\n', stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      }
+      if (args[0] === 'rm') {
+        rmCalls++
+        rmTarget = args[args.length - 1]
+        rmDone = true
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    expect(await cleanupRunCorpse(exec, 'x')).toBe('removed')
+    expect(rmCalls).toBe(1)
+    // rm MUST target the probed ID, not the name — otherwise a same-name
+    // peer created between probe and rm would be killed.
+    expect(rmTarget).toBe('corpse-id-abc')
+    // probe inspect + at least one waitForRemoval inspect = 2+
+    expect(inspectCalls).toBeGreaterThanOrEqual(2)
+  })
+
+  test('returns "running" and does NOT issue rm when the named container is currently running', async () => {
+    let rmIssued = false
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') return { exitCode: 0, stdout: 'live-id-abc|true\n', stderr: '' }
+      if (args[0] === 'rm') {
+        rmIssued = true
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    expect(await cleanupRunCorpse(exec, 'x')).toBe('running')
+    expect(rmIssued).toBe(false)
+  })
+
+  test('returns "removed" when rm reports "in-progress" and inspect later confirms removal', async () => {
+    let rmDone = false
+    let postRmInspects = 0
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') {
+        if (!rmDone) return { exitCode: 0, stdout: 'corpse-id|false\n', stderr: '' }
+        postRmInspects++
+        if (postRmInspects <= 1) return { exitCode: 0, stdout: 'false\n', stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      }
+      if (args[0] === 'rm') {
+        rmDone = true
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr: 'Error response from daemon: removal of container x is already in progress',
+        }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    expect(await cleanupRunCorpse(exec, 'x')).toBe('removed')
+    expect(postRmInspects).toBeGreaterThanOrEqual(2)
+  })
+
+  test('returns "gone" when rm reports the container is already gone', async () => {
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') return { exitCode: 0, stdout: 'corpse-id|false\n', stderr: '' }
+      if (args[0] === 'rm') return { exitCode: 1, stdout: '', stderr: 'Error: No such container: x' }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    expect(await cleanupRunCorpse(exec, 'x')).toBe('gone')
+  })
+
+  test('returns "stuck" when rm fails with a non-benign error', async () => {
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') return { exitCode: 0, stdout: 'corpse-id|false\n', stderr: '' }
+      if (args[0] === 'rm') return { exitCode: 1, stdout: '', stderr: 'permission denied' }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    expect(await cleanupRunCorpse(exec, 'x')).toBe('stuck')
+  })
+
+  test('returns "stuck" when probe stdout is malformed (no ID, defensive)', async () => {
+    // Defensive: a daemon hiccup returning exit 0 with empty stdout
+    // should not let us issue rm without an ID — we'd fall back to
+    // killing by name and that's the very TOCTOU we're closing.
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'inspect') return { exitCode: 0, stdout: '\n', stderr: '' }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    expect(await cleanupRunCorpse(exec, 'x')).toBe('stuck')
   })
 })
 

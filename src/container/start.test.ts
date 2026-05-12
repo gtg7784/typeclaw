@@ -1546,27 +1546,62 @@ describe('start (composition)', () => {
     expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
   })
 
-  test('retries docker run when Docker returns "container name is already in use" despite inspect reporting gone (split-state race)', async () => {
-    // given: a fresh start. The preflight `docker inspect` reports the
-    // container is gone, so start() proceeds straight to `docker run`. But
-    // Docker's name-reservation table has not finished draining a prior
-    // removal, so the first two `docker run` attempts fail with the exact
-    // user-visible conflict error from typeclaw compose restart. The third
-    // attempt succeeds.
+  test('retries docker run after force-removing the non-running corpse that holds the name', async () => {
+    // given: the preflight `docker inspect` says the name is free, so
+    // start() proceeds to `docker run`. The first run fails with the
+    // user-visible name-conflict error referencing a concrete corpse ID —
+    // exactly the failure mode behind the reported `typeclaw compose
+    // restart` bug. Once the retry path force-removes the corpse, the
+    // next `docker run --name <same>` succeeds.
     //
-    // Without the retry, the test fails with the production error string
-    // verbatim — that's the mutation check.
+    // Mutation check: revert the cleanupRunCorpse call inside
+    // execRunWithConflictRetry to a passive setTimeout and this test fails
+    // — the fake's `docker run` keeps returning conflict until something
+    // flips containerExists to false, and only the rm path does that.
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     let runAttempts = 0
-    const conflictStderr =
-      'docker: Error response from daemon: Conflict. The container name "/anderson" is already in use by container "e8d39ae0eb16428c58b143b3a8ac60267ae87ce4fc0f2859022183b512287209". You have to remove (or rename) that container to be able to reuse that name.'
+    let rmAttempts = 0
+    // Models the moby#51758 / moby#8294 bug: docker create succeeds and
+    // reserves the name, but `docker run -p <busy>:...` later fails with
+    // port-allocated and leaves the corpse in `docker ps -a`. In this test
+    // start()'s preflight inspect runs BEFORE the corpse is created, so it
+    // sees "no such container" and skips the preflight rm — exactly the
+    // race the production fix must handle inside execRunWithConflictRetry.
+    let corpseExists = false
+    let rmTarget: string | undefined
+    const corpseId = 'e8d39ae0eb16428c58b143b3a8ac60267ae87ce4fc0f2859022183b512287209'
+    const conflictStderr = `docker: Error response from daemon: Conflict. The container name "/anderson" is already in use by container "${corpseId}". You have to remove (or rename) that container to be able to reuse that name.`
+    const calls: { args: string[] }[] = []
     const exec: DockerExec = async (args) => {
+      calls.push({ args })
       if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
-      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      if (args[0] === 'inspect') {
+        if (!corpseExists) return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+        // cleanupRunCorpse asks for `{{.Id}}|{{.State.Running}}`; everything
+        // else (preflight, waitForRemoval) only asks for State.Running. Both
+        // formats are emitted here — the production parser ignores the
+        // extra field, and the cleanupRunCorpse parser splits on '|'.
+        if (args.includes('{{.Id}}|{{.State.Running}}')) {
+          return { exitCode: 0, stdout: `${corpseId}|false\n`, stderr: '' }
+        }
+        return { exitCode: 0, stdout: 'false\n', stderr: '' }
+      }
+      if (args[0] === 'rm') {
+        rmAttempts++
+        rmTarget = args[args.length - 1]
+        corpseExists = false
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
       if (args[0] === 'run') {
         runAttempts++
-        if (runAttempts <= 2) return { exitCode: 125, stdout: '', stderr: conflictStderr }
+        if (runAttempts === 1) {
+          // Simulate Docker creating the named container before failing
+          // the actual run; surface the conflict against that corpse.
+          corpseExists = true
+          return { exitCode: 125, stdout: '', stderr: conflictStderr }
+        }
+        if (corpseExists) return { exitCode: 125, stdout: '', stderr: conflictStderr }
         return { exitCode: 0, stdout: 'fake-id\n', stderr: '' }
       }
       return { exitCode: 0, stdout: '', stderr: '' }
@@ -1582,15 +1617,337 @@ describe('start (composition)', () => {
     })
 
     expect(result.ok).toBe(true)
-    expect(runAttempts).toBe(3)
+    expect(runAttempts).toBe(2)
+    expect(rmAttempts).toBe(1)
+    // The rm MUST target the corpse ID parsed from the inspect probe,
+    // NOT the container name. Targeting by name is the TOCTOU race where
+    // a same-name peer container spun up between probe and rm gets killed.
+    expect(rmTarget).toBe(corpseId)
+    const firstRunIdx = calls.findIndex((c) => c.args[0] === 'run')
+    const rmIdx = calls.findIndex((c) => c.args[0] === 'rm')
+    const lastRunIdx = calls.length - 1 - [...calls].reverse().findIndex((c) => c.args[0] === 'run')
+    expect(rmIdx).toBeGreaterThan(firstRunIdx)
+    expect(rmIdx).toBeLessThan(lastRunIdx)
   })
 
-  test('surfaces the docker run name-conflict error after exhausting retries', async () => {
-    // given: Docker keeps returning the name-conflict error on every
-    // attempt — e.g. a wedged corpse on a sick daemon that no amount of
-    // waiting will fix. start() must eventually give up and surface the
-    // error so the user can act (`docker rm -f <name>` or restart Docker)
-    // instead of silently hanging.
+  test('does NOT force-remove a RUNNING same-name container when docker run reports conflict', async () => {
+    // given: a docker run hits a name conflict but the named container is
+    // currently RUNNING. The destructive retry path MUST refuse to kill a
+    // live container — that would either murder a concurrent legitimate
+    // start of the same name OR a foreign container the user wants alive.
+    // start() must surface the conflict error untouched.
+    //
+    // Mutation check: drop the running-check from cleanupRunCorpse and
+    // this test fails — rmAttempts becomes 1 and the live container is
+    // killed.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    let runAttempts = 0
+    let rmAttempts = 0
+    let probeAttempts = 0
+    const conflictStderr =
+      'docker: Error response from daemon: Conflict. The container name "/x" is already in use by container "abc". You have to remove (or rename) that container to be able to reuse that name.'
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') {
+        probeAttempts++
+        // First inspect (start's preflight) reports gone so we proceed to docker run.
+        if (probeAttempts === 1) return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+        // Subsequent inspect (the retry-path corpse probe) reports running=true.
+        // cleanupRunCorpse uses `{{.Id}}|{{.State.Running}}`; non-cleanupRunCorpse
+        // callers use just State.Running. Emit both formats so either parser works.
+        if (args.includes('{{.Id}}|{{.State.Running}}')) {
+          return { exitCode: 0, stdout: 'live-id|true\n', stderr: '' }
+        }
+        return { exitCode: 0, stdout: 'true\n', stderr: '' }
+      }
+      if (args[0] === 'rm') {
+        rmAttempts++
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
+      if (args[0] === 'run') {
+        runAttempts++
+        return { exitCode: 125, stdout: '', stderr: conflictStderr }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toMatch(/Conflict.*container name.*is already in use/)
+    expect(rmAttempts).toBe(0)
+    expect(runAttempts).toBe(1)
+  })
+
+  test('cleans up the failed-run corpse before retrying with a new port (TOCTOU + port-bind-after-create)', async () => {
+    // given: the first `docker run -p 8973:...` fails because another
+    // process claimed 8973 between our probe and the run, AND Docker
+    // already created the named container record before the port bind
+    // failed. The port-TOCTOU retry must force-remove the corpse before
+    // re-running `docker run --name <same>` with the new port, or the
+    // retry hits the user-visible Conflict error against its own corpse
+    // — exactly the bug `typeclaw compose restart` was hitting.
+    //
+    // Mutation check: remove the cleanupRunCorpse call in the port-retry
+    // branch and this test fails — the second `docker run` returns
+    // conflict against the corpse left by the first run.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    let runAttempts = 0
+    let rmAttempts = 0
+    let corpseExists = false
+    const calls: { args: string[] }[] = []
+    const portStderr = 'docker: Bind for :::8973 failed: port is already allocated'
+    const conflictStderr =
+      'docker: Error response from daemon: Conflict. The container name "/x" is already in use by container "deadbeef". You have to remove (or rename) that container to be able to reuse that name.'
+    const exec: DockerExec = async (args) => {
+      calls.push({ args })
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') {
+        if (!corpseExists) return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+        if (args.includes('{{.Id}}|{{.State.Running}}')) {
+          return { exitCode: 0, stdout: 'deadbeef|false\n', stderr: '' }
+        }
+        return { exitCode: 0, stdout: 'false\n', stderr: '' }
+      }
+      if (args[0] === 'rm') {
+        rmAttempts++
+        corpseExists = false
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
+      if (args[0] === 'run') {
+        runAttempts++
+        if (runAttempts === 1) {
+          // Docker created the container before failing the port bind.
+          corpseExists = true
+          return { exitCode: 125, stdout: '', stderr: portStderr }
+        }
+        if (corpseExists) return { exitCode: 125, stdout: '', stderr: conflictStderr }
+        return { exitCode: 0, stdout: 'fake-id\n', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const ports = [8973, 49160]
+    const allocatePort = async (): Promise<number> => ports.shift() ?? 0
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(runAttempts).toBe(2)
+    expect(rmAttempts).toBe(1)
+    // The cleanup rm must happen BETWEEN the two docker run calls so the
+    // second run sees a free name.
+    const firstRunIdx = calls.findIndex((c) => c.args[0] === 'run')
+    const rmIdx = calls.findIndex((c) => c.args[0] === 'rm')
+    const lastRunIdx = calls.length - 1 - [...calls].reverse().findIndex((c) => c.args[0] === 'run')
+    expect(rmIdx).toBeGreaterThan(firstRunIdx)
+    expect(rmIdx).toBeLessThan(lastRunIdx)
+    // The retry used the new port.
+    const runCalls = calls.filter((c) => c.args[0] === 'run')
+    expect(runCalls[0]!.args).toContain('127.0.0.1:8973:8973')
+    expect(runCalls[1]!.args).toContain('127.0.0.1:49160:8973')
+  })
+
+  test('waits for "removal in progress" to drain during conflict-retry cleanup', async () => {
+    // given: docker run reports name conflict; the retry path calls
+    // `docker rm -f` which itself returns "removal of container … is
+    // already in progress". The cleanup must call waitForRemoval to
+    // confirm the container actually disappears before retrying
+    // `docker run`, or the retry races the drain and fails again.
+    //
+    // Mutation check: revert cleanupRunCorpse to skip waitForRemoval on
+    // the "in-progress" rm-stderr path and this test fails — the second
+    // docker run fires while inspect still reports the corpse, returning
+    // conflict.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    let inspectsBeforeRm = 0
+    let inspectAfterRm = 0
+    let rmReturned = false
+    let runAttempts = 0
+    const conflictStderr =
+      'docker: Error response from daemon: Conflict. The container name "/x" is already in use by container "abc". You have to remove (or rename) that container to be able to reuse that name.'
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') {
+        if (!rmReturned) {
+          inspectsBeforeRm++
+          // First inspect is start's preflight (name is free); second is
+          // cleanupRunCorpse's pre-rm probe AFTER the failed docker run
+          // has populated the corpse — it must see the corpse to issue rm.
+          if (inspectsBeforeRm === 1) return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+          if (args.includes('{{.Id}}|{{.State.Running}}')) {
+            return { exitCode: 0, stdout: 'abc|false\n', stderr: '' }
+          }
+          return { exitCode: 0, stdout: 'false\n', stderr: '' }
+        }
+        inspectAfterRm++
+        // Container keeps showing up for 2 post-rm probes, then drains.
+        if (inspectAfterRm <= 2) return { exitCode: 0, stdout: 'false\n', stderr: '' }
+        return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      }
+      if (args[0] === 'rm') {
+        rmReturned = true
+        return {
+          exitCode: 1,
+          stdout: '',
+          stderr: 'Error response from daemon: removal of container x is already in progress',
+        }
+      }
+      if (args[0] === 'run') {
+        runAttempts++
+        // Until cleanup actually waits for the drain, every retry hits
+        // conflict — that's the regression this test guards against.
+        if (!rmReturned || inspectAfterRm <= 2) return { exitCode: 125, stdout: '', stderr: conflictStderr }
+        return { exitCode: 0, stdout: 'fake-id\n', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    // Cleanup probed inspect post-rm at least once (waitForRemoval).
+    expect(inspectAfterRm).toBeGreaterThanOrEqual(1)
+    // docker run must have been retried at least once after the failed
+    // initial attempt — otherwise the test never exercised the drain path.
+    expect(runAttempts).toBeGreaterThanOrEqual(2)
+  })
+
+  test('backs off between conflict retries when cleanup reports gone but the name still conflicts', async () => {
+    // given: Docker's name-reservation table is draining independently of
+    // `docker inspect`. cleanupRunCorpse's probe returns 'gone' (inspect
+    // says the corpse is removed), but the very next `docker run --name`
+    // still hits a Conflict because the reservation hasn't released. The
+    // production fix's bounded backoff (100/200/400ms) covers exactly
+    // this residual race — without it, three rapid-fire retries all
+    // happen inside the same drain window and exhaust uselessly.
+    //
+    // Mutation check: delete the `await setTimeout(backoffMs)` from
+    // execRunWithConflictRetry and this test fails — runAttempts hits 4
+    // immediately and result.ok is false because the drain never
+    // completes between attempts.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    let runAttempts = 0
+    const drainStart = Date.now()
+    const drainMs = 150
+    const conflictStderr =
+      'docker: Error response from daemon: Conflict. The container name "/x" is already in use by container "abc". You have to remove (or rename) that container to be able to reuse that name.'
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      // inspect always reports 'gone' — modeling the daemon's split-state:
+      // the container record disappears from inspect/ps but the name
+      // reservation lingers a bit longer.
+      if (args[0] === 'inspect') return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      if (args[0] === 'run') {
+        runAttempts++
+        // Returns conflict until enough wall time has elapsed for the
+        // name reservation to drain.
+        if (Date.now() - drainStart < drainMs) {
+          return { exitCode: 125, stdout: '', stderr: conflictStderr }
+        }
+        return { exitCode: 0, stdout: 'fake-id\n', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    // The backoff between retries gives the daemon time to drain. With
+    // the bug (no sleep), all four attempts would fire within ms.
+    expect(runAttempts).toBeGreaterThanOrEqual(2)
+  })
+
+  test('removes the corpse by ID, not by name, to avoid killing a same-name peer (TOCTOU)', async () => {
+    // given: cleanupRunCorpse's inspect probe sees a non-running corpse
+    // with ID "corpse-A". Between probe and rm, a concurrent peer starts
+    // a NEW live container with the same name (ID "live-B"). If our rm
+    // targets the name, we'd kill live-B. If our rm targets the probed
+    // ID "corpse-A", we remove only the corpse we measured.
+    //
+    // This test asserts the rm command is invoked with the corpse ID, not
+    // the container name. Mutation check: switch rm back to `rm -f <name>`
+    // and this assertion fails directly.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const corpseId = 'corpse-A-1234'
+    const containerName = basename(root)
+    let rmTarget: string | undefined
+    let runAttempts = 0
+    const conflictStderr = `docker: Error response from daemon: Conflict. The container name "/${containerName}" is already in use by container "${corpseId}". You have to remove (or rename) that container to be able to reuse that name.`
+    const exec: DockerExec = async (args) => {
+      if (args[0] === 'image' && args[1] === 'inspect') return { exitCode: 0, stdout: '', stderr: '' }
+      if (args[0] === 'inspect') {
+        if (args.includes('{{.Id}}|{{.State.Running}}')) {
+          return { exitCode: 0, stdout: `${corpseId}|false\n`, stderr: '' }
+        }
+        return { exitCode: 1, stdout: '', stderr: 'Error: No such container' }
+      }
+      if (args[0] === 'rm') {
+        rmTarget = args[args.length - 1]
+        return { exitCode: 0, stdout: '', stderr: '' }
+      }
+      if (args[0] === 'run') {
+        runAttempts++
+        if (runAttempts === 1) return { exitCode: 125, stdout: '', stderr: conflictStderr }
+        return { exitCode: 0, stdout: 'fake-id\n', stderr: '' }
+      }
+      return { exitCode: 0, stdout: '', stderr: '' }
+    }
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(rmTarget).toBe(corpseId)
+    expect(rmTarget).not.toBe(containerName)
+  })
+
+  test('surfaces the docker run name-conflict error when cleanup cannot free the name', async () => {
+    // given: Docker keeps returning the name-conflict error AND the
+    // cleanup `docker rm -f` cannot complete — a wedged daemon or a
+    // protected container that no amount of cleanup-then-retry will fix.
+    // start() must eventually give up and surface the original error so
+    // the user can act (`docker rm -f <name>` manually, restart Docker)
+    // instead of looping forever.
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     let runAttempts = 0

@@ -15,6 +15,7 @@ import { refreshPackageJson } from '@/init/packagejson'
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import {
   classifyRmStderr,
+  cleanupRunCorpse,
   containerNameFromCwd,
   defaultDockerExec,
   type DockerExec,
@@ -235,21 +236,45 @@ export async function start({
       built = true
     }
 
-    let run = await execRunWithConflictRetry(exec, plan.runArgs, cwd)
+    let run = await execRunWithConflictRetry(exec, plan.runArgs, cwd, containerName)
 
     // TOCTOU: another process may have grabbed the port between our probe and
     // `docker run`, or the kernel-assigned port may itself have been claimed.
     // Treat docker as the authority and retry once with a fresh ephemeral port.
     // Skip rebuild on retry: the image is already on disk from the first attempt.
     // Re-register so the daemon's broker resolver returns the new port.
+    //
+    // Failed `docker run -p` calls can leave a created-but-not-running
+    // container record behind: depending on daemon version, Docker creates
+    // the container before binding the port, so the bind failure aborts
+    // start but leaves the corpse holding the name. The port-TOCTOU retry
+    // would then re-run `docker run --name <same>` and hit a name conflict
+    // against that corpse. Clean it up before the retry so the new run sees
+    // a free name. cleanupRunCorpse is safe (only force-removes non-running
+    // same-name containers) and a no-op when the name is already free.
     if (run.exitCode !== 0 && isPortAllocatedError(run.stderr)) {
+      const cleanup = await cleanupRunCorpse(exec, containerName)
+      if (cleanup === 'running') {
+        await cleanupHostDaemonRegistration(containerName, hostd)
+        return {
+          ok: false,
+          reason: `docker run failed (port bind) but cleanup found ${containerName} now running — refusing to retry against a live container.`,
+        }
+      }
+      if (cleanup === 'stuck') {
+        await cleanupHostDaemonRegistration(containerName, hostd)
+        return {
+          ok: false,
+          reason: `docker run failed (${sanitizeDockerStderr(run.stderr) || 'port bind'}) and the failed-run corpse for ${containerName} did not disappear within 10s; refusing to retry.`,
+        }
+      }
       hostPort = await allocatePort(0)
       if (cliEntry) {
         hostd = await registerWithDaemon({ cwd, containerName, cliEntry, hostPort, reuseCurrentHostDaemon })
         hostdControl = hostd.state === 'registered' ? hostd.control : undefined
       }
       plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false, hostdControl })
-      run = await execRunWithConflictRetry(exec, plan.runArgs, cwd)
+      run = await execRunWithConflictRetry(exec, plan.runArgs, cwd, containerName)
     }
 
     if (run.exitCode !== 0) {
@@ -420,31 +445,52 @@ async function inspectContainer(exec: DockerExec, name: string): Promise<Inspect
   return { exists: true, running: result.stdout.trim() === 'true' }
 }
 
-// Cumulative budget ~2.7s. Five attempts is enough for the worst OrbStack-
-// under-load drain we've observed (a few hundred ms); the trailing 1200ms
-// step gives headroom for an unusually slow drain without ballooning the
-// budget on the genuinely-stuck case where the user needs to see the error.
-const RUN_RETRY_DELAYS_MS = [100, 200, 400, 800, 1200] as const
-
-// Retries `docker run` on name-conflict responses to handle Docker's split-
-// state race: `docker inspect <name>` can report "no such container" while
-// `docker run --name <same>` still rejects on the name-reservation table.
-// See isContainerNameConflict for the full failure-mode rationale.
+// Retries `docker run` on name-conflict responses by FIRST force-removing
+// the non-running same-name corpse that's blocking the name. Sleep-only
+// retries (PR #121's earlier approach) cannot recover when the corpse is
+// stable — see isContainerNameConflict's comment for why corpses survive
+// the preflight (port-bind-after-create leaves a created-but-not-running
+// container record behind, and start()'s own port-TOCTOU retry triggers
+// this path against that corpse).
 //
-// Only the name-conflict path retries — any other non-zero exit is returned
-// to the caller unchanged so the existing port-conflict TOCTOU retry and
-// permission-denied surfacing keep working without being shadowed by the
-// outer retry loop.
-async function execRunWithConflictRetry(exec: DockerExec, runArgs: string[], cwd: string): Promise<DockerExecResult> {
+// cleanupRunCorpse refuses to touch a running container, so a concurrent
+// legitimate start of the same name (or a foreign-but-named container the
+// user wants alive) is surfaced as a hard failure rather than silently
+// killed. 'stuck' likewise surfaces — a wedged daemon that won't drain a
+// removal needs the user to act (`docker rm -f <name>` manually, or restart
+// Docker) instead of looping forever.
+//
+// A small bounded backoff (100/200/400ms) follows each cleanup before the
+// next `docker run`. waitForRemoval polls `docker inspect`, which can
+// report the container gone BEFORE Docker's internal name-reservation
+// table has fully released the name. Without the backoff, the three
+// retries can all fire inside the same daemon drain window and exhaust
+// uselessly. The cumulative ~700ms is small next to the docker run RTT
+// itself and dwarfed by the user-visible cost of a failed start.
+//
+// Only the name-conflict path engages this destructive retry. Any other
+// non-zero exit (port-allocated, image-not-found, permission-denied) is
+// returned unchanged so the existing port-conflict TOCTOU retry and
+// surfacing keep working without being shadowed.
+async function execRunWithConflictRetry(
+  exec: DockerExec,
+  runArgs: string[],
+  cwd: string,
+  containerName: string,
+): Promise<DockerExecResult> {
   let last = await exec(runArgs, { cwd })
-  for (const delayMs of RUN_RETRY_DELAYS_MS) {
+  for (const backoffMs of CONFLICT_RETRY_BACKOFFS_MS) {
     if (last.exitCode === 0) return last
     if (!isContainerNameConflict(last.stderr)) return last
-    await new Promise((resolve) => setTimeout(resolve, delayMs))
+    const outcome = await cleanupRunCorpse(exec, containerName)
+    if (outcome === 'running' || outcome === 'stuck') return last
+    await new Promise((resolve) => setTimeout(resolve, backoffMs))
     last = await exec(runArgs, { cwd })
   }
   return last
 }
+
+const CONFLICT_RETRY_BACKOFFS_MS = [100, 200, 400] as const
 
 // Idempotent path for `start()`: the named container is already up. Reflect
 // the live container's identity (id) and host port in the result so callers
