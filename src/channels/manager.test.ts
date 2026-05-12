@@ -54,6 +54,7 @@ const enabledAdapterCfg = () => ({
     stickiness: { perReply: { window: 300_000 } },
   },
   history: defaultHistoryConfig(),
+  autoMarkRead: false,
 })
 
 describe('channel manager — slack adapter lifecycle', () => {

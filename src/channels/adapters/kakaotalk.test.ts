@@ -14,9 +14,14 @@ import type {
 } from 'agent-messenger/kakaotalk'
 
 import { createChannelRouter } from '@/channels/router'
-import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
+import { defaultHistoryConfig, type KakaotalkAdapterConfig } from '@/channels/schema'
 
-import { createKakaotalkAdapter, type KakaoTalkClient, type KakaoTalkListener } from './kakaotalk'
+import {
+  createKakaotalkAdapter,
+  type KakaoMarkReadResult,
+  type KakaoTalkClient,
+  type KakaoTalkListener,
+} from './kakaotalk'
 
 type EventKey = keyof KakaoTalkListenerEventMap
 
@@ -76,6 +81,9 @@ class FakeClient implements KakaoTalkClient {
   inlineNamesByChat: Map<string, Map<number, string>> = new Map()
   getMembersError: Error | null = null
   sendResult: KakaoSendResult = { success: true, status_code: 0, chat_id: '111', log_id: 'L1', sent_at: 0 }
+  markReadCalls: Array<{ chatId: string; logId: string; opts?: { linkId?: string } }> = []
+  markReadResult: KakaoMarkReadResult = { success: true, status_code: 0, chat_id: '111', watermark: 'L1' }
+  markReadError: Error | null = null
 
   async login(): Promise<this> {
     this.loginCalls++
@@ -94,6 +102,12 @@ class FakeClient implements KakaoTalkClient {
   async sendMessage(chatId: string, text: string): Promise<KakaoSendResult> {
     this.sendMessageCalls.push({ chatId, text })
     return this.sendResult
+  }
+
+  async markRead(chatId: string, logId: string, opts?: { linkId?: string }): Promise<KakaoMarkReadResult> {
+    this.markReadCalls.push({ chatId, logId, ...(opts !== undefined ? { opts } : {}) })
+    if (this.markReadError !== null) throw this.markReadError
+    return this.markReadResult
   }
 
   async getProfile(): Promise<KakaoProfile> {
@@ -115,7 +129,7 @@ class FakeClient implements KakaoTalkClient {
   }
 }
 
-const adapterCfg = (over: Partial<ChannelAdapterConfig> = {}): ChannelAdapterConfig => ({
+const adapterCfg = (over: Partial<KakaotalkAdapterConfig> = {}): KakaotalkAdapterConfig => ({
   allow: ['kakao:*'],
   enabled: true,
   engagement: {
@@ -123,6 +137,7 @@ const adapterCfg = (over: Partial<ChannelAdapterConfig> = {}): ChannelAdapterCon
     stickiness: { perReply: { window: 300_000 } },
   },
   history: defaultHistoryConfig(),
+  autoMarkRead: false,
   ...over,
 })
 
@@ -741,6 +756,225 @@ describe('createKakaotalkAdapter — inbound classification', () => {
     await new Promise((r) => setTimeout(r, 0))
 
     expect(client.sendMessageCalls).toHaveLength(0)
+
+    await adapter.stop()
+    await router.stop()
+  })
+})
+
+describe('createKakaotalkAdapter — auto mark read', () => {
+  const dmChat = (id: string): KakaoChat => ({
+    chat_id: id,
+    type: 0,
+    display_name: 'Other',
+    title: null,
+    active_members: 2,
+    unread_count: 0,
+    last_message: null,
+  })
+
+  const groupChat = (id: string, members: number): KakaoChat => ({
+    chat_id: id,
+    type: 10,
+    display_name: 'Team',
+    title: null,
+    active_members: members,
+    unread_count: 0,
+    last_message: null,
+  })
+
+  const openChat = (id: string): KakaoChat => ({
+    chat_id: id,
+    type: 13,
+    display_name: 'Open Room',
+    title: null,
+    active_members: 50,
+    unread_count: 0,
+    last_message: null,
+  })
+
+  const accepted = (chatId: string, logId: string, authorId = 111): KakaoTalkPushMessageEvent => ({
+    type: 'MSG',
+    chat_id: chatId,
+    log_id: logId,
+    author_id: authorId,
+    author_name: 'Alice',
+    message: 'hello',
+    message_type: 1,
+    sent_at: 1_730_000_000_000,
+  })
+
+  test('fires markRead after route resolves when autoMarkRead is true', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const cfg = adapterCfg({ autoMarkRead: true })
+    const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
+    const logs: string[] = []
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => cfg,
+      client,
+      listenerFactory: () => listener,
+      logger: {
+        info: (m) => logs.push(m),
+        warn: (m) => logs.push(m),
+        error: (m) => logs.push(m),
+      },
+    })
+    client.chats = [dmChat('111')]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', accepted('111', 'L42'))
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(client.markReadCalls).toEqual([{ chatId: '111', logId: 'L42' }])
+
+    await adapter.stop()
+    await router.stop()
+  })
+
+  test('does not fire markRead when autoMarkRead is false (default)', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+    client.chats = [dmChat('111')]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', accepted('111', 'L42'))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(client.markReadCalls).toHaveLength(0)
+
+    await adapter.stop()
+    await router.stop()
+  })
+
+  test('does not fire markRead for dropped messages even when autoMarkRead is true', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const cfg = adapterCfg({ autoMarkRead: true })
+    const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => cfg,
+      client,
+      listenerFactory: () => listener,
+    })
+    client.chats = [dmChat('111')]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', accepted('111', 'L42', 999))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(client.markReadCalls).toHaveLength(0)
+
+    await adapter.stop()
+    await router.stop()
+  })
+
+  test('skips markRead for open-chat bucket (linkId not yet wired through resolver)', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const cfg = adapterCfg({ allow: ['kakao:open/*'], autoMarkRead: true })
+    const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
+    const logs: string[] = []
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => cfg,
+      client,
+      listenerFactory: () => listener,
+      logger: {
+        info: (m) => logs.push(m),
+        warn: (m) => logs.push(m),
+        error: (m) => logs.push(m),
+      },
+    })
+    client.chats = [openChat('555')]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', accepted('555', 'L77'))
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(client.markReadCalls).toHaveLength(0)
+    const skipped = logs.find(
+      (m) => m.includes('auto-mark-read skipped') && m.includes('open_chat_link_id_unsupported'),
+    )
+    expect(skipped).toBeDefined()
+
+    await adapter.stop()
+    await router.stop()
+  })
+
+  test('markRead rejection is logged and never bubbles out of the handler', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    client.markReadError = new Error('LOCO packet timeout')
+    const cfg = adapterCfg({ allow: ['kakao:group/*'], autoMarkRead: true })
+    const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
+    const logs: string[] = []
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => cfg,
+      client,
+      listenerFactory: () => listener,
+      logger: {
+        info: (m) => logs.push(m),
+        warn: (m) => logs.push(m),
+        error: (m) => logs.push(m),
+      },
+    })
+    client.chats = [groupChat('222', 5)]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', accepted('222', 'L11'))
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(client.markReadCalls).toHaveLength(1)
+    const failure = logs.find((m) => m.includes('auto-mark-read failed') && m.includes('LOCO packet timeout'))
+    expect(failure).toBeDefined()
+
+    await adapter.stop()
+    await router.stop()
+  })
+
+  test('markRead non-success status is surfaced as a warn log', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    client.markReadResult = { success: false, status_code: -500, chat_id: '222', watermark: 'L11' }
+    const cfg = adapterCfg({ allow: ['kakao:group/*'], autoMarkRead: true })
+    const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
+    const logs: string[] = []
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => cfg,
+      client,
+      listenerFactory: () => listener,
+      logger: {
+        info: (m) => logs.push(m),
+        warn: (m) => logs.push(m),
+        error: (m) => logs.push(m),
+      },
+    })
+    client.chats = [groupChat('222', 5)]
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    listener.emit('message', accepted('222', 'L11'))
+    await new Promise((r) => setTimeout(r, 50))
+
+    const nonSuccess = logs.find((m) => m.includes('auto-mark-read non-success') && m.includes('status_code=-500'))
+    expect(nonSuccess).toBeDefined()
 
     await adapter.stop()
     await router.stop()
