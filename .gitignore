@@ -51,7 +51,7 @@ auth.json
 
 # Local agent state created by tests / dev runs.
 # Anchored with a leading slash so they only match the dev-stage repo root,
-# never nested directories that share these names (`plugins/memory/`,
+# never nested directories that share these names (`src/bundled-plugins/memory/`,
 # `src/channels/`, etc. would otherwise be silently ignored).
 /sessions/
 /memory/
