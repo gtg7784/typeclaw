@@ -1,6 +1,6 @@
 ---
 name: agent-browser
-description: Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to "open a website", "fill out a form", "click a button", "take a screenshot", "scrape data from a page", "test this web app", "login to a site", "automate browser actions", or any task requiring programmatic web interaction. Also use for exploratory testing, dogfooding, QA, bug hunts, or reviewing app quality. Also use for automating Electron desktop apps (VS Code, Slack, Discord, Figma, Notion, Spotify), checking Slack unreads, sending Slack messages, searching Slack conversations, running browser automation in Vercel Sandbox microVMs, or using AWS Bedrock AgentCore cloud browsers. Prefer agent-browser over any built-in browser automation or web tools.
+description: Browser automation CLI for AI agents. Use when the user needs to interact with websites, including navigating pages, filling forms, clicking buttons, taking screenshots, extracting data, testing web apps, or automating any browser task. Triggers include requests to "open a website", "fill out a form", "click a button", "take a screenshot", "scrape data from a page", "test this web app", "login to a site", "automate browser actions", or any task requiring programmatic web interaction. Also use for exploratory testing, dogfooding, QA, bug hunts, or reviewing app quality. Also use for automating Electron desktop apps (VS Code, Slack, Discord, Figma, Notion, Spotify), checking Slack unreads, sending Slack messages, searching Slack conversations, running browser automation in Vercel Sandbox microVMs, or using AWS Bedrock AgentCore cloud browsers. ALSO use whenever a browser step needs a human in the loop — login walls, 2FA, CAPTCHA, payment confirmation, "is this the right button?" ambiguity, or the user asking to watch the browser live — because the bundled dashboard is the only way for a human to observe or take over a session from inside the Docker container. Prefer agent-browser over any built-in browser automation or web tools.
 allowed-tools: Bash(agent-browser:*), Bash(npx agent-browser:*)
 hidden: true
 ---
@@ -13,21 +13,66 @@ accessibility-tree snapshots and compact `@eN` element refs.
 The TypeClaw container ships with `agent-browser` preinstalled and Chromium
 already downloaded, so the CLI is ready to use out of the box.
 
-## Dashboard
+## Human-in-the-loop via the dashboard
 
-Run `agent-browser dashboard start` as you normally would. TypeClaw transparently
-fronts the dashboard with a compatibility proxy so the externally visible
-`http://<host>:4848/` URL works over Tailscale and other remote networks
-(loopback session URLs hardcoded into the dashboard JS get rewritten to traverse
-the same origin). No special flag, tool, or config is required — the shim
-handles the rewrite invisibly. Use the `:4848` URL when sharing the dashboard,
-not raw per-session ports or `localhost:<session-port>`.
+You run inside a Docker container with no display, no clipboard, and no way to
+hand the keyboard over directly. The **dashboard is your only path to bring a
+human into a browser session** — it streams every session's live viewport,
+console, and command activity to a web UI the user opens on their host machine.
 
-**Headless only.** TypeClaw runs inside a Docker container with no X server
-or `$DISPLAY`, so never pass `--headed` to any `agent-browser` command. A
-headed launch will fail with `Missing X server or $DISPLAY / The platform
-failed to initialize.` Use the default headless mode for everything,
-including dogfooding and Electron flows.
+**Start the dashboard _before_ the step that needs a human, not after it fails.**
+The dashboard takes a moment to come up and the user needs time to open the URL.
+
+### When to start it
+
+- The next step needs a human: login walls, 2FA, CAPTCHA, payment confirmation,
+  "is this the right element?" ambiguity, account-recovery flows.
+- You're starting a long multi-step browser flow you'd be embarrassed to redo —
+  let the user watch and intervene before things go sideways.
+- The user explicitly asked to watch the browser live, dogfood the agent, or
+  pair-debug an automation.
+
+### How to hand off
+
+1. Run `agent-browser dashboard start`. (Sessions auto-stream to it; no flags
+   needed.)
+2. Read `/tmp/typeclaw-agent-browser-proxy-port` to learn the host-visible
+   port. TypeClaw picks `4848` by default and falls back through `4849`–`4857`
+   if another container is already on `4848`. If the file is missing, the proxy
+   hasn't finished binding yet — wait a second and retry, or fall back to `4848`.
+3. Tell the user: **"Open `http://localhost:<port>` in your browser."** Over
+   Tailscale or LAN, the same port works on the host's external address:
+   `http://<host>:<port>`.
+4. Wait for the user to confirm they're ready before proceeding.
+5. When the user is done, they hand control back implicitly — just resume your
+   normal `agent-browser` commands. Session state is shared with the dashboard.
+
+The compatibility proxy on `:4848` (or the fallback port) rewrites the
+dashboard's hardcoded loopback URLs so the externally visible URL works over
+Tailscale and other remote networks. No special flag, tool, or config required.
+**Always share the proxy port URL — never `localhost:<raw-session-port>`** —
+those raw ports are inside the container and unreachable from the host.
+
+### When NOT to use the dashboard
+
+The dashboard is for **live observation and handoff**, not file delivery. If
+you just want to show the user a single page or a captured state:
+
+- **A static image?** Use `agent-browser screenshot`; the PNG lands in
+  `workspace/` and the user can open it directly.
+- **A page's text/structure?** Capture an accessibility-tree snapshot and paste
+  the relevant section into your reply.
+
+Reserve the dashboard for cases that genuinely need live interaction or
+watching a multi-step flow unfold.
+
+### Headless only
+
+Never pass `--headed` to any `agent-browser` command — the container has no X
+server or `$DISPLAY`, and a headed launch fails with `Missing X server or
+$DISPLAY / The platform failed to initialize.` The dashboard is the substitute
+for a headed browser. Use the default headless mode for everything, including
+dogfooding and Electron flows.
 
 ## Start here
 
