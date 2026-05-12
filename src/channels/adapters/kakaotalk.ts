@@ -30,7 +30,7 @@ import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
 
 // Inlined locally because agent-messenger/kakaotalk's index does not
 // re-export KakaoMarkReadResult even though client.markRead returns it
-// (agent-messenger 2.14.0). Upstream re-export fix is independent.
+// (agent-messenger 2.14.1). Upstream re-export fix is independent.
 export interface KakaoMarkReadResult {
   success: boolean
   status_code: number
