@@ -213,16 +213,16 @@ export function isAllowed(rules: readonly AllowRule[], workspace: string, chat: 
 // as workspace coordinates so the bucket-* rules are pure prefix matches
 // against `workspace`.
 function matchRule(rule: string, workspace: string, chat: string): boolean {
-  // KakaoTalk workspaces require an explicit `kakao:*` rule. The global
-  // `*` catch-all is intentionally NOT extended to admit kakao chats:
-  // KakaoTalk authenticates as a personal user account, so a user who
-  // wrote `'*'` for their Slack/Discord bot doesn't expect that rule
-  // to also expose every personal KakaoTalk DM and group they're in.
-  // To admit kakao chats, the user must write `kakao:*` (or a narrower
-  // bucket rule) explicitly. Adapter-specific non-kakao rules
-  // (`team:*`, `guild:*`, `dm:*`, `im:*`) likewise never admit kakao
-  // workspaces — the matcher returns false before evaluating them.
+  // KakaoTalk workspaces accept the global `*` catch-all or any `kakao:`
+  // rule. Adapter-specific non-kakao rules (`team:*`, `guild:*`, `dm:*`,
+  // `im:*`, `tg:*`) never admit kakao workspaces — those are scoped to
+  // their own adapter's coordinate space and would be meaningless here.
+  // The init wizard still defaults kakaotalk to the narrower `kakao:dm/*`
+  // (group chats with personal accounts are sensitive — every member sees
+  // every reply), so opting into `*` is an explicit, per-adapter decision
+  // made in `channels.kakaotalk.allow`.
   if (KAKAO_WORKSPACES.has(workspace)) {
+    if (rule === '*') return true
     if (rule.startsWith('kakao:')) return matchKakaoRule(rule.slice(6), workspace, chat)
     return false
   }
