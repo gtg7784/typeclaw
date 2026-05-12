@@ -3,6 +3,7 @@ import { definePlugin } from '@/plugin'
 import { checkGitExfilGuard } from './policies/git-exfil'
 import { checkOutboundSecretGuard } from './policies/outbound-secret-scan'
 import { applyPromptInjectionDefense } from './policies/prompt-injection'
+import { clearSessionTaints } from './policies/remote-taint-state'
 import { checkSecretExfilBashGuard } from './policies/secret-exfil-bash'
 import { checkSecretExfilReadGuard } from './policies/secret-exfil-read'
 import { checkSessionSearchSecretsGuard } from './policies/session-search-secrets'
@@ -18,7 +19,7 @@ export default definePlugin({
       'tool.before': async (event) => {
         const checks = [
           checkSecretExfilBashGuard({ tool: event.tool, args: event.args }),
-          checkGitExfilGuard({ tool: event.tool, args: event.args }),
+          checkGitExfilGuard({ tool: event.tool, args: event.args, sessionId: event.sessionId }),
           checkSecretExfilReadGuard({ tool: event.tool, args: event.args }),
           checkSsrfGuard({ tool: event.tool, args: event.args }),
           checkSessionSearchSecretsGuard({ tool: event.tool, args: event.args }),
@@ -29,6 +30,9 @@ export default definePlugin({
           if (result) return result
         }
         return undefined
+      },
+      'session.end': async (event) => {
+        clearSessionTaints(event.sessionId)
       },
     },
   }),
