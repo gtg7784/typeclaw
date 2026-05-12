@@ -5,8 +5,16 @@ import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
 import { startDaemon, type Daemon } from '@/hostd/daemon'
+import { CLI_VERSION } from '@/init/cli-version'
 import { buildDockerfile } from '@/init/dockerfile'
 import { buildGitignore } from '@/init/gitignore'
+
+// Mirror what `refreshDockerfile` writes for an installed-style agent
+// folder (package.json declares typeclaw via a registry-style spec).
+// Tests that scaffold such a folder and then assert on the on-disk
+// Dockerfile must compare against THIS form, not the inline form.
+const buildInstalledAgentDockerfile = (config?: Parameters<typeof buildDockerfile>[0]) =>
+  buildDockerfile(config, { baseImageVersion: CLI_VERSION })
 
 import type { DockerExec } from './shared'
 import { commitSystemFile, planStart, refreshDockerfile, refreshGitignore, start } from './start'
@@ -789,7 +797,7 @@ describe('start (composition)', () => {
     // then: the Dockerfile on disk was refreshed even though docker build never ran
     expect(result.ok).toBe(true)
     const onDisk = await readFile(join(root, 'Dockerfile'), 'utf8')
-    expect(onDisk).toBe(buildDockerfile())
+    expect(onDisk).toBe(buildInstalledAgentDockerfile())
     expect(onDisk).not.toContain('FROM stale')
   })
 
@@ -858,7 +866,7 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     const buildCall = calls.find((c) => c.args[0] === 'build')
     expect(buildCall).toBeDefined()
-    expect(buildCall!.dockerfileSnapshot).toBe(buildDockerfile())
+    expect(buildCall!.dockerfileSnapshot).toBe(buildInstalledAgentDockerfile())
     expect(buildCall!.dockerfileSnapshot).not.toContain('FROM stale')
   })
 
@@ -965,7 +973,7 @@ describe('start (composition)', () => {
     const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
     expect(headAfter).toBe(headBefore)
     // and: the Dockerfile on disk is the fresh template
-    expect(await readFile(join(root, 'Dockerfile'), 'utf8')).toBe(buildDockerfile())
+    expect(await readFile(join(root, 'Dockerfile'), 'utf8')).toBe(buildInstalledAgentDockerfile())
   })
 
   test('does not commit when the refresh produces no change (clean working tree)', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { dockerfileSchema } from '@/config/config'
 
+import { GHCR_BASE_IMAGE_REPO } from './cli-version'
 import {
   buildBaseDockerfile,
   buildDockerfile,
@@ -268,5 +269,91 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
     const base = buildBaseDockerfile()
     expect(base).toContain('docker-clean')
     expect(base).toContain('Keep-Downloaded-Packages "true"')
+  })
+})
+
+// The versioned form is what `typeclaw start` writes for installed-style
+// agent folders (package.json declares typeclaw via a registry-style spec).
+// These tests lock the structural invariants of that path: the FROM line
+// must pin the GHCR base image at the requested version, and none of the
+// heavy stack layers (apt baseline, Chrome runtime libs, curl-impersonate,
+// agent-browser, Chrome for Testing) may be duplicated — they already
+// exist in the base image, and re-running them in the per-agent build
+// would silently undo the entire point of pinning.
+describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
+  test('FROMs ghcr.io/typeclaw/typeclaw-base at the requested version', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })
+    expect(out).toContain(`FROM ${GHCR_BASE_IMAGE_REPO}:0.1.1`)
+    expect(out).not.toContain('FROM oven/bun:1-slim')
+  })
+
+  test('FROM tag tracks an arbitrary version string (no hidden coercion)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '9.99.99-beta.1' })
+    expect(out).toContain(`FROM ${GHCR_BASE_IMAGE_REPO}:9.99.99-beta.1`)
+  })
+
+  test('omits the heavy stack — those layers live in the base image', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })
+    // curl-impersonate (Layer 2.5)
+    expect(out).not.toContain('curl-impersonate.tar.gz')
+    expect(out).not.toContain(CURL_IMPERSONATE_VERSION)
+    // agent-browser CLI install (Layer 4)
+    expect(out).not.toContain('bun install -g agent-browser')
+    // Chrome for Testing (Layer 5)
+    expect(out).not.toContain('agent-browser install --with-deps')
+    // arm64 chromium config (Layer 3)
+    expect(out).not.toContain('/root/.agent-browser/config.json')
+    // Chrome runtime libs (Layer 2 else-branch)
+    expect(out).not.toContain('libglib2.0-0t64')
+    // Baseline apt packages (Layer 2 main line) — base image has them
+    expect(out).not.toMatch(/apt-get install -y --no-install-recommends \\\n\s+git ca-certificates curl gnupg/)
+  })
+
+  test('with all toggles off: omits the apt install layer entirely (zero-cost per-agent rebuild)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ tmux: false, gh: false, python: false, ffmpeg: false }), {
+      baseImageVersion: '0.1.1',
+    })
+    expect(out).not.toContain('apt-get install')
+    expect(out).not.toContain('apt-get update')
+  })
+
+  test('with toggles on: installs only the toggle-driven packages (no baseline duplication)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ gh: true, tmux: true, python: false, ffmpeg: false }), {
+      baseImageVersion: '0.1.1',
+    })
+    const m = out.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+)/)
+    expect(m).not.toBeNull()
+    const pkgs = m![1]!.split(/\s+/).filter(Boolean)
+    expect(pkgs).toEqual(['gh', 'tmux'])
+  })
+
+  test('keeps gh keyring bootstrap when gh: true (still per-agent toggle)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ gh: true }), { baseImageVersion: '0.1.1' })
+    expect(out).toContain('cli.github.com/packages')
+    expect(out).toContain('githubcli-archive-keyring.gpg')
+  })
+
+  test('drops gh keyring bootstrap when gh: false', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ gh: false }), { baseImageVersion: '0.1.1' })
+    expect(out).not.toContain('cli.github.com/packages')
+  })
+
+  test('keeps ENV vars, custom append lines, and ENTRYPOINT (truly per-agent state)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ append: ['ENV CUSTOM_TOOL=1'] }), {
+      baseImageVersion: '0.1.1',
+    })
+    expect(out).toContain('ENV NODE_ENV=production')
+    expect(out).toContain('ENV AGENT_MESSENGER_CONFIG_DIR=/agent/workspace/.agent-messenger')
+    expect(out).toContain('ENV CUSTOM_TOOL=1')
+    expect(out).toContain('ENTRYPOINT ["bun", "run", "typeclaw"]')
+    expect(out).toContain('CMD ["run"]')
+  })
+
+  test('explicit baseImageVersion: null falls back to the inline (oven/bun:1-slim) form', () => {
+    const inlineExplicit = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: null })
+    const inlineDefault = buildDockerfile(dockerfileSchema.parse({}))
+    expect(inlineExplicit).toBe(inlineDefault)
+    expect(inlineExplicit).toContain('FROM oven/bun:1-slim')
+    expect(inlineExplicit).not.toContain(GHCR_BASE_IMAGE_REPO)
   })
 })

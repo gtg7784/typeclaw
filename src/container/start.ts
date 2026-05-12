@@ -7,6 +7,7 @@ import { configSchema, expandMountPath, type Config } from '@/config/config'
 import { send as sendToDaemon } from '@/hostd/client'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
+import { resolveBaseImageVersion } from '@/init/cli-version'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
@@ -386,7 +387,8 @@ export async function planStart({
 
 export async function refreshDockerfile(cwd: string): Promise<void> {
   const cfg = await loadTypeclawConfig(cwd)
-  await writeFile(join(cwd, DOCKERFILE), buildDockerfile(cfg.dockerfile))
+  const baseImageVersion = await resolveBaseImageVersion(cwd)
+  await writeFile(join(cwd, DOCKERFILE), buildDockerfile(cfg.dockerfile, { baseImageVersion }))
 }
 
 export async function refreshGitignore(cwd: string): Promise<void> {

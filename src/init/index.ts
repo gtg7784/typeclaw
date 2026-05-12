@@ -8,6 +8,7 @@ import { DEFAULT_MODEL_REF, KNOWN_PROVIDERS, providerForModelRef, type KnownMode
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
 import { createTui } from '@/tui'
 
+import { resolveBaseImageVersion } from './cli-version'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { HATCHING_PROMPT } from './hatching'
@@ -434,9 +435,10 @@ export async function writeDockerAssets(root: string): Promise<DockerAssetsResul
     const devMode = typeclawSpec.startsWith('file:')
 
     const typeclawConfig = await readTypeclawConfig(root)
-    await writeFile(join(root, DOCKERFILE), buildDockerfile(typeclawConfig.dockerfile), { flag: 'wx' }).catch(
-      ignoreExists,
-    )
+    const baseImageVersion = await resolveBaseImageVersion(root)
+    await writeFile(join(root, DOCKERFILE), buildDockerfile(typeclawConfig.dockerfile, { baseImageVersion }), {
+      flag: 'wx',
+    }).catch(ignoreExists)
 
     return { ok: true, devMode }
   } catch (error) {
