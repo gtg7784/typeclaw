@@ -8,6 +8,9 @@ import { installShim, KNOWN_BIN_PATHS, type InstallShimResult } from './shim-ins
 
 type SafeResult = InstallShimResult | { kind: 'error'; binPath: string; error: unknown }
 
+// Documented in skills/agent-browser/SKILL.md so the agent can discover which
+// port the proxy actually bound to (4848 + a 10-port fallback range). Moving
+// or renaming this path requires updating the skill in lockstep.
 const PROXY_PORT_HINT_PATH = '/tmp/typeclaw-agent-browser-proxy-port'
 const PORT_CANDIDATE_RANGE = 10
 const BROKER_HANDSHAKE_DELAY_MS = 1_000
