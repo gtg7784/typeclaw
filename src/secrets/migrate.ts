@@ -70,9 +70,10 @@ function renameWithRaceFallback(from: string, to: string): void {
   }
 }
 
-// "Empty envelope" = no actual credentials. Parsed shape with empty llm and
-// empty channels. We do NOT try to be clever about "approximately empty" —
-// exact emptiness is the only safe auto-delete / auto-overwrite case.
+// "Empty envelope" = no actual credentials. parseSecretsFile normalises both
+// legacy v1 and current v2 to a v2-shaped SecretsFile, so we only check the
+// v2 fields. We do NOT try to be clever about "approximately empty" — exact
+// emptiness is the only safe auto-delete / auto-overwrite case.
 function isEmptyEnvelope(path: string): boolean {
   let raw: string
   try {
@@ -91,5 +92,5 @@ function isEmptyEnvelope(path: string): boolean {
 
   const result = parseSecretsFile(parsed)
   if (!result.ok) return false
-  return Object.keys(result.file.llm).length === 0 && Object.keys(result.file.channels).length === 0
+  return Object.keys(result.file.providers).length === 0 && Object.keys(result.file.channels).length === 0
 }

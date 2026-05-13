@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -15,22 +15,22 @@ afterEach(() => {
   rmSync(root, { recursive: true, force: true })
 })
 
-function writeSecrets(file: {
-  channels?: Record<string, Record<string, string>>
-  llm?: Record<string, unknown>
+function writeSecretsV2(file: {
+  channels?: Record<string, Record<string, unknown>>
+  providers?: Record<string, unknown>
 }): void {
   writeFileSync(
     join(root, 'secrets.json'),
-    JSON.stringify({ version: 1, llm: file.llm ?? {}, channels: file.channels ?? {} }),
+    JSON.stringify({ version: 2, providers: file.providers ?? {}, channels: file.channels ?? {} }),
   )
 }
 
 describe('hydrateChannelEnvFromSecrets', () => {
-  test('copies each (key, value) pair from every adapter slot into env', () => {
-    writeSecrets({
+  test('injects each per-adapter field into env using the default env-var name', () => {
+    writeSecretsV2({
       channels: {
-        'discord-bot': { DISCORD_BOT_TOKEN: 'd-tok' },
-        'slack-bot': { SLACK_BOT_TOKEN: 'xoxb-a', SLACK_APP_TOKEN: 'xapp-b' },
+        'discord-bot': { token: 'd-tok' },
+        'slack-bot': { botToken: 'xoxb-a', appToken: 'xapp-b' },
       },
     })
     const env: NodeJS.ProcessEnv = {}
@@ -43,8 +43,8 @@ describe('hydrateChannelEnvFromSecrets', () => {
     expect(result.applied.sort()).toEqual(['DISCORD_BOT_TOKEN', 'SLACK_APP_TOKEN', 'SLACK_BOT_TOKEN'])
   })
 
-  test('does not overwrite a key already set in env (--env-file wins)', () => {
-    writeSecrets({ channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'from-secrets' } } })
+  test('env wins: existing env value is preserved and file value is skipped', () => {
+    writeSecretsV2({ channels: { 'discord-bot': { token: 'from-secrets' } } })
     const env: NodeJS.ProcessEnv = { DISCORD_BOT_TOKEN: 'from-env-file' }
 
     const result = hydrateChannelEnvFromSecrets({ agentDir: root, env })
@@ -54,24 +54,41 @@ describe('hydrateChannelEnvFromSecrets', () => {
     expect(result.skipped).toEqual(['DISCORD_BOT_TOKEN'])
   })
 
-  test('strips applied keys from .env to make secrets.json the single source of truth', () => {
-    writeSecrets({ channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'd-tok' } } })
+  test('does NOT strip .env after applying (the legacy auto-strip is gone)', () => {
+    writeSecretsV2({ channels: { 'discord-bot': { token: 'd-tok' } } })
     writeFileSync(join(root, '.env'), 'FIREWORKS_API_KEY=keep\nDISCORD_BOT_TOKEN=stale\n')
     const env: NodeJS.ProcessEnv = {}
 
     hydrateChannelEnvFromSecrets({ agentDir: root, env })
 
-    expect(readFileSync(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=keep\n')
+    const after = readFileSync(join(root, '.env'), 'utf8')
+    expect(after).toBe('FIREWORKS_API_KEY=keep\nDISCORD_BOT_TOKEN=stale\n')
   })
 
-  test('does not strip keys that were skipped because env already had them', () => {
-    writeSecrets({ channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'd-tok' } } })
-    writeFileSync(join(root, '.env'), 'DISCORD_BOT_TOKEN=in-env\n')
-    const env: NodeJS.ProcessEnv = { DISCORD_BOT_TOKEN: 'in-env' }
+  test('object Secret with explicit env field is honored', () => {
+    writeSecretsV2({
+      channels: {
+        'discord-bot': { token: { value: 'd-disk', env: 'CUSTOM_DISCORD_TOKEN' } },
+      },
+    })
+    const env: NodeJS.ProcessEnv = { CUSTOM_DISCORD_TOKEN: 'd-custom' }
 
     hydrateChannelEnvFromSecrets({ agentDir: root, env })
 
-    expect(readFileSync(join(root, '.env'), 'utf8')).toBe('DISCORD_BOT_TOKEN=in-env\n')
+    expect(env['DISCORD_BOT_TOKEN']).toBe('d-custom')
+  })
+
+  test('object Secret with only env field and env unset falls back to nothing (no injection)', () => {
+    writeSecretsV2({
+      channels: {
+        'discord-bot': { token: { env: 'NOT_SET' } },
+      },
+    })
+    const env: NodeJS.ProcessEnv = {}
+
+    hydrateChannelEnvFromSecrets({ agentDir: root, env })
+
+    expect(env['DISCORD_BOT_TOKEN']).toBeUndefined()
   })
 
   test('returns empty result when secrets.json does not exist', () => {
@@ -84,12 +101,28 @@ describe('hydrateChannelEnvFromSecrets', () => {
   })
 
   test('returns empty result when secrets.json#channels is empty', () => {
-    writeSecrets({ channels: {} })
+    writeSecretsV2({ channels: {} })
     const env: NodeJS.ProcessEnv = {}
 
     const result = hydrateChannelEnvFromSecrets({ agentDir: root, env })
 
     expect(result.applied).toEqual([])
+  })
+
+  test('legacy v1 envelope with env-keyed channels still hydrates correctly', () => {
+    writeFileSync(
+      join(root, 'secrets.json'),
+      JSON.stringify({
+        version: 1,
+        llm: {},
+        channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'd-legacy' } },
+      }),
+    )
+    const env: NodeJS.ProcessEnv = {}
+
+    hydrateChannelEnvFromSecrets({ agentDir: root, env })
+
+    expect(env['DISCORD_BOT_TOKEN']).toBe('d-legacy')
   })
 
   test('ignores malformed secrets.json rather than throwing', () => {
@@ -99,15 +132,30 @@ describe('hydrateChannelEnvFromSecrets', () => {
     expect(() => hydrateChannelEnvFromSecrets({ agentDir: root, env })).not.toThrow()
   })
 
-  test('mutation check: commenting out the env[key] = value line leaves env empty', () => {
-    // Acceptance bar from AGENTS.md §3: if the assignment line is removed,
-    // this test must fail because env stays empty even though applied is
-    // populated.
-    writeSecrets({ channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'd-tok' } } })
+  test('skips unknown adapter ids (forward-compat for plugin adapters)', () => {
+    writeSecretsV2({ channels: { 'future-plugin-adapter': { token: 'pt' } } })
+    const env: NodeJS.ProcessEnv = {}
+
+    const result = hydrateChannelEnvFromSecrets({ agentDir: root, env })
+
+    expect(result.applied).toEqual([])
+  })
+
+  test('mutation check: commenting out env[envName] = resolved leaves env empty', () => {
+    writeSecretsV2({ channels: { 'discord-bot': { token: 'd-tok' } } })
     const env: NodeJS.ProcessEnv = {}
 
     hydrateChannelEnvFromSecrets({ agentDir: root, env })
 
     expect(env['DISCORD_BOT_TOKEN']).toBe('d-tok')
+  })
+
+  test('does not exist: .env file is never written by hydrate', () => {
+    writeSecretsV2({ channels: { 'discord-bot': { token: 'd-tok' } } })
+    const env: NodeJS.ProcessEnv = {}
+
+    hydrateChannelEnvFromSecrets({ agentDir: root, env })
+
+    expect(existsSync(join(root, '.env'))).toBe(false)
   })
 })

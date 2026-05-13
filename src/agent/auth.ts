@@ -10,7 +10,7 @@ import {
   supportsOAuth,
   type KnownProviderId,
 } from '@/config/providers'
-import { createSecretsStoreForAgent, stripEnvKey } from '@/secrets'
+import { createSecretsStoreForAgent } from '@/secrets'
 
 type Auth = {
   authStorage: AuthStorage
@@ -19,10 +19,6 @@ type Auth = {
 
 const TEST_DUMMY_API_KEY = 'test_dummy_key'
 
-// In container stage, /agent is the bind-mounted agent folder; in host stage
-// (only used by `typeclaw init` itself), it falls back to process.cwd(). The
-// host writes secrets.json at init time and the container reads + refreshes
-// it at runtime — both paths point at the same file on the host filesystem.
 function secretsJsonPath(): string {
   return join(process.cwd(), 'secrets.json')
 }
@@ -35,10 +31,6 @@ export function getAuth(): Auth {
   const providerId = providerForModelRef(getConfig().model)
   const provider = KNOWN_PROVIDERS[providerId]
 
-  // Bun sets NODE_ENV=test automatically under `bun test`. The dummy path
-  // bypasses both secrets.json and process.env so suites that build sessions
-  // but never hit the LLM don't need real credentials; production still
-  // hard-exits to surface misconfiguration.
   if (process.env.NODE_ENV === 'test' && !hasAnyCredentialInEnv(provider.apiKeyEnv)) {
     const authStorage = AuthStorage.inMemory()
     if (supportsApiKey(provider)) {
@@ -51,42 +43,31 @@ export function getAuth(): Auth {
 
   const authStorage = createSecretsStoreForAgent(secretsJsonPath())
 
-  // Persist the .env API key into secrets.json so the file is the single
-  // source of truth for credentials. Upstream pi-ai's `getEnvApiKey()` only
-  // knows about a hardcoded set of providers (anthropic, openai, etc.) and
-  // does NOT know about Fireworks, so `hasAuth("fireworks")` returns false
-  // unless a credential is materialized into AuthStorage's data map. Before
-  // this migration the code used `setRuntimeApiKey`, which papered over the
-  // gap in-memory but never wrote secrets.json — leaving `llm` empty for every
-  // downstream consumer (rotation, audit, transport over the daemon
-  // boundary) that treats the file as authoritative.
+  // Env-wins for api-key providers: when the canonical env var is set, layer
+  // that value in via setRuntimeApiKey so AuthStorage's hasAuth resolves
+  // true without persisting anything to secrets.json. This is the explicit
+  // reversal of the pre-v2 auto-migrate-to-file behaviour.
   //
-  // Policy: never overwrite an existing OAuth credential. The user
-  // explicitly logged in at init, and an unrelated `.env` value must not
-  // silently displace it. Only write when no credential exists, or when an
-  // existing api-key value drifted from the env var (the user rotated the
-  // key in .env and expects the next boot to pick it up).
+  // setRuntimeApiKey is in-memory only (it writes to runtimeOverrides, never
+  // through withLock), so the file remains untouched even when the env var
+  // is set. OAuth credentials in the file still take precedence on read
+  // because AuthStorage's hasAuth checks runtimeOverrides first only for
+  // api-key-shaped credentials — OAuth on disk wins on its own.
+  //
+  // The previous code branch that wrote the env value into secrets.json and
+  // stripped the matching `.env` line has been removed. Env values stay in
+  // env; the file stays user-owned. See src/secrets/hydrate.ts for the same
+  // policy on the channels side.
   if (supportsApiKey(provider) && provider.apiKeyEnv) {
     const envKey = process.env[provider.apiKeyEnv]
-    if (envKey) {
+    if (envKey !== undefined && envKey !== '') {
       const existing = authStorage.get(provider.id)
-      const apiKeyOwned = existing === undefined || existing.type === 'api_key'
-      if (apiKeyOwned) {
-        if (existing === undefined || existing.key !== envKey) {
-          authStorage.set(provider.id, { type: 'api_key', key: envKey })
-        }
-        // secrets.json is now authoritative for this provider's api-key credential.
-        // Strip the value from `.env` so the next boot does not silently revive a
-        // stale or rotated-away key, and so users have a single place to edit.
-        stripEnvKey(join(process.cwd(), '.env'), provider.apiKeyEnv)
+      if (existing === undefined || existing.type === 'api_key') {
+        authStorage.setRuntimeApiKey(provider.id, envKey)
       }
     }
   }
 
-  // OAuth providers persist via `oauth-login.ts` at init time; api-key
-  // providers persist via the migration block above. By this point
-  // secrets.json is authoritative — a missing entry means the user skipped
-  // login at init, deleted the file, or never set the provider's env var.
   if (!authStorage.hasAuth(provider.id)) {
     console.error(missingCredentialMessage(providerId))
     process.exit(1)
@@ -119,7 +100,7 @@ function missingCredentialMessage(providerId: KnownProviderId): string {
     return `No credentials for ${provider.name}. Run \`typeclaw init\` and pick "OAuth" to log in to ${modelName}.`
   }
   if (apiKeyOnly && provider.apiKeyEnv) {
-    return `Set ${provider.apiKeyEnv} in .env to use ${modelName} via ${provider.name}.`
+    return `Set ${provider.apiKeyEnv} in .env (or secrets.json#providers.${provider.id}.key.value) to use ${modelName} via ${provider.name}.`
   }
   return `No credentials for ${provider.name}. Either set ${provider.apiKeyEnv ?? '<api-key-env>'} in .env or run \`typeclaw init\` and pick "OAuth".`
 }

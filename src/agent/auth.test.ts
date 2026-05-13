@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -22,8 +23,6 @@ describe('getAuth', () => {
     delete process.env.OPENAI_API_KEY
     delete process.env.FIREWORKS_API_KEY
     cwd = await mkdtemp(join(tmpdir(), 'typeclaw-auth-'))
-    // Pin process.cwd() to the tmpdir so the secrets store writes
-    // secrets.json under the test scratch dir instead of polluting the repo.
     prevCwd = process.cwd()
     process.chdir(cwd)
     resetAuthForTesting()
@@ -42,7 +41,7 @@ describe('getAuth', () => {
     await rm(cwd, { recursive: true, force: true })
   })
 
-  test('persists FIREWORKS_API_KEY to secrets.json on first boot', async () => {
+  test('env-wins: FIREWORKS_API_KEY satisfies hasAuth without persisting to secrets.json', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
       JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
@@ -50,39 +49,91 @@ describe('getAuth', () => {
     reloadConfig(cwd)
     process.env.FIREWORKS_API_KEY = 'fw_test'
 
-    getAuth()
+    const auth = getAuth()
 
-    const file = await readSecretsFile(join(cwd, 'secrets.json'))
-    expect(file.llm).toEqual({ fireworks: { type: 'api_key', key: 'fw_test' } })
+    expect(auth.authStorage.hasAuth('fireworks')).toBe(true)
+    expect(await auth.authStorage.getApiKey('fireworks')).toBe('fw_test')
+
+    if (existsSync(join(cwd, 'secrets.json'))) {
+      const file = await readSecretsFile(join(cwd, 'secrets.json'))
+      expect(file.providers).toEqual({})
+    }
   })
 
-  test('persists OPENAI_API_KEY to secrets.json on first boot', async () => {
+  test('env-wins: OPENAI_API_KEY satisfies hasAuth without persisting to secrets.json', async () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
     reloadConfig(cwd)
     process.env.OPENAI_API_KEY = 'sk-test'
 
-    getAuth()
+    const auth = getAuth()
 
-    const file = await readSecretsFile(join(cwd, 'secrets.json'))
-    expect(file.llm).toEqual({ openai: { type: 'api_key', key: 'sk-test' } })
+    expect(auth.authStorage.hasAuth('openai')).toBe(true)
+    expect(await auth.authStorage.getApiKey('openai')).toBe('sk-test')
+    if (existsSync(join(cwd, 'secrets.json'))) {
+      const file = await readSecretsFile(join(cwd, 'secrets.json'))
+      expect(file.providers).toEqual({})
+    }
   })
 
-  test('updates secrets.json when the .env key rotated', async () => {
+  test('env wins over file value when both are set', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
       JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
     )
     await writeFile(
       join(cwd, 'secrets.json'),
-      JSON.stringify({ version: 1, llm: { fireworks: { type: 'api_key', key: 'fw_old' } }, channels: {} }),
+      JSON.stringify({
+        version: 2,
+        providers: { fireworks: { type: 'api_key', key: { value: 'fw_disk' } } },
+        channels: {},
+      }),
     )
     reloadConfig(cwd)
-    process.env.FIREWORKS_API_KEY = 'fw_rotated'
+    process.env.FIREWORKS_API_KEY = 'fw_env'
+
+    const auth = getAuth()
+
+    expect(await auth.authStorage.getApiKey('fireworks')).toBe('fw_env')
+  })
+
+  test('file value is used when env var is unset', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
+    )
+    await writeFile(
+      join(cwd, 'secrets.json'),
+      JSON.stringify({
+        version: 2,
+        providers: { fireworks: { type: 'api_key', key: { value: 'fw_disk' } } },
+        channels: {},
+      }),
+    )
+    reloadConfig(cwd)
+    // The dummy in-memory branch in getAuth() triggers under NODE_ENV=test
+    // when no api-key env var is set. Bypass it so the on-disk file is the
+    // credential source under test.
+    delete process.env.NODE_ENV
+
+    const auth = getAuth()
+
+    expect(auth.authStorage.hasAuth('fireworks')).toBe(true)
+    expect(await auth.authStorage.getApiKey('fireworks')).toBe('fw_disk')
+  })
+
+  test('does NOT strip .env after layering env-resolved api-key in-memory', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
+    )
+    const original = 'FIREWORKS_API_KEY=fw_from_env\nUNRELATED=keep-me\n'
+    await writeFile(join(cwd, '.env'), original)
+    reloadConfig(cwd)
+    process.env.FIREWORKS_API_KEY = 'fw_from_env'
 
     getAuth()
 
-    const file = await readSecretsFile(join(cwd, 'secrets.json'))
-    expect(file.llm['fireworks']).toEqual({ type: 'api_key', key: 'fw_rotated' })
+    expect(await readFile(join(cwd, '.env'), 'utf8')).toBe(original)
   })
 
   test('preserves an existing OAuth credential and ignores the .env key', async () => {
@@ -95,7 +146,7 @@ describe('getAuth', () => {
     }
     await writeFile(
       join(cwd, 'secrets.json'),
-      JSON.stringify({ version: 1, llm: { openai: oauthCredential }, channels: {} }),
+      JSON.stringify({ version: 2, providers: { openai: oauthCredential }, channels: {} }),
     )
     reloadConfig(cwd)
     process.env.OPENAI_API_KEY = 'sk-from-env'
@@ -103,7 +154,29 @@ describe('getAuth', () => {
     getAuth()
 
     const file = await readSecretsFile(join(cwd, 'secrets.json'))
-    expect(file.llm['openai']).toEqual(oauthCredential)
+    expect(file.providers['openai']).toEqual(oauthCredential)
+  })
+
+  test('does not touch .env when an OAuth credential already owns the provider slot', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
+    const oauthCredential = {
+      type: 'oauth' as const,
+      access_token: 'tok',
+      refresh_token: 'refresh',
+      expires_at: Date.now() + 1_000_000,
+    }
+    await writeFile(
+      join(cwd, 'secrets.json'),
+      JSON.stringify({ version: 2, providers: { openai: oauthCredential }, channels: {} }),
+    )
+    const envBefore = 'OPENAI_API_KEY=sk-leave-me\n'
+    await writeFile(join(cwd, '.env'), envBefore)
+    reloadConfig(cwd)
+    process.env.OPENAI_API_KEY = 'sk-leave-me'
+
+    getAuth()
+
+    expect(await readFile(join(cwd, '.env'), 'utf8')).toBe(envBefore)
   })
 
   test('falls back to a dummy in-memory storage when the provider env var is missing under NODE_ENV=test', async () => {
@@ -128,60 +201,22 @@ describe('getAuth', () => {
     expect(a).toBe(b)
   })
 
-  test('strips the api-key env var from .env after persisting to secrets.json', async () => {
-    await writeFile(
-      join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
-    )
-    await writeFile(join(cwd, '.env'), 'FIREWORKS_API_KEY=fw_from_env\nUNRELATED=keep-me\n')
-    reloadConfig(cwd)
-    process.env.FIREWORKS_API_KEY = 'fw_from_env'
-
-    getAuth()
-
-    const file = await readSecretsFile(join(cwd, 'secrets.json'))
-    expect(file.llm).toEqual({ fireworks: { type: 'api_key', key: 'fw_from_env' } })
-    expect(await readFile(join(cwd, '.env'), 'utf8')).toBe('UNRELATED=keep-me\n')
-  })
-
-  test('strips the api-key env var from .env on rotation', async () => {
+  test('legacy v1 envelope is read on first boot (transparent upgrade)', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
       JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
     )
     await writeFile(
       join(cwd, 'secrets.json'),
-      JSON.stringify({ version: 1, llm: { fireworks: { type: 'api_key', key: 'fw_old' } }, channels: {} }),
+      JSON.stringify({ version: 1, llm: { fireworks: { type: 'api_key', key: 'fw_v1' } }, channels: {} }),
     )
-    await writeFile(join(cwd, '.env'), 'FIREWORKS_API_KEY=fw_rotated\n')
     reloadConfig(cwd)
-    process.env.FIREWORKS_API_KEY = 'fw_rotated'
+    delete process.env.NODE_ENV
 
-    getAuth()
+    const auth = getAuth()
 
-    expect(await readFile(join(cwd, '.env'), 'utf8')).toBe('')
-  })
-
-  test('does not touch .env when an OAuth credential already owns the provider slot', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
-    const oauthCredential = {
-      type: 'oauth' as const,
-      access_token: 'tok',
-      refresh_token: 'refresh',
-      expires_at: Date.now() + 1_000_000,
-    }
-    await writeFile(
-      join(cwd, 'secrets.json'),
-      JSON.stringify({ version: 1, llm: { openai: oauthCredential }, channels: {} }),
-    )
-    const envBefore = 'OPENAI_API_KEY=sk-leave-me\n'
-    await writeFile(join(cwd, '.env'), envBefore)
-    reloadConfig(cwd)
-    process.env.OPENAI_API_KEY = 'sk-leave-me'
-
-    getAuth()
-
-    expect(await readFile(join(cwd, '.env'), 'utf8')).toBe(envBefore)
+    expect(auth.authStorage.hasAuth('fireworks')).toBe(true)
+    expect(await auth.authStorage.getApiKey('fireworks')).toBe('fw_v1')
   })
 
   test('migrates a legacy auth.json to secrets.json on first getAuth()', async () => {
@@ -195,21 +230,19 @@ describe('getAuth', () => {
       }),
     )
     reloadConfig(cwd)
-    // Force the real-storage branch (the dummy-in-memory path skips
-    // createSecretsStoreForAgent and therefore the migration).
     process.env.OPENAI_API_KEY = 'sk-migration-test'
 
     getAuth()
 
     await expect(readFile(join(cwd, 'auth.json'), 'utf8')).rejects.toThrow()
-    const migrated = JSON.parse(await readFile(join(cwd, 'secrets.json'), 'utf8')) as {
-      llm: Record<string, { type: string }>
-    }
-    expect(migrated.llm.openai?.type).toBe('oauth')
+    const file = await readSecretsFile(join(cwd, 'secrets.json'))
+    const openai = file.providers['openai']
+    expect(openai).toBeDefined()
+    expect((openai as { type: string }).type).toBe('oauth')
   })
 })
 
-async function readSecretsFile(path: string): Promise<{ llm: Record<string, unknown> }> {
+async function readSecretsFile(path: string): Promise<{ providers: Record<string, unknown> }> {
   const raw = await readFile(path, 'utf8')
   const result = parseSecretsFile(JSON.parse(raw))
   if (!result.ok) throw new Error(`secrets.json failed to parse: ${result.reason}`)

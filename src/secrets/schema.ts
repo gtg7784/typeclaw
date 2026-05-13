@@ -1,88 +1,163 @@
 import { z } from 'zod'
 
-// The api_key shape exactly matches pi-coding-agent's ApiKeyCredential. We
-// re-state it here (rather than import the upstream type into the schema)
-// because Zod schemas are the source of truth for validation and JSON Schema
-// generation, and pi-coding-agent does not export Zod schemas.
-const llmApiKeyCredentialSchema = z.object({
+import { CHANNEL_ENV_TO_FIELD } from './defaults'
+import { secretFieldSchema, type Secret } from './resolve'
+
+// providers.<id> for api-key credentials: the `key` field is a Secret (string
+// shorthand or `{ value?, env? }` object). resolveSecret turns this into a
+// flat string at read time so AuthStorage (which expects `key: string`)
+// stays happy. OAuth credentials carry stateful refresh/access tokens that
+// are not env-injectable, so they pass through unchanged via catchall.
+const apiKeyProviderSchema = z.object({
   type: z.literal('api_key'),
-  key: z.string().min(1),
+  key: secretFieldSchema,
 })
 
-// pi-coding-agent's OAuth credential carries provider-specific fields
-// (access, refresh, expires, plus arbitrary upstream additions). We accept
-// them as a passthrough object so future upstream additions don't break parse.
-// Upstream is the runtime authority on OAuth shape; our job here is only to
-// route the slice safely through the file envelope.
-const llmOAuthCredentialSchema = z
+const oauthProviderSchema = z
   .object({
     type: z.literal('oauth'),
   })
   .catchall(z.unknown())
 
-export const llmCredentialSchema = z.discriminatedUnion('type', [llmApiKeyCredentialSchema, llmOAuthCredentialSchema])
+export const providerCredentialSchema = z.discriminatedUnion('type', [apiKeyProviderSchema, oauthProviderSchema])
 
-// Map keyed by provider id ("openai", "openai-codex", "fireworks", ...).
-// Exactly the shape pi-coding-agent persists today as the entire secrets file.
-export const llmCredentialsSchema = z.record(z.string(), llmCredentialSchema)
+export const providersSchema = z.record(z.string(), providerCredentialSchema)
 
-// Each adapter's slot is a flat map of env-var name -> secret value. The
-// runtime hydrates `process.env` from this map at boot (see
-// `hydrateChannelEnvFromSecrets` in `src/secrets/hydrate.ts`), so adding a new
-// secret env var to an adapter requires no schema change here — the catchall
-// on the value type accepts arbitrary keys. The OUTER catchall (`z.record`
-// catchall) keeps forward compatibility when a future TypeClaw writes
-// additional adapter ids the current version doesn't know about.
-//
-// Why a string→string map and not a typed `{ token, appToken }` shape per
-// adapter: the on-disk file mirrors the env-var contract the manager already
-// honors (TOKEN_ENV in `src/channels/manager.ts`). Keeping the shape
-// schema-mirrored to env keys means the manager doesn't need a per-adapter
-// translation layer — hydration is `for (const [k, v] of entries) env[k] = v`.
-const channelTokenMapSchema = z.record(z.string(), z.string())
+// Per-adapter channel slots use named fields (`botToken`, `appToken`, `token`)
+// instead of env-var-name keys. The Secret union per field carries the env-var
+// override. Unknown adapter ids pass through via catchall so a future
+// plugin-contributed adapter doesn't fail validation.
+const slackBotChannelSchema = z.object({
+  botToken: secretFieldSchema.optional(),
+  appToken: secretFieldSchema.optional(),
+})
 
-const knownAdapterIds = ['discord-bot', 'slack-bot', 'telegram-bot'] as const
+const discordBotChannelSchema = z.object({
+  token: secretFieldSchema.optional(),
+})
+
+const telegramBotChannelSchema = z.object({
+  token: secretFieldSchema.optional(),
+})
 
 export const channelsSchema = z
-  .object(Object.fromEntries(knownAdapterIds.map((id) => [id, channelTokenMapSchema.optional()])))
+  .object({
+    'slack-bot': slackBotChannelSchema.optional(),
+    'discord-bot': discordBotChannelSchema.optional(),
+    'telegram-bot': telegramBotChannelSchema.optional(),
+  })
   .catchall(z.unknown())
+
+// version 2 = providers.* with Secret-typed api-key.key + per-adapter
+// channel field shapes. version 1 = the previous shape (flat `llm.*`, channel
+// slots keyed by env-var name). Legacy v1 input is upgraded transparently by
+// parseSecretsFile; the first write persists v2.
+export const SECRETS_FILE_VERSION = 2
 
 export const secretsFileSchema = z.object({
   $schema: z.string().optional(),
-  version: z.literal(1),
-  llm: llmCredentialsSchema.default({}),
+  version: z.literal(SECRETS_FILE_VERSION),
+  providers: providersSchema.default({}),
   channels: channelsSchema.default({}),
 })
 
-export type LlmCredential = z.infer<typeof llmCredentialSchema>
-export type LlmCredentials = z.infer<typeof llmCredentialsSchema>
+export type ProviderCredential = z.infer<typeof providerCredentialSchema>
+export type Providers = z.infer<typeof providersSchema>
+export type Channels = z.infer<typeof channelsSchema>
 export type SecretsFile = z.infer<typeof secretsFileSchema>
 
 export type ParseSecretsResult = { ok: true; file: SecretsFile } | { ok: false; reason: string }
 
-// parseSecretsFile recognises two shapes:
-//   1. The new envelope: { version: 1, llm: {...}, channels: {...} }
-//   2. The legacy flat shape pi-coding-agent writes today: a top-level
-//      Record<string, AuthCredential>. Treated as { version: 1, llm: <flat>,
-//      channels: {} } so existing OAuth users transparently upgrade on the
-//      next write that goes through this code path.
+// parseSecretsFile recognises three shapes, in priority order:
+//   1. The v2 envelope (current): { version: 2, providers, channels }
+//   2. The v1 envelope (legacy): { version: 1, llm, channels } where channel
+//      slots are keyed by env-var name. Both `llm` and `channels` get
+//      reshaped — llm -> providers, env-keyed channel slots -> field-keyed.
+//   3. The pre-envelope flat shape (very legacy): Record<string, AuthCredential>
+//      at top level. Treated as { version: 2, providers: <flat>, channels: {} }
+//      so existing OAuth users transparently upgrade.
 //
-// An empty object {} is a legitimate legacy state — a freshly-created
-// secrets file with no providers logged in yet. It upgrades cleanly to the
-// new envelope with empty llm and channels.
+// Every legacy upgrade produces a v2-shaped SecretsFile in memory; the next
+// write persists v2 to disk. The legacy branches stay forever as a quiet
+// compatibility seam — only the v2 form is documented.
 export function parseSecretsFile(raw: unknown): ParseSecretsResult {
-  const direct = secretsFileSchema.safeParse(raw)
-  if (direct.success) return { ok: true, file: direct.data }
+  const v2 = secretsFileSchema.safeParse(raw)
+  if (v2.success) return { ok: true, file: v2.data }
 
-  const legacy = llmCredentialsSchema.safeParse(raw)
-  if (legacy.success) {
-    return { ok: true, file: { version: 1, llm: legacy.data, channels: {} } }
+  const v1 = legacyV1Schema.safeParse(raw)
+  if (v1.success) return { ok: true, file: upgradeV1ToV2(v1.data) }
+
+  const flat = legacyFlatProviderSchema.safeParse(raw)
+  if (flat.success) {
+    return { ok: true, file: upgradeV1ToV2({ version: 1, llm: flat.data, channels: {} }) }
   }
 
-  // Neither shape matched. We surface the new-shape error because that's the
-  // target the user is presumably moving toward; the legacy path is a quiet
-  // compatibility seam, not a documented format.
-  return { ok: false, reason: direct.error.issues.map(formatIssue).join('; ') }
+  return { ok: false, reason: v2.error.issues.map(formatIssue).join('; ') }
+}
+
+// Legacy v1 schema: `llm` (flat string-key) and `channels` (env-var-keyed
+// flat map per adapter). Used only for upgrade reads; never written.
+const legacyV1ApiKeySchema = z.object({
+  type: z.literal('api_key'),
+  key: z.string().min(1),
+})
+
+const legacyV1OAuthSchema = z
+  .object({
+    type: z.literal('oauth'),
+  })
+  .catchall(z.unknown())
+
+const legacyV1CredentialSchema = z.discriminatedUnion('type', [legacyV1ApiKeySchema, legacyV1OAuthSchema])
+
+const legacyV1LlmSchema = z.record(z.string(), legacyV1CredentialSchema)
+
+const legacyV1ChannelsSchema = z.record(z.string(), z.record(z.string(), z.string()))
+
+const legacyV1Schema = z.object({
+  $schema: z.string().optional(),
+  version: z.literal(1),
+  llm: legacyV1LlmSchema.default({}),
+  channels: legacyV1ChannelsSchema.default({}),
+})
+
+const legacyFlatProviderSchema = z.record(z.string(), legacyV1CredentialSchema)
+
+function upgradeV1ToV2(legacy: z.infer<typeof legacyV1Schema>): SecretsFile {
+  const providers: Providers = {}
+  for (const [providerId, cred] of Object.entries(legacy.llm)) {
+    if (cred.type === 'api_key') {
+      providers[providerId] = { type: 'api_key', key: { value: cred.key } }
+    } else {
+      providers[providerId] = cred
+    }
+  }
+
+  const channels: Channels = {}
+  for (const [adapterId, envKeyedSlot] of Object.entries(legacy.channels)) {
+    const upgradedSlot: Record<string, Secret> = {}
+    for (const [envKey, value] of Object.entries(envKeyedSlot)) {
+      const mapping = CHANNEL_ENV_TO_FIELD[envKey]
+      if (mapping && mapping.adapterId === adapterId) {
+        upgradedSlot[mapping.fieldName] = { value }
+      } else {
+        // Unknown env-var-name key on a known adapter, or an adapter we don't
+        // recognise: pass through verbatim under the original key. Better to
+        // preserve user data than drop it; the catchall on channelsSchema
+        // makes this safe.
+        upgradedSlot[envKey] = { value }
+      }
+    }
+    channels[adapterId] = upgradedSlot
+  }
+
+  const result: SecretsFile = {
+    version: SECRETS_FILE_VERSION,
+    providers,
+    channels,
+  }
+  if (legacy.$schema !== undefined) result.$schema = legacy.$schema
+  return result
 }
 
 function formatIssue(issue: { path: PropertyKey[]; message: string }): string {

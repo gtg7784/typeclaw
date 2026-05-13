@@ -9,12 +9,21 @@ import { createSecretsStoreForAgent } from './storage'
 
 describe('migrateLegacyAuthJson', () => {
   let dir: string
+  let prevFireworks: string | undefined
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), 'typeclaw-secrets-migrate-'))
+    // The createSecretsStoreForAgent integration test reads back the
+    // migrated credential via AuthStorage.get, which honors env-wins. CI
+    // sets FIREWORKS_API_KEY=dummy workflow-wide; scrub it so the on-disk
+    // value is what comes back.
+    prevFireworks = process.env.FIREWORKS_API_KEY
+    delete process.env.FIREWORKS_API_KEY
   })
 
   afterEach(async () => {
+    if (prevFireworks === undefined) delete process.env.FIREWORKS_API_KEY
+    else process.env.FIREWORKS_API_KEY = prevFireworks
     await rm(dir, { recursive: true, force: true })
   })
 

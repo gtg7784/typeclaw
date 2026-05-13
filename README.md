@@ -110,6 +110,10 @@ my-agent/
 
 `Dockerfile` and `.gitignore` are owned by TypeClaw and rewritten on every `start` — edit `src/init/dockerfile.ts` and re-run `start --build` to ship template changes.
 
+### Secrets
+
+Credentials live in two gitignored files: `.env` (plain `KEY=value` lines, injected into the container via `--env-file`) and `secrets.json` (a structured store managed by TypeClaw). **Env-wins**: when a credential's canonical env var (e.g. `FIREWORKS_API_KEY`, `SLACK_BOT_TOKEN`) is set, that value is used at runtime — `secrets.json` is never auto-mutated to capture it. Every secret-bearing field in `secrets.json` is a `Secret` (`string | { value?, env? }`), so the file can rebind a credential to a custom env-var name on demand. See [AGENTS.md § Secrets](./AGENTS.md#secrets) for the full contract.
+
 ## Development
 
 ```sh

@@ -170,6 +170,82 @@ The wiring lives in `setupSession` in `src/agent/index.ts` (around line 366). Wh
 
 **Skills are lazy by design.** Adding a skill costs zero tokens until the agent loads it. This is the right home for platform-specific guidance, large procedural runbooks, or knowledge that's only relevant in a subset of sessions. **Do not** copy that same guidance into tool descriptions to "make it more reliable" — tool descriptions reload into every tool-call prefix, which is exactly the cost model skills exist to avoid (production failure: commit `e2b08ab`, reverted in `ccb4669`, where embedded per-platform formatting hints were ignored by the LLM under chat-prose load _and_ paid the token tax on every channel turn).
 
+## Secrets
+
+`src/secrets/` owns TypeClaw's credential storage. Two on-disk files compose the surface:
+
+- **`<agentDir>/.env`** — plain `KEY=value` lines. Loaded by Docker at container start via `--env-file`; injected into `process.env`. First-class source of truth for whatever the operator puts there. Gitignored.
+- **`<agentDir>/secrets.json`** — the structured store. `v2` envelope managed by `SecretsBackend` (in `src/secrets/storage.ts`), which wraps `pi-coding-agent`'s `AuthStorage`. Gitignored. Two top-level slices:
+  - `providers.<id>` — per-provider credentials. API-key shape: `{ type: 'api_key', key: <Secret> }`. OAuth shape: `{ type: 'oauth', access_token, refresh_token, expires_at, ... }` (catchall-passthrough for upstream-controlled fields).
+  - `channels.<adapter>` — per-adapter credentials, keyed by named fields:
+    - `discord-bot: { token: <Secret> }`
+    - `slack-bot: { botToken: <Secret>, appToken: <Secret> }`
+    - `telegram-bot: { token: <Secret> }`
+
+The schema is in `src/secrets/schema.ts` (`secretsFileSchema`). The bridge between TypeClaw's envelope and AuthStorage's flat `Record<provider, AuthCredential>` contract lives in `SecretsBackend.withLock` / `withLockAsync`. Channel adapters never read the envelope directly — `hydrateChannelEnvFromSecrets` (in `hydrate.ts`) injects resolved field values into `process.env[TOKEN_ENV]` at boot so `src/channels/manager.ts` keeps its existing env-based contract.
+
+### The `Secret` shape
+
+Every secret-bearing field is typed as `Secret = string | { value?: string, env?: string }`. The string form is shorthand for `{ value }`. The schema normalises both to the object form at parse time, so consumers only see `{ value?, env? }`.
+
+```jsonc
+{
+  "version": 2,
+  "providers": {
+    "fireworks": { "type": "api_key", "key": "fw_xxx" }, // string shorthand
+    "openai": { "type": "api_key", "key": { "value": "sk_xxx", "env": "MY_OPENAI" } }, // explicit env binding
+  },
+  "channels": {
+    "slack-bot": {
+      "botToken": { "value": "xoxb-..." }, // file-only
+      "appToken": { "env": "CI_SLACK_APP_TOKEN" }, // env-only
+    },
+  },
+}
+```
+
+The single env-vs-file precedence rule lives in `resolveSecret(secret, defaultEnv, env)` (in `src/secrets/resolve.ts`):
+
+1. `process.env[secret.env]` — explicit binding wins.
+2. `process.env[defaultEnv]` — canonical env-var-name fallback. Defaults come from `CHANNEL_FIELD_ENV` for channels and `KNOWN_PROVIDERS[id].apiKeyEnv` for providers (both centralised in `src/secrets/defaults.ts`).
+3. `secret.value` — the on-disk value.
+4. Otherwise the field is treated as missing.
+
+### Env-wins, file-never-auto-mutated (the policy)
+
+- For api-key providers in `src/agent/auth.ts`: when the canonical env var is set at boot, the value is layered in via `authStorage.setRuntimeApiKey(...)` (in-memory only, never goes through `withLock`). `hasAuth` reports true, `getApiKey` returns the env value, `secrets.json` stays untouched.
+- For channel fields in `src/secrets/hydrate.ts`: existing `process.env[TOKEN_ENV]` is kept as-is; only when the env var is unset does hydrate inject the resolved Secret value into `process.env`. `.env` is never stripped, `secrets.json` is never rewritten.
+- No auto-promotion. Previous versions ran `promoteChannelEnvIntoSecrets` at boot to copy `.env` channel tokens into `secrets.json#channels` and erase the `.env` lines. **That module is gone.** Env values stay where the user put them; the file stays user-owned.
+
+### Bridge idempotency (the load-bearing invariant)
+
+`SecretsBackend.withLock` diffs AuthStorage's returned flat slice against the prior on-disk envelope:
+
+- **Provider unchanged** — preserve the on-disk Secret bytes verbatim (no flatten, no rewrap). This is the rule that prevents OAuth-refresh writes from accidentally persisting env-resolved api-key values into the file.
+- **API-key value changed** — rewrap as Secret, preserving any prior `env` field the user authored.
+- **Provider added** — write as string-value Secret.
+- **Provider removed** — actually remove (do not resurrect).
+- **Unknown `type` value** — pass through verbatim (forward-compat for upstream adding a third credential type).
+
+OAuth credentials always pass through as flat strings — they're not env-injectable (refresh tokens are stateful). This is the single asymmetry between api-key and OAuth in the bridge.
+
+### Versioning and migration
+
+The envelope's `version` field is `2` on writes. Three legacy shapes are accepted on read and upgraded transparently:
+
+1. **v1 envelope** (`{ version: 1, llm, channels: { adapter: { ENV_NAME: value } } }`) — `llm` → `providers`, env-var-keyed channel slots → field-name-keyed via `CHANNEL_ENV_TO_FIELD`.
+2. **Pre-envelope flat shape** (`{ openai: { type, key }, ... }` at top level) — wrapped as v2 with the providers slice populated.
+3. **Pre-rename file** (`auth.json` instead of `secrets.json`) — renamed by `migrateLegacyAuthJson` in `createSecretsStoreForAgent`.
+
+All three are read-only legacy branches; the next write produces v2. The legacy parsers stay forever as quiet compat seams.
+
+### Rules of thumb
+
+- **Adding a new adapter or provider with credentials** requires three coordinated edits, all in `src/secrets/defaults.ts` + `src/secrets/schema.ts`: (a) add the per-adapter field schema (or extend `KNOWN_PROVIDERS` for providers), (b) add the entry to `CHANNEL_FIELD_ENV` so `hydrateChannelEnvFromSecrets` can inject the resolved value, (c) extend `CHANNEL_ENV_TO_FIELD` if the v1 upgrade should rename legacy env-key entries. Forgetting (b) silently breaks injection at boot — `manager.ts` would never see the value in `process.env`.
+- **Never write env-resolved values back to disk.** If you find yourself calling `authStorage.set(provider, { type: 'api_key', key: envValue })`, use `setRuntimeApiKey(provider, envValue)` instead. The first persists; the second is in-memory only. The whole env-wins policy depends on this distinction.
+- **`pi-coding-agent`'s `AuthStorage.set` always writes through `withLock`.** Our bridge has to be ready for full-slice rewrites that include providers the caller didn't intend to change (OAuth refresh is the canonical example). The diff-and-preserve logic in `mergeProvidersIntoEnvelope` is what makes those writes safe; do not "simplify" it back to a wholesale replace.
+- **`.env` and `secrets.json` are peers, not migration source and sink.** `typeclaw doctor` is the right place to surface "this secret resolves from env / file / nothing" — not a boot-time auto-migration.
+
 ## Host daemon (hostd)
 
 `src/hostd/` is a **host-stage** subsystem that owns every host-side capability the running container needs — currently the **supervisor** (`src/hostd/supervisor.ts`, restart) and the **port broker** (delegated to `src/portbroker/`, glued in via `src/hostd/portbroker-manager.ts`). Architecturally: a **singleton daemon per host** (not per agent) — the only persistent host-side process in the codebase, and the only persistent host-stage state (`~/.typeclaw/`). New host-side capabilities should plug in as additional `src/hostd/<capability>.ts` glue + an `src/<capability>/` module that does the actual work, and an additional optional callback on `DaemonOptions`. **Don't add new daemons.**
