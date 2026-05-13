@@ -111,13 +111,24 @@ export type GitignoreConfig = z.infer<typeof gitignoreSchema>
 // multicast/reserved, IPv6 ULA/link-local/multicast. The capability is then
 // dropped from the bounding set via setpriv before the agent process exec's,
 // so no child (python, curl, bun-spawned anything) can mutate or recover it.
-// Default is `false` so existing agent folders are unaffected by an upgrade;
-// `typeclaw init` writes `true` for new agents (handled separately in init).
+//
+// Default is `true`: the threat model that motivated this feature — prompt
+// injection asking the agent to fetch RFC1918 hosts (e.g. a LAN router admin
+// page) or the cloud-IMDS endpoint — applies to every agent equally, so the
+// safe default is "on" and
+// the explicit opt-out is for users who need their agent to reach LAN hosts
+// (NAS, internal services, sibling dev machines). PR #145 shipped this with
+// default `false` to preserve existing-folder behavior on upgrade; this
+// follow-up (the one PR #145 promised in its description) makes the default
+// match the intent. `typeclaw init` also writes `true` explicitly so the
+// field is discoverable in fresh `typeclaw.json` files. Loopback traffic
+// (`-o lo`) is always allowed by the shim, so `bun run dev` and local APIs
+// on `localhost` / `127.0.0.1` are unaffected.
 export const networkSchema = z
   .object({
-    blockInternal: z.boolean().default(false),
+    blockInternal: z.boolean().default(true),
   })
-  .default({ blockInternal: false })
+  .default({ blockInternal: true })
 
 export type NetworkConfig = z.infer<typeof networkSchema>
 

@@ -416,17 +416,17 @@ describe('planStart mounts', () => {
 })
 
 describe('planStart network egress filter', () => {
-  test('emits no NET_ADMIN cap and no env var when typeclaw.json is missing (existing-agent default = off)', async () => {
+  test('grants NET_ADMIN and sets TYPECLAW_NETWORK_BLOCK_INTERNAL=1 when typeclaw.json is missing (new default = on)', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
 
-    expect(plan.runArgs).not.toContain('--cap-add=NET_ADMIN')
-    expect(plan.runArgs.filter((a) => a.includes('TYPECLAW_NETWORK_BLOCK_INTERNAL'))).toHaveLength(0)
+    expect(plan.runArgs).toContain('--cap-add=NET_ADMIN')
+    expect(plan.runArgs).toContain('TYPECLAW_NETWORK_BLOCK_INTERNAL=1')
   })
 
-  test('emits no NET_ADMIN cap and no env var when network.blockInternal is explicitly false', async () => {
+  test('emits no NET_ADMIN cap and no env var when network.blockInternal is explicitly false (opt-out path for LAN access)', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeTypeclawConfig(root, { network: { blockInternal: false } })

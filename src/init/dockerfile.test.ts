@@ -389,7 +389,7 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
 })
 
 describe('network egress entrypoint shim', () => {
-  test('is a no-op when TYPECLAW_NETWORK_BLOCK_INTERNAL is unset or not "1" (existing agents unaffected by upgrade)', () => {
+  test('is a no-op when TYPECLAW_NETWORK_BLOCK_INTERNAL is unset or not "1" (off-switch path: users who opted out via network.blockInternal=false)', () => {
     const shim = buildEntrypointShim()
     expect(shim).toContain('"${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1"')
     expect(shim).toMatch(/!= "1" \];? then\s+exec bun run typeclaw "\$@"/)
