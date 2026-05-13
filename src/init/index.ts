@@ -70,7 +70,13 @@ export type InitStepEvent =
   | { step: 'hatching'; phase: 'start' }
   | { step: 'hatching'; phase: 'done'; result: HatchingResult }
 
-export type HatchRunner = (options: { cwd: string; port: number }) => Promise<HatchingResult>
+// `cliEntry` is the path to the running CLI module (typically `process.argv[1]`).
+// When provided, the hatching step threads it into `start()`, which spawns the
+// host daemon and registers the freshly-hatched container with the supervisor +
+// portbroker — same path `typeclaw start` takes. When omitted (test fixtures,
+// programmatic callers that never want a daemon), `start()` skips the daemon
+// path entirely and the container runs unmanaged.
+export type HatchRunner = (options: { cwd: string; port: number; cliEntry?: string }) => Promise<HatchingResult>
 
 export type KakaotalkAuthRunner = (options: { cwd: string }) => Promise<KakaotalkAuthResult>
 
@@ -105,6 +111,12 @@ export type InitOptions = {
   runHatching?: HatchRunner
   runBunInstall?: InstallRunner
   dockerExec?: DockerExec
+  // Production CLI callers (src/cli/init.ts) pass `process.argv[1]` so the
+  // hatching step's `start()` call spawns the host daemon and registers the
+  // freshly-hatched container — same path `typeclaw start` takes. Tests omit
+  // this to skip the daemon entirely (matching the existing seam in
+  // src/container/start.ts).
+  cliEntry?: string
 }
 
 export async function runInit({
@@ -126,6 +138,7 @@ export async function runInit({
   runHatching = defaultRunHatching,
   runBunInstall: installRunner = runBunInstall,
   dockerExec,
+  cliEntry,
 }: InitOptions): Promise<void> {
   const emit = onProgress ?? (() => {})
 
@@ -218,13 +231,21 @@ export async function runInit({
   emit({ step: 'git', phase: 'done', result: git })
 
   emit({ step: 'hatching', phase: 'start' })
-  const hatching = await runHatching({ cwd, port: config.port })
+  const hatching = await runHatching({ cwd, port: config.port, ...(cliEntry !== undefined ? { cliEntry } : {}) })
   emit({ step: 'hatching', phase: 'done', result: hatching })
 }
 
-async function defaultRunHatching({ cwd, port }: { cwd: string; port: number }): Promise<HatchingResult> {
+async function defaultRunHatching({
+  cwd,
+  port,
+  cliEntry,
+}: {
+  cwd: string
+  port: number
+  cliEntry?: string
+}): Promise<HatchingResult> {
   try {
-    const launch = await start({ cwd, preferredHostPort: port })
+    const launch = await start({ cwd, preferredHostPort: port, ...(cliEntry !== undefined ? { cliEntry } : {}) })
     if (!launch.ok) return { ok: false, reason: launch.reason }
 
     // start() may have allocated a different host port (the preferred one was

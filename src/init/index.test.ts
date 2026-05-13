@@ -54,8 +54,8 @@ const okDocker: DockerExec = async () => ({ exitCode: 0, stdout: '29.4.0\n', std
 // own InstallRunner.
 const okInstall: InstallRunner = async () => ({ ok: true })
 
-function captureHatch(): { runner: HatchRunner; calls: Array<{ cwd: string; port: number }> } {
-  const calls: Array<{ cwd: string; port: number }> = []
+function captureHatch(): { runner: HatchRunner; calls: Array<{ cwd: string; port: number; cliEntry?: string }> } {
+  const calls: Array<{ cwd: string; port: number; cliEntry?: string }> = []
   const runner: HatchRunner = async (options) => {
     calls.push(options)
     return { ok: true }
@@ -132,6 +132,37 @@ describe('runInit', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]?.cwd).toBe(root)
     expect(calls[0]?.port).toBeGreaterThan(0)
+  })
+
+  test('hatching forwards cliEntry when runInit receives it', async () => {
+    const { runner, calls } = captureHatch()
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: runner,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+      cliEntry: '/fake/cli/entry.ts',
+    })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.cliEntry).toBe('/fake/cli/entry.ts')
+  })
+
+  test('hatching omits cliEntry when runInit is called without it', async () => {
+    const { runner, calls } = captureHatch()
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      runHatching: runner,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.cliEntry).toBeUndefined()
   })
 
   test('hatching failure is reported via event, not thrown', async () => {
