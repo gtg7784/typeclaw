@@ -7,13 +7,19 @@ import { configSchema, expandMountPath, type Config } from '@/config/config'
 import { send as sendToDaemon } from '@/hostd/client'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
-import { autoUpgradeTypeclawDep, type AutoUpgradeOutcome, outcomeForcesInstall } from '@/init/auto-upgrade'
+import {
+  autoUpgradeTypeclawDep,
+  type AutoUpgradeOutcome,
+  expectedInstalledAfterUpgrade,
+  outcomeForcesInstall,
+  readInstalledTypeclawVersionFromAgent,
+} from '@/init/auto-upgrade'
 import { resolveBaseImageVersion } from '@/init/cli-version'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
-import { type InstallRunner, runBunInstall } from '@/init/run-bun-install'
+import { runBunUpdate, type UpdateRunner } from '@/init/run-bun-install'
 
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import {
@@ -84,9 +90,20 @@ export type StartOptions = {
   // package.json). Tests inject a stub to simulate `bun -g update typeclaw`
   // having bumped the CLI without touching the agent folder.
   autoUpgrade?: (cwd: string) => Promise<AutoUpgradeOutcome>
-  // Test seam for the auto-upgrade-triggered `bun install`. Defaults to the
-  // same runBunInstall the ensureDeps codepath uses.
-  forceBunInstall?: InstallRunner
+  // Test seam for the auto-upgrade-triggered registry resolution. Defaults
+  // to `bun update typeclaw --latest`. Cannot be `runBunInstall` — see the
+  // module header in src/init/auto-upgrade.ts for why install doesn't move
+  // an already-locked in-range dep.
+  forceBunUpdate?: UpdateRunner
+  // Test seam for the post-install verification. Reads the version actually
+  // present in <agent>/node_modules/typeclaw/package.json after the upgrade
+  // install completes. Defaults to readInstalledTypeclawVersionFromAgent.
+  // Verification is mandatory: `bun update` can succeed (exit 0) but still
+  // resolve to an older version than expected if the registry has issues
+  // or the spec resolution surprises us; we MUST refuse to proceed to
+  // refreshDockerfile in that case, otherwise the Dockerfile pins a stale
+  // base image and the build either fails or runs against the wrong runtime.
+  readInstalledVersion?: (cwd: string) => string | null
   // Post-`docker run` verifier. `docker run -d` returns exit 0 the moment the
   // container is created, even if its entrypoint crashes milliseconds later.
   // The default verifier polls `docker inspect` for 1.5s and converts crashes
@@ -130,7 +147,8 @@ export async function start({
   reuseCurrentHostDaemon = false,
   ensureDeps = (dir) => ensureDepsInstalled({ cwd: dir }),
   autoUpgrade = (dir) => autoUpgradeTypeclawDep({ cwd: dir }),
-  forceBunInstall = runBunInstall,
+  forceBunUpdate = runBunUpdate,
+  readInstalledVersion = readInstalledTypeclawVersionFromAgent,
   verifyRunning = createVerifyRunning({ exec }),
 }: StartOptions): Promise<StartResult> {
   try {
@@ -169,15 +187,32 @@ export async function start({
     // stays pinned to whatever was installed at init time. refreshDockerfile
     // then pins FROM ghcr/typeclaw-base:<old-version> and the docker build
     // either fails (image never published) or runs against a stale runtime.
-    // When the spec is rewritten or installed < CLI, ensureDeps may consider
-    // every declared dep already present and short-circuit — force the
-    // install here so the new typeclaw version actually lands in node_modules.
+    //
+    // We use `bun update typeclaw --latest` (NOT `bun install`) because plain
+    // install honors the lockfile and is a no-op when the lockfile already
+    // satisfies the declared spec — which is the canonical regression case
+    // (lockfile pins 0.1.0, spec says ^0.1.0, CLI is 0.1.2; install does
+    // nothing, update force-resolves to 0.1.2).
+    //
+    // After the update we MUST verify the installed version actually matches
+    // the upgrade target. `bun update` can exit 0 but resolve to a stale
+    // version (registry hiccups, surprising spec resolution). If verification
+    // fails we abort before refreshDockerfile so we never pin a stale base
+    // image to a fresh container build.
     const upgrade = await autoUpgrade(cwd)
     const upgradeCommitMessage = commitMessageForAutoUpgrade(upgrade)
     if (outcomeForcesInstall(upgrade)) {
-      const forced = await forceBunInstall(cwd)
+      const forced = await forceBunUpdate(cwd, 'typeclaw')
       if (!forced.ok) {
         return { ok: false, reason: `typeclaw auto-upgrade install failed: ${forced.reason}` }
+      }
+      const expected = expectedInstalledAfterUpgrade(upgrade)
+      const installedAfter = readInstalledVersion(cwd)
+      if (expected !== null && (installedAfter === null || !installedReachesTarget(installedAfter, expected))) {
+        return {
+          ok: false,
+          reason: `typeclaw auto-upgrade verification failed: bun update reported success but <agent>/node_modules/typeclaw is ${installedAfter ?? 'missing'} (expected >= ${expected}). Refusing to build a Docker image against a stale runtime.`,
+        }
       }
     }
 
@@ -346,6 +381,18 @@ function commitMessageForAutoUpgrade(outcome: AutoUpgradeOutcome): string | null
   if (outcome.kind === 'spec-rewritten') return `Upgrade typeclaw to ${outcome.to}`
   if (outcome.kind === 'reinstall-needed') return `Upgrade typeclaw to ${outcome.to}`
   return null
+}
+
+function installedReachesTarget(installed: string, target: string): boolean {
+  const ai = installed.match(/^(\d+)\.(\d+)\.(\d+)$/)
+  const at = target.match(/^(\d+)\.(\d+)\.(\d+)$/)
+  if (!ai || !at) return false
+  for (let i = 1; i <= 3; i++) {
+    const a = Number.parseInt(ai[i]!, 10)
+    const t = Number.parseInt(at[i]!, 10)
+    if (a !== t) return a > t
+  }
+  return true
 }
 
 export async function planStart({
@@ -576,7 +623,7 @@ async function reportAlreadyRunning(exec: DockerExec, cwd: string, containerName
     hostPort,
     hostd: { state: 'disabled' },
     alreadyRunning: true,
-    autoUpgrade: { kind: 'skipped-no-dep' },
+    autoUpgrade: { kind: 'skipped-already-running' },
   }
 }
 

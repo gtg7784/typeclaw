@@ -7,21 +7,28 @@ import { resolveScaffoldVersion } from './cli-version'
 const PACKAGE_FILE = 'package.json'
 const TYPECLAW = 'typeclaw'
 
-// Pre-1.0 caret semantics are the whole reason this module exists:
-//   `^0.1.0` resolves to >=0.1.0 <0.2.0 (minor pins the range, not major).
-// So a CLI bump from 0.1.x to 0.2.0 falls OUT of the agent's existing
-// `^0.1.x` range — bun install would refuse to upgrade. We have to rewrite
-// the spec for those crossings. In-range drift (0.1.0 → 0.1.2) only needs
-// a `bun install` re-run. Exact pins (`0.1.0` without `^`/`~`) are user
-// intent and never auto-rewritten — see exact-pin branch below.
+// Two semver quirks drive every branch in this module:
+//
+// 1. Pre-1.0 caret: `^0.1.0` resolves to `>=0.1.0 <0.2.0`. A CLI bump from
+//    0.1.x to 0.2.0 falls OUT of the agent's range, so we must rewrite the
+//    spec for those crossings.
+//
+// 2. `bun install` honors the lockfile: when the lockfile entry already
+//    satisfies the declared spec, `bun install` is a no-op even if a newer
+//    in-range version exists upstream. To actually upgrade an in-range dep
+//    we MUST use `bun update <pkg> --latest`. See src/init/run-bun-install.ts.
+//
+// The decision matrix anchors on the INSTALLED version (the truth), not the
+// declared range floor (a promise the agent may not yet have kept).
 
 export type AutoUpgradeOutcome =
   | { kind: 'skipped-dev-mode' }
   | { kind: 'skipped-no-dep' }
   | { kind: 'skipped-non-release-spec'; declared: string }
+  | { kind: 'skipped-already-running' }
   | { kind: 'up-to-date'; installedVersion: string }
   | { kind: 'exact-pin-respected'; declared: string; cliVersion: string }
-  | { kind: 'spec-rewritten'; from: string; to: string }
+  | { kind: 'spec-rewritten'; from: string; to: string; cliVersion: string }
   | { kind: 'reinstall-needed'; from: string; to: string }
 
 export type AutoUpgradeOptions = {
@@ -52,34 +59,50 @@ export async function autoUpgradeTypeclawDep(options: AutoUpgradeOptions): Promi
 
   const installed = readInstalledTypeclawVersion(cwd)
 
-  // Exact pin: silently rewriting violates user intent (they wrote `0.1.0`
-  // with no operator deliberately — testing a held-back version, debugging
-  // a regression, etc). Surface the divergence as a warning and proceed.
-  if (declaredKind.kind === 'exact') {
-    const declaredVersion = formatTriple(declaredKind.version)
-    if (declaredVersion === cliVersion) {
-      return { kind: 'up-to-date', installedVersion: installed ?? cliVersion }
+  // "Upgrade only, never downgrade" — anchored on the INSTALLED version
+  // (the truth), with the declared range floor used ONLY when nothing is
+  // installed yet (best proxy for "what would land if bun install ran").
+  //
+  // Anchoring on `installed` first closes the half-applied-rewrite hole:
+  // a previous start may have written ^0.2.0 to package.json but failed
+  // its install, leaving node_modules at 0.1.x. The declared floor would
+  // wrongly say "up-to-date"; the installed version correctly says "retry."
+  if (installed !== null && compareReleaseVersions(installed, cliVersion) >= 0) {
+    return { kind: 'up-to-date', installedVersion: installed }
+  }
+  if (installed === null && declaredKind.kind !== 'exact') {
+    const declaredFloor = formatTriple(declaredKind.version)
+    if (compareReleaseVersions(declaredFloor, cliVersion) >= 0) {
+      return { kind: 'up-to-date', installedVersion: declaredFloor }
     }
-    return { kind: 'exact-pin-respected', declared, cliVersion }
   }
 
-  // "Upgrade only, never downgrade." The agent's effective version is the
-  // max of (installed copy, declared range floor). If that already meets or
-  // exceeds the CLI, leave everything alone — even when the range itself
-  // does not include the CLI version (e.g. `^0.1.5` against CLI 0.1.2).
-  const declaredFloor = formatTriple(declaredKind.version)
-  const effective =
-    installed !== null && compareReleaseVersions(installed, declaredFloor) > 0 ? installed : declaredFloor
-  if (compareReleaseVersions(effective, cliVersion) >= 0) {
-    return { kind: 'up-to-date', installedVersion: installed ?? declaredFloor }
+  if (declaredKind.kind === 'exact') {
+    const declaredVersion = formatTriple(declaredKind.version)
+    // Exact pin matches CLI but installed is stale (or missing): we still
+    // need to install. The user wrote the right spec — they just haven't
+    // materialized it yet. Return reinstall-needed; caller will run
+    // `bun update typeclaw --latest` against that exact spec.
+    if (declaredVersion === cliVersion) {
+      return { kind: 'reinstall-needed', from: installed ?? '<missing>', to: cliVersion }
+    }
+    // Exact pin diverges from CLI. User intent wins; we warn but never
+    // rewrite. If installed is ALSO ahead of CLI (e.g. exact pin 0.1.5,
+    // CLI 0.1.2), the up-to-date check above already returned.
+    return { kind: 'exact-pin-respected', declared, cliVersion }
   }
 
   if (!rangeSatisfies(declaredKind, cliVersion)) {
     const newSpec = `^${cliVersion}`
     await writeDepSpec(cwd, pkg.raw, pkg.parsed, newSpec)
-    return { kind: 'spec-rewritten', from: declared, to: newSpec }
+    return { kind: 'spec-rewritten', from: declared, to: newSpec, cliVersion }
   }
 
+  // Declared range includes CLI. Three sub-cases:
+  //   - installed === null: fresh agent, nothing on disk yet. ensureDeps
+  //     will install for the missing-dep reason; nothing for us to add.
+  //   - installed > CLI but in range: we already returned up-to-date above.
+  //   - installed < CLI: force an upgrade via `bun update typeclaw --latest`.
   if (installed === null) {
     return { kind: 'up-to-date', installedVersion: cliVersion }
   }
@@ -90,9 +113,21 @@ export function outcomeForcesInstall(outcome: AutoUpgradeOutcome): boolean {
   return outcome.kind === 'spec-rewritten' || outcome.kind === 'reinstall-needed'
 }
 
+// The version we expect to find in node_modules/typeclaw after the
+// auto-upgrade-triggered install completes. Callers use this to verify
+// the install actually moved the on-disk version (not just resolved the
+// lockfile). Returns null when no install was forced — verification is
+// skipped on no-op outcomes.
+export function expectedInstalledAfterUpgrade(outcome: AutoUpgradeOutcome): string | null {
+  if (outcome.kind === 'spec-rewritten') return outcome.cliVersion
+  if (outcome.kind === 'reinstall-needed') return outcome.to
+  return null
+}
+
 export function describeAutoUpgrade(outcome: AutoUpgradeOutcome): string {
   switch (outcome.kind) {
     case 'spec-rewritten':
+      return `Upgrading agent typeclaw ${outcome.from} → ${outcome.to} to match CLI`
     case 'reinstall-needed':
       return `Upgrading agent typeclaw ${outcome.from} → ${outcome.to} to match CLI`
     case 'exact-pin-respected':
@@ -100,6 +135,10 @@ export function describeAutoUpgrade(outcome: AutoUpgradeOutcome): string {
     default:
       return ''
   }
+}
+
+export function readInstalledTypeclawVersionFromAgent(cwd: string): string | null {
+  return readInstalledTypeclawVersion(cwd)
 }
 
 type ParsedPackage = {
@@ -247,20 +286,83 @@ function isReleaseVersion(version: string): boolean {
 }
 
 async function writeDepSpec(cwd: string, raw: string, parsed: ParsedPackage['parsed'], newSpec: string): Promise<void> {
-  // Preserve user formatting (indentation, trailing newline, key order) by
-  // editing the raw string. Round-tripping through JSON.stringify would
-  // reorder keys and erase user-applied whitespace choices. Fallback below
-  // only kicks in for pathological package.json shapes where the regex
-  // can't anchor on the typeclaw key.
-  const replaced = raw.replace(
-    /("typeclaw"\s*:\s*)"[^"]+"/,
-    (_match, prefix: string) => `${prefix}${JSON.stringify(newSpec)}`,
-  )
-  if (replaced !== raw) {
-    await writeFile(join(cwd, PACKAGE_FILE), replaced)
-    return
+  // Scoped edit: replace the typeclaw spec ONLY inside the dependencies
+  // object. The previous implementation used `raw.replace(/"typeclaw":.../)`
+  // unscoped, which would silently rewrite devDependencies.typeclaw if it
+  // appeared before dependencies.typeclaw in the file (the original spec
+  // never moves). We slice the dependencies object's textual range, edit
+  // inside it, then splice back to preserve whitespace, key order, and
+  // trailing newline. If the slice fails (unusual JSON shape), fall back
+  // to a full JSON round-trip — formatting churn is acceptable; silently
+  // updating the wrong key is not.
+  const scoped = sliceDependenciesRange(raw, parsed)
+  if (scoped !== null) {
+    const { start, end } = scoped
+    const block = raw.slice(start, end)
+    const replaced = block.replace(
+      /("typeclaw"\s*:\s*)"[^"]+"/,
+      (_m, prefix: string) => `${prefix}${JSON.stringify(newSpec)}`,
+    )
+    if (replaced !== block) {
+      await writeFile(join(cwd, PACKAGE_FILE), `${raw.slice(0, start)}${replaced}${raw.slice(end)}`)
+      return
+    }
   }
   const deps = { ...parsed.dependencies, [TYPECLAW]: newSpec }
   const next = { ...parsed, dependencies: deps }
-  await writeFile(join(cwd, PACKAGE_FILE), `${JSON.stringify(next, null, 2)}\n`)
+  const indent = detectIndent(raw)
+  await writeFile(join(cwd, PACKAGE_FILE), `${JSON.stringify(next, null, indent)}\n`)
+}
+
+// Returns the [start, end) byte range of the "dependencies" object's value
+// in `raw`, or null if it can't be located unambiguously. Uses a brace-
+// counting tokenizer that respects string literals so a `dependencies` key
+// inside a string value (e.g. inside a `description`) cannot fool it.
+function sliceDependenciesRange(raw: string, parsed: ParsedPackage['parsed']): { start: number; end: number } | null {
+  if (parsed.dependencies === undefined || parsed.dependencies === null) return null
+  const keyMatch = raw.match(/"dependencies"\s*:\s*\{/)
+  if (!keyMatch || keyMatch.index === undefined) return null
+  const startOfOpenBrace = keyMatch.index + keyMatch[0].length - 1
+  const closeBrace = findMatchingCloseBrace(raw, startOfOpenBrace)
+  if (closeBrace === null) return null
+  return { start: startOfOpenBrace, end: closeBrace + 1 }
+}
+
+function findMatchingCloseBrace(raw: string, openIndex: number): number | null {
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = openIndex; i < raw.length; i++) {
+    const ch = raw[i]
+    if (escape) {
+      escape = false
+      continue
+    }
+    if (inString) {
+      if (ch === '\\') escape = true
+      else if (ch === '"') inString = false
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+    if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) return i
+    }
+  }
+  return null
+}
+
+function detectIndent(raw: string): number | string {
+  // Default to 2 — matches `JSON.stringify(_, _, 2)` behavior and the
+  // project's existing scaffold style. Only override when we can see a
+  // clear non-2 indent on the first indented line.
+  const match = raw.match(/\n([\t ]+)\S/)
+  if (!match) return 2
+  const sample = match[1]!
+  if (sample.startsWith('\t')) return '\t'
+  return sample.length
 }

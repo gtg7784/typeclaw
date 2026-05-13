@@ -3,7 +3,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { autoUpgradeTypeclawDep, describeAutoUpgrade, outcomeForcesInstall } from './auto-upgrade'
+import {
+  autoUpgradeTypeclawDep,
+  describeAutoUpgrade,
+  expectedInstalledAfterUpgrade,
+  outcomeForcesInstall,
+  readInstalledTypeclawVersionFromAgent,
+} from './auto-upgrade'
 
 let root: string
 
@@ -30,7 +36,7 @@ async function readPackageJson(): Promise<Record<string, unknown>> {
   return JSON.parse(raw) as Record<string, unknown>
 }
 
-describe('autoUpgradeTypeclawDep', () => {
+describe('autoUpgradeTypeclawDep — skipped outcomes', () => {
   test('returns skipped-dev-mode when scaffold version is null (running from typeclaw source repo)', async () => {
     await writePackageJson({ dependencies: { typeclaw: '^0.1.0' } })
 
@@ -45,7 +51,23 @@ describe('autoUpgradeTypeclawDep', () => {
     expect(outcome).toEqual({ kind: 'skipped-no-dep' })
   })
 
-  test('returns skipped-no-dep when package.json has no typeclaw dependency', async () => {
+  test('returns skipped-no-dep when package.json has no dependencies field at all', async () => {
+    await writePackageJson({ name: 'foo' })
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
+
+    expect(outcome).toEqual({ kind: 'skipped-no-dep' })
+  })
+
+  test('returns skipped-no-dep when typeclaw is in devDependencies only (not dependencies)', async () => {
+    await writePackageJson({ devDependencies: { typeclaw: '^0.1.0' } })
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
+
+    expect(outcome).toEqual({ kind: 'skipped-no-dep' })
+  })
+
+  test('returns skipped-no-dep when package.json has dependencies but no typeclaw key', async () => {
     await writePackageJson({ dependencies: { other: '^1.0.0' } })
 
     const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
@@ -53,8 +75,34 @@ describe('autoUpgradeTypeclawDep', () => {
     expect(outcome).toEqual({ kind: 'skipped-no-dep' })
   })
 
-  test('returns skipped-non-release-spec for file: / link: / dist-tag specs', async () => {
-    for (const spec of ['file:../typeclaw', 'link:../typeclaw', 'latest', 'workspace:*', 'npm:typeclaw@0.1.0']) {
+  test('returns skipped-no-dep for an array-typed package.json (parses as JSON but is not an object)', async () => {
+    await writeFile(join(root, 'package.json'), '[]')
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
+
+    expect(outcome).toEqual({ kind: 'skipped-no-dep' })
+  })
+
+  test('returns skipped-no-dep for corrupt JSON (never throws)', async () => {
+    await writeFile(join(root, 'package.json'), '{ "name": "broken", "dependencies":')
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
+
+    expect(outcome).toEqual({ kind: 'skipped-no-dep' })
+  })
+
+  test('returns skipped-non-release-spec for file: / link: / dist-tag / range / glob / github: specs', async () => {
+    for (const spec of [
+      'file:../typeclaw',
+      'link:../typeclaw',
+      'latest',
+      'workspace:*',
+      'npm:typeclaw@0.1.0',
+      '>=0.1.0',
+      '*',
+      '0.1.x',
+      'github:typeclaw/typeclaw',
+    ]) {
       await writePackageJson({ dependencies: { typeclaw: spec } })
 
       const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
@@ -62,17 +110,21 @@ describe('autoUpgradeTypeclawDep', () => {
       expect(outcome).toEqual({ kind: 'skipped-non-release-spec', declared: spec })
     }
   })
+})
 
-  test('returns up-to-date when installed version matches CLI version (caret range)', async () => {
+describe('autoUpgradeTypeclawDep — upgrade-only invariant', () => {
+  test('installed > CLI and range satisfies CLI → up-to-date (never downgrades)', async () => {
+    // given: installed 0.1.5, spec ^0.1.0 (includes CLI 0.1.2), CLI 0.1.2
     await writePackageJson({ dependencies: { typeclaw: '^0.1.0' } })
-    await writeInstalledTypeclaw('0.1.2')
+    await writeInstalledTypeclaw('0.1.5')
 
     const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
 
-    expect(outcome).toEqual({ kind: 'up-to-date', installedVersion: '0.1.2' })
+    expect(outcome).toEqual({ kind: 'up-to-date', installedVersion: '0.1.5' })
   })
 
-  test('returns up-to-date when installed version is AHEAD of CLI (never downgrades)', async () => {
+  test('installed > CLI and range does NOT satisfy CLI → up-to-date (never downgrades)', async () => {
+    // given: installed 0.1.5, spec ^0.1.5 (excludes CLI 0.1.2), CLI 0.1.2
     await writePackageJson({ dependencies: { typeclaw: '^0.1.5' } })
     await writeInstalledTypeclaw('0.1.5')
 
@@ -81,66 +133,86 @@ describe('autoUpgradeTypeclawDep', () => {
     expect(outcome).toEqual({ kind: 'up-to-date', installedVersion: '0.1.5' })
   })
 
-  test('returns reinstall-needed when installed is older than CLI but spec range allows CLI', async () => {
-    // given: agent was bun-installed against typeclaw 0.1.0; CLI bumped to 0.1.2;
-    //        the existing `^0.1.0` already permits 0.1.2 so no spec rewrite is needed.
+  test('installed == CLI → up-to-date', async () => {
+    await writePackageJson({ dependencies: { typeclaw: '^0.1.0' } })
+    await writeInstalledTypeclaw('0.1.2')
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
+
+    expect(outcome).toEqual({ kind: 'up-to-date', installedVersion: '0.1.2' })
+  })
+
+  test('installed < CLI but range satisfies CLI → reinstall-needed (the in-range upgrade case)', async () => {
+    // The canonical regression: `bun -g update typeclaw` moved the global CLI from 0.1.0
+    // to 0.1.2, the agent's package.json says `^0.1.0` which still permits 0.1.2, but
+    // node_modules/typeclaw is still 0.1.0 because `bun install` honors the lockfile.
+    // We MUST force a `bun update`, not just `bun install`.
     await writePackageJson({ dependencies: { typeclaw: '^0.1.0' } })
     await writeInstalledTypeclaw('0.1.0')
 
     const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
 
     expect(outcome).toEqual({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' })
-
-    // and: package.json was NOT modified (range still permits the new CLI)
+    // and: package.json is NOT modified — the existing range still permits the new CLI.
     const pkg = await readPackageJson()
     expect((pkg.dependencies as Record<string, string>).typeclaw).toBe('^0.1.0')
   })
 
-  test('rewrites spec when CLI version is OUT of range (pre-1.0 minor bump)', async () => {
-    // given: agent pinned to ^0.1.0 (>=0.1.0 <0.2.0); CLI moved to 0.2.0
+  test('installed < CLI and range does NOT satisfy CLI → spec-rewritten (pre-1.0 minor bump)', async () => {
+    // given: pre-1.0 caret ^0.1.0 excludes 0.2.0 (the entire bug class auto-upgrade fixes).
     await writePackageJson({ dependencies: { typeclaw: '^0.1.0' } })
     await writeInstalledTypeclaw('0.1.2')
 
     const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.2.0' })
 
-    expect(outcome).toEqual({ kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0' })
-
-    // and: package.json was rewritten with the new spec
+    expect(outcome).toEqual({ kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0', cliVersion: '0.2.0' })
     const pkg = await readPackageJson()
     expect((pkg.dependencies as Record<string, string>).typeclaw).toBe('^0.2.0')
   })
 
-  test('rewrites spec when CLI crosses a major from ^1.x', async () => {
+  test('spec-rewritten across a major boundary (^1.x → ^2.x)', async () => {
     await writePackageJson({ dependencies: { typeclaw: '^1.5.0' } })
     await writeInstalledTypeclaw('1.5.0')
 
     const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^2.0.0' })
 
-    expect(outcome).toEqual({ kind: 'spec-rewritten', from: '^1.5.0', to: '^2.0.0' })
+    expect(outcome).toEqual({ kind: 'spec-rewritten', from: '^1.5.0', to: '^2.0.0', cliVersion: '2.0.0' })
   })
 
-  test('respects exact pin (no operator) without rewriting when CLI version differs', async () => {
-    await writePackageJson({ dependencies: { typeclaw: '0.1.0' } })
-    await writeInstalledTypeclaw('0.1.0')
+  test('half-applied rewrite recovery: package.json points ahead but node_modules is stale → reinstall-needed', async () => {
+    // Scenario: a previous `typeclaw start` rewrote package.json to ^0.2.0 but the
+    // subsequent `bun update` failed. We must not treat the declared spec as ground
+    // truth; the installed version is the source of truth. Otherwise the next start
+    // would silently believe everything is fine and pin a stale Dockerfile.
+    await writePackageJson({ dependencies: { typeclaw: '^0.2.0' } })
+    await writeInstalledTypeclaw('0.1.2')
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.2.0' })
+
+    expect(outcome).toEqual({ kind: 'reinstall-needed', from: '0.1.2', to: '0.2.0' })
+  })
+
+  test('fresh agent (no node_modules) with in-range spec → up-to-date (ensureDeps installs separately)', async () => {
+    await writePackageJson({ dependencies: { typeclaw: '^0.1.2' } })
 
     const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
 
-    expect(outcome).toEqual({ kind: 'exact-pin-respected', declared: '0.1.0', cliVersion: '0.1.2' })
-
-    // and: spec was preserved exactly
-    const pkg = await readPackageJson()
-    expect((pkg.dependencies as Record<string, string>).typeclaw).toBe('0.1.0')
+    expect(outcome).toEqual({ kind: 'up-to-date', installedVersion: '0.1.2' })
   })
 
-  test('treats `=X.Y.Z` as an exact pin', async () => {
-    await writePackageJson({ dependencies: { typeclaw: '=0.1.0' } })
+  test('fresh agent (no node_modules) with range floor > CLI → up-to-date with floor as installedVersion', async () => {
+    // Per "never downgrade": when nothing is installed, the declared floor is our best
+    // estimate of "what would land if bun install ran." If that's already >= CLI, no-op.
+    await writePackageJson({ dependencies: { typeclaw: '^0.1.5' } })
 
     const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
 
-    expect(outcome).toEqual({ kind: 'exact-pin-respected', declared: '=0.1.0', cliVersion: '0.1.2' })
+    expect(outcome).toEqual({ kind: 'up-to-date', installedVersion: '0.1.5' })
   })
+})
 
-  test('exact pin matching CLI version → up-to-date (no warning, no rewrite)', async () => {
+describe('autoUpgradeTypeclawDep — exact pin handling', () => {
+  test('exact pin matching CLI, installed also matches → up-to-date', async () => {
     await writePackageJson({ dependencies: { typeclaw: '0.1.2' } })
     await writeInstalledTypeclaw('0.1.2')
 
@@ -149,27 +221,69 @@ describe('autoUpgradeTypeclawDep', () => {
     expect(outcome).toEqual({ kind: 'up-to-date', installedVersion: '0.1.2' })
   })
 
-  test('returns up-to-date when fresh agent has no node_modules yet but spec is in-range', async () => {
-    // given: package.json exists, but bun install never ran. ensureDeps will
-    //        install for the missing-dep reason — auto-upgrade has nothing to add.
-    await writePackageJson({ dependencies: { typeclaw: '^0.1.2' } })
+  test('exact pin matching CLI but installed is stale → reinstall-needed (this is BLOCKING regression #3)', async () => {
+    // Without this branch, the original production bug would still bite: a user who
+    // pins exactly to 0.1.2 but has 0.1.0 in node_modules would see refreshDockerfile
+    // pin :0.1.0 from resolveBaseImageVersion.
+    await writePackageJson({ dependencies: { typeclaw: '0.1.2' } })
+    await writeInstalledTypeclaw('0.1.0')
 
     const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
 
-    expect(outcome).toEqual({ kind: 'up-to-date', installedVersion: '0.1.2' })
+    expect(outcome).toEqual({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' })
   })
 
-  test('tilde range that excludes CLI version triggers a rewrite', async () => {
-    // given: ~0.1.2 → >=0.1.2 <0.2.0. CLI moved to 0.2.0 → out of range.
-    await writePackageJson({ dependencies: { typeclaw: '~0.1.2' } })
+  test('exact pin matching CLI with no node_modules → reinstall-needed', async () => {
+    await writePackageJson({ dependencies: { typeclaw: '0.1.2' } })
 
-    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.2.0' })
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
 
-    expect(outcome).toEqual({ kind: 'spec-rewritten', from: '~0.1.2', to: '^0.2.0' })
+    expect(outcome).toEqual({ kind: 'reinstall-needed', from: '<missing>', to: '0.1.2' })
   })
 
-  test('tilde range that includes CLI version is treated like any in-range case', async () => {
-    // given: ~0.1.0 → >=0.1.0 <0.2.0. CLI moved to 0.1.5 (still in range).
+  test('exact pin LOWER than CLI → exact-pin-respected (user wants the older version)', async () => {
+    await writePackageJson({ dependencies: { typeclaw: '0.1.0' } })
+    await writeInstalledTypeclaw('0.1.0')
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
+
+    expect(outcome).toEqual({ kind: 'exact-pin-respected', declared: '0.1.0', cliVersion: '0.1.2' })
+    const pkg = await readPackageJson()
+    expect((pkg.dependencies as Record<string, string>).typeclaw).toBe('0.1.0')
+  })
+
+  test('exact pin HIGHER than CLI → up-to-date (never downgrade — installed > CLI wins)', async () => {
+    // Symmetric to "lower". The user pinned to a newer version than the global CLI;
+    // installed matches the pin and is ahead of CLI, so the upgrade-only check
+    // returns up-to-date before we ever reach the exact-pin branch.
+    await writePackageJson({ dependencies: { typeclaw: '0.1.5' } })
+    await writeInstalledTypeclaw('0.1.5')
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
+
+    expect(outcome).toEqual({ kind: 'up-to-date', installedVersion: '0.1.5' })
+  })
+
+  test('exact pin HIGHER than CLI, no node_modules → exact-pin-respected (no on-disk version to defer to)', async () => {
+    await writePackageJson({ dependencies: { typeclaw: '0.1.5' } })
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
+
+    expect(outcome).toEqual({ kind: 'exact-pin-respected', declared: '0.1.5', cliVersion: '0.1.2' })
+  })
+
+  test('treats =X.Y.Z as exact pin', async () => {
+    await writePackageJson({ dependencies: { typeclaw: '=0.1.0' } })
+    await writeInstalledTypeclaw('0.1.0')
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
+
+    expect(outcome).toEqual({ kind: 'exact-pin-respected', declared: '=0.1.0', cliVersion: '0.1.2' })
+  })
+})
+
+describe('autoUpgradeTypeclawDep — tilde ranges and other range parsers', () => {
+  test('~0.1.0 includes CLI 0.1.5 → reinstall-needed', async () => {
     await writePackageJson({ dependencies: { typeclaw: '~0.1.0' } })
     await writeInstalledTypeclaw('0.1.0')
 
@@ -178,9 +292,17 @@ describe('autoUpgradeTypeclawDep', () => {
     expect(outcome).toEqual({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.5' })
   })
 
-  test('preserves package.json formatting (key order, indentation) when rewriting spec', async () => {
-    // Hand-craft a package.json with a specific layout and confirm the rewrite
-    // touches ONLY the typeclaw spec value, leaving everything else byte-identical.
+  test('~0.1.2 excludes CLI 0.2.0 → spec-rewritten', async () => {
+    await writePackageJson({ dependencies: { typeclaw: '~0.1.2' } })
+
+    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.2.0' })
+
+    expect(outcome).toEqual({ kind: 'spec-rewritten', from: '~0.1.2', to: '^0.2.0', cliVersion: '0.2.0' })
+  })
+})
+
+describe('writeDepSpec via autoUpgradeTypeclawDep — formatting and scope', () => {
+  test('preserves user formatting (2-space, key order, trailing newline)', async () => {
     const original = `{
   "name": "my-agent",
   "type": "module",
@@ -206,43 +328,121 @@ describe('autoUpgradeTypeclawDep', () => {
 `)
   })
 
-  test('rejects a corrupt package.json by returning skipped-no-dep (never throws)', async () => {
-    await writeFile(join(root, 'package.json'), '{ "name": "broken", "dependencies":')
+  test('preserves 4-space indentation', async () => {
+    const original = `{
+    "name": "my-agent",
+    "dependencies": {
+        "typeclaw": "^0.1.0"
+    }
+}
+`
+    await writeFile(join(root, 'package.json'), original)
 
-    const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
+    await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.2.0' })
 
-    expect(outcome).toEqual({ kind: 'skipped-no-dep' })
+    const after = await readFile(join(root, 'package.json'), 'utf8')
+    expect(after).toContain('"typeclaw": "^0.2.0"')
+    // and: the 4-space indent inside dependencies is preserved exactly
+    expect(after).toContain('        "typeclaw": "^0.2.0"')
   })
 
-  test('ignores an installed typeclaw whose version is a prerelease tag', async () => {
-    // given: node_modules/typeclaw/package.json has 0.2.0-beta.1; spec is ^0.1.0;
-    //        CLI is 0.1.2 (in range). The prerelease cannot be compared against
-    //        the CLI as a release version — treat installed as absent.
+  test('preserves tab indentation', async () => {
+    const original = '{\n\t"name": "my-agent",\n\t"dependencies": {\n\t\t"typeclaw": "^0.1.0"\n\t}\n}\n'
+    await writeFile(join(root, 'package.json'), original)
+
+    await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.2.0' })
+
+    const after = await readFile(join(root, 'package.json'), 'utf8')
+    expect(after).toContain('\t\t"typeclaw": "^0.2.0"')
+  })
+
+  test('does NOT rewrite devDependencies.typeclaw when it appears before dependencies.typeclaw', async () => {
+    // Regression guard for the BLOCKING bug Oracle caught: the original unscoped regex
+    // would silently rewrite the FIRST occurrence of `"typeclaw": "..."` in the file,
+    // even if that's in devDependencies. The scoped tokenizer must edit only inside
+    // the dependencies object.
+    const original = `{
+  "name": "my-agent",
+  "devDependencies": {
+    "typeclaw": "0.1.0"
+  },
+  "dependencies": {
+    "typeclaw": "^0.1.0"
+  }
+}
+`
+    await writeFile(join(root, 'package.json'), original)
+
+    await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.2.0' })
+
+    const after = await readFile(join(root, 'package.json'), 'utf8')
+    expect(after).toContain('"devDependencies": {\n    "typeclaw": "0.1.0"\n  }')
+    expect(after).toContain('"dependencies": {\n    "typeclaw": "^0.2.0"\n  }')
+  })
+
+  test('handles minified package.json (no whitespace) without corrupting other keys', async () => {
+    const original = `{"name":"my-agent","dependencies":{"typeclaw":"^0.1.0","zod":"^4.0.0"}}`
+    await writeFile(join(root, 'package.json'), original)
+
+    await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.2.0' })
+
+    const pkg = await readPackageJson()
+    expect((pkg.dependencies as Record<string, string>).typeclaw).toBe('^0.2.0')
+    expect((pkg.dependencies as Record<string, string>).zod).toBe('^4.0.0')
+  })
+
+  test('rejects an installed-typeclaw with a non-release version (prerelease tag)', async () => {
     await writePackageJson({ dependencies: { typeclaw: '^0.1.0' } })
     await writeInstalledTypeclaw('0.2.0-beta.1')
 
     const outcome = await autoUpgradeTypeclawDep({ cwd: root, scaffoldVersion: '^0.1.2' })
 
+    // and: prerelease installed is treated as "not a release we can compare," so
+    // we fall back to the declared range floor for the up-to-date check.
     expect(outcome).toEqual({ kind: 'up-to-date', installedVersion: '0.1.2' })
   })
 })
 
 describe('outcomeForcesInstall', () => {
-  test('returns true only for outcomes that change what bun install must do', () => {
-    expect(outcomeForcesInstall({ kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0' })).toBe(true)
+  test('returns true only for outcomes that mutate node_modules', () => {
+    expect(outcomeForcesInstall({ kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0', cliVersion: '0.2.0' })).toBe(
+      true,
+    )
     expect(outcomeForcesInstall({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' })).toBe(true)
 
     expect(outcomeForcesInstall({ kind: 'up-to-date', installedVersion: '0.1.2' })).toBe(false)
     expect(outcomeForcesInstall({ kind: 'skipped-dev-mode' })).toBe(false)
     expect(outcomeForcesInstall({ kind: 'skipped-no-dep' })).toBe(false)
     expect(outcomeForcesInstall({ kind: 'skipped-non-release-spec', declared: 'latest' })).toBe(false)
+    expect(outcomeForcesInstall({ kind: 'skipped-already-running' })).toBe(false)
     expect(outcomeForcesInstall({ kind: 'exact-pin-respected', declared: '0.1.0', cliVersion: '0.1.2' })).toBe(false)
+  })
+})
+
+describe('expectedInstalledAfterUpgrade', () => {
+  test('returns the CLI version for spec-rewritten (the post-install verification target)', () => {
+    expect(
+      expectedInstalledAfterUpgrade({ kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0', cliVersion: '0.2.0' }),
+    ).toBe('0.2.0')
+  })
+
+  test('returns the target version for reinstall-needed', () => {
+    expect(expectedInstalledAfterUpgrade({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' })).toBe('0.1.2')
+  })
+
+  test('returns null for outcomes that did not trigger an install', () => {
+    expect(expectedInstalledAfterUpgrade({ kind: 'up-to-date', installedVersion: '0.1.2' })).toBeNull()
+    expect(expectedInstalledAfterUpgrade({ kind: 'skipped-dev-mode' })).toBeNull()
+    expect(expectedInstalledAfterUpgrade({ kind: 'skipped-no-dep' })).toBeNull()
+    expect(
+      expectedInstalledAfterUpgrade({ kind: 'exact-pin-respected', declared: '0.1.0', cliVersion: '0.1.2' }),
+    ).toBeNull()
   })
 })
 
 describe('describeAutoUpgrade', () => {
   test('returns the upgrade line for spec-rewritten and reinstall-needed', () => {
-    expect(describeAutoUpgrade({ kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0' })).toBe(
+    expect(describeAutoUpgrade({ kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0', cliVersion: '0.2.0' })).toBe(
       'Upgrading agent typeclaw ^0.1.0 → ^0.2.0 to match CLI',
     )
     expect(describeAutoUpgrade({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' })).toBe(
@@ -256,10 +456,29 @@ describe('describeAutoUpgrade', () => {
     )
   })
 
-  test('returns empty string for no-op outcomes', () => {
+  test('returns empty string for no-op outcomes (silent on no-op)', () => {
     expect(describeAutoUpgrade({ kind: 'up-to-date', installedVersion: '0.1.2' })).toBe('')
     expect(describeAutoUpgrade({ kind: 'skipped-dev-mode' })).toBe('')
     expect(describeAutoUpgrade({ kind: 'skipped-no-dep' })).toBe('')
+    expect(describeAutoUpgrade({ kind: 'skipped-already-running' })).toBe('')
     expect(describeAutoUpgrade({ kind: 'skipped-non-release-spec', declared: 'latest' })).toBe('')
+  })
+})
+
+describe('readInstalledTypeclawVersionFromAgent (post-install verification helper)', () => {
+  test('returns the version when node_modules/typeclaw/package.json carries a release version', async () => {
+    await writeInstalledTypeclaw('0.1.2')
+
+    expect(readInstalledTypeclawVersionFromAgent(root)).toBe('0.1.2')
+  })
+
+  test('returns null when node_modules/typeclaw is missing', async () => {
+    expect(readInstalledTypeclawVersionFromAgent(root)).toBeNull()
+  })
+
+  test('returns null for a prerelease version (cannot map to a GHCR release tag)', async () => {
+    await writeInstalledTypeclaw('0.2.0-beta.1')
+
+    expect(readInstalledTypeclawVersionFromAgent(root)).toBeNull()
   })
 })
