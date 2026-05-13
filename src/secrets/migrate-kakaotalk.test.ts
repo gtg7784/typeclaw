@@ -98,7 +98,7 @@ describe('migrateKakaotalkCredentials', () => {
       }
       await writeFile(
         join(root, 'secrets.json'),
-        JSON.stringify({ version: 1, llm: {}, channels: { kakaotalk: existing } }),
+        JSON.stringify({ version: 2, providers: {}, channels: { kakaotalk: existing } }),
       )
 
       const result = await migrateKakaotalkCredentials(root)
@@ -143,7 +143,7 @@ describe('migrateKakaotalkCredentials', () => {
       }
       await writeFile(
         join(root, 'secrets.json'),
-        JSON.stringify({ version: 1, llm: {}, channels: { kakaotalk: existing } }),
+        JSON.stringify({ version: 2, providers: {}, channels: { kakaotalk: existing } }),
       )
 
       const result = await migrateKakaotalkCredentials(root)

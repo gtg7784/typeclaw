@@ -395,8 +395,8 @@ describe('channel manager — kakaotalk credential preflight', () => {
     await writeFile(
       path,
       JSON.stringify({
-        version: 1,
-        llm: {},
+        version: 2,
+        providers: {},
         channels: {
           kakaotalk: {
             currentAccount: accountId,
@@ -484,7 +484,7 @@ describe('channel manager — kakaotalk credential preflight', () => {
     await mgr.start()
     expect(fake.startCalls).toBe(1)
 
-    await writeFile(path, JSON.stringify({ version: 1, llm: {}, channels: {} }))
+    await writeFile(path, JSON.stringify({ version: 2, providers: {}, channels: {} }))
 
     const result = await mgr.reload()
     expect(result.stopped).toContain('kakaotalk')

@@ -139,8 +139,8 @@ describe('runKakaotalkBootstrap', () => {
       await writeFile(
         kakaotalkSecretsPath(agentDir),
         JSON.stringify({
-          version: 1,
-          llm: {},
+          version: 2,
+          providers: {},
           channels: {
             kakaotalk: {
               currentAccount: null,
