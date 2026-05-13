@@ -89,6 +89,7 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
   try {
     await new Promise<void>((resolve, reject) => {
       const cleanup = () => {
+        clearTimeout(timer)
         ws.removeEventListener('open', onOpen)
         ws.removeEventListener('error', onError)
       }
@@ -100,6 +101,19 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
         cleanup()
         reject(err instanceof Error ? err : new Error(`failed to connect to ${url}`))
       }
+      // Bun's WebSocket has no built-in connect timeout. Without this, a TCP
+      // handshake that completes but never produces an Upgrade response
+      // (e.g. a wedged docker/orbstack port-forward) leaves the WS stuck in
+      // CONNECTING forever — neither 'open' nor 'error' ever fires, and
+      // `typeclaw doctor` hangs. The per-request timeout downstream doesn't
+      // help because we never reach it.
+      const timer = setTimeout(() => {
+        cleanup()
+        try {
+          ws.close()
+        } catch {}
+        reject(new Error(`websocket connect timeout after ${timeoutMs}ms`))
+      }, timeoutMs)
       ws.addEventListener('open', onOpen, { once: true })
       ws.addEventListener('error', onError, { once: true })
     })
