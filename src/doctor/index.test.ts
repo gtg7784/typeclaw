@@ -124,6 +124,51 @@ describe('runDoctor', () => {
     expect(result.commit?.kind).toBe('skipped')
   })
 
+  test('skips commit when every fixed path is gitignored (e.g. Dockerfile)', async () => {
+    const cwd = makeTmpAgentDir()
+    await initGitRepo(cwd)
+    writeFileSync(join(cwd, '.gitignore'), 'alpha.txt\n', 'utf8')
+    await run(['git', 'add', '.gitignore'], cwd)
+    await run(['git', 'commit', '-q', '-m', 'add gitignore'], cwd)
+
+    const result = await runDoctor({
+      cwd,
+      fix: true,
+      staticChecks: [fakeCheck('alpha', 'warning', { autoFix: true })],
+      fetchPluginChecks: async () => ({ kind: 'ok', checks: [] }),
+    })
+
+    expect(result.fixAttempts?.[0]).toMatchObject({ ok: true })
+    expect(result.commit?.kind).toBe('skipped')
+    if (result.commit?.kind === 'skipped') {
+      expect(result.commit.reason).toMatch(/gitignored/)
+    }
+  })
+
+  test('reports failed (not skipped) when git status itself errors', async () => {
+    const cwd = makeTmpAgentDir()
+    await initGitRepo(cwd)
+
+    const spawnGit = async (args: string[]) =>
+      args[0] === 'status'
+        ? { exitCode: 128, stdout: '', stderr: 'fatal: index file corrupt' }
+        : { exitCode: 0, stdout: '', stderr: '' }
+
+    const result = await runDoctor({
+      cwd,
+      fix: true,
+      staticChecks: [fakeCheck('alpha', 'warning', { autoFix: true })],
+      fetchPluginChecks: async () => ({ kind: 'ok', checks: [] }),
+      spawnGit,
+    })
+
+    expect(result.commit?.kind).toBe('failed')
+    if (result.commit?.kind === 'failed') {
+      expect(result.commit.reason).toMatch(/git status failed/)
+      expect(result.commit.reason).toMatch(/index file corrupt/)
+    }
+  })
+
   test('marks plugin checks deferred when bridge is unreachable', async () => {
     const cwd = makeTmpAgentDir()
     const result = await runDoctor({
