@@ -142,14 +142,15 @@ export async function startAgent({
     const entry = snap.pluginSubagentByShim.get(subagent)
     if (entry) {
       const sessionId = `subagent-${entry.pluginName}-${crypto.randomUUID()}`
+      const origin = {
+        kind: 'subagent' as const,
+        subagent: subagentOptions?.name ?? entry.subagentName,
+        parentSessionId: subagentOptions?.parentSessionId ?? '<unknown>',
+      }
       const created = await createSessionWithDispose({
         systemPromptOverride: entry.pluginSubagent.systemPrompt,
         channelRouter: channelManager.router,
-        origin: {
-          kind: 'subagent',
-          subagent: subagentOptions?.name ?? entry.subagentName,
-          parentSessionId: subagentOptions?.parentSessionId ?? '<unknown>',
-        },
+        origin,
         plugins: {
           registry: snap.registry,
           hooks: snap.hooks,
@@ -167,6 +168,8 @@ export async function startAgent({
         ...created,
         hooks: snap.hooks,
         sessionId,
+        agentDir: cwd,
+        origin,
       }
     }
     return defaultCreateSessionForSubagent(subagent, subagentOptions)
@@ -221,6 +224,8 @@ export async function startAgent({
         prompt: (text) => session.prompt(text),
         dispose: () => session.dispose(),
         sessionId,
+        agentDir: cwd,
+        origin: { kind: 'cron' as const, jobId: job.id, jobKind: 'prompt' as const },
         ...(snap.hasAnyPluginContent ? { hooks: snap.hooks } : {}),
         getTranscriptPath: () => sessionManager.getSessionFile(),
       }

@@ -5,6 +5,7 @@ import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
 import { type AgentSession, createSession } from './index'
+import type { SessionOrigin } from './session-origin'
 
 type AgentSessionTools = NonNullable<Parameters<typeof createSession>[0]>['tools']
 
@@ -54,6 +55,8 @@ export type CreateSessionForSubagentResult = {
   dispose?: () => Promise<void>
   hooks?: HookBus
   sessionId?: string
+  agentDir?: string
+  origin?: SessionOrigin
   getTranscriptPath?: () => string | undefined
 }
 export type CreateSessionForSubagentOptions = {
@@ -82,6 +85,8 @@ type NormalizedSubagentSession = {
   dispose: () => Promise<void>
   hooks: HookBus | undefined
   sessionId: string | undefined
+  agentDir: string | undefined
+  origin: SessionOrigin | undefined
   getTranscriptPath: (() => string | undefined) | undefined
 }
 
@@ -92,6 +97,8 @@ function normalizeSubagentSession(result: AgentSession | CreateSessionForSubagen
       dispose: result.dispose ?? (async () => {}),
       hooks: result.hooks,
       sessionId: result.sessionId,
+      agentDir: result.agentDir,
+      origin: result.origin,
       getTranscriptPath: result.getTranscriptPath,
     }
   }
@@ -100,6 +107,8 @@ function normalizeSubagentSession(result: AgentSession | CreateSessionForSubagen
     dispose: async () => {},
     hooks: undefined,
     sessionId: undefined,
+    agentDir: undefined,
+    origin: undefined,
     getTranscriptPath: undefined,
   }
 }
@@ -125,11 +134,24 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
   }
 
   const runSession: RunSession = async (override) => {
-    const { session, dispose, hooks, sessionId, getTranscriptPath } = normalizeSubagentSession(
+    const { session, dispose, hooks, sessionId, agentDir, origin, getTranscriptPath } = normalizeSubagentSession(
       await createSessionForSubagent(subagent, sessionOptions),
     )
+    const turnEvent =
+      hooks && sessionId !== undefined && agentDir !== undefined
+        ? { sessionId, agentDir, ...(origin !== undefined ? { origin } : {}) }
+        : undefined
     try {
-      await session.prompt(override?.userPrompt ?? options.userPrompt)
+      if (hooks && turnEvent !== undefined) {
+        await hooks.runSessionTurnStart(turnEvent)
+      }
+      try {
+        await session.prompt(override?.userPrompt ?? options.userPrompt)
+      } finally {
+        if (hooks && turnEvent !== undefined) {
+          await hooks.runSessionTurnEnd(turnEvent)
+        }
+      }
       if (hooks && sessionId !== undefined) {
         await hooks.runSessionIdle({
           sessionId,

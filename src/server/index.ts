@@ -160,7 +160,7 @@ export function createServer({
 
           if (stream) {
             state.unsubPrompts = stream.subscribe({ target: { kind: 'session', sessionId: sessionFileId } }, (msg) =>
-              enqueuePrompt(ws, state, msg),
+              enqueuePrompt(ws, state, msg, agentDir),
             )
 
             state.unsubBroadcast = stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
@@ -226,13 +226,27 @@ export function createServer({
               return
             }
             send(ws, { type: 'prompt_started', messageId: `local-${crypto.randomUUID()}`, text: msg.text })
+            const fallbackHooks = state.runtimeSnapshot?.hooks
+            if (fallbackHooks !== undefined && agentDir !== undefined) {
+              await fallbackHooks.runSessionTurnStart({
+                sessionId: state.sessionFileId,
+                agentDir,
+                origin: state.origin,
+              })
+            }
             try {
               await state.session.prompt(msg.text)
               send(ws, { type: 'done' })
             } catch (err) {
               send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
             }
-            const fallbackHooks = state.runtimeSnapshot?.hooks
+            if (fallbackHooks !== undefined && agentDir !== undefined) {
+              await fallbackHooks.runSessionTurnEnd({
+                sessionId: state.sessionFileId,
+                agentDir,
+                origin: state.origin,
+              })
+            }
             if (fallbackHooks !== undefined) {
               await fallbackHooks.runSessionIdle({
                 sessionId: state.sessionFileId,
@@ -334,7 +348,7 @@ function forwardAssistantError(ws: Ws, message: unknown): void {
   send(ws, { type: 'error', message: text })
 }
 
-function enqueuePrompt(ws: Ws, state: SessionState, msg: StreamMessage): void {
+function enqueuePrompt(ws: Ws, state: SessionState, msg: StreamMessage, agentDir: string | undefined): void {
   const payload = msg.payload as { kind?: string; text?: string; delivery?: PromptDelivery }
   if (payload?.kind !== 'prompt' || typeof payload.text !== 'string') return
   const delivery: PromptDelivery = payload.delivery ?? 'queue'
@@ -350,7 +364,7 @@ function enqueuePrompt(ws: Ws, state: SessionState, msg: StreamMessage): void {
     ts: msg.ts,
   })
   pushQueueState(ws, state)
-  void drain(ws, state)
+  void drain(ws, state, agentDir)
 }
 
 // `session.idle` semantically means "the agent finished a prompt and is now
@@ -371,10 +385,26 @@ function makeIdleHookCaller(state: SessionState): () => Promise<void> {
   }
 }
 
-async function drain(ws: Ws, state: SessionState): Promise<void> {
+function makeTurnHookCallers(
+  state: SessionState,
+  agentDir: string | undefined,
+): { fireTurnStart: () => Promise<void>; fireTurnEnd: () => Promise<void> } {
+  const hooks: HookBus | undefined = state.runtimeSnapshot?.hooks
+  if (hooks === undefined || agentDir === undefined) {
+    return { fireTurnStart: async () => {}, fireTurnEnd: async () => {} }
+  }
+  const event = { sessionId: state.sessionFileId, agentDir, origin: state.origin }
+  return {
+    fireTurnStart: () => hooks.runSessionTurnStart(event),
+    fireTurnEnd: () => hooks.runSessionTurnEnd(event),
+  }
+}
+
+async function drain(ws: Ws, state: SessionState, agentDir: string | undefined): Promise<void> {
   if (state.draining) return
   state.draining = true
   const fireIdle = makeIdleHookCaller(state)
+  const { fireTurnStart, fireTurnEnd } = makeTurnHookCallers(state, agentDir)
   try {
     while (state.drainQueue.length > 0) {
       const item = state.drainQueue.shift()
@@ -382,12 +412,14 @@ async function drain(ws: Ws, state: SessionState): Promise<void> {
       pushQueueState(ws, state)
       send(ws, { type: 'prompt_started', messageId: item.streamMessageId, text: item.text })
 
+      await fireTurnStart()
       try {
         await state.session.prompt(item.text)
         send(ws, { type: 'done' })
       } catch (err) {
         send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
       }
+      await fireTurnEnd()
       await fireIdle()
     }
   } finally {

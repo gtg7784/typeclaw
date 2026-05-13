@@ -1513,6 +1513,8 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
         events.push(`idle:${e.sessionId}:${e.parentTranscriptPath ?? '-'}`)
       },
       runSessionPrompt: async () => {},
+      runSessionTurnStart: async () => {},
+      runSessionTurnEnd: async () => {},
       runToolBefore: async () => undefined,
       runToolAfter: async () => {},
       count: () => 0,
@@ -1566,6 +1568,8 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
         idleEvents.push(e)
       },
       runSessionPrompt: async () => {},
+      runSessionTurnStart: async () => {},
+      runSessionTurnEnd: async () => {},
       runToolBefore: async () => undefined,
       runToolAfter: async () => {},
       count: () => 0,
@@ -1639,6 +1643,8 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
         events.push(`idle:${e.sessionId}`)
       },
       runSessionPrompt: async () => {},
+      runSessionTurnStart: async () => {},
+      runSessionTurnEnd: async () => {},
       runToolBefore: async () => undefined,
       runToolAfter: async () => {},
       count: () => 0,
@@ -1702,6 +1708,8 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
       runSessionEnd: async () => {},
       runSessionIdle: () => new Promise(() => {}),
       runSessionPrompt: async () => {},
+      runSessionTurnStart: async () => {},
+      runSessionTurnEnd: async () => {},
       runToolBefore: async () => undefined,
       runToolAfter: async () => {},
       count: () => 0,
@@ -2568,6 +2576,8 @@ describe('ChannelRouter idle session GC', () => {
         events.push(`idle:${e.sessionId}`)
       },
       runSessionPrompt: async () => {},
+      runSessionTurnStart: async () => {},
+      runSessionTurnEnd: async () => {},
       runToolBefore: async () => undefined,
       runToolAfter: async () => {},
       count: () => 0,

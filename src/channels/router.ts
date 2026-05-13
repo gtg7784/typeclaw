@@ -776,6 +776,32 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  const fireSessionTurnStart = async (live: LiveSession): Promise<void> => {
+    if (!live.hooks) return
+    try {
+      await live.hooks.runSessionTurnStart({
+        sessionId: live.sessionId,
+        agentDir: options.agentDir,
+        origin: buildLiveOrigin(live),
+      })
+    } catch (err) {
+      logger.warn(`[channels] session.turn.start hook threw for ${live.keyId}: ${describe(err)}`)
+    }
+  }
+
+  const fireSessionTurnEnd = async (live: LiveSession): Promise<void> => {
+    if (!live.hooks) return
+    try {
+      await live.hooks.runSessionTurnEnd({
+        sessionId: live.sessionId,
+        agentDir: options.agentDir,
+        origin: buildLiveOrigin(live),
+      })
+    } catch (err) {
+      logger.warn(`[channels] session.turn.end hook threw for ${live.keyId}: ${describe(err)}`)
+    }
+  }
+
   const buildLiveOrigin = (live: LiveSession): SessionOrigin => {
     const membership = readMembership(live.key)
     return {
@@ -848,6 +874,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.info(`[channels] ${live.keyId} prompting batch=${batch.length} text_len=${text.length}`)
         const promptStart = now()
         const successfulSendsBeforePrompt = live.successfulChannelSends
+        await fireSessionTurnStart(live)
         try {
           await live.session.prompt(text)
           await validateChannelTurn(live, successfulSendsBeforePrompt)
@@ -856,6 +883,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         } catch (err) {
           logger.warn(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
           live.consecutiveSends.clear()
+        } finally {
+          await fireSessionTurnEnd(live)
         }
         await fireSessionIdle(live)
         live.lastTurnAuthorIds = new Set(live.currentTurnAuthorIds)
