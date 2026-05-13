@@ -539,17 +539,56 @@ Do **not** edit `typeclaw.json` to a model the registry doesn't know, even if th
 
 `typeclaw.json` does **not** hold API keys or OAuth tokens. Credentials live in two gitignored files:
 
-- **`./.env`** (API key providers): the env var depends on which provider's model you've selected.
-  - `OPENAI_API_KEY` — required for any `openai/...` model.
-  - `FIREWORKS_API_KEY` — required for any `fireworks/...` model.
-- **`./secrets.json`** (OAuth providers): structured JSON file managed by `pi-coding-agent`'s `AuthStorage`, wrapped by `SecretsBackend`. Contains refresh + access tokens. The container refreshes tokens on its own with file locking; the host writes once at `typeclaw init` time when the user picks "OAuth (browser login)". (Pre-rename agent folders may carry the file as `auth.json`; it is migrated to `secrets.json` on the next agent boot.)
-  - `openai-codex/...` models — credentials persisted under the `llm` slice as `{ "llm": { "openai-codex": { "type": "oauth", ... } } }`.
+- **`./.env`** (any environment variable, including API keys): plain `KEY=value` lines, loaded by Docker via `--env-file` at container start. The canonical env-var names per provider:
+  - `OPENAI_API_KEY` — for any `openai/...` model.
+  - `FIREWORKS_API_KEY` — for any `fireworks/...` model.
+- **`./secrets.json`** (structured store): a `v2` envelope managed by `SecretsBackend` (wraps `pi-coding-agent`'s `AuthStorage`). Two top-level slices:
+  - `providers.*` — per-provider credentials. API-key providers store `{ type: 'api_key', key: <Secret> }`. OAuth providers store the `pi-coding-agent` token blob `{ type: 'oauth', access_token, refresh_token, expires_at, ... }`. The container auto-refreshes OAuth tokens with file locking; api-key writes only happen on explicit user-driven rotation.
+  - `channels.*` — per-adapter credentials, with named fields per adapter:
+    - `discord-bot: { token: <Secret> }`
+    - `slack-bot: { botToken: <Secret>, appToken: <Secret> }`
+    - `telegram-bot: { token: <Secret> }`
 
-If a user wants to switch from API key to OAuth (or vice versa) for a provider that supports both, the easiest path is to delete the relevant entry from `.env` / `secrets.json` and re-run `typeclaw init` from inside the agent folder — it'll prompt for the auth method again.
+  (Pre-v2 agent folders carry the older `llm` slice and channel-env-var-keyed shape; they are upgraded transparently on first read. Pre-rename folders may even carry the file as `auth.json`; it is renamed to `secrets.json` on the next boot.)
 
-If the user wants to rotate or change the key, edit `.env`, not `typeclaw.json`. After editing `.env`, the same restart rule applies: `typeclaw restart` on the host stage.
+### The `Secret` shape and env-wins resolution
 
-Never echo, log, or commit values from `.env`. `.env` is gitignored by default — keep it that way.
+Every secret-bearing field in `secrets.json` is a **`Secret`**: either a plain string or an object `{ value?, env? }`.
+
+```json
+{
+  "version": 2,
+  "providers": {
+    "fireworks": { "type": "api_key", "key": "fw_xxx" },
+    "openai-codex": { "type": "oauth", "access_token": "...", "refresh_token": "...", "expires_at": 99 }
+  },
+  "channels": {
+    "slack-bot": {
+      "botToken": "xoxb-...",
+      "appToken": { "value": "xapp-...", "env": "MY_CUSTOM_SLACK_APP_TOKEN" }
+    }
+  }
+}
+```
+
+**Resolution at boot, in order:**
+
+1. `process.env[secret.env]` — explicit binding wins (the `env` field on the object form).
+2. `process.env[<canonical env name>]` — canonical-env fallback (`SLACK_BOT_TOKEN`, `FIREWORKS_API_KEY`, etc.).
+3. `secret.value` — the on-disk value.
+4. Otherwise the field is treated as missing.
+
+**Env wins, the file is never auto-mutated.** When the env var is set, that value is used in-memory via `setRuntimeApiKey` (api-keys) or `process.env` injection (channels) — `secrets.json` is **not** rewritten to capture the env value. The user's file stays user-owned.
+
+**Custom env-var binding** — the optional `env` field on the object form lets the user route a credential through an env var of their choosing (e.g., a CI system that exposes `MY_PROD_SLACK_TOKEN` instead of `SLACK_BOT_TOKEN`).
+
+### Switching credentials
+
+If a user wants to switch from API key to OAuth (or vice versa) for a provider that supports both, the easiest path is to delete the relevant entry from `.env` / `secrets.json#providers` and re-run `typeclaw init` from inside the agent folder — it'll prompt for the auth method again.
+
+If the user wants to rotate an api-key, edit either `.env` (env-wins picks it up immediately) or `secrets.json#providers.<provider>.key` (rewrite the `value` field, or remove the entry if the env var should take over). After either, `typeclaw restart` on the host stage.
+
+Never echo, log, or commit values from `.env` or `secrets.json`. Both are gitignored by default — keep them that way.
 
 ## Editing `typeclaw.json` safely
 
