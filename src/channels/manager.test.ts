@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -446,6 +447,25 @@ describe('channel manager — kakaotalk credential preflight', () => {
 
     await mgr.start()
     expect(fake.startCalls).toBe(0)
+
+    await mgr.stop()
+  })
+
+  test('missing kakaotalk credentials preflight does not create secrets.json', async () => {
+    cfg.kakaotalk = enabledAdapterCfg()
+    const secretsPath = join(agentDir, 'secrets.json')
+    const fake = makeFakeAdapter()
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: {},
+      createKakaotalkAdapter: () => fake,
+    })
+
+    await mgr.start()
+
+    expect(fake.startCalls).toBe(0)
+    expect(existsSync(secretsPath)).toBe(false)
 
     await mgr.stop()
   })

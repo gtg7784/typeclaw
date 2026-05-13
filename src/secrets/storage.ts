@@ -149,6 +149,17 @@ export class SecretsBackend implements AuthStorageBackend {
     }
   }
 
+  tryReadChannelsSync(): Channels | null {
+    if (!existsSync(this.secretsPath)) return null
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      return this.readEnvelope().channels
+    } finally {
+      release?.()
+    }
+  }
+
   writeChannelsSync(next: Channels): void {
     this.ensureParentDir()
     this.ensureFileExists()

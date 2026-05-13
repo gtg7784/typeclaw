@@ -3,8 +3,8 @@ import { rename } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { KakaoCredentialManager } from 'agent-messenger/kakaotalk'
+import type { KakaoConfig, PendingLoginState } from 'agent-messenger/kakaotalk'
 
-import { SecretsKakaoCredentialStore } from './kakao-store'
 import { type KakaoChannelBlock, kakaoChannelBlockSchema } from './schema'
 import { SecretsBackend } from './storage'
 
@@ -21,20 +21,30 @@ export async function migrateKakaotalkCredentials(agentDir: string): Promise<Kak
   if (!existsSync(credentialsPath) && !existsSync(pendingLoginPath)) return { promoted: false }
 
   const secretsPath = join(agentDir, 'secrets.json')
-  const existing = parseExistingBlock(new SecretsBackend(secretsPath).readChannelsSync().kakaotalk)
-  if (!isEmptyBlock(existing)) return { promoted: false }
-
   const legacy = new KakaoCredentialManager(configDir)
   const config = await legacy.load()
   const pendingLogin = await legacy.loadPendingLogin()
   if (Object.keys(config.accounts).length === 0 && pendingLogin === null) return { promoted: false }
 
-  const store = new SecretsKakaoCredentialStore({ mode: 'host', secretsPath })
-  await store.save(config)
-  if (pendingLogin) await store.savePendingLogin(pendingLogin)
+  const backend = new SecretsBackend(secretsPath)
+  const result = await backend.updateChannelsAsync(async (channels) => {
+    const existing = parseExistingBlock(channels.kakaotalk)
+    const next = mergeLegacyBlock(existing, config, pendingLogin)
+    if (next === existing) return { result: { promoted: false, renameCredentials: false, renamePending: false } }
 
-  await renameIfPresent(credentialsPath, `${credentialsPath}.migrated`)
-  await renameIfPresent(pendingLoginPath, `${pendingLoginPath}.migrated`)
+    return {
+      result: {
+        promoted: true,
+        renameCredentials: isEmptyBlock(existing) && Object.keys(config.accounts).length > 0,
+        renamePending: pendingLogin !== null && existing?.pendingLogin === undefined,
+      },
+      next: { ...channels, kakaotalk: next },
+    }
+  })
+  if (!result.promoted) return { promoted: false }
+
+  if (result.renameCredentials) await renameIfPresent(credentialsPath, `${credentialsPath}.migrated`)
+  if (result.renamePending) await renameIfPresent(pendingLoginPath, `${pendingLoginPath}.migrated`)
   return { promoted: true }
 }
 
@@ -48,6 +58,22 @@ function isEmptyBlock(block: KakaoChannelBlock | null): boolean {
     block === null ||
     (block.currentAccount === null && Object.keys(block.accounts).length === 0 && block.pendingLogin === undefined)
   )
+}
+
+function mergeLegacyBlock(
+  existing: KakaoChannelBlock | null,
+  config: KakaoConfig,
+  pendingLogin: PendingLoginState | null,
+): KakaoChannelBlock | null {
+  if (existing === null || isEmptyBlock(existing)) {
+    return {
+      currentAccount: config.current_account,
+      accounts: config.accounts,
+      ...(pendingLogin ? { pendingLogin } : {}),
+    }
+  }
+  if (pendingLogin === null || existing.pendingLogin !== undefined) return existing
+  return { ...existing, pendingLogin }
 }
 
 async function renameIfPresent(from: string, to: string): Promise<void> {

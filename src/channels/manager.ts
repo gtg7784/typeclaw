@@ -276,7 +276,7 @@ function createContainerKakaoCredentialStore(agentDir: string, env: NodeJS.Proce
 function buildKakaotalkSignature(agentDir: string): { signature: string; missing: string[] } {
   const path = join(agentDir, 'secrets.json')
   try {
-    const block = new SecretsBackend(path).readChannelsSync().kakaotalk
+    const block = new SecretsBackend(path).tryReadChannelsSync()?.kakaotalk
     if (!isKakaoCredentialBlock(block)) {
       return { signature: '', missing: ['secrets.json#channels.kakaotalk'] }
     }

@@ -103,12 +103,63 @@ describe('migrateKakaotalkCredentials', () => {
 
       const result = await migrateKakaotalkCredentials(root)
 
-      expect(result.promoted).toBe(false)
+      expect(result.promoted).toBe(true)
       const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
-        channels: { kakaotalk: unknown }
+        channels: { kakaotalk: { pendingLogin?: unknown } }
       }
-      expect(secrets.channels.kakaotalk).toEqual(existing)
+      expect(secrets.channels.kakaotalk).toEqual({
+        ...existing,
+        pendingLogin: {
+          device_uuid: 'pending-device',
+          device_type: 'tablet',
+          email: 'user@example.com',
+          created_at: '2026-01-01T00:00:00.000Z',
+        },
+      })
       expect(existsSync(join(legacyDir, 'kakaotalk-credentials.json'))).toBe(true)
+      expect(existsSync(join(legacyDir, 'kakaotalk-pending-login.json'))).toBe(false)
+      expect(existsSync(join(legacyDir, 'kakaotalk-pending-login.json.migrated'))).toBe(true)
+    })
+  })
+
+  test('resumes a partial migration by importing only leftover pending login state', async () => {
+    await withAgent(async (root, legacyDir) => {
+      await writeLegacyFiles(legacyDir)
+      const existing = {
+        currentAccount: 'user-1',
+        accounts: {
+          'user-1': {
+            account_id: 'user-1',
+            oauth_token: 'oauth-user-1',
+            user_id: 'user-1',
+            refresh_token: 'refresh-user-1',
+            device_uuid: 'device-user-1',
+            device_type: 'tablet',
+            auth_method: 'login',
+            created_at: '2026-01-01T00:00:00.000Z',
+            updated_at: '2026-01-01T00:00:00.000Z',
+          },
+        },
+      }
+      await writeFile(
+        join(root, 'secrets.json'),
+        JSON.stringify({ version: 1, llm: {}, channels: { kakaotalk: existing } }),
+      )
+
+      const result = await migrateKakaotalkCredentials(root)
+
+      expect(result.promoted).toBe(true)
+      const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+        channels: { kakaotalk: { pendingLogin?: unknown } }
+      }
+      expect(secrets.channels.kakaotalk.pendingLogin).toEqual({
+        device_uuid: 'pending-device',
+        device_type: 'tablet',
+        email: 'user@example.com',
+        created_at: '2026-01-01T00:00:00.000Z',
+      })
+      expect(existsSync(join(legacyDir, 'kakaotalk-credentials.json'))).toBe(true)
+      expect(existsSync(join(legacyDir, 'kakaotalk-pending-login.json'))).toBe(false)
     })
   })
 })

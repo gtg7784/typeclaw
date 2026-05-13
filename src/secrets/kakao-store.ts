@@ -79,7 +79,9 @@ export class SecretsKakaoCredentialStore {
   }
 
   private readBlock(): KakaoChannelBlock {
-    const raw = this.backend.readChannelsSync().kakaotalk
+    const channels =
+      this.options.mode === 'container' ? this.backend.tryReadChannelsSync() : this.backend.readChannelsSync()
+    const raw = channels?.kakaotalk
     return parseBlock(raw)
   }
 

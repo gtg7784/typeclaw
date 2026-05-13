@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -61,6 +62,25 @@ function startFakeHostd(
 }
 
 describe('SecretsKakaoCredentialStore container mode', () => {
+  test('reads an absent secrets.json as empty without creating it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'typeclaw-kakao-store-container-'))
+    try {
+      const secretsPath = join(root, 'secrets.json')
+      const store = new SecretsKakaoCredentialStore({
+        mode: 'container',
+        secretsPath,
+        hostdUrl: 'http://127.0.0.1:1',
+        restartToken: 'secret',
+        containerName: 'coder',
+      })
+
+      expect(await store.load()).toEqual({ current_account: null, accounts: {} })
+      expect(existsSync(secretsPath)).toBe(false)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test('routes writes through secrets-patch and reads the updated local envelope', async () => {
     const root = await mkdtemp(join(tmpdir(), 'typeclaw-kakao-store-container-'))
     try {
