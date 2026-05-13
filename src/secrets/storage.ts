@@ -8,8 +8,17 @@ import {
 } from '@mariozechner/pi-coding-agent'
 import lockfile from 'proper-lockfile'
 
+import { providerKeyDefaultEnv } from './defaults'
 import { migrateLegacyAuthJson } from './migrate'
-import { type SecretsFile, parseSecretsFile } from './schema'
+import { resolveSecret, type Secret } from './resolve'
+import {
+  type Channels,
+  type ProviderCredential,
+  type Providers,
+  type SecretsFile,
+  SECRETS_FILE_VERSION,
+  parseSecretsFile,
+} from './schema'
 
 const SCHEMA_REL = './node_modules/typeclaw/secrets.schema.json'
 const FILE_MODE = 0o600
@@ -23,26 +32,44 @@ const ASYNC_LOCK_OPTIONS = {
   stale: 30000,
 } as const
 
-// SecretsBackend implements pi-coding-agent's AuthStorageBackend contract
-// while keeping TypeClaw in control of the on-disk file shape.
+// SecretsBackend bridges TypeClaw's on-disk envelope (v2: providers with
+// Secret-typed keys, channels with per-adapter field shapes) to upstream
+// `AuthStorage`'s flat `Record<provider, AuthCredential>` contract.
 //
-// Upstream's FileAuthStorageBackend assumes the entire file IS the
-// AuthStorageData (a flat Record<string, AuthCredential>). TypeClaw needs the
-// file to also carry version + channels alongside the LLM slice, so we wrap:
-// every withLock cycle reads the full envelope, presents only file.llm to the
-// AuthStorage instance as if it were the whole file, and merges the result
-// back into the envelope on write.
+// READ (withLock's `current` parameter):
+//   - Parse the envelope, walk `providers`, resolve each api-key `Secret` to
+//     a flat string via env-wins (process.env wins over file value).
+//   - OAuth credentials pass through untouched.
+//   - Capture the resolved string for each provider into `readSnapshot` so
+//     the write path can detect "unchanged" without re-resolving (the env
+//     can change between read and write, and re-resolving would misclassify
+//     env mutations as credential mutations).
+//   - Hand AuthStorage a flat-shape JSON string. Upstream is none the wiser.
 //
-// Locking and durability semantics mirror upstream's FileAuthStorageBackend:
-// - proper-lockfile, sync version uses busy-loop retry on ELOCKED so callers
-//   stay synchronous (matching upstream's API contract)
-// - parent directory created with 0o700, file written with 0o600
-// - empty file is created on first access so proper-lockfile has something
-//   to lock against (it requires the target to exist)
+// WRITE (the `next` field):
+//   - AuthStorage hands back the full flat slice as JSON. We do NOT
+//     wholesale-replace the on-disk `providers` slice with this.
+//   - Instead, we DIFF at credential level against the prior envelope using
+//     the read-time `readSnapshot`:
+//       * Provider unchanged (flatKey === readSnapshot[providerId]) → preserve
+//         on-disk Secret bytes verbatim (no flatten, no rewrap). This is the
+//         idempotency rule that prevents OAuth-refresh from accidentally
+//         persisting env-resolved api-key values into the file.
+//       * Provider changed → rewrap as Secret, preserving any prior `env`
+//         field the user authored.
+//       * Provider added → write as string shorthand (no env binding).
+//       * Provider removed → actually remove (do NOT resurrect).
+//   - OAuth credentials stay flat strings in the envelope (no Secret
+//     wrapping) — they're not env-injectable.
+//   - Unknown credential `type` values pass through verbatim, in case
+//     upstream adds a third type in a future release.
+//   - Empty/missing `key` from AuthStorage on api-key is treated as no-op
+//     (preserve prior on-disk Secret if any). The schema requires non-empty
+//     `value`, so writing an empty key would corrupt the file at next read.
 //
-// We additionally write atomically (temp + rename) for durability — upstream
-// uses plain writeFileSync, but we own a richer envelope and a half-write
-// would leave us with neither the old nor the new shape parseable.
+// Locking and durability mirror upstream's FileAuthStorageBackend: sync
+// busy-loop retry on ELOCKED to keep callers synchronous, 0o600 file, 0o700
+// parent, atomic temp+rename.
 export class SecretsBackend implements AuthStorageBackend {
   constructor(private readonly secretsPath: string) {}
 
@@ -53,11 +80,11 @@ export class SecretsBackend implements AuthStorageBackend {
     try {
       release = this.acquireSyncLockWithRetry()
       const envelope = this.readEnvelope()
-      const innerCurrent = JSON.stringify(envelope.llm, null, 2)
+      const { flatJson, readSnapshot } = flattenProvidersForAuthStorage(envelope.providers, process.env)
 
-      const { result, next } = fn(innerCurrent)
+      const { result, next } = fn(flatJson)
       if (next !== undefined) {
-        const merged = mergeLlmIntoEnvelope(envelope, next)
+        const merged = mergeProvidersIntoEnvelope(envelope, next, readSnapshot)
         this.writeEnvelopeAtomic(merged)
       }
       return result
@@ -87,12 +114,12 @@ export class SecretsBackend implements AuthStorageBackend {
       })
       throwIfCompromised()
       const envelope = this.readEnvelope()
-      const innerCurrent = JSON.stringify(envelope.llm, null, 2)
+      const { flatJson, readSnapshot } = flattenProvidersForAuthStorage(envelope.providers, process.env)
 
-      const { result, next } = await fn(innerCurrent)
+      const { result, next } = await fn(flatJson)
       throwIfCompromised()
       if (next !== undefined) {
-        const merged = mergeLlmIntoEnvelope(envelope, next)
+        const merged = mergeProvidersIntoEnvelope(envelope, next, readSnapshot)
         this.writeEnvelopeAtomic(merged)
       }
       throwIfCompromised()
@@ -110,24 +137,19 @@ export class SecretsBackend implements AuthStorageBackend {
     }
   }
 
-  // Read the channels slice without going through the AuthStorage wrapper.
-  // The wrapper is hard-coded to the `llm` slice; channels are TypeClaw's
-  // own concern and need their own seam. Lock is acquired in the same way as
-  // the llm path so concurrent llm writes (login, api-key promotion) don't
-  // race with a channels read.
-  readChannelsSync(): Record<string, unknown> {
+  readChannelsSync(): Channels {
     this.ensureParentDir()
     this.ensureFileExists()
     let release: (() => void) | undefined
     try {
       release = this.acquireSyncLockWithRetry()
-      return this.readEnvelope().channels as Record<string, unknown>
+      return this.readEnvelope().channels
     } finally {
       release?.()
     }
   }
 
-  writeChannelsSync(next: Record<string, unknown>): void {
+  writeChannelsSync(next: Channels): void {
     this.ensureParentDir()
     this.ensureFileExists()
     let release: (() => void) | undefined
@@ -137,7 +159,8 @@ export class SecretsBackend implements AuthStorageBackend {
       const merged: SecretsFile = {
         ...envelope,
         $schema: envelope.$schema ?? SCHEMA_REL,
-        channels: next as SecretsFile['channels'],
+        version: SECRETS_FILE_VERSION,
+        channels: next,
       }
       this.writeEnvelopeAtomic(merged)
     } finally {
@@ -152,10 +175,6 @@ export class SecretsBackend implements AuthStorageBackend {
     }
   }
 
-  // proper-lockfile requires the target to exist before locking. We seed an
-  // empty new-shape envelope so the very first call has something to lock,
-  // and so the file is parseable by a third-party reader even before the
-  // first credential is written.
   private ensureFileExists(): void {
     if (existsSync(this.secretsPath)) return
     const seed = newEmptyEnvelope()
@@ -175,11 +194,9 @@ export class SecretsBackend implements AuthStorageBackend {
             : undefined
         if (code !== 'ELOCKED' || attempt === SYNC_LOCK_RETRIES) throw error
         lastError = error
-        // Busy-wait so the call stays synchronous. Matches upstream's
-        // FileAuthStorageBackend.acquireLockSyncWithRetry.
         const start = Date.now()
         while (Date.now() - start < SYNC_LOCK_DELAY_MS) {
-          // intentionally empty
+          // intentionally empty: synchronous busy-wait to match upstream contract
         }
       }
     }
@@ -202,8 +219,6 @@ export class SecretsBackend implements AuthStorageBackend {
     return result.file
   }
 
-  // Atomic temp+rename, same pattern as src/hostd/daemon.ts:persistRegistration.
-  // The temp file lives in the same directory so rename is intra-filesystem.
   private writeEnvelopeAtomic(envelope: SecretsFile): void {
     const tmp = `${this.secretsPath}.${process.pid}.${Date.now()}.tmp`
     writeFileSync(tmp, stringifyEnvelope(envelope), { encoding: 'utf8', mode: FILE_MODE })
@@ -221,44 +236,145 @@ export class SecretsBackend implements AuthStorageBackend {
   }
 }
 
-// createSecretsStoreForAgent is the single seam every TypeClaw caller should
-// use to obtain an AuthStorage tied to an agent folder's secrets file. Keeps
-// the upstream constructor (AuthStorage.fromStorage) usage isolated to one
-// module so a future change to upstream wiring only touches this file.
-//
-// Performs the one-shot auth.json -> secrets.json rename before opening the
-// backend, so callers never observe the legacy filename even on agents that
-// pre-date the rename.
 export function createSecretsStoreForAgent(secretsPath: string): AuthStorage {
   migrateLegacyAuthJson(dirname(secretsPath))
   return AuthStorageImpl.fromStorage(new SecretsBackend(secretsPath))
 }
 
 function newEmptyEnvelope(): SecretsFile {
-  return { $schema: SCHEMA_REL, version: 1, llm: {}, channels: {} }
+  return { $schema: SCHEMA_REL, version: SECRETS_FILE_VERSION, providers: {}, channels: {} }
 }
 
 function stringifyEnvelope(envelope: SecretsFile): string {
   return `${JSON.stringify(envelope, null, 2)}\n`
 }
 
-function mergeLlmIntoEnvelope(envelope: SecretsFile, nextLlmJson: string): SecretsFile {
+type ReadSnapshot = Map<string, string>
+
+// Build the flat shape AuthStorage expects, resolving Secret-typed api-key
+// keys to plain strings on the way out. Also capture each resolved api-key
+// value into a snapshot keyed by providerId; the write path uses this
+// snapshot (NOT a re-resolution against current process.env) to detect
+// untouched providers. OAuth and unknown types are passed through verbatim
+// and never enter the snapshot — they don't participate in env-wins.
+function flattenProvidersForAuthStorage(
+  providers: Providers,
+  env: NodeJS.ProcessEnv,
+): { flatJson: string; readSnapshot: ReadSnapshot } {
+  const flat: Record<string, unknown> = {}
+  const readSnapshot: ReadSnapshot = new Map()
+  for (const [providerId, cred] of Object.entries(providers)) {
+    if (cred.type === 'api_key') {
+      const defaultEnv = providerKeyDefaultEnv(providerId)
+      const resolved = resolveSecret(cred.key, defaultEnv, env) ?? cred.key.value ?? ''
+      flat[providerId] = { type: 'api_key', key: resolved }
+      readSnapshot.set(providerId, resolved)
+    } else {
+      flat[providerId] = cred
+    }
+  }
+  return { flatJson: JSON.stringify(flat, null, 2), readSnapshot }
+}
+
+// Diff-and-preserve merge per the bridge idempotency rule. AuthStorage hands
+// back the full flat provider slice; we walk it credential-by-credential and
+// decide for each provider whether to:
+//   - preserve the prior on-disk Secret bytes verbatim (untouched provider,
+//     detected by comparing AuthStorage's flat value to the read-time
+//     snapshot, NOT a re-resolution against current env),
+//   - reconstruct as Secret with prior `env` preserved (api-key value changed),
+//   - write as new shape (provider added),
+// and we drop providers that disappeared from the flat slice (real removal).
+function mergeProvidersIntoEnvelope(
+  envelope: SecretsFile,
+  nextProvidersJson: string,
+  readSnapshot: ReadSnapshot,
+): SecretsFile {
   let parsed: unknown
   try {
-    parsed = JSON.parse(nextLlmJson)
+    parsed = JSON.parse(nextProvidersJson)
   } catch (err) {
     throw new Error(
-      `AuthStorage produced invalid JSON for the llm slice: ${err instanceof Error ? err.message : String(err)}`,
+      `AuthStorage produced invalid JSON for the providers slice: ${err instanceof Error ? err.message : String(err)}`,
     )
   }
   if (!isPlainObject(parsed)) {
-    throw new Error('AuthStorage produced a non-object llm slice')
+    throw new Error('AuthStorage produced a non-object providers slice')
   }
+
+  const nextProviders: Providers = {}
+  for (const [providerId, raw] of Object.entries(parsed)) {
+    const reconstructed = reconstructProviderCredential(
+      raw,
+      envelope.providers[providerId],
+      readSnapshot.get(providerId),
+    )
+    if (reconstructed !== undefined) {
+      nextProviders[providerId] = reconstructed
+    }
+  }
+
   return {
     ...envelope,
     $schema: envelope.$schema ?? SCHEMA_REL,
-    llm: parsed as SecretsFile['llm'],
+    version: SECRETS_FILE_VERSION,
+    providers: nextProviders,
   }
+}
+
+function reconstructProviderCredential(
+  raw: unknown,
+  priorOnDisk: ProviderCredential | undefined,
+  resolvedAtRead: string | undefined,
+): ProviderCredential | undefined {
+  if (!isPlainObject(raw)) return undefined
+  const type = raw['type']
+
+  if (type === 'api_key') {
+    const flatKey = typeof raw['key'] === 'string' ? raw['key'] : ''
+
+    // Empty/missing key from AuthStorage on an api-key credential cannot
+    // round-trip: the schema requires `value` to be non-empty, so writing
+    // `{ value: '' }` would make the file unparseable on next read. Treat
+    // it as "no-op" and preserve the prior on-disk Secret if any. A real
+    // deletion comes through as the provider being absent from `next`,
+    // which is handled by the caller dropping it.
+    if (flatKey === '') {
+      if (priorOnDisk !== undefined) return priorOnDisk
+      return undefined
+    }
+
+    // Idempotency: if AuthStorage's flat key matches the resolved value
+    // captured at read time, the credential is untouched. Preserve the
+    // on-disk Secret verbatim — including any `env` binding and any string
+    // shorthand the user authored. Comparing against the read-time snapshot
+    // (not a re-resolution against current process.env) is what makes this
+    // safe against env mutations between read and write.
+    if (priorOnDisk && priorOnDisk.type === 'api_key' && resolvedAtRead === flatKey) {
+      return priorOnDisk
+    }
+
+    // Mutation path: rewrap as Secret, preserving the user's `env` binding
+    // when prior was also an api-key so the next boot's env-wins still
+    // consults the right variable.
+    if (priorOnDisk && priorOnDisk.type === 'api_key' && priorOnDisk.key.env !== undefined) {
+      return { type: 'api_key', key: { value: flatKey, env: priorOnDisk.key.env } satisfies Secret }
+    }
+
+    return { type: 'api_key', key: { value: flatKey } }
+  }
+
+  if (type === 'oauth') {
+    // OAuth credentials are not env-injectable. Pass through verbatim,
+    // preserving every upstream-controlled field (access, refresh, expires,
+    // and any future additions covered by the catchall).
+    return raw as ProviderCredential
+  }
+
+  // Unknown credential type. Pass through verbatim as a defensive measure
+  // against upstream adding a third type in a future release. Better to
+  // round-trip user data than drop it.
+  return raw as ProviderCredential
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
