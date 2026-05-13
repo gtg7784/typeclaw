@@ -33,7 +33,6 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): Docto
     agentFolderDockerfileTemplate(),
     agentFolderGitignoreTemplate(),
     agentFolderNodeModules(),
-    agentFolderEnvFile(),
     agentFolderGitRepo(),
     configValid(),
     hostdHomeWritable(),
@@ -204,24 +203,6 @@ function agentFolderNodeModules(): DoctorCheck {
         message: `${missing.length} package(s) missing from node_modules`,
         details: missing.map((m) => `missing: ${m}`),
         fix: { description: 'Run `bun install` inside the agent folder.' },
-      }
-    },
-  }
-}
-
-function agentFolderEnvFile(): DoctorCheck {
-  return {
-    name: 'agent-folder.env-file',
-    category: 'agent-folder',
-    description: '.env file is present',
-    applies: (ctx) => ctx.hasAgentFolder,
-    async run(ctx) {
-      if (existsSync(join(ctx.cwd, '.env'))) return { status: 'ok', message: '.env present' }
-      return {
-        status: 'warning',
-        message: '.env is missing',
-        details: ['Channels and external API integrations will not have their secrets injected.'],
-        fix: { description: 'Create a .env file with the credentials your agent needs.' },
       }
     },
   }
