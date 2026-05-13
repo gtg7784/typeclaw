@@ -11,9 +11,23 @@ export type BuildDockerfileOptions = {
 
 // Apt packages that EVERY image must have — git for the agent runtime,
 // curl/ca-certificates/gnupg for HTTPS and key fetches that downstream layers
-// (e.g. the gh keyring) depend on. Listed first in the apt-get install line so
-// the package set is self-documenting at a glance.
-const BASELINE_APT_PACKAGES = ['git', 'ca-certificates', 'curl', 'gnupg'] as const
+// (e.g. the gh keyring) depend on. `iptables` and `util-linux` back the
+// network egress entrypoint shim, installed unconditionally so that flipping
+// `typeclaw.json#network.blockInternal` is a runtime toggle (re-run
+// `typeclaw restart`) and not an image rebuild.
+//
+// On Debian trixie the single `iptables` package ships both the IPv4 nft
+// frontend (`iptables-nft`, available as `iptables` through
+// update-alternatives) and the IPv6 nft frontend (`ip6tables-nft`, available
+// as `ip6tables`). The standalone `iptables-nft`/`ip6tables-nft` package
+// names do NOT exist on trixie — `apt install iptables-nft` fails with
+// "Unable to locate package". The shim invokes `iptables` and `ip6tables`
+// which alternatives resolves to the nft variants.
+//
+// `util-linux` carries `setpriv`, which the shim uses to drop CAP_NET_ADMIN
+// from the bounding set before exec'ing the agent. Listed first in the
+// apt-get install line so the package set is self-documenting at a glance.
+const BASELINE_APT_PACKAGES = ['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux'] as const
 
 // curl-impersonate is the only currently-working way to query DuckDuckGo from
 // a non-browser client on residential IPs in 2026. DDG fingerprints incoming
@@ -41,6 +55,132 @@ export const CURL_IMPERSONATE_SHA256_ARM64 = '6766bc67fd3e8e2313875f32b36b5a3fab
 // drops chrome136 fails loudly at search time instead of silently regressing
 // the impersonation to whatever `curl_chrome` resolves to.
 export const CURL_IMPERSONATE_PROFILE = 'chrome136'
+
+export const TYPECLAW_ENTRYPOINT_PATH = '/usr/local/bin/typeclaw-entrypoint'
+
+// IPv4 networks the container is forbidden to egress to when
+// `network.blockInternal` is true. Loopback (127/8) is NOT here — loopback
+// traffic uses the `lo` interface, which the shim's first ACCEPT rule
+// short-circuits. The agent inside the container needs loopback to dogfood
+// its own `bun run dev` server. RFC1918 (10/8, 172.16/12, 192.168/16) covers
+// router admin panels and home/office LANs. 169.254/16 covers cloud
+// metadata (169.254.169.254 IMDS, 169.254.170.2 ECS task role) and Windows
+// APIPA. 100.64/10 is CGNAT. 224/4 multicast and 240/4 reserved are belt-
+// and-suspenders against creative exfil targets. host.docker.internal (in
+// 172.16/12 on Docker Desktop/Linux) is re-allowed by the shim at runtime
+// via getent so the agent's `restart` tool can still reach hostd.
+export const NETWORK_BLOCK_IPV4_NETS = [
+  '10.0.0.0/8',
+  '172.16.0.0/12',
+  '192.168.0.0/16',
+  '169.254.0.0/16',
+  '100.64.0.0/10',
+  '224.0.0.0/4',
+  '240.0.0.0/4',
+] as const
+
+// IPv6 mirrors of the IPv4 block list. fc00::/7 is unique-local (the IPv6
+// equivalent of RFC1918), fe80::/10 is link-local (incl. SLAAC + IPv6 cloud
+// metadata in fd00:ec2::/64 which fits inside fc00::/7), ff00::/8 is
+// multicast, ::ffff:0:0/96 is IPv4-mapped IPv6 (an attacker could otherwise
+// reach 192.168.x.x via [::ffff:192.168.0.1]).
+export const NETWORK_BLOCK_IPV6_NETS = ['fc00::/7', 'fe80::/10', 'ff00::/8', '::ffff:0:0/96'] as const
+
+// Renders the shell script that runs as PID 1 inside the container. Two
+// modes, picked at boot time from `$TYPECLAW_NETWORK_BLOCK_INTERNAL`:
+//
+//   off (default, blockInternal=false or env unset): no rules installed,
+//   no setpriv. Just exec `bun run typeclaw "$@"`. Identical observable
+//   behavior to the pre-feature container.
+//
+//   on (blockInternal=true): walks IPv4 + IPv6 block lists and installs
+//   REJECT rules in the OUTPUT chain. Loopback (`-o lo`) is ACCEPT'd first
+//   so dev-server dogfooding still works. The hostd HTTP control port on
+//   `host.docker.internal` is re-allowed at runtime — narrowly, single
+//   TCP destport, only when hostd is configured — so the agent's `restart`
+//   tool can still reach the daemon. The shim then drops CAP_NET_ADMIN
+//   from the bounding set AND from the inheritable + ambient sets via
+//   setpriv before exec'ing the agent. Bounding set is the hard ceiling
+//   enforced by execve; inheritable + ambient are cleared defensively to
+//   match setpriv(1)'s explicit warning about not dropping the bounding
+//   set alone.
+//
+// Carve-out is intentionally narrow: ACCEPT only `tcp --dport <hostd-port>`
+// to the host gateway, never the gateway IP wholesale. Without the dport
+// scope, a compromised agent could reach any host service via
+// `host.docker.internal:22` (SSH), `:53` (DNS), `:5432` (postgres), etc.
+// The gateway IP itself sits inside `172.16.0.0/12`, which the IPv4 reject
+// rules below DROP — the narrow ACCEPT here is the only path through.
+// When hostd is not configured (`TYPECLAW_HOSTD_URL` unset or unparseable),
+// nothing is ACCEPT'd: the agent loses self-restart capability but the
+// rest of the egress filter still works.
+//
+// IPv4-only carve-out uses `getent ahostsv4` to force the resolver into
+// the A-record path. Without this, `getent hosts` would return whichever
+// family the resolver prefers, and on systems that prefer AAAA we'd feed
+// a v6 address to `iptables` and crash under `set -e`. host.docker.internal
+// resolves to a bridge gateway that is IPv4-only on every Docker runtime
+// we support (Docker Desktop, OrbStack, Docker on Linux with the
+// `--add-host host.docker.internal:host-gateway` flag typeclaw injects).
+//
+// REJECT (not DROP) so the agent fails fast with an ICMP unreachable
+// instead of hanging on a 30-second connect timeout — much friendlier
+// debug UX and identical security posture.
+//
+// `set -eu` propagates rule-install failures up to PID 1 exit, which kills
+// the container. Failing closed is the right thing: an unenforced
+// blockInternal=true is worse than blockInternal=false.
+export function buildEntrypointShim(): string {
+  const ipv4Rules = NETWORK_BLOCK_IPV4_NETS.map(
+    (net) => `iptables -A OUTPUT -d ${net} -j REJECT --reject-with icmp-port-unreachable`,
+  )
+  const ipv6Rules = NETWORK_BLOCK_IPV6_NETS.map(
+    (net) => `ip6tables -A OUTPUT -d ${net} -j REJECT --reject-with icmp6-port-unreachable`,
+  )
+  return `#!/bin/sh
+# AUTOGENERATED by typeclaw — do not edit.
+# Source: src/init/dockerfile.ts \`buildEntrypointShim()\`.
+set -eu
+
+if [ "\${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then
+  exec bun run typeclaw "$@"
+fi
+
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# Hostd HTTP control carve-out: narrow ACCEPT, scoped to one TCP port on
+# the host gateway. Skipped silently when hostd is not configured.
+hostd_port=""
+if [ -n "\${TYPECLAW_HOSTD_URL:-}" ]; then
+  hostd_port="$(printf '%s' "$TYPECLAW_HOSTD_URL" | sed -n 's#^https\\{0,1\\}://[^/:]\\{1,\\}:\\([0-9]\\{1,5\\}\\).*#\\1#p')"
+fi
+if [ -n "\${hostd_port:-}" ]; then
+  host_gw_ip="$(getent ahostsv4 host.docker.internal 2>/dev/null | awk '{print $1; exit}')"
+  if [ -n "\${host_gw_ip:-}" ]; then
+    iptables -A OUTPUT -p tcp -d "$host_gw_ip" --dport "$hostd_port" -j ACCEPT
+  fi
+fi
+${ipv4Rules.join('\n')}
+
+ip6tables -A OUTPUT -o lo -j ACCEPT
+${ipv6Rules.join('\n')}
+
+exec setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin -- bun run typeclaw "$@"
+`
+}
+
+// Layer 6: install the network-egress entrypoint shim. Content is base64-
+// encoded inline so the Dockerfile is fully self-contained — no second file
+// in the build context, no COPY, no chicken-and-egg between init and start.
+// Layer placement is intentionally late: shim source changes invalidate
+// only this small layer (~1KB image impact), keeping Chrome and apt cached.
+function renderEntrypointShimLayer(): string {
+  const encoded = Buffer.from(buildEntrypointShim(), 'utf8').toString('base64')
+  return `# Layer 6 (small, changes with the egress shim): install /usr/local/bin/typeclaw-entrypoint.
+# The shim is a no-op unless \`network.blockInternal\` is true at runtime.
+RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
+ && chmod +x ${TYPECLAW_ENTRYPOINT_PATH}`
+}
 
 // Shared-library runtime deps Chrome for Testing needs to launch on amd64
 // Debian trixie (base of `oven/bun:1-slim`). `agent-browser install
@@ -133,7 +273,7 @@ ENV NODE_ENV=production
 # end up at <agentDir>/workspace/.agent-messenger/ on the host.
 ENV AGENT_MESSENGER_CONFIG_DIR=/agent/workspace/.agent-messenger
 
-${customLines}ENTRYPOINT ["bun", "run", "typeclaw"]
+${customLines}ENTRYPOINT ["${TYPECLAW_ENTRYPOINT_PATH}"]
 CMD ["run"]
 `
 }
@@ -201,6 +341,8 @@ ${LAYER_4_AGENT_BROWSER_INSTALL}
 
 ${LAYER_5_CHROME_FOR_TESTING}
 
+${renderEntrypointShimLayer()}
+
 `
 }
 
@@ -259,6 +401,8 @@ ${LAYER_3_AGENT_BROWSER_ARM64_CONFIG}
 ${LAYER_4_AGENT_BROWSER_INSTALL}
 
 ${LAYER_5_CHROME_FOR_TESTING}
+
+${renderEntrypointShimLayer()}
 `
 }
 

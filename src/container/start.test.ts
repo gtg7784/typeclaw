@@ -57,6 +57,7 @@ type ScaffoldedConfig = {
     tmux?: boolean | string
   }
   gitignore?: { append?: string[] }
+  network?: { blockInternal?: boolean }
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -66,6 +67,7 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     mounts: overrides.mounts ?? [],
     ...(overrides.dockerfile ? { dockerfile: overrides.dockerfile } : {}),
     ...(overrides.gitignore ? { gitignore: overrides.gitignore } : {}),
+    ...(overrides.network ? { network: overrides.network } : {}),
   }
   await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
 }
@@ -413,6 +415,66 @@ describe('planStart mounts', () => {
   })
 })
 
+describe('planStart network egress filter', () => {
+  test('emits no NET_ADMIN cap and no env var when typeclaw.json is missing (existing-agent default = off)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).not.toContain('--cap-add=NET_ADMIN')
+    expect(plan.runArgs.filter((a) => a.includes('TYPECLAW_NETWORK_BLOCK_INTERNAL'))).toHaveLength(0)
+  })
+
+  test('emits no NET_ADMIN cap and no env var when network.blockInternal is explicitly false', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { network: { blockInternal: false } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).not.toContain('--cap-add=NET_ADMIN')
+    expect(plan.runArgs.filter((a) => a.includes('TYPECLAW_NETWORK_BLOCK_INTERNAL'))).toHaveLength(0)
+  })
+
+  test('grants NET_ADMIN and sets TYPECLAW_NETWORK_BLOCK_INTERNAL=1 when blockInternal is true', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { network: { blockInternal: true } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).toContain('--cap-add=NET_ADMIN')
+    expect(plan.runArgs).toContain('TYPECLAW_NETWORK_BLOCK_INTERNAL=1')
+  })
+
+  test('the env var lands as a docker `-e` flag (not `--env-file` or `--env`)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { network: { blockInternal: true } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+    const envIdx = plan.runArgs.indexOf('TYPECLAW_NETWORK_BLOCK_INTERNAL=1')
+
+    expect(envIdx).toBeGreaterThan(0)
+    expect(plan.runArgs[envIdx - 1]).toBe('-e')
+  })
+
+  test('cap-add appears before the image tag so docker picks it up at run time, not at exec time', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { network: { blockInternal: true } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+    const capIdx = plan.runArgs.indexOf('--cap-add=NET_ADMIN')
+    const imageIdx = plan.runArgs.indexOf(plan.imageTag)
+
+    expect(capIdx).toBeGreaterThan(-1)
+    expect(imageIdx).toBeGreaterThan(-1)
+    expect(capIdx).toBeLessThan(imageIdx)
+  })
+})
+
 describe('refreshDockerfile', () => {
   test('overwrites a stale Dockerfile with the current template', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-'))
@@ -453,7 +515,7 @@ describe('refreshDockerfile', () => {
       const written = await readFile(join(dir, 'Dockerfile'), 'utf8')
       const runIdx = written.indexOf('RUN echo custom')
       const envIdx = written.indexOf('ENV CUSTOM_FLAG=1')
-      const entrypointIdx = written.indexOf('ENTRYPOINT ["bun", "run", "typeclaw"]')
+      const entrypointIdx = written.indexOf('ENTRYPOINT ["/usr/local/bin/typeclaw-entrypoint"]')
       expect(runIdx).toBeGreaterThan(-1)
       expect(runIdx).toBeLessThan(envIdx)
       expect(envIdx).toBeLessThan(entrypointIdx)
@@ -944,7 +1006,7 @@ describe('start (composition)', () => {
     if (!buildCall?.dockerfileSnapshot) throw new Error('expected docker build to capture Dockerfile snapshot')
     expect(buildCall.dockerfileSnapshot).toContain('RUN echo from-config')
     expect(buildCall.dockerfileSnapshot.indexOf('RUN echo from-config')).toBeLessThan(
-      buildCall.dockerfileSnapshot.indexOf('ENTRYPOINT ["bun", "run", "typeclaw"]'),
+      buildCall.dockerfileSnapshot.indexOf('ENTRYPOINT ["/usr/local/bin/typeclaw-entrypoint"]'),
     )
   })
 

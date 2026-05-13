@@ -1054,7 +1054,7 @@ describe('writeDockerAssets', () => {
     const commentIdx = dockerfile.indexOf('# Custom lines from typeclaw.json#dockerfile.append.')
     const runIdx = dockerfile.indexOf('RUN apt-get update')
     const envIdx = dockerfile.indexOf('ENV CUSTOM_TOOL=1')
-    const entrypointIdx = dockerfile.indexOf('ENTRYPOINT ["bun", "run", "typeclaw"]')
+    const entrypointIdx = dockerfile.indexOf('ENTRYPOINT ["/usr/local/bin/typeclaw-entrypoint"]')
     expect(commentIdx).toBeGreaterThan(-1)
     expect(commentIdx).toBeLessThan(runIdx)
     expect(runIdx).toBeLessThan(envIdx)
