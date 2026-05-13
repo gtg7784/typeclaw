@@ -1,7 +1,7 @@
 import { createRequire } from 'node:module'
 import { join } from 'node:path'
 
-import { KakaoCredentialManager } from 'agent-messenger/kakaotalk'
+import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 
 export type KakaotalkBootstrapStatus = { ok: true } | { ok: false; reason: string }
 
@@ -50,11 +50,17 @@ export function kakaotalkConfigDir(agentDir: string): string {
   return join(agentDir, 'workspace', '.agent-messenger')
 }
 
+export function kakaotalkSecretsPath(agentDir: string): string {
+  return join(agentDir, 'secrets.json')
+}
+
 export async function runKakaotalkBootstrap(input: KakaotalkLoginInput): Promise<KakaotalkBootstrapStatus> {
-  const configDir = kakaotalkConfigDir(input.agentDir)
   try {
     const loginFlow = input.loginFlow ?? (await resolveLoginFlow())
-    const credManager = new KakaoCredentialManager(configDir)
+    const credManager = new SecretsKakaoCredentialStore({
+      mode: 'host',
+      secretsPath: kakaotalkSecretsPath(input.agentDir),
+    })
     const pending = await credManager.loadPendingLogin()
     const existing = await credManager.getAccount()
     const savedDeviceUuid =

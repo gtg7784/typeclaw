@@ -916,6 +916,80 @@ describe('start (composition)', () => {
     expect(onDisk).not.toContain('FROM stale')
   })
 
+  test('promotes legacy KakaoTalk credential files into secrets.json before container start', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await mkdir(join(root, 'workspace', '.agent-messenger'), { recursive: true })
+    const legacyDir = join(root, 'workspace', '.agent-messenger')
+    await writeFile(
+      join(legacyDir, 'kakaotalk-credentials.json'),
+      JSON.stringify({
+        current_account: 'user-1',
+        accounts: {
+          'user-1': {
+            account_id: 'user-1',
+            oauth_token: 'oauth-user-1',
+            user_id: 'user-1',
+            refresh_token: 'refresh-user-1',
+            device_uuid: 'device-user-1',
+            device_type: 'tablet',
+            auth_method: 'login',
+            created_at: '2026-01-01T00:00:00.000Z',
+            updated_at: '2026-01-01T00:00:00.000Z',
+          },
+        },
+      }),
+    )
+    await writeFile(
+      join(legacyDir, 'kakaotalk-pending-login.json'),
+      JSON.stringify({
+        device_uuid: 'pending-device',
+        device_type: 'tablet',
+        email: 'user@example.com',
+        created_at: '2026-01-01T00:00:00.000Z',
+      }),
+    )
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels: {
+        kakaotalk?: { currentAccount: string | null; accounts: Record<string, unknown>; pendingLogin?: unknown }
+      }
+    }
+    expect(secrets.channels.kakaotalk?.currentAccount).toBe('user-1')
+    expect(secrets.channels.kakaotalk?.accounts['user-1']).toBeDefined()
+    expect(secrets.channels.kakaotalk?.pendingLogin).toEqual({
+      device_uuid: 'pending-device',
+      device_type: 'tablet',
+      email: 'user@example.com',
+      created_at: '2026-01-01T00:00:00.000Z',
+    })
+    expect(existsSync(join(legacyDir, 'kakaotalk-credentials.json'))).toBe(false)
+    expect(existsSync(join(legacyDir, 'kakaotalk-credentials.json.migrated'))).toBe(true)
+    expect(existsSync(join(legacyDir, 'kakaotalk-pending-login.json.migrated'))).toBe(true)
+
+    const second = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+    expect(second.ok).toBe(true)
+    expect(JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8'))).toEqual(secrets)
+  })
+
   test('refreshes .gitignore from the template on every start', async () => {
     // given: a stale .gitignore and an existing image
     await writeFile(join(root, '.gitignore'), '# stale\nold-entry\n')

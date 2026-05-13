@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
+
+import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
+import { SecretsBackend } from '@/secrets/storage'
 
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
 import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
@@ -62,10 +64,10 @@ type AnyAdapter = DiscordBotAdapter | KakaotalkAdapter | SlackBotAdapter | Teleg
 // Credential signature is the comparison key for credential-rotation
 // detection on reload. Discord and Telegram each use a single bot token;
 // Slack needs both a bot token and an app-level token (Socket Mode);
-// KakaoTalk authenticates via a credentials file under
-// AGENT_MESSENGER_CONFIG_DIR (workspace/), so its signature is the file's
-// content hash. The "credential" naming (vs "token") generalizes across the
-// env-var-based adapters and KakaoTalk's file-based credential pathway.
+// KakaoTalk authenticates via a structured multi-account block in
+// secrets.json#channels.kakaotalk, so its signature is that block's content
+// hash. The "credential" naming (vs "token") generalizes across the
+// env-var-based adapters and KakaoTalk's account credential pathway.
 type AdapterEntry = {
   adapter: AnyAdapter
   credentialSignature: string
@@ -89,7 +91,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   const live = new Map<AdapterId, AdapterEntry>()
 
   const buildCredentialSignature = (name: AdapterId): { signature: string; missing: string[] } => {
-    if (name === 'kakaotalk') return buildKakaotalkSignature(options.agentDir, env)
+    if (name === 'kakaotalk') return buildKakaotalkSignature(options.agentDir)
     const requiredEnvs = TOKEN_ENV[name]
     const parts: string[] = []
     const missing: string[] = []
@@ -132,7 +134,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
-        credentialsDir: resolveKakaoConfigDir(options.agentDir, env),
+        credentialsStore: createContainerKakaoCredentialStore(options.agentDir, env),
       })
     }
     if (name === 'telegram-bot') {
@@ -223,7 +225,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
           const { signature, missing } = buildCredentialSignature(name)
           if (missing.length > 0) {
             // Required credentials disappeared (env vars removed from .env, or
-            // KakaoTalk credentials file deleted). Continuing to use the
+            // KakaoTalk credentials removed from secrets.json). Continuing to use the
             // in-memory credentials would silently honor a credential the
             // operator explicitly removed, so stop the adapter instead of
             // waiting for a manual restart.
@@ -244,47 +246,54 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   }
 }
 
-// Token-based adapters only. KakaoTalk's credentials live in a file under
-// AGENT_MESSENGER_CONFIG_DIR (workspace/.agent-messenger/), not in env, so
-// it goes through buildKakaotalkSignature instead.
+// Token-based adapters only. KakaoTalk's credentials live in
+// secrets.json#channels.kakaotalk, not in env, so it goes through
+// buildKakaotalkSignature instead.
 const TOKEN_ENV: Record<Exclude<AdapterId, 'kakaotalk'>, readonly string[]> = {
   'discord-bot': ['DISCORD_BOT_TOKEN'],
   'slack-bot': ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
   'telegram-bot': ['TELEGRAM_BOT_TOKEN'],
 }
 
-const KAKAO_DEFAULT_SUBDIR = '.agent-messenger'
-const KAKAO_CREDENTIALS_FILE = 'kakaotalk-credentials.json'
-
-function resolveKakaoConfigDir(agentDir: string, env: NodeJS.ProcessEnv): string {
-  const override = env.AGENT_MESSENGER_CONFIG_DIR
-  if (override !== undefined && override.trim() !== '') return override
-  return join(agentDir, 'workspace', KAKAO_DEFAULT_SUBDIR)
-}
-
-function resolveKakaoCredentialsPath(agentDir: string, env: NodeJS.ProcessEnv): string {
-  return join(resolveKakaoConfigDir(agentDir, env), KAKAO_CREDENTIALS_FILE)
-}
-
-function buildKakaotalkSignature(agentDir: string, env: NodeJS.ProcessEnv): { signature: string; missing: string[] } {
-  const path = resolveKakaoCredentialsPath(agentDir, env)
-  if (!existsSync(path)) {
-    return { signature: '', missing: [`kakaotalk credentials file at ${path}`] }
+function createContainerKakaoCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsKakaoCredentialStore {
+  const hostdUrl = env.TYPECLAW_HOSTD_URL
+  const restartToken = env.TYPECLAW_HOSTD_TOKEN
+  const containerName = env.TYPECLAW_CONTAINER_NAME
+  if (!hostdUrl || !restartToken || !containerName) {
+    throw new Error(
+      'KakaoTalk credentials require TYPECLAW_HOSTD_URL, TYPECLAW_HOSTD_TOKEN, and TYPECLAW_CONTAINER_NAME',
+    )
   }
+  return new SecretsKakaoCredentialStore({
+    mode: 'container',
+    secretsPath: join(agentDir, 'secrets.json'),
+    hostdUrl,
+    restartToken,
+    containerName,
+  })
+}
+
+function buildKakaotalkSignature(agentDir: string): { signature: string; missing: string[] } {
+  const path = join(agentDir, 'secrets.json')
   try {
-    // Content hash, not mtime+size: KakaoTalk's credential file is small
-    // (a few hundred bytes of JSON) and is rewritten on every OAuth token
-    // refresh. Hashing avoids two failure modes mtime+size could miss:
-    //   (a) a refresh that produces byte-identical content (rare but
-    //       possible when nothing actually rotated) — we correctly skip;
-    //   (b) a refresh that lands on the same mtime due to FS resolution
-    //       (some host filesystems quantize to seconds).
-    const buf = readFileSync(path)
-    const digest = createHash('sha256').update(buf).digest('hex')
-    return { signature: `${path}@sha256:${digest}`, missing: [] }
+    const block = new SecretsBackend(path).tryReadChannelsSync()?.kakaotalk
+    if (!isKakaoCredentialBlock(block)) {
+      return { signature: '', missing: ['secrets.json#channels.kakaotalk'] }
+    }
+    const digest = createHash('sha256').update(JSON.stringify(block)).digest('hex')
+    return { signature: `secrets.json#channels.kakaotalk@sha256:${digest}`, missing: [] }
   } catch (err) {
-    return { signature: '', missing: [`kakaotalk credentials file at ${path} (${describe(err)})`] }
+    return { signature: '', missing: [`secrets.json#channels.kakaotalk (${describe(err)})`] }
   }
+}
+
+function isKakaoCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  if (!('accounts' in value)) return false
+  const accounts = value.accounts
+  return (
+    typeof accounts === 'object' && accounts !== null && !Array.isArray(accounts) && Object.keys(accounts).length > 0
+  )
 }
 
 function describe(err: unknown): string {

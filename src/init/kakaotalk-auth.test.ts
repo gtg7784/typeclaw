@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 import {
   kakaotalkConfigDir,
+  kakaotalkSecretsPath,
   type LoginFlowFn,
   type LoginFlowOptions,
   type LoginFlowResult,
@@ -49,14 +50,18 @@ describe('runKakaotalkBootstrap', () => {
         loginFlow: fake,
       })
       expect(result).toEqual({ ok: true })
-      const credPath = join(kakaotalkConfigDir(agentDir), 'kakaotalk-credentials.json')
-      const stored = JSON.parse(await readFile(credPath, 'utf8')) as {
-        current_account: string
-        accounts: Record<string, { user_id: string; auth_method: string; oauth_token: string }>
+      const stored = JSON.parse(await readFile(kakaotalkSecretsPath(agentDir), 'utf8')) as {
+        channels: {
+          kakaotalk: {
+            currentAccount: string
+            accounts: Record<string, { user_id: string; auth_method: string; oauth_token: string }>
+          }
+        }
       }
-      expect(stored.current_account).toBe('user-1')
-      expect(stored.accounts['user-1']?.oauth_token).toBe('oauth-abc')
-      expect(stored.accounts['user-1']?.auth_method).toBe('login')
+      expect(stored.channels.kakaotalk.currentAccount).toBe('user-1')
+      expect(stored.channels.kakaotalk.accounts['user-1']?.oauth_token).toBe('oauth-abc')
+      expect(stored.channels.kakaotalk.accounts['user-1']?.auth_method).toBe('login')
+      await expect(readFile(join(kakaotalkConfigDir(agentDir), 'kakaotalk-credentials.json'), 'utf8')).rejects.toThrow()
     } finally {
       await rm(agentDir, { recursive: true, force: true })
     }
@@ -130,15 +135,24 @@ describe('runKakaotalkBootstrap', () => {
   test('reuses savedDeviceUuid from prior pending login', async () => {
     const agentDir = await tmp()
     try {
-      const configDir = kakaotalkConfigDir(agentDir)
-      await mkdir(configDir, { recursive: true })
+      await mkdir(agentDir, { recursive: true })
       await writeFile(
-        join(configDir, 'kakaotalk-pending-login.json'),
+        kakaotalkSecretsPath(agentDir),
         JSON.stringify({
-          device_uuid: 'previous-uuid',
-          device_type: 'tablet',
-          email: 'u@e.com',
-          created_at: new Date().toISOString(),
+          version: 2,
+          providers: {},
+          channels: {
+            kakaotalk: {
+              currentAccount: null,
+              accounts: {},
+              pendingLogin: {
+                device_uuid: 'previous-uuid',
+                device_type: 'tablet',
+                email: 'u@e.com',
+                created_at: new Date().toISOString(),
+              },
+            },
+          },
         }),
       )
       let received: string | undefined
@@ -180,9 +194,10 @@ describe('runKakaotalkBootstrap', () => {
         loginFlow: fake,
       })
       expect(result).toEqual({ ok: true })
-      const credPath = join(kakaotalkConfigDir(agentDir), 'kakaotalk-credentials.json')
-      const stored = JSON.parse(await readFile(credPath, 'utf8')) as { current_account: string }
-      expect(stored.current_account).toBe('default')
+      const stored = JSON.parse(await readFile(kakaotalkSecretsPath(agentDir), 'utf8')) as {
+        channels: { kakaotalk: { currentAccount: string } }
+      }
+      expect(stored.channels.kakaotalk.currentAccount).toBe('default')
     } finally {
       await rm(agentDir, { recursive: true, force: true })
     }

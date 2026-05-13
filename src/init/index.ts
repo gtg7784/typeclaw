@@ -698,7 +698,7 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   //
   // We run KakaoTalk auth FIRST so a failed login leaves typeclaw.json and
   // .env untouched. The runtime treats `channels.kakaotalk` without a
-  // credentials file as "missing credentials, skip adapter", which silently
+  // secrets.json#channels.kakaotalk block as "missing credentials, skip adapter", which silently
   // drops messages — the same trap `runInit` already guards against. Aborting
   // before any file write means the user's next `typeclaw channel add
   // kakaotalk` retry has no half-applied state to clean up.
@@ -738,8 +738,8 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
     case 'telegram-bot':
       return { token: options.telegramBotToken }
     case 'kakaotalk':
-      // KakaoTalk credentials live in `workspace/.agent-messenger/`, written
-      // by the auth runner above. Nothing to record in secrets.json.
+      // KakaoTalk auth writes its structured multi-account block directly to
+      // secrets.json#channels.kakaotalk before config mutation.
       return {}
   }
 }

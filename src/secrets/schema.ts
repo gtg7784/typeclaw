@@ -40,11 +40,37 @@ const telegramBotChannelSchema = z.object({
   token: secretFieldSchema.optional(),
 })
 
+export const kakaoAccountRecordSchema = z.object({
+  account_id: z.string(),
+  oauth_token: z.string(),
+  user_id: z.string(),
+  refresh_token: z.string().optional(),
+  device_uuid: z.string(),
+  device_type: z.union([z.literal('pc'), z.literal('tablet')]),
+  auth_method: z.union([z.literal('login'), z.literal('extract')]).optional(),
+  created_at: z.string(),
+  updated_at: z.string(),
+})
+
+export const kakaoPendingLoginRecordSchema = z.object({
+  device_uuid: z.string(),
+  device_type: z.union([z.literal('pc'), z.literal('tablet')]),
+  email: z.string(),
+  created_at: z.string(),
+})
+
+export const kakaoChannelBlockSchema = z.object({
+  currentAccount: z.string().nullable(),
+  accounts: z.record(z.string(), kakaoAccountRecordSchema),
+  pendingLogin: kakaoPendingLoginRecordSchema.optional(),
+})
+
 export const channelsSchema = z
   .object({
     'slack-bot': slackBotChannelSchema.optional(),
     'discord-bot': discordBotChannelSchema.optional(),
     'telegram-bot': telegramBotChannelSchema.optional(),
+    kakaotalk: kakaoChannelBlockSchema.optional(),
   })
   .catchall(z.unknown())
 
@@ -64,6 +90,9 @@ export const secretsFileSchema = z.object({
 export type ProviderCredential = z.infer<typeof providerCredentialSchema>
 export type Providers = z.infer<typeof providersSchema>
 export type Channels = z.infer<typeof channelsSchema>
+export type KakaoAccountRecord = z.infer<typeof kakaoAccountRecordSchema>
+export type PendingLoginRecord = z.infer<typeof kakaoPendingLoginRecordSchema>
+export type KakaoChannelBlock = z.infer<typeof kakaoChannelBlockSchema>
 export type SecretsFile = z.infer<typeof secretsFileSchema>
 
 export type ParseSecretsResult = { ok: true; file: SecretsFile } | { ok: false; reason: string }
