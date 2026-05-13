@@ -141,17 +141,22 @@ describe('portForwardSchema', () => {
 })
 
 describe('networkSchema', () => {
-  test('defaults to blockInternal:false when omitted (existing agents not affected by upgrade)', () => {
+  test('defaults to blockInternal:true when omitted (egress filter on for every agent unless opted out)', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL })
-    expect(parsed.network).toEqual({ blockInternal: false })
+    expect(parsed.network).toEqual({ blockInternal: true })
   })
 
-  test('accepts an empty network object, inheriting the false default', () => {
+  test('accepts an empty network object, inheriting the true default', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL, network: {} })
+    expect(parsed.network).toEqual({ blockInternal: true })
+  })
+
+  test('preserves blockInternal:false when explicitly opted out', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, network: { blockInternal: false } })
     expect(parsed.network).toEqual({ blockInternal: false })
   })
 
-  test('preserves blockInternal:true when explicitly set', () => {
+  test('preserves blockInternal:true when explicitly set (redundant with default, but harmless)', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL, network: { blockInternal: true } })
     expect(parsed.network).toEqual({ blockInternal: true })
   })

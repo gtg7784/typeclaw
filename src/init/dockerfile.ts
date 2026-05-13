@@ -89,11 +89,13 @@ export const NETWORK_BLOCK_IPV6_NETS = ['fc00::/7', 'fe80::/10', 'ff00::/8', '::
 // Renders the shell script that runs as PID 1 inside the container. Two
 // modes, picked at boot time from `$TYPECLAW_NETWORK_BLOCK_INTERNAL`:
 //
-//   off (default, blockInternal=false or env unset): no rules installed,
-//   no setpriv. Just exec `bun run typeclaw "$@"`. Identical observable
-//   behavior to the pre-feature container.
+//   off (env unset or != "1"): no rules installed, no setpriv. Just exec
+//   `bun run typeclaw "$@"`. Identical observable behavior to a container
+//   without this feature. This is the opt-out path for users who set
+//   `network.blockInternal: false` in their `typeclaw.json`.
 //
-//   on (blockInternal=true): walks IPv4 + IPv6 block lists and installs
+//   on (default, env = "1" via `network.blockInternal: true`): walks IPv4 +
+//   IPv6 block lists and installs
 //   REJECT rules in the OUTPUT chain. Loopback (`-o lo`) is ACCEPT'd first
 //   so dev-server dogfooding still works. The hostd HTTP control port on
 //   `host.docker.internal` is re-allowed at runtime — narrowly, single
