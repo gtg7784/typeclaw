@@ -88,8 +88,13 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
   const ws = new WebSocket(url)
   try {
     await new Promise<void>((resolve, reject) => {
+      // `timer` is declared up front so `cleanup` can reference it without
+      // hitting the TDZ if the WS fires a synchronous error event during
+      // addEventListener (theoretical, but const-after-cleanup-definition
+      // would throw ReferenceError instead of being the intended no-op).
+      let timer: ReturnType<typeof setTimeout> | undefined
       const cleanup = () => {
-        clearTimeout(timer)
+        if (timer !== undefined) clearTimeout(timer)
         ws.removeEventListener('open', onOpen)
         ws.removeEventListener('error', onError)
       }
@@ -107,7 +112,7 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
       // CONNECTING forever — neither 'open' nor 'error' ever fires, and
       // `typeclaw doctor` hangs. The per-request timeout downstream doesn't
       // help because we never reach it.
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         cleanup()
         try {
           ws.close()
