@@ -123,5 +123,6 @@ function startOk(opts: StartOptions): StartResult {
     hostPort: opts.preferredHostPort,
     hostd: { state: 'registered' },
     alreadyRunning: false,
+    autoUpgrade: { kind: 'skipped-no-dep' },
   }
 }

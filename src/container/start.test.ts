@@ -2370,3 +2370,306 @@ describe('planStart port mapping', () => {
     expect(plan.hostPort).toBe(49160)
   })
 })
+
+describe('start autoUpgrade integration', () => {
+  test('forces bun update typeclaw when autoUpgrade reports spec-rewritten', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.2.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const updateCalls: Array<{ cwd: string; pkg: string }> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: async () => ({ kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0', cliVersion: '0.2.0' }),
+      forceBunUpdate: async (cwd, pkg) => {
+        updateCalls.push({ cwd, pkg })
+        return { ok: true }
+      },
+      readInstalledVersion: () => '0.2.0',
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    // and: bun update was called with the agent folder AND the typeclaw package name
+    expect(updateCalls).toEqual([{ cwd: root, pkg: 'typeclaw' }])
+    if (!result.ok) throw new Error('expected success')
+    expect(result.autoUpgrade).toEqual({ kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0', cliVersion: '0.2.0' })
+  })
+
+  test('forces bun update typeclaw when autoUpgrade reports reinstall-needed', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const updateCalls: Array<{ cwd: string; pkg: string }> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: async () => ({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' }),
+      forceBunUpdate: async (cwd, pkg) => {
+        updateCalls.push({ cwd, pkg })
+        return { ok: true }
+      },
+      readInstalledVersion: () => '0.1.2',
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(updateCalls).toEqual([{ cwd: root, pkg: 'typeclaw' }])
+  })
+
+  test('does NOT call forceBunUpdate for no-op outcomes (up-to-date, dev mode, exact pin, already running, etc.)', async () => {
+    for (const upgrade of [
+      { kind: 'up-to-date', installedVersion: '0.1.2' } as const,
+      { kind: 'skipped-dev-mode' } as const,
+      { kind: 'skipped-no-dep' } as const,
+      { kind: 'skipped-already-running' } as const,
+      { kind: 'skipped-non-release-spec', declared: 'file:../typeclaw' } as const,
+      { kind: 'exact-pin-respected', declared: '0.1.0', cliVersion: '0.1.2' } as const,
+    ]) {
+      await writeDockerfile(root)
+      await writePackageJson(root, { typeclaw: '^0.1.0' })
+      const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+      const updateCalls: Array<{ cwd: string; pkg: string }> = []
+      const result = await start({
+        cwd: root,
+        preferredHostPort: 8973,
+        exec,
+        allocatePort: deterministicAllocator,
+        ensureDeps: noEnsureDeps,
+        autoUpgrade: async () => upgrade,
+        forceBunUpdate: async (cwd, pkg) => {
+          updateCalls.push({ cwd, pkg })
+          return { ok: true }
+        },
+        ...bypassVerify,
+      })
+
+      expect(result.ok).toBe(true)
+      expect(updateCalls).toEqual([])
+    }
+  })
+
+  test('aborts start (no docker run) when forceBunUpdate reports failure', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: async () => ({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' }),
+      forceBunUpdate: async () => ({ ok: false, reason: 'registry timeout' }),
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toContain('registry timeout')
+    expect(result.reason).toContain('auto-upgrade')
+    expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
+  })
+
+  test('aborts start when bun update succeeds but installed version is still stale (verification gate)', async () => {
+    // Oracle's BLOCKING #5: bun update can exit 0 but resolve to an older version
+    // than expected. Without verification, refreshDockerfile would pin a stale base
+    // image. This test guards the verification step.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: async () => ({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' }),
+      forceBunUpdate: async () => ({ ok: true }),
+      readInstalledVersion: () => '0.1.0',
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toContain('verification failed')
+    expect(result.reason).toContain('0.1.0')
+    expect(result.reason).toContain('0.1.2')
+    expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
+  })
+
+  test('verification passes when installed reaches OR EXCEEDS the upgrade target', async () => {
+    // The registry may resolve a caret range to a higher patch than we asked for
+    // (e.g. expected 0.1.2 but got 0.1.5 because the lockfile no longer pinned it).
+    // Treat "ahead" as success — we only fail when installed is BEHIND target.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: async () => ({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' }),
+      forceBunUpdate: async () => ({ ok: true }),
+      readInstalledVersion: () => '0.1.5',
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+  })
+
+  test('autoUpgrade runs BEFORE ensureDeps (load-bearing order)', async () => {
+    // The whole feature breaks if ensureDeps runs first: ensureDeps short-circuits
+    // on "every declared dep exists" and skips the install that auto-upgrade depends
+    // on. Test by recording call order in a shared array.
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const order: string[] = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      autoUpgrade: async () => {
+        order.push('autoUpgrade')
+        return { kind: 'skipped-no-dep' }
+      },
+      ensureDeps: async () => {
+        order.push('ensureDeps')
+        return { ok: true, installed: false }
+      },
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(order).toEqual(['autoUpgrade', 'ensureDeps'])
+  })
+
+  test('alreadyRunning short-circuit surfaces autoUpgrade: skipped-already-running', async () => {
+    // When the container is already up, start() returns without checking auto-upgrade.
+    // The outcome must reflect that honestly, not pretend we checked and found no dep.
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: true, running: true } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('expected success')
+    expect(result.alreadyRunning).toBe(true)
+    expect(result.autoUpgrade).toEqual({ kind: 'skipped-already-running' })
+  })
+
+  test('commits package.json + bun.lock under "Upgrade typeclaw to X.Y.Z" when autoUpgrade rewrote spec', async () => {
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1}\n')
+    await runGit(root, ['add', '.gitignore', 'package.json', 'packages/.gitkeep', 'bun.lock'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: async () => ({ kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0', cliVersion: '0.2.0' }),
+      forceBunUpdate: async (dir) => {
+        await writePackageJson(dir, { typeclaw: '^0.2.0' })
+        await writeFile(join(dir, 'bun.lock'), '{"lockfileVersion":1,"deps":"upgraded"}\n')
+        return { ok: true }
+      },
+      readInstalledVersion: () => '0.2.0',
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
+    expect(subjects).toContain('Upgrade typeclaw to ^0.2.0')
+    expect(subjects).not.toContain('Update dependencies')
+    const filesInCommit = (await runGit(root, ['show', '--name-only', '--format=', 'HEAD'])).split('\n').sort()
+    expect(filesInCommit).toEqual(['bun.lock', 'package.json'])
+  })
+
+  test('commits under "Upgrade typeclaw to X.Y.Z" for reinstall-needed (not just spec-rewritten)', async () => {
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1}\n')
+    await runGit(root, ['add', '.gitignore', 'package.json', 'packages/.gitkeep', 'bun.lock'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      autoUpgrade: async () => ({ kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' }),
+      forceBunUpdate: async (dir) => {
+        await writeFile(join(dir, 'bun.lock'), '{"lockfileVersion":1,"deps":"upgraded"}\n')
+        return { ok: true }
+      },
+      readInstalledVersion: () => '0.1.2',
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
+    expect(subjects).toContain('Upgrade typeclaw to 0.1.2')
+  })
+
+  test('uses "Update dependencies" when autoUpgrade is a no-op (no upgrade attribution)', async () => {
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(join(root, 'bun.lock'), '{"lockfileVersion":1}\n')
+    await runGit(root, ['add', '.gitignore', 'package.json', 'packages/.gitkeep', 'bun.lock'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (dir) => {
+        await writeFile(join(dir, 'bun.lock'), '{"lockfileVersion":1,"deps":"new"}\n')
+        return { ok: true, installed: true }
+      },
+      autoUpgrade: async () => ({ kind: 'up-to-date', installedVersion: '0.1.2' }),
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
+    expect(subjects).toContain('Update dependencies')
+    expect(subjects.filter((s) => s.startsWith('Upgrade typeclaw'))).toEqual([])
+  })
+})

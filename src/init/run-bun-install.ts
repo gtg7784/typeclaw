@@ -34,3 +34,37 @@ export async function runBunInstall(cwd: string): Promise<InstallResult> {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
 }
+
+// Signature for the function that re-resolves a SINGLE dep against its
+// current spec. Distinct from InstallRunner because the auto-upgrade path
+// MUST force re-resolution against the registry (lockfile-honoring `bun
+// install` would no-op when the existing lockfile entry already satisfies
+// an in-range spec — which is the exact regression auto-upgrade exists to
+// prevent).
+export type UpdateRunner = (cwd: string, pkg: string) => Promise<InstallResult>
+
+export async function runBunUpdate(cwd: string, pkg: string): Promise<InstallResult> {
+  const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
+  if (!bun) return { ok: false, reason: 'bun runtime not available' }
+  try {
+    const proc = bun.spawn({
+      // `bun update <pkg> --latest` re-resolves <pkg> against the registry,
+      // capped by the spec in package.json. For a caret/tilde range this
+      // pulls the highest in-range version (the case `bun install` won't
+      // upgrade because the lockfile already satisfies the spec). For an
+      // exact pin it's effectively a force re-fetch of that exact version.
+      // `--linker=hoisted` for the same Bun 1.3.x deadlock reason as
+      // runBunInstall above.
+      cmd: ['bun', 'update', pkg, '--latest', '--linker=hoisted'],
+      cwd,
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const code = await proc.exited
+    if (code === 0) return { ok: true }
+    const stderr = await new Response(proc.stderr).text()
+    return { ok: false, reason: `bun update ${pkg} exited with code ${code}: ${stderr.trim() || 'no stderr'}` }
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}

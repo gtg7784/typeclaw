@@ -140,6 +140,62 @@ describe('renderStartSuccess', () => {
     expect(out).toContain('\u001b[32m8973')
     expect(out).toContain('\u001b[36mcoder')
   })
+
+  test('omits any auto-upgrade line on no-op outcomes (silent on no-op)', () => {
+    for (const upgrade of [
+      { kind: 'up-to-date', installedVersion: '0.1.2' } as const,
+      { kind: 'skipped-dev-mode' } as const,
+      { kind: 'skipped-no-dep' } as const,
+      { kind: 'skipped-already-running' } as const,
+      { kind: 'skipped-non-release-spec', declared: 'latest' } as const,
+    ]) {
+      const out = withNoColor(() => renderStartSuccess(baseResult({ autoUpgrade: upgrade })))
+      expect(out).not.toContain('Upgrading')
+      expect(out).not.toContain('exact-pinned')
+    }
+  })
+
+  test('renders the cyan upgrade line on spec-rewritten', () => {
+    const out = withForcedColor(() =>
+      renderStartSuccess(
+        baseResult({ autoUpgrade: { kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0', cliVersion: '0.2.0' } }),
+      ),
+    )
+    expect(out).toContain('Upgrading agent typeclaw ^0.1.0')
+    expect(out).toContain('^0.2.0')
+    expect(out).toContain('\u001b[36m')
+  })
+
+  test('renders the cyan upgrade line on reinstall-needed', () => {
+    const out = withForcedColor(() =>
+      renderStartSuccess(baseResult({ autoUpgrade: { kind: 'reinstall-needed', from: '0.1.0', to: '0.1.2' } })),
+    )
+    expect(out).toContain('Upgrading agent typeclaw 0.1.0 → 0.1.2')
+    expect(out).toContain('\u001b[36m')
+  })
+
+  test('renders the yellow warning line on exact-pin-respected', () => {
+    const out = withForcedColor(() =>
+      renderStartSuccess(
+        baseResult({ autoUpgrade: { kind: 'exact-pin-respected', declared: '0.1.0', cliVersion: '0.1.2' } }),
+      ),
+    )
+    expect(out).toContain('exact-pinned to 0.1.0')
+    expect(out).toContain('CLI is 0.1.2')
+    expect(out).toContain('\u001b[33m')
+  })
+
+  test('places the upgrade line ABOVE the "started on host port" line', () => {
+    const out = withNoColor(() =>
+      renderStartSuccess(
+        baseResult({ autoUpgrade: { kind: 'spec-rewritten', from: '^0.1.0', to: '^0.2.0', cliVersion: '0.2.0' } }),
+      ),
+    )
+    const upgradeIdx = out.indexOf('Upgrading')
+    const startedIdx = out.indexOf('started on host port')
+    expect(upgradeIdx).toBeGreaterThanOrEqual(0)
+    expect(startedIdx).toBeGreaterThan(upgradeIdx)
+  })
 })
 
 describe('errorLine / successLine', () => {
