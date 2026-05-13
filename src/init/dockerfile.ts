@@ -282,8 +282,18 @@ CMD ["run"]
 // layers (apt baseline, Chrome runtime libs, curl-impersonate, agent-browser,
 // Chrome for Testing) are already in that image, so the per-agent head only
 // re-runs the toggle apt install and (optionally) the gh keyring bootstrap.
-// When no toggle adds packages, the head is empty after the FROM/WORKDIR/ARG
-// trio — rebuild cost ≈ zero for users who don't change typeclaw.json#dockerfile.
+//
+// The entrypoint shim is ALSO re-emitted here, even though the base image
+// already carries it. Two reasons: (1) older base images published before
+// the shim landed (or before a shim source edit) don't have the up-to-date
+// binary at TYPECLAW_ENTRYPOINT_PATH, and the per-agent ENTRYPOINT line
+// would crash on startup with `stat: no such file or directory`. Re-emitting
+// is ~1KB of image and keeps the contract local: whatever per-agent
+// Dockerfile we emit guarantees the shim path exists, regardless of which
+// base-image vintage we FROM. (2) Edits to `buildEntrypointShim()` ship via
+// npm + `typeclaw start --build` immediately, instead of being blocked on a
+// fresh base-image release. The base image's copy is harmlessly overwritten
+// by this RUN — same path, same chmod.
 function renderVersionedHead(baseImageVersion: string, ghKeyringLayer: string, toggleAptArgs: string[]): string {
   const toggleAptLayer = toggleAptArgs.length === 0 ? '' : `${renderToggleAptInstallLayer(toggleAptArgs)}\n\n`
   return `FROM ${GHCR_BASE_IMAGE_REPO}:${baseImageVersion}
@@ -292,7 +302,9 @@ WORKDIR /agent
 
 ARG TARGETARCH
 
-${ghKeyringLayer}${toggleAptLayer}`
+${ghKeyringLayer}${toggleAptLayer}${renderEntrypointShimLayer()}
+
+`
 }
 
 // FROMs oven/bun:1-slim and rebuilds the full heavy stack inline. Used by
