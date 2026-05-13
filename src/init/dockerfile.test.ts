@@ -368,6 +368,14 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
     expect(out.indexOf('ENV CUSTOM_TOOL=1')).toBeLessThan(out.indexOf('ENTRYPOINT'))
   })
 
+  test('emits the entrypoint shim install layer even though the base image already carries it (guards against older base images and shim source edits)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })
+    const encoded = Buffer.from(buildEntrypointShim(), 'utf8').toString('base64')
+    expect(out).toContain(`echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH}`)
+    expect(out).toContain(`chmod +x ${TYPECLAW_ENTRYPOINT_PATH}`)
+    expect(out.indexOf(TYPECLAW_ENTRYPOINT_PATH)).toBeLessThan(out.indexOf('ENTRYPOINT'))
+  })
+
   test('explicit baseImageVersion: null is identical to the default (inline) form', () => {
     // when: caller explicitly passes null vs omits the option
     const inlineExplicit = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: null })
