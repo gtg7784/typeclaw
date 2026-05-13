@@ -5,6 +5,8 @@ import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 import type { ChannelHistoryMessage } from '@/channels/types'
 
+import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
+
 export type ChannelHistoryOrigin = {
   adapter: AdapterId
   workspace: string
@@ -15,6 +17,7 @@ export type ChannelHistoryOrigin = {
 export type CreateChannelHistoryToolOptions = {
   router: ChannelRouter
   origin: ChannelHistoryOrigin
+  logger?: ChannelToolLogger
 }
 
 // channel_history is a lazy "look back" capability for channel-routed
@@ -27,7 +30,11 @@ export type CreateChannelHistoryToolOptions = {
 // `scope` defaults to thread when the origin has one, channel otherwise.
 // Thread scope on a channel-root session is rejected rather than silently
 // downgraded so the agent doesn't conflate the two views.
-export function createChannelHistoryTool({ router, origin }: CreateChannelHistoryToolOptions) {
+export function createChannelHistoryTool({
+  router,
+  origin,
+  logger = consoleChannelLogger,
+}: CreateChannelHistoryToolOptions) {
   return defineTool({
     name: 'channel_history',
     label: 'Channel History',
@@ -64,6 +71,7 @@ export function createChannelHistoryTool({ router, origin }: CreateChannelHistor
       type Details = { ok: boolean; error?: string; count?: number; nextCursor?: string }
 
       if (scope === 'thread' && origin.thread === null) {
+        logger.warn(formatChannelToolFailure('channel_history', 'thread-scope-requires-thread-session'))
         const text =
           'channel_history error: thread-scope-requires-thread-session — this session is not in a thread; pass `scope: "channel"` instead.'
         const details: Details = { ok: false, error: 'thread-scope-requires-thread-session' }
@@ -78,6 +86,7 @@ export function createChannelHistoryTool({ router, origin }: CreateChannelHistor
       })
 
       if (!result.ok) {
+        logger.warn(formatChannelToolFailure('channel_history', `${origin.adapter}:${origin.chat}: ${result.error}`))
         const details: Details = { ok: false, error: result.error }
         return {
           content: [{ type: 'text' as const, text: `channel_history error: ${result.error}` }],

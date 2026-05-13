@@ -7,6 +7,8 @@ import { defineTool } from '@mariozechner/pi-coding-agent'
 import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 
+import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
+
 export type ChannelFetchAttachmentOrigin = {
   adapter: AdapterId
 }
@@ -15,6 +17,7 @@ export type CreateChannelFetchAttachmentToolOptions = {
   router: ChannelRouter
   origin: ChannelFetchAttachmentOrigin
   inboxDir?: string
+  logger?: ChannelToolLogger
 }
 
 export const DEFAULT_INBOX_DIR = '/agent/workspace/inbox'
@@ -23,6 +26,7 @@ export function createChannelFetchAttachmentTool({
   router,
   origin,
   inboxDir,
+  logger = consoleChannelLogger,
 }: CreateChannelFetchAttachmentToolOptions) {
   const baseDir = inboxDir ?? DEFAULT_INBOX_DIR
   const adapter = origin.adapter
@@ -60,6 +64,7 @@ export function createChannelFetchAttachmentTool({
         ...(params.filename !== undefined ? { filename: params.filename } : {}),
       })
       if (!result.ok) {
+        logger.warn(formatChannelToolFailure('channel_fetch_attachment', `${adapter}: ${result.error}`))
         const text = `channel_fetch_attachment error: ${result.error}`
         const details: Details = { ok: false, error: result.error }
         return { content: [{ type: 'text' as const, text }], details }
@@ -74,6 +79,7 @@ export function createChannelFetchAttachmentTool({
         await writeFile(targetPath, result.buffer)
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
+        logger.warn(formatChannelToolFailure('channel_fetch_attachment', `${adapter}: write failed: ${message}`))
         const text = `channel_fetch_attachment error: write failed: ${message}`
         const details: Details = { ok: false, error: `write failed: ${message}` }
         return { content: [{ type: 'text' as const, text }], details }
