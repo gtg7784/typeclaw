@@ -4,6 +4,8 @@ import { defineTool } from '@mariozechner/pi-coding-agent'
 import { isNoReplySignal, type ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 
+import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
+
 export type ChannelReplyOrigin = {
   adapter: AdapterId
   workspace: string
@@ -14,6 +16,7 @@ export type ChannelReplyOrigin = {
 export type CreateChannelReplyToolOptions = {
   router: ChannelRouter
   origin: ChannelReplyOrigin
+  logger?: ChannelToolLogger
 }
 
 // channel_reply is the happy-path companion to channel_send for channel-routed
@@ -25,7 +28,11 @@ export type CreateChannelReplyToolOptions = {
 // channel_reply takes only `text` and addresses the message from the origin.
 // channel_send remains for posting somewhere else (different chat, breaking
 // out of a thread, sending DMs from a channel session, etc.).
-export function createChannelReplyTool({ router, origin }: CreateChannelReplyToolOptions) {
+export function createChannelReplyTool({
+  router,
+  origin,
+  logger = consoleChannelLogger,
+}: CreateChannelReplyToolOptions) {
   return defineTool({
     name: 'channel_reply',
     label: 'Channel Reply',
@@ -64,6 +71,7 @@ export function createChannelReplyTool({ router, origin }: CreateChannelReplyToo
       const text = params.text
       const attachments = params.attachments
       if ((text === undefined || text === '') && (attachments === undefined || attachments.length === 0)) {
+        logger.warn(formatChannelToolFailure('channel_reply', 'missing text and attachments'))
         return {
           content: [
             { type: 'text' as const, text: 'channel_reply denied: must provide `text`, `attachments`, or both.' },
@@ -74,6 +82,7 @@ export function createChannelReplyTool({ router, origin }: CreateChannelReplyToo
 
       const noReplyError = noReplyMisuseError(text)
       if (noReplyError) {
+        logger.warn(formatChannelToolFailure('channel_reply', noReplyError))
         return {
           content: [{ type: 'text' as const, text: `channel_reply denied: ${noReplyError}` }],
           details: { ok: false, error: noReplyError },
@@ -89,6 +98,14 @@ export function createChannelReplyTool({ router, origin }: CreateChannelReplyToo
         ...(attachments !== undefined ? { attachments } : {}),
       })
 
+      if (!result.ok) {
+        logger.warn(
+          formatChannelToolFailure(
+            'channel_reply',
+            `${origin.adapter}:${origin.workspace}/${origin.chat}: ${result.error}`,
+          ),
+        )
+      }
       const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
       // Echo the delivered text back to the model. The adapter classifier
       // drops self-authored messages on the inbound path (`self_author`),

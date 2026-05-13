@@ -4,6 +4,7 @@ import { defineTool } from '@mariozechner/pi-coding-agent'
 import { isNoReplySignal, type ChannelRouter } from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 
+import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
 import { renderOutboundEcho } from './channel-reply'
 
 export type ChannelSendOrigin = {
@@ -21,9 +22,10 @@ export type CreateChannelSendToolOptions = {
   // the model can self-correct on its next turn. Absent for sessions whose
   // origin isn't a channel (e.g. cron prompts that send to channels).
   origin?: ChannelSendOrigin
+  logger?: ChannelToolLogger
 }
 
-export function createChannelSendTool({ router, origin }: CreateChannelSendToolOptions) {
+export function createChannelSendTool({ router, origin, logger = consoleChannelLogger }: CreateChannelSendToolOptions) {
   return defineTool({
     name: 'channel_send',
     label: 'Channel Send',
@@ -93,6 +95,7 @@ export function createChannelSendTool({ router, origin }: CreateChannelSendToolO
       const bodyText = params.text
       const attachments = params.attachments
       if ((bodyText === undefined || bodyText === '') && (attachments === undefined || attachments.length === 0)) {
+        logger.warn(formatChannelToolFailure('channel_send', 'missing text and attachments'))
         return {
           content: [
             { type: 'text' as const, text: 'channel_send denied: must provide `text`, `attachments`, or both.' },
@@ -103,6 +106,7 @@ export function createChannelSendTool({ router, origin }: CreateChannelSendToolO
 
       const noReplyError = noReplyMisuseError(bodyText)
       if (noReplyError) {
+        logger.warn(formatChannelToolFailure('channel_send', noReplyError))
         return {
           content: [{ type: 'text' as const, text: `channel_send denied: ${noReplyError}` }],
           details: { ok: false, error: noReplyError },
@@ -118,6 +122,14 @@ export function createChannelSendTool({ router, origin }: CreateChannelSendToolO
         ...(attachments !== undefined ? { attachments } : {}),
       })
 
+      if (!result.ok) {
+        logger.warn(
+          formatChannelToolFailure(
+            'channel_send',
+            `${params.adapter}:${params.workspace}/${params.chat}: ${result.error}`,
+          ),
+        )
+      }
       const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
       const echo = renderOutboundEcho(bodyText, attachments)
       const baseText = result.ok
