@@ -403,7 +403,7 @@ describe('startDaemon', () => {
     try {
       await writeFile(
         join(agentDir, 'secrets.json'),
-        JSON.stringify({ version: 1, llm: {}, channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'keep' } } }),
+        JSON.stringify({ version: 2, providers: {}, channels: { 'discord-bot': { token: { value: 'keep' } } } }),
       )
       daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
       const info = await send({ kind: 'http-info' })
@@ -427,7 +427,7 @@ describe('startDaemon', () => {
       const raw = JSON.parse(await readFile(join(agentDir, 'secrets.json'), 'utf8')) as {
         channels: Record<string, unknown>
       }
-      expect(raw.channels['discord-bot']).toEqual({ DISCORD_BOT_TOKEN: 'keep' })
+      expect(raw.channels['discord-bot']).toEqual({ token: { value: 'keep' } })
       const kakao = raw.channels.kakaotalk as KakaoChannelBlock
       expect([kakaoBlock('user-1'), kakaoBlock('user-2')]).toContainEqual(kakao)
     } finally {
