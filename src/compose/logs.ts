@@ -1,4 +1,5 @@
 import { containerExists } from '@/container'
+import { makeLogTimestampReformatter, type TimestampReformatter } from '@/container/log-timestamps'
 import { getBun } from '@/container/shared'
 
 import { discoverAgents, type AgentEntry } from './discover'
@@ -91,7 +92,9 @@ export async function composeLogs({
   const useColor = supportsColor(out)
 
   const procs = attached.map((agent) => {
-    const cmd = follow ? ['docker', 'logs', '-f', agent.containerName] : ['docker', 'logs', agent.containerName]
+    const cmd = follow
+      ? ['docker', 'logs', '--timestamps', '-f', agent.containerName]
+      : ['docker', 'logs', '--timestamps', agent.containerName]
     const proc = bun.spawn({ cmd, stdout: 'pipe', stderr: 'pipe' })
     return { agent, proc }
   })
@@ -110,8 +113,8 @@ export async function composeLogs({
   const pumps = procs.flatMap(({ agent, proc }) => {
     const color = colorFor(agent.name)
     return [
-      pumpStream(proc.stdout, makeLinePrefixer(agent.name, width, color, useColor), out),
-      pumpStream(proc.stderr, makeLinePrefixer(agent.name, width, color, useColor), err),
+      pumpStream(proc.stdout, makeLogTimestampReformatter(), makeLinePrefixer(agent.name, width, color, useColor), out),
+      pumpStream(proc.stderr, makeLogTimestampReformatter(), makeLinePrefixer(agent.name, width, color, useColor), err),
     ]
   })
 
@@ -128,27 +131,33 @@ export async function composeLogs({
 
 async function pumpStream(
   stream: ReadableStream<Uint8Array>,
+  reformatter: TimestampReformatter,
   prefixer: { write: (s: string) => string; flush: () => string },
   sink: NodeJS.WritableStream,
 ): Promise<void> {
   const decoder = new TextDecoder()
   const reader = stream.getReader()
+  const writeChunk = (chunk: string): void => {
+    const reformatted = reformatter.write(chunk)
+    if (reformatted.length === 0) return
+    const prefixed = prefixer.write(reformatted)
+    if (prefixed.length > 0) sink.write(prefixed)
+  }
   try {
     while (true) {
       const { done, value } = await reader.read()
       if (done) break
-      if (value && value.byteLength > 0) {
-        const out = prefixer.write(decoder.decode(value, { stream: true }))
-        if (out.length > 0) sink.write(out)
-      }
+      if (value && value.byteLength > 0) writeChunk(decoder.decode(value, { stream: true }))
     }
     const tail = decoder.decode()
-    if (tail.length > 0) {
-      const out = prefixer.write(tail)
-      if (out.length > 0) sink.write(out)
+    if (tail.length > 0) writeChunk(tail)
+    const flushedTs = reformatter.flush()
+    if (flushedTs.length > 0) {
+      const prefixed = prefixer.write(flushedTs)
+      if (prefixed.length > 0) sink.write(prefixed)
     }
-    const flushed = prefixer.flush()
-    if (flushed.length > 0) sink.write(flushed)
+    const flushedPrefix = prefixer.flush()
+    if (flushedPrefix.length > 0) sink.write(flushedPrefix)
   } finally {
     reader.releaseLock()
   }

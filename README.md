@@ -68,18 +68,18 @@ That's it. The agent is now alive, listening on a websocket, ready to receive pr
 
 ## CLI
 
-| Command            | Purpose                                         |
-| ------------------ | ----------------------------------------------- |
-| `typeclaw init`    | Scaffold a new agent folder                     |
-| `typeclaw start`   | Build and run the container                     |
-| `typeclaw stop`    | Stop the container                              |
-| `typeclaw restart` | `stop` then `start`                             |
-| `typeclaw status`  | Show container + daemon registration state      |
-| `typeclaw logs`    | `docker logs` passthrough, `-f` to follow       |
-| `typeclaw tui`     | Attach a terminal UI over the agent's websocket |
-| `typeclaw shell`   | Open a shell inside the running container       |
-| `typeclaw reload`  | Push a live config reload to the running agent  |
-| `typeclaw compose` | Orchestrate multiple agents                     |
+| Command            | Purpose                                                              |
+| ------------------ | -------------------------------------------------------------------- |
+| `typeclaw init`    | Scaffold a new agent folder                                          |
+| `typeclaw start`   | Build and run the container                                          |
+| `typeclaw stop`    | Stop the container                                                   |
+| `typeclaw restart` | `stop` then `start`                                                  |
+| `typeclaw status`  | Show container + daemon registration state                           |
+| `typeclaw logs`    | Stream container stdout/stderr with local timestamps; `-f` to follow |
+| `typeclaw tui`     | Attach a terminal UI over the agent's websocket                      |
+| `typeclaw shell`   | Open a shell inside the running container                            |
+| `typeclaw reload`  | Push a live config reload to the running agent                       |
+| `typeclaw compose` | Orchestrate multiple agents                                          |
 
 ## Configuration
 

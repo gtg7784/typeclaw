@@ -35,7 +35,7 @@ Where an end user lives once they run `typeclaw init`. Their cwd is an agent fol
 - `typeclaw start` — spawn the container (`docker run`) configured in `typeclaw.json`.
 - `typeclaw stop` — stop it.
 - `typeclaw restart` — `stop` then `start` with the same flags as `start`.
-- `typeclaw logs [-f]` — show (or follow) the container's stdout/stderr via `docker logs`.
+- `typeclaw logs [-f]` — show (or follow) the container's stdout/stderr via `docker logs --timestamps`, with each line reformatted to a local `YYYY-MM-DD HH:MM:SS` prefix for human readability. The same reformatter runs in `typeclaw compose logs` so the multi-agent view stays consistent.
 - `typeclaw tui` — attach a TUI client over a websocket to a running agent.
 - `typeclaw compose …` — orchestrate multiple agents across multiple agent folders.
 - `typeclaw _hostd` — internal foreground process spawned detached by the first `typeclaw start` on the host. Long-lived; serves every typeclaw agent on the machine. Underscore-prefixed and hidden from `--help`. See `src/hostd/`. Hosts two capabilities today: the **port broker** (forwards container ports to localhost) and the **supervisor** (honors `restart` RPCs from inside the container).
