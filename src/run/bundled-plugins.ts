@@ -1,4 +1,5 @@
 import agentBrowserPlugin from '@/bundled-plugins/agent-browser'
+import backupPlugin from '@/bundled-plugins/backup'
 import guardPlugin from '@/bundled-plugins/guard'
 import memoryPlugin from '@/bundled-plugins/memory'
 import securityPlugin from '@/bundled-plugins/security'
@@ -16,9 +17,16 @@ import type { ResolvedPlugin } from '@/plugin'
 // Letting `guard` run first would still work today since the two plugins
 // guard disjoint surfaces, but seeding the order now means future overlap
 // (e.g. a security policy on writes) blocks before guard's softer advice.
+//
+// `memory` is registered before `backup` so memory's dreaming commits always
+// land in the same git index window before backup's commit-and-push cycle.
+// They commit disjoint paths today (memory/ vs sessions/ + agent changes),
+// but if either ever holds .git/index.lock the deterministic order makes the
+// contention easier to reason about.
 export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'security', version: undefined, source: '<bundled>', defined: securityPlugin },
   { name: 'guard', version: undefined, source: '<bundled>', defined: guardPlugin },
   { name: 'memory', version: undefined, source: '<bundled>', defined: memoryPlugin },
+  { name: 'backup', version: undefined, source: '<bundled>', defined: backupPlugin },
   { name: 'agent-browser', version: undefined, source: '<bundled>', defined: agentBrowserPlugin },
 ]

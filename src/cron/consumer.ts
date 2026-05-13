@@ -10,7 +10,7 @@ import type { CronJob, ExecJob, PromptJob } from './schema'
 // `session.idle` after, then `session.end` on dispose — mirroring the
 // lifecycle signals the TUI server emits in `src/server/index.ts`. Without
 // this the bundled memory plugin's debounced `memory-logger` never spawns for
-// cron prompt jobs (it only wakes on `session.idle`), and the auto-backup
+// cron prompt jobs (it only wakes on `session.idle`), and the bundled backup
 // plugin's turn counter would miss cron-driven activity.
 export type CronSession = {
   prompt: (text: string) => Promise<void>

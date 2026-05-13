@@ -102,7 +102,7 @@ export type SessionIdleEvent = {
 // long-lived TUI or channel sessions, which can sit idle between turns,
 // don't wedge a turn-counter forever. `origin` carries the session's origin
 // so observers can exclude their own induced turns when counting (e.g. the
-// auto-backup plugin excludes `subagent: 'auto-backup'` to avoid self-gating).
+// backup plugin excludes `subagent: 'backup'` to avoid self-gating).
 export type SessionTurnStartEvent = {
   sessionId: string
   agentDir: string
