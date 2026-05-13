@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
+
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
 import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
@@ -132,7 +134,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         configRef: () => options.channelsConfigRef()[name] ?? cfg,
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
-        credentialsDir: resolveKakaoConfigDir(options.agentDir, env),
+        credentialsStore: createContainerKakaoCredentialStore(options.agentDir, env),
       })
     }
     if (name === 'telegram-bot') {
@@ -264,6 +266,24 @@ function resolveKakaoConfigDir(agentDir: string, env: NodeJS.ProcessEnv): string
 
 function resolveKakaoCredentialsPath(agentDir: string, env: NodeJS.ProcessEnv): string {
   return join(resolveKakaoConfigDir(agentDir, env), KAKAO_CREDENTIALS_FILE)
+}
+
+function createContainerKakaoCredentialStore(agentDir: string, env: NodeJS.ProcessEnv): SecretsKakaoCredentialStore {
+  const hostdUrl = env.TYPECLAW_HOSTD_URL
+  const restartToken = env.TYPECLAW_HOSTD_TOKEN
+  const containerName = env.TYPECLAW_CONTAINER_NAME
+  if (!hostdUrl || !restartToken || !containerName) {
+    throw new Error(
+      'KakaoTalk credentials require TYPECLAW_HOSTD_URL, TYPECLAW_HOSTD_TOKEN, and TYPECLAW_CONTAINER_NAME',
+    )
+  }
+  return new SecretsKakaoCredentialStore({
+    mode: 'container',
+    secretsPath: join(agentDir, 'secrets.json'),
+    hostdUrl,
+    restartToken,
+    containerName,
+  })
 }
 
 function buildKakaotalkSignature(agentDir: string, env: NodeJS.ProcessEnv): { signature: string; missing: string[] } {

@@ -11,6 +11,7 @@ import {
   type KakaoTalkPushEmoticonEvent,
   type KakaoTalkPushMessageEvent,
 } from 'agent-messenger/kakaotalk'
+import type { KakaoAccountCredentials, KakaoConfig, PendingLoginState } from 'agent-messenger/kakaotalk'
 
 import type { ChannelRouter } from '@/channels/router'
 import { isAllowed, type ChannelAdapterConfig, type KakaotalkAdapterConfig } from '@/channels/schema'
@@ -75,6 +76,19 @@ export interface KakaoTalkListener {
   ): this
 }
 
+export type KakaoCredentialStore = {
+  load(): Promise<KakaoConfig>
+  save(config: KakaoConfig): Promise<void>
+  getAccount(id?: string): Promise<KakaoAccountCredentials | null>
+  setAccount(account: KakaoAccountCredentials): Promise<void>
+  removeAccount(id: string): Promise<void>
+  listAccounts(): Promise<Array<KakaoAccountCredentials & { is_current: boolean }>>
+  setCurrentAccount(id: string): Promise<void>
+  savePendingLogin(state: PendingLoginState): Promise<void>
+  loadPendingLogin(): Promise<PendingLoginState | null>
+  clearPendingLogin(): Promise<void>
+}
+
 const KakaoTalkClient = RealKakaoTalkClient as unknown as new () => KakaoTalkClient
 const KakaoTalkListener = RealKakaoTalkListener as unknown as new (client: KakaoTalkClient) => KakaoTalkListener
 
@@ -95,13 +109,9 @@ export type KakaotalkAdapterOptions = {
   configRef: () => KakaotalkAdapterConfig
   logger?: KakaotalkAdapterLogger
   selfAliasesRef?: () => readonly string[]
-  // When set, the adapter loads KakaoTalk credentials from this directory
-  // (via KakaoCredentialManager(credentialsDir)) instead of relying on
-  // the SDK's AGENT_MESSENGER_CONFIG_DIR env-var fallback. Production
-  // wiring in src/channels/manager.ts passes the agent-folder workspace
-  // path here so the adapter's credential resolution does NOT depend on
-  // process.env state — easier to test, and removes a hidden coupling
-  // with whatever set the env var (Dockerfile, CLI shell, etc.).
+  credentialsStore?: KakaoCredentialStore
+  // Deprecated compatibility path for old tests/callers. Production uses
+  // credentialsStore so secrets.json remains the credential source of truth.
   credentialsDir?: string
   client?: KakaoTalkClient
   listenerFactory?: (client: KakaoTalkClient) => KakaoTalkListener
@@ -416,17 +426,16 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       lastConnectedAt = null
       resetRecoveryEpisode()
       try {
-        if (options.credentialsDir !== undefined) {
-          // Explicit credential path: read the file ourselves and pass the
-          // tokens directly to client.login(). This bypasses the SDK's
-          // ensureKakaoAuth() (which reads AGENT_MESSENGER_CONFIG_DIR or
-          // ~/.config/agent-messenger), making the adapter independent of
-          // process.env state.
-          const credManager = new KakaoCredentialManager(options.credentialsDir)
-          const account = await credManager.getAccount()
+        const credentialStore =
+          options.credentialsStore ??
+          (options.credentialsDir !== undefined ? new KakaoCredentialManager(options.credentialsDir) : null)
+        if (credentialStore !== null) {
+          const account = await credentialStore.getAccount()
           if (account === null) {
             throw new Error(
-              `no KakaoTalk account in ${options.credentialsDir}/kakaotalk-credentials.json (run typeclaw init to authenticate)`,
+              options.credentialsDir !== undefined
+                ? `no KakaoTalk account in ${options.credentialsDir}/kakaotalk-credentials.json (run typeclaw init to authenticate)`
+                : 'no KakaoTalk account in secrets.json#channels.kakaotalk (run typeclaw init to authenticate)',
             )
           }
           await client.login({
