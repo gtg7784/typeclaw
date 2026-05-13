@@ -85,6 +85,29 @@ describe('SecretsKakaoCredentialStore container mode', () => {
     }
   })
 
+  test('serializes concurrent writes before sending full-block patches', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'typeclaw-kakao-store-container-'))
+    try {
+      const secretsPath = join(root, 'secrets.json')
+      new SecretsBackend(secretsPath).writeChannelsSync({})
+      const hostd = startFakeHostd(secretsPath, 'secret', 'coder')
+      const store = new SecretsKakaoCredentialStore({
+        mode: 'container',
+        secretsPath,
+        hostdUrl: hostd.url,
+        restartToken: 'secret',
+        containerName: 'coder',
+      })
+
+      await Promise.all([store.setAccount(account('user-1')), store.setAccount(account('user-2'))])
+
+      const loaded = await store.load()
+      expect(Object.keys(loaded.accounts).sort()).toEqual(['user-1', 'user-2'])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   test('surfaces hostd write failures', async () => {
     const root = await mkdtemp(join(tmpdir(), 'typeclaw-kakao-store-container-'))
     try {

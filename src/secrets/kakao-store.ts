@@ -14,6 +14,7 @@ const EMPTY_BLOCK: KakaoChannelBlock = { currentAccount: null, accounts: {} }
 
 export class SecretsKakaoCredentialStore {
   private readonly backend: SecretsBackend
+  private writeChain: Promise<void> = Promise.resolve()
 
   constructor(private readonly options: SecretsKakaoCredentialStoreOptions) {
     this.backend = new SecretsBackend(options.secretsPath)
@@ -83,20 +84,32 @@ export class SecretsKakaoCredentialStore {
   }
 
   private async writeBlock(update: (current: KakaoChannelBlock) => KakaoChannelBlock): Promise<void> {
-    if (this.options.mode === 'container') {
-      const next = update(this.readBlock())
-      const response = await sendHttp(
-        { kind: 'secrets-patch', containerName: this.options.containerName, patch: { channels: { kakaotalk: next } } },
-        { url: this.options.hostdUrl, token: this.options.restartToken },
-      )
-      if (!response.ok) throw new Error(`secrets-patch failed: ${response.reason}`)
-      return
-    }
+    return this.enqueueWrite(async () => {
+      if (this.options.mode === 'container') {
+        const next = update(this.readBlock())
+        const response = await sendHttp(
+          {
+            kind: 'secrets-patch',
+            containerName: this.options.containerName,
+            patch: { channels: { kakaotalk: next } },
+          },
+          { url: this.options.hostdUrl, token: this.options.restartToken },
+        )
+        if (!response.ok) throw new Error(`secrets-patch failed: ${response.reason}`)
+        return
+      }
 
-    await this.backend.updateChannelsAsync(async (channels) => {
-      const next = { ...channels, kakaotalk: update(parseBlock(channels.kakaotalk)) }
-      return { result: undefined, next }
+      await this.backend.updateChannelsAsync(async (channels) => {
+        const next = { ...channels, kakaotalk: update(parseBlock(channels.kakaotalk)) }
+        return { result: undefined, next }
+      })
     })
+  }
+
+  private enqueueWrite(op: () => Promise<void>): Promise<void> {
+    const next = this.writeChain.then(op, op)
+    this.writeChain = next.catch(() => {})
+    return next
   }
 }
 
