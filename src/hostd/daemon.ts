@@ -7,6 +7,8 @@ import type { Socket, UnixSocketListener } from 'bun'
 import type { PortForward } from '@/config'
 import { defaultDockerExec, type DockerExec } from '@/container'
 import type { PortForwardEvent } from '@/portbroker'
+import { kakaoChannelBlockSchema } from '@/secrets/schema'
+import { SecretsBackend } from '@/secrets/storage'
 
 import { isDaemonReachable } from './client'
 import { ensureDirs, registrationFilePath, registrationsDir, socketPath } from './paths'
@@ -16,6 +18,7 @@ import type {
   Request,
   Response as RpcResponse,
   RestartResult,
+  SecretsPatchResult,
   ShutdownResult,
   StatusResult,
   VersionResult,
@@ -351,6 +354,26 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     return { ok: true, result }
   }
 
+  const handleSecretsPatch = async (req: {
+    containerName: string
+    patch: { channels: { kakaotalk: unknown } }
+  }): Promise<RpcResponse> =>
+    runSerially(req.containerName, async () => {
+      const cwd = cwds.get(req.containerName)
+      if (!cwd) return { ok: false, reason: `not registered: ${req.containerName}` }
+      const parsed = kakaoChannelBlockSchema.safeParse(req.patch?.channels?.kakaotalk)
+      if (!parsed.success) {
+        return { ok: false, reason: parsed.error.issues.map((issue) => issue.message).join('; ') }
+      }
+      const backend = new SecretsBackend(join(cwd, 'secrets.json'))
+      await backend.updateChannelsAsync(async (channels) => ({
+        result: undefined,
+        next: { ...channels, kakaotalk: parsed.data },
+      }))
+      const result: SecretsPatchResult = { containerName: req.containerName, patched: true }
+      return { ok: true, result }
+    })
+
   const handleHttpInfo = (): RpcResponse => {
     const result: HttpInfoResult = { port: httpPort }
     return { ok: true, result }
@@ -392,6 +415,8 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         return handleStatus(req)
       case 'restart':
         return handleRestart(req)
+      case 'secrets-patch':
+        return handleSecretsPatch(req)
       case 'http-info':
         return handleHttpInfo()
       case 'version':
@@ -454,13 +479,13 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     } catch {
       return json({ ok: false, reason: 'invalid request json' }, 400)
     }
-    if (rpc.kind !== 'restart') {
-      return json({ ok: false, reason: 'http transport only supports restart' }, 403)
+    if (rpc.kind !== 'restart' && rpc.kind !== 'secrets-patch') {
+      return json({ ok: false, reason: 'http transport only supports restart and secrets-patch' }, 403)
     }
     if (restartTokens.get(rpc.containerName) !== token) {
       return json({ ok: false, reason: 'invalid restart token' }, 403)
     }
-    return json(await handleRestart(rpc))
+    return json(rpc.kind === 'restart' ? await handleRestart(rpc) : await handleSecretsPatch(rpc))
   }
 
   const httpHostname = opts.httpHost ?? '0.0.0.0'

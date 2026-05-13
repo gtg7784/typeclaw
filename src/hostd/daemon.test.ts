@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { DockerExec } from '@/container'
+import type { KakaoChannelBlock } from '@/secrets/schema'
 
 import { send, sendHttp } from './client'
 import { startDaemon, type Daemon, type PortbrokerCallbacks, type PortbrokerStartInput } from './daemon'
@@ -38,6 +39,25 @@ function fakeExec(alive: Set<string> = new Set()): DockerExec {
       return { exitCode: 0, stdout: alive.has(name) ? `${name}\n` : '', stderr: '' }
     }
     return { exitCode: 1, stdout: '', stderr: 'unknown command' }
+  }
+}
+
+function kakaoBlock(accountId: string): KakaoChannelBlock {
+  return {
+    currentAccount: accountId,
+    accounts: {
+      [accountId]: {
+        account_id: accountId,
+        oauth_token: `oauth-${accountId}`,
+        user_id: accountId,
+        refresh_token: `refresh-${accountId}`,
+        device_uuid: `device-${accountId}`,
+        device_type: 'tablet',
+        auth_method: 'login',
+        created_at: '2026-01-01T00:00:00.000Z',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      },
+    },
   }
 }
 
@@ -324,6 +344,95 @@ describe('startDaemon', () => {
     expect(ack.ok).toBe(false)
     if (ack.ok) return
     expect(ack.reason).toContain('invalid restart token')
+  })
+
+  test('HTTP secrets-patch writes kakaotalk secrets for the registered container', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-daemon-agent-'))
+    try {
+      daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+      const info = await send({ kind: 'http-info' })
+      expect(info.ok).toBe(true)
+      if (!info.ok) return
+      await send({ kind: 'register', containerName: 'coder', cwd: agentDir, restartToken: 'secret' })
+
+      const ack = await sendHttp(
+        { kind: 'secrets-patch', containerName: 'coder', patch: { channels: { kakaotalk: kakaoBlock('user-1') } } },
+        { url: `http://127.0.0.1:${(info.result as HttpInfoResult).port}`, token: 'secret' },
+      )
+
+      expect(ack.ok).toBe(true)
+      const raw = JSON.parse(await readFile(join(agentDir, 'secrets.json'), 'utf8')) as {
+        channels: Record<string, unknown>
+      }
+      expect(raw.channels.kakaotalk).toEqual(kakaoBlock('user-1'))
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('HTTP secrets-patch rejects unregistered containers and wrong tokens', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-daemon-agent-'))
+    try {
+      daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+      const info = await send({ kind: 'http-info' })
+      expect(info.ok).toBe(true)
+      if (!info.ok) return
+      const url = `http://127.0.0.1:${(info.result as HttpInfoResult).port}`
+
+      const unregistered = await sendHttp(
+        { kind: 'secrets-patch', containerName: 'missing', patch: { channels: { kakaotalk: kakaoBlock('user-1') } } },
+        { url, token: 'secret' },
+      )
+      expect(unregistered.ok).toBe(false)
+
+      await send({ kind: 'register', containerName: 'coder', cwd: agentDir, restartToken: 'secret' })
+      const wrongToken = await sendHttp(
+        { kind: 'secrets-patch', containerName: 'coder', patch: { channels: { kakaotalk: kakaoBlock('user-1') } } },
+        { url, token: 'wrong' },
+      )
+      expect(wrongToken.ok).toBe(false)
+      if (wrongToken.ok) return
+      expect(wrongToken.reason).toContain('invalid restart token')
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('HTTP secrets-patch preserves other channels and serializes concurrent patches', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-daemon-agent-'))
+    try {
+      await writeFile(
+        join(agentDir, 'secrets.json'),
+        JSON.stringify({ version: 1, llm: {}, channels: { 'discord-bot': { DISCORD_BOT_TOKEN: 'keep' } } }),
+      )
+      daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+      const info = await send({ kind: 'http-info' })
+      expect(info.ok).toBe(true)
+      if (!info.ok) return
+      const url = `http://127.0.0.1:${(info.result as HttpInfoResult).port}`
+      await send({ kind: 'register', containerName: 'coder', cwd: agentDir, restartToken: 'secret' })
+
+      const replies = await Promise.all([
+        sendHttp(
+          { kind: 'secrets-patch', containerName: 'coder', patch: { channels: { kakaotalk: kakaoBlock('user-1') } } },
+          { url, token: 'secret' },
+        ),
+        sendHttp(
+          { kind: 'secrets-patch', containerName: 'coder', patch: { channels: { kakaotalk: kakaoBlock('user-2') } } },
+          { url, token: 'secret' },
+        ),
+      ])
+
+      expect(replies.every((reply) => reply.ok)).toBe(true)
+      const raw = JSON.parse(await readFile(join(agentDir, 'secrets.json'), 'utf8')) as {
+        channels: Record<string, unknown>
+      }
+      expect(raw.channels['discord-bot']).toEqual({ DISCORD_BOT_TOKEN: 'keep' })
+      const kakao = raw.channels.kakaotalk as KakaoChannelBlock
+      expect([kakaoBlock('user-1'), kakaoBlock('user-2')]).toContainEqual(kakao)
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
   })
 
   test('HTTP restart rejects oversized unauthenticated requests before parsing JSON', async () => {
