@@ -8,6 +8,8 @@
 // newline-terminated lines and flushes the un-terminated tail on EOF, so
 // interleaved reads from `docker logs` can never shred a line mid-character.
 
+import { colorize } from './log-colors'
+
 // `2026-05-13T14:23:01.123456789Z` or `...+09:00` etc. We accept anything
 // from Docker that Date can parse, but anchor on the ISO date+time prefix to
 // avoid eating non-timestamped log content.
@@ -18,7 +20,18 @@ export type TimestampReformatter = {
   flush: () => string
 }
 
-export function makeLogTimestampReformatter(now: () => Date = () => new Date()): TimestampReformatter {
+export type ReformatterOptions = {
+  // Color is opt-in and applied per emitted line *after* timestamp rewriting.
+  // Defaults to `false` so tests stay deterministic and pipes/files stay
+  // ANSI-free unless callers explicitly opt in via supportsColor(out).
+  color?: boolean
+}
+
+export function makeLogTimestampReformatter(
+  now: () => Date = () => new Date(),
+  options: ReformatterOptions = {},
+): TimestampReformatter {
+  const useColor = options.color ?? false
   let buffer = ''
   return {
     write(chunk: string): string {
@@ -30,12 +43,12 @@ export function makeLogTimestampReformatter(now: () => Date = () => new Date()):
       return complete
         .split('\n')
         .slice(0, -1)
-        .map((line) => `${reformatLine(line, now)}\n`)
+        .map((line) => `${colorize(reformatLine(line, now), useColor)}\n`)
         .join('')
     },
     flush(): string {
       if (buffer.length === 0) return ''
-      const out = `${reformatLine(buffer, now)}\n`
+      const out = `${colorize(reformatLine(buffer, now), useColor)}\n`
       buffer = ''
       return out
     },

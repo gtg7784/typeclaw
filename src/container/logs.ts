@@ -1,3 +1,4 @@
+import { supportsColor } from './log-colors'
 import { makeLogTimestampReformatter, type TimestampReformatter } from './log-timestamps'
 import { containerExists, containerNameFromCwd, getBun } from './shared'
 
@@ -14,6 +15,9 @@ export type LogsOptions = {
   out?: NodeJS.WritableStream
   err?: NodeJS.WritableStream
   signal?: AbortSignal
+  // When undefined, defaults to TTY+NO_COLOR detection on `out`/`err`.
+  // Tests pass `false` for deterministic plain output.
+  useColor?: boolean
 }
 
 export async function logs({
@@ -22,6 +26,7 @@ export async function logs({
   out = process.stdout,
   err = process.stderr,
   signal,
+  useColor,
 }: LogsOptions): Promise<LogsResult> {
   const bun = getBun()
   if (!bun) return { ok: false, reason: 'bun runtime not available' }
@@ -48,7 +53,12 @@ export async function logs({
     }
     signal?.addEventListener('abort', onAbort, { once: true })
 
-    await Promise.all([pumpWithTimestamps(proc.stdout, out), pumpWithTimestamps(proc.stderr, err)])
+    const colorOut = useColor ?? supportsColor(out)
+    const colorErr = useColor ?? supportsColor(err)
+    await Promise.all([
+      pumpWithTimestamps(proc.stdout, out, makeLogTimestampReformatter(undefined, { color: colorOut })),
+      pumpWithTimestamps(proc.stderr, err, makeLogTimestampReformatter(undefined, { color: colorErr })),
+    ])
     const exitCode = await proc.exited
     signal?.removeEventListener('abort', onAbort)
 

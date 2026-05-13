@@ -1,4 +1,5 @@
 import { containerExists } from '@/container'
+import { supportsColor } from '@/container/log-colors'
 import { makeLogTimestampReformatter, type TimestampReformatter } from '@/container/log-timestamps'
 import { getBun } from '@/container/shared'
 
@@ -113,8 +114,18 @@ export async function composeLogs({
   const pumps = procs.flatMap(({ agent, proc }) => {
     const color = colorFor(agent.name)
     return [
-      pumpStream(proc.stdout, makeLogTimestampReformatter(), makeLinePrefixer(agent.name, width, color, useColor), out),
-      pumpStream(proc.stderr, makeLogTimestampReformatter(), makeLinePrefixer(agent.name, width, color, useColor), err),
+      pumpStream(
+        proc.stdout,
+        makeLogTimestampReformatter(undefined, { color: useColor }),
+        makeLinePrefixer(agent.name, width, color, useColor),
+        out,
+      ),
+      pumpStream(
+        proc.stderr,
+        makeLogTimestampReformatter(undefined, { color: useColor }),
+        makeLinePrefixer(agent.name, width, color, useColor),
+        err,
+      ),
     ]
   })
 
@@ -161,11 +172,4 @@ async function pumpStream(
   } finally {
     reader.releaseLock()
   }
-}
-
-function supportsColor(stream: NodeJS.WritableStream): boolean {
-  const tty = (stream as unknown as { isTTY?: boolean }).isTTY === true
-  if (!tty) return false
-  if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== '') return false
-  return true
 }
