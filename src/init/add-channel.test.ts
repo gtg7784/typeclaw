@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { type AddChannelStepEvent, readConfiguredChannels, runAddChannel, scaffold, writeSecrets } from './index'
+import { runKakaotalkBootstrap } from './kakaotalk-auth'
 
 let root: string
 
@@ -114,6 +116,39 @@ describe('runAddChannel', () => {
     const cfg = await readConfig()
     expect(cfg.channels?.kakaotalk?.allow).toEqual(['kakao:dm/*'])
     expect(await readEnv()).toBe('FIREWORKS_API_KEY=fw_existing\n')
+  })
+
+  test('adds kakaotalk credentials to secrets.json instead of workspace credential files', async () => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'kakaotalk',
+      runKakaotalkAuth: async ({ cwd }) =>
+        runKakaotalkBootstrap({
+          email: 'user@example.com',
+          password: 'secret',
+          agentDir: cwd,
+          callbacks: { onPasscode: () => {} },
+          loginFlow: async () => ({
+            authenticated: true,
+            credentials: {
+              access_token: 'oauth-abc',
+              refresh_token: 'refresh-xyz',
+              user_id: 'user-1',
+              device_uuid: 'uuid-1',
+              device_type: 'tablet',
+            },
+          }),
+        }),
+    })
+
+    const channels = await readSecretsChannels()
+    const kakao = channels.kakaotalk as unknown as {
+      currentAccount: string
+      accounts: Record<string, { oauth_token: string }>
+    }
+    expect(kakao.currentAccount).toBe('user-1')
+    expect(kakao.accounts['user-1']?.oauth_token).toBe('oauth-abc')
+    expect(existsSync(join(root, 'workspace', '.agent-messenger', 'kakaotalk-credentials.json'))).toBe(false)
   })
 
   test('kakaotalk with allowAll=true broadens allow to kakao:*', async () => {

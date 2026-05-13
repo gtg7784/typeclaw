@@ -738,8 +738,8 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
     case 'telegram-bot':
       return { token: options.telegramBotToken }
     case 'kakaotalk':
-      // KakaoTalk credentials live in `workspace/.agent-messenger/`, written
-      // by the auth runner above. Nothing to record in secrets.json.
+      // KakaoTalk auth writes its structured multi-account block directly to
+      // secrets.json#channels.kakaotalk before config mutation.
       return {}
   }
 }
