@@ -140,6 +140,38 @@ describe('portForwardSchema', () => {
   })
 })
 
+describe('networkSchema', () => {
+  test('defaults to blockInternal:false when omitted (existing agents not affected by upgrade)', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.network).toEqual({ blockInternal: false })
+  })
+
+  test('accepts an empty network object, inheriting the false default', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, network: {} })
+    expect(parsed.network).toEqual({ blockInternal: false })
+  })
+
+  test('preserves blockInternal:true when explicitly set', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, network: { blockInternal: true } })
+    expect(parsed.network).toEqual({ blockInternal: true })
+  })
+
+  test('rejects non-boolean blockInternal', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { blockInternal: 'yes' } })).toThrow()
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { blockInternal: 1 } })).toThrow()
+  })
+
+  test('does not leak into the plugin config map', () => {
+    const plugins = extractPluginConfigs({
+      model: VALID_MODEL,
+      network: { blockInternal: true },
+      'my-plugin': { x: 1 },
+    })
+    expect('network' in plugins).toBe(false)
+    expect(plugins['my-plugin']).toEqual({ x: 1 })
+  })
+})
+
 describe('dockerfileSchema', () => {
   const FULL_DEFAULTS = { ffmpeg: false, gh: true, python: true, tmux: true, append: [] }
 

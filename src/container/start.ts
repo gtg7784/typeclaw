@@ -320,7 +320,8 @@ export async function planStart({
   const imageTag = imageTagFromCwd(cwd)
 
   const devSourcePath = await detectDevSource(cwd)
-  const mounts = await loadMounts(cwd)
+  const cfg = await loadTypeclawConfig(cwd)
+  const mounts = cfg.mounts
 
   // No `--rm`: a crashed container's logs MUST survive past exit so users can
   // debug the failure. `typeclaw stop` removes the container explicitly, and
@@ -328,6 +329,17 @@ export async function planStart({
   // launch — so the only state Docker ever sees in `docker ps -a` is either
   // a running container or one the user has not started again yet.
   const runArgs = ['run', '-d', '--name', containerName, '-p', `127.0.0.1:${hostPort}:${CONTAINER_PORT}`]
+
+  // Network egress filter: when `typeclaw.json#network.blockInternal` is true,
+  // grant the container CAP_NET_ADMIN at boot so the entrypoint shim can
+  // install iptables OUTPUT rules. The shim drops the capability from the
+  // bounding set via setpriv before exec'ing the agent — see the shim source
+  // in src/init/dockerfile.ts for the full handoff. The `-e` flag is what
+  // tells the shim to take the on-path; absent or set to anything other than
+  // "1", the shim is a no-op.
+  if (cfg.network.blockInternal) {
+    runArgs.push('--cap-add=NET_ADMIN', '-e', 'TYPECLAW_NETWORK_BLOCK_INTERNAL=1')
+  }
 
   if (hostdControl) {
     runArgs.push('--add-host', HOST_GATEWAY_ALIAS)
@@ -584,11 +596,6 @@ async function detectDevSource(cwd: string): Promise<string | null> {
 // folder mid-init). Anything else — malformed JSON, schema-invalid config,
 // invalid mount entry — must surface so the user sees they configured a mount
 // that won't be applied.
-async function loadMounts(cwd: string): Promise<Config['mounts']> {
-  const cfg = await loadTypeclawConfig(cwd)
-  return cfg.mounts
-}
-
 async function loadTypeclawConfig(cwd: string): Promise<Config> {
   return configSchema.parse(await loadConfigJson(cwd))
 }

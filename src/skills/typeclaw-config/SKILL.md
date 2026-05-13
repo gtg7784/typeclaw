@@ -403,7 +403,7 @@ RUN apt-get install ... <baseline + enabled toggle packages>   ← toggles fan o
 ENV NODE_ENV=production
 # Custom lines from typeclaw.json#dockerfile.append.   ← only emitted when append is non-empty
 <your appended lines>
-ENTRYPOINT ["bun", "run", "typeclaw"]
+ENTRYPOINT ["/usr/local/bin/typeclaw-entrypoint"]
 CMD ["run"]
 ```
 

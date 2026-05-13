@@ -104,6 +104,23 @@ export const gitignoreSchema = z
 
 export type GitignoreConfig = z.infer<typeof gitignoreSchema>
 
+// `blockInternal` is the kill-switch for the container-stage egress filter
+// installed by Dockerfile entrypoint shim: when true, the container is granted
+// CAP_NET_ADMIN at boot just long enough to install iptables OUTPUT rules
+// that DROP traffic to RFC1918, link-local (incl. cloud metadata), CGNAT,
+// multicast/reserved, IPv6 ULA/link-local/multicast. The capability is then
+// dropped from the bounding set via setpriv before the agent process exec's,
+// so no child (python, curl, bun-spawned anything) can mutate or recover it.
+// Default is `false` so existing agent folders are unaffected by an upgrade;
+// `typeclaw init` writes `true` for new agents (handled separately in init).
+export const networkSchema = z
+  .object({
+    blockInternal: z.boolean().default(false),
+  })
+  .default({ blockInternal: false })
+
+export type NetworkConfig = z.infer<typeof networkSchema>
+
 export const configSchema = z
   .object({
     $schema: z.string().optional(),
@@ -123,6 +140,7 @@ export const configSchema = z
     alias: z.array(z.string().trim().min(1)).default([]),
     channels: channelsSchema,
     portForward: portForwardSchema,
+    network: networkSchema,
     dockerfile: dockerfileSchema,
     gitignore: gitignoreSchema,
   })
@@ -213,6 +231,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   alias: 'applied',
   channels: 'applied',
   portForward: 'restart-required',
+  network: 'restart-required',
   dockerfile: 'restart-required',
   gitignore: 'restart-required',
 }
@@ -276,6 +295,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'plugins',
     'channels',
     'portForward',
+    'network',
     'dockerfile',
     'gitignore',
   ])
