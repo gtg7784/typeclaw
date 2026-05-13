@@ -61,6 +61,80 @@ describe('parseSecretsFile (v2 envelope)', () => {
     expect(result.file.channels['discord-bot']).toEqual({ token: { env: 'CUSTOM_DISCORD' } })
   })
 
+  test('accepts channels.kakaotalk credential block', () => {
+    const result = parseSecretsFile({
+      version: 2,
+      channels: {
+        kakaotalk: {
+          currentAccount: 'user-1',
+          accounts: {
+            'user-1': {
+              account_id: 'user-1',
+              oauth_token: 'oauth-token',
+              user_id: 'user-1',
+              refresh_token: 'refresh-token',
+              device_uuid: 'device-uuid',
+              device_type: 'tablet',
+              auth_method: 'login',
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+            },
+          },
+          pendingLogin: {
+            device_uuid: 'pending-device',
+            device_type: 'tablet',
+            email: 'user@example.com',
+            created_at: '2026-01-01T00:00:00.000Z',
+          },
+        },
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.file.channels.kakaotalk?.currentAccount).toBe('user-1')
+    expect(result.file.channels.kakaotalk?.accounts['user-1']?.oauth_token).toBe('oauth-token')
+    expect(result.file.channels.kakaotalk?.pendingLogin?.email).toBe('user@example.com')
+  })
+
+  test('accepts empty channels.kakaotalk block', () => {
+    const result = parseSecretsFile({ version: 2, channels: { kakaotalk: { currentAccount: null, accounts: {} } } })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.file.channels.kakaotalk).toEqual({ currentAccount: null, accounts: {} })
+  })
+
+  test('rejects malformed channels.kakaotalk account block', () => {
+    const result = parseSecretsFile({
+      version: 2,
+      channels: {
+        kakaotalk: {
+          currentAccount: 'user-1',
+          accounts: {
+            'user-1': { account_id: 'user-1', oauth_token: 'oauth-token' },
+          },
+        },
+      },
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.reason).toContain('channels.kakaotalk.accounts.user-1.user_id')
+  })
+
+  test('upgrades legacy flat shape with at least one credential', () => {
+    const result = parseSecretsFile({
+      openai: { type: 'api_key', key: 'sk-test' },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.file.version).toBe(SECRETS_FILE_VERSION)
+    expect(result.file.providers.openai).toEqual({ type: 'api_key', key: { value: 'sk-test' } })
+    expect(result.file.channels).toEqual({})
+  })
+
   test('preserves passthrough fields on OAuth credentials so upstream additions survive', () => {
     const result = parseSecretsFile({
       version: 2,
