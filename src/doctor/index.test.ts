@@ -145,6 +145,30 @@ describe('runDoctor', () => {
     }
   })
 
+  test('reports failed (not skipped) when git status itself errors', async () => {
+    const cwd = makeTmpAgentDir()
+    await initGitRepo(cwd)
+
+    const spawnGit = async (args: string[]) =>
+      args[0] === 'status'
+        ? { exitCode: 128, stdout: '', stderr: 'fatal: index file corrupt' }
+        : { exitCode: 0, stdout: '', stderr: '' }
+
+    const result = await runDoctor({
+      cwd,
+      fix: true,
+      staticChecks: [fakeCheck('alpha', 'warning', { autoFix: true })],
+      fetchPluginChecks: async () => ({ kind: 'ok', checks: [] }),
+      spawnGit,
+    })
+
+    expect(result.commit?.kind).toBe('failed')
+    if (result.commit?.kind === 'failed') {
+      expect(result.commit.reason).toMatch(/git status failed/)
+      expect(result.commit.reason).toMatch(/index file corrupt/)
+    }
+  })
+
   test('marks plugin checks deferred when bridge is unreachable', async () => {
     const cwd = makeTmpAgentDir()
     const result = await runDoctor({

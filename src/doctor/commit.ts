@@ -29,7 +29,9 @@ export async function commitAutoFixes(opts: CommitOptions): Promise<CommitOutcom
 
   const spawnGit = opts.spawnGit ?? defaultSpawnGit
 
-  const pathsStaged = await filterCommittable(spawnGit, opts.cwd, requested)
+  const filter = await filterCommittable(spawnGit, opts.cwd, requested)
+  if (filter.kind === 'failed') return filter
+  const pathsStaged = filter.paths
   if (pathsStaged.length === 0) {
     return {
       kind: 'skipped',
@@ -60,14 +62,28 @@ export async function commitAutoFixes(opts: CommitOptions): Promise<CommitOutcom
 // `git status --porcelain -- <ignored>` returns empty. We replicate that
 // behavior here so `doctor --fix` produces the same skip semantics instead
 // of failing with `git add` hints about the ignored file.
-async function filterCommittable(spawnGit: SpawnGit, cwd: string, paths: string[]): Promise<string[]> {
+//
+// A non-zero git-status exit IS NOT the same signal as 'empty stdout' — the
+// former means git itself failed (broken index, malformed pathspec, etc.).
+// Surface that as { kind: 'failed' } so the user sees the real cause instead
+// of a misleading 'all paths are gitignored' message.
+async function filterCommittable(
+  spawnGit: SpawnGit,
+  cwd: string,
+  paths: string[],
+): Promise<{ kind: 'ok'; paths: string[] } | { kind: 'failed'; reason: string }> {
   const out: string[] = []
   for (const p of paths) {
     const status = await spawnGit(['status', '--porcelain', '--', p], cwd)
-    if (status.exitCode !== 0) continue
+    if (status.exitCode !== 0) {
+      return {
+        kind: 'failed',
+        reason: `git status failed for ${p}: ${status.stderr.trim() || `exit ${status.exitCode}`}`,
+      }
+    }
     if (status.stdout.trim().length > 0) out.push(p)
   }
-  return out
+  return { kind: 'ok', paths: out }
 }
 
 export function buildCommitMessage(attempts: FixAttempt[]): string {
