@@ -168,6 +168,50 @@ export class SecretsBackend implements AuthStorageBackend {
     }
   }
 
+  async updateChannelsAsync<T>(
+    fn: (current: Record<string, unknown>) => Promise<{ result: T; next?: Record<string, unknown> }>,
+  ): Promise<T> {
+    this.ensureParentDir()
+    this.ensureFileExists()
+    let release: (() => Promise<void>) | undefined
+    let lockCompromised = false
+    let lockCompromisedError: Error | undefined
+    const throwIfCompromised = (): void => {
+      if (lockCompromised) {
+        throw lockCompromisedError ?? new Error('Secrets store lock was compromised')
+      }
+    }
+    try {
+      release = await lockfile.lock(this.secretsPath, {
+        ...ASYNC_LOCK_OPTIONS,
+        onCompromised: (err: Error) => {
+          lockCompromised = true
+          lockCompromisedError = err
+        },
+      })
+      throwIfCompromised()
+      const envelope = this.readEnvelope()
+      const { result, next } = await fn(envelope.channels as Record<string, unknown>)
+      throwIfCompromised()
+      if (next !== undefined) {
+        const merged: SecretsFile = {
+          ...envelope,
+          $schema: envelope.$schema ?? SCHEMA_REL,
+          channels: next as SecretsFile['channels'],
+        }
+        this.writeEnvelopeAtomic(merged)
+      }
+      throwIfCompromised()
+      return result
+    } finally {
+      if (release) {
+        try {
+          await release()
+        } catch {}
+      }
+    }
+  }
+
   private ensureParentDir(): void {
     const dir = dirname(this.secretsPath)
     if (!existsSync(dir)) {
