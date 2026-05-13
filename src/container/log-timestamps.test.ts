@@ -2,6 +2,10 @@ import { describe, expect, test } from 'bun:test'
 
 import { makeLogTimestampReformatter, reformatLine } from './log-timestamps'
 
+// ANSI escapes are control characters by definition; we're testing for them.
+// eslint-disable-next-line no-control-regex
+const ANSI_RE = /\u001B\[\d+m/g
+
 const FIXED = new Date('2026-05-13T14:23:01.123456789Z')
 const fixedNow = (): Date => FIXED
 
@@ -102,5 +106,22 @@ describe('makeLogTimestampReformatter', () => {
     const r = makeLogTimestampReformatter(fixedNow)
 
     expect(r.write('plain\nstill plain\n')).toBe('plain\nstill plain\n')
+  })
+
+  test('emits zero ANSI escapes by default (color is opt-in)', () => {
+    const r = makeLogTimestampReformatter(fixedNow)
+
+    const out = r.write('2026-05-13T14:23:01Z [plugin:memory] done\n')
+    expect(out).not.toContain('\x1b[')
+  })
+
+  test('with color: true, emits ANSI escapes that strip back to the plain reformatted line', () => {
+    const r = makeLogTimestampReformatter(fixedNow, { color: true })
+    const expectedPlain = `${localStampOf(new Date('2026-05-13T14:23:01Z'))} [plugin:memory] done\n`
+
+    const colored = r.write('2026-05-13T14:23:01Z [plugin:memory] done\n')
+
+    expect(colored).toContain('\x1b[')
+    expect(colored.replace(ANSI_RE, '')).toBe(expectedPlain)
   })
 })
