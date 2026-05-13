@@ -7,11 +7,13 @@ import { configSchema, expandMountPath, type Config } from '@/config/config'
 import { send as sendToDaemon } from '@/hostd/client'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
+import { autoUpgradeTypeclawDep, type AutoUpgradeOutcome, outcomeForcesInstall } from '@/init/auto-upgrade'
 import { resolveBaseImageVersion } from '@/init/cli-version'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 import { refreshPackageJson } from '@/init/packagejson'
+import { type InstallRunner, runBunInstall } from '@/init/run-bun-install'
 
 import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
 import {
@@ -77,6 +79,14 @@ export type StartOptions = {
   // Reusing that daemon avoids a self-shutdown when disk source has drifted.
   reuseCurrentHostDaemon?: boolean
   ensureDeps?: (cwd: string) => Promise<EnsureDepsResult>
+  // Test seam for the typeclaw-version auto-upgrade. Production callers omit
+  // this and get the real autoUpgradeTypeclawDep (which reads the CLI's own
+  // package.json). Tests inject a stub to simulate `bun -g update typeclaw`
+  // having bumped the CLI without touching the agent folder.
+  autoUpgrade?: (cwd: string) => Promise<AutoUpgradeOutcome>
+  // Test seam for the auto-upgrade-triggered `bun install`. Defaults to the
+  // same runBunInstall the ensureDeps codepath uses.
+  forceBunInstall?: InstallRunner
   // Post-`docker run` verifier. `docker run -d` returns exit 0 the moment the
   // container is created, even if its entrypoint crashes milliseconds later.
   // The default verifier polls `docker inspect` for 1.5s and converts crashes
@@ -106,6 +116,7 @@ export type StartResult =
       // every fresh launch, including the post-stale-corpse `--rm` recovery
       // path — that one rebuilds the container from scratch.
       alreadyRunning: boolean
+      autoUpgrade: AutoUpgradeOutcome
     }
   | { ok: false; reason: string }
 
@@ -118,6 +129,8 @@ export async function start({
   cliEntry,
   reuseCurrentHostDaemon = false,
   ensureDeps = (dir) => ensureDepsInstalled({ cwd: dir }),
+  autoUpgrade = (dir) => autoUpgradeTypeclawDep({ cwd: dir }),
+  forceBunInstall = runBunInstall,
   verifyRunning = createVerifyRunning({ exec }),
 }: StartOptions): Promise<StartResult> {
   try {
@@ -149,6 +162,25 @@ export async function start({
     if (pkgRefresh.changed) {
       await commitSystemFile(cwd, pkgRefresh.files, 'Enable bun workspaces (packages/*)')
     }
+
+    // Align the agent's typeclaw dep with the global CLI version BEFORE
+    // ensureDeps runs. The classic regression this prevents: `bun -g update
+    // typeclaw` bumps the global CLI but the agent's node_modules/typeclaw
+    // stays pinned to whatever was installed at init time. refreshDockerfile
+    // then pins FROM ghcr/typeclaw-base:<old-version> and the docker build
+    // either fails (image never published) or runs against a stale runtime.
+    // When the spec is rewritten or installed < CLI, ensureDeps may consider
+    // every declared dep already present and short-circuit — force the
+    // install here so the new typeclaw version actually lands in node_modules.
+    const upgrade = await autoUpgrade(cwd)
+    const upgradeCommitMessage = commitMessageForAutoUpgrade(upgrade)
+    if (outcomeForcesInstall(upgrade)) {
+      const forced = await forceBunInstall(cwd)
+      if (!forced.ok) {
+        return { ok: false, reason: `typeclaw auto-upgrade install failed: ${forced.reason}` }
+      }
+    }
+
     // Run `bun install` BEFORE the dependency-drift commit so the lockfile
     // changes the install produces are caught by the same commit. Without
     // this, upgrading the typeclaw CLI to a version that adds a new dep
@@ -160,7 +192,7 @@ export async function start({
     if (!deps.ok) {
       return { ok: false, reason: `dependency install failed: ${deps.reason}` }
     }
-    await commitSystemFile(cwd, DEPENDENCY_FILES, 'Update dependencies')
+    await commitSystemFile(cwd, DEPENDENCY_FILES, upgradeCommitMessage ?? 'Update dependencies')
     // Dockerfile refresh AFTER ensureDeps so the version pin in the FROM
     // line resolves against the agent's installed node_modules/typeclaw —
     // ensures the base image's CLI version matches the runtime the
@@ -303,10 +335,17 @@ export async function start({
       hostPort,
       hostd: stripHostDaemonControl(hostd),
       alreadyRunning: false,
+      autoUpgrade: upgrade,
     }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
+}
+
+function commitMessageForAutoUpgrade(outcome: AutoUpgradeOutcome): string | null {
+  if (outcome.kind === 'spec-rewritten') return `Upgrade typeclaw to ${outcome.to}`
+  if (outcome.kind === 'reinstall-needed') return `Upgrade typeclaw to ${outcome.to}`
+  return null
 }
 
 export async function planStart({
@@ -537,6 +576,7 @@ async function reportAlreadyRunning(exec: DockerExec, cwd: string, containerName
     hostPort,
     hostd: { state: 'disabled' },
     alreadyRunning: true,
+    autoUpgrade: { kind: 'skipped-no-dep' },
   }
 }
 

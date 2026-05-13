@@ -2,6 +2,8 @@ import { styleText } from 'node:util'
 
 import { cancel, intro, isCancel, log, note, outro, spinner as clackSpinner } from '@clack/prompts'
 
+import { type AutoUpgradeOutcome, describeAutoUpgrade } from '@/init/auto-upgrade'
+
 export { cancel, intro, isCancel, log, note, outro }
 
 function colorize(modifier: Parameters<typeof styleText>[0], s: string): string {
@@ -62,12 +64,21 @@ export type StartLikeResult = {
   hostPort: number
   containerId: string
   hostd: { state: 'registered' } | { state: 'unavailable'; reason: string } | { state: 'disabled' }
+  autoUpgrade?: AutoUpgradeOutcome
 }
 
 export function renderStartSuccess(result: StartLikeResult): string {
   const lines: string[] = []
   const name = c.cyan(result.plan.containerName)
   const port = c.green(String(result.hostPort))
+
+  if (result.autoUpgrade) {
+    const message = describeAutoUpgrade(result.autoUpgrade)
+    if (message.length > 0) {
+      const tint = result.autoUpgrade.kind === 'exact-pin-respected' ? c.yellow : c.cyan
+      lines.push(tint(message))
+    }
+  }
 
   if (result.alreadyRunning) {
     lines.push(`${c.green('●')} ${name} is already running on host port ${port}.`)
