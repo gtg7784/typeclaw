@@ -1,5 +1,5 @@
 import { existsSync, mkdirSync } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join, relative } from 'node:path'
 
@@ -10,10 +10,13 @@ import {
   defaultDockerExec,
   imageTagFromCwd,
   inspectContainer,
+  refreshDockerfile,
+  refreshGitignore,
   resolveHostPort,
   type DockerExec,
 } from '@/container'
 import { isDaemonReachable, send } from '@/hostd'
+import { resolveBaseImageVersion } from '@/init/cli-version'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { detectMissingDeps } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
@@ -151,7 +154,7 @@ function agentFolderDockerfileTemplate(): DoctorCheck {
         fix: {
           description: 'Regenerate the Dockerfile from the typeclaw template.',
           autoFix: async () => {
-            await writeAtomic(dockerfilePath, expected)
+            await refreshDockerfile(ctx.cwd)
             return { summary: 'refreshed Dockerfile from template', changedPaths: [DOCKERFILE] }
           },
         },
@@ -180,7 +183,7 @@ function agentFolderGitignoreTemplate(): DoctorCheck {
         fix: {
           description: 'Regenerate .gitignore from the typeclaw template.',
           autoFix: async () => {
-            await writeAtomic(gitignorePath, expected)
+            await refreshGitignore(ctx.cwd)
             return { summary: 'refreshed .gitignore from template', changedPaths: [GITIGNORE_FILE] }
           },
         },
@@ -365,7 +368,7 @@ function buildExpectedDockerfile(cwd: string): string | null {
   try {
     const cfg = loadConfigStrictForTemplate(cwd)
     if (cfg === null) return null
-    return buildDockerfile(cfg.dockerfile)
+    return buildDockerfile(cfg.dockerfile, { baseImageVersion: resolveBaseImageVersion(cwd) })
   } catch {
     return null
   }
@@ -396,10 +399,6 @@ async function safeRead(path: string): Promise<string | null> {
   } catch {
     return null
   }
-}
-
-async function writeAtomic(path: string, content: string): Promise<void> {
-  await writeFile(path, content)
 }
 
 export function relativeToCwd(cwd: string, path: string): string {

@@ -17,6 +17,8 @@ export {
 } from './shared'
 export {
   planStart,
+  refreshDockerfile,
+  refreshGitignore,
   start,
   type HostDaemonStatus,
   type PlanStartOptions,
