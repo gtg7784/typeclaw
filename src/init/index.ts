@@ -698,7 +698,7 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   //
   // We run KakaoTalk auth FIRST so a failed login leaves typeclaw.json and
   // .env untouched. The runtime treats `channels.kakaotalk` without a
-  // credentials file as "missing credentials, skip adapter", which silently
+  // secrets.json#channels.kakaotalk block as "missing credentials, skip adapter", which silently
   // drops messages — the same trap `runInit` already guards against. Aborting
   // before any file write means the user's next `typeclaw channel add
   // kakaotalk` retry has no half-applied state to clean up.

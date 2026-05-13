@@ -266,13 +266,10 @@ ${fromAndHeavyLayers}
 
 ENV NODE_ENV=production
 
-# Pin agent-messenger's config dir into the agent's workspace/ so KakaoTalk
-# (and any future agent-messenger-backed channel) reads/writes credentials
-# inside the bind-mounted agent folder. Without this, the SDK would default
-# to /root/.config/agent-messenger inside the container, which doesn't
-# survive container restarts and isn't visible from the host. The agent
-# folder's bind-mount maps /agent → host's agent dir, so the credentials
-# end up at <agentDir>/workspace/.agent-messenger/ on the host.
+# Keep agent-messenger's fallback config dir inside workspace/ for any future
+# SDK fallback paths. TypeClaw's KakaoTalk adapter does not write there:
+# credentials live in secrets.json#channels.kakaotalk and container writes go
+# through hostd's secrets-patch RPC.
 ENV AGENT_MESSENGER_CONFIG_DIR=/agent/workspace/.agent-messenger
 
 ${customLines}ENTRYPOINT ["${TYPECLAW_ENTRYPOINT_PATH}"]

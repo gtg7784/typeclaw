@@ -415,7 +415,7 @@ function preflightFailureGuidance(result: Extract<DockerAvailability, { ok: fals
 }
 
 function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
-  if (result.ok) return 'KakaoTalk credentials saved to workspace/.agent-messenger/.'
+  if (result.ok) return 'KakaoTalk credentials saved to secrets.json.'
   return `KakaoTalk login failed: ${result.reason}`
 }
 
