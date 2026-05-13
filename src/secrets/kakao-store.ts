@@ -1,10 +1,14 @@
 import type { KakaoAccountCredentials, KakaoConfig } from 'agent-messenger/kakaotalk'
 import type { PendingLoginState } from 'agent-messenger/kakaotalk'
 
+import { sendHttp } from '@/hostd/client'
+
 import { type KakaoChannelBlock, kakaoChannelBlockSchema } from './schema'
 import { SecretsBackend } from './storage'
 
-export type SecretsKakaoCredentialStoreOptions = { mode: 'host'; secretsPath: string }
+export type SecretsKakaoCredentialStoreOptions =
+  | { mode: 'host'; secretsPath: string }
+  | { mode: 'container'; secretsPath: string; hostdUrl: string; restartToken: string; containerName: string }
 
 const EMPTY_BLOCK: KakaoChannelBlock = { currentAccount: null, accounts: {} }
 
@@ -79,6 +83,16 @@ export class SecretsKakaoCredentialStore {
   }
 
   private async writeBlock(update: (current: KakaoChannelBlock) => KakaoChannelBlock): Promise<void> {
+    if (this.options.mode === 'container') {
+      const next = update(this.readBlock())
+      const response = await sendHttp(
+        { kind: 'secrets-patch', containerName: this.options.containerName, patch: { channels: { kakaotalk: next } } },
+        { url: this.options.hostdUrl, token: this.options.restartToken },
+      )
+      if (!response.ok) throw new Error(`secrets-patch failed: ${response.reason}`)
+      return
+    }
+
     await this.backend.updateChannelsAsync(async (channels) => {
       const next = { ...channels, kakaotalk: update(parseBlock(channels.kakaotalk)) }
       return { result: undefined, next }
