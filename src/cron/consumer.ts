@@ -1,20 +1,25 @@
+import type { SessionOrigin } from '@/agent/session-origin'
 import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
 import type { CronJob, ExecJob, PromptJob } from './schema'
 
-// `hooks`, `sessionId`, and `getTranscriptPath` are optional so test fakes can
-// stay one-liners. When present, the consumer fires `session.idle` after every
-// prompt completion and `session.end` on dispose, mirroring the lifecycle
-// signals the TUI server already emits in `src/server/index.ts`. Without this
-// the bundled memory plugin's debounced `memory-logger` never spawns for cron
-// prompt jobs because it only wakes on `session.idle`.
+// `hooks`, `sessionId`, `agentDir`, and `getTranscriptPath` are optional so
+// test fakes can stay one-liners. When present, the consumer fires
+// `session.turn.start`/`session.turn.end` around `prompt()`, then
+// `session.idle` after, then `session.end` on dispose — mirroring the
+// lifecycle signals the TUI server emits in `src/server/index.ts`. Without
+// this the bundled memory plugin's debounced `memory-logger` never spawns for
+// cron prompt jobs (it only wakes on `session.idle`), and the bundled backup
+// plugin's turn counter would miss cron-driven activity.
 export type CronSession = {
   prompt: (text: string) => Promise<void>
   dispose?: () => void
   hooks?: HookBus
   sessionId?: string
+  agentDir?: string
   getTranscriptPath?: () => string | undefined
+  origin?: SessionOrigin
 }
 
 export type CronConsumerLogger = {
@@ -102,8 +107,25 @@ async function runPrompt(
     return
   }
   const session = await createSessionForCron(job)
+  const turnEvent =
+    session.hooks && session.sessionId !== undefined && session.agentDir !== undefined
+      ? {
+          sessionId: session.sessionId,
+          agentDir: session.agentDir,
+          ...(session.origin !== undefined ? { origin: session.origin } : {}),
+        }
+      : undefined
   try {
-    await session.prompt(job.prompt)
+    if (session.hooks && turnEvent !== undefined) {
+      await session.hooks.runSessionTurnStart(turnEvent)
+    }
+    try {
+      await session.prompt(job.prompt)
+    } finally {
+      if (session.hooks && turnEvent !== undefined) {
+        await session.hooks.runSessionTurnEnd(turnEvent)
+      }
+    }
     if (session.hooks && session.sessionId !== undefined) {
       await session.hooks.runSessionIdle({
         sessionId: session.sessionId,

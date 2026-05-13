@@ -6,6 +6,8 @@ import type {
   SessionIdleEvent,
   SessionPromptEvent,
   SessionStartEvent,
+  SessionTurnEndEvent,
+  SessionTurnStartEvent,
   ToolAfterEvent,
   ToolBeforeEvent,
   ToolBeforeResult,
@@ -43,6 +45,8 @@ export type HookBus = {
   runSessionEnd: (event: SessionEndEvent) => Promise<void>
   runSessionIdle: (event: SessionIdleEvent) => Promise<void>
   runSessionPrompt: (event: SessionPromptEvent) => Promise<void>
+  runSessionTurnStart: (event: SessionTurnStartEvent) => Promise<void>
+  runSessionTurnEnd: (event: SessionTurnEndEvent) => Promise<void>
   runToolBefore: (event: ToolBeforeEvent) => Promise<{ block: true; reason: string } | undefined>
   runToolAfter: (event: ToolAfterEvent) => Promise<void>
   count: (name: keyof Hooks) => number
@@ -62,6 +66,8 @@ type Registries = {
   'session.end': RegisteredHook<'session.end'>[]
   'session.idle': RegisteredHook<'session.idle'>[]
   'session.prompt': RegisteredHook<'session.prompt'>[]
+  'session.turn.start': RegisteredHook<'session.turn.start'>[]
+  'session.turn.end': RegisteredHook<'session.turn.end'>[]
   'tool.before': RegisteredHook<'tool.before'>[]
   'tool.after': RegisteredHook<'tool.after'>[]
 }
@@ -74,6 +80,8 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
     'session.end': [],
     'session.idle': [],
     'session.prompt': [],
+    'session.turn.start': [],
+    'session.turn.end': [],
     'tool.before': [],
     'tool.after': [],
   }
@@ -89,6 +97,8 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
       if (hooks['session.end']) r['session.end'].push({ ...base, handler: hooks['session.end'] })
       if (hooks['session.idle']) r['session.idle'].push({ ...base, handler: hooks['session.idle'] })
       if (hooks['session.prompt']) r['session.prompt'].push({ ...base, handler: hooks['session.prompt'] })
+      if (hooks['session.turn.start']) r['session.turn.start'].push({ ...base, handler: hooks['session.turn.start'] })
+      if (hooks['session.turn.end']) r['session.turn.end'].push({ ...base, handler: hooks['session.turn.end'] })
       if (hooks['tool.before']) r['tool.before'].push({ ...base, handler: hooks['tool.before'] })
       if (hooks['tool.after']) r['tool.after'].push({ ...base, handler: hooks['tool.after'] })
     },
@@ -98,6 +108,8 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
       r['session.end'] = r['session.end'].filter((h) => h.pluginName !== pluginName)
       r['session.idle'] = r['session.idle'].filter((h) => h.pluginName !== pluginName)
       r['session.prompt'] = r['session.prompt'].filter((h) => h.pluginName !== pluginName)
+      r['session.turn.start'] = r['session.turn.start'].filter((h) => h.pluginName !== pluginName)
+      r['session.turn.end'] = r['session.turn.end'].filter((h) => h.pluginName !== pluginName)
       r['tool.before'] = r['tool.before'].filter((h) => h.pluginName !== pluginName)
       r['tool.after'] = r['tool.after'].filter((h) => h.pluginName !== pluginName)
     },
@@ -146,6 +158,26 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
           await reg.handler(event, ctx(reg))
         } catch (err) {
           reportHookError(reg, 'session.prompt', err)
+        }
+      }
+    },
+
+    async runSessionTurnStart(event) {
+      for (const reg of r['session.turn.start']) {
+        try {
+          await reg.handler(event, ctx(reg))
+        } catch (err) {
+          reportHookError(reg, 'session.turn.start', err)
+        }
+      }
+    },
+
+    async runSessionTurnEnd(event) {
+      for (const reg of r['session.turn.end']) {
+        try {
+          await reg.handler(event, ctx(reg))
+        } catch (err) {
+          reportHookError(reg, 'session.turn.end', err)
         }
       }
     },

@@ -97,6 +97,24 @@ export type SessionIdleEvent = {
   origin?: SessionOrigin
 }
 
+// Brackets every `session.prompt(...)` invocation. Distinct from
+// `session.start`/`session.end` (which bracket session lifetime) so that
+// long-lived TUI or channel sessions, which can sit idle between turns,
+// don't wedge a turn-counter forever. `origin` carries the session's origin
+// so observers can exclude their own induced turns when counting (e.g. the
+// backup plugin excludes `subagent: 'backup'` to avoid self-gating).
+export type SessionTurnStartEvent = {
+  sessionId: string
+  agentDir: string
+  origin?: SessionOrigin
+}
+
+export type SessionTurnEndEvent = {
+  sessionId: string
+  agentDir: string
+  origin?: SessionOrigin
+}
+
 // Provider prompt caching requires byte-identical prefixes. Mutations near the
 // end of `event.prompt` preserve cache hits across sessions; mutations near
 // the start invalidate the cache on every LLM call.
@@ -136,6 +154,8 @@ export type Hooks = {
   'session.end'?: (event: SessionEndEvent, ctx: HookContext) => Promise<void> | void
   'session.idle'?: (event: SessionIdleEvent, ctx: HookContext) => Promise<void> | void
   'session.prompt'?: (event: SessionPromptEvent, ctx: HookContext) => Promise<void> | void
+  'session.turn.start'?: (event: SessionTurnStartEvent, ctx: HookContext) => Promise<void> | void
+  'session.turn.end'?: (event: SessionTurnEndEvent, ctx: HookContext) => Promise<void> | void
   'tool.before'?: (event: ToolBeforeEvent, ctx: HookContext) => Promise<ToolBeforeResult> | ToolBeforeResult
   'tool.after'?: (event: ToolAfterEvent, ctx: HookContext) => Promise<void> | void
 }

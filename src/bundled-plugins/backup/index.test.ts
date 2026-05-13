@@ -1,0 +1,182 @@
+import { describe, expect, test } from 'bun:test'
+
+import type { PluginContext, PluginExports } from '@/plugin'
+
+import backupPlugin from './index'
+
+type SpawnCall = { name: string; payload: unknown }
+
+function makeCtx(overrides: { config: unknown }): {
+  ctx: PluginContext<any>
+  spawnCalls: SpawnCall[]
+} {
+  const spawnCalls: SpawnCall[] = []
+  const logs: string[] = []
+  const ctx: PluginContext<any> = {
+    name: 'backup',
+    version: undefined,
+    agentDir: '/agent',
+    config: overrides.config,
+    logger: {
+      info: (m) => logs.push(`info:${m}`),
+      warn: (m) => logs.push(`warn:${m}`),
+      error: (m) => logs.push(`error:${m}`),
+    },
+    spawnSubagent: async (name, payload) => {
+      spawnCalls.push({ name, payload })
+    },
+  }
+  return { ctx, spawnCalls }
+}
+
+async function loadPlugin(ctx: PluginContext<any>): Promise<PluginExports> {
+  return backupPlugin.plugin(ctx)
+}
+
+async function loadHooks(ctx: PluginContext<any>): Promise<{
+  turnStart: NonNullable<NonNullable<PluginExports['hooks']>['session.turn.start']>
+  turnEnd: NonNullable<NonNullable<PluginExports['hooks']>['session.turn.end']>
+  idle: NonNullable<NonNullable<PluginExports['hooks']>['session.idle']>
+  sessionEnd: NonNullable<NonNullable<PluginExports['hooks']>['session.end']>
+}> {
+  const exports = await loadPlugin(ctx)
+  const hooks = exports.hooks
+  if (!hooks) throw new Error('plugin returned no hooks')
+  const turnStart = hooks['session.turn.start']
+  const turnEnd = hooks['session.turn.end']
+  const idle = hooks['session.idle']
+  const sessionEnd = hooks['session.end']
+  if (!turnStart || !turnEnd || !idle || !sessionEnd) throw new Error('expected lifecycle hooks missing')
+  return { turnStart, turnEnd, idle, sessionEnd }
+}
+
+const tinyConfig = {
+  enabled: true,
+  idleMs: 25,
+  pushToOrigin: false,
+  commitTimeoutMs: 1000,
+  networkTimeoutMs: 1000,
+}
+
+describe('backup plugin', () => {
+  test('exposes the three subagents (runner, message, diagnose)', async () => {
+    const { ctx } = makeCtx({ config: tinyConfig })
+    const exports = await loadPlugin(ctx)
+    const subs = Object.keys(exports.subagents ?? {}).sort()
+    expect(subs).toEqual(['backup', 'backup-diagnose', 'backup-message'])
+  })
+
+  test('registers the four expected hooks', async () => {
+    const { ctx } = makeCtx({ config: tinyConfig })
+    const exports = await loadPlugin(ctx)
+    const hookNames = Object.keys(exports.hooks ?? {}).sort()
+    expect(hookNames).toEqual(['session.end', 'session.idle', 'session.turn.end', 'session.turn.start'])
+  })
+
+  test('config schema validates with all defaults', () => {
+    const parsed = backupPlugin.configSchema?.parse(undefined)
+    expect(parsed).toEqual({
+      enabled: true,
+      idleMs: 30_000,
+      pushToOrigin: true,
+      commitTimeoutMs: 30_000,
+      networkTimeoutMs: 60_000,
+    })
+  })
+
+  test('rejects idleMs below 1000ms', () => {
+    expect(() => backupPlugin.configSchema?.parse({ idleMs: 500 })).toThrow()
+  })
+
+  test('idle hook with no active turns spawns the runner after debounce', async () => {
+    const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
+    const { idle } = await loadHooks(ctx)
+    await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
+    await sleep(80)
+    expect(spawnCalls.map((c) => c.name)).toEqual(['backup'])
+    expect(spawnCalls[0]?.payload).toEqual({ agentDir: '/agent', pushToOrigin: false })
+  })
+
+  test('idle hook does not fire when an active turn is in progress', async () => {
+    const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
+    const { turnStart, idle } = await loadHooks(ctx)
+
+    await turnStart({ sessionId: 's1', agentDir: '/agent' }, hookCtx())
+    await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
+    await sleep(80)
+    expect(spawnCalls).toEqual([])
+  })
+
+  test('runner fires after the active turn ends and a fresh idle arrives', async () => {
+    const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
+    const { turnStart, turnEnd, idle } = await loadHooks(ctx)
+
+    await turnStart({ sessionId: 's1', agentDir: '/agent' }, hookCtx())
+    await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
+    await sleep(40)
+    expect(spawnCalls).toEqual([])
+
+    await turnEnd({ sessionId: 's1', agentDir: '/agent' }, hookCtx())
+    await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
+    await sleep(80)
+    expect(spawnCalls.map((c) => c.name)).toEqual(['backup'])
+  })
+
+  test('self-induced subagent turns do not count against the active-turn gate', async () => {
+    const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
+    const { turnStart, idle } = await loadHooks(ctx)
+
+    await turnStart(
+      {
+        sessionId: 'self',
+        agentDir: '/agent',
+        origin: { kind: 'subagent', subagent: 'backup-message', parentSessionId: 'p' },
+      },
+      hookCtx(),
+    )
+    await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
+    await sleep(80)
+    expect(spawnCalls.map((c) => c.name)).toEqual(['backup'])
+  })
+
+  test('debounce: rapid idle events coalesce into a single fire', async () => {
+    const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
+    const { idle } = await loadHooks(ctx)
+
+    for (let i = 0; i < 5; i++) {
+      await idle({ sessionId: 's', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
+      await sleep(5)
+    }
+    await sleep(80)
+    expect(spawnCalls.length).toBe(1)
+  })
+
+  test('disabled plugin never spawns the runner', async () => {
+    const { ctx, spawnCalls } = makeCtx({ config: { ...tinyConfig, enabled: false } })
+    const { idle } = await loadHooks(ctx)
+    await idle({ sessionId: 's', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
+    await sleep(80)
+    expect(spawnCalls).toEqual([])
+  })
+
+  test('session.end clears any in-flight active turn for that session', async () => {
+    const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
+    const { turnStart, sessionEnd, idle } = await loadHooks(ctx)
+
+    await turnStart({ sessionId: 's1', agentDir: '/agent' }, hookCtx())
+    await sessionEnd({ sessionId: 's1' }, hookCtx())
+    await idle({ sessionId: 's2', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
+    await sleep(80)
+    expect(spawnCalls.length).toBe(1)
+  })
+})
+
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+
+function hookCtx() {
+  return {
+    agentDir: '/agent',
+    pluginName: 'backup',
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  }
+}

@@ -20,6 +20,8 @@ function makeFakeHookBus(events: string[]): HookBus {
       events.push(`idle:${e.sessionId}:${e.parentTranscriptPath ?? '-'}`)
     },
     runSessionPrompt: async () => {},
+    runSessionTurnStart: async () => {},
+    runSessionTurnEnd: async () => {},
     runToolBefore: async () => undefined,
     runToolAfter: async () => {},
     count: () => 0,
