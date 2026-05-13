@@ -104,6 +104,25 @@ export const gitignoreSchema = z
 
 export type GitignoreConfig = z.infer<typeof gitignoreSchema>
 
+const IPV4_CIDR_PATTERN = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/
+
+const ipv4CidrSchema = z.string().refine(
+  (value) => {
+    const match = IPV4_CIDR_PATTERN.exec(value)
+    if (!match) return false
+    const octets = [match[1], match[2], match[3], match[4]].map(Number)
+    if (octets.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false
+    if (match[5] !== undefined) {
+      const prefix = Number(match[5])
+      if (!Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false
+    }
+    return true
+  },
+  {
+    message: 'network.allow entries must be IPv4 addresses or CIDR ranges (e.g. "10.0.0.0/16", "10.0.0.2")',
+  },
+)
+
 // `blockInternal` is the kill-switch for the container-stage egress filter
 // installed by Dockerfile entrypoint shim: when true, the container is granted
 // CAP_NET_ADMIN at boot just long enough to install iptables OUTPUT rules
@@ -124,11 +143,38 @@ export type GitignoreConfig = z.infer<typeof gitignoreSchema>
 // field is discoverable in fresh `typeclaw.json` files. Loopback traffic
 // (`-o lo`) is always allowed by the shim, so `bun run dev` and local APIs
 // on `localhost` / `127.0.0.1` are unaffected.
+//
+// `autoAllowResolvers` (default `true`) makes the shim narrowly carve out
+// the container's DNS resolvers — every `nameserver` line in
+// `/etc/resolv.conf` gets a `udp/tcp --dport 53` ACCEPT inserted BEFORE the
+// REJECT rules. This fixes the canonical EC2/GCE/Azure footgun: cloud VPC
+// resolvers live inside RFC1918 (e.g. AWS VPC DNS at `10.0.0.2`), so
+// `blockInternal: true` would otherwise kill every DNS lookup the agent
+// makes. The carve-out is scoped to port 53 only — a compromised agent
+// cannot reach the resolver host on any other port. On a laptop where
+// `/etc/resolv.conf` points at a public resolver (1.1.1.1, 8.8.8.8), the
+// generated ACCEPT rules are no-ops because public IPs are not in the
+// block list to begin with. Opt-out (`false`) is for users who explicitly
+// configure DNS via `.env` (e.g. `DOCKER_DNS=1.1.1.1`) and want a fully
+// closed filter.
+//
+// `allow` is the power-user escape hatch: an explicit list of IPv4 CIDRs
+// or bare IPv4 addresses that punch through the block list wholesale (all
+// ports, all protocols). Use case: VPC-private services the agent must
+// reach by IP — internal APIs, RDS endpoints, VPC interface endpoints for
+// S3/Bedrock. Each entry inserts an unscoped `iptables -A OUTPUT -d <cidr>
+// -j ACCEPT` before the REJECT rules. IPv4 only: the carve-out is for
+// destinations the operator names explicitly, and every cloud VPC we
+// support is IPv4-routable. Validation at parse time rejects non-CIDR
+// strings, IPv6 forms, and out-of-range octets so a typo in
+// `typeclaw.json` surfaces immediately instead of at container boot.
 export const networkSchema = z
   .object({
     blockInternal: z.boolean().default(true),
+    autoAllowResolvers: z.boolean().default(true),
+    allow: z.array(ipv4CidrSchema).default([]),
   })
-  .default({ blockInternal: true })
+  .default({ blockInternal: true, autoAllowResolvers: true, allow: [] })
 
 export type NetworkConfig = z.infer<typeof networkSchema>
 

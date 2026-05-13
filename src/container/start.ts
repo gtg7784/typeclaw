@@ -424,9 +424,16 @@ export async function planStart({
   // bounding set via setpriv before exec'ing the agent — see the shim source
   // in src/init/dockerfile.ts for the full handoff. The `-e` flag is what
   // tells the shim to take the on-path; absent or set to anything other than
-  // "1", the shim is a no-op.
+  // "1", the shim is a no-op. `autoAllowResolvers` / `allow` envs are only
+  // emitted on the on-path because the shim's off-path doesn't read them;
+  // `TYPECLAW_NETWORK_ALLOW` is comma-joined to match the shim's `IFS=','`
+  // loop, and CIDR validation already happened at config parse time.
   if (cfg.network.blockInternal) {
     runArgs.push('--cap-add=NET_ADMIN', '-e', 'TYPECLAW_NETWORK_BLOCK_INTERNAL=1')
+    runArgs.push('-e', `TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS=${cfg.network.autoAllowResolvers ? '1' : '0'}`)
+    if (cfg.network.allow.length > 0) {
+      runArgs.push('-e', `TYPECLAW_NETWORK_ALLOW=${cfg.network.allow.join(',')}`)
+    }
   }
 
   if (hostdControl) {

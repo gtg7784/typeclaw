@@ -132,6 +132,44 @@ export const NETWORK_BLOCK_IPV6_NETS = ['fc00::/7', 'fe80::/10', 'ff00::/8', '::
 // `set -eu` propagates rule-install failures up to PID 1 exit, which kills
 // the container. Failing closed is the right thing: an unenforced
 // blockInternal=true is worse than blockInternal=false.
+//
+// Carve-out ordering is load-bearing. iptables OUTPUT is first-match-wins,
+// and we use -A (append). So the order written into the shim is the order
+// rules will be evaluated:
+//   1. loopback ACCEPT
+//   2. hostd port ACCEPT (narrow: tcp + single dport on the host gateway)
+//   3. resolver ACCEPT (narrow: udp/tcp dport 53 to each /etc/resolv.conf
+//      nameserver) — gated on TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS=1
+//   4. user-supplied allowlist ACCEPT (wholesale: -d <cidr>) — driven by
+//      TYPECLAW_NETWORK_ALLOW comma-separated env
+//   5. RFC1918 + link-local + CGNAT + multicast + reserved REJECTs
+// A resolver at 10.0.0.2 hits (3) and ACCEPTs before (5) DROPs it.
+//
+// The resolver carve-out reads /etc/resolv.conf inside the container, NOT
+// on the host. Docker propagates the host's resolver into the container by
+// default (Docker Desktop and OrbStack rewrite it to the embedded DNS
+// proxy at 127.0.0.11; Docker on Linux copies the host's resolv.conf
+// verbatim unless --dns is passed). On Docker Desktop / OrbStack the
+// nameserver is loopback and the rule is a no-op (loopback is already
+// ACCEPT'd by rule 1). On native Linux + EC2/GCE/Azure VMs, the
+// nameserver is the VPC resolver inside RFC1918 — exactly the case this
+// carve-out targets.
+//
+// `awk '/^nameserver/{print $2}'` extracts only the IP, skipping
+// comments, `search`, `options`, and malformed lines. We don't validate
+// the IP further: a malformed nameserver line would have crashed glibc's
+// resolver long before the shim ran, so we trust resolv.conf's contents.
+// IPv6 nameservers (rare in practice, never the case on EC2/GCE/Azure)
+// are skipped by `grep -v ':'` to avoid feeding a v6 address to iptables.
+// `iptables -C` (check) is intentionally NOT used to dedupe — duplicate
+// ACCEPT rules are harmless (still first-match-wins), and the check
+// flag's exit code is hard to reason about under `set -e`.
+//
+// The user-supplied allowlist (TYPECLAW_NETWORK_ALLOW) is splat on
+// commas. Each entry is fed directly to iptables -d, which accepts both
+// bare IPs and CIDR notation. Validation already happened in config.ts at
+// parse time, so the shim trusts the env. Empty env → loop body never
+// runs, zero ACCEPT rules added.
 export function buildEntrypointShim(): string {
   const ipv4Rules = NETWORK_BLOCK_IPV4_NETS.map(
     (net) => `iptables -A OUTPUT -d ${net} -j REJECT --reject-with icmp-port-unreachable`,
@@ -161,6 +199,26 @@ if [ -n "\${hostd_port:-}" ]; then
   if [ -n "\${host_gw_ip:-}" ]; then
     iptables -A OUTPUT -p tcp -d "$host_gw_ip" --dport "$hostd_port" -j ACCEPT
   fi
+fi
+
+# Resolver carve-out: parse /etc/resolv.conf nameservers and ACCEPT
+# udp+tcp dport 53 to each. Gated on TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS=1.
+if [ "\${TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS:-0}" = "1" ] && [ -r /etc/resolv.conf ]; then
+  for ns in $(awk '/^[[:space:]]*nameserver[[:space:]]+/{print $2}' /etc/resolv.conf | grep -v ':' || true); do
+    iptables -A OUTPUT -p udp -d "$ns" --dport 53 -j ACCEPT
+    iptables -A OUTPUT -p tcp -d "$ns" --dport 53 -j ACCEPT
+  done
+fi
+
+# User-supplied allowlist carve-out: comma-separated CIDRs/IPs from
+# TYPECLAW_NETWORK_ALLOW. Already validated at config-parse time.
+if [ -n "\${TYPECLAW_NETWORK_ALLOW:-}" ]; then
+  IFS=','
+  for cidr in $TYPECLAW_NETWORK_ALLOW; do
+    [ -z "$cidr" ] && continue
+    iptables -A OUTPUT -d "$cidr" -j ACCEPT
+  done
+  unset IFS
 fi
 ${ipv4Rules.join('\n')}
 

@@ -486,4 +486,61 @@ describe('network egress entrypoint shim', () => {
     expect(base).toContain(encoded)
     expect(base).toContain(TYPECLAW_ENTRYPOINT_PATH)
   })
+
+  test('resolver carve-out is gated on TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS=1 (default-on via container env, opt-out by setting to 0)', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('"${TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS:-0}" = "1"')
+  })
+
+  test('resolver carve-out reads /etc/resolv.conf and ACCEPTs udp+tcp dport 53 to each nameserver (fixes EC2 VPC DNS at 10.0.0.2)', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('/etc/resolv.conf')
+    expect(shim).toContain("awk '/^[[:space:]]*nameserver[[:space:]]+/{print $2}'")
+    expect(shim).toContain('iptables -A OUTPUT -p udp -d "$ns" --dport 53 -j ACCEPT')
+    expect(shim).toContain('iptables -A OUTPUT -p tcp -d "$ns" --dport 53 -j ACCEPT')
+  })
+
+  test('resolver carve-out filters IPv6 nameservers via grep -v : so iptables never sees a v6 address', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toMatch(/grep -v ':'/)
+  })
+
+  test('resolver carve-out is guarded by -r /etc/resolv.conf so a missing file fails open (not a crash under set -e)', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('[ -r /etc/resolv.conf ]')
+  })
+
+  test('user-supplied allow list is driven by TYPECLAW_NETWORK_ALLOW (comma-separated)', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('"${TYPECLAW_NETWORK_ALLOW:-}"')
+    expect(shim).toContain("IFS=','")
+    expect(shim).toContain('iptables -A OUTPUT -d "$cidr" -j ACCEPT')
+  })
+
+  test('ACCEPT carve-outs are written BEFORE the REJECT block list (first-match-wins on OUTPUT)', () => {
+    const shim = buildEntrypointShim()
+    const resolverIdx = shim.indexOf('--dport 53 -j ACCEPT')
+    const allowIdx = shim.indexOf('iptables -A OUTPUT -d "$cidr" -j ACCEPT')
+    const firstRejectIdx = shim.indexOf('-j REJECT --reject-with icmp-port-unreachable')
+
+    expect(resolverIdx).toBeGreaterThan(-1)
+    expect(allowIdx).toBeGreaterThan(-1)
+    expect(firstRejectIdx).toBeGreaterThan(-1)
+    expect(resolverIdx).toBeLessThan(firstRejectIdx)
+    expect(allowIdx).toBeLessThan(firstRejectIdx)
+  })
+
+  test('resolver carve-out also runs in the on-branch only, never in the off path', () => {
+    const shim = buildEntrypointShim()
+    const offBranchEnd = shim.indexOf('fi\n', shim.indexOf('!= "1"'))
+    const offBranch = shim.slice(0, offBranchEnd)
+    expect(offBranch).not.toContain('TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS')
+    expect(offBranch).not.toContain('TYPECLAW_NETWORK_ALLOW')
+    expect(offBranch).not.toContain('/etc/resolv.conf')
+  })
+
+  test('allow loop unsets IFS after splitting so subsequent commands see a clean environment', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('unset IFS')
+  })
 })

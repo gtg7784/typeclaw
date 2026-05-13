@@ -57,7 +57,7 @@ type ScaffoldedConfig = {
     tmux?: boolean | string
   }
   gitignore?: { append?: string[] }
-  network?: { blockInternal?: boolean }
+  network?: { blockInternal?: boolean; autoAllowResolvers?: boolean; allow?: string[] }
 }
 
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
@@ -472,6 +472,76 @@ describe('planStart network egress filter', () => {
     expect(capIdx).toBeGreaterThan(-1)
     expect(imageIdx).toBeGreaterThan(-1)
     expect(capIdx).toBeLessThan(imageIdx)
+  })
+
+  test('sets TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS=1 by default (auto-carve resolv.conf nameservers, fixes EC2 VPC DNS)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).toContain('TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS=1')
+  })
+
+  test('sets TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS=0 when autoAllowResolvers is explicitly false (closed filter)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { network: { blockInternal: true, autoAllowResolvers: false } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).toContain('TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS=0')
+    expect(plan.runArgs).not.toContain('TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS=1')
+  })
+
+  test('omits TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS entirely when blockInternal is false (off-path skips all resolver logic)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { network: { blockInternal: false } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs.filter((a) => a.includes('TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS'))).toHaveLength(0)
+  })
+
+  test('joins network.allow entries into a single comma-separated TYPECLAW_NETWORK_ALLOW env (matches shim IFS=, loop)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, {
+      network: { blockInternal: true, allow: ['10.210.0.0/16', '10.211.1.42'] },
+    })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).toContain('TYPECLAW_NETWORK_ALLOW=10.210.0.0/16,10.211.1.42')
+  })
+
+  test('omits TYPECLAW_NETWORK_ALLOW when network.allow is empty (no env clutter for the common case)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { network: { blockInternal: true, allow: [] } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs.filter((a) => a.startsWith('TYPECLAW_NETWORK_ALLOW='))).toHaveLength(0)
+  })
+
+  test('omits TYPECLAW_NETWORK_ALLOW even when entries are set if blockInternal is false (off-path consistency)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { network: { blockInternal: false, allow: ['10.0.0.0/8'] } })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs.filter((a) => a.startsWith('TYPECLAW_NETWORK_ALLOW='))).toHaveLength(0)
+  })
+
+  test('rejects invalid CIDRs in network.allow at config parse time (fail-fast on typos)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeTypeclawConfig(root, { network: { blockInternal: true, allow: ['not-a-cidr'] } })
+
+    await expect(planStart({ cwd: root, hostPort: 8973, imageExists: true })).rejects.toThrow()
   })
 })
 

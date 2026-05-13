@@ -141,24 +141,26 @@ describe('portForwardSchema', () => {
 })
 
 describe('networkSchema', () => {
-  test('defaults to blockInternal:true when omitted (egress filter on for every agent unless opted out)', () => {
+  const FULL_DEFAULTS = { blockInternal: true, autoAllowResolvers: true, allow: [] as string[] }
+
+  test('defaults to blockInternal:true, autoAllowResolvers:true, allow:[] when omitted (egress filter on for every agent unless opted out)', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL })
-    expect(parsed.network).toEqual({ blockInternal: true })
+    expect(parsed.network).toEqual(FULL_DEFAULTS)
   })
 
-  test('accepts an empty network object, inheriting the true default', () => {
+  test('accepts an empty network object, inheriting all field defaults', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL, network: {} })
-    expect(parsed.network).toEqual({ blockInternal: true })
+    expect(parsed.network).toEqual(FULL_DEFAULTS)
   })
 
   test('preserves blockInternal:false when explicitly opted out', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL, network: { blockInternal: false } })
-    expect(parsed.network).toEqual({ blockInternal: false })
+    expect(parsed.network.blockInternal).toBe(false)
   })
 
   test('preserves blockInternal:true when explicitly set (redundant with default, but harmless)', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL, network: { blockInternal: true } })
-    expect(parsed.network).toEqual({ blockInternal: true })
+    expect(parsed.network.blockInternal).toBe(true)
   })
 
   test('rejects non-boolean blockInternal', () => {
@@ -166,10 +168,55 @@ describe('networkSchema', () => {
     expect(() => configSchema.parse({ model: VALID_MODEL, network: { blockInternal: 1 } })).toThrow()
   })
 
+  test('preserves autoAllowResolvers:false when explicitly opted out (closed filter for users who configure DNS via .env)', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, network: { autoAllowResolvers: false } })
+    expect(parsed.network.autoAllowResolvers).toBe(false)
+  })
+
+  test('rejects non-boolean autoAllowResolvers', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { autoAllowResolvers: 'yes' } })).toThrow()
+  })
+
+  test('accepts bare IPv4 addresses in allow (single-host carve-out: AWS VPC DNS at 10.0.0.2, internal API server, etc.)', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, network: { allow: ['10.0.0.2', '10.210.1.42'] } })
+    expect(parsed.network.allow).toEqual(['10.0.0.2', '10.210.1.42'])
+  })
+
+  test('accepts IPv4 CIDR ranges in allow (VPC subnet, ECS task subnet, etc.)', () => {
+    const parsed = configSchema.parse({
+      model: VALID_MODEL,
+      network: { allow: ['10.210.0.0/16', '172.20.0.0/24', '192.168.42.0/28'] },
+    })
+    expect(parsed.network.allow).toEqual(['10.210.0.0/16', '172.20.0.0/24', '192.168.42.0/28'])
+  })
+
+  test('rejects non-IPv4 strings in allow (bare hostname, garbage, etc.)', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['not-a-cidr'] } })).toThrow()
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['example.com'] } })).toThrow()
+  })
+
+  test('rejects out-of-range IPv4 octets in allow (typo guard)', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['10.0.0.300'] } })).toThrow()
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['999.0.0.0/8'] } })).toThrow()
+  })
+
+  test('rejects out-of-range CIDR prefix lengths in allow', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['10.0.0.0/33'] } })).toThrow()
+  })
+
+  test('rejects IPv6 addresses in allow (scope is IPv4-only; IPv6 block list is not punched through)', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['fe80::1'] } })).toThrow()
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['fc00::/7'] } })).toThrow()
+  })
+
+  test('rejects non-array allow', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: '10.0.0.0/8' } })).toThrow()
+  })
+
   test('does not leak into the plugin config map', () => {
     const plugins = extractPluginConfigs({
       model: VALID_MODEL,
-      network: { blockInternal: true },
+      network: { blockInternal: true, autoAllowResolvers: true, allow: [] },
       'my-plugin': { x: 1 },
     })
     expect('network' in plugins).toBe(false)
