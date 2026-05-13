@@ -4,11 +4,31 @@ export type ReloadResultPayload =
 
 export type PromptDelivery = 'queue' | 'steer' | 'interrupt'
 
+export type DoctorRequestId = string
+
+export type DoctorCheckPayload = {
+  id: string
+  pluginName: string
+  checkName: string
+  description: string
+  category: string
+  status: 'ok' | 'warning' | 'error'
+  message: string
+  details?: string[]
+  fix?: { description: string; hasApply: boolean }
+}
+
+export type DoctorFixPayload =
+  | { ok: true; checkId: string; summary: string; changedPaths: string[] }
+  | { ok: false; checkId: string; error: string }
+
 export type ClientMessage =
   | { type: 'prompt'; text: string; delivery?: PromptDelivery }
   | { type: 'reload'; scope?: string }
   | { type: 'abort' }
   | { type: 'queue_cancel'; messageId: string }
+  | { type: 'doctor'; requestId: DoctorRequestId }
+  | { type: 'doctor_fix'; requestId: DoctorRequestId; checkId: string }
 
 export type QueueStateItem = { id: string; text: string; ts: number }
 
@@ -23,3 +43,5 @@ export type ServerMessage =
   | { type: 'notification'; payload: unknown; replyTo?: string; meta?: Record<string, string> }
   | { type: 'queue_state'; pending: QueueStateItem[] }
   | { type: 'prompt_started'; messageId: string; text: string }
+  | { type: 'doctor_result'; requestId: DoctorRequestId; checks: DoctorCheckPayload[] }
+  | { type: 'doctor_fix_result'; requestId: DoctorRequestId; result: DoctorFixPayload }

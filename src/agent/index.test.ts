@@ -153,6 +153,7 @@ describe('createResourceLoader', () => {
           path: join(import.meta.dir, '..', 'bundled-plugins', 'agent-browser', 'skills'),
         },
       ],
+      doctorChecks: [],
     }
 
     const loader = await createResourceLoader({
@@ -275,6 +276,7 @@ describe('createResourceLoader', () => {
       cronJobs: [],
       skills: [],
       skillsDirs: [],
+      doctorChecks: [],
     }
 
     // when
@@ -307,6 +309,7 @@ describe('createResourceLoader', () => {
       cronJobs: [],
       skills: [],
       skillsDirs: [],
+      doctorChecks: [],
     }
     const origin: SessionOrigin = {
       kind: 'channel',

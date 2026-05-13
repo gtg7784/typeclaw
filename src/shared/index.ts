@@ -1,5 +1,8 @@
 export {
   type ClientMessage,
+  type DoctorCheckPayload,
+  type DoctorFixPayload,
+  type DoctorRequestId,
   type PromptDelivery,
   type QueueStateItem,
   type ReloadResultPayload,

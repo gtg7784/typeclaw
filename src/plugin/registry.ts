@@ -3,13 +3,28 @@ import { existsSync } from 'node:fs'
 import type { CronJob, PromptJob } from '@/cron'
 
 import type { HookBus } from './hooks'
-import type { PluginCronJob, PluginExports, PluginLogger, PluginSkill, Subagent, Tool } from './types'
+import type {
+  PluginCronJob,
+  PluginDoctorCheck,
+  PluginExports,
+  PluginLogger,
+  PluginSkill,
+  Subagent,
+  Tool,
+} from './types'
 
 export type RegisteredTool = { pluginName: string; toolName: string; tool: Tool<any>; logger: PluginLogger }
 export type RegisteredSubagent = { pluginName: string; subagentName: string; subagent: Subagent<any> }
 export type RegisteredCronJob = { pluginName: string; localId: string; globalId: string; job: CronJob }
 export type RegisteredSkillEntry = { pluginName: string; localName: string; skill: PluginSkill }
 export type RegisteredSkillDir = { pluginName: string; path: string }
+export type RegisteredDoctorCheck = {
+  pluginName: string
+  checkName: string
+  pluginConfig: unknown
+  logger: PluginLogger
+  check: PluginDoctorCheck
+}
 
 export type PluginRegistry = {
   tools: RegisteredTool[]
@@ -17,6 +32,7 @@ export type PluginRegistry = {
   cronJobs: RegisteredCronJob[]
   skills: RegisteredSkillEntry[]
   skillsDirs: RegisteredSkillDir[]
+  doctorChecks: RegisteredDoctorCheck[]
 }
 
 export type RegisterContributionsOptions = {
@@ -26,6 +42,7 @@ export type RegisterContributionsOptions = {
   registry: PluginRegistry
   hooks: HookBus
   agentDir: string
+  pluginConfig: unknown
 }
 
 export function buildPluginCronGlobalId(pluginName: string, localId: string): string {
@@ -33,7 +50,7 @@ export function buildPluginCronGlobalId(pluginName: string, localId: string): st
 }
 
 export function registerContributions(opts: RegisterContributionsOptions): void {
-  const { pluginName, logger, exports: ex, registry, hooks, agentDir } = opts
+  const { pluginName, logger, exports: ex, registry, hooks, agentDir, pluginConfig } = opts
 
   if (ex.tools) {
     for (const [toolName, tool] of Object.entries(ex.tools)) {
@@ -99,6 +116,17 @@ export function registerContributions(opts: RegisterContributionsOptions): void 
   if (ex.hooks) {
     hooks.registerAll(pluginName, agentDir, logger, ex.hooks)
   }
+
+  if (ex.doctorChecks) {
+    for (const [checkName, check] of Object.entries(ex.doctorChecks)) {
+      assertNotEmpty('doctor check name', checkName, pluginName)
+      const conflict = registry.doctorChecks.find((c) => c.pluginName === pluginName && c.checkName === checkName)
+      if (conflict) {
+        throw new Error(`plugin ${pluginName}: doctor check "${checkName}" already registered`)
+      }
+      registry.doctorChecks.push({ pluginName, checkName, pluginConfig, logger, check })
+    }
+  }
 }
 
 export function discardRegistrationsBy(pluginName: string, registry: PluginRegistry, hooks: HookBus): void {
@@ -107,11 +135,12 @@ export function discardRegistrationsBy(pluginName: string, registry: PluginRegis
   registry.cronJobs = registry.cronJobs.filter((j) => j.pluginName !== pluginName)
   registry.skills = registry.skills.filter((s) => s.pluginName !== pluginName)
   registry.skillsDirs = registry.skillsDirs.filter((d) => d.pluginName !== pluginName)
+  registry.doctorChecks = registry.doctorChecks.filter((d) => d.pluginName !== pluginName)
   hooks.unregisterAll(pluginName)
 }
 
 export function emptyRegistry(): PluginRegistry {
-  return { tools: [], subagents: [], cronJobs: [], skills: [], skillsDirs: [] }
+  return { tools: [], subagents: [], cronJobs: [], skills: [], skillsDirs: [], doctorChecks: [] }
 }
 
 function assertNotEmpty(kind: string, value: string, pluginName: string): void {

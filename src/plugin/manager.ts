@@ -93,6 +93,7 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
         registry,
         hooks,
         agentDir: opts.agentDir,
+        pluginConfig: validatedConfig,
       })
     } catch (err) {
       discardRegistrationsBy(resolved.name, registry, hooks)
@@ -123,6 +124,7 @@ export function summarizeLoaded(loaded: LoadPluginsResult['loadedPlugins'], regi
     `${registry.cronJobs.length} cron job(s)`,
     `${registry.skills.length} skill(s)`,
     `${registry.skillsDirs.length} skills dir(s)`,
+    `${registry.doctorChecks.length} doctor check(s)`,
   ].join(', ')
   return `${loaded.length} plugin(s): ${head} [${counts}]`
 }

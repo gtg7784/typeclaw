@@ -1,4 +1,6 @@
-import { stat } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { access, constants as fsConstants, mkdir, stat, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 
 import { CronExpressionParser } from 'cron-parser'
 import { z } from 'zod'
@@ -210,6 +212,45 @@ export default definePlugin({
           await fireMemoryLogger(event.sessionId, 'session-end')
           lastIdleEvent.delete(event.sessionId)
           bytesAtLastRun.delete(event.sessionId)
+        },
+      },
+      doctorChecks: {
+        'dir-writable': {
+          description: 'memory/ exists and is writable',
+          run: async (dctx) => {
+            const dir = join(dctx.agentDir, 'memory')
+            try {
+              await access(dir, fsConstants.W_OK)
+              return { status: 'ok', message: `${dir} writable` }
+            } catch {
+              return {
+                status: 'error',
+                message: `${dir} is missing or not writable`,
+                fix: { description: 'Create memory/ in the agent folder or fix its permissions on the host.' },
+              }
+            }
+          },
+        },
+        'daily-stream-current': {
+          description: "today's daily stream file exists",
+          run: async (dctx) => {
+            const today = new Date().toISOString().slice(0, 10)
+            const rel = `memory/${today}.md`
+            const abs = join(dctx.agentDir, rel)
+            if (existsSync(abs)) return { status: 'ok', message: `${rel} present` }
+            return {
+              status: 'warning',
+              message: `${rel} missing`,
+              fix: {
+                description: `Create empty ${rel} so memory-logger has a target.`,
+                apply: async () => {
+                  await mkdir(dirname(abs), { recursive: true })
+                  await writeFile(abs, '', 'utf8')
+                  return { summary: `created ${rel}`, changedPaths: [rel] }
+                },
+              },
+            }
+          },
         },
       },
     }
