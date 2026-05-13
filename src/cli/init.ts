@@ -275,6 +275,7 @@ export const init = defineCommand({
         cwd,
         llmAuth,
         model: selectedModel.ref,
+        cliEntry: process.argv[1],
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
         ...(telegramBotToken !== undefined ? { telegramBotToken } : {}),
