@@ -3,6 +3,7 @@ import backupPlugin from '@/bundled-plugins/backup'
 import guardPlugin from '@/bundled-plugins/guard'
 import memoryPlugin from '@/bundled-plugins/memory'
 import securityPlugin from '@/bundled-plugins/security'
+import toolResultCapPlugin from '@/bundled-plugins/tool-result-cap'
 import type { ResolvedPlugin } from '@/plugin'
 
 // Consumed by both `startAgent` (auto-loaded before user plugins) AND
@@ -18,6 +19,11 @@ import type { ResolvedPlugin } from '@/plugin'
 // guard disjoint surfaces, but seeding the order now means future overlap
 // (e.g. a security policy on writes) blocks before guard's softer advice.
 //
+// `tool-result-cap` is registered before `guard` so guard's `tool.after`
+// advice (uncommitted-changes warning) appends to already-capped content.
+// Reversing this order would make guard advise on the full oversized payload
+// and then tool-result-cap would clobber the advice text along with the rest.
+//
 // `memory` is registered before `backup` so memory's dreaming commits always
 // land in the same git index window before backup's commit-and-push cycle.
 // They commit disjoint paths today (memory/ vs sessions/ + agent changes),
@@ -25,6 +31,7 @@ import type { ResolvedPlugin } from '@/plugin'
 // contention easier to reason about.
 export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'security', version: undefined, source: '<bundled>', defined: securityPlugin },
+  { name: 'tool-result-cap', version: undefined, source: '<bundled>', defined: toolResultCapPlugin },
   { name: 'guard', version: undefined, source: '<bundled>', defined: guardPlugin },
   { name: 'memory', version: undefined, source: '<bundled>', defined: memoryPlugin },
   { name: 'backup', version: undefined, source: '<bundled>', defined: backupPlugin },
