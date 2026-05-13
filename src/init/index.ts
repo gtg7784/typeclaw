@@ -235,17 +235,33 @@ export async function runInit({
   emit({ step: 'hatching', phase: 'done', result: hatching })
 }
 
-async function defaultRunHatching({
+// Exported for the composition test in index.test.ts: the seam that the
+// hatching-hostd fix turns on (passing `cliEntry` into `start()`) is the bug
+// site itself, so a guard test that proves `defaultRunHatching` forwards
+// `cliEntry` to `start()` is what blocks the regression from coming back.
+// Tests inject `startContainer` and `tui` to avoid Docker / TUI side effects;
+// production callers omit both and get the real `start` + `createTui`.
+export async function defaultRunHatching({
   cwd,
   port,
   cliEntry,
+  startContainer = start,
+  tui: tuiFactory = createTui,
+  waitForAgent: waitForAgentFn = waitForAgent,
 }: {
   cwd: string
   port: number
   cliEntry?: string
+  startContainer?: typeof start
+  tui?: typeof createTui
+  waitForAgent?: typeof waitForAgent
 }): Promise<HatchingResult> {
   try {
-    const launch = await start({ cwd, preferredHostPort: port, ...(cliEntry !== undefined ? { cliEntry } : {}) })
+    const launch = await startContainer({
+      cwd,
+      preferredHostPort: port,
+      ...(cliEntry !== undefined ? { cliEntry } : {}),
+    })
     if (!launch.ok) return { ok: false, reason: launch.reason }
 
     // start() may have allocated a different host port (the preferred one was
@@ -253,9 +269,9 @@ async function defaultRunHatching({
     // the preferred port, otherwise we'd connect to the wrong service.
     const hostPort = launch.hostPort
 
-    await waitForAgent(`http://localhost:${hostPort}`, { timeoutMs: 30_000 })
+    await waitForAgentFn(`http://localhost:${hostPort}`, { timeoutMs: 30_000 })
 
-    const tui = createTui({
+    const tui = tuiFactory({
       url: `ws://localhost:${hostPort}`,
       initialPrompt: HATCHING_PROMPT,
     })

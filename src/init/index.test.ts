@@ -13,6 +13,7 @@ import type { DockerExec } from '@/container'
 import { buildDockerfile } from './dockerfile'
 import { buildGitignore } from './gitignore'
 import {
+  defaultRunHatching,
   findAgentDir,
   type HatchingResult,
   type HatchRunner,
@@ -1286,5 +1287,95 @@ describe('writeSecrets', () => {
 
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_test\n')
     expect(existsSync(join(root, 'secrets.json'))).toBe(false)
+  })
+})
+
+// Guards the exact bug site of the hatching-hostd fix: that the default
+// hatching implementation forwards `cliEntry` into `start()`. The runInit
+// pipeline tests above stop at `runInit -> runHatching` (their fake
+// runHatching captures call args but never reaches start()), so without
+// these, a future contributor could drop `cliEntry` from defaultRunHatching's
+// start() call and the suite would stay green.
+describe('defaultRunHatching', () => {
+  type StartCall = Parameters<typeof import('@/container').start>[0]
+
+  function fakeStart(): { fn: typeof import('@/container').start; calls: StartCall[] } {
+    const calls: StartCall[] = []
+    const fn: typeof import('@/container').start = async (options) => {
+      calls.push(options)
+      return {
+        ok: true,
+        plan: {
+          containerName: 'fake',
+          imageTag: 'fake:latest',
+          buildContext: options.cwd,
+          dockerfile: 'Dockerfile',
+          runArgs: [],
+          needsBuild: false,
+          hostPort: 19173,
+        },
+        containerId: 'fake-id',
+        built: false,
+        hostPort: 19173,
+        hostd: { state: 'disabled' },
+        alreadyRunning: false,
+        autoUpgrade: { kind: 'skipped-already-running' },
+      }
+    }
+    return { fn, calls }
+  }
+
+  // Bypass real Docker / TUI / HTTP probes — defaultRunHatching's behavior we
+  // care about is "did it pass cliEntry through to start()", and the rest of
+  // the function (waitForAgent + TUI) just needs to not blow up.
+  const fakeTui: typeof import('@/tui').createTui = () =>
+    ({ run: async () => {} }) as ReturnType<typeof import('@/tui').createTui>
+  const fakeWaitForAgent = async () => {}
+
+  test('forwards cliEntry to start() when provided', async () => {
+    const { fn, calls } = fakeStart()
+
+    const result = await defaultRunHatching({
+      cwd: '/agent',
+      port: 8973,
+      cliEntry: '/fake/cli/entry.ts',
+      startContainer: fn,
+      tui: fakeTui,
+      waitForAgent: fakeWaitForAgent,
+    })
+
+    expect(result).toEqual({ ok: true })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.cliEntry).toBe('/fake/cli/entry.ts')
+  })
+
+  test('omits cliEntry from start() when not provided', async () => {
+    const { fn, calls } = fakeStart()
+
+    await defaultRunHatching({
+      cwd: '/agent',
+      port: 8973,
+      startContainer: fn,
+      tui: fakeTui,
+      waitForAgent: fakeWaitForAgent,
+    })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.cliEntry).toBeUndefined()
+  })
+
+  test('propagates start() failure as a hatching failure', async () => {
+    const failingStart: typeof import('@/container').start = async () => ({ ok: false, reason: 'docker not running' })
+
+    const result = await defaultRunHatching({
+      cwd: '/agent',
+      port: 8973,
+      cliEntry: '/fake/cli/entry.ts',
+      startContainer: failingStart,
+      tui: fakeTui,
+      waitForAgent: fakeWaitForAgent,
+    })
+
+    expect(result).toEqual({ ok: false, reason: 'docker not running' })
   })
 })
