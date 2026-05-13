@@ -25,6 +25,7 @@ import {
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
 import { createContainerBroker, publishForwardResult } from '@/portbroker'
 import { ReloadRegistry } from '@/reload'
+import { hydrateChannelEnvFromSecrets, promoteChannelEnvIntoSecrets } from '@/secrets'
 import { createServer, type Server } from '@/server'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
@@ -118,6 +119,19 @@ export async function startAgent({
     loadedPlugins: pluginsLoaded.loadedPlugins,
     materializedSkills: null,
   })
+
+  // secrets.json#channels is the source of truth for adapter tokens. Two
+  // boot-time passes keep the agent working across the .env→secrets.json
+  // migration:
+  //   1. promote any legacy `*_BOT_TOKEN` values from `process.env` (set via
+  //      docker --env-file .env on older agent folders) into secrets.json#channels.
+  //   2. hydrate process.env from secrets.json#channels for any keys that
+  //      aren't already set, then strip the corresponding .env lines.
+  // After both passes secrets.json carries the canonical values; channel
+  // adapters still read `process.env`, unchanged. See
+  // `src/secrets/migrate-channel-env.ts` and `src/secrets/hydrate.ts`.
+  promoteChannelEnvIntoSecrets({ agentDir: cwd })
+  hydrateChannelEnvFromSecrets({ agentDir: cwd })
 
   const channelManager = createChannelManager({
     agentDir: cwd,

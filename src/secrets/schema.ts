@@ -26,10 +26,26 @@ export const llmCredentialSchema = z.discriminatedUnion('type', [llmApiKeyCreden
 // Exactly the shape pi-coding-agent persists today as the entire secrets file.
 export const llmCredentialsSchema = z.record(z.string(), llmCredentialSchema)
 
-// Empty channels schema today; channel adapter tokens (Slack/Discord/Telegram)
-// will move here in a follow-up plan. The catchall keeps forward compatibility
-// when a future TypeClaw reads a file written by an even-newer TypeClaw.
-export const channelsSchema = z.object({}).catchall(z.unknown())
+// Each adapter's slot is a flat map of env-var name -> secret value. The
+// runtime hydrates `process.env` from this map at boot (see
+// `hydrateChannelEnvFromSecrets` in `src/secrets/hydrate.ts`), so adding a new
+// secret env var to an adapter requires no schema change here — the catchall
+// on the value type accepts arbitrary keys. The OUTER catchall (`z.record`
+// catchall) keeps forward compatibility when a future TypeClaw writes
+// additional adapter ids the current version doesn't know about.
+//
+// Why a string→string map and not a typed `{ token, appToken }` shape per
+// adapter: the on-disk file mirrors the env-var contract the manager already
+// honors (TOKEN_ENV in `src/channels/manager.ts`). Keeping the shape
+// schema-mirrored to env keys means the manager doesn't need a per-adapter
+// translation layer — hydration is `for (const [k, v] of entries) env[k] = v`.
+const channelTokenMapSchema = z.record(z.string(), z.string())
+
+const knownAdapterIds = ['discord-bot', 'slack-bot', 'telegram-bot'] as const
+
+export const channelsSchema = z
+  .object(Object.fromEntries(knownAdapterIds.map((id) => [id, channelTokenMapSchema.optional()])))
+  .catchall(z.unknown())
 
 export const secretsFileSchema = z.object({
   $schema: z.string().optional(),

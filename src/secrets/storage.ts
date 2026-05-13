@@ -110,6 +110,41 @@ export class SecretsBackend implements AuthStorageBackend {
     }
   }
 
+  // Read the channels slice without going through the AuthStorage wrapper.
+  // The wrapper is hard-coded to the `llm` slice; channels are TypeClaw's
+  // own concern and need their own seam. Lock is acquired in the same way as
+  // the llm path so concurrent llm writes (login, api-key promotion) don't
+  // race with a channels read.
+  readChannelsSync(): Record<string, unknown> {
+    this.ensureParentDir()
+    this.ensureFileExists()
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      return this.readEnvelope().channels as Record<string, unknown>
+    } finally {
+      release?.()
+    }
+  }
+
+  writeChannelsSync(next: Record<string, unknown>): void {
+    this.ensureParentDir()
+    this.ensureFileExists()
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      const envelope = this.readEnvelope()
+      const merged: SecretsFile = {
+        ...envelope,
+        $schema: envelope.$schema ?? SCHEMA_REL,
+        channels: next as SecretsFile['channels'],
+      }
+      this.writeEnvelopeAtomic(merged)
+    } finally {
+      release?.()
+    }
+  }
+
   private ensureParentDir(): void {
     const dir = dirname(this.secretsPath)
     if (!existsSync(dir)) {

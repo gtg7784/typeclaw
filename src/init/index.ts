@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 import { config, configSchema, type Config } from '@/config'
 import { DEFAULT_MODEL_REF, KNOWN_PROVIDERS, providerForModelRef, type KnownModelRef } from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
+import { SecretsBackend } from '@/secrets'
 import { createTui } from '@/tui'
 
 import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
@@ -516,10 +517,16 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
   }
 }
 
-// Writes the LLM provider's API key (under its provider-specific env var,
-// e.g. OPENAI_API_KEY or FIREWORKS_API_KEY) plus any channel adapter tokens.
-// The provider env var is resolved from KNOWN_PROVIDERS via the model ref,
-// so adding a new provider only requires touching providers.ts.
+// Writes the LLM provider's API key to `.env` (under its provider-specific
+// env var, e.g. OPENAI_API_KEY or FIREWORKS_API_KEY) and the channel adapter
+// tokens to `secrets.json#channels`. Two stores on purpose: the api-key flows
+// through .env to keep parity with the existing `--env-file .env` boot
+// contract (the runtime promotes it into secrets.json on first read, see
+// `src/agent/auth.ts`); channel tokens skip the .env hop entirely and land
+// in secrets.json directly because that's the only file the runtime needs to
+// see (it hydrates process.env from there at boot, see
+// `src/secrets/hydrate.ts`). Keeps secrets.json as the on-disk source of
+// truth for adapter credentials from day one.
 export async function writeSecrets(
   root: string,
   {
@@ -531,8 +538,9 @@ export async function writeSecrets(
     telegramBotToken,
   }: {
     model?: KnownModelRef
-    // Omitted on the OAuth path — credentials live in secrets.json instead. The
-    // .env file still gets written for any channel adapter tokens.
+    // Omitted on the OAuth path — credentials live in secrets.json instead.
+    // The .env file still gets written (empty) so post-init callers that
+    // read it don't ENOENT-crash.
     apiKey?: string
     discordBotToken?: string
     slackBotToken?: string
@@ -546,22 +554,40 @@ export async function writeSecrets(
   if (apiKey !== undefined && apiKeyEnv !== null) {
     lines.push(`${apiKeyEnv}=${apiKey}`)
   }
-  if (discordBotToken !== undefined && discordBotToken !== '') {
-    lines.push(`DISCORD_BOT_TOKEN=${discordBotToken}`)
-  }
-  if (slackBotToken !== undefined && slackBotToken !== '') {
-    lines.push(`SLACK_BOT_TOKEN=${slackBotToken}`)
-  }
-  if (slackAppToken !== undefined && slackAppToken !== '') {
-    lines.push(`SLACK_APP_TOKEN=${slackAppToken}`)
-  }
-  if (telegramBotToken !== undefined && telegramBotToken !== '') {
-    lines.push(`TELEGRAM_BOT_TOKEN=${telegramBotToken}`)
-  }
-  // Always write .env even when empty so existing callers that read it
-  // post-init (channel `add`, runtime startup) don't ENOENT-crash.
   const body = lines.length > 0 ? `${lines.join('\n')}\n` : ''
   await writeFile(join(root, SECRETS_FILE), body)
+
+  const channelTokens: Record<string, Record<string, string>> = {}
+  if (discordBotToken !== undefined && discordBotToken !== '') {
+    channelTokens['discord-bot'] = { DISCORD_BOT_TOKEN: discordBotToken }
+  }
+  if (slackBotToken !== undefined && slackBotToken !== '') {
+    channelTokens['slack-bot'] = { ...channelTokens['slack-bot'], SLACK_BOT_TOKEN: slackBotToken }
+  }
+  if (slackAppToken !== undefined && slackAppToken !== '') {
+    channelTokens['slack-bot'] = { ...channelTokens['slack-bot'], SLACK_APP_TOKEN: slackAppToken }
+  }
+  if (telegramBotToken !== undefined && telegramBotToken !== '') {
+    channelTokens['telegram-bot'] = { TELEGRAM_BOT_TOKEN: telegramBotToken }
+  }
+  if (Object.keys(channelTokens).length === 0) return
+
+  const backend = new SecretsBackend(join(root, 'secrets.json'))
+  const existing = backend.readChannelsSync()
+  for (const [adapterId, tokens] of Object.entries(channelTokens)) {
+    const slot = isStringRecord(existing[adapterId]) ? { ...(existing[adapterId] as Record<string, string>) } : {}
+    for (const [k, v] of Object.entries(tokens)) slot[k] = v
+    existing[adapterId] = slot
+  }
+  backend.writeChannelsSync(existing)
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  for (const v of Object.values(value)) {
+    if (typeof v !== 'string') return false
+  }
+  return true
 }
 
 function resolveLLMAuth(llmAuth: LLMAuth | undefined, apiKey: string | undefined): LLMAuth {
@@ -651,7 +677,10 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   emit({ step: 'config', phase: 'done' })
 
   emit({ step: 'secrets', phase: 'start' })
-  await appendChannelSecrets(options.cwd, channelSecretsFromOptions(options))
+  const tokens = channelSecretsFromOptions(options)
+  if (Object.keys(tokens).length > 0) {
+    await appendChannelSecrets(options.cwd, options.channel, tokens)
+  }
   emit({ step: 'secrets', phase: 'done' })
 }
 
@@ -672,7 +701,8 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
     case 'telegram-bot':
       return { TELEGRAM_BOT_TOKEN: options.telegramBotToken }
     case 'kakaotalk':
-      // Credentials live in workspace/.agent-messenger/, not .env.
+      // KakaoTalk credentials live in `workspace/.agent-messenger/`, written
+      // by the auth runner above. Nothing to record in secrets.json.
       return {}
   }
 }
@@ -741,56 +771,32 @@ function buildAllow(channel: ChannelKind, allowAll: boolean): string[] {
   return allowAll ? ['*'] : []
 }
 
-// Appends only keys that are not already present in .env. We never rewrite
-// existing values: if the user has `SLACK_BOT_TOKEN=` left over from a manual
-// edit, we surface that as a hard error rather than overwrite the user's
-// hand-rolled value.
-//
-// `.env` parsing is intentionally line-based and dumb (matching dotenv's
-// minimum surface): trim, skip blanks/comments, split on the first `=`. We do
-// not unquote values because we only check for key presence.
-async function appendChannelSecrets(cwd: string, secrets: ChannelSecrets): Promise<void> {
-  if (Object.keys(secrets).length === 0) return
+// Writes tokens into `secrets.json#channels.<adapter>`. Refuses to overwrite
+// existing keys: if the user already has `SLACK_BOT_TOKEN` recorded (from a
+// prior `channel add` whose follow-up steps failed, or a hand-edit), we
+// surface that as a hard error rather than silently displace it. Same trap
+// the old .env-append path guarded against, applied to the new destination.
+async function appendChannelSecrets(cwd: string, channel: ChannelKind, tokens: ChannelSecrets): Promise<void> {
+  if (Object.keys(tokens).length === 0) return
 
-  const path = join(cwd, SECRETS_FILE)
-  let existing: string
-  try {
-    existing = await readFile(path, 'utf8')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      throw new Error(
-        `${SECRETS_FILE} not found at ${cwd}. Run \`typeclaw init\` before adding channels, or run this command from inside an agent folder.`,
-      )
-    }
-    throw error
+  if (!existsSync(join(cwd, CONFIG_FILE))) {
+    throw new Error(
+      `${CONFIG_FILE} not found at ${cwd}. Run \`typeclaw init\` before adding channels, or run this command from inside an agent folder.`,
+    )
   }
 
-  const presentKeys = parseEnvKeys(existing)
-  for (const key of Object.keys(secrets)) {
-    if (presentKeys.has(key)) {
+  const backend = new SecretsBackend(join(cwd, 'secrets.json'))
+  const channels = backend.readChannelsSync()
+  const slot = isStringRecord(channels[channel]) ? { ...(channels[channel] as Record<string, string>) } : {}
+
+  for (const key of Object.keys(tokens)) {
+    if (slot[key] !== undefined) {
       throw new Error(
-        `${key} is already set in ${SECRETS_FILE}. Remove it before re-adding the channel, or edit the value by hand.`,
+        `${key} is already set in secrets.json under "${channel}". Remove it before re-adding the channel, or edit the value by hand.`,
       )
     }
   }
-
-  // Ensure exactly one trailing newline before our appended block so the
-  // resulting file remains POSIX-clean even if the user's editor stripped it.
-  const trailingNewline = existing.endsWith('\n') || existing === '' ? '' : '\n'
-  const appended = Object.entries(secrets)
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n')
-  await writeFile(path, `${existing}${trailingNewline}${appended}\n`)
-}
-
-function parseEnvKeys(content: string): Set<string> {
-  const keys = new Set<string>()
-  for (const rawLine of content.split('\n')) {
-    const line = rawLine.trim()
-    if (line === '' || line.startsWith('#')) continue
-    const eq = line.indexOf('=')
-    if (eq <= 0) continue
-    keys.add(line.slice(0, eq).trim())
-  }
-  return keys
+  for (const [k, v] of Object.entries(tokens)) slot[k] = v
+  channels[channel] = slot
+  backend.writeChannelsSync(channels)
 }
