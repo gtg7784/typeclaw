@@ -2,9 +2,12 @@
 
 import { defineCommand, runMain } from 'citty'
 
+import { CLI_VERSION } from '../init/cli-version'
+
 const main = defineCommand({
   meta: {
     name: 'typeclaw',
+    version: CLI_VERSION,
     description: 'TypeClaw agent runtime',
   },
   subCommands: {
