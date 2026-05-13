@@ -72,32 +72,41 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Ensure npm CLI supports OIDC trusted publishing
+        # npm trusted publishing requires npm ≥ 11.5.1. Node 24's bundled npm
+        # has been past that threshold since 24.5.0 (Aug 2025), but Node 24.0.x
+        # ships npm 11.3.0 — too old. Pinning to npm@latest sidesteps any
+        # future bundled-npm regression and is a no-op when the bundled
+        # version is already current. A 404 on `npm publish` is the failure
+        # mode this prevents (npm returns 404 when OIDC isn't supported by
+        # the CLI sending the request — confusingly identical to "package
+        # missing").
+        run: npm install -g npm@latest && npm --version
+
       - name: Bump version
         # TypeClaw publishes raw TS sources (no build step), and has no
         # .claude-plugin/plugin.json or skill `version:` frontmatter to sync —
         # package.json is the only place a version lives. `--allow-same-version`
-        # makes this idempotent across re-runs.
+        # makes this idempotent across re-runs. Mutates package.json in the
+        # runner only; the bumped value is pushed by `Commit and tag` after
+        # every downstream publish succeeds.
         run: npm version ${{ inputs.version }} --no-git-tag-version --allow-same-version
 
-      - name: Publish to npm
-        # Idempotency guard: if a previous run already published this version,
-        # treat the conflict as success so the rest of the workflow can repair
-        # whatever halted it (image push, git tag, GitHub Release). npm view
-        # returns the version string on success and exits non-zero when the
-        # package@version is missing — so a non-empty stdout means "already
-        # published, skip."
-        run: |
-          if [ -n "$(npm view typeclaw@${{ inputs.version }} version 2>/dev/null || true)" ]; then
-            echo "typeclaw@${{ inputs.version }} already published, skipping npm publish"
-          else
-            npm publish --provenance --access public
-          fi
+      # ─────────────── GHCR base image first, npm second ───────────────
+      # Order matters: a user who `npm install typeclaw@X.Y.Z` and runs
+      # `typeclaw start` writes a per-agent Dockerfile that does
+      # `FROM ghcr.io/typeclaw/typeclaw-base:X.Y.Z` (see src/init/dockerfile.ts).
+      # If `npm publish` ran before the GHCR push, there is a window where
+      # users can install a CLI version whose base image does not yet exist.
+      # Publishing the image first — and verifying it is pullable — closes
+      # that race. The npm publish below remains the cardinal irreversible
+      # step; everything before it must already be in place.
 
       - name: Generate base Dockerfile
         # Same source as base-image.yml (PR validation) — the published base
         # image is a function of src/init/dockerfile.ts at this commit,
-        # tagged with the CLI version so downstream consumers pin by
-        # `ghcr.io/typeclaw/typeclaw-base:${{ inputs.version }}`.
+        # tagged with the CLI version. The per-agent Dockerfile written by
+        # `typeclaw start` pins this exact tag.
         run: bun run scripts/emit-base-dockerfile.ts > base.Dockerfile
 
       - name: Show generated Dockerfile
@@ -123,7 +132,10 @@ jobs:
         # mapping as the single writer for version-named tags. Re-pushing
         # the same content to GHCR is idempotent (no immutability policy
         # exists on GHCR as of 2026, so the second push overwrites with
-        # identical layers and the tag points at the same digest).
+        # identical layers and the tag points at the same digest). Do NOT
+        # add a "skip if exists" guard here: partial-failure recovery
+        # (image pushed, npm publish failed) depends on a re-run re-pushing
+        # the same content so the verify step below has something to pull.
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -136,14 +148,61 @@ jobs:
           cache-from: type=registry,ref=ghcr.io/${{ github.repository_owner }}/typeclaw-base:cache
           cache-to: type=registry,ref=ghcr.io/${{ github.repository_owner }}/typeclaw-base:cache,mode=max
 
+      - name: Verify base image is anonymously pullable on both platforms
+        # The end-user contract is "an unauthenticated `docker pull` from a
+        # fresh machine resolves both linux/amd64 and linux/arm64 manifests."
+        # The login from the push step must be cleared first — otherwise a
+        # private package could pass verification on a credentialed runner
+        # and then fail on every user's first `typeclaw start`.
+        #
+        # Three checks, each closing a distinct failure mode:
+        #   (a) `imagetools inspect` confirms the manifest list and both
+        #       per-platform manifests exist as a single atomic record.
+        #   (b) `docker pull --platform linux/amd64` proves the amd64 layer
+        #       blobs are actually pullable, not just referenced.
+        #   (c) `docker pull --platform linux/arm64` does the same for arm64.
+        #
+        # No retries: `imagetools inspect` should be immediately consistent
+        # after `build-push-action` exits, and the pulls run from a fresh
+        # connection. If any step fails the image is not safe to release.
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/typeclaw-base:${{ inputs.version }}
+        run: |
+          docker logout ghcr.io
+          docker buildx imagetools inspect "$IMAGE"
+          docker pull --platform linux/amd64 "$IMAGE"
+          docker pull --platform linux/arm64 "$IMAGE"
+
+      - name: Publish to npm
+        # Cardinal irreversible step. npm enforces version immutability —
+        # once typeclaw@X.Y.Z is on the registry, that name is burned
+        # forever. By the time this step runs, the GHCR image at the same
+        # version tag has been pushed AND verified pullable, so any user
+        # who installs typeclaw@X.Y.Z within seconds of this step
+        # completing will succeed at `typeclaw start`.
+        #
+        # Idempotency guard: if a previous run already published this
+        # version, treat the conflict as success so the rest of the
+        # workflow can repair whatever halted it (git tag, GitHub Release).
+        # `npm view` returns the version string on success and exits
+        # non-zero when the package@version is missing — so a non-empty
+        # stdout means "already published, skip."
+        run: |
+          if [ -n "$(npm view typeclaw@${{ inputs.version }} version 2>/dev/null || true)" ]; then
+            echo "typeclaw@${{ inputs.version }} already published, skipping npm publish"
+          else
+            npm publish --provenance --access public
+          fi
+
       - name: Commit and tag
-        # Moved after npm + image publish so a transient failure in either
-        # doesn't leave a published git tag pointing at a half-released
-        # state. Idempotency guards on both tag creation and push handle
-        # re-runs after a tag-step blip: `git tag -f` overwrites a local
-        # tag of the same name (harmless on fresh runners where no local
-        # tag exists), and `git push --force` on the tag is scoped to the
-        # specific tag ref so it cannot rewrite branches or other refs.
+        # Runs after BOTH the GHCR image push and the npm publish so a
+        # transient failure in either does not leave a published git tag
+        # pointing at a half-released state. Idempotency guards on both
+        # tag creation and push handle re-runs after a tag-step blip:
+        # `git tag -f` overwrites a local tag of the same name (harmless
+        # on fresh runners where no local tag exists), and `git push
+        # --force` on the tag is scoped to the specific tag ref so it
+        # cannot rewrite branches or other refs.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

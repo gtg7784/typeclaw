@@ -7,6 +7,7 @@ import { configSchema, expandMountPath, type Config } from '@/config/config'
 import { send as sendToDaemon } from '@/hostd/client'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
+import { resolveBaseImageVersion } from '@/init/cli-version'
 import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { ensureDepsInstalled, type EnsureDepsResult } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
@@ -142,7 +143,6 @@ export async function start({
     // one-shot and idempotent — once `workspaces` is set, refreshPackageJson
     // is a no-op, so users who never edit their agent folder pay zero cost on
     // subsequent starts and users who customized `workspaces` are not clobbered.
-    await refreshDockerfile(cwd)
     await refreshGitignore(cwd)
     const pkgRefresh = await refreshPackageJson(cwd)
     await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
@@ -161,6 +161,11 @@ export async function start({
       return { ok: false, reason: `dependency install failed: ${deps.reason}` }
     }
     await commitSystemFile(cwd, DEPENDENCY_FILES, 'Update dependencies')
+    // Dockerfile refresh AFTER ensureDeps so the version pin in the FROM
+    // line resolves against the agent's installed node_modules/typeclaw —
+    // ensures the base image's CLI version matches the runtime the
+    // container will actually load.
+    await refreshDockerfile(cwd)
 
     if (state.exists) {
       // Container holds the name but is not running. Without `--rm`, this is
@@ -386,7 +391,10 @@ export async function planStart({
 
 export async function refreshDockerfile(cwd: string): Promise<void> {
   const cfg = await loadTypeclawConfig(cwd)
-  await writeFile(join(cwd, DOCKERFILE), buildDockerfile(cfg.dockerfile))
+  await writeFile(
+    join(cwd, DOCKERFILE),
+    buildDockerfile(cfg.dockerfile, { baseImageVersion: resolveBaseImageVersion(cwd) }),
+  )
 }
 
 export async function refreshGitignore(cwd: string): Promise<void> {
