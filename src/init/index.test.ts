@@ -1208,19 +1208,45 @@ describe('writeSecrets', () => {
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_new\n')
   })
 
-  test('appends TELEGRAM_BOT_TOKEN when telegramBotToken is provided', async () => {
+  test('writes TELEGRAM_BOT_TOKEN to secrets.json#channels (not .env) when telegramBotToken is provided', async () => {
     await writeSecrets(root, {
       apiKey: 'fw_test',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
       telegramBotToken: '1234567890:ABCdef',
     })
 
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe(
-      'FIREWORKS_API_KEY=fw_test\nTELEGRAM_BOT_TOKEN=1234567890:ABCdef\n',
-    )
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_test\n')
+    const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels?: Record<string, Record<string, string>>
+    }
+    expect(secrets.channels?.['telegram-bot']).toEqual({ TELEGRAM_BOT_TOKEN: '1234567890:ABCdef' })
   })
 
-  test('omits TELEGRAM_BOT_TOKEN when telegramBotToken is empty string', async () => {
+  test('writes DISCORD_BOT_TOKEN to secrets.json#channels when discordBotToken is provided', async () => {
+    await writeSecrets(root, { apiKey: 'sk-x', model: 'openai/gpt-5.4-nano', discordBotToken: 'discord-tok' })
+
+    const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels?: Record<string, Record<string, string>>
+    }
+    expect(secrets.channels?.['discord-bot']).toEqual({ DISCORD_BOT_TOKEN: 'discord-tok' })
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe('OPENAI_API_KEY=sk-x\n')
+  })
+
+  test('merges SLACK_BOT_TOKEN + SLACK_APP_TOKEN into the same slack-bot slot in secrets.json', async () => {
+    await writeSecrets(root, {
+      apiKey: 'sk-x',
+      model: 'openai/gpt-5.4-nano',
+      slackBotToken: 'xoxb-a',
+      slackAppToken: 'xapp-b',
+    })
+
+    const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels?: Record<string, Record<string, string>>
+    }
+    expect(secrets.channels?.['slack-bot']).toEqual({ SLACK_BOT_TOKEN: 'xoxb-a', SLACK_APP_TOKEN: 'xapp-b' })
+  })
+
+  test('does not create secrets.json#channels entries when no channel tokens are provided', async () => {
     await writeSecrets(root, {
       apiKey: 'fw_test',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
@@ -1228,5 +1254,6 @@ describe('writeSecrets', () => {
     })
 
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_test\n')
+    expect(existsSync(join(root, 'secrets.json'))).toBe(false)
   })
 })

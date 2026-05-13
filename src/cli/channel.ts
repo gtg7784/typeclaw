@@ -336,7 +336,7 @@ function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEv
         s.stop('Updated typeclaw.json.')
         break
       case 'secrets':
-        s.stop('Appended credentials to .env.')
+        s.stop('Saved credentials to secrets.json.')
         break
     }
   }
@@ -345,7 +345,7 @@ function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEv
 const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   config: 'Updating typeclaw.json...',
-  secrets: 'Appending credentials to .env...',
+  secrets: 'Saving credentials to secrets.json...',
 }
 
 function reportKakaotalkAuth(result: KakaotalkAuthResult): string {
