@@ -74,7 +74,7 @@ The adapter exposes three engagement triggers via `channels.kakaotalk.engagement
 
 Stickiness behaves the same as Slack/Discord: once you've engaged in a chat, follow-up messages within `engagement.stickiness.perReply.window` ms will route to you regardless of trigger.
 
-If you find yourself NOT receiving messages you expect to, the most likely cause is the `allow` list. KakaoTalk uses a different grammar from Slack/Discord:
+If you find yourself NOT receiving messages you expect to, the most likely cause is missing role coverage in `roles.<role>.match[]`. KakaoTalk's match-rule grammar:
 
 - `kakao:*` — every chat the account can see (use sparingly: this is every group and DM you are a member of)
 - `kakao:dm/*` — every 1:1 chat
@@ -82,7 +82,7 @@ If you find yourself NOT receiving messages you expect to, the most likely cause
 - `kakao:open/*` — every open chat
 - `kakao:<chat-id>` — a specific chat by numeric chat_id
 
-The init wizard's default is `kakao:dm/*` because group chats with personal accounts are sensitive — every member sees every reply. Only broaden the allow list when the user explicitly asks.
+Group chats with personal accounts are sensitive — every member sees every reply. Be conservative when widening match-rules: a `kakao:group/*` entry on a permissive role exposes the agent in every group the account is a member of. See the `typeclaw-permissions` skill.
 
 ## Mark read on every inbound
 
@@ -91,7 +91,7 @@ The adapter sends a LOCO `NOTIREAD` ack to KakaoTalk for every inbound message e
 Things to know about this behavior:
 
 - Auto-acking every received message is a distinct behavioral fingerprint compared to a human. A human reads messages when they open the chat; this adapter acks every received message instantly, even ones you never reply to. KakaoTalk's abuse detection may flag accounts that ack rapidly and unconditionally. **Run the kakaotalk adapter only on dedicated agent accounts you can afford to lose.**
-- Dropped messages are still acked. If classify drops the message (your own self-sent loopback, empty text, sender not in `allow`), the unread "1" still clears — the agent has observed the bytes, so the read indicator should match.
+- Dropped messages are still acked. If classify drops the message (your own self-sent loopback, empty text, unknown chat), or the router drops it on the `channel.respond` gate, the unread "1" still clears — the agent has observed the bytes, so the read indicator should match.
 - Open chats (오픈채팅) are skipped: the LOCO `NOTIREAD` packet needs a `linkId` for open chats and the adapter doesn't surface it yet. Unread counters in open chats will not decrement.
 - The phone's home-screen OS unread badge may lag until the phone client foregrounds; the in-chat counter and other participants' indicators update immediately. KakaoTalk client quirk, not a typeclaw bug.
 
