@@ -839,10 +839,10 @@ describe('scaffold', () => {
     expect(gitignore).toMatch(/^packages\/\*\/node_modules\/$/m)
   })
 
-  test('buildGitignore includes custom entries from gitignore.append before managed entries', () => {
+  test('buildGitignore includes custom entries from git.ignore.append before managed entries', () => {
     const gitignore = buildGitignore({ append: ['scratch/', '*.local.log'] })
 
-    const customCommentIdx = gitignore.indexOf('# Custom entries from typeclaw.json#gitignore.append.')
+    const customCommentIdx = gitignore.indexOf('# Custom entries from typeclaw.json#git.ignore.append.')
     const scratchIdx = gitignore.indexOf('scratch/')
     const logIdx = gitignore.indexOf('*.local.log')
     const trulyIgnoredIdx = gitignore.indexOf('# Truly ignored:')
@@ -852,7 +852,7 @@ describe('scaffold', () => {
     expect(logIdx).toBeLessThan(trulyIgnoredIdx)
   })
 
-  test('buildGitignore without config matches an empty gitignore.append config', () => {
+  test('buildGitignore without config matches an empty git.ignore.append config', () => {
     expect(buildGitignore()).toBe(buildGitignore({ append: [] }))
   })
 
@@ -1076,16 +1076,16 @@ describe('writeDockerAssets', () => {
     expect(dockerfile.split('\n')[0]).toBe('# syntax=docker/dockerfile:1.7')
   })
 
-  test('Dockerfile includes custom lines from typeclaw.json dockerfile.append before ENTRYPOINT', async () => {
+  test('Dockerfile includes custom lines from typeclaw.json docker.file.append before ENTRYPOINT', async () => {
     await scaffold(root)
     const raw = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
-    raw.dockerfile = { append: ['RUN apt-get update', 'ENV CUSTOM_TOOL=1'] }
+    raw.docker = { file: { append: ['RUN apt-get update', 'ENV CUSTOM_TOOL=1'] } }
     await writeFile(join(root, 'typeclaw.json'), `${JSON.stringify(raw, null, 2)}\n`)
 
     await writeDockerAssets(root)
 
     const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8')
-    const commentIdx = dockerfile.indexOf('# Custom lines from typeclaw.json#dockerfile.append.')
+    const commentIdx = dockerfile.indexOf('# Custom lines from typeclaw.json#docker.file.append.')
     const runIdx = dockerfile.indexOf('RUN apt-get update')
     const envIdx = dockerfile.indexOf('ENV CUSTOM_TOOL=1')
     const entrypointIdx = dockerfile.indexOf('ENTRYPOINT ["/usr/local/bin/typeclaw-entrypoint"]')
@@ -1095,7 +1095,7 @@ describe('writeDockerAssets', () => {
     expect(envIdx).toBeLessThan(entrypointIdx)
   })
 
-  test('buildDockerfile without config matches a fully-defaulted dockerfile config', () => {
+  test('buildDockerfile without config matches a fully-defaulted docker.file config', () => {
     expect(buildDockerfile()).toBe(buildDockerfile(dockerfileSchema.parse({})))
   })
 

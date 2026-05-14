@@ -1,4 +1,4 @@
-import { accessSync, constants as fsConstants, readFileSync, statSync } from 'node:fs'
+import { accessSync, constants as fsConstants, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
 
@@ -75,7 +75,7 @@ const dockerfileFeatureSchema = z.union([
 ])
 
 // `default(() => ({}))` paired with field-level defaults is the idiom that
-// makes both `dockerfile: {}` and an omitted `dockerfile` key resolve to the
+// makes both `docker.file: {}` and an omitted `docker.file` key resolve to the
 // SAME fully-populated object. A plain `.default({})` would short-circuit the
 // inner field defaults when the key is omitted, leaving downstream code with
 // `{ append: undefined, tmux: undefined, ... }` and a `lines.length` crash.
@@ -92,17 +92,42 @@ export const dockerfileSchema = dockerfileObjectSchema.default(() => dockerfileO
 export type DockerfileConfig = z.infer<typeof dockerfileSchema>
 export type DockerfileFeatureToggle = z.infer<typeof dockerfileFeatureSchema>
 
+// The `docker` namespace nests Docker-related blocks under one top-level key
+// so future extensions (e.g. `docker.compose`, `docker.buildArgs`) have a home
+// without polluting the root. Today the only inhabitant is `docker.file`,
+// which holds the same shape that used to live at top-level `dockerfile`.
+// One-time migration (see `migrateLegacyConfigShape`) rewrites the old
+// top-level key into the new path on first load.
+export const dockerSchema = z
+  .object({
+    file: dockerfileSchema,
+  })
+  .default(() => ({ file: dockerfileObjectSchema.parse({}) }))
+
+export type DockerConfig = z.infer<typeof dockerSchema>
+
 const gitignoreLineSchema = z.string().refine((line) => !/[\r\n]/.test(line), {
-  message: 'gitignore.append entries must be single gitignore lines; split multiline patterns into array entries',
+  message: 'git.ignore.append entries must be single gitignore lines; split multiline patterns into array entries',
 })
 
-export const gitignoreSchema = z
-  .object({
-    append: z.array(gitignoreLineSchema).default([]),
-  })
-  .default({ append: [] })
+const gitignoreObjectSchema = z.object({
+  append: z.array(gitignoreLineSchema).default([]),
+})
+
+export const gitignoreSchema = gitignoreObjectSchema.default(() => gitignoreObjectSchema.parse({}))
 
 export type GitignoreConfig = z.infer<typeof gitignoreSchema>
+
+// Same rationale as `dockerSchema`: a `git` namespace today carries `git.ignore`
+// and leaves room for future siblings (e.g. `git.attributes`). The one-time
+// migration also handles the rename of legacy top-level `gitignore`.
+export const gitSchema = z
+  .object({
+    ignore: gitignoreSchema,
+  })
+  .default(() => ({ ignore: gitignoreObjectSchema.parse({}) }))
+
+export type GitConfig = z.infer<typeof gitSchema>
 
 const IPV4_CIDR_PATTERN = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})(?:\/(\d{1,2}))?$/
 
@@ -198,8 +223,8 @@ export const configSchema = z
     channels: channelsSchema,
     portForward: portForwardSchema,
     network: networkSchema,
-    dockerfile: dockerfileSchema,
-    gitignore: gitignoreSchema,
+    docker: dockerSchema,
+    git: gitSchema,
   })
   .catchall(z.unknown())
 
@@ -289,8 +314,8 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   channels: 'applied',
   portForward: 'restart-required',
   network: 'restart-required',
-  dockerfile: 'restart-required',
-  gitignore: 'restart-required',
+  'docker.file': 'restart-required',
+  'git.ignore': 'restart-required',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -353,8 +378,8 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'channels',
     'portForward',
     'network',
-    'dockerfile',
-    'gitignore',
+    'docker',
+    'git',
   ])
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
@@ -376,7 +401,8 @@ export function loadPluginConfigsSync(cwd: string): Record<string, unknown> {
   } catch {
     return {}
   }
-  return extractPluginConfigs(json)
+  const migrated = migrateLegacyConfigShape(json)
+  return extractPluginConfigs(migrated.json)
 }
 
 export function loadConfigSync(cwd: string): Config {
@@ -395,11 +421,79 @@ export function loadConfigSync(cwd: string): Config {
     throw new Error(`${CONFIG_FILE} is not valid JSON: ${detail}`)
   }
 
-  const result = configSchema.safeParse(json)
+  const migrated = migrateLegacyConfigShape(json)
+  if (migrated.changed) {
+    persistMigratedConfig(cwd, migrated.json)
+  }
+
+  const result = configSchema.safeParse(migrated.json)
   if (!result.success) {
     throw new Error(`${CONFIG_FILE} is invalid: ${formatZodError(result.error)}`)
   }
   return result.data
+}
+
+// One-shot rename of legacy top-level `dockerfile` / `gitignore` keys into the
+// nested `docker.file` / `git.ignore` shape introduced for namespace
+// extensibility (`docker.compose`, `git.attributes`, etc. land here later
+// without a second migration). Called from every entry point that reads
+// `typeclaw.json` so the rest of the pipeline only ever sees the new shape.
+//
+// Precedence when both legacy and new keys coexist: the new shape wins and
+// the legacy key is dropped silently. Two ways this happens in practice:
+//   1. User hand-edited the new shape after auto-migration but forgot to
+//      delete the legacy key.
+//   2. Two `typeclaw start` invocations raced on a stale checkout.
+// Either way, the new shape is the source of truth — losing the legacy
+// duplicate is the right call because it would otherwise be shadowed at
+// parse time anyway (`configSchema` has no `dockerfile`/`gitignore` keys).
+export function migrateLegacyConfigShape(json: unknown): { json: unknown; changed: boolean } {
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) {
+    return { json, changed: false }
+  }
+
+  const obj = json as Record<string, unknown>
+  const hasLegacyDockerfile = 'dockerfile' in obj
+  const hasLegacyGitignore = 'gitignore' in obj
+  if (!hasLegacyDockerfile && !hasLegacyGitignore) {
+    return { json, changed: false }
+  }
+
+  const next: Record<string, unknown> = { ...obj }
+  if (hasLegacyDockerfile) {
+    const legacy = next.dockerfile
+    delete next.dockerfile
+    if (!('docker' in next)) {
+      next.docker = { file: legacy }
+    } else if (isPlainObject(next.docker) && !('file' in next.docker)) {
+      next.docker = { ...next.docker, file: legacy }
+    }
+  }
+  if (hasLegacyGitignore) {
+    const legacy = next.gitignore
+    delete next.gitignore
+    if (!('git' in next)) {
+      next.git = { ignore: legacy }
+    } else if (isPlainObject(next.git) && !('ignore' in next.git)) {
+      next.git = { ...next.git, ignore: legacy }
+    }
+  }
+  return { json: next, changed: true }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function persistMigratedConfig(cwd: string, json: unknown): void {
+  try {
+    writeFileSync(join(cwd, CONFIG_FILE), `${JSON.stringify(json, null, 2)}\n`)
+  } catch {
+    // Best-effort write-back: the migration is also applied in-memory on every
+    // load, so a read-only filesystem (e.g. snapshotted CI checkout) just
+    // means the rewrite retries next start. Surfacing the error would brick
+    // load paths the user didn't ask to mutate.
+  }
 }
 
 export type ValidateConfigResult = { ok: true } | { ok: false; reason: string }
@@ -430,7 +524,12 @@ export function validateConfig(cwd: string): ValidateConfigResult {
     return { ok: false, reason: `${CONFIG_FILE} is not valid JSON: ${detail}` }
   }
 
-  const result = configSchema.safeParse(json)
+  const migrated = migrateLegacyConfigShape(json)
+  if (migrated.changed) {
+    persistMigratedConfig(cwd, migrated.json)
+  }
+
+  const result = configSchema.safeParse(migrated.json)
   if (!result.success) {
     return { ok: false, reason: `${CONFIG_FILE} is invalid: ${formatZodError(result.error)}` }
   }

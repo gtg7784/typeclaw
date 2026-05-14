@@ -99,17 +99,17 @@ describe('createConfigReloadable', () => {
     expect(paths).toEqual(['mounts', 'port'])
   })
 
-  test('field fence: dockerfile changes land in `restartRequired`', async () => {
+  test('field fence: docker.file changes land in `restartRequired`', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL_A, dockerfile: { append: ['RUN echo old'] } }),
+      JSON.stringify({ model: VALID_MODEL_A, docker: { file: { append: ['RUN echo old'] } } }),
     )
     const reloadable = createConfigReloadable({ cwd })
     await reloadable.reload()
 
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL_A, dockerfile: { append: ['RUN echo new'] } }),
+      JSON.stringify({ model: VALID_MODEL_A, docker: { file: { append: ['RUN echo new'] } } }),
     )
     const result = await reloadable.reload()
 
@@ -120,20 +120,20 @@ describe('createConfigReloadable', () => {
       restartRequired: { path: string }[]
       ignored: unknown[]
     }
-    expect(diff.restartRequired.map((c) => c.path)).toEqual(['dockerfile'])
+    expect(diff.restartRequired.map((c) => c.path)).toEqual(['docker.file'])
   })
 
-  test('field fence: gitignore changes land in `restartRequired`', async () => {
+  test('field fence: git.ignore changes land in `restartRequired`', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL_A, gitignore: { append: ['scratch/'] } }),
+      JSON.stringify({ model: VALID_MODEL_A, git: { ignore: { append: ['scratch/'] } } }),
     )
     const reloadable = createConfigReloadable({ cwd })
     await reloadable.reload()
 
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL_A, gitignore: { append: ['scratch/', '*.local.log'] } }),
+      JSON.stringify({ model: VALID_MODEL_A, git: { ignore: { append: ['scratch/', '*.local.log'] } } }),
     )
     const result = await reloadable.reload()
 
@@ -144,7 +144,7 @@ describe('createConfigReloadable', () => {
       restartRequired: { path: string }[]
       ignored: unknown[]
     }
-    expect(diff.restartRequired.map((c) => c.path)).toEqual(['gitignore'])
+    expect(diff.restartRequired.map((c) => c.path)).toEqual(['git.ignore'])
   })
 
   test('field fence: $schema change is ignored', async () => {
@@ -226,6 +226,6 @@ function enumeratePaths(obj: Record<string, unknown>, prefix = ''): string[] {
   return out
 }
 
-function shouldRecurse(_path: string): boolean {
-  return false
+function shouldRecurse(path: string): boolean {
+  return path === 'docker' || path === 'git'
 }

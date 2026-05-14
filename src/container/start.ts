@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
-import { configSchema, expandMountPath, type Config } from '@/config/config'
+import { configSchema, expandMountPath, migrateLegacyConfigShape, type Config } from '@/config'
 import { send as sendToDaemon } from '@/hostd/client'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
@@ -500,13 +500,13 @@ export async function refreshDockerfile(cwd: string): Promise<void> {
   const cfg = await loadTypeclawConfig(cwd)
   await writeFile(
     join(cwd, DOCKERFILE),
-    buildDockerfile(cfg.dockerfile, { baseImageVersion: resolveBaseImageVersion(cwd) }),
+    buildDockerfile(cfg.docker.file, { baseImageVersion: resolveBaseImageVersion(cwd) }),
   )
 }
 
 export async function refreshGitignore(cwd: string): Promise<void> {
   const cfg = await loadTypeclawConfig(cwd)
-  await writeFile(join(cwd, GITIGNORE_FILE), buildGitignore(cfg.gitignore))
+  await writeFile(join(cwd, GITIGNORE_FILE), buildGitignore(cfg.git.ignore))
 }
 
 // Commits TypeClaw-owned system file(s) if any are dirty in git. Skips silently
@@ -747,7 +747,7 @@ async function loadConfigJson(cwd: string): Promise<unknown> {
   } catch {
     return {}
   }
-  return JSON.parse(raw)
+  return migrateLegacyConfigShape(JSON.parse(raw)).json
 }
 
 type PreparedHostDaemonStatus =
