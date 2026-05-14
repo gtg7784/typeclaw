@@ -44,19 +44,31 @@ export type MatchRule =
 export type ParseMatchRuleResult = { ok: true; value: MatchRule } | { ok: false; error: string }
 
 // Regex used by the JSON Schema layer for editor-time validation. Kept here
-// next to the parser so divergence is harder. Permissive on purpose — the
-// parser owns the precise semantics; the regex just catches typos.
+// next to the parser so divergence is harder. Deliberately permissive: it
+// matches any `<name>:<value>` qualifier shape so the parser still gets to
+// run and emit typo suggestions like `autor:` -> `author:`. If we tightened
+// this to `author:` only, the JSON schema would reject typos with a generic
+// "did not match pattern" error and the user would lose the actionable hint.
 export const MATCH_RULE_REGEX_SOURCE =
-  '^(tui|cron|subagent(:[a-z][a-z0-9-]*)?|\\*|(slack|discord|telegram|kakao):[^\\s]+)(\\s+author:[^\\s]+)*$'
+  '^(tui|cron|subagent(:[a-z][a-z0-9-]*)?|\\*|(slack|discord|telegram|kakao):[^\\s]+)(\\s+[a-zA-Z][a-zA-Z0-9_]*:[^\\s]+)*$'
 
 export function parseMatchRule(input: string): ParseMatchRuleResult {
   if (input !== input.trim() || input.length === 0) {
     return { ok: false, error: 'match rule must not have leading or trailing whitespace' }
   }
 
-  // Split on a single space. Multiple spaces or other whitespace is rejected
-  // upstream by checking the round-trip: re-joining the tokens with single
-  // spaces must equal the original input.
+  // The DSL allows ONLY single literal spaces as token separators. Any
+  // other whitespace (tabs, newlines, CR, vertical tab, NBSP, NUL, etc.)
+  // inside a rule is rejected -- both because the JSON Schema regex uses
+  // `\s` boundaries that would diverge from this parser otherwise, and
+  // because workspace/chat IDs containing whitespace are not a legitimate
+  // shape on any supported platform.
+  if (/[^\S ]|\u0000/.test(input)) {
+    return {
+      ok: false,
+      error: 'match rule must use only single ASCII spaces; no tabs, newlines, or control characters',
+    }
+  }
   const tokens = input.split(' ')
   if (tokens.some((t) => t.length === 0)) {
     return { ok: false, error: 'match rule must use exactly one space between tokens' }
