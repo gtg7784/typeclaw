@@ -45,7 +45,7 @@ When dreaming fires, it reads:
 1. `MEMORY.md`
 2. The **undreamed tail** of every `memory/yyyy-MM-dd.md` (the runtime tells it the exact line range — earlier lines are already consolidated into `MEMORY.md` and must NOT be re-read)
 
-It rewrites `MEMORY.md` with the merged result, advances the per-day watermark in `memory/.dreaming-state.json`, optionally writes muscle-memory skills under `memory/skills/<name>/SKILL.md`, then `git commit -m "Dream"` the snapshot. After the commit, the runtime sets the `skip-worktree` index flag on the tracked memory artifacts so the user's `git status` and `git diff` stay clean. The flag is cleared and re-applied around every commit.
+It rewrites `MEMORY.md` with the merged result, advances the per-day watermark in `memory/.dreaming-state.json`, optionally writes muscle-memory skills under `memory/skills/<name>/SKILL.md`, then commits the snapshot with a message shaped like `dream: <summary> <emoji>` — e.g. `dream: 3 fragments + new skill 'pr-review' 🔮`. The summary is derived from the staged diff (line additions in daily streams, newly-added skills, etc.), and the emoji is a random pick from a small thematic pool. After the commit, the runtime sets the `skip-worktree` index flag on the tracked memory artifacts so the user's `git status` and `git diff` stay clean. The flag is cleared and re-applied around every commit.
 
 The dreaming subagent has only three tools: `read`, `write`, `ls`. No `bash`. No `edit`. It cannot run shell commands.
 
@@ -115,19 +115,19 @@ You cannot remove a fragment cleanly. The right response depends on what X is:
 
 ## When the user asks "what did you dream?" / "when do you dream next?"
 
-1. **What you dreamed**: read the most recent `Dream` git commit on your agent folder (`git log --grep='^Dream' -1`) and show the diff against `MEMORY.md` if useful. The commit timestamp tells you when dreaming last ran. If the answer is "no `Dream` commits yet", say that — `MEMORY.md` may exist but be the auto-created empty file from the first dreaming attempt.
+1. **What you dreamed**: read the most recent `dream:` git commit on your agent folder (`git log --grep='^dream:' -1`) and show the diff against `MEMORY.md` if useful. The commit timestamp tells you when dreaming last ran. If the answer is "no `dream:` commits yet", say that — `MEMORY.md` may exist but be the auto-created empty file from the first dreaming attempt.
 2. **When you dream next**: read `memory.dreaming.schedule` from `typeclaw.json` (default `"*/30 * * * *"` — every 30 minutes). Translate the cron expression to a wall-clock time in the agent's `TZ`. The dreaming cron job is **always registered** even when `memory.dreaming` is omitted; the default schedule applies. Tell the user honestly when the next fire is in the agent's local time.
 
 ## When the user asks "what's a daily stream?" / "where is your memory stored?"
 
 Stay concrete. Use this map:
 
-| File / dir                      | What it is                                                                    | Who writes it                                                  | Tracked in git                                              |
-| ------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------- | ----------------------------------------------------------- |
-| `MEMORY.md`                     | Long-term memory, consolidated topics with fragment citations.                | Dreaming subagent (rewrites in full on each run).              | Yes (force-committed under `Dream` commits, skip-worktree). |
-| `memory/yyyy-MM-dd.md`          | Daily fragment streams. Append-only during the day.                           | Memory-logger subagent (one fragment ≈ one prompt completion). | Gitignored, but force-committed in the dreaming snapshot.   |
-| `memory/skills/<name>/SKILL.md` | Muscle-memory skills distilled from recurring procedures.                     | Dreaming subagent only.                                        | Gitignored, force-committed in the dreaming snapshot.       |
-| `memory/.dreaming-state.json`   | Per-day watermarks (line counts already consolidated). Plain JSON, fail-open. | Dreaming subagent.                                             | Gitignored, force-committed in the dreaming snapshot.       |
+| File / dir                      | What it is                                                                    | Who writes it                                                  | Tracked in git                                               |
+| ------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------ |
+| `MEMORY.md`                     | Long-term memory, consolidated topics with fragment citations.                | Dreaming subagent (rewrites in full on each run).              | Yes (force-committed under `dream:` commits, skip-worktree). |
+| `memory/yyyy-MM-dd.md`          | Daily fragment streams. Append-only during the day.                           | Memory-logger subagent (one fragment ≈ one prompt completion). | Gitignored, but force-committed in the dreaming snapshot.    |
+| `memory/skills/<name>/SKILL.md` | Muscle-memory skills distilled from recurring procedures.                     | Dreaming subagent only.                                        | Gitignored, force-committed in the dreaming snapshot.        |
+| `memory/.dreaming-state.json`   | Per-day watermarks (line counts already consolidated). Plain JSON, fail-open. | Dreaming subagent.                                             | Gitignored, force-committed in the dreaming snapshot.        |
 
 `typeclaw init` does **not** scaffold any of these. They appear when needed — `MEMORY.md` and `memory/` are created by the first dreaming run; daily streams appear when the first memory-logger fires.
 

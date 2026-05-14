@@ -8,6 +8,7 @@ import type { RunSession, SubagentContext } from '@/plugin'
 import {
   commitMemorySnapshot,
   createDreamingSubagent,
+  DREAM_EMOJI_POOL,
   type DreamingLogger,
   type DreamingPayload,
   isDreamingPayload,
@@ -373,5 +374,100 @@ describe('commitMemorySnapshot', () => {
     expect(await trackedFiles(agentDir)).toEqual(['MEMORY.md', 'memory/skills/release-checklist/SKILL.md'])
     expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md', 'memory/skills/release-checklist/SKILL.md'])
     expect(await porcelainStatus(agentDir)).toBe('')
+  })
+})
+
+async function lastCommitSubject(cwd: string): Promise<string> {
+  const result = await runGit(cwd, ['log', '-1', '--format=%s'])
+  return result.stdout
+}
+
+describe('dream commit message', () => {
+  test('starts with `dream:` and ends with a single emoji from the pool', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), '# Memory\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'fragment\n')
+
+    await commitMemorySnapshot(agentDir)
+
+    const subject = await lastCommitSubject(agentDir)
+    expect(subject.startsWith('dream: ')).toBe(true)
+    const last = [...subject].at(-1) ?? ''
+    expect(DREAM_EMOJI_POOL).toContain(last as (typeof DREAM_EMOJI_POOL)[number])
+  })
+
+  test('reports `N fragments` derived from added lines in memory/yyyy-MM-dd.md', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), '# Memory\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'a\nb\nc\nd\ne\n')
+
+    await commitMemorySnapshot(agentDir)
+
+    expect(await lastCommitSubject(agentDir)).toMatch(/^dream: 5 fragments /)
+  })
+
+  test('uses singular `fragment` when exactly one line was added', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), '# Memory\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'only one\n')
+
+    await commitMemorySnapshot(agentDir)
+
+    expect(await lastCommitSubject(agentDir)).toMatch(/^dream: 1 fragment /)
+  })
+
+  test("appends `new skill 'x'` when a single muscle-memory skill is newly added", async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), '# Memory\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'f1\nf2\nf3\n')
+    await mkdir(join(agentDir, 'memory', 'skills', 'pr-review'), { recursive: true })
+    await writeFile(join(agentDir, 'memory', 'skills', 'pr-review', 'SKILL.md'), '---\nname: pr-review\n---\n# PR\n')
+
+    await commitMemorySnapshot(agentDir)
+
+    expect(await lastCommitSubject(agentDir)).toMatch(/^dream: 3 fragments \+ new skill 'pr-review' /)
+  })
+
+  test('reports `N new skills` when multiple muscle-memory skills are newly added', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), '# Memory\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'frag\n')
+    await mkdir(join(agentDir, 'memory', 'skills', 'one'), { recursive: true })
+    await mkdir(join(agentDir, 'memory', 'skills', 'two'), { recursive: true })
+    await writeFile(join(agentDir, 'memory', 'skills', 'one', 'SKILL.md'), '---\nname: one\n---\n#1\n')
+    await writeFile(join(agentDir, 'memory', 'skills', 'two', 'SKILL.md'), '---\nname: two\n---\n#2\n')
+
+    await commitMemorySnapshot(agentDir)
+
+    expect(await lastCommitSubject(agentDir)).toMatch(/^dream: 1 fragment \+ 2 new skills /)
+  })
+
+  test('reports `MEMORY.md only` when only MEMORY.md changed in this commit', async () => {
+    // First commit establishes baseline so the second snapshot only sees MEMORY.md changes.
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), '# v1\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'frag\n')
+    await commitMemorySnapshot(agentDir)
+
+    await writeFile(join(agentDir, 'MEMORY.md'), '# v2\n')
+    await commitMemorySnapshot(agentDir)
+
+    expect(await lastCommitSubject(agentDir)).toMatch(/^dream: MEMORY\.md only /)
+  })
+
+  test('falls back to `watermarks only` when neither MEMORY.md nor any stream has line additions', async () => {
+    await initRepo(agentDir)
+    await writeFile(join(agentDir, 'MEMORY.md'), '# Memory\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'frag1\nfrag2\n')
+    await commitMemorySnapshot(agentDir)
+
+    // Truncate the stream below its previous line count — numstat sees 0 added
+    // (only deletions), and MEMORY.md is untouched. The state file is still
+    // staged, which is exactly the `watermarks only` shape.
+    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), '')
+    await writeFile(join(agentDir, DREAMING_STATE_FILE), '{"version":1,"dreamedThrough":{}}')
+    await commitMemorySnapshot(agentDir)
+
+    expect(await lastCommitSubject(agentDir)).toMatch(/^dream: watermarks only /)
   })
 })
