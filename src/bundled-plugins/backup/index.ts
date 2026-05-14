@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { definePlugin, type Subagent } from '@/plugin'
+import { definePlugin, type PluginContext, type SpawnSubagentOptions, type Subagent } from '@/plugin'
 
 import { COMMIT_TIMEOUT_MS, makeDefaultGitSpawn, NETWORK_TIMEOUT_MS, runBackup, type BackupResult } from './runner'
 import {
@@ -78,10 +78,19 @@ export default definePlugin({
       if (activeTurns.size > 0) return
       inFlight = true
       try {
-        await ctx.spawnSubagent(SUBAGENT_BACKUP_RUNNER, {
-          agentDir: ctx.agentDir,
-          pushToOrigin,
-        } satisfies RunnerPayload)
+        await ctx.spawnSubagent(
+          SUBAGENT_BACKUP_RUNNER,
+          {
+            agentDir: ctx.agentDir,
+            pushToOrigin,
+          } satisfies RunnerPayload,
+          // The backup runner is a system-level operation that commits +
+          // pushes on the operator's behalf. It runs after every idle
+          // window regardless of which session caused activity, so it has
+          // no single user session to inherit from. Mark it as TUI-equivalent
+          // so it resolves to `owner` and can use git push, etc.
+          { spawnedByOrigin: { kind: 'tui', sessionId: 'backup-runner' } },
+        )
       } catch (err) {
         ctx.logger.error(`backup runner spawn failed: ${err instanceof Error ? err.message : String(err)}`)
       } finally {
@@ -152,12 +161,18 @@ async function runBackupOnce(
   ctx: {
     agentDir: string
     logger: { info: (m: string) => void; warn: (m: string) => void }
-    spawnSubagent: (name: string, payload?: unknown) => Promise<void>
+    spawnSubagent: PluginContext['spawnSubagent']
   },
 ): Promise<BackupResult> {
   const messagePath = messageFilePath(payload.agentDir)
   await ensureMessageDir(messagePath)
   await cleanupMessageFile(messagePath)
+  // Inherit the backup-runner's owner privileges for the message-picking
+  // and diagnose subagents it spawns. Same rationale as the runner itself
+  // — these are system-level operations on the operator's behalf.
+  const inheritOwner: SpawnSubagentOptions = {
+    spawnedByOrigin: { kind: 'tui', sessionId: 'backup-runner' },
+  }
 
   const result = await runBackup(
     { cwd: payload.agentDir, pushToOrigin: payload.pushToOrigin },
@@ -172,7 +187,7 @@ async function runBackupOnce(
           outputPath: messagePath,
         }
         try {
-          await ctx.spawnSubagent(SUBAGENT_COMMIT_MESSAGE, messagePayload)
+          await ctx.spawnSubagent(SUBAGENT_COMMIT_MESSAGE, messagePayload, inheritOwner)
         } catch (err) {
           ctx.logger.warn(
             `${SUBAGENT_COMMIT_MESSAGE} subagent failed, using fallback: ${err instanceof Error ? err.message : String(err)}`,
@@ -191,7 +206,7 @@ async function runBackupOnce(
           stdout: input.stdout,
         }
         try {
-          await ctx.spawnSubagent(SUBAGENT_DIAGNOSE, diagPayload)
+          await ctx.spawnSubagent(SUBAGENT_DIAGNOSE, diagPayload, inheritOwner)
         } catch (err) {
           ctx.logger.warn(`${SUBAGENT_DIAGNOSE} subagent failed: ${err instanceof Error ? err.message : String(err)}`)
         }

@@ -122,7 +122,13 @@ export default definePlugin({
           bytesAtLastRun.set(sessionId, currentSize)
           ctx.logger.info(`memory-logger spawn ${sessionId} reason=${reason} transcript_bytes=${currentSize}`)
           try {
-            await raceSpawn(ctx.spawnSubagent('memory-logger', payload), spawnTimeoutMs)
+            await raceSpawn(
+              ctx.spawnSubagent('memory-logger', payload, {
+                parentSessionId: sessionId,
+                ...(last.origin !== undefined ? { spawnedByOrigin: last.origin } : {}),
+              }),
+              spawnTimeoutMs,
+            )
           } catch (err) {
             ctx.logger.error(`memory-logger spawn failed: ${err instanceof Error ? err.message : String(err)}`)
           }
