@@ -100,8 +100,24 @@ async function runPrompt(
   stream: Stream,
 ): Promise<void> {
   if (job.subagent !== undefined) {
+    // Propagate the cron job's role and origin into the spawned subagent.
+    // Without this, every cron-triggered subagent (e.g. memory dreaming)
+    // resolves to `guest` because the new-session consumer reads provenance
+    // off the stream target rather than rebuilding it. Encode the parent
+    // origin as JSON since StreamTarget is a flat-string shape.
+    const parentOrigin: SessionOrigin = {
+      kind: 'cron',
+      jobId: job.id,
+      jobKind: 'prompt',
+      ...(job.scheduledByRole !== undefined ? { scheduledByRole: job.scheduledByRole } : {}),
+    }
     stream.publish({
-      target: { kind: 'new-session', subagent: job.subagent },
+      target: {
+        kind: 'new-session',
+        subagent: job.subagent,
+        ...(job.scheduledByRole !== undefined ? { spawnedByRole: job.scheduledByRole } : {}),
+        spawnedByOriginJson: JSON.stringify(parentOrigin),
+      },
       payload: job.payload,
     })
     return
