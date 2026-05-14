@@ -8,6 +8,7 @@ import type { SessionEntry } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession } from '@/agent'
 import type { SessionOrigin } from '@/agent/session-origin'
+import type { PermissionService } from '@/permissions'
 import type { HookBus, SessionIdleEvent } from '@/plugin'
 
 import { channelsSessionsPath, loadChannelSessions, saveChannelSessions } from './persistence'
@@ -111,6 +112,8 @@ function makeRouter(
     transcriptPathFor?: (sessionId: string) => string | undefined
     configuredAliases?: () => readonly string[]
     ensureLiveTimeoutMs?: number
+    permissions?: PermissionService
+    gateChannelRespond?: () => boolean
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -121,6 +124,8 @@ function makeRouter(
     configForAdapter: () => options.config ?? baseConfig,
     ...(options.configuredAliases !== undefined ? { configuredAliases: options.configuredAliases } : {}),
     ...(options.ensureLiveTimeoutMs !== undefined ? { ensureLiveTimeoutMs: options.ensureLiveTimeoutMs } : {}),
+    ...(options.permissions !== undefined ? { permissions: options.permissions } : {}),
+    ...(options.gateChannelRespond !== undefined ? { gateChannelRespond: options.gateChannelRespond } : {}),
     now: () => nowRef.value,
     logger: {
       info: (m) => options.logs?.push(`info:${m}`),
@@ -2710,5 +2715,131 @@ describe('ChannelRouter idle session GC', () => {
     // then
     expect(router.liveCount()).toBe(0)
     expect(logs.some((l) => l.includes('dispose'))).toBe(true)
+  })
+})
+
+describe('ChannelRouter channel.respond gate', () => {
+  type PermissionTable = Record<string, readonly string[]>
+
+  const buildPermissions = (table: PermissionTable, fallback: readonly string[] = []): PermissionService => ({
+    has: (origin, permission) => {
+      if (origin === undefined || origin.kind !== 'channel') return fallback.includes(permission)
+      const authorId = origin.lastInboundAuthorId ?? '*'
+      const grants = table[authorId] ?? fallback
+      return grants.includes(permission)
+    },
+    resolveRole: () => 'guest',
+    describe: () => ({ role: 'guest', permissions: [] }),
+  })
+
+  test('flag off → router treats inbound as before, even with a deny-all service', async () => {
+    // given: a deny-all permission service but the flag is off
+    const dir = await tempDir()
+    const permissions: PermissionService = {
+      has: () => false,
+      resolveRole: () => 'guest',
+      describe: () => ({ role: 'guest', permissions: [] }),
+    }
+    const { router, sessions } = makeRouter(dir, { permissions, gateChannelRespond: () => false })
+
+    // when
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: gate is bypassed entirely; session created and prompted
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+  })
+
+  test('flag on + author has channel.respond → routes through normally', async () => {
+    // given
+    const dir = await tempDir()
+    const permissions = buildPermissions({ alice: ['channel.respond'] })
+    const { router, sessions } = makeRouter(dir, { permissions, gateChannelRespond: () => true })
+
+    // when
+    await router.route(inbound({ authorId: 'alice' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+  })
+
+  test('flag on + author lacks channel.respond → inbound dropped, no session created', async () => {
+    // given: stranger has no permissions
+    const dir = await tempDir()
+    const logs: string[] = []
+    const permissions = buildPermissions({ alice: ['channel.respond'] })
+    const { router, sessions } = makeRouter(dir, {
+      permissions,
+      gateChannelRespond: () => true,
+      logs,
+    })
+
+    // when
+    await router.route(inbound({ authorId: 'stranger', externalMessageId: 'm-stranger' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    // then: no session, no prompt, and a denial line is logged for audit
+    expect(sessions).toHaveLength(0)
+    expect(router.liveCount()).toBe(0)
+    expect(logs.some((l) => l.includes('denied by permissions') && l.includes('author=stranger'))).toBe(true)
+  })
+
+  test('flag on + denied author + later granted author → only the granted one routes', async () => {
+    // given: alice has the permission, stranger does not
+    const dir = await tempDir()
+    const permissions = buildPermissions({ alice: ['channel.respond'] })
+    const { router, sessions } = makeRouter(dir, { permissions, gateChannelRespond: () => true })
+
+    // when: stranger posts first, then alice
+    await router.route(inbound({ authorId: 'stranger', externalMessageId: 'm-stranger' }))
+    await new Promise((r) => setTimeout(r, 5))
+    expect(sessions).toHaveLength(0)
+    await router.route(inbound({ authorId: 'alice', externalMessageId: 'm-alice' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: only alice's turn produced a session and a prompt
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+  })
+
+  test('flag flips live between inbounds (no router recreation)', async () => {
+    // given: starts with flag off so the first inbound goes through despite deny-all
+    const dir = await tempDir()
+    let gateOn = false
+    const permissions: PermissionService = {
+      has: () => false,
+      resolveRole: () => 'guest',
+      describe: () => ({ role: 'guest', permissions: [] }),
+    }
+    const { router, sessions } = makeRouter(dir, { permissions, gateChannelRespond: () => gateOn })
+
+    // when: first inbound under flag-off succeeds
+    await router.route(inbound({ externalMessageId: 'm-pre' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+
+    // and: flag flips on, second inbound is denied
+    gateOn = true
+    await router.route(inbound({ externalMessageId: 'm-post' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    // then: still only the pre-flip prompt; the post-flip inbound was dropped
+    expect(sessions[0]!.prompts).toHaveLength(1)
+  })
+
+  test('flag on without a permission service → inbound passes (gate disabled)', async () => {
+    // given
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, { gateChannelRespond: () => true })
+
+    // when
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(sessions).toHaveLength(1)
   })
 })

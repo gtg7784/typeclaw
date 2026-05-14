@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 
+import type { PermissionService } from '@/permissions'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 import { SecretsBackend } from '@/secrets/storage'
 
@@ -50,6 +51,13 @@ export type ChannelManagerOptions = {
   createKakaotalkAdapter?: typeof createKakaotalkAdapter
   createSlackAdapter?: typeof createSlackBotAdapter
   createTelegramAdapter?: typeof createTelegramBotAdapter
+  // Dual-path wake-up gate. When both are provided AND the flag returns
+  // true, the router gates every inbound by `channel.respond` in addition
+  // to `channels.<adapter>.allow[]`. Omitting either reverts to
+  // `allow[]`-only. Production wiring (src/run/index.ts) always passes
+  // both; tests that don't exercise the gate omit them.
+  permissions?: PermissionService
+  gateChannelRespond?: () => boolean
 }
 
 export type ChannelManager = {
@@ -82,6 +90,8 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     logger,
     ...(options.aliasesRef ? { configuredAliases: options.aliasesRef } : {}),
     ...(options.createSessionForChannel ? { createSessionForChannel: options.createSessionForChannel } : {}),
+    ...(options.permissions ? { permissions: options.permissions } : {}),
+    ...(options.gateChannelRespond ? { gateChannelRespond: options.gateChannelRespond } : {}),
   })
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createKakaotalk = options.createKakaotalkAdapter ?? createKakaotalkAdapter

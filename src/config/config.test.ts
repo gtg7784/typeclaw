@@ -80,6 +80,30 @@ describe('configSchema alias field', () => {
   })
 })
 
+describe('configSchema permissions field', () => {
+  test('defaults gateChannelRespond to false when permissions block is omitted', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.permissions.gateChannelRespond).toBe(false)
+  })
+
+  test('defaults gateChannelRespond to false when permissions block is empty', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, permissions: {} })
+    expect(parsed.permissions.gateChannelRespond).toBe(false)
+  })
+
+  test('accepts gateChannelRespond: true', () => {
+    const parsed = configSchema.parse({
+      model: VALID_MODEL,
+      permissions: { gateChannelRespond: true },
+    })
+    expect(parsed.permissions.gateChannelRespond).toBe(true)
+  })
+
+  test('rejects non-boolean gateChannelRespond', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, permissions: { gateChannelRespond: 'yes' } })).toThrow()
+  })
+})
+
 describe('configSchema preserves unknown top-level keys (plugin config blocks)', () => {
   test('a top-level "memory" block survives the schema as unknown (consumed by the bundled memory plugin)', () => {
     const parsed = configSchema.parse({

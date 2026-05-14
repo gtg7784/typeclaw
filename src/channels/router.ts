@@ -6,6 +6,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 import { createSession, type AgentSession } from '@/agent'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { createCommandRegistry } from '@/commands'
+import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 
 import { decideEngagement, grantStickyForReplyTargets, StickyLedger, type EngagementDecision } from './engagement'
@@ -315,6 +316,16 @@ export type CreateChannelRouterOptions = {
   // Test seam: bound the session.idle hook chain so the timeout path is
   // exercisable in tens of milliseconds instead of the 30s default.
   sessionIdleTimeoutMs?: number
+  // Dual-path wake-up gate: when `gateChannelRespond()` returns true,
+  // every inbound is additionally gated by `permissions.has(partialOrigin,
+  // 'channel.respond')` BEFORE ensureLive. The flag is read live so a
+  // reload that flips `permissions.gateChannelRespond` takes effect on the
+  // next inbound without restart. Both fields must be present together —
+  // there is no path where the flag is on but the service is absent (the
+  // factory in src/run/index.ts always pairs them). Omitted entirely =
+  // `channels.<adapter>.allow[]` is the only wake-up gate.
+  permissions?: PermissionService
+  gateChannelRespond?: () => boolean
 }
 
 export function createChannelRouter(options: CreateChannelRouterOptions): ChannelRouter {
@@ -324,6 +335,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const resolveChannelNamesTimeoutMs = options.resolveChannelNamesTimeoutMs ?? RESOLVE_CHANNEL_NAMES_TIMEOUT_MS
   const fetchHistoryTimeoutMs = options.fetchHistoryTimeoutMs ?? FETCH_HISTORY_TIMEOUT_MS
   const sessionIdleTimeoutMs = options.sessionIdleTimeoutMs ?? SESSION_IDLE_TIMEOUT_MS
+  const permissions = options.permissions
+  const gateChannelRespond = options.gateChannelRespond
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
@@ -936,6 +949,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       thread: event.thread,
     }
 
+    if (isChannelRespondDenied(event)) {
+      logger.info(
+        `[channels] ${channelKeyId(key)}: denied by permissions (channel.respond) author=${event.authorId} id=${event.externalMessageId}`,
+      )
+      return
+    }
+
     const parsedCommand = commands.parse(event.text)
     if (parsedCommand !== null) {
       const keyId = channelKeyId(key)
@@ -1020,6 +1040,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
     scheduleDebouncedDrain(live)
+  }
+
+  const isChannelRespondDenied = (event: InboundMessage): boolean => {
+    if (gateChannelRespond === undefined || permissions === undefined) return false
+    if (!gateChannelRespond()) return false
+    const partial: SessionOrigin = {
+      kind: 'channel',
+      adapter: event.adapter,
+      workspace: event.workspace,
+      chat: event.chat,
+      thread: event.thread,
+      lastInboundAuthorId: event.authorId,
+    }
+    return !permissions.has(partial, CORE_PERMISSIONS.channelRespond)
   }
 
   const updateLoopGuard = (live: LiveSession, event: InboundMessage): void => {
