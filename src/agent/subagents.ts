@@ -229,13 +229,32 @@ function parseSpawnedByOriginJson(
   subagentName: string,
 ): SessionOrigin | undefined {
   if (raw === undefined) return undefined
+  let parsed: unknown
   try {
-    return JSON.parse(raw) as SessionOrigin
+    parsed = JSON.parse(raw)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     logger.warn(`[subagent] ${subagentName}: ignoring malformed spawnedByOriginJson on stream target: ${message}`)
     return undefined
   }
+  // Shape-validate the decoded value so a malformed sender (or a future
+  // bug in cron consumer's encode side) cannot poison the subagent's
+  // origin with arbitrary shapes. The check is narrow: object with a
+  // `kind` field whose value is one of the SessionOrigin discriminator
+  // strings. Permission resolution treats unknown shapes as guest, so
+  // failing closed here matches the rest of the system.
+  if (!isSessionOriginShape(parsed)) {
+    logger.warn(`[subagent] ${subagentName}: ignoring spawnedByOriginJson with unrecognized SessionOrigin shape`)
+    return undefined
+  }
+  return parsed
+}
+
+const SESSION_ORIGIN_KINDS = new Set(['tui', 'cron', 'channel', 'subagent'])
+function isSessionOriginShape(value: unknown): value is SessionOrigin {
+  if (value === null || typeof value !== 'object') return false
+  const kind = (value as { kind?: unknown }).kind
+  return typeof kind === 'string' && SESSION_ORIGIN_KINDS.has(kind)
 }
 
 export function createSubagentConsumer({
