@@ -199,7 +199,6 @@ export type PluginExports = {
   skillsDirs?: string[]
   hooks?: Hooks
   doctorChecks?: Record<string, PluginDoctorCheck>
-  permissions?: readonly string[]
 }
 
 // `typeclaw doctor` plugin extension surface. Each check is read-only by
