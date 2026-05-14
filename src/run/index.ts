@@ -273,13 +273,24 @@ export async function startAgent({
   reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
   await channelManager.start()
 
-  pluginsLoaded.setSpawnSubagent(async (name, payload) => {
+  pluginsLoaded.setSpawnSubagent(async (name, payload, options) => {
+    // Resolve the spawning session's role from its origin so the subagent
+    // inherits it. Callers (hooks like session.idle) pass the parent origin
+    // verbatim; we look up the role rather than letting the caller forge it,
+    // closing the laundering vector the design doc calls out for cron.
+    const spawnedByRole =
+      options?.spawnedByOrigin !== undefined
+        ? pluginsLoaded.permissions.resolveRole(options.spawnedByOrigin)
+        : undefined
     await invokeSubagent(name, {
       registry: pluginRuntime.get().subagents,
       createSessionForSubagent,
       agentDir: cwd,
       userPrompt: '',
       payload,
+      ...(options?.parentSessionId !== undefined ? { parentSessionId: options.parentSessionId } : {}),
+      ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
+      ...(options?.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
     })
   })
   pluginsLoaded.markBooted()

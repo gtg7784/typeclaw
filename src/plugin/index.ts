@@ -36,6 +36,7 @@ export type {
   SessionIdleEvent,
   SessionPromptEvent,
   SessionStartEvent,
+  SpawnSubagentOptions,
   Subagent,
   SubagentContext,
   Tool,
