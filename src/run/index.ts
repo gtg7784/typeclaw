@@ -1,6 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, createSessionWithDispose } from '@/agent'
+import type { SessionOrigin } from '@/agent/session-origin'
 import {
   createSubagentConsumer,
   defaultCreateSessionForSubagent,
@@ -96,6 +97,7 @@ export async function startAgent({
     agentDir: cwd,
     configsByName: pluginConfigsByName,
     bundled: BUNDLED_PLUGINS,
+    ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
   const pluginRegistry = pluginsLoaded.registry
   const pluginHooks = pluginsLoaded.hooks
@@ -151,10 +153,12 @@ export async function startAgent({
     const entry = snap.pluginSubagentByShim.get(subagent)
     if (entry) {
       const sessionId = `subagent-${entry.pluginName}-${crypto.randomUUID()}`
-      const origin = {
+      const origin: SessionOrigin = {
         kind: 'subagent' as const,
         subagent: subagentOptions?.name ?? entry.subagentName,
         parentSessionId: subagentOptions?.parentSessionId ?? '<unknown>',
+        ...(subagentOptions?.spawnedByRole !== undefined ? { spawnedByRole: subagentOptions.spawnedByRole } : {}),
+        ...(subagentOptions?.spawnedByOrigin !== undefined ? { spawnedByOrigin: subagentOptions.spawnedByOrigin } : {}),
       }
       const created = await createSessionWithDispose({
         systemPromptOverride: entry.pluginSubagent.systemPrompt,
@@ -211,12 +215,19 @@ export async function startAgent({
       const snap = pluginRuntime.get()
       const sessionManager = SessionManager.create(cwd, sessionFactory.sessionDir())
       const sessionId = sessionManager.getSessionId()
+      const cronOrigin: SessionOrigin = {
+        kind: 'cron',
+        jobId: job.id,
+        jobKind: 'prompt',
+        ...(job.scheduledByRole !== undefined ? { scheduledByRole: job.scheduledByRole } : {}),
+        scheduledByOrigin: { kind: 'config-file' },
+      }
       const session = await createSession({
         reloadRegistry,
         sessionManager,
         stream,
         channelRouter: channelManager.router,
-        origin: { kind: 'cron', jobId: job.id, jobKind: 'prompt' },
+        origin: cronOrigin,
         ...(snap.hasAnyPluginContent
           ? {
               plugins: {
@@ -234,7 +245,7 @@ export async function startAgent({
         dispose: () => session.dispose(),
         sessionId,
         agentDir: cwd,
-        origin: { kind: 'cron' as const, jobId: job.id, jobKind: 'prompt' as const },
+        origin: cronOrigin,
         ...(snap.hasAnyPluginContent ? { hooks: snap.hooks } : {}),
         getTranscriptPath: () => sessionManager.getSessionFile(),
       }

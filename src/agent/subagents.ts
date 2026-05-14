@@ -62,6 +62,8 @@ export type CreateSessionForSubagentResult = {
 export type CreateSessionForSubagentOptions = {
   name?: string
   parentSessionId?: string
+  spawnedByRole?: string
+  spawnedByOrigin?: SessionOrigin
 }
 export type CreateSessionForSubagent = (
   subagent: Subagent<any>,
@@ -75,6 +77,8 @@ export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subage
       kind: 'subagent',
       subagent: options?.name ?? '<unknown>',
       parentSessionId: options?.parentSessionId ?? '<unknown>',
+      ...(options?.spawnedByRole !== undefined ? { spawnedByRole: options.spawnedByRole } : {}),
+      ...(options?.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
     },
     ...(subagent.tools ? { tools: subagent.tools } : {}),
     customTools: subagent.customTools ?? [],
@@ -120,6 +124,8 @@ export type InvokeSubagentOptions = {
   userPrompt: string
   payload?: unknown
   parentSessionId?: string
+  spawnedByRole?: string
+  spawnedByOrigin?: SessionOrigin
 }
 
 export async function invokeSubagent(name: string, options: InvokeSubagentOptions): Promise<void> {
@@ -131,6 +137,8 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
   const sessionOptions: CreateSessionForSubagentOptions = {
     name,
     ...(options.parentSessionId !== undefined ? { parentSessionId: options.parentSessionId } : {}),
+    ...(options.spawnedByRole !== undefined ? { spawnedByRole: options.spawnedByRole } : {}),
+    ...(options.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
   }
 
   const runSession: RunSession = async (override) => {
@@ -215,6 +223,21 @@ const consoleLogger: SubagentConsumerLogger = {
   error: (m) => console.error(m),
 }
 
+function parseSpawnedByOriginJson(
+  raw: string | undefined,
+  logger: SubagentConsumerLogger,
+  subagentName: string,
+): SessionOrigin | undefined {
+  if (raw === undefined) return undefined
+  try {
+    return JSON.parse(raw) as SessionOrigin
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.warn(`[subagent] ${subagentName}: ignoring malformed spawnedByOriginJson on stream target: ${message}`)
+    return undefined
+  }
+}
+
 export function createSubagentConsumer({
   stream,
   getRegistry,
@@ -234,6 +257,8 @@ export function createSubagentConsumer({
           kind: 'new-session'
           subagent: string
           parentSessionId?: string
+          spawnedByRole?: string
+          spawnedByOriginJson?: string
         }
         const name = target.subagent
         const registry = getRegistry()
@@ -248,6 +273,7 @@ export function createSubagentConsumer({
         }
         inFlight.add(key)
         try {
+          const spawnedByOrigin = parseSpawnedByOriginJson(target.spawnedByOriginJson, logger, name)
           await invokeSubagent(name, {
             registry,
             ...(createSessionForSubagent !== undefined ? { createSessionForSubagent } : {}),
@@ -255,6 +281,8 @@ export function createSubagentConsumer({
             userPrompt: '',
             payload: msg.payload,
             ...(target.parentSessionId !== undefined ? { parentSessionId: target.parentSessionId } : {}),
+            ...(target.spawnedByRole !== undefined ? { spawnedByRole: target.spawnedByRole } : {}),
+            ...(spawnedByOrigin !== undefined ? { spawnedByOrigin } : {}),
           })
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)

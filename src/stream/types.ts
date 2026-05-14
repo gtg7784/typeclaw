@@ -3,7 +3,13 @@ export type StreamMessageId = string
 export type StreamTarget =
   | { kind: 'broadcast' }
   | { kind: 'session'; sessionId: string }
-  | { kind: 'new-session'; subagent: string }
+  | {
+      kind: 'new-session'
+      subagent: string
+      parentSessionId?: string
+      spawnedByRole?: string
+      spawnedByOriginJson?: string
+    }
   | { kind: 'cron'; jobId: string }
 
 export type StreamMessage = {
