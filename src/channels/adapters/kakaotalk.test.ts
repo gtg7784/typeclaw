@@ -110,7 +110,9 @@ class FakeClient implements KakaoTalkClient {
     return this.markReadResult
   }
 
+  profileError: Error | null = null
   async getProfile(): Promise<KakaoProfile> {
+    if (this.profileError !== null) throw this.profileError
     return this.profileResult
   }
 
@@ -225,6 +227,42 @@ describe('createKakaotalkAdapter — start/stop lifecycle', () => {
 
     await adapter.stop()
     expect(listener.stopCalls).toBe(1)
+
+    await router.stop()
+  })
+
+  test('throws a classified error when getProfile() returns 401 (stale sub-device token)', async () => {
+    const client = new FakeClient()
+    client.profileError = new Error('Profile request failed: 401')
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+
+    await expect(adapter.start()).rejects.toThrow(/sub-device session is stale/)
+    await expect(adapter.start()).rejects.toThrow(/typeclaw channel reauth kakaotalk/)
+
+    await router.stop()
+  })
+
+  test('re-throws an unclassified getProfile error verbatim (no 401-specific message)', async () => {
+    const client = new FakeClient()
+    client.profileError = new Error('Profile request failed: 503')
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+
+    await expect(adapter.start()).rejects.toThrow(/Profile request failed: 503/)
+    await expect(adapter.start()).rejects.not.toThrow(/sub-device session is stale/)
 
     await router.stop()
   })

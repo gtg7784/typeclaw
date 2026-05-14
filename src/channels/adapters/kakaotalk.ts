@@ -462,6 +462,15 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         logger.info(`[kakaotalk] authenticated as ${profile.nickname || profile.user_id} (${profile.user_id})`)
       } catch (err) {
         started = false
+        if (isKakaoUnauthorizedError(err)) {
+          const message =
+            'KakaoTalk sub-device session is stale (server returned 401 on getProfile). ' +
+            'This usually means the ~7-day token TTL has expired and the hostd renewal cron has not refreshed it yet — ' +
+            'either because the agent was just initialized without stored credentials, or because the encryption key ' +
+            'is missing/wrong. Run `typeclaw channel reauth kakaotalk` to mint fresh tokens, then `typeclaw reload`.'
+          logger.error(`[kakaotalk] ${message}`)
+          throw new Error(message)
+        }
         logger.error(`[kakaotalk] getProfile failed: ${describe(err)}`)
         throw err
       }
@@ -525,7 +534,8 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
             `[kakaotalk] session is DEAD after KICKOUT — ${reason}. ` +
               'Likely a real cross-device login is fighting our session. ' +
               'Stop the other client, then run `typeclaw restart`. ' +
-              'If the conflict persists, re-run `typeclaw init` to mint a new device_uuid.',
+              'If the conflict persists, run `typeclaw channel reauth kakaotalk` to mint a fresh sub-device session ' +
+              '(the existing device_uuid is preserved by default so the new login skips phone-passcode confirmation).',
           )
           resetRecoveryEpisode()
           return
@@ -683,4 +693,15 @@ function suggestedAllowPattern(bucket: '@kakao-dm' | '@kakao-group' | '@kakao-op
 function isKickoutError(err: unknown): boolean {
   if (!(err instanceof Error)) return false
   return err.message.includes('kicked') || err.message.includes('KICKOUT')
+}
+
+// String-match on agent-messenger's `Profile request failed: ${status}`
+// error format (see kakaotalk/client.js:544). The SDK throws KakaoTalkError
+// with code='profile_request_failed' for any non-2xx status, so we have to
+// inspect the message to tell 401 (expired sub-device token, needs renewal)
+// apart from 5xx (transient server issue). Until the SDK exposes a typed
+// `unauthorized` code, this is the realistic detection path.
+function isKakaoUnauthorizedError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false
+  return /Profile request failed: 401\b/.test(err.message)
 }

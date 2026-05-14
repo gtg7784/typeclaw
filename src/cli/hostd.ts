@@ -3,6 +3,7 @@ import { defineCommand } from 'citty'
 import { loadConfigSync, validateConfig, type Config, type ValidateConfigResult } from '@/config'
 import { start, stop, type StartOptions, type StartResult, type StopResult } from '@/container'
 import { startDaemon, type DaemonLogEvent, type RestartPreflight } from '@/hostd/daemon'
+import { createKakaoRenewalManager } from '@/hostd/kakao-renewal-manager'
 import { createPortbrokerManager } from '@/hostd/portbroker-manager'
 import type { SupervisorLogEvent, SupervisorRestart } from '@/hostd/supervisor'
 import { computeSourceVersion, resolveSrcRoot, UNVERSIONED_SENTINEL } from '@/hostd/version'
@@ -22,11 +23,16 @@ export const hostdCommand = defineCommand({
       onLog: (msg) => writeLogLine(msg),
     })
 
+    const kakaoRenewal = createKakaoRenewalManager({
+      onLog: (event) => writeLogLine(formatLog(event)),
+    })
+
     const daemon = await startDaemon({
       onLog: (e) => writeLogLine(formatLog(e)),
       version,
       onShutdown: () => process.exit(0),
       portbroker,
+      kakaoRenewal,
       restartPreflight: buildHostdRestartPreflight(cliEntry, version),
       restart: buildHostdRestart(cliEntry, defaultRestartDeps, version),
     })
@@ -35,6 +41,7 @@ export const hostdCommand = defineCommand({
       void daemon
         .stop()
         .then(() => portbroker.drain())
+        .then(() => kakaoRenewal.drain())
         .then(() => process.exit(0))
     }
     process.on('SIGTERM', shutdown)
@@ -135,6 +142,18 @@ function formatLog(event: DaemonLogEvent | SupervisorLogEvent): string {
       return formatPortForwardEvent(event.event)
     case 'tailscale-serve-event':
       return formatTailscaleServeEvent(event.event)
+    case 'kakao-renewal-tick-start':
+      return `[hostd] kakao renewal tick started for ${event.containerName}`
+    case 'kakao-renewal-tick-skipped':
+      return `[hostd] kakao renewal skipped for ${event.containerName}: ${event.reason}${event.ageMs !== undefined ? ` (age=${Math.round(event.ageMs / 1000 / 60 / 60)}h)` : ''}`
+    case 'kakao-renewal-tick-ok':
+      return `[hostd] kakao renewal OK for ${event.containerName} account=${event.accountId} (was last updated ${event.previousUpdatedAt})`
+    case 'kakao-renewal-tick-reauth-required':
+      return `[hostd] kakao renewal REAUTH REQUIRED for ${event.containerName} account=${event.accountId} reason=${event.reason} — ${event.message}`
+    case 'kakao-renewal-tick-transient-failure':
+      return `[hostd] kakao renewal transient failure for ${event.containerName} account=${event.accountId}: ${event.reason}`
+    case 'kakao-renewal-tick-error':
+      return `[hostd] kakao renewal ERROR for ${event.containerName}: ${event.error}`
   }
 }
 

@@ -9,6 +9,7 @@ import { join } from 'node:path'
 const CONTAINER_HOST_RUN_DIR = '/run/typeclaw-host'
 const SOCKET_FILE = 'hostd.sock'
 const REGISTRATIONS_DIR = 'registrations'
+const KEYS_DIR = 'keys'
 
 // Defense-in-depth: containerName arrives from RPC payloads (some of which
 // originate inside the container). Docker already forbids slashes and most
@@ -51,6 +52,10 @@ export function registrationsDir(): string {
   return join(runDir(), REGISTRATIONS_DIR)
 }
 
+export function keysDir(): string {
+  return join(homeRoot(), KEYS_DIR)
+}
+
 // Throws on any name that could traverse out of registrationsDir() or
 // confuse the filesystem. Caller's responsibility to handle the error;
 // don't catch-and-ignore — an invalid name is a protocol violation.
@@ -76,7 +81,9 @@ export async function ensureDirs(): Promise<void> {
   await mkdir(runDir(), { recursive: true })
   await mkdir(logDir(), { recursive: true })
   await mkdir(registrationsDir(), { recursive: true })
+  await mkdir(keysDir(), { recursive: true })
   await chmod(runDir(), 0o700).catch(() => {})
   await chmod(logDir(), 0o700).catch(() => {})
   await chmod(registrationsDir(), 0o700).catch(() => {})
+  await chmod(keysDir(), 0o700).catch(() => {})
 }

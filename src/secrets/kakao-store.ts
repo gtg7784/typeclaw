@@ -3,8 +3,18 @@ import type { PendingLoginState } from 'agent-messenger/kakaotalk'
 
 import { sendHttp } from '@/hostd/client'
 
-import { type KakaoChannelBlock, kakaoChannelBlockSchema } from './schema'
+import { type KakaoChannelBlock, type KakaoEncryptedPassword, kakaoChannelBlockSchema } from './schema'
 import { SecretsBackend } from './storage'
+
+// Account shape accepted by setAccount(). Extends the upstream
+// KakaoAccountCredentials with the typeclaw-only renewal fields (email +
+// encrypted password). Callers that don't care about renewal can pass the
+// upstream slice unchanged; production's runKakaotalkBootstrap supplies the
+// extra fields so the renewal cron can use them.
+export type SetKakaoAccountInput = KakaoAccountCredentials & {
+  email?: string
+  encryptedPassword?: KakaoEncryptedPassword
+}
 
 export type SecretsKakaoCredentialStoreOptions =
   | { mode: 'host'; secretsPath: string }
@@ -25,7 +35,7 @@ export class SecretsKakaoCredentialStore {
   }
 
   async save(config: KakaoConfig): Promise<void> {
-    await this.writeBlock(() => fromKakaoConfig(config))
+    await this.writeBlock((prior) => fromKakaoConfig(config, prior))
   }
 
   async getAccount(id?: string): Promise<KakaoAccountCredentials | null> {
@@ -35,9 +45,10 @@ export class SecretsKakaoCredentialStore {
     return config.accounts[config.current_account] ?? null
   }
 
-  async setAccount(account: KakaoAccountCredentials): Promise<void> {
+  async setAccount(account: SetKakaoAccountInput): Promise<void> {
     await this.writeBlock((block) => {
-      const accounts = { ...block.accounts, [account.account_id]: account }
+      const merged = mergeUpstreamAccount(account, block.accounts[account.account_id])
+      const accounts = { ...block.accounts, [account.account_id]: merged }
       return { ...block, currentAccount: block.currentAccount ?? account.account_id, accounts }
     })
   }
@@ -124,6 +135,33 @@ function toKakaoConfig(block: KakaoChannelBlock): KakaoConfig {
   return { current_account: block.currentAccount, accounts: block.accounts }
 }
 
-function fromKakaoConfig(config: KakaoConfig): KakaoChannelBlock {
-  return { currentAccount: config.current_account, accounts: config.accounts }
+// The upstream KakaoConfig/KakaoAccountCredentials types have no awareness of
+// `email` or `encryptedPassword`, so any SDK-driven round-trip (save() after
+// token refresh, KakaoCredentialManager replacing a config slot) would strip
+// them. Re-attach them per-account from the prior on-disk block, keyed by
+// account_id, so token rotations preserve the renewal credentials the cron
+// depends on.
+function fromKakaoConfig(config: KakaoConfig, prior: KakaoChannelBlock): KakaoChannelBlock {
+  const accounts: KakaoChannelBlock['accounts'] = {}
+  for (const [id, account] of Object.entries(config.accounts)) {
+    accounts[id] = mergeUpstreamAccount(account, prior.accounts[id])
+  }
+  return { ...prior, currentAccount: config.current_account, accounts }
+}
+
+function mergeUpstreamAccount(
+  incoming: SetKakaoAccountInput | KakaoAccountCredentials,
+  priorOnDisk: KakaoChannelBlock['accounts'][string] | undefined,
+): KakaoChannelBlock['accounts'][string] {
+  const incomingExt = incoming as SetKakaoAccountInput
+  const merged: KakaoChannelBlock['accounts'][string] = { ...incoming }
+  // Incoming wins for fields it explicitly carries (e.g. fresh login provides
+  // email + encryptedPassword); otherwise we fall back to the prior on-disk
+  // record so token-refresh round-trips through the SDK don't strip our
+  // renewal credentials.
+  if (incomingExt.email !== undefined) merged.email = incomingExt.email
+  else if (priorOnDisk?.email !== undefined) merged.email = priorOnDisk.email
+  if (incomingExt.encryptedPassword !== undefined) merged.encryptedPassword = incomingExt.encryptedPassword
+  else if (priorOnDisk?.encryptedPassword !== undefined) merged.encryptedPassword = priorOnDisk.encryptedPassword
+  return merged
 }

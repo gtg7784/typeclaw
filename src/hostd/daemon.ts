@@ -11,6 +11,7 @@ import { kakaoChannelBlockSchema } from '@/secrets/schema'
 import { SecretsBackend } from '@/secrets/storage'
 
 import { isDaemonReachable } from './client'
+import type { KakaoRenewalCallbacks, KakaoRenewalLogEvent } from './kakao-renewal-manager'
 import { ensureDirs, registrationFilePath, registrationsDir, socketPath } from './paths'
 import type {
   HttpInfoResult,
@@ -54,6 +55,11 @@ export type DaemonOptions = {
   // fields trigger broker spawn alongside supervisor registration. Tests omit
   // it to keep the broker out of unrelated suites.
   portbroker?: PortbrokerCallbacks
+  // KakaoTalk credential renewal capability. When provided, the daemon
+  // starts a per-container daily renewal tick on register and stops it on
+  // deregister. Omit to disable in tests / when the agent has no kakaotalk
+  // channel configured.
+  kakaoRenewal?: KakaoRenewalCallbacks
 }
 
 export type RestartPreflight = (input: {
@@ -94,6 +100,7 @@ export type DaemonLogEvent =
   | { kind: 'shutdown-requested' }
   | { kind: 'port-forward-event'; event: PortForwardEvent }
   | { kind: 'tailscale-serve-event'; event: TailscaleServeEvent }
+  | KakaoRenewalLogEvent
 
 export type Daemon = {
   registered: () => string[]
@@ -284,6 +291,9 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         onTailscaleServeEvent: (event) => log({ kind: 'tailscale-serve-event', event }),
       })
     }
+    if (opts.kakaoRenewal) {
+      opts.kakaoRenewal.start({ containerName: payload.containerName, cwd: payload.cwd })
+    }
   }
 
   const handleRegister = async (req: RegisterPayload): Promise<RpcResponse> => {
@@ -309,6 +319,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       restartTokens.delete(req.containerName)
       gcMisses.delete(req.containerName)
       if (opts.portbroker) await opts.portbroker.stop(req.containerName, 'deregistered').catch(() => {})
+      if (opts.kakaoRenewal) await opts.kakaoRenewal.stop(req.containerName).catch(() => {})
       await removeRegistrationFile(req.containerName)
       if (hadCwd) log({ kind: 'deregister', containerName: req.containerName, reason: 'requested' })
       return { ok: true }
@@ -574,6 +585,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
         const hadCwd = cwds.delete(name)
         restartTokens.delete(name)
         if (opts.portbroker) await opts.portbroker.stop(name, 'deregistered').catch(() => {})
+        if (opts.kakaoRenewal) await opts.kakaoRenewal.stop(name).catch(() => {})
         await removeRegistrationFile(name)
         if (hadCwd) log({ kind: 'deregister', containerName: name, reason: 'gone' })
         return { ok: true }
@@ -600,6 +612,10 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       if (opts.portbroker) {
         const names = Array.from(cwds.keys())
         await Promise.allSettled(names.map((n) => opts.portbroker!.stop(n, 'broker-stopped')))
+      }
+      if (opts.kakaoRenewal) {
+        const names = Array.from(cwds.keys())
+        await Promise.allSettled(names.map((n) => opts.kakaoRenewal!.stop(n)))
       }
       cwds.clear()
       restartTokens.clear()
