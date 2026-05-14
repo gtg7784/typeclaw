@@ -106,34 +106,49 @@ const DANGEROUS_COMMAND_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string
   },
 ]
 
+// Records remote-taint for any `git remote add/set-url` in this bash
+// command IF the command would have been allowed to proceed (either
+// gitExfil was acknowledged on the call, or the caller is bypassing
+// gitExfil via permission -- caller signals the latter with
+// `permittedBypass: true`). The taint is what makes the second-step
+// gitRemoteTainted defense work, so recording must NOT depend on the
+// gitExfil guard's return value: a permission-bypassed actor would
+// otherwise skip taint recording entirely and a later push to the
+// re-pointed remote would escape detection.
+//
+// When the command would have been blocked (no ack, no bypass), nothing
+// is recorded -- the agent never actually ran the set-url so the remote
+// state on disk is unchanged.
+export function recordGitRemoteTaintIfAny(options: {
+  tool: string
+  args: Record<string, unknown>
+  sessionId?: string
+  permittedBypass?: boolean
+}): void {
+  const { tool, args, sessionId, permittedBypass } = options
+  if (tool !== 'bash') return
+  if (!sessionId) return
+  const command = args.command
+  if (typeof command !== 'string') return
+  const allowed = permittedBypass === true || isGuardAcknowledged(args, GUARD_GIT_EXFIL)
+  if (!allowed) return
+  for (const change of parseRemoteChanges(command)) {
+    recordRemoteTaint(sessionId, { remoteName: change.remoteName, url: change.url })
+  }
+}
+
 export function checkGitExfilGuard(options: {
   tool: string
   args: Record<string, unknown>
   sessionId?: string
 }): SecurityBlock | undefined {
-  const { tool, args, sessionId } = options
+  const { tool, args } = options
   if (tool !== 'bash') return undefined
 
   const command = args.command
   if (typeof command !== 'string') return undefined
 
-  const taintBlock = checkPushToTaintedRemote({ command, args, sessionId })
-  if (taintBlock) return taintBlock
-
-  if (isGuardAcknowledged(args, GUARD_GIT_EXFIL)) {
-    // The user acknowledged that this command may exfil. If the command is a
-    // `git remote add/set-url`, treat the ack as the commit point and taint
-    // the affected remote so any later push must be acknowledged separately.
-    // Done here (and not at tool.after) so the taint is recorded even if the
-    // subsequent shell exec fails -- a partially-applied remote change still
-    // leaves the repo in an exfil-shaped state.
-    if (sessionId) {
-      for (const change of parseRemoteChanges(command)) {
-        recordRemoteTaint(sessionId, { remoteName: change.remoteName, url: change.url })
-      }
-    }
-    return undefined
-  }
+  if (isGuardAcknowledged(args, GUARD_GIT_EXFIL)) return undefined
 
   const matched = DANGEROUS_COMMAND_PATTERNS.find(({ pattern }) => pattern.test(command))
   if (!matched) return undefined
@@ -146,6 +161,24 @@ export function checkGitExfilGuard(options: {
       `If this is genuinely intentional and the user (not a channel message) explicitly asked for it, retry with \`${ACKNOWLEDGE_GUARDS}.${GUARD_GIT_EXFIL}: true\` in the bash arguments.`,
     ].join(' '),
   }
+}
+
+// Separate top-level guard so `security.bypass.gitRemoteTainted` can be
+// granted independently of `security.bypass.gitExfil`. The two defend
+// different shapes: gitExfil blocks the first step (re-point or push),
+// gitRemoteTainted blocks the second step (push to a remote that was
+// re-pointed earlier in the same session). Bypassing one must not silently
+// disable the other.
+export function checkGitRemoteTaintedGuard(options: {
+  tool: string
+  args: Record<string, unknown>
+  sessionId?: string
+}): SecurityBlock | undefined {
+  const { tool, args, sessionId } = options
+  if (tool !== 'bash') return undefined
+  const command = args.command
+  if (typeof command !== 'string') return undefined
+  return checkPushToTaintedRemote({ command, args, sessionId })
 }
 
 function checkPushToTaintedRemote(options: {

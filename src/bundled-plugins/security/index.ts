@@ -1,7 +1,7 @@
 import { definePlugin } from '@/plugin'
 
 import { SECURITY_PERMISSIONS } from './permissions'
-import { checkGitExfilGuard } from './policies/git-exfil'
+import { checkGitExfilGuard, checkGitRemoteTaintedGuard, recordGitRemoteTaintIfAny } from './policies/git-exfil'
 import { checkOutboundSecretGuard } from './policies/outbound-secret-scan'
 import { applyPromptInjectionDefense } from './policies/prompt-injection'
 import { clearSessionTaints } from './policies/remote-taint-state'
@@ -22,7 +22,24 @@ export default definePlugin({
       },
       'tool.before': async (event) => {
         const can = (perm: string) => ctx.permissions.has(event.origin, perm)
+
+        // Taint-recording runs FIRST, independently of the gitExfil guard.
+        // The gitRemoteTainted defense depends on it. We pass through
+        // `permittedBypass` for actors who can skip gitExfil via permission
+        // so the recorder still fires for them (an acked or
+        // permission-bypassed command will actually run, so its remote
+        // change must be remembered).
+        recordGitRemoteTaintIfAny({
+          tool: event.tool,
+          args: event.args,
+          sessionId: event.sessionId,
+          permittedBypass: can(SECURITY_PERMISSIONS.bypassGitExfil),
+        })
+
         const checks = [
+          can(SECURITY_PERMISSIONS.bypassGitRemoteTainted)
+            ? undefined
+            : checkGitRemoteTaintedGuard({ tool: event.tool, args: event.args, sessionId: event.sessionId }),
           can(SECURITY_PERMISSIONS.bypassSecretExfilBash)
             ? undefined
             : checkSecretExfilBashGuard({ tool: event.tool, args: event.args }),
