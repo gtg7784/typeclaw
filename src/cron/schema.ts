@@ -11,6 +11,7 @@ const baseJob = z.object({
   schedule: z.string().min(1),
   enabled: z.boolean().default(true),
   timezone: z.string().optional(),
+  scheduledByRole: z.string().optional(),
 })
 
 const promptJob = baseJob.extend({
@@ -71,6 +72,13 @@ export function parseCronFile(raw: unknown, options: ParseCronOptions = {}): Par
         return { ok: false, reason: `job ${job.id}: invalid timezone "${job.timezone}": ${message}` }
       }
       return { ok: false, reason: `job ${job.id}: invalid schedule "${job.schedule}": ${message}` }
+    }
+
+    if (job.scheduledByRole === undefined) {
+      return {
+        ok: false,
+        reason: `job ${job.id}: missing 'scheduledByRole'. Add "scheduledByRole": "owner" if you authored this entry manually.`,
+      }
     }
 
     if (job.kind === 'prompt' && job.subagent !== undefined && options.subagents !== undefined) {

@@ -66,7 +66,7 @@ describe('createCronReloadable', () => {
     await writeFile(
       join(agentDir, 'cron.json'),
       JSON.stringify({
-        jobs: [{ id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+        jobs: [{ id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
       }),
     )
 
@@ -132,8 +132,8 @@ describe('createCronReloadable', () => {
       join(agentDir, 'cron.json'),
       JSON.stringify({
         jobs: [
-          { id: 'dup', schedule: '* * * * *', kind: 'prompt', prompt: 'a' },
-          { id: 'dup', schedule: '0 * * * *', kind: 'prompt', prompt: 'b' },
+          { id: 'dup', schedule: '* * * * *', kind: 'prompt', prompt: 'a', scheduledByRole: 'owner' },
+          { id: 'dup', schedule: '0 * * * *', kind: 'prompt', prompt: 'b', scheduledByRole: 'owner' },
         ],
       }),
     )
@@ -149,7 +149,9 @@ describe('createCronReloadable', () => {
     const scheduler = failingScheduler(new Error('apply blew up'))
     await writeFile(
       join(agentDir, 'cron.json'),
-      JSON.stringify({ jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }] }),
+      JSON.stringify({
+        jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      }),
     )
 
     const reloadable = createCronReloadable({ cwd: agentDir, scheduler })
@@ -163,7 +165,7 @@ describe('createCronReloadable', () => {
     await writeFile(
       join(agentDir, 'cron.json'),
       JSON.stringify({
-        jobs: [{ id: 'user-job', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+        jobs: [{ id: 'user-job', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
       }),
     )
     const internal: CronJob = {

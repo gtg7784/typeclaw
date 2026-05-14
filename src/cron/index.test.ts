@@ -36,8 +36,14 @@ describe('loadCron', () => {
       join(root, 'cron.json'),
       JSON.stringify({
         jobs: [
-          { id: 'daily', schedule: '30 23 * * *', kind: 'prompt', prompt: 'summarize' },
-          { id: 'backup', schedule: '0 * * * *', kind: 'exec', command: ['git', 'commit', '-am', 'x'] },
+          { id: 'daily', schedule: '30 23 * * *', kind: 'prompt', prompt: 'summarize', scheduledByRole: 'owner' },
+          {
+            id: 'backup',
+            schedule: '0 * * * *',
+            kind: 'exec',
+            command: ['git', 'commit', '-am', 'x'],
+            scheduledByRole: 'owner',
+          },
         ],
       }),
     )

@@ -61,8 +61,8 @@ describe('reload end-to-end via ws', () => {
       join(agentDir, 'cron.json'),
       JSON.stringify({
         jobs: [
-          { id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x' },
-          { id: 'b', schedule: '0 * * * *', kind: 'prompt', prompt: 'y' },
+          { id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' },
+          { id: 'b', schedule: '0 * * * *', kind: 'prompt', prompt: 'y', scheduledByRole: 'owner' },
         ],
       }),
     )
@@ -94,7 +94,7 @@ describe('reload end-to-end via ws', () => {
     await writeFile(
       join(agentDir, 'cron.json'),
       JSON.stringify({
-        jobs: [{ id: 'good', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+        jobs: [{ id: 'good', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
       }),
     )
     const initial = await loadCron(agentDir)
@@ -133,7 +133,9 @@ describe('reload end-to-end via ws', () => {
 
     await writeFile(
       join(agentDir, 'cron.json'),
-      JSON.stringify({ jobs: [{ id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }] }),
+      JSON.stringify({
+        jobs: [{ id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      }),
     )
     const { url } = await startTestAgent(scheduler)
 
@@ -160,7 +162,9 @@ describe('reload end-to-end via ws', () => {
 
     await writeFile(
       join(agentDir, 'cron.json'),
-      JSON.stringify({ jobs: [{ id: 'one', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }] }),
+      JSON.stringify({
+        jobs: [{ id: 'one', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      }),
     )
     await requestReload({ url })
 
@@ -168,8 +172,8 @@ describe('reload end-to-end via ws', () => {
       join(agentDir, 'cron.json'),
       JSON.stringify({
         jobs: [
-          { id: 'one', schedule: '* * * * *', kind: 'prompt', prompt: 'x' },
-          { id: 'two', schedule: '0 * * * *', kind: 'prompt', prompt: 'y' },
+          { id: 'one', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' },
+          { id: 'two', schedule: '0 * * * *', kind: 'prompt', prompt: 'y', scheduledByRole: 'owner' },
         ],
       }),
     )
