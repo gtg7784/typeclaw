@@ -160,6 +160,21 @@ export class SecretsBackend implements AuthStorageBackend {
     }
   }
 
+  tryReadProviderApiKeySync(providerId: string, env: NodeJS.ProcessEnv = process.env): string | null {
+    if (!existsSync(this.secretsPath)) return null
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      const credential = this.readEnvelope().providers[providerId]
+      if (credential?.type !== 'api_key') return null
+      const resolved =
+        resolveSecret(credential.key, providerKeyDefaultEnv(providerId), env) ?? credential.key.value ?? ''
+      return resolved.trim() !== '' ? resolved : null
+    } finally {
+      release?.()
+    }
+  }
+
   writeChannelsSync(next: Channels): void {
     this.ensureParentDir()
     this.ensureFileExists()

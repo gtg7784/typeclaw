@@ -12,7 +12,7 @@ import {
   type KnownProviderId,
 } from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
-import { type Channels, type Secret, SecretsBackend } from '@/secrets'
+import { createSecretsStoreForAgent, type Channels, type Secret, SecretsBackend } from '@/secrets'
 import { createTui } from '@/tui'
 
 import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
@@ -29,7 +29,6 @@ export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 
 const CONFIG_FILE = 'typeclaw.json'
 const CRON_FILE = 'cron.json'
-const SECRETS_FILE = '.env'
 const PACKAGE_FILE = 'package.json'
 
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'] as const
@@ -564,15 +563,10 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
   }
 }
 
-// Writes the LLM provider's API key to `.env` (under its provider-specific
-// env var, e.g. OPENAI_API_KEY or FIREWORKS_API_KEY) and the channel adapter
-// tokens to `secrets.json#channels`. Two stores on purpose: api-keys land in
-// `.env` to match the `--env-file .env` boot contract (env-wins: `auth.ts`
-// reads the value at runtime via `setRuntimeApiKey` and never persists it to
-// `secrets.json`, see `src/agent/auth.ts`); channel tokens skip the .env hop
-// entirely and land in `secrets.json#channels` as `{ value }` Secrets that
-// `hydrateChannelEnvFromSecrets` injects into `process.env` only when the
-// canonical env var is unset, see `src/secrets/hydrate.ts`.
+// Writes LLM provider API keys to `secrets.json#providers` and channel adapter
+// tokens to `secrets.json#channels`. Both paths go through the structured
+// v2 secrets envelope so reruns can reuse existing values without depending on
+// host-stage env files.
 export async function writeSecrets(
   root: string,
   {
@@ -584,9 +578,7 @@ export async function writeSecrets(
     telegramBotToken,
   }: {
     model?: KnownModelRef
-    // Omitted on the OAuth path — credentials live in secrets.json instead.
-    // The .env file still gets written (empty) so post-init callers that
-    // read it don't ENOENT-crash.
+    // Omitted on the OAuth path — credentials live in secrets.json via the OAuth runner.
     apiKey?: string
     discordBotToken?: string
     slackBotToken?: string
@@ -596,7 +588,9 @@ export async function writeSecrets(
 ): Promise<void> {
   const providerId = providerForModelRef(model)
   const apiKeyEnv = KNOWN_PROVIDERS[providerId].apiKeyEnv
-  await writeEnvFile(root, apiKeyEnv === null || apiKey === undefined ? undefined : { name: apiKeyEnv, value: apiKey })
+  if (apiKey !== undefined && apiKeyEnv !== null) {
+    createSecretsStoreForAgent(join(root, 'secrets.json')).set(providerId, { type: 'api_key', key: apiKey })
+  }
 
   const channelTokens: Record<string, Record<string, Secret>> = {}
   if (discordBotToken !== undefined && discordBotToken !== '') {
@@ -625,61 +619,9 @@ export async function writeSecrets(
 }
 
 export async function readExistingProviderApiKey(root: string, providerId: KnownProviderId): Promise<string | null> {
-  const apiKeyEnv = KNOWN_PROVIDERS[providerId].apiKeyEnv
-  if (apiKeyEnv === null) return null
-  const env = await readEnvFile(root)
-  const value = env.values.get(apiKeyEnv)
-  return value !== undefined && value.trim() !== '' ? value : null
-}
-
-async function writeEnvFile(root: string, apiKey: { name: string; value: string } | undefined): Promise<void> {
-  const env = await readEnvFile(root)
-  if (apiKey === undefined) {
-    await writeFile(join(root, SECRETS_FILE), env.body)
-    return
-  }
-
-  const lines = env.lines.slice()
-  const existingLine = env.entries.get(apiKey.name)
-  if (existingLine !== undefined) {
-    lines[existingLine] = `${apiKey.name}=${apiKey.value}`
-  } else {
-    lines.push(`${apiKey.name}=${apiKey.value}`)
-  }
-  await writeFile(join(root, SECRETS_FILE), lines.length > 0 ? `${lines.join('\n')}\n` : '')
-}
-
-async function readEnvFile(
-  root: string,
-): Promise<{ body: string; lines: string[]; entries: Map<string, number>; values: Map<string, string> }> {
-  let body: string
-  try {
-    body = await readFile(join(root, SECRETS_FILE), 'utf8')
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    body = ''
-  }
-
-  const lines = body === '' ? [] : body.replace(/\n$/, '').split('\n')
-  const entries = new Map<string, number>()
-  const values = new Map<string, string>()
-  for (const [index, line] of lines.entries()) {
-    const parsed = parseEnvLine(line)
-    if (parsed === null) continue
-    entries.set(parsed.name, index)
-    values.set(parsed.name, parsed.value)
-  }
-  return { body, lines, entries, values }
-}
-
-function parseEnvLine(line: string): { name: string; value: string } | null {
-  const trimmed = line.trimStart()
-  if (trimmed === '' || trimmed.startsWith('#')) return null
-  const separator = line.indexOf('=')
-  if (separator <= 0) return null
-  const name = line.slice(0, separator).trim()
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null
-  return { name, value: line.slice(separator + 1) }
+  const provider = KNOWN_PROVIDERS[providerId]
+  if (provider.apiKeyEnv === null) return null
+  return new SecretsBackend(join(root, 'secrets.json')).tryReadProviderApiKeySync(providerId)
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
