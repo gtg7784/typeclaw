@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import type { DiscordBotClient, DiscordFile, DiscordMessage } from 'agent-messenger/discordbot'
 import { DiscordIntent } from 'agent-messenger/discordbot'
 
-import { defaultHistoryConfig, isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 import type { FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
 
 import {
@@ -14,23 +14,6 @@ import {
   DISCORD_BOT_INTENTS,
   DISCORD_HISTORY_LIMIT_MAX,
 } from './discord-bot'
-
-describe('discord-bot adapter (unit-level pure helpers)', () => {
-  test('isAllowed denies a guild channel not in the allow list', () => {
-    expect(isAllowed(['guild:1/2'], '1', '99')).toBe(false)
-    expect(isAllowed(['guild:1/2'], '2', '2')).toBe(false)
-  })
-
-  test('isAllowed admits a guild channel in the allow list', () => {
-    expect(isAllowed(['guild:1/2'], '1', '2')).toBe(true)
-  })
-
-  test('isAllowed admits DMs only when the rule covers @dm', () => {
-    expect(isAllowed(['guild:*'], '@dm', 'd1')).toBe(false)
-    expect(isAllowed(['dm:*'], '@dm', 'd1')).toBe(true)
-    expect(isAllowed(['*'], '@dm', 'd1')).toBe(true)
-  })
-})
 
 describe('discord-bot gateway intents', () => {
   test('includes MessageContent (privileged) so inbound messages carry text', () => {
@@ -67,12 +50,6 @@ describe('createTypingCallback', () => {
   test('POSTs to /channels/{chat}/typing with bot token authorization', async () => {
     const cb = createTypingCallback({
       token: 'tok-abc',
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, phase: 'tick' })
@@ -86,31 +63,10 @@ describe('createTypingCallback', () => {
   test('uses thread id as the channel id when thread is set', async () => {
     const cb = createTypingCallback({
       token: 'tok',
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 'thr-9', phase: 'tick' })
     expect(calls[0]!.url).toBe('https://discord.com/api/v10/channels/thr-9/typing')
-  })
-
-  test('skips disallowed channels (does not call fetch)', async () => {
-    const cb = createTypingCallback({
-      token: 'tok',
-      configRef: () => ({
-        allow: ['guild:other'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-    })
-    await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, phase: 'tick' })
-    expect(calls).toHaveLength(0)
   })
 
   test('non-OK responses are logged but do not throw', async () => {
@@ -118,12 +74,6 @@ describe('createTypingCallback', () => {
     const warns: string[] = []
     const cb = createTypingCallback({
       token: 'tok',
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
     })
     await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, phase: 'tick' })
@@ -137,12 +87,6 @@ describe('createTypingCallback', () => {
     const warns: string[] = []
     const cb = createTypingCallback({
       token: 'tok',
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
     })
     await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, phase: 'tick' })
@@ -152,12 +96,6 @@ describe('createTypingCallback', () => {
   test('rejects non-discord adapter without calling fetch', async () => {
     const cb = createTypingCallback({
       token: 'tok',
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     await cb({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null, phase: 'tick' })
@@ -167,12 +105,6 @@ describe('createTypingCallback', () => {
   test('phase=stop is a no-op (Discord typing auto-expires; extra POST would re-arm it)', async () => {
     const cb = createTypingCallback({
       token: 'tok',
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     await cb({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null, phase: 'stop' })
@@ -437,7 +369,6 @@ describe('createDiscordHistoryCallback', () => {
 
   function permissiveConfig(): ChannelAdapterConfig {
     return {
-      allow: ['*'],
       engagement: { trigger: ['mention'], stickiness: 'off' },
       enabled: true,
       history: defaultHistoryConfig(),
@@ -449,7 +380,6 @@ describe('createDiscordHistoryCallback', () => {
     const { fn, calls } = fakeFetch([])
     const cb = createDiscordHistoryCallback({
       token: 'bot-tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -472,7 +402,6 @@ describe('createDiscordHistoryCallback', () => {
     const { fn, calls } = fakeFetch([])
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -486,7 +415,6 @@ describe('createDiscordHistoryCallback', () => {
     const { fn: fn2, calls: calls2 } = fakeFetch([])
     const cb2 = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn2,
@@ -524,7 +452,6 @@ describe('createDiscordHistoryCallback', () => {
     ])
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -556,7 +483,6 @@ describe('createDiscordHistoryCallback', () => {
     ])
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -583,7 +509,6 @@ describe('createDiscordHistoryCallback', () => {
     ])
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => 'u-bot',
       fetchImpl: fn,
@@ -615,7 +540,6 @@ describe('createDiscordHistoryCallback', () => {
     ])
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -640,7 +564,6 @@ describe('createDiscordHistoryCallback', () => {
     ])
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -657,7 +580,6 @@ describe('createDiscordHistoryCallback', () => {
     const { fn, calls } = fakeFetch([])
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -674,7 +596,6 @@ describe('createDiscordHistoryCallback', () => {
     const { fn, calls } = fakeFetch([])
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -691,7 +612,6 @@ describe('createDiscordHistoryCallback', () => {
     const { fn } = fakeFetch({ status: 429 })
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -709,7 +629,6 @@ describe('createDiscordHistoryCallback', () => {
     }) as unknown as typeof fetch
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -720,39 +639,11 @@ describe('createDiscordHistoryCallback', () => {
     expect(result).toEqual({ ok: false, error: 'network down' })
   })
 
-  test('refuses fetch when chat is not in the allow list', async () => {
-    // given
-    const { fn, calls } = fakeFetch([])
-    const cb = createDiscordHistoryCallback({
-      token: 'tok',
-      configRef: (): ChannelAdapterConfig => ({
-        allow: ['guild:other-guild'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
-      logger: silentLogger(),
-      botUserIdRef: () => null,
-      fetchImpl: fn,
-    })
-    // when
-    const result = await cb({ chat: 'channel-id', thread: null, limit: 10 })
-    // then
-    expect(calls).toHaveLength(0)
-    expect(result).toEqual({ ok: false, error: 'denied by allow rules' })
-  })
-
   test('admits per-channel allow rule (channel:<id>) without a workspace at fetch time', async () => {
     // given
     const { fn, calls } = fakeFetch([])
     const cb = createDiscordHistoryCallback({
       token: 'tok',
-      configRef: (): ChannelAdapterConfig => ({
-        allow: ['channel:channel-id'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -812,7 +703,6 @@ describe('discord-bot createOutboundCallback', () => {
 
   function permissive(): ChannelAdapterConfig {
     return {
-      allow: ['*'],
       engagement: { trigger: ['mention'], stickiness: 'off' },
       enabled: true,
       history: defaultHistoryConfig(),
@@ -828,7 +718,7 @@ describe('discord-bot createOutboundCallback', () => {
   test('text-only path posts via sendMessage and never calls uploadFile', async () => {
     // given
     const { client, sends, uploads } = makeFakeClient()
-    const cb = createOutboundCallback({ client, configRef: permissive, logger: silentLogger(), formatChannelTag: tag })
+    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
     // when
     const result = await cb(makeMsg({ text: 'hello' }))
     // then
@@ -839,14 +729,14 @@ describe('discord-bot createOutboundCallback', () => {
 
   test('threaded text-only post forwards thread_id to sendMessage', async () => {
     const { client, sends } = makeFakeClient()
-    const cb = createOutboundCallback({ client, configRef: permissive, logger: silentLogger(), formatChannelTag: tag })
+    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
     await cb(makeMsg({ text: 'hello', thread: 't1' }))
     expect(sends).toEqual([{ chat: 'c1', content: 'hello', options: { thread_id: 't1' } }])
   })
 
   test('attachments-only post uploads each file with no follow-up sendMessage', async () => {
     const { client, sends, uploads } = makeFakeClient()
-    const cb = createOutboundCallback({ client, configRef: permissive, logger: silentLogger(), formatChannelTag: tag })
+    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
     const result = await cb(
       makeMsg({ text: undefined, attachments: [{ path: '/agent/a.png' }, { path: '/agent/b.pdf' }] }),
     )
@@ -874,7 +764,6 @@ describe('discord-bot createOutboundCallback', () => {
     }
     const cb = createOutboundCallback({
       client: recordingClient,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
     })
@@ -892,7 +781,6 @@ describe('discord-bot createOutboundCallback', () => {
     const warns: string[] = []
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
       formatChannelTag: tag,
     })
@@ -905,7 +793,7 @@ describe('discord-bot createOutboundCallback', () => {
 
   test('upload failure aborts before sendMessage runs', async () => {
     const { client, sends } = makeFakeClient({ uploadFile: 'reject' })
-    const cb = createOutboundCallback({ client, configRef: permissive, logger: silentLogger(), formatChannelTag: tag })
+    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
     const result = await cb(makeMsg({ text: 'caption', attachments: [{ path: '/agent/a.png' }] }))
     expect(result.ok).toBe(false)
     expect(result.ok === false ? result.error : '').toContain('uploadFile failed')
@@ -914,7 +802,7 @@ describe('discord-bot createOutboundCallback', () => {
 
   test('rejects when message has neither text nor attachments', async () => {
     const { client } = makeFakeClient()
-    const cb = createOutboundCallback({ client, configRef: permissive, logger: silentLogger(), formatChannelTag: tag })
+    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
     const result = await cb(makeMsg({ text: undefined, attachments: [] }))
     expect(result.ok).toBe(false)
   })
@@ -923,27 +811,11 @@ describe('discord-bot createOutboundCallback', () => {
     const { client, uploads } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       resolvePath: (p) => p.replace('/agent/', '/host/mounts/agent/'),
     })
     await cb(makeMsg({ text: undefined, attachments: [{ path: '/agent/a.png' }] }))
     expect(uploads).toEqual([{ chat: 'c1', path: '/host/mounts/agent/a.png' }])
-  })
-
-  test('denies when allow rules reject the channel without contacting the API', async () => {
-    const { client, sends, uploads } = makeFakeClient()
-    const restrictive = (): ChannelAdapterConfig => ({
-      allow: ['guild:other/*'],
-      engagement: { trigger: ['mention'], stickiness: 'off' },
-      enabled: true,
-      history: defaultHistoryConfig(),
-    })
-    const cb = createOutboundCallback({ client, configRef: restrictive, logger: silentLogger(), formatChannelTag: tag })
-    const result = await cb(makeMsg({ text: 'hi' }))
-    expect(result.ok).toBe(false)
-    expect(sends).toHaveLength(0)
-    expect(uploads).toHaveLength(0)
   })
 })

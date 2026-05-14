@@ -89,7 +89,6 @@ function messageEntry(message: AssistantMessage): SessionEntry {
 }
 
 const baseConfig: ChannelAdapterConfig = {
-  allow: ['*'],
   engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
   enabled: true,
   history: defaultHistoryConfig(),
@@ -572,7 +571,6 @@ describe('ChannelRouter engagement and prompt composition', () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir, {
       config: {
-        allow: [],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
         history: defaultHistoryConfig(),
@@ -594,7 +592,6 @@ describe('ChannelRouter engagement and prompt composition', () => {
     const logs: string[] = []
     const { router } = makeRouter(dir, {
       config: {
-        allow: ['*'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
         history: defaultHistoryConfig(),
@@ -2407,7 +2404,6 @@ describe('ChannelRouter cold-start prefetch', () => {
     const { router, sessions } = makeRouter(dir, {
       // override defaults to make elision easy to trigger
       config: {
-        allow: ['*'],
         engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
         enabled: true,
         history: { prefetch: { thread: { head: 1, tail: 1 }, channel: { tail: 0 } } },
@@ -2437,7 +2433,6 @@ describe('ChannelRouter cold-start prefetch', () => {
     let historyCalls = 0
     const { router, sessions } = makeRouter(dir, {
       config: {
-        allow: ['*'],
         engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
         enabled: true,
         history: { prefetch: { thread: { head: 0, tail: 0 }, channel: { tail: 0 } } },
@@ -2460,7 +2455,6 @@ describe('ChannelRouter cold-start prefetch', () => {
     const captured: FetchHistoryArgs[] = []
     const { router } = makeRouter(dir, {
       config: {
-        allow: ['*'],
         engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
         enabled: true,
         history: { prefetch: { thread: { head: 2, tail: 5 }, channel: { tail: 8 } } },

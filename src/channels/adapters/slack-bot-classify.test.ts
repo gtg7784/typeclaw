@@ -8,7 +8,6 @@ const TEAM_ID = 'T0ACME'
 const BOT_USER_ID = 'UBOT'
 
 const baseConfig: ChannelAdapterConfig = {
-  allow: ['*'],
   enabled: true,
   engagement: {
     trigger: ['mention', 'reply', 'dm'],
@@ -160,33 +159,6 @@ describe('slack-bot classifyInbound — drop paths', () => {
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.isBotMention).toBe(false)
-  })
-
-  test('drops messages from a team not in the allow list with reason=not_in_allow_list', () => {
-    const config: ChannelAdapterConfig = { ...baseConfig, allow: ['team:T0OTHER'] }
-    const event = buildEvent()
-
-    const verdict = classifyInbound(event, config, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'not_in_allow_list' })
-  })
-
-  test('drops a DM when allow list only covers team channels', () => {
-    const config: ChannelAdapterConfig = { ...baseConfig, allow: ['team:*'] }
-    const event = buildEvent({ channel_type: 'im', channel: 'D0DMID' })
-
-    const verdict = classifyInbound(event, config, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'not_in_allow_list' })
-  })
-
-  test('self_author wins over allow filtering (drop reasons checked first)', () => {
-    const config: ChannelAdapterConfig = { ...baseConfig, allow: [] }
-    const event = buildEvent({ user: BOT_USER_ID })
-
-    const verdict = classifyInbound(event, config, { teamId: TEAM_ID, botUserId: BOT_USER_ID })
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
   })
 
   test('drops messages before bot identity is known with reason=pre_connect', () => {

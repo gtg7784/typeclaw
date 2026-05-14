@@ -9,7 +9,6 @@ import { classifyInbound, TELEGRAM_WORKSPACE } from './telegram-bot-classify'
 const BOT: TelegramBotUser = { id: 999, is_bot: true, first_name: 'TypeClaw', username: 'typeclaw_bot' }
 
 const baseConfig: ChannelAdapterConfig = {
-  allow: ['*'],
   enabled: true,
   engagement: {
     trigger: ['mention', 'reply', 'dm'],
@@ -54,30 +53,12 @@ describe('telegram-bot classifyInbound — drops', () => {
     expect(verdict).toEqual({ kind: 'drop', reason: 'empty_text' })
   })
 
-  test('drops chats not admitted by the allow list', () => {
-    const config: ChannelAdapterConfig = { ...baseConfig, allow: ['tg:-100999'] }
-    const event = buildMessage()
-
-    const verdict = classifyInbound(event, config, BOT)
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'not_in_allow_list' })
-  })
-
   test('drops messages received before the bot identity is known', () => {
     const event = buildMessage()
 
     const verdict = classifyInbound(event, baseConfig, null)
 
     expect(verdict).toEqual({ kind: 'drop', reason: 'pre_connect' })
-  })
-
-  test('self-author drop wins over allow-list filtering (precedence)', () => {
-    const config: ChannelAdapterConfig = { ...baseConfig, allow: [] }
-    const event = buildMessage({ from: { id: BOT.id, is_bot: true, first_name: 'TypeClaw' } })
-
-    const verdict = classifyInbound(event, config, BOT)
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
   })
 })
 

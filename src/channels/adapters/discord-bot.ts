@@ -9,7 +9,7 @@ import {
 } from '@/channels/membership'
 import { deriveMembershipFromHistory } from '@/channels/membership-from-history'
 import type { ChannelRouter } from '@/channels/router'
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
   FetchAttachmentCallback,
@@ -82,11 +82,10 @@ export type DiscordBotAdapter = {
 // router caps cadence per-channel at 8s.
 export function createTypingCallback(deps: {
   token: string
-  configRef: () => ChannelAdapterConfig
   logger: DiscordBotAdapterLogger
   formatChannelTag?: (workspace: string, chat: string) => Promise<string>
 }): TypingCallback {
-  const { token, configRef, logger, formatChannelTag } = deps
+  const { token, logger, formatChannelTag } = deps
   return async (target: TypingTarget): Promise<void> => {
     if (target.adapter !== 'discord-bot') return
     // Discord's typing indicator auto-expires after ~10s on Discord's side,
@@ -94,8 +93,6 @@ export function createTypingCallback(deps: {
     // for platforms (Slack) that need an explicit clear; for Discord it
     // would be extra POSTs that confuse the indicator into reappearing.
     if (target.phase === 'stop') return
-    const config = configRef()
-    if (!isAllowed(config.allow, target.workspace, target.chat)) return
     // Threads are channels in Discord, so the typing endpoint takes the
     // thread id directly when present.
     const channelId = target.thread ?? target.chat
@@ -240,19 +237,13 @@ type DiscordRawHistoryMessage = {
 // design where `chat` is the parent and `thread` is the thread channel id).
 export function createDiscordHistoryCallback(deps: {
   token: string
-  configRef: () => ChannelAdapterConfig
   logger: DiscordBotAdapterLogger
   botUserIdRef: () => string | null
   fetchImpl?: typeof fetch
 }): HistoryCallback {
-  const { token, configRef, logger, botUserIdRef } = deps
+  const { token, logger, botUserIdRef } = deps
   const fetchFn = deps.fetchImpl ?? fetch
   return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
-    const config = configRef()
-    if (!isAllowedAnyGuild(config.allow, args.chat)) {
-      return { ok: false, error: 'denied by allow rules' }
-    }
-
     const channelId = args.thread ?? args.chat
     const limit = clampLimit(args.limit, DISCORD_HISTORY_LIMIT_MAX)
     const params = new URLSearchParams({ limit: String(limit) })
@@ -315,27 +306,6 @@ function clampLimit(requested: number, max: number): number {
   return Math.min(Math.floor(requested), max)
 }
 
-// Discord channel ids are globally unique snowflakes, so a `channel:<id>`
-// or `guild:<g>/<id>` rule for any guild admits this chat. We match this
-// way because at fetch time the tool has resolved the chat from session
-// origin but does not always re-supply the guild id (esp. across cursor
-// pagination), so the workspace-aware `isAllowed` is too narrow here.
-function isAllowedAnyGuild(rules: readonly string[], chat: string): boolean {
-  for (const rule of rules) {
-    if (rule === '*') return true
-    if (rule === 'guild:*' || rule === 'team:*') return true
-    if (rule === 'dm:*') return true
-    if (rule.startsWith('channel:') && rule.slice(8) === chat) return true
-    if (rule.startsWith('dm:') && rule.slice(3) === chat) return true
-    if (rule.startsWith('guild:')) {
-      const body = rule.slice(6)
-      const slash = body.indexOf('/')
-      if (slash !== -1 && body.slice(slash + 1) === chat) return true
-    }
-  }
-  return false
-}
-
 // Discord-side asymmetry: agent-messenger's upstream `uploadFile` posts the
 // file to `POST /channels/{id}/messages` as a multipart-only request. It does
 // not accept a `content` body or a `thread_id`. So when the agent wants to
@@ -353,20 +323,14 @@ function isAllowedAnyGuild(rules: readonly string[], chat: string): boolean {
 // after every upload succeeds.
 export function createOutboundCallback(deps: {
   client: Pick<DiscordBotClient, 'sendMessage' | 'uploadFile'>
-  configRef: () => ChannelAdapterConfig
   logger: DiscordBotAdapterLogger
   formatChannelTag: (workspace: string, chat: string) => Promise<string>
   resolvePath?: (path: string) => string
 }): OutboundCallback {
-  const { client, configRef, logger, formatChannelTag, resolvePath } = deps
+  const { client, logger, formatChannelTag, resolvePath } = deps
   return async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'discord-bot') {
       return { ok: false, error: `unknown adapter: ${msg.adapter}` }
-    }
-    const config = configRef()
-    if (!isAllowed(config.allow, msg.workspace, msg.chat)) {
-      logger.warn(`[discord-bot] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
-      return { ok: false, error: 'denied by allow rules' }
     }
     const text = msg.text ?? ''
     const attachments = msg.attachments ?? []
@@ -491,14 +455,12 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
 
   const typingCallback = createTypingCallback({
     token: options.token,
-    configRef: options.configRef,
     logger,
     formatChannelTag,
   })
 
   const historyCallback = createDiscordHistoryCallback({
     token: options.token,
-    configRef: options.configRef,
     logger,
     botUserIdRef: () => botUserId,
   })
@@ -511,7 +473,6 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
 
   const outboundCallback = createOutboundCallback({
     client,
-    configRef: options.configRef,
     logger,
     formatChannelTag,
   })
@@ -631,8 +592,6 @@ function dropHint(reason: InboundDropReason): string {
   switch (reason) {
     case 'empty_content':
       return ' (enable MESSAGE CONTENT INTENT in Discord Developer Portal and restart)'
-    case 'not_in_allow_list':
-      return ' (extend channels.discord-bot.allow in typeclaw.json to admit this workspace/channel)'
     case 'pre_connect':
     case 'self_author':
       return ''

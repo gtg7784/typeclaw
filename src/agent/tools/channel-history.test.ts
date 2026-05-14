@@ -8,7 +8,6 @@ import { createChannelHistoryTool, type ChannelHistoryOrigin } from './channel-h
 
 function emptyAdapterConfig(): ChannelAdapterConfig {
   return {
-    allow: ['*'],
     engagement: { trigger: ['mention'], stickiness: 'off' },
     enabled: true,
     history: defaultHistoryConfig(),

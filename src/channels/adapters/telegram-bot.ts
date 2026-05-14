@@ -3,7 +3,7 @@ import type { TelegramBotUser, TelegramMessage } from 'agent-messenger/telegramb
 
 import type { MembershipResolver, MembershipResolverFailure, MembershipResolverResult } from '@/channels/membership'
 import type { ChannelRouter } from '@/channels/router'
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelNameResolver,
   FetchAttachmentCallback,
@@ -77,12 +77,11 @@ export type TelegramBotAdapter = {
 
 export function createTypingCallback(deps: {
   token: string
-  configRef: () => ChannelAdapterConfig
   logger: TelegramBotAdapterLogger
   formatChannelTag?: (chat: string) => Promise<string>
   fetchImpl?: typeof fetch
 }): TypingCallback {
-  const { token, configRef, logger, formatChannelTag } = deps
+  const { token, logger, formatChannelTag } = deps
   const fetchImpl = deps.fetchImpl ?? fetch
   return async (target: TypingTarget): Promise<void> => {
     if (target.adapter !== 'telegram-bot') return
@@ -91,8 +90,6 @@ export function createTypingCallback(deps: {
     // a missed beat just gaps the indicator. There is no explicit clear,
     // so the 'stop' phase is a no-op.
     if (target.phase === 'stop') return
-    const config = configRef()
-    if (!isAllowed(config.allow, target.workspace, target.chat)) return
     const tag = formatChannelTag ? await formatChannelTag(target.chat) : `chat=${target.chat}`
     const body: Record<string, unknown> = { chat_id: target.chat, action: 'typing' }
     const threadId = parseThreadId(target.thread)
@@ -197,20 +194,14 @@ export function createTelegramMembershipResolver(deps: {
 
 export function createOutboundCallback(deps: {
   client: Pick<TelegramBotClient, 'sendMessage' | 'sendDocument'>
-  configRef: () => ChannelAdapterConfig
   logger: TelegramBotAdapterLogger
   formatChannelTag: (chat: string) => Promise<string>
   resolvePath?: (path: string) => string
 }): OutboundCallback {
-  const { client, configRef, logger, formatChannelTag, resolvePath } = deps
+  const { client, logger, formatChannelTag, resolvePath } = deps
   return async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'telegram-bot') {
       return { ok: false, error: `unknown adapter: ${msg.adapter}` }
-    }
-    const config = configRef()
-    if (!isAllowed(config.allow, msg.workspace, msg.chat)) {
-      logger.warn(`[telegram-bot] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
-      return { ok: false, error: 'denied by allow rules' }
     }
     const text = msg.text ?? ''
     const attachments = msg.attachments ?? []
@@ -396,7 +387,6 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
 
   const typingCallback = createTypingCallback({
     token: options.token,
-    configRef: options.configRef,
     logger,
     formatChannelTag,
   })
@@ -405,7 +395,6 @@ export function createTelegramBotAdapter(options: TelegramBotAdapterOptions): Te
 
   const outboundCallback = createOutboundCallback({
     client,
-    configRef: options.configRef,
     logger,
     formatChannelTag,
   })
@@ -595,8 +584,6 @@ function dropHint(reason: InboundDropReason): string {
       return ' (channel post / anonymous; cannot attribute to an author)'
     case 'empty_text':
       return ' (message had no text and no recognized media; check Telegram privacy mode in @BotFather)'
-    case 'not_in_allow_list':
-      return ' (extend channels.telegram-bot.allow in typeclaw.json to admit this chat)'
     case 'pre_connect':
     case 'self_author':
       return ''

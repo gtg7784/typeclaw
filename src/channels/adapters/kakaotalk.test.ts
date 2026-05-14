@@ -14,7 +14,7 @@ import type {
 } from 'agent-messenger/kakaotalk'
 
 import { createChannelRouter, type ChannelRouter } from '@/channels/router'
-import { defaultHistoryConfig, type KakaotalkAdapterConfig } from '@/channels/schema'
+import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 
 import {
   createKakaotalkAdapter,
@@ -131,8 +131,7 @@ class FakeClient implements KakaoTalkClient {
   }
 }
 
-const adapterCfg = (over: Partial<KakaotalkAdapterConfig> = {}): KakaotalkAdapterConfig => ({
-  allow: ['kakao:*'],
+const adapterCfg = (over: Partial<ChannelAdapterConfig> = {}): ChannelAdapterConfig => ({
   enabled: true,
   engagement: {
     trigger: ['mention', 'reply', 'dm'],
@@ -320,34 +319,6 @@ describe('createKakaotalkAdapter — outbound', () => {
     // The agent contract violation Oracle flagged: text MUST NOT have been
     // sent if we report failure. Otherwise the agent would say "I sent your
     // message" while the file silently disappeared.
-    expect(client.sendMessageCalls).toHaveLength(0)
-
-    await adapter.stop()
-    await router.stop()
-  })
-
-  test('returns ok:false when allow rules deny the chat', async () => {
-    const client = new FakeClient()
-    const listener = new FakeListener()
-    const router = createChannelRouter({
-      agentDir,
-      configForAdapter: () => adapterCfg({ allow: ['kakao:dm/*'] }),
-    })
-    const adapter = createKakaotalkAdapter({
-      router,
-      configRef: () => adapterCfg({ allow: ['kakao:dm/*'] }),
-      client,
-      listenerFactory: () => listener,
-    })
-    await adapter.start()
-
-    const result = await router.send({
-      adapter: 'kakaotalk',
-      workspace: '@kakao-group',
-      chat: '222',
-      text: 'leak',
-    })
-    expect(result.ok).toBe(false)
     expect(client.sendMessageCalls).toHaveLength(0)
 
     await adapter.stop()
@@ -570,65 +541,6 @@ describe('createKakaotalkAdapter — KICKOUT recovery', () => {
 
     await h.adapter.stop()
     await h.router.stop()
-  })
-})
-
-describe('createKakaotalkAdapter — drop hint', () => {
-  test('not_in_allow_list hint suggests bucket-specific patterns', async () => {
-    const client = new FakeClient()
-    const listener = new FakeListener()
-    const router = createChannelRouter({
-      agentDir,
-      configForAdapter: () => adapterCfg({ allow: ['kakao:dm/*'] }),
-    })
-    const logs: string[] = []
-    const adapter = createKakaotalkAdapter({
-      router,
-      configRef: () => adapterCfg({ allow: ['kakao:dm/*'] }),
-      client,
-      listenerFactory: () => listener,
-      logger: {
-        info: (m) => logs.push(m),
-        warn: () => {},
-        error: () => {},
-      },
-    })
-    // Group chat (5 members → group bucket regardless of LOCO type code).
-    client.chats = [
-      {
-        chat_id: '222',
-        type: 10,
-        display_name: 'Team',
-        title: null,
-        active_members: 5,
-        unread_count: 0,
-        last_message: null,
-      },
-    ]
-    await adapter.start()
-    listener.emit('connected', { userId: '999' })
-
-    listener.emit('message', {
-      type: 'MSG',
-      chat_id: '222',
-      log_id: 'L99',
-      author_id: 1,
-      author_name: null,
-      message: 'hi',
-      message_type: 1,
-      attachment: null,
-      sent_at: Date.now(),
-    })
-
-    await new Promise((r) => setTimeout(r, 0))
-
-    const drop = logs.find((m) => m.includes('reason=not_in_allow_list'))
-    expect(drop).toBeDefined()
-    expect(drop).toContain('kakao:group/*')
-    expect(drop).toContain('kakao:222')
-
-    await adapter.stop()
-    await router.stop()
   })
 })
 
@@ -1177,7 +1089,7 @@ describe('createKakaotalkAdapter — mark read on every inbound', () => {
   test('skips markRead for open-chat bucket (linkId not yet wired through resolver)', async () => {
     const client = new FakeClient()
     const listener = new FakeListener()
-    const cfg = adapterCfg({ allow: ['kakao:open/*'] })
+    const cfg = adapterCfg()
     const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
     const logs: string[] = []
     const adapter = createKakaotalkAdapter({
@@ -1210,7 +1122,7 @@ describe('createKakaotalkAdapter — mark read on every inbound', () => {
     const client = new FakeClient()
     const listener = new FakeListener()
     client.markReadError = new Error('LOCO packet timeout')
-    const cfg = adapterCfg({ allow: ['kakao:group/*'] })
+    const cfg = adapterCfg()
     const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
     const logs: string[] = []
     const adapter = createKakaotalkAdapter({
@@ -1243,7 +1155,7 @@ describe('createKakaotalkAdapter — mark read on every inbound', () => {
     const client = new FakeClient()
     const listener = new FakeListener()
     client.markReadResult = { success: false, status_code: -500, chat_id: '222', watermark: 'L11' }
-    const cfg = adapterCfg({ allow: ['kakao:group/*'] })
+    const cfg = adapterCfg()
     const router = createChannelRouter({ agentDir, configForAdapter: () => cfg })
     const logs: string[] = []
     const adapter = createKakaotalkAdapter({

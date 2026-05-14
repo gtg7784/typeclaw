@@ -7,7 +7,6 @@ import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/sche
 import { classifyInbound, type KakaoChatLookup } from './kakaotalk-classify'
 
 const dmConfig = (): ChannelAdapterConfig => ({
-  allow: ['kakao:dm/*'],
   enabled: true,
   engagement: {
     trigger: ['mention', 'reply', 'dm'],
@@ -17,7 +16,6 @@ const dmConfig = (): ChannelAdapterConfig => ({
 })
 
 const groupConfig = (): ChannelAdapterConfig => ({
-  allow: ['kakao:group/*'],
   enabled: true,
   engagement: {
     trigger: ['mention', 'reply', 'dm'],
@@ -70,14 +68,6 @@ describe('classifyInbound', () => {
       lookupChat: () => null,
     })
     expect(verdict).toEqual({ kind: 'drop', reason: 'unknown_chat' })
-  })
-
-  test('drops not_in_allow_list when chat is in a bucket the rules do not admit', () => {
-    const verdict = classifyInbound(event(), dmConfig(), {
-      selfUserId: '999',
-      lookupChat: groupLookup,
-    })
-    expect(verdict).toEqual({ kind: 'drop', reason: 'not_in_allow_list' })
   })
 
   test('routes a 1:1 message and stamps the dm workspace + isDm', () => {

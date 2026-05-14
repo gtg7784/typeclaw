@@ -1,7 +1,7 @@
 import type { SlackFile, SlackSocketModeAppMentionEvent, SlackSocketModeMessageEvent } from 'agent-messenger/slackbot'
 
 import { matchesAnyAlias } from '@/channels/engagement'
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
 import { slackTsToMillis } from './slack-bot-time'
@@ -38,7 +38,6 @@ export type InboundDropReason =
   | 'self_author' // event.user === botUserId; we never route our own messages back to ourselves
   | 'no_user' // event has no `user` field (e.g. system messages: channel_join, message_changed)
   | 'empty_text' // event has neither text nor files — nothing for the agent to act on
-  | 'not_in_allow_list' // workspace/channel not admitted by typeclaw.json `channels.slack-bot.allow`
   | 'pre_connect' // bot identity is not known yet, so mention/self/reply classification cannot be trusted
 
 export type InboundClassification =
@@ -67,7 +66,7 @@ export type SlackInboundContext = {
 // forces logging to stay exhaustive.
 export function classifyInbound(
   event: SlackInboundMessageEvent,
-  config: ChannelAdapterConfig,
+  _config: ChannelAdapterConfig,
   context: SlackInboundContext,
 ): InboundClassification {
   // Self-drop is the hard floor: never route our own messages back to
@@ -92,9 +91,6 @@ export function classifyInbound(
 
   const isDm = event.channel_type === 'im'
   const workspace = isDm ? '@dm' : context.teamId
-  if (!isAllowed(config.allow, workspace, event.channel)) {
-    return { kind: 'drop', reason: 'not_in_allow_list' }
-  }
 
   if (context.botUserId === null) {
     return { kind: 'drop', reason: 'pre_connect' }

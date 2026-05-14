@@ -19,7 +19,6 @@ import { createTelegramBotAdapter, type TelegramBotAdapterLogger } from './teleg
 const BOT_USER: TelegramBotUser = { id: 999, is_bot: true, first_name: 'TypeClaw', username: 'typeclaw_bot' }
 
 const adapterCfg: ChannelAdapterConfig = {
-  allow: ['*'],
   enabled: true,
   engagement: {
     trigger: ['mention', 'reply', 'dm'],

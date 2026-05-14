@@ -8,7 +8,7 @@ import {
 } from '@/channels/membership'
 import { deriveMembershipFromHistory } from '@/channels/membership-from-history'
 import type { ChannelRouter } from '@/channels/router'
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
   FetchAttachmentCallback,
@@ -170,15 +170,12 @@ export function createSlackTypingTracker(deps: {
 
 export function createTypingCallback(deps: {
   typingTracker: Pick<SlackTypingTracker, 'setStatus' | 'clearAfterSend'>
-  configRef: () => ChannelAdapterConfig
   logger: SlackBotAdapterLogger
   formatChannelTag?: (workspace: string, chat: string) => Promise<string>
 }): TypingCallback {
-  const { typingTracker, configRef, logger, formatChannelTag } = deps
+  const { typingTracker, logger, formatChannelTag } = deps
   return async (target: TypingTarget): Promise<void> => {
     if (target.adapter !== 'slack-bot') return
-    const config = configRef()
-    if (!isAllowed(config.allow, target.workspace, target.chat)) return
     const tag = formatChannelTag
       ? await formatChannelTag(target.workspace, target.thread ?? target.chat)
       : `channel=${target.thread ?? target.chat}`
@@ -370,23 +367,13 @@ function slackFailureForError(error: string): MembershipResolverFailure {
 // and is the most-tested wire format.
 export function createSlackHistoryCallback(deps: {
   token: string
-  configRef: () => ChannelAdapterConfig
   logger: SlackBotAdapterLogger
   botUserIdRef: () => string | null
   fetchImpl?: typeof fetch
 }): HistoryCallback {
-  const { token, configRef, logger, botUserIdRef } = deps
+  const { token, logger, botUserIdRef } = deps
   const fetchFn = deps.fetchImpl ?? fetch
   return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
-    const config = configRef()
-    if (!isAllowed(config.allow, '@dm', args.chat) && !isAllowedAnyTeam(config.allow, args.chat)) {
-      // Same defense-in-depth as outbound: refuse to fetch history for a
-      // channel the operator hasn't admitted, even if the agent somehow
-      // resolved its id. Returning an error rather than empty so the
-      // agent doesn't think the channel is genuinely silent.
-      return { ok: false, error: 'denied by allow rules' }
-    }
-
     const limit = clampLimit(args.limit, SLACK_HISTORY_LIMIT_MAX)
     const endpoint = args.thread === null ? 'conversations.history' : 'conversations.replies'
     const body = new URLSearchParams()
@@ -465,25 +452,6 @@ function clampLimit(requested: number, max: number): number {
   return Math.min(Math.floor(requested), max)
 }
 
-// Slack channel ids are globally unique on Slack's side, so a `channel:C…`
-// or `team:T/C` rule for any team admits this chat. We use this for the
-// history allow check because at fetch time we only know the channel id,
-// not the workspace (the tool resolves the chat from session origin and
-// the workspace doesn't always round-trip through cursor pagination).
-function isAllowedAnyTeam(rules: readonly string[], chat: string): boolean {
-  for (const rule of rules) {
-    if (rule === '*') return true
-    if (rule === 'team:*' || rule === 'guild:*') return true
-    if (rule.startsWith('channel:') && rule.slice(8) === chat) return true
-    if (rule.startsWith('team:')) {
-      const body = rule.slice(5)
-      const slash = body.indexOf('/')
-      if (slash !== -1 && body.slice(slash + 1) === chat) return true
-    }
-  }
-  return false
-}
-
 // Slack supports text+file in a single API call via `initial_comment`, and
 // honors `thread_ts` on every upload — both luxuries Discord lacks. So we
 // fold `text` into the FIRST attachment's `initial_comment` rather than
@@ -528,22 +496,16 @@ function buildMarkdownBlock(text: string): MarkdownBlock {
 
 export function createOutboundCallback(deps: {
   client: Pick<SlackBotClient, 'postMessage' | 'uploadFile'>
-  configRef: () => ChannelAdapterConfig
   logger: SlackBotAdapterLogger
   formatChannelTag: (workspace: string, chat: string) => Promise<string>
   readFile?: (path: string) => Promise<Buffer>
   typingTracker?: Pick<SlackTypingTracker, 'clearAfterSend'>
 }): OutboundCallback {
-  const { client, configRef, logger, formatChannelTag, typingTracker } = deps
+  const { client, logger, formatChannelTag, typingTracker } = deps
   const readFile = deps.readFile ?? readAttachmentBuffer
   return async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'slack-bot') {
       return { ok: false, error: `unknown adapter: ${msg.adapter}` }
-    }
-    const config = configRef()
-    if (!isAllowed(config.allow, msg.workspace, msg.chat)) {
-      logger.warn(`[slack-bot] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
-      return { ok: false, error: 'denied by allow rules' }
     }
     const text = msg.text ?? ''
     const attachments = msg.attachments ?? []
@@ -672,14 +634,12 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
 
   const typingCallback = createTypingCallback({
     typingTracker,
-    configRef: options.configRef,
     logger,
     formatChannelTag,
   })
 
   const historyCallback = createSlackHistoryCallback({
     token: options.token,
-    configRef: options.configRef,
     logger,
     botUserIdRef: () => botUserId,
   })
@@ -692,7 +652,6 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
 
   const outboundCallback = createOutboundCallback({
     client,
-    configRef: options.configRef,
     logger,
     formatChannelTag,
     typingTracker,
@@ -865,13 +824,8 @@ function describe(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-// Operator hints appended to drop logs. Kept short — full guidance lives in
-// docs. The not_in_allow_list hint is the highest-leverage one because that
-// failure mode is invisible from Slack's side (bot stays online).
 function dropHint(reason: InboundDropReason): string {
   switch (reason) {
-    case 'not_in_allow_list':
-      return ' (extend channels.slack-bot.allow in typeclaw.json to admit this team/channel)'
     case 'empty_text':
     case 'no_user':
     case 'pre_connect':

@@ -4,11 +4,6 @@ export const ADAPTER_IDS = ['discord-bot', 'kakaotalk', 'slack-bot', 'telegram-b
 
 export type AdapterId = (typeof ADAPTER_IDS)[number]
 
-const allowRuleSchema = z.string().min(1).refine(isValidAllowRule, {
-  message:
-    'allow rule must be one of: *, guild:*, guild:<id>, guild:<id>/<channel>, team:*, team:<id>, team:<id>/<channel>, tg:*, tg:<chat_id>, channel:<id>, dm:*, dm:<id>, im:*, im:<id>, kakao:*, kakao:<chat>, kakao:dm/*, kakao:group/*, kakao:open/*',
-})
-
 const engagementTriggerSchema = z.enum(['mention', 'reply', 'dm'])
 
 const stickinessSchema = z.union([
@@ -92,8 +87,13 @@ const historySchema = z
     },
   })
 
+// Deliberately non-strict: a stale on-disk file may still carry the
+// legacy `allow` field (`migrateLegacyConfigShape` lifts it into
+// `roles.member.match[]` on load, but a between-reload window can
+// briefly contain both). Zod silently drops unknown keys here, which is
+// exactly what we want — a hard `.strict()` reject would brick recovery
+// for any user mid-migration.
 const adapterSchema = z.object({
-  allow: z.array(allowRuleSchema).default([]),
   engagement: engagementSchema,
   history: historySchema,
   enabled: z.boolean().default(true),
@@ -118,156 +118,6 @@ export const channelsSchema = z
   })
   .default({})
 
-export type AllowRule = string
 export type EngagementConfig = z.infer<typeof engagementSchema>
 export type ChannelAdapterConfig = z.infer<typeof adapterSchema>
-export type KakaotalkAdapterConfig = ChannelAdapterConfig
 export type ChannelsConfig = z.infer<typeof channelsSchema>
-
-// Discord IDs are numeric snowflakes; Slack IDs start with a single uppercase
-// letter (T for teams, C/D/G for channels) followed by alphanumerics; Telegram
-// chat IDs are signed integers (negative for groups, `-100…` for supergroups
-// and channels); KakaoTalk chat IDs are LOCO-protocol decimal integers
-// (large enough to need BigInt at the protocol layer, but rendered as plain
-// decimal strings here). All shapes are accepted on every adapter so the
-// allow list stays declarative — the runtime ensures only the right adapter
-// ever sees its own IDs.
-const RULE_PATTERNS = [
-  /^\*$/,
-  // Discord
-  /^guild:\*$/,
-  /^guild:[0-9]+$/,
-  /^guild:[0-9]+\/[0-9]+$/,
-  /^dm:\*$/,
-  /^dm:[0-9]+$/,
-  // Slack
-  /^team:\*$/,
-  /^team:[A-Z0-9]+$/,
-  /^team:[A-Z0-9]+\/[A-Z0-9]+$/,
-  /^im:\*$/,
-  /^im:[A-Z0-9]+$/,
-  // Telegram (`tg:*` admits all chats; `tg:<chat_id>` scopes to one chat —
-  // numeric, may be negative). There is no team/guild concept; every chat is
-  // identified by its absolute id.
-  /^tg:\*$/,
-  /^tg:-?[0-9]+$/,
-  // KakaoTalk: a single workspace per logged-in account, so the rules scope
-  // by chat-type (1:1 / group / open) rather than by workspace. `kakao:*`
-  // admits every chat the account can see; `kakao:dm/*`, `kakao:group/*`,
-  // `kakao:open/*` admit one chat-type bucket; `kakao:<chat-id>` admits a
-  // single chat. The runtime classifies each chat into a bucket based on
-  // KakaoChat.type at chat-resolver time and surfaces the bucket via the
-  // workspace coordinate.
-  /^kakao:\*$/,
-  /^kakao:dm\/\*$/,
-  /^kakao:group\/\*$/,
-  /^kakao:open\/\*$/,
-  /^kakao:[0-9]+$/,
-  // Shared (channel ids are unique on both platforms)
-  /^channel:[A-Z0-9]+$/,
-  /^channel:-?[0-9]+$/,
-]
-
-function isValidAllowRule(rule: string): boolean {
-  return RULE_PATTERNS.some((p) => p.test(rule))
-}
-
-export function isAllowed(rules: readonly AllowRule[], workspace: string, chat: string): boolean {
-  for (const rule of rules) {
-    if (matchRule(rule, workspace, chat)) return true
-  }
-  return false
-}
-
-// `*`              → every workspace channel + every DM (catch-all)
-// `guild:*`        → every Discord guild channel (no DMs)
-// `guild:G`        → every channel in guild G
-// `guild:G/C`      → channel C in guild G only
-// `team:*`         → every Slack team channel (no DMs)
-// `team:T`         → every channel in team T
-// `team:T/C`       → channel C in team T only
-// `tg:*`           → every Telegram chat (DMs, groups, supergroups, channels)
-// `tg:C`           → Telegram chat C only (signed numeric chat id)
-// `channel:C`      → channel C in any workspace (IDs are globally unique on
-//                    Discord/Slack and Telegram chat ids are also globally
-//                    unique numeric values)
-// `dm:*`           → every Discord DM
-// `dm:C`           → Discord DM channel C only
-// `im:*`           → every Slack DM (im channel)
-// `im:D`           → Slack DM channel D only
-// `kakao:*`            → every KakaoTalk chat the account is in
-// `kakao:dm/*`         → every KakaoTalk 1:1 chat
-// `kakao:group/*`      → every KakaoTalk group chat
-// `kakao:open/*`       → every KakaoTalk open chat
-// `kakao:<id>`         → KakaoTalk chat with the given numeric chat_id
-//
-// `guild:`/`dm:`, `team:`/`im:`, `tg:`, and `kakao:` identify which adapter
-// the rule was written for, but the matcher applies any rule that the
-// (workspace, chat) pair satisfies. That keeps the adapter-side coupling at
-// the schema/UX layer (Slack users write `team:`, Discord users write
-// `guild:`, Telegram users write `tg:`, KakaoTalk users write `kakao:`)
-// without bloating the matching logic. Telegram has no workspace concept;
-// the adapter pins workspace to `'telegram'` so `tg:*` only ever admits
-// Telegram chats. KakaoTalk uses `@kakao-dm` / `@kakao-group` / `@kakao-open`
-// as workspace coordinates so the bucket-* rules are pure prefix matches
-// against `workspace`.
-function matchRule(rule: string, workspace: string, chat: string): boolean {
-  // KakaoTalk workspaces accept the global `*` catch-all or any `kakao:`
-  // rule. Adapter-specific non-kakao rules (`team:*`, `guild:*`, `dm:*`,
-  // `im:*`, `tg:*`) never admit kakao workspaces — those are scoped to
-  // their own adapter's coordinate space and would be meaningless here.
-  // The init wizard still defaults kakaotalk to the narrower `kakao:dm/*`
-  // (group chats with personal accounts are sensitive — every member sees
-  // every reply), so opting into `*` is an explicit, per-adapter decision
-  // made in `channels.kakaotalk.allow`.
-  if (KAKAO_WORKSPACES.has(workspace)) {
-    if (rule === '*') return true
-    if (rule.startsWith('kakao:')) return matchKakaoRule(rule.slice(6), workspace, chat)
-    return false
-  }
-
-  if (rule === '*') return true
-  if (rule.startsWith('kakao:')) return false
-
-  if (workspace === '@dm') {
-    if (rule === 'dm:*' || rule === 'im:*') return true
-    if (rule.startsWith('dm:')) return rule.slice(3) === chat
-    if (rule.startsWith('im:')) return rule.slice(3) === chat
-    if (rule.startsWith('channel:')) return rule.slice(8) === chat
-    return false
-  }
-
-  if (workspace === 'telegram') {
-    if (rule === 'tg:*') return true
-    if (rule.startsWith('tg:')) return rule.slice(3) === chat
-    if (rule.startsWith('channel:')) return rule.slice(8) === chat
-    return false
-  }
-
-  if (rule === 'guild:*' || rule === 'team:*') return true
-  if (rule.startsWith('channel:')) return rule.slice(8) === chat
-  if (rule.startsWith('guild:')) {
-    const body = rule.slice(6)
-    const slash = body.indexOf('/')
-    if (slash === -1) return body === workspace
-    return body.slice(0, slash) === workspace && body.slice(slash + 1) === chat
-  }
-  if (rule.startsWith('team:')) {
-    const body = rule.slice(5)
-    const slash = body.indexOf('/')
-    if (slash === -1) return body === workspace
-    return body.slice(0, slash) === workspace && body.slice(slash + 1) === chat
-  }
-  return false
-}
-
-const KAKAO_WORKSPACES = new Set(['@kakao-dm', '@kakao-group', '@kakao-open'])
-
-function matchKakaoRule(body: string, workspace: string, chat: string): boolean {
-  if (!KAKAO_WORKSPACES.has(workspace)) return false
-  if (body === '*') return true
-  if (body === 'dm/*') return workspace === '@kakao-dm'
-  if (body === 'group/*') return workspace === '@kakao-group'
-  if (body === 'open/*') return workspace === '@kakao-open'
-  return body === chat
-}

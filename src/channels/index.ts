@@ -8,11 +8,9 @@ export {
 export { createChannelsReloadable } from './reloadable'
 export {
   channelsSchema,
-  isAllowed,
   ADAPTER_IDS,
   STICKY_DEFAULT_WINDOW_MS,
   type AdapterId,
-  type AllowRule,
   type ChannelAdapterConfig,
   type ChannelsConfig,
   type EngagementConfig,

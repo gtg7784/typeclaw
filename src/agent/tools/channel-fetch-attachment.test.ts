@@ -11,7 +11,6 @@ import { createChannelFetchAttachmentTool } from './channel-fetch-attachment'
 
 function emptyAdapterConfig(): ChannelAdapterConfig {
   return {
-    allow: ['*'],
     engagement: { trigger: ['mention'], stickiness: 'off' },
     enabled: true,
     history: defaultHistoryConfig(),

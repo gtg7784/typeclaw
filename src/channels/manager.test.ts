@@ -48,7 +48,6 @@ afterEach(async () => {
 })
 
 const enabledAdapterCfg = () => ({
-  allow: ['*'],
   enabled: true,
   engagement: {
     trigger: ['mention', 'reply', 'dm'] as Array<'mention' | 'reply' | 'dm'>,
@@ -166,7 +165,6 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
     //   solo-human fallback is disabled and the alias path is the only
     //   engagement gate that can fire
     const slackCfg: ChannelAdapterConfig = {
-      allow: ['*'],
       enabled: true,
       engagement: { trigger: ['mention'], stickiness: 'off' },
       history: defaultHistoryConfig(),
