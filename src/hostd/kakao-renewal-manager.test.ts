@@ -240,4 +240,207 @@ describe('createKakaoRenewalManager', () => {
       expect(scheduleStopCalled).toBe(2)
     })
   })
+
+  test('invokes onRenewalOk after a successful renewal, so the host can restart the container', async () => {
+    await withAgentDir(async (dir) => {
+      const setup = await setupAgent({ agentDir: dir, ageDays: 6, withEncryptedPassword: true })
+      const restartCalls: Array<{ containerName: string; cwd: string; accountId: string }> = []
+
+      const manager = createKakaoRenewalManager({
+        keyStoreFactory: () => createKeyStore({ keysDir: setup.keysDir }),
+        attemptLogin: async (_email, _password, deviceUuid, deviceType) => ({
+          authenticated: true,
+          credentials: {
+            access_token: 'fresh',
+            refresh_token: 'fresh-refresh',
+            user_id: 'u-1',
+            device_uuid: deviceUuid,
+            device_type: deviceType,
+          },
+        }),
+        schedule: (_fn, _ms) => ({ stop: () => {} }),
+        onRenewalOk: async (input) => {
+          restartCalls.push(input)
+        },
+      })
+
+      manager.start({ containerName: setup.containerName, cwd: setup.cwd })
+      await manager.drain()
+
+      expect(restartCalls).toEqual([{ containerName: setup.containerName, cwd: setup.cwd, accountId: 'u-1' }])
+    })
+  })
+
+  test('does NOT invoke onRenewalOk when the renewal skips, reauth-requires, or transient-fails', async () => {
+    await withAgentDir(async (dir) => {
+      const setup = await setupAgent({ agentDir: dir, ageDays: 2, withEncryptedPassword: true })
+      let restartCalls = 0
+
+      const manager = createKakaoRenewalManager({
+        keyStoreFactory: () => createKeyStore({ keysDir: setup.keysDir }),
+        attemptLogin: async () => {
+          throw new Error('attemptLogin should not run for a fresh account')
+        },
+        schedule: (_fn, _ms) => ({ stop: () => {} }),
+        onRenewalOk: async () => {
+          restartCalls++
+        },
+      })
+
+      manager.start({ containerName: setup.containerName, cwd: setup.cwd })
+      await manager.drain()
+
+      expect(restartCalls).toBe(0)
+    })
+  })
+
+  test('logs kakao-renewal-restart-failed when onRenewalOk throws', async () => {
+    await withAgentDir(async (dir) => {
+      const setup = await setupAgent({ agentDir: dir, ageDays: 6, withEncryptedPassword: true })
+      const events: KakaoRenewalLogEvent[] = []
+
+      const manager = createKakaoRenewalManager({
+        keyStoreFactory: () => createKeyStore({ keysDir: setup.keysDir }),
+        attemptLogin: async (_email, _password, deviceUuid, deviceType) => ({
+          authenticated: true,
+          credentials: {
+            access_token: 'fresh',
+            refresh_token: 'fresh-refresh',
+            user_id: 'u-1',
+            device_uuid: deviceUuid,
+            device_type: deviceType,
+          },
+        }),
+        schedule: (_fn, _ms) => ({ stop: () => {} }),
+        onRenewalOk: async () => {
+          throw new Error('docker stop refused')
+        },
+        onLog: (e) => events.push(e),
+      })
+
+      manager.start({ containerName: setup.containerName, cwd: setup.cwd })
+      await manager.drain()
+
+      expect(events.some((e) => e.kind === 'kakao-renewal-tick-ok')).toBe(true)
+      expect(events.some((e) => e.kind === 'kakao-renewal-restart-failed')).toBe(true)
+    })
+  })
+
+  test('shouldRenew=false suppresses the cron entirely (no tick, no timer, no log spam)', async () => {
+    await withAgentDir(async (dir) => {
+      const setup = await setupAgent({ agentDir: dir, ageDays: 6, withEncryptedPassword: true })
+      const events: KakaoRenewalLogEvent[] = []
+      let scheduleCalls = 0
+      let attemptCalls = 0
+
+      const manager = createKakaoRenewalManager({
+        keyStoreFactory: () => createKeyStore({ keysDir: setup.keysDir }),
+        attemptLogin: async () => {
+          attemptCalls++
+          throw new Error('attemptLogin should not run for a non-kakao agent')
+        },
+        schedule: (_fn, _ms) => {
+          scheduleCalls++
+          return { stop: () => {} }
+        },
+        onLog: (e) => events.push(e),
+        shouldRenew: () => false,
+      })
+
+      manager.start({ containerName: setup.containerName, cwd: setup.cwd })
+      await new Promise((r) => setTimeout(r, 30))
+
+      expect(scheduleCalls).toBe(0)
+      expect(attemptCalls).toBe(0)
+      expect(events).toHaveLength(0)
+
+      await manager.drain()
+    })
+  })
+
+  test('drain() awaits in-flight renewal work so the daemon does not exit mid-attemptLogin', async () => {
+    await withAgentDir(async (dir) => {
+      const setup = await setupAgent({ agentDir: dir, ageDays: 6, withEncryptedPassword: true })
+      let attemptStarted = false
+      let attemptFinished = false
+      let releaseAttempt: (() => void) | null = null
+
+      const manager = createKakaoRenewalManager({
+        keyStoreFactory: () => createKeyStore({ keysDir: setup.keysDir }),
+        attemptLogin: async (_email, _password, deviceUuid, deviceType) => {
+          attemptStarted = true
+          await new Promise<void>((r) => {
+            releaseAttempt = r
+          })
+          attemptFinished = true
+          return {
+            authenticated: true,
+            credentials: {
+              access_token: 'fresh',
+              refresh_token: 'fresh-refresh',
+              user_id: 'u-1',
+              device_uuid: deviceUuid,
+              device_type: deviceType,
+            },
+          }
+        },
+        schedule: (_fn, _ms) => ({ stop: () => {} }),
+      })
+
+      manager.start({ containerName: setup.containerName, cwd: setup.cwd })
+      // Wait until the in-flight attemptLogin has parked.
+      while (!attemptStarted) await new Promise((r) => setTimeout(r, 5))
+      expect(attemptFinished).toBe(false)
+
+      const drainPromise = manager.drain()
+      // Drain must NOT settle while attemptLogin is parked.
+      const racer = Promise.race([drainPromise, new Promise((r) => setTimeout(() => r('timeout'), 50))])
+      expect(await racer).toBe('timeout')
+      expect(attemptFinished).toBe(false)
+
+      // Release the in-flight login; drain should now settle.
+      releaseAttempt!()
+      await drainPromise
+      expect(attemptFinished).toBe(true)
+    })
+  })
+
+  test('stop(containerName) awaits the in-flight tick for that container', async () => {
+    await withAgentDir(async (dir) => {
+      const setup = await setupAgent({ agentDir: dir, ageDays: 6, withEncryptedPassword: true })
+      let attemptStarted = false
+      let releaseAttempt: (() => void) | null = null
+
+      const manager = createKakaoRenewalManager({
+        keyStoreFactory: () => createKeyStore({ keysDir: setup.keysDir }),
+        attemptLogin: async (_email, _password, deviceUuid, deviceType) => {
+          attemptStarted = true
+          await new Promise<void>((r) => {
+            releaseAttempt = r
+          })
+          return {
+            authenticated: true,
+            credentials: {
+              access_token: 'fresh',
+              refresh_token: 'fresh-refresh',
+              user_id: 'u-1',
+              device_uuid: deviceUuid,
+              device_type: deviceType,
+            },
+          }
+        },
+        schedule: (_fn, _ms) => ({ stop: () => {} }),
+      })
+
+      manager.start({ containerName: setup.containerName, cwd: setup.cwd })
+      while (!attemptStarted) await new Promise((r) => setTimeout(r, 5))
+
+      const stopPromise = manager.stop(setup.containerName)
+      const racer = Promise.race([stopPromise, new Promise((r) => setTimeout(() => r('timeout'), 50))])
+      expect(await racer).toBe('timeout')
+
+      releaseAttempt!()
+      await stopPromise
+    })
+  })
 })

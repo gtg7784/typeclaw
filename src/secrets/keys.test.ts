@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -122,6 +122,33 @@ describe('keys store', () => {
     await withTempKeysDir(async (keysDir) => {
       const store = createKeyStore({ keysDir })
       expect(store.keyPath('kakao')).toBe(store.keyPath('kakao'))
+    })
+  })
+
+  test('read rejects symlinks at the key path (defense against same-user symlink attack)', async () => {
+    await withTempKeysDir(async (keysDir) => {
+      const store = createKeyStore({ keysDir })
+      const decoyDir = await mkdtemp(join(tmpdir(), 'typeclaw-keys-decoy-'))
+      const decoy = join(decoyDir, 'decoy.key')
+      await writeFile(decoy, Buffer.alloc(32, 0x42))
+      const fs = await import('node:fs/promises')
+      await fs.mkdir(keysDir, { recursive: true })
+      await symlink(decoy, store.keyPath('kakao'))
+      try {
+        await store.read('kakao')
+        throw new Error('expected throw on symlinked key file')
+      } catch (err) {
+        if (!(err instanceof Error)) throw err
+        expect(err.message).toMatch(/not a regular file/)
+      }
+    })
+  })
+
+  test('concurrent ensure() calls converge: both return the same key bytes (race-safe)', async () => {
+    await withTempKeysDir(async (keysDir) => {
+      const store = createKeyStore({ keysDir })
+      const [a, b] = await Promise.all([store.ensure('kakao'), store.ensure('kakao')])
+      expect(a.equals(b)).toBe(true)
     })
   })
 })

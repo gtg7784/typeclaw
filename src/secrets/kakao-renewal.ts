@@ -41,6 +41,7 @@ export type AccountSnapshot = {
   email: string
   device_uuid: string
   device_type: KakaoDeviceType
+  created_at: string
   updated_at: string
 }
 
@@ -73,10 +74,6 @@ export type RenewalContext = {
   attemptLogin?: AttemptLoginFn
 }
 
-// decideRenewal answers "should we renew? if so, with what credentials?"
-// for the current account in the supplied block. Async because reading the
-// encryption key file (when decryption is needed) is async. No SDK call, no
-// network, no token writes — those happen in renewCurrentAccount().
 export async function decideRenewal(block: KakaoChannelBlock, ctx: RenewalContext): Promise<RenewalDecision> {
   const accountId = block.currentAccount
   if (!accountId) return { kind: 'skip', reason: 'no_account' }
@@ -122,16 +119,13 @@ export async function decideRenewal(block: KakaoChannelBlock, ctx: RenewalContex
       email: account.email,
       device_uuid: account.device_uuid,
       device_type: account.device_type,
+      created_at: account.created_at,
       updated_at: account.updated_at,
     },
     password: plaintextPassword,
   }
 }
 
-// renewCurrentAccount is the orchestration: read block, decide, call
-// attemptLogin if needed, write fresh tokens back through the host-mode
-// kakao store (which preserves email + encryptedPassword via the bridge
-// merge). Returns a RenewalAttempt the caller can log structurally.
 export async function renewCurrentAccount(
   ctx: RenewalContext,
 ): Promise<RenewalAttempt | { kind: 'skipped'; reason: string; ageMs?: number }> {
@@ -193,7 +187,7 @@ export async function renewCurrentAccount(
     device_uuid: result.credentials.device_uuid,
     device_type: result.credentials.device_type,
     auth_method: 'login',
-    created_at: decision.account.updated_at,
+    created_at: decision.account.created_at,
     updated_at: nowIso,
   })
 
@@ -211,11 +205,18 @@ function parseBlockOrEmpty(value: unknown): KakaoChannelBlock {
 }
 
 function classifyDecryptFailure(err: unknown, accountId: string): RenewalDecision {
-  if (err instanceof KeyStoreError && err.code === 'missing') {
+  if (err instanceof KeyStoreError) {
+    if (err.code === 'missing') {
+      return {
+        kind: 'reauth_required',
+        reason: 'key_missing',
+        message: `Encryption key missing for KakaoTalk account ${accountId} — run \`typeclaw channel reauth kakaotalk\` to mint a fresh one.`,
+      }
+    }
     return {
       kind: 'reauth_required',
       reason: 'key_missing',
-      message: `Encryption key missing for KakaoTalk account ${accountId} — run \`typeclaw channel reauth kakaotalk\` to mint a fresh one.`,
+      message: `Encryption key for KakaoTalk account ${accountId} is unusable (${err.code}: ${err.message}). Move it aside and run \`typeclaw channel reauth kakaotalk\` to mint a fresh one.`,
     }
   }
   if (err instanceof EncryptionError) {

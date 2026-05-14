@@ -187,6 +187,29 @@ describe('SecretsKakaoCredentialStore host mode', () => {
     })
   })
 
+  test('getAccount() strips email + encryptedPassword from the runtime object so SDK callers do not see them', async () => {
+    await withStore(async (store, secretsPath) => {
+      await store.setAccount(account('user-1'))
+      const seeded = JSON.parse(await readFile(secretsPath, 'utf8'))
+      seeded.channels.kakaotalk.accounts['user-1'].email = 'user@example.com'
+      seeded.channels.kakaotalk.accounts['user-1'].encryptedPassword = {
+        v: 1,
+        alg: 'AES-256-GCM',
+        kid: 'sha256:0123456789abcdef',
+        iv: 'aXY=',
+        ciphertext: 'Y3Q=',
+        authTag: 'YXQ=',
+        createdAt: '2026-05-14T00:00:00.000Z',
+      }
+      await Bun.write(secretsPath, JSON.stringify(seeded))
+
+      const upstream = await store.getAccount()
+      expect(upstream).not.toBeNull()
+      expect((upstream as unknown as { email?: string }).email).toBeUndefined()
+      expect((upstream as unknown as { encryptedPassword?: unknown }).encryptedPassword).toBeUndefined()
+    })
+  })
+
   test('getAccountWithRenewalFields accepts an explicit account id (multi-account selection)', async () => {
     await withStore(async (store, secretsPath) => {
       await store.setAccount(account('user-1'))

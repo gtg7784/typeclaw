@@ -1,11 +1,14 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto'
 
 // AES-256-GCM authenticated encryption for at-rest secrets. The threat model
-// is "agent folder leaked but ~/.typeclaw/keys/ did not" — backups, accidental
-// copies, mistakes like `git add secrets.json`. This is defense-in-depth for
-// at-rest folder leaks, not a sandbox boundary; anyone with read access to
-// both the agent folder and ~/.typeclaw/ already has the live OAuth tokens
-// stored next to the encrypted blob, so they bypass encryption entirely.
+// is narrow and conditional: "agent folder leaked but the effective TypeClaw
+// home (default ~/.typeclaw/, overridable via TYPECLAW_HOME) did not." That
+// covers accidental `git add secrets.json`, agent-folder backups, shared
+// mounts that expose only the agent dir. It does NOT cover (a) full host
+// compromise (the live OAuth tokens in the same secrets.json grant equivalent
+// capability), (b) whole-$HOME backups that capture both the agent dir and
+// ~/.typeclaw/, or (c) misconfiguration where TYPECLAW_HOME points inside the
+// leaked scope (e.g. inside the agent folder itself).
 //
 // AAD binds the ciphertext to the specific (containerName, accountId, version)
 // it was produced for, so a ciphertext copied between accounts or containers
@@ -106,11 +109,8 @@ export function decrypt(envelope: EncryptedEnvelope, key: Buffer, context: Encry
   }
 }
 
-// AAD = "typeclaw:kakaotalk-password:v1:<containerName>:<accountId>" — binds
-// the ciphertext to a specific (container, account) pair. A blob copied to a
-// different account or container fails authentication on decrypt even with
-// the same key, so attackers can't shuffle ciphertexts between identities to
-// confuse the renewal cron.
+// Changing this format breaks decryption of every previously-stored ciphertext.
+// See the module-header threat-model comment for the binding rationale.
 function buildAad(context: EncryptionContext): Buffer {
   return Buffer.from(`typeclaw:kakaotalk-password:v1:${context.containerName}:${context.accountId}`, 'utf8')
 }

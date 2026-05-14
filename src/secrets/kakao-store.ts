@@ -58,7 +58,7 @@ export class SecretsKakaoCredentialStore {
 
   async setAccount(account: SetKakaoAccountInput): Promise<void> {
     await this.writeBlock((block) => {
-      const merged = mergeUpstreamAccount(account, block.accounts[account.account_id])
+      const merged = mergeAccountPreservingRenewalFields(account, block.accounts[account.account_id])
       const accounts = { ...block.accounts, [account.account_id]: merged }
       return { ...block, currentAccount: block.currentAccount ?? account.account_id, accounts }
     })
@@ -142,8 +142,18 @@ function parseBlock(value: unknown): KakaoChannelBlock {
   return kakaoChannelBlockSchema.parse(value)
 }
 
+// Strips the typeclaw-only renewal fields (email + encryptedPassword) when
+// projecting the on-disk block to the upstream SDK's KakaoConfig shape. This
+// keeps getAccount()'s runtime contract honest with its TypeScript type, and
+// means the SDK's KakaoCredentialManager never sees fields it doesn't know
+// about (forward-compat for future SDK validation tightening).
 function toKakaoConfig(block: KakaoChannelBlock): KakaoConfig {
-  return { current_account: block.currentAccount, accounts: block.accounts }
+  const accounts: KakaoConfig['accounts'] = {}
+  for (const [id, account] of Object.entries(block.accounts)) {
+    const { email: _email, encryptedPassword: _encryptedPassword, ...upstream } = account
+    accounts[id] = upstream
+  }
+  return { current_account: block.currentAccount, accounts }
 }
 
 // The upstream KakaoConfig/KakaoAccountCredentials types have no awareness of
@@ -155,12 +165,12 @@ function toKakaoConfig(block: KakaoChannelBlock): KakaoConfig {
 function fromKakaoConfig(config: KakaoConfig, prior: KakaoChannelBlock): KakaoChannelBlock {
   const accounts: KakaoChannelBlock['accounts'] = {}
   for (const [id, account] of Object.entries(config.accounts)) {
-    accounts[id] = mergeUpstreamAccount(account, prior.accounts[id])
+    accounts[id] = mergeAccountPreservingRenewalFields(account, prior.accounts[id])
   }
   return { ...prior, currentAccount: config.current_account, accounts }
 }
 
-function mergeUpstreamAccount(
+function mergeAccountPreservingRenewalFields(
   incoming: SetKakaoAccountInput | KakaoAccountCredentials,
   priorOnDisk: KakaoChannelBlock['accounts'][string] | undefined,
 ): KakaoChannelBlock['accounts'][string] {

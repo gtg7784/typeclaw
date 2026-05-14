@@ -243,6 +243,56 @@ describe('renewCurrentAccount', () => {
     })
   })
 
+  test('preserves created_at across renewals (only updated_at advances)', async () => {
+    await withAgentDir(async (agentDir) => {
+      const key = generateKey()
+      const encryptedPassword = encrypt('hunter2', key, { containerName: 'kakao', accountId: 'u-1' })
+      const originalCreatedAt = '2026-01-01T00:00:00.000Z'
+      const olderUpdatedAt = new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString()
+      const block: KakaoChannelBlock = {
+        currentAccount: 'u-1',
+        accounts: {
+          'u-1': {
+            account_id: 'u-1',
+            oauth_token: 'stale',
+            user_id: 'u-1',
+            refresh_token: 'stale-refresh',
+            device_uuid: 'device-uuid',
+            device_type: 'tablet',
+            auth_method: 'login',
+            created_at: originalCreatedAt,
+            updated_at: olderUpdatedAt,
+            email: 'u@e.com',
+            encryptedPassword,
+          },
+        },
+      }
+      await seedSecrets(agentDir, block)
+
+      const result = await renewCurrentAccount({
+        containerName: 'kakao',
+        agentDir,
+        keyStore: fakeKeyStore({ containerName: 'kakao', key }),
+        attemptLogin: async (_email, _password, deviceUuid, deviceType) => ({
+          authenticated: true,
+          credentials: {
+            access_token: 'fresh',
+            refresh_token: 'fresh-refresh',
+            user_id: 'u-1',
+            device_uuid: deviceUuid,
+            device_type: deviceType,
+          },
+        }),
+      })
+
+      expect(result.kind).toBe('ok')
+      const raw = JSON.parse(await readFile(join(agentDir, 'secrets.json'), 'utf8'))
+      const persisted = raw.channels.kakaotalk.accounts['u-1']
+      expect(persisted.created_at).toBe(originalCreatedAt)
+      expect(Date.parse(persisted.updated_at)).toBeGreaterThan(Date.parse(olderUpdatedAt))
+    })
+  })
+
   test('reports reauth_required (not transient) on bad_credentials', async () => {
     await withAgentDir(async (agentDir) => {
       const key = generateKey()

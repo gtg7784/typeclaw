@@ -105,6 +105,114 @@ describe('parseSecretsFile (v2 envelope)', () => {
     expect(result.file.channels.kakaotalk).toEqual({ currentAccount: null, accounts: {} })
   })
 
+  test('accepts a kakaotalk account with renewal fields (email + encryptedPassword)', () => {
+    const result = parseSecretsFile({
+      version: 2,
+      channels: {
+        kakaotalk: {
+          currentAccount: 'user-1',
+          accounts: {
+            'user-1': {
+              account_id: 'user-1',
+              oauth_token: 'oauth-token',
+              user_id: 'user-1',
+              device_uuid: 'device-uuid',
+              device_type: 'tablet',
+              auth_method: 'login',
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+              email: 'user@example.com',
+              encryptedPassword: {
+                v: 1,
+                alg: 'AES-256-GCM',
+                kid: 'sha256:0123456789abcdef',
+                iv: 'aXY=',
+                ciphertext: 'Y3Q=',
+                authTag: 'YXQ=',
+                createdAt: '2026-05-14T00:00:00.000Z',
+              },
+            },
+          },
+        },
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const account = result.file.channels.kakaotalk?.accounts['user-1']
+    expect(account?.email).toBe('user@example.com')
+    expect(account?.encryptedPassword?.v).toBe(1)
+    expect(account?.encryptedPassword?.alg).toBe('AES-256-GCM')
+    expect(account?.encryptedPassword?.kid).toBe('sha256:0123456789abcdef')
+  })
+
+  test('rejects a kakaotalk encryptedPassword envelope with unknown extra fields (strict schema)', () => {
+    const result = parseSecretsFile({
+      version: 2,
+      channels: {
+        kakaotalk: {
+          currentAccount: 'user-1',
+          accounts: {
+            'user-1': {
+              account_id: 'user-1',
+              oauth_token: 'o',
+              user_id: 'user-1',
+              device_uuid: 'd',
+              device_type: 'tablet',
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+              encryptedPassword: {
+                v: 1,
+                alg: 'AES-256-GCM',
+                kid: 'sha256:0123456789abcdef',
+                iv: 'a',
+                ciphertext: 'b',
+                authTag: 'c',
+                createdAt: '2026-05-14T00:00:00.000Z',
+                rogue: 'forward-compat-violation',
+              },
+            },
+          },
+        },
+      },
+    })
+
+    expect(result.ok).toBe(false)
+  })
+
+  test('rejects a kakaotalk encryptedPassword envelope with wrong algorithm', () => {
+    const result = parseSecretsFile({
+      version: 2,
+      channels: {
+        kakaotalk: {
+          currentAccount: 'user-1',
+          accounts: {
+            'user-1': {
+              account_id: 'user-1',
+              oauth_token: 'o',
+              user_id: 'user-1',
+              device_uuid: 'd',
+              device_type: 'tablet',
+              created_at: '2026-01-01T00:00:00.000Z',
+              updated_at: '2026-01-01T00:00:00.000Z',
+              encryptedPassword: {
+                v: 1,
+                alg: 'AES-128-GCM',
+                kid: 'sha256:0123456789abcdef',
+                iv: 'a',
+                ciphertext: 'b',
+                authTag: 'c',
+                createdAt: '2026-05-14T00:00:00.000Z',
+              },
+            },
+          },
+        },
+      },
+    })
+
+    expect(result.ok).toBe(false)
+  })
+
   test('rejects malformed channels.kakaotalk account block', () => {
     const result = parseSecretsFile({
       version: 2,

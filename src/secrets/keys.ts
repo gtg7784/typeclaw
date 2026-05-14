@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import { fingerprintKey, generateKey } from './encryption'
@@ -13,7 +13,7 @@ const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/
 export class KeyStoreError extends Error {
   constructor(
     message: string,
-    public readonly code: 'invalid_name' | 'missing' | 'corrupt_size',
+    public readonly code: 'invalid_name' | 'missing' | 'corrupt_size' | 'not_a_regular_file' | 'race_lost',
   ) {
     super(message)
     this.name = 'KeyStoreError'
@@ -59,6 +59,7 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
       if (!existsSync(path)) {
         throw new KeyStoreError(`key file missing: ${path}`, 'missing')
       }
+      await assertRegularFile(path)
       const buf = await readFile(path)
       if (buf.length !== KEY_BYTES) {
         throw new KeyStoreError(`key file is ${buf.length} bytes (expected ${KEY_BYTES}): ${path}`, 'corrupt_size')
@@ -69,6 +70,7 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
     async ensure(containerName: string): Promise<Buffer> {
       const path = keyPath(containerName)
       if (existsSync(path)) {
+        await assertRegularFile(path)
         const existing = await readFile(path)
         if (existing.length === KEY_BYTES) return existing
         // Corrupt-size key: surface rather than silently overwrite. The user
@@ -81,10 +83,63 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
         )
       }
       await ensureDir()
+      // Exclusive-create (wx flag) makes the first-write race-safe: if two
+      // processes both pass the existsSync check above and race, only one
+      // wx open of the temp file (or the final-path file via rename below)
+      // succeeds. The loser reads the winning key off disk and returns IT
+      // rather than its own bytes. Without this, the loser's
+      // secrets.json#encryptedPassword would be ciphertext for a key that
+      // just got overwritten by the winner's rename — silent
+      // undecryptable-ness.
       const fresh = generateKey()
-      const tmp = `${path}.${process.pid}.tmp`
-      await writeFile(tmp, fresh, { mode: KEY_FILE_MODE })
-      await rename(tmp, path)
+      // Per-PID-and-randomized temp path so two same-process concurrent
+      // ensure() calls don't collide on the same temp file. The crypto-random
+      // suffix is the only reason same-process concurrency is safe at all.
+      const tmpSuffix = Math.random().toString(36).slice(2, 10)
+      const tmp = `${path}.${process.pid}.${tmpSuffix}.tmp`
+      try {
+        await writeFile(tmp, fresh, { mode: KEY_FILE_MODE, flag: 'wx' })
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code
+        if (code !== 'EEXIST') throw err
+        // Astronomically unlikely (same pid AND same random suffix). Treat
+        // as a corruption signal and surface; do not silently overwrite.
+        throw new KeyStoreError(`temp key path collision at ${tmp}; refusing to overwrite`, 'race_lost')
+      }
+      try {
+        // link() is atomic and refuses to overwrite an existing dest. If the
+        // dest already exists, another process won the race; link will throw
+        // EEXIST. We then unlink our tmp and read the winner's bytes.
+        const fs = await import('node:fs/promises')
+        await fs.link(tmp, path)
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code
+        const fs = await import('node:fs/promises')
+        if (code === 'EEXIST') {
+          await fs.unlink(tmp).catch(() => {})
+          if (!existsSync(path)) {
+            throw new KeyStoreError(
+              `key path ${path} reports EEXIST but is not present; refusing to retry`,
+              'race_lost',
+            )
+          }
+          await assertRegularFile(path)
+          const winner = await readFile(path)
+          if (winner.length !== KEY_BYTES) {
+            throw new KeyStoreError(
+              `race winner key at ${path} is ${winner.length} bytes (expected ${KEY_BYTES})`,
+              'race_lost',
+            )
+          }
+          return winner
+        }
+        await fs.unlink(tmp).catch(() => {})
+        throw err
+      }
+      // Clean up the temp file (the link succeeded; tmp is now a second
+      // hardlink that we no longer need). Best-effort.
+      const fs2 = await import('node:fs/promises')
+      await fs2.unlink(tmp).catch(() => {})
       await chmod(path, KEY_FILE_MODE).catch(() => {})
       return fresh
     },
@@ -101,4 +156,18 @@ export type KeyStore = {
   read: (containerName: string) => Promise<Buffer>
   ensure: (containerName: string) => Promise<Buffer>
   fingerprint: (key: Buffer) => string
+}
+
+// Reject symlinks (and other non-regular files) so a same-user attacker who
+// can write under ~/.typeclaw/keys/ can't pre-place <name>.key as a symlink
+// to another 32-byte readable file and have TypeClaw treat that file's
+// content as the encryption key. lstat refuses to follow the link itself.
+async function assertRegularFile(path: string): Promise<void> {
+  const info = await lstat(path)
+  if (!info.isFile()) {
+    throw new KeyStoreError(
+      `key path ${path} is not a regular file (mode=${info.mode.toString(8)})`,
+      'not_a_regular_file',
+    )
+  }
 }

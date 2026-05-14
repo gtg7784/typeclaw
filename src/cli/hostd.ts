@@ -23,8 +23,18 @@ export const hostdCommand = defineCommand({
       onLog: (msg) => writeLogLine(msg),
     })
 
+    const hostdRestart = buildHostdRestart(cliEntry, defaultRestartDeps, version)
     const kakaoRenewal = createKakaoRenewalManager({
       onLog: (event) => writeLogLine(formatLog(event)),
+      onRenewalOk: async ({ containerName, cwd }) => {
+        // Restart the container so the in-memory KakaoTalk LOCO client picks
+        // up the renewed tokens from secrets.json. Without this, the cron
+        // would write fresh tokens but the running adapter would keep using
+        // the old token in its closure and still 401 at the ~7-day wall.
+        const result = await hostdRestart({ containerName, cwd })
+        if (!result.ok) throw new Error(result.reason)
+      },
+      shouldRenew: ({ cwd }) => kakaoChannelConfigured(cwd),
     })
 
     const daemon = await startDaemon({
@@ -34,7 +44,7 @@ export const hostdCommand = defineCommand({
       portbroker,
       kakaoRenewal,
       restartPreflight: buildHostdRestartPreflight(cliEntry, version),
-      restart: buildHostdRestart(cliEntry, defaultRestartDeps, version),
+      restart: hostdRestart,
     })
 
     const shutdown = (): void => {
@@ -154,6 +164,25 @@ function formatLog(event: DaemonLogEvent | SupervisorLogEvent): string {
       return `[hostd] kakao renewal transient failure for ${event.containerName} account=${event.accountId}: ${event.reason}`
     case 'kakao-renewal-tick-error':
       return `[hostd] kakao renewal ERROR for ${event.containerName}: ${event.error}`
+    case 'kakao-renewal-restart-scheduled':
+      return `[hostd] kakao renewal scheduled container restart for ${event.containerName} account=${event.accountId}`
+    case 'kakao-renewal-restart-failed':
+      return `[hostd] kakao renewal container restart FAILED for ${event.containerName} account=${event.accountId}: ${event.reason}`
+  }
+}
+
+// Reads the agent's typeclaw.json to decide whether the kakao renewal cron
+// should run for this container. Without this, every typeclaw agent on the
+// host gets a daily `no_account` skip event from the renewal manager — log
+// spam for non-kakao agents. Returns false on read/parse errors so the
+// renewal cron stays silent for agents we can't classify; the kakao adapter
+// itself would surface the real config issue on its next start.
+function kakaoChannelConfigured(cwd: string): boolean {
+  try {
+    const cfg = loadConfigSync(cwd)
+    return cfg.channels?.kakaotalk !== undefined
+  } catch {
+    return false
   }
 }
 
