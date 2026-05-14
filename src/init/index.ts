@@ -103,14 +103,10 @@ export type InitOptions = {
   llmAuth?: LLMAuth
   apiKey?: string
   discordBotToken?: string
-  discordAllowAll?: boolean
   slackBotToken?: string
   slackAppToken?: string
-  slackAllowAll?: boolean
   telegramBotToken?: string
-  telegramAllowAll?: boolean
   withKakaotalk?: boolean
-  kakaotalkAllowAll?: boolean
   runKakaotalkAuth?: KakaotalkAuthRunner
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
@@ -130,14 +126,10 @@ export async function runInit({
   llmAuth,
   model = DEFAULT_MODEL_REF,
   discordBotToken,
-  discordAllowAll = true,
   slackBotToken,
   slackAppToken,
-  slackAllowAll = true,
   telegramBotToken,
-  telegramAllowAll = true,
   withKakaotalk = false,
-  kakaotalkAllowAll = false,
   runKakaotalkAuth,
   onProgress,
   runHatching = defaultRunHatching,
@@ -187,13 +179,9 @@ export async function runInit({
   await scaffold(cwd, {
     model,
     withDiscord: wantsDiscord,
-    discordAllowAll,
     withSlack: wantsSlack,
-    slackAllowAll,
     withTelegram: wantsTelegram,
-    telegramAllowAll,
     withKakaotalk,
-    kakaotalkAllowAll,
   })
   // Only write the LLM API key on the api-key path. OAuth providers persist
   // their credentials to secrets.json (via the OAuth login step above); writing
@@ -373,13 +361,9 @@ export async function isHatched(dir: string): Promise<boolean> {
 export type ScaffoldOptions = {
   model?: KnownModelRef
   withDiscord?: boolean
-  discordAllowAll?: boolean
   withSlack?: boolean
-  slackAllowAll?: boolean
   withTelegram?: boolean
-  telegramAllowAll?: boolean
   withKakaotalk?: boolean
-  kakaotalkAllowAll?: boolean
 }
 
 export async function scaffold(root: string, options: ScaffoldOptions = {}): Promise<void> {
@@ -405,17 +389,11 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
     model: options.model ?? DEFAULT_MODEL_REF,
     network: { blockInternal: true },
   }
-  const channels: Record<string, { allow: string[] }> = {}
-  if (options.withDiscord) channels['discord-bot'] = { allow: options.discordAllowAll === false ? [] : ['*'] }
-  if (options.withSlack) channels['slack-bot'] = { allow: options.slackAllowAll === false ? [] : ['*'] }
-  if (options.withTelegram) channels['telegram-bot'] = { allow: options.telegramAllowAll === false ? [] : ['*'] }
-  if (options.withKakaotalk) {
-    // KakaoTalk involves a personal account, so we default to a tighter
-    // allow list (DMs only) than Slack/Discord/Telegram which scope to a
-    // workspace the user explicitly admitted the bot into. The user can
-    // broaden to `kakao:*` later by editing typeclaw.json.
-    channels.kakaotalk = { allow: options.kakaotalkAllowAll === true ? ['kakao:*'] : ['kakao:dm/*'] }
-  }
+  const channels: Record<string, Record<string, never>> = {}
+  if (options.withDiscord) channels['discord-bot'] = {}
+  if (options.withSlack) channels['slack-bot'] = {}
+  if (options.withTelegram) channels['telegram-bot'] = {}
+  if (options.withKakaotalk) channels.kakaotalk = {}
   if (Object.keys(channels).length > 0) config.channels = channels
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 
@@ -689,7 +667,6 @@ export type AddChannelStepEvent =
 // from prompts; tests build them inline.
 export type AddChannelOptions = {
   cwd: string
-  allowAll?: boolean
   onProgress?: (event: AddChannelStepEvent) => void
 } & (
   | { channel: 'discord-bot'; discordBotToken: string }
@@ -717,7 +694,7 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   }
 
   emit({ step: 'config', phase: 'start' })
-  await mergeChannelIntoConfig(options.cwd, options.channel, options.allowAll ?? defaultAllowAll(options.channel))
+  await mergeChannelIntoConfig(options.cwd, options.channel)
   emit({ step: 'config', phase: 'done' })
 
   emit({ step: 'secrets', phase: 'start' })
@@ -726,14 +703,6 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
     await appendChannelSecrets(options.cwd, options.channel, tokens)
   }
   emit({ step: 'secrets', phase: 'done' })
-}
-
-// `channel add` mirrors `runInit`'s allow defaults: workspace-scoped adapters
-// (discord/slack/telegram) default to `*` because the bot only sees what the
-// operator invited it into, while KakaoTalk uses a personal account and
-// defaults to DMs only.
-function defaultAllowAll(channel: ChannelKind): boolean {
-  return channel !== 'kakaotalk'
 }
 
 function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
@@ -774,7 +743,7 @@ export async function readConfiguredChannels(cwd: string): Promise<Set<ChannelKi
   return present
 }
 
-async function mergeChannelIntoConfig(cwd: string, channel: ChannelKind, allowAll: boolean): Promise<void> {
+async function mergeChannelIntoConfig(cwd: string, channel: ChannelKind): Promise<void> {
   const path = join(cwd, CONFIG_FILE)
   let parsed: Record<string, unknown>
   try {
@@ -798,21 +767,16 @@ async function mergeChannelIntoConfig(cwd: string, channel: ChannelKind, allowAl
     // Defense in depth — the CLI already filters configured channels out of
     // the picker and rejects them as the positional arg. Hitting this branch
     // means a programmatic caller passed a duplicate; better to fail loudly
-    // than silently overwrite the user's existing allow list.
+    // than silently overwrite the user's existing config.
     throw new Error(`Channel "${channel}" is already configured in ${CONFIG_FILE}.`)
   }
 
   parsed.channels = {
     ...existingChannels,
-    [channel]: { allow: buildAllow(channel, allowAll) },
+    [channel]: {},
   }
 
   await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`)
-}
-
-function buildAllow(channel: ChannelKind, allowAll: boolean): string[] {
-  if (channel === 'kakaotalk') return allowAll ? ['kakao:*'] : ['kakao:dm/*']
-  return allowAll ? ['*'] : []
 }
 
 // Writes per-adapter field values into `secrets.json#channels.<adapter>`.

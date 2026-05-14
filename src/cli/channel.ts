@@ -278,7 +278,7 @@ function validateAdapterArg(adapter: string, configured: Set<ChannelKind>): Chan
   if (configured.has(adapter)) {
     console.error(
       errorLine(
-        `${CHANNEL_LABELS[adapter]} ("${adapter}") is already configured in typeclaw.json. Edit the file directly to change its allow list.`,
+        `${CHANNEL_LABELS[adapter]} ("${adapter}") is already configured in typeclaw.json. Edit the file directly to change its configuration.`,
       ),
     )
     process.exit(1)
