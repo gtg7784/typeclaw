@@ -22,7 +22,13 @@ export type ChannelOriginContext = {
 
 export type SessionOrigin =
   | { kind: 'tui'; sessionId: string }
-  | { kind: 'cron'; jobId: string; jobKind: 'prompt' | 'exec' | 'subagent' }
+  | {
+      kind: 'cron'
+      jobId: string
+      jobKind: 'prompt' | 'exec' | 'subagent'
+      scheduledByRole?: string
+      scheduledByOrigin?: SessionOrigin | { kind: 'config-file' }
+    }
   | {
       kind: 'channel'
       adapter: AdapterId
@@ -35,7 +41,13 @@ export type SessionOrigin =
       participants?: readonly ChannelParticipant[]
       membership?: MembershipCount
     }
-  | { kind: 'subagent'; subagent: string; parentSessionId: string }
+  | {
+      kind: 'subagent'
+      subagent: string
+      parentSessionId: string
+      spawnedByRole?: string
+      spawnedByOrigin?: SessionOrigin
+    }
 
 export const PARTICIPANTS_TOP_K = 10
 export const PARTICIPANTS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
