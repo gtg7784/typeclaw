@@ -220,7 +220,11 @@ export async function startAgent({
         jobId: job.id,
         jobKind: 'prompt',
         ...(job.scheduledByRole !== undefined ? { scheduledByRole: job.scheduledByRole } : {}),
-        scheduledByOrigin: { kind: 'config-file' },
+        // Honor the persisted audit snapshot when present (TUI-authored
+        // crons, or jobs scheduled by a future `cron_schedule` tool).
+        // Hand-authored entries fall back to the config-file synthetic
+        // marker so the audit trail records "user edited cron.json".
+        scheduledByOrigin: (job.scheduledByOrigin as SessionOrigin | undefined) ?? { kind: 'config-file' },
       }
       const session = await createSession({
         reloadRegistry,
