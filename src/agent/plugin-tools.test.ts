@@ -483,3 +483,79 @@ describe('wrapSystemAgentTool', () => {
     expect(seen[0]).toEqual({ path: 'typeclaw.json', edits: [{ oldText: 'x', newText: 'y' }] })
   })
 })
+
+describe('getOrigin (live origin holder)', () => {
+  test('wrapPluginTool: tool.before sees the current value of getOrigin() at execute time, not at wrap time', async () => {
+    // Regression for: channel sessions need per-turn lastInboundAuthorId on
+    // tool.before so permission gating can resolve author: rules against the
+    // current actor, not the cold-start origin captured at session creation.
+    const seenOrigins: (unknown | undefined)[] = []
+    const hooks = createHookBus()
+    hooks.registerAll('p', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        seenOrigins.push(event.origin)
+        return undefined
+      },
+    })
+    const ref: { current: unknown } = { current: { kind: 'tui', sessionId: 's-A' } }
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({}),
+      async execute() {
+        return { content: [{ type: 'text', text: 'ok' }] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'p',
+      toolName: 't',
+      agentDir: '/agent',
+      sessionId: 'sess',
+      logger: noopLogger,
+      hooks,
+      getOrigin: () => ref.current as never,
+    })
+
+    await wrapped.execute('c1', {}, undefined, undefined, {} as never)
+    ref.current = { kind: 'tui', sessionId: 's-B' }
+    await wrapped.execute('c2', {}, undefined, undefined, {} as never)
+
+    expect(seenOrigins).toEqual([
+      { kind: 'tui', sessionId: 's-A' },
+      { kind: 'tui', sessionId: 's-B' },
+    ])
+  })
+
+  test('wrapSystemTool: same dynamic-origin contract', async () => {
+    const seenOrigins: (unknown | undefined)[] = []
+    const hooks = createHookBus()
+    hooks.registerAll('p', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        seenOrigins.push(event.origin)
+        return undefined
+      },
+    })
+    const ref: { current: unknown } = { current: { kind: 'cron', jobId: 'j1', jobKind: 'prompt' } }
+    const tool = definePiTool({
+      name: 'sys',
+      label: 'sys',
+      description: '',
+      parameters: Type.Object({}),
+      async execute() {
+        return { content: [{ type: 'text', text: 'ok' }], details: undefined }
+      },
+    })
+    const wrapped = wrapSystemTool(tool, {
+      agentDir: '/agent',
+      sessionId: 'sess',
+      hooks,
+      getOrigin: () => ref.current as never,
+    })
+
+    await wrapped.execute('c1', {}, undefined, undefined, {} as never)
+    ref.current = { kind: 'cron', jobId: 'j2', jobKind: 'prompt' }
+    await wrapped.execute('c2', {}, undefined, undefined, {} as never)
+
+    expect((seenOrigins[0] as { jobId: string }).jobId).toBe('j1')
+    expect((seenOrigins[1] as { jobId: string }).jobId).toBe('j2')
+  })
+})

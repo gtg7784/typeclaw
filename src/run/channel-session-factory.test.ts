@@ -83,6 +83,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
       participants: [],
       origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
     })
 
     expect(captured).toBeDefined()
@@ -112,6 +113,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
       participants: [],
       origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
     })
 
     expect(captured!.stream).toBe(stream)
@@ -139,6 +141,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
       participants: [],
       origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
     })
 
     expect(captured!.plugins).toBeUndefined()
@@ -166,6 +169,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
       participants: [],
       origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
     })
 
     expect(captured!.plugins).toBeDefined()
@@ -203,6 +207,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       key: { adapter: 'discord-bot', workspace: 'guild-123', chat: 'channel-456', thread: null },
       participants: origin.participants,
       origin,
+      originRef: { current: undefined },
     })
 
     expect(captured!.origin).toEqual(origin)
@@ -235,6 +240,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
       participants: [],
       origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
     })
 
     expect(captured!.channelRouter).toBe(router)
@@ -262,6 +268,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
       participants: [],
       origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
     })
 
     expect(capturedSm).not.toBeNull()
@@ -285,6 +292,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
       participants: [],
       origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
     })
 
     expect(result.hooks).toBe(runtime.get().hooks)
@@ -309,6 +317,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
       participants: [],
       origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
     })
 
     expect(result.hooks).toBeUndefined()

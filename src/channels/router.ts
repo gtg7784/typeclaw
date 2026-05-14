@@ -154,6 +154,12 @@ export type CreateSessionForChannel = (params: {
   existingSessionFile?: string
   participants: readonly ChannelParticipant[]
   origin: SessionOrigin
+  // Mutable holder the router updates per turn (with the current turn's
+  // lastInboundAuthorId, participants, etc.) so tool.before events stamp
+  // the live actor identity rather than the cold-start snapshot. The
+  // factory is expected to pass this through to createSession as
+  // `options.originRef`.
+  originRef: { current: SessionOrigin | undefined }
 }) => Promise<{
   session: AgentSession
   sessionId: string
@@ -201,6 +207,7 @@ type LiveSession = {
   getTranscriptPath: (() => string | undefined) | undefined
   participants: ChannelParticipant[]
   resolvedNames: ResolvedChannelNames
+  originRef: { current: SessionOrigin | undefined }
   promptQueue: QueuedInbound[]
   contextBuffer: ObservedInbound[]
   draining: boolean
@@ -373,7 +380,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const createForChannel: CreateSessionForChannel =
     options.createSessionForChannel ??
-    (async ({ key, existingSessionId, existingSessionFile, origin }) => {
+    (async ({ key, existingSessionId, existingSessionFile, origin, originRef }) => {
       const sessionDir = options.sessionDir ?? `${options.agentDir}/sessions`
       const sessionManager =
         existingSessionId !== undefined
@@ -382,6 +389,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       const session = await createSession({
         sessionManager,
         origin,
+        originRef,
       })
       const sessionId = sessionManager.getSessionId()
       void key
@@ -509,12 +517,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
       const isColdStart = record?.sessionId === undefined
 
+      // The router writes into this holder before every prompt() so the
+      // tool wrappers' getOrigin() sees the current-turn origin.
+      const originRef: { current: SessionOrigin | undefined } = { current: origin }
+
       const created = await createForChannel({
         key,
         ...(record?.sessionId ? { existingSessionId: record.sessionId } : {}),
         ...(record?.sessionFile ? { existingSessionFile: record.sessionFile } : {}),
         participants,
         origin,
+        originRef,
       })
       logger.info(`[channels] ${keyId}: ensureLive session-created sessionId=${created.sessionId}`)
 
@@ -553,6 +566,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         getTranscriptPath: created.getTranscriptPath,
         participants,
         resolvedNames,
+        originRef,
         promptQueue: [],
         contextBuffer: [],
         draining: false,
@@ -696,8 +710,6 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     mappings = next
     await persist()
   }
-
-  const regenerateOrigin = (live: LiveSession): SessionOrigin => buildLiveOrigin(live)
 
   const fireTyping = async (live: LiveSession, phase: 'tick' | 'stop'): Promise<void> => {
     const callbacks = typingCallbacks.get(live.key.adapter)
@@ -860,13 +872,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
         if (batch.length > 0) live.consecutiveSends.clear()
 
-        // The agent's view of the channel should reflect the current
-        // participants + last inbound author. We update the in-memory
-        // origin via the session-origin renderer, but the loader was
-        // captured at session creation. v0.1 keeps the per-session loader
-        // (so origin reflects participants at session-creation time);
-        // per-prompt regeneration of system prompts is a v0.2 work.
-        void regenerateOrigin
+        // Update the live origin holder so this turn's tool.before events
+        // carry the current actor's id. The DefaultResourceLoader still
+        // renders the session-creation origin into the system prompt (v0.2
+        // work to regenerate that per-turn); but permission gating off
+        // `lastInboundAuthorId` happens in the tool layer and now sees the
+        // live value.
+        live.originRef.current = buildLiveOrigin(live)
 
         // Bracketing logs around the LLM call so a hung prompt() is
         // diagnosable from logs alone (we see prompting without prompted).

@@ -56,6 +56,15 @@ export type PluginSubagentSelection = {
   toolNamePrefix: string
 }
 
+// Mutable holder for the live session origin. Pass this when the origin
+// must be updated turn-by-turn after session creation (channel sessions
+// whose `lastInboundAuthorId` changes with each inbound message). Tool
+// wrappers read `.current` at execute time, not at wrap time, so the
+// `tool.before` event carries the per-turn actor identity rather than the
+// stale session-creation snapshot. Sessions that never mutate origin
+// (TUI, cron, subagent) can omit it and pass `origin` instead.
+export type SessionOriginRef = { current: SessionOrigin | undefined }
+
 export type CreateSessionOptions = {
   reloadRegistry?: ReloadRegistry
   sessionManager?: SessionManager
@@ -68,6 +77,13 @@ export type CreateSessionOptions = {
   // Rendered into the system prompt so the agent knows who's listening, where
   // its output goes, and what to pass to channel_send.
   origin?: SessionOrigin
+  // Live origin holder. When provided, the tool wrappers read this at execute
+  // time so `tool.before` events see the current-turn origin. Caller is
+  // responsible for keeping `.current` up to date. If both `origin` and
+  // `originRef` are passed, the ref wins for tool stamping; the static
+  // `origin` still drives the initial system-prompt rendering and channel
+  // tool addressing (those are only valid at session-creation time).
+  originRef?: SessionOriginRef
   tools?: AgentSessionTools
   customTools?: ToolDefinition[]
   plugins?: PluginSessionWiring
@@ -112,17 +128,20 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           ...(options.origin ? { origin: options.origin } : {}),
         })
 
+  const getOrigin: () => SessionOrigin | undefined =
+    options.originRef !== undefined ? () => options.originRef!.current : () => options.origin
+
   const subagentBuiltinTools = options.pluginSubagent?.toolRefs
     ? resolveBuiltinToolRefs(options.pluginSubagent.toolRefs)
     : undefined
   const pluginCustomTools = options.pluginSubagent
-    ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins, options.origin)
-    : wrapRegistryTools(options.plugins, options.origin)
+    ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins, getOrigin)
+    : wrapRegistryTools(options.plugins, getOrigin)
 
   const tools = wrapSystemAgentTools(
     options.tools ?? (subagentBuiltinTools as AgentSessionTools | undefined),
     options.plugins,
-    options.origin,
+    getOrigin,
   )
 
   // Hoisted above tool construction so the restart tool can be wired with the
@@ -152,7 +171,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
                 ]
               : []),
           ]
-  const customTools = [...wrapSystemTools(customSystemTools, options.plugins, options.origin), ...pluginCustomTools]
+  const customTools = [...wrapSystemTools(customSystemTools, options.plugins, getOrigin), ...pluginCustomTools]
 
   const model = resolveModel(getConfig().model)
   const { session } = await createAgentSession({
@@ -297,7 +316,7 @@ export function buildChannelTools(
 
 function wrapRegistryTools(
   plugins: PluginSessionWiring | undefined,
-  origin: SessionOrigin | undefined,
+  getOrigin: () => SessionOrigin | undefined,
 ): ToolDefinition[] {
   if (!plugins) return []
   return plugins.registry.tools.map((t: PluginRegisteredTool) =>
@@ -308,7 +327,7 @@ function wrapRegistryTools(
       sessionId: plugins.sessionId,
       logger: t.logger,
       hooks: plugins.hooks,
-      ...(origin !== undefined ? { origin } : {}),
+      getOrigin,
     }),
   )
 }
@@ -316,7 +335,7 @@ function wrapRegistryTools(
 function wrapSystemAgentTools(
   tools: AgentSessionTools | undefined,
   plugins: PluginSessionWiring | undefined,
-  origin: SessionOrigin | undefined,
+  getOrigin: () => SessionOrigin | undefined,
 ): AgentSessionTools | undefined {
   if (!tools || !hasToolHooks(plugins)) return tools
   return tools.map((tool) =>
@@ -324,7 +343,7 @@ function wrapSystemAgentTools(
       agentDir: plugins.agentDir,
       sessionId: plugins.sessionId,
       hooks: plugins.hooks,
-      ...(origin !== undefined ? { origin } : {}),
+      getOrigin,
     }),
   )
 }
@@ -332,7 +351,7 @@ function wrapSystemAgentTools(
 function wrapSystemTools(
   tools: ToolDefinition[],
   plugins: PluginSessionWiring | undefined,
-  origin: SessionOrigin | undefined,
+  getOrigin: () => SessionOrigin | undefined,
 ): ToolDefinition[] {
   if (!hasToolHooks(plugins)) return tools
   return tools.map((tool) =>
@@ -340,7 +359,7 @@ function wrapSystemTools(
       agentDir: plugins.agentDir,
       sessionId: plugins.sessionId,
       hooks: plugins.hooks,
-      ...(origin !== undefined ? { origin } : {}),
+      getOrigin,
     }),
   )
 }
@@ -353,7 +372,7 @@ function hasToolHooks(plugins: PluginSessionWiring | undefined): plugins is Plug
 function wrapSubagentCustomTools(
   selection: PluginSubagentSelection,
   plugins: PluginSessionWiring | undefined,
-  origin: SessionOrigin | undefined,
+  getOrigin: () => SessionOrigin | undefined,
 ): ToolDefinition[] {
   if (!selection.customTools || !plugins) return []
   const logger = makePluginLogger(selection.pluginName)
@@ -365,7 +384,7 @@ function wrapSubagentCustomTools(
       sessionId: plugins.sessionId,
       logger,
       hooks: plugins.hooks,
-      ...(origin !== undefined ? { origin } : {}),
+      getOrigin,
     }),
   )
 }
