@@ -449,7 +449,14 @@ async function collectLLMAuth(
   const supportsApiKey = providerSupportsApiKey(provider)
   const supportsOAuth = providerSupportsOAuth(provider)
 
-  if (supportsApiKey && existingApiKey !== null) {
+  const existingKeyDecision = await decideExistingApiKeyReuse(provider, existingApiKey, (message) =>
+    confirm({ message, initialValue: true }),
+  )
+  if (existingKeyDecision === 'cancel') {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  if (existingKeyDecision === 'reuse' && existingApiKey !== null) {
     log.info(`Using existing ${provider.apiKeyEnv} from .env.`)
     return { kind: 'api-key', apiKey: existingApiKey }
   }
@@ -488,6 +495,18 @@ async function collectLLMAuth(
   }
 
   return { kind: 'oauth', runLogin: makeOAuthLoginRunner(buildOAuthCallbacks(provider.name)) }
+}
+
+export async function decideExistingApiKeyReuse(
+  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+  existingApiKey: string | null,
+  askReuse: (message: string) => Promise<unknown>,
+): Promise<'reuse' | 'prompt' | 'cancel'> {
+  if (!providerSupportsApiKey(provider) || existingApiKey === null) return 'prompt'
+
+  const reuse = await askReuse(`Reuse existing ${provider.apiKeyEnv} from .env?`)
+  if (isCancel(reuse)) return 'cancel'
+  return reuse === true ? 'reuse' : 'prompt'
 }
 
 // Wraps the OAuth lifecycle into the same clack idiom the rest of the wizard
