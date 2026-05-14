@@ -6,6 +6,7 @@ export {
   getConfig,
   loadConfigSync,
   loadPluginConfigsSync,
+  migrateLegacyConfigShape,
   mountSchema,
   dockerfileSchema,
   portForwardSchema,

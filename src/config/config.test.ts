@@ -9,6 +9,7 @@ import {
   expandMountPath,
   loadConfigSync,
   loadPluginConfigsSync,
+  migrateLegacyConfigShape,
   mountSchema,
   validateConfig,
   validateMount,
@@ -297,6 +298,98 @@ describe('gitignoreSchema', () => {
         gitignore: { append: ['scratch/\n*.local.log'] },
       }),
     ).toThrow(/single gitignore lines/)
+  })
+})
+
+describe('migrateLegacyConfigShape', () => {
+  test('returns input unchanged when neither legacy key is present', () => {
+    const input = { model: VALID_MODEL, port: 9001 }
+    const result = migrateLegacyConfigShape(input)
+    expect(result.changed).toBe(false)
+    expect(result.json).toBe(input)
+  })
+
+  test('moves legacy dockerfile into docker.file', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      dockerfile: { ffmpeg: true, append: ['ENV X=1'] },
+    })
+    expect(result.changed).toBe(true)
+    expect(result.json).toEqual({
+      model: VALID_MODEL,
+      docker: { file: { ffmpeg: true, append: ['ENV X=1'] } },
+    })
+  })
+
+  test('moves legacy gitignore into git.ignore', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      gitignore: { append: ['scratch/'] },
+    })
+    expect(result.changed).toBe(true)
+    expect(result.json).toEqual({
+      model: VALID_MODEL,
+      git: { ignore: { append: ['scratch/'] } },
+    })
+  })
+
+  test('migrates both legacy keys in a single pass', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      dockerfile: { ffmpeg: true },
+      gitignore: { append: ['scratch/'] },
+    })
+    expect(result.changed).toBe(true)
+    expect(result.json).toEqual({
+      model: VALID_MODEL,
+      docker: { file: { ffmpeg: true } },
+      git: { ignore: { append: ['scratch/'] } },
+    })
+  })
+
+  test('drops legacy dockerfile when new docker.file already present (new shape wins)', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      dockerfile: { ffmpeg: false, append: ['LEGACY'] },
+      docker: { file: { ffmpeg: true, append: ['NEW'] } },
+    })
+    expect(result.changed).toBe(true)
+    expect(result.json).toEqual({
+      model: VALID_MODEL,
+      docker: { file: { ffmpeg: true, append: ['NEW'] } },
+    })
+  })
+
+  test('drops legacy gitignore when new git.ignore already present (new shape wins)', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      gitignore: { append: ['LEGACY'] },
+      git: { ignore: { append: ['NEW'] } },
+    })
+    expect(result.changed).toBe(true)
+    expect(result.json).toEqual({
+      model: VALID_MODEL,
+      git: { ignore: { append: ['NEW'] } },
+    })
+  })
+
+  test('merges legacy dockerfile into existing docker namespace that lacks file', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      dockerfile: { ffmpeg: true },
+      docker: { somethingElse: 'future' },
+    })
+    expect(result.changed).toBe(true)
+    expect(result.json).toEqual({
+      model: VALID_MODEL,
+      docker: { somethingElse: 'future', file: { ffmpeg: true } },
+    })
+  })
+
+  test('non-object inputs are returned unchanged', () => {
+    expect(migrateLegacyConfigShape(null)).toEqual({ json: null, changed: false })
+    expect(migrateLegacyConfigShape([])).toEqual({ json: [], changed: false })
+    expect(migrateLegacyConfigShape('string')).toEqual({ json: 'string', changed: false })
   })
 })
 

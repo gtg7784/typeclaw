@@ -402,6 +402,59 @@ export function loadConfigSync(cwd: string): Config {
   return result.data
 }
 
+// One-shot rename of legacy top-level `dockerfile` / `gitignore` keys into the
+// nested `docker.file` / `git.ignore` shape introduced for namespace
+// extensibility (`docker.compose`, `git.attributes`, etc. land here later
+// without a second migration). Pure — the caller decides where the migrated
+// JSON goes (parse it, write it back, both).
+//
+// Precedence when both legacy and new keys coexist: the new shape wins and
+// the legacy key is dropped silently. Two ways this happens in practice:
+//   1. User hand-edited the new shape after auto-migration but forgot to
+//      delete the legacy key.
+//   2. Two `typeclaw start` invocations raced on a stale checkout.
+// Either way, the new shape is the source of truth — losing the legacy
+// duplicate is the right call because it would otherwise be shadowed at
+// parse time anyway (`configSchema` has no `dockerfile`/`gitignore` keys
+// once they move under the namespaces).
+export function migrateLegacyConfigShape(json: unknown): { json: unknown; changed: boolean } {
+  if (typeof json !== 'object' || json === null || Array.isArray(json)) {
+    return { json, changed: false }
+  }
+
+  const obj = json as Record<string, unknown>
+  const hasLegacyDockerfile = 'dockerfile' in obj
+  const hasLegacyGitignore = 'gitignore' in obj
+  if (!hasLegacyDockerfile && !hasLegacyGitignore) {
+    return { json, changed: false }
+  }
+
+  const next: Record<string, unknown> = { ...obj }
+  if (hasLegacyDockerfile) {
+    const legacy = next.dockerfile
+    delete next.dockerfile
+    if (!('docker' in next)) {
+      next.docker = { file: legacy }
+    } else if (isPlainObject(next.docker) && !('file' in next.docker)) {
+      next.docker = { ...next.docker, file: legacy }
+    }
+  }
+  if (hasLegacyGitignore) {
+    const legacy = next.gitignore
+    delete next.gitignore
+    if (!('git' in next)) {
+      next.git = { ignore: legacy }
+    } else if (isPlainObject(next.git) && !('ignore' in next.git)) {
+      next.git = { ...next.git, ignore: legacy }
+    }
+  }
+  return { json: next, changed: true }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 export type ValidateConfigResult = { ok: true } | { ok: false; reason: string }
 
 // Missing file → ok (matches `loadMounts` in src/container/up.ts; `isInitialized`
