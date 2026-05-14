@@ -136,14 +136,38 @@ export const NETWORK_BLOCK_IPV6_NETS = ['fc00::/7', 'fe80::/10', 'ff00::/8', '::
 // Carve-out ordering is load-bearing. iptables OUTPUT is first-match-wins,
 // and we use -A (append). So the order written into the shim is the order
 // rules will be evaluated:
-//   1. loopback ACCEPT
-//   2. hostd port ACCEPT (narrow: tcp + single dport on the host gateway)
-//   3. resolver ACCEPT (narrow: udp/tcp dport 53 to each /etc/resolv.conf
+//   1. ESTABLISHED,RELATED ACCEPT (return path for any connection initiated
+//      from outside the container — see comment block below)
+//   2. loopback ACCEPT
+//   3. hostd port ACCEPT (narrow: tcp + single dport on the host gateway)
+//   4. resolver ACCEPT (narrow: udp/tcp dport 53 to each /etc/resolv.conf
 //      nameserver) — gated on TYPECLAW_NETWORK_AUTO_ALLOW_RESOLVERS=1
-//   4. user-supplied allowlist ACCEPT (wholesale: -d <cidr>) — driven by
+//   5. user-supplied allowlist ACCEPT (wholesale: -d <cidr>) — driven by
 //      TYPECLAW_NETWORK_ALLOW comma-separated env
-//   5. RFC1918 + link-local + CGNAT + multicast + reserved REJECTs
-// A resolver at 10.0.0.2 hits (3) and ACCEPTs before (5) DROPs it.
+//   6. RFC1918 + link-local + CGNAT + multicast + reserved REJECTs
+// A resolver at 10.0.0.2 hits (4) and ACCEPTs before (6) DROPs it.
+//
+// Rule 1 (conntrack ESTABLISHED,RELATED) is what makes Docker port-forward
+// reply traffic survive the RFC1918 REJECT. On Docker Desktop and OrbStack
+// the bridge gateway is in 192.168.0.0/16 (OrbStack: 192.168.215.1 or
+// 192.168.139.1; Docker Desktop: 192.168.65.1). A host -> container request
+// via `docker run -p 127.0.0.1:HOST:CONTAINER` arrives at the container
+// from the bridge gateway IP. Without rule 1, the reply packets would
+// match rule 6 (192.168.0.0/16 REJECT) and never reach the host — TCP
+// handshake completes (kernel SYN/ACK is in INPUT, not OUTPUT), the
+// request body is delivered, but the agent's HTTP response is dropped at
+// OUTPUT. Symptom: `curl http://127.0.0.1:HOST` connects but receives
+// zero bytes and times out. Stateful inversion via conntrack is the
+// canonical fix: ESTABLISHED matches packets belonging to a connection
+// the kernel already tracks (including the inbound port-forward), and
+// RELATED covers ICMP error packets for those connections. No new
+// outbound capability is granted — a compromised agent still cannot
+// initiate connections to RFC1918, only respond to inbound ones.
+//
+// Requires the `xt_conntrack` kernel module (universal on Linux 2.6.20+
+// and on every Docker/OrbStack VM kernel) and the userspace iptables
+// `conntrack` match (shipped in the `iptables` Debian package on trixie
+// alongside the binary itself; no extra apt install needed).
 //
 // The resolver carve-out reads /etc/resolv.conf inside the container, NOT
 // on the host. Docker propagates the host's resolver into the container by
@@ -186,6 +210,7 @@ if [ "\${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then
   exec bun run typeclaw "$@"
 fi
 
+iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 
 # Hostd HTTP control carve-out: narrow ACCEPT, scoped to one TCP port on
@@ -222,6 +247,7 @@ if [ -n "\${TYPECLAW_NETWORK_ALLOW:-}" ]; then
 fi
 ${ipv4Rules.join('\n')}
 
+ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 ip6tables -A OUTPUT -o lo -j ACCEPT
 ${ipv6Rules.join('\n')}
 

@@ -421,6 +421,21 @@ describe('network egress entrypoint shim', () => {
     expect(shim).toContain('ip6tables -A OUTPUT -o lo -j ACCEPT')
   })
 
+  test('allows ESTABLISHED,RELATED return traffic so Docker port-forward replies survive the RFC1918 REJECT', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT')
+    expect(shim).toContain('ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT')
+  })
+
+  test('ESTABLISHED,RELATED ACCEPT runs before the RFC1918 REJECTs (first-match-wins ordering)', () => {
+    const shim = buildEntrypointShim()
+    const ctstateIdx = shim.indexOf('--ctstate ESTABLISHED,RELATED -j ACCEPT')
+    const rejectIdx = shim.indexOf('192.168.0.0/16 -j REJECT')
+    expect(ctstateIdx).toBeGreaterThan(-1)
+    expect(rejectIdx).toBeGreaterThan(-1)
+    expect(ctstateIdx).toBeLessThan(rejectIdx)
+  })
+
   test('re-allows hostd narrowly: TCP, single port parsed from TYPECLAW_HOSTD_URL, IPv4-only', () => {
     const shim = buildEntrypointShim()
     expect(shim).toContain('TYPECLAW_HOSTD_URL')
