@@ -269,10 +269,10 @@ export async function defaultRunHatching({
     // the preferred port, otherwise we'd connect to the wrong service.
     const hostPort = launch.hostPort
 
-    await waitForAgentFn(`http://localhost:${hostPort}`, { timeoutMs: 30_000 })
+    await waitForAgentFn(`http://127.0.0.1:${hostPort}`, { timeoutMs: 30_000 })
 
     const tui = tuiFactory({
-      url: `ws://localhost:${hostPort}`,
+      url: buildTuiUrl(hostPort, launch.tuiToken),
       initialPrompt: HATCHING_PROMPT,
     })
     await tui.run()
@@ -280,6 +280,12 @@ export async function defaultRunHatching({
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
+}
+
+function buildTuiUrl(hostPort: number, token: string | null): string {
+  const url = new URL(`ws://127.0.0.1:${hostPort}`)
+  if (token !== null) url.searchParams.set('token', token)
+  return url.toString()
 }
 
 // Probe the server's plain HTTP fallback (non-upgrade requests get a 200 with

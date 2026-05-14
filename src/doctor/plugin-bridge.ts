@@ -1,4 +1,4 @@
-import { resolveHostPort } from '@/container'
+import { resolveHostPort, resolveTuiToken } from '@/container'
 import type { ClientMessage, DoctorCheckPayload, DoctorFixPayload, ServerMessage } from '@/shared'
 
 export type PluginBridgeOptions = {
@@ -80,7 +80,8 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
   if (url === undefined) {
     try {
       const port = await resolveHostPort({ cwd: opts.cwd })
-      url = `ws://localhost:${port}`
+      const token = await resolveTuiToken({ cwd: opts.cwd })
+      url = buildBridgeUrl(port, token)
     } catch (err) {
       return { kind: 'unreachable', reason: err instanceof Error ? err.message : String(err) }
     }
@@ -126,6 +127,12 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
     return { kind: 'unreachable', reason: err instanceof Error ? err.message : String(err) }
   }
   return { kind: 'ok', ws, timeoutMs }
+}
+
+function buildBridgeUrl(port: number, token: string | null): string {
+  const url = new URL(`ws://127.0.0.1:${port}`)
+  if (token !== null) url.searchParams.set('token', token)
+  return url.toString()
 }
 
 async function withRequest<R extends { kind: string }>(
