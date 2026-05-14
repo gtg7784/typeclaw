@@ -30,6 +30,8 @@ import type {
   ToolResult,
 } from '@/plugin'
 
+import type { SessionOrigin } from './session-origin'
+
 type AnyAgentTool =
   | typeof piReadTool
   | typeof piBashTool
@@ -73,12 +75,14 @@ export type WrapToolOptions = {
   sessionId: string
   logger: PluginLogger
   hooks: HookBus
+  origin?: SessionOrigin
 }
 
 export type WrapSystemToolOptions = {
   agentDir: string
   sessionId: string
   hooks: HookBus
+  origin?: SessionOrigin
 }
 
 export function zodToToolParameters(schema: z.ZodType<unknown>): TSchema {
@@ -106,6 +110,7 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
         sessionId: opts.sessionId,
         callId: toolCallId,
         args: mutableArgs,
+        ...(opts.origin !== undefined ? { origin: opts.origin } : {}),
       }
       const blockResult = await opts.hooks.runToolBefore(before)
       if (blockResult !== undefined) {
@@ -156,6 +161,7 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
         sessionId: opts.sessionId,
         callId: toolCallId,
         args: mutableArgs,
+        ...(opts.origin !== undefined ? { origin: opts.origin } : {}),
       })
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
@@ -203,6 +209,7 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
         sessionId: opts.sessionId,
         callId: toolCallId,
         args: mutableArgs,
+        ...(opts.origin !== undefined ? { origin: opts.origin } : {}),
       })
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)

@@ -1,3 +1,5 @@
+import type { PermissionService } from '@/permissions'
+
 import type { PluginContext, PluginLogger } from './types'
 
 export type SpawnSubagentFn = (name: string, payload?: unknown) => Promise<void>
@@ -8,6 +10,7 @@ export type CreatePluginContextOptions<TConfig> = {
   agentDir: string
   config: TConfig
   logger: PluginLogger
+  permissions: PermissionService
   spawnSubagent: SpawnSubagentFn
   isBooted: () => boolean
 }
@@ -19,6 +22,7 @@ export function createPluginContext<TConfig>(opts: CreatePluginContextOptions<TC
     agentDir: opts.agentDir,
     config: opts.config,
     logger: opts.logger,
+    permissions: opts.permissions,
     spawnSubagent: async (name: string, payload?: unknown) => {
       if (!opts.isBooted()) {
         throw new Error(

@@ -1,6 +1,7 @@
 import type { z } from 'zod'
 
 import type { SessionOrigin } from '@/agent/session-origin'
+import type { PermissionService } from '@/permissions'
 
 export type ContentPart = { type: 'text'; text: string } | { type: 'image'; mimeType: string; data: string }
 
@@ -132,6 +133,7 @@ export type ToolBeforeEvent = {
   sessionId: string
   callId: string
   args: Record<string, unknown>
+  origin?: SessionOrigin
 }
 
 export type ToolBeforeResult = void | undefined | { block: true; reason: string }
@@ -174,6 +176,7 @@ export type PluginContext<TConfig = never> = {
   readonly agentDir: string
   readonly config: TConfig
   readonly logger: PluginLogger
+  readonly permissions: PermissionService
   spawnSubagent: (name: string, payload?: unknown) => Promise<void>
 }
 
@@ -185,6 +188,7 @@ export type PluginExports = {
   skillsDirs?: string[]
   hooks?: Hooks
   doctorChecks?: Record<string, PluginDoctorCheck>
+  permissions?: readonly string[]
 }
 
 // `typeclaw doctor` plugin extension surface. Each check is read-only by
@@ -233,5 +237,6 @@ export type PluginFixResult = {
 
 export type DefinedPlugin<TConfig = never> = {
   readonly configSchema?: z.ZodType<TConfig>
+  readonly permissions?: readonly string[]
   readonly plugin: (ctx: PluginContext<TConfig>) => Promise<PluginExports>
 }
