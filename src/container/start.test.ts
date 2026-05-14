@@ -718,7 +718,7 @@ describe('refreshGitignore', () => {
       await refreshGitignore(dir)
 
       const written = await readFile(join(dir, '.gitignore'), 'utf8')
-      const customCommentIdx = written.indexOf('# Custom entries from typeclaw.json#gitignore.append.')
+      const customCommentIdx = written.indexOf('# Custom entries from typeclaw.json#git.ignore.append.')
       const scratchIdx = written.indexOf('scratch/')
       const logIdx = written.indexOf('*.local.log')
       const trulyIgnoredIdx = written.indexOf('# Truly ignored:')

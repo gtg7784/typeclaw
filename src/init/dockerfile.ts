@@ -384,7 +384,7 @@ ${ghKeyringLayer}# Layer 2 (changes when the package list changes): the actual a
 # Cache mounts make a re-install nearly free when this layer is invalidated:
 # .deb files come straight from the host's BuildKit cache instead of being
 # refetched from Debian/GitHub mirrors. Package set is composed from the
-# \`dockerfile\` config block in typeclaw.json — toggles for tmux/python/gh/
+# \`docker.file\` config block in typeclaw.json — toggles for tmux/python/gh/
 # ffmpeg fan out into the args below. Baseline (git/ca-certificates/curl/
 # gnupg) is always installed because downstream layers depend on it.
 #
@@ -417,7 +417,7 @@ ${renderEntrypointShimLayer()}
 
 function renderToggleAptInstallLayer(toggleAptArgs: string[]): string {
   return `# Layer 1 (toggle apt install): packages requested via typeclaw.json
-# #dockerfile toggles. Baseline + Chrome runtime libs are already in the
+# #docker.file toggles. Baseline + Chrome runtime libs are already in the
 # base image; this layer only adds gh/tmux/python/ffmpeg if enabled.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\
@@ -432,7 +432,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
 // two cannot drift — the published image is a function of this source, not
 // a checked-in Dockerfile that needs hand-syncing. The base intentionally
 // stops before the per-agent layers (gh keyring, apt feature toggles,
-// dockerfile.append, ENV, ENTRYPOINT) so users can still toggle them via
+// docker.file.append, ENV, ENTRYPOINT) so users can still toggle them via
 // typeclaw.json without forcing a base-image rebuild.
 //
 // Layer 2's apt-get install line installs only the baseline packages, NOT
@@ -587,7 +587,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
 
 function renderCustomDockerfileLines(lines: string[]): string {
   if (lines.length === 0) return ''
-  return `# Custom lines from typeclaw.json#dockerfile.append.
+  return `# Custom lines from typeclaw.json#docker.file.append.
 ${lines.join('\n')}
 
 `

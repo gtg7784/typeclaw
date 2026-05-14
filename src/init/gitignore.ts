@@ -39,7 +39,7 @@ channels/
 
 function renderCustomGitignoreEntries(entries: string[]): string {
   if (entries.length === 0) return ''
-  return `# Custom entries from typeclaw.json#gitignore.append.
+  return `# Custom entries from typeclaw.json#git.ignore.append.
 ${entries.join('\n')}
 
 `
