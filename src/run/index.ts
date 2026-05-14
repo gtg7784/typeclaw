@@ -145,6 +145,8 @@ export async function startAgent({
       getChannelRouter: () => channelManager.router,
       ...containerNameOpt,
     }),
+    permissions: pluginsLoaded.permissions,
+    gateChannelRespond: () => getConfig().permissions.gateChannelRespond,
   })
 
   const createSessionForSubagent: import('@/agent/subagents').CreateSessionForSubagent = async (
