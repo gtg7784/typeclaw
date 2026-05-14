@@ -246,6 +246,76 @@ All three are read-only legacy branches; the next write produces v2. The legacy 
 - **`pi-coding-agent`'s `AuthStorage.set` always writes through `withLock`.** Our bridge has to be ready for full-slice rewrites that include providers the caller didn't intend to change (OAuth refresh is the canonical example). The diff-and-preserve logic in `mergeProvidersIntoEnvelope` is what makes those writes safe; do not "simplify" it back to a wholesale replace.
 - **`.env` and `secrets.json` are peers, not migration source and sink.** `typeclaw doctor` is the right place to surface "this secret resolves from env / file / nothing" — not a boot-time auto-migration.
 
+## Permissions
+
+`src/permissions/` is TypeClaw's per-actor access-control subsystem. Roles bundle permission strings **and** match rules. Actors are derived at runtime from `SessionOrigin`; nothing about an actor is stored on disk. Plugins and any future consumer query the service via `ctx.permissions.has(origin, perm)`. v1 has exactly one consumer wired up — the security plugin — but the wiring is unified so the channel router can plug in next.
+
+### Mental model
+
+- **Actor** — derived at runtime from `SessionOrigin`. Not stored.
+- **Role** — named bundle of `permissions[]` + `match[]`. Static, declared under `typeclaw.json#roles`.
+- **Permission** — namespaced string of the shape `<plugin>.<verb>.<noun>`. Plugins declare them on their `definePlugin({ permissions: [...] })`; consumers check by string.
+
+Resolution walks roles in declaration order. For each role, every rule in `match[]` is tested against the origin. The first role with any matching rule wins. The fallback role is built-in `guest`, which has no permissions.
+
+### Built-in roles (`src/permissions/builtins.ts`)
+
+| Role      | Built-in `match[]` (prepended) | Built-in `permissions[]`                                                                                                           |
+| --------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`   | `[{ kind: 'tui' }]`            | `channel.respond`, `cron.schedule`, `cron.modify`, plus the union of all plugin-registered `security.bypass.*` (wildcard sentinel) |
+| `trusted` | `[]`                           | `channel.respond`, `cron.schedule`, `security.bypass.secretExfilBash`                                                              |
+| `member`  | `[]`                           | `channel.respond`                                                                                                                  |
+| `guest`   | `[]`                           | (none)                                                                                                                             |
+
+User-declared `match[]` **appends** to the built-in match list. User-declared `permissions[]` **replaces** the built-in list entirely — there is no merge, so `"permissions": []` means none. Custom (non-built-in) role names must declare both fields.
+
+### Match-rule DSL (`src/permissions/match-rule.ts`)
+
+Compact strings, parsed at boot. Examples:
+
+```
+tui
+cron
+subagent
+subagent:memory-logger
+*                                    # any channel session, any platform
+slack:*                              # any Slack chat, any workspace
+slack:T0123                          # one Slack workspace
+slack:T0123/C0ABCDE                  # one specific Slack chat
+slack:T0123 author:U_ME              # one author in one workspace
+slack:dm/*                           # any Slack DM
+discord:9999 author:U_MOD            # one Discord author across a guild
+kakao:group/*                        # any KakaoTalk group chat
+```
+
+Within one rule, tokens are AND'd; across multiple `match[]` entries on the same role they're OR'd. The parser owns three concerns: (1) precise typo errors (`autor:` → "Did you mean 'author:'?"), (2) rejection of redundant or impossible forms (`slack:*/*`, `slack:*/C0ABCDE`, `slack:T0123/*`), (3) compat for legacy `channels.allow[]` prefixes (`team:`, `guild:`, `tg:`) which parse for the transition window with a remediation message. Strict equality on every field — no regex, no glob beyond the listed `*` shapes. The JSON Schema layer ships a permissive regex pattern (`MATCH_RULE_REGEX_SOURCE`) so editors flag obvious typos, but the zod parser owns the semantic checks.
+
+### Cron and subagent provenance
+
+`kind: 'cron'` and `kind: 'subagent'` sessions do **not** resolve via match-rule walking. They carry stamped provenance fields:
+
+- **Cron**: `origin.scheduledByRole` (the role to run as) and `origin.scheduledByOrigin` (full parent `SessionOrigin` snapshot, for audit). The cron session's role is `scheduledByRole` directly.
+- **Subagent**: `origin.spawnedByRole` + `origin.spawnedByOrigin`. Snapshot at spawn — the subagent carries its inherited role for its full lifetime; parent cleanup doesn't affect it.
+
+This closes the laundering attack: an attacker session resolving to `guest` who asks the agent to schedule a cron gets `scheduledByRole: 'guest'` stamped into the persisted job. When the job fires, the cron session resolves to `guest` and the security plugin blocks `bash env` again. Hand-authored `cron.json` entries that omit `scheduledByRole` cause **boot failure** with a precise remediation message — there is no implicit-owner fallback.
+
+### Wiring
+
+1. **Config**: top-level `roles?` in `typeclaw.json`, parsed by `rolesConfigSchema`. **`roles` is restart-required** (FIELD_EFFECTS classification).
+2. **Plugin registration**: `definePlugin({ permissions: [...] })` lists the permissions the plugin both checks and contributes. The runtime reads every plugin's `permissions[]` at boot, _before_ invoking any plugin factory, and uses the union to (a) expand `owner`'s security wildcard sentinel into concrete permission strings, (b) populate `LoadPluginsResult.declaredPermissions` for diagnostics.
+3. **Plugin context**: `PluginContext.permissions: PermissionService` is constructed once at plugin load and lives for the plugin's lifetime. Reload of `roles` requires a restart.
+4. **`ToolBeforeEvent.origin?: SessionOrigin`**: the active session's origin is threaded from `createSession`'s `options.origin` into the `WrapToolOptions` / `WrapSystemToolOptions` of `src/agent/plugin-tools.ts`, and stamped onto every `tool.before` event. The security plugin uses `ctx.permissions.has(event.origin, ...)` per check.
+5. **Cron stamping**: `createSessionForCron` in `src/run/index.ts` reads `job.scheduledByRole` from the persisted `CronJob` record and copies it into the new cron session's origin. The cron schema (`src/cron/schema.ts`) requires the field on every job.
+6. **Subagent stamping**: the `new-session` stream target carries `parentSessionId`, `spawnedByRole`, and `spawnedByOriginJson` (a JSON-encoded snapshot of the parent origin). `SubagentConsumer` parses these into `InvokeSubagentOptions.spawnedByRole` / `.spawnedByOrigin`, which flow into both `defaultCreateSessionForSubagent` and the plugin-aware path in `run/index.ts`.
+
+### Rules of thumb
+
+- **Plugins must declare `permissions: [...]` on `definePlugin(...)`, not on `PluginExports`.** The declaration is read before the factory runs, so the owner-wildcard expansion is deterministic. Listing permissions only inside the factory's returned exports would mean `owner`'s `security.bypass.*` set is empty at the moment `createPermissionService` is constructed.
+- **Never let users write `*` in their own `permissions[]`.** The owner wildcard is a sentinel (`OWNER_SECURITY_WILDCARD`) that lives inside the built-in `owner` spec only; user-declared `permissions[]` are taken literally. `permissionSchema` rejects strings that don't match the dotted `<plugin>.<verb>.<noun>` shape, which already prevents `*`.
+- **A `scheduledByRole` or `spawnedByRole` that names a role nobody defined resolves to `guest`.** The service requires the named role to exist in the resolved role table. This forecloses an attacker forging a role string into a job record.
+- **Permissions gate _actions_, not _state_.** Memory (`MEMORY.md`, `memory/yyyy-MM-dd.md`), `workspace/`, and `sessions/` are shared across all origins; this subsystem does not isolate them. If state isolation matters, run separate agent folders.
+- **Match-rule consumers operate on `MatchRule[]`, not strings.** The DSL is the file format; the typed union is the internal currency. Adding a new platform or qualifier is additive — extend the parser and the union together, old configs still parse.
+
 ## Host daemon (hostd)
 
 `src/hostd/` is a **host-stage** subsystem that owns every host-side capability the running container needs — currently the **supervisor** (`src/hostd/supervisor.ts`, restart) and the **port broker** (delegated to `src/portbroker/`, glued in via `src/hostd/portbroker-manager.ts`). Architecturally: a **singleton daemon per host** (not per agent) — the only persistent host-side process in the codebase, and the only persistent host-stage state (`~/.typeclaw/`). New host-side capabilities should plug in as additional `src/hostd/<capability>.ts` glue + an `src/<capability>/` module that does the actual work, and an additional optional callback on `DaemonOptions`. **Don't add new daemons.**
