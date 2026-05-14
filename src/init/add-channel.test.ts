@@ -25,19 +25,24 @@ async function readConfig(): Promise<{ channels?: Record<string, { allow: string
   }
 }
 
-async function readEnv(): Promise<string> {
-  return readFile(join(root, '.env'), 'utf8')
-}
-
-async function readSecretsChannels(): Promise<Record<string, Record<string, unknown>>> {
+async function readSecrets(): Promise<{
+  providers?: Record<string, unknown>
+  channels?: Record<string, Record<string, unknown>>
+}> {
   try {
     const raw = await readFile(join(root, 'secrets.json'), 'utf8')
-    const parsed = JSON.parse(raw) as { channels?: Record<string, Record<string, unknown>> }
-    return parsed.channels ?? {}
+    return JSON.parse(raw) as {
+      providers?: Record<string, unknown>
+      channels?: Record<string, Record<string, unknown>>
+    }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {}
     throw err
   }
+}
+
+async function readSecretsChannels(): Promise<Record<string, Record<string, unknown>>> {
+  return (await readSecrets()).channels ?? {}
 }
 
 describe('runAddChannel', () => {
@@ -60,14 +65,12 @@ describe('runAddChannel', () => {
     expect(cfg.channels?.['discord-bot']?.allow).toEqual([])
   })
 
-  test('saves discord-bot.token to secrets.json#channels without disturbing FIREWORKS_API_KEY in .env', async () => {
+  test('saves discord-bot.token to secrets.json#channels without disturbing the Fireworks provider key', async () => {
     await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-token-x' })
 
-    const env = await readEnv()
-    expect(env).toContain('FIREWORKS_API_KEY=fw_existing')
-    expect(env).not.toContain('DISCORD_BOT_TOKEN')
-    const channels = await readSecretsChannels()
-    expect(channels['discord-bot']).toEqual({ token: { value: 'discord-token-x' } })
+    const secrets = await readSecrets()
+    expect(secrets.providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
+    expect(secrets.channels?.['discord-bot']).toEqual({ token: { value: 'discord-token-x' } })
   })
 
   test('adds slack-bot with both bot+app tokens to secrets.json#channels.slack-bot', async () => {
@@ -85,9 +88,7 @@ describe('runAddChannel', () => {
       botToken: { value: 'xoxb-bot' },
       appToken: { value: 'xapp-app' },
     })
-    const env = await readEnv()
-    expect(env).not.toContain('SLACK_BOT_TOKEN')
-    expect(env).not.toContain('SLACK_APP_TOKEN')
+    expect((await readSecrets()).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
   })
 
   test('adds telegram-bot config + secrets.json#channels.telegram-bot', async () => {
@@ -97,8 +98,7 @@ describe('runAddChannel', () => {
     expect(cfg.channels?.['telegram-bot']?.allow).toEqual(['*'])
     const channels = await readSecretsChannels()
     expect(channels['telegram-bot']).toEqual({ token: { value: '123:tg-secret' } })
-    const env = await readEnv()
-    expect(env).not.toContain('TELEGRAM_BOT_TOKEN')
+    expect((await readSecrets()).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
   })
 
   test('adds kakaotalk with kakao:dm/* allow by default and runs auth runner', async () => {
@@ -115,7 +115,7 @@ describe('runAddChannel', () => {
     expect(authCalls).toEqual([root])
     const cfg = await readConfig()
     expect(cfg.channels?.kakaotalk?.allow).toEqual(['kakao:dm/*'])
-    expect(await readEnv()).toBe('FIREWORKS_API_KEY=fw_existing\n')
+    expect((await readSecrets()).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
   })
 
   test('adds kakaotalk credentials to secrets.json instead of workspace credential files', async () => {
@@ -163,9 +163,9 @@ describe('runAddChannel', () => {
     expect(cfg.channels?.kakaotalk?.allow).toEqual(['kakao:*'])
   })
 
-  test('aborts and leaves typeclaw.json + .env untouched when kakaotalk auth fails', async () => {
+  test('aborts and leaves typeclaw.json + secrets.json untouched when kakaotalk auth fails', async () => {
     const beforeConfig = await readFile(join(root, 'typeclaw.json'), 'utf8')
-    const beforeEnv = await readEnv()
+    const beforeSecrets = await readFile(join(root, 'secrets.json'), 'utf8')
 
     await expect(
       runAddChannel({
@@ -176,7 +176,7 @@ describe('runAddChannel', () => {
     ).rejects.toThrow(/bad password/)
 
     expect(await readFile(join(root, 'typeclaw.json'), 'utf8')).toBe(beforeConfig)
-    expect(await readEnv()).toBe(beforeEnv)
+    expect(await readFile(join(root, 'secrets.json'), 'utf8')).toBe(beforeSecrets)
   })
 
   test('preserves an existing channel when adding a different one', async () => {

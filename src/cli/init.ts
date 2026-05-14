@@ -13,6 +13,7 @@ import {
   findAgentDir,
   isDirectoryNonEmpty,
   isHatched,
+  readExistingProviderApiKey,
   runInit,
   type InitStep,
   type InitStepEvent,
@@ -64,10 +65,11 @@ export const init = defineCommand({
     const selectedModel = await pickModel()
     const provider = KNOWN_PROVIDERS[selectedModel.providerId]
 
-    const llmAuth = await collectLLMAuth(provider)
+    const existingApiKey = await readExistingProviderApiKey(cwd, selectedModel.providerId)
+    const llmAuth = await collectLLMAuth(provider, existingApiKey)
 
     const channelChoice = await select({
-      message: 'Pick a channel to wire (you can add more later by editing typeclaw.json + .env)',
+      message: 'Pick a channel to wire (you can add more later by editing typeclaw.json + secrets.json)',
       options: [
         { value: 'slack', label: 'Slack' },
         { value: 'discord', label: 'Discord' },
@@ -435,21 +437,36 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
 }
 
 // Resolves how the user wants to authenticate to the chosen provider:
-// - api-key only (e.g. Fireworks): prompt for the key, write to .env.
+// - api-key only (e.g. Fireworks): prompt for the key, write to secrets.json.
 // - oauth only (e.g. openai-codex): run the browser flow inline, write
 //   secrets.json. No API key prompt at all.
 // - both supported (no providers ship this today, but Anthropic will when
 //   wired): ask "API key or OAuth?" first, then dispatch to the chosen path.
-async function collectLLMAuth(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]): Promise<LLMAuth> {
+async function collectLLMAuth(
+  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+  existingApiKey: string | null,
+): Promise<LLMAuth> {
   const supportsApiKey = providerSupportsApiKey(provider)
   const supportsOAuth = providerSupportsOAuth(provider)
+
+  const existingKeyDecision = await decideExistingApiKeyReuse(provider, existingApiKey, (message) =>
+    confirm({ message, initialValue: true }),
+  )
+  if (existingKeyDecision === 'cancel') {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  if (existingKeyDecision === 'reuse' && existingApiKey !== null) {
+    log.info(`Using existing ${provider.name} API key from secrets.json.`)
+    return { kind: 'api-key', apiKey: existingApiKey }
+  }
 
   let method: 'api-key' | 'oauth'
   if (supportsApiKey && supportsOAuth) {
     const choice = await select<'api-key' | 'oauth'>({
       message: `How do you want to authenticate to ${provider.name}?`,
       options: [
-        { value: 'api-key', label: 'API key', hint: `saved to .env as ${provider.apiKeyEnv}` },
+        { value: 'api-key', label: 'API key', hint: 'saved to secrets.json' },
         { value: 'oauth', label: 'OAuth (browser login)', hint: 'saved to secrets.json' },
       ],
       initialValue: 'api-key',
@@ -467,7 +484,7 @@ async function collectLLMAuth(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId
 
   if (method === 'api-key') {
     const apiKey = await password({
-      message: `Put your ${provider.name} API key (will be saved to .env as ${provider.apiKeyEnv})`,
+      message: `Put your ${provider.name} API key (will be saved to secrets.json)`,
       validate: (value) => (value && value.length > 0 ? undefined : 'API key is required'),
     })
     if (isCancel(apiKey)) {
@@ -478,6 +495,18 @@ async function collectLLMAuth(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId
   }
 
   return { kind: 'oauth', runLogin: makeOAuthLoginRunner(buildOAuthCallbacks(provider.name)) }
+}
+
+export async function decideExistingApiKeyReuse(
+  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+  existingApiKey: string | null,
+  askReuse: (message: string) => Promise<unknown>,
+): Promise<'reuse' | 'prompt' | 'cancel'> {
+  if (!providerSupportsApiKey(provider) || existingApiKey === null) return 'prompt'
+
+  const reuse = await askReuse(`Reuse existing ${provider.name} API key from secrets.json?`)
+  if (isCancel(reuse)) return 'cancel'
+  return reuse === true ? 'reuse' : 'prompt'
 }
 
 // Wraps the OAuth lifecycle into the same clack idiom the rest of the wizard

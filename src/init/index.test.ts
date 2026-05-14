@@ -23,6 +23,7 @@ import {
   isDirectoryNonEmpty,
   isHatched,
   isInitialized,
+  readExistingProviderApiKey,
   runInit,
   scaffold,
   writeDockerAssets,
@@ -73,6 +74,16 @@ async function runGit(cwd: string, args: string[]): Promise<string> {
   const out = await new Response(proc.stdout).text()
   await proc.exited
   return out.trim()
+}
+
+async function readSecrets(root: string): Promise<{
+  providers?: Record<string, unknown>
+  channels?: Record<string, Record<string, unknown>>
+}> {
+  return JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+    providers?: Record<string, unknown>
+    channels?: Record<string, Record<string, unknown>>
+  }
 }
 
 describe('runInit', () => {
@@ -197,7 +208,10 @@ describe('runInit', () => {
     })
 
     expect(isInitialized(root)).toBe(true)
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_integration_key\n')
+    expect((await readSecrets(root)).providers?.fireworks).toEqual({
+      type: 'api_key',
+      key: { value: 'fw_integration_key' },
+    })
     expect(existsSync(join(root, 'AGENTS.md'))).toBe(true)
     expect(existsSync(join(root, '.git'))).toBe(true)
     expect(await runGit(root, ['log', '--oneline'])).toContain('Initial commit 🥚')
@@ -389,7 +403,7 @@ describe('runInit', () => {
       throw new Error('expected git:done with ok result')
     }
     expect(gitDone.result.skipped).toBe(true)
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_second_key\n')
+    expect((await readSecrets(root)).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_second_key' } })
   })
 
   test('aborts before scaffolding when docker binary is missing', async () => {
@@ -490,7 +504,7 @@ describe('runInit', () => {
     expect(hatchingInvoked).toBe(false)
   })
 
-  test('OAuth path: emits oauth-login step, omits API key from .env, calls login runner with chosen model', async () => {
+  test('OAuth path: emits oauth-login step, omits API key credentials, calls login runner with chosen model', async () => {
     const calls: Array<{ cwd: string; model: string; providerId: string }> = []
     const fakeLogin = makeFakeOAuthLoginRunner({
       onCalled: (opts) => {
@@ -526,8 +540,8 @@ describe('runInit', () => {
       'hatching:start',
       'hatching:done',
     ])
-    // .env should be empty (no LLM key, no channel tokens) under OAuth.
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('')
+    expect(existsSync(join(root, '.env'))).toBe(false)
+    expect(existsSync(join(root, 'secrets.json'))).toBe(false)
   })
 
   test('OAuth path: aborts before scaffold when login fails (no half-init folder)', async () => {
@@ -1214,32 +1228,66 @@ describe('writeDockerAssets', () => {
 })
 
 describe('writeSecrets', () => {
-  test('writes OPENAI_API_KEY to .env when model is an OpenAI model', async () => {
-    await writeSecrets(root, { apiKey: 'sk-test_abc123', model: 'openai/gpt-5.4-nano' })
+  test('writes an OpenAI API key to secrets.json#providers when model is an OpenAI model', async () => {
+    await writeSecrets(root, { apiKey: 'openai-test-key', model: 'openai/gpt-5.4-nano' })
 
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('OPENAI_API_KEY=sk-test_abc123\n')
+    expect((await readSecrets(root)).providers?.openai).toEqual({ type: 'api_key', key: { value: 'openai-test-key' } })
   })
 
-  test('writes FIREWORKS_API_KEY to .env when model is a Fireworks model', async () => {
+  test('writes a Fireworks API key to secrets.json#providers when model is a Fireworks model', async () => {
     await writeSecrets(root, {
       apiKey: 'fw_test_abc123',
       model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
     })
 
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_test_abc123\n')
+    expect((await readSecrets(root)).providers?.fireworks).toEqual({
+      type: 'api_key',
+      key: { value: 'fw_test_abc123' },
+    })
   })
 
-  test('defaults to OPENAI_API_KEY when model is omitted (matches DEFAULT_MODEL_REF)', async () => {
-    await writeSecrets(root, { apiKey: 'sk-default' })
+  test('defaults to OpenAI provider when model is omitted (matches DEFAULT_MODEL_REF)', async () => {
+    await writeSecrets(root, { apiKey: 'openai-default-key' })
 
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('OPENAI_API_KEY=sk-default\n')
+    expect((await readSecrets(root)).providers?.openai).toEqual({
+      type: 'api_key',
+      key: { value: 'openai-default-key' },
+    })
   })
 
-  test('overwrites an existing .env', async () => {
-    await writeFile(join(root, '.env'), 'OLD=1\n')
+  test('updates an existing provider API key in secrets.json', async () => {
+    await writeSecrets(root, { apiKey: 'fw_old', model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
     await writeSecrets(root, { apiKey: 'fw_new', model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
 
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_new\n')
+    expect((await readSecrets(root)).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_new' } })
+  })
+
+  test('preserves an existing provider API key when no new provider key is provided', async () => {
+    await writeSecrets(root, { apiKey: 'fw_existing', model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
+    await writeSecrets(root, { model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
+
+    expect((await readSecrets(root)).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
+  })
+
+  test('reads an existing provider API key from secrets.json', async () => {
+    await writeSecrets(root, { apiKey: 'openai-existing-key', model: 'openai/gpt-5.4-nano' })
+
+    expect(await readExistingProviderApiKey(root, 'openai')).toBe('openai-existing-key')
+    expect(await readExistingProviderApiKey(root, 'fireworks')).toBe(null)
+  })
+
+  test('ignores blank provider API keys in secrets.json', async () => {
+    await writeFile(
+      join(root, 'secrets.json'),
+      `${JSON.stringify({ version: 2, providers: { openai: { type: 'api_key', key: { value: '   ' } } }, channels: {} }, null, 2)}\n`,
+    )
+
+    expect(await readExistingProviderApiKey(root, 'openai')).toBe(null)
+  })
+
+  test('returns null when reading a provider API key without secrets.json', async () => {
+    expect(await readExistingProviderApiKey(root, 'openai')).toBe(null)
+    expect(existsSync(join(root, 'secrets.json'))).toBe(false)
   })
 
   test('writes telegram-bot.token to secrets.json#channels (not .env) when telegramBotToken is provided', async () => {
@@ -1249,34 +1297,28 @@ describe('writeSecrets', () => {
       telegramBotToken: '1234567890:ABCdef',
     })
 
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_test\n')
-    const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
-      channels?: Record<string, Record<string, unknown>>
-    }
+    const secrets = await readSecrets(root)
+    expect(secrets.providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_test' } })
     expect(secrets.channels?.['telegram-bot']).toEqual({ token: { value: '1234567890:ABCdef' } })
   })
 
   test('writes discord-bot.token to secrets.json#channels when discordBotToken is provided', async () => {
-    await writeSecrets(root, { apiKey: 'sk-x', model: 'openai/gpt-5.4-nano', discordBotToken: 'discord-tok' })
+    await writeSecrets(root, { apiKey: 'openai-key', model: 'openai/gpt-5.4-nano', discordBotToken: 'discord-tok' })
 
-    const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
-      channels?: Record<string, Record<string, unknown>>
-    }
+    const secrets = await readSecrets(root)
     expect(secrets.channels?.['discord-bot']).toEqual({ token: { value: 'discord-tok' } })
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('OPENAI_API_KEY=sk-x\n')
+    expect(secrets.providers?.openai).toEqual({ type: 'api_key', key: { value: 'openai-key' } })
   })
 
   test('merges botToken + appToken into the same slack-bot slot in secrets.json', async () => {
     await writeSecrets(root, {
-      apiKey: 'sk-x',
+      apiKey: 'openai-key',
       model: 'openai/gpt-5.4-nano',
       slackBotToken: 'xoxb-a',
       slackAppToken: 'xapp-b',
     })
 
-    const secrets = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
-      channels?: Record<string, Record<string, unknown>>
-    }
+    const secrets = await readSecrets(root)
     expect(secrets.channels?.['slack-bot']).toEqual({
       botToken: { value: 'xoxb-a' },
       appToken: { value: 'xapp-b' },
@@ -1290,8 +1332,8 @@ describe('writeSecrets', () => {
       telegramBotToken: '',
     })
 
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_test\n')
-    expect(existsSync(join(root, 'secrets.json'))).toBe(false)
+    expect((await readSecrets(root)).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_test' } })
+    expect((await readSecrets(root)).channels).toEqual({})
   })
 })
 

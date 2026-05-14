@@ -4,9 +4,15 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { config, configSchema, migrateLegacyConfigShape, type Config } from '@/config'
-import { DEFAULT_MODEL_REF, KNOWN_PROVIDERS, providerForModelRef, type KnownModelRef } from '@/config/providers'
+import {
+  DEFAULT_MODEL_REF,
+  KNOWN_PROVIDERS,
+  providerForModelRef,
+  type KnownModelRef,
+  type KnownProviderId,
+} from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
-import { type Channels, type Secret, SecretsBackend } from '@/secrets'
+import { createSecretsStoreForAgent, type Channels, type Secret, SecretsBackend } from '@/secrets'
 import { createTui } from '@/tui'
 
 import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
@@ -23,7 +29,6 @@ export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 
 const CONFIG_FILE = 'typeclaw.json'
 const CRON_FILE = 'cron.json'
-const SECRETS_FILE = '.env'
 const PACKAGE_FILE = 'package.json'
 
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'] as const
@@ -558,15 +563,10 @@ export async function initGitRepo(cwd: string): Promise<GitInitResult> {
   }
 }
 
-// Writes the LLM provider's API key to `.env` (under its provider-specific
-// env var, e.g. OPENAI_API_KEY or FIREWORKS_API_KEY) and the channel adapter
-// tokens to `secrets.json#channels`. Two stores on purpose: api-keys land in
-// `.env` to match the `--env-file .env` boot contract (env-wins: `auth.ts`
-// reads the value at runtime via `setRuntimeApiKey` and never persists it to
-// `secrets.json`, see `src/agent/auth.ts`); channel tokens skip the .env hop
-// entirely and land in `secrets.json#channels` as `{ value }` Secrets that
-// `hydrateChannelEnvFromSecrets` injects into `process.env` only when the
-// canonical env var is unset, see `src/secrets/hydrate.ts`.
+// Writes LLM provider API keys to `secrets.json#providers` and channel adapter
+// tokens to `secrets.json#channels`. Both paths go through the structured
+// v2 secrets envelope so reruns can reuse existing values without depending on
+// host-stage env files.
 export async function writeSecrets(
   root: string,
   {
@@ -578,9 +578,7 @@ export async function writeSecrets(
     telegramBotToken,
   }: {
     model?: KnownModelRef
-    // Omitted on the OAuth path — credentials live in secrets.json instead.
-    // The .env file still gets written (empty) so post-init callers that
-    // read it don't ENOENT-crash.
+    // Omitted on the OAuth path — credentials live in secrets.json via the OAuth runner.
     apiKey?: string
     discordBotToken?: string
     slackBotToken?: string
@@ -590,12 +588,9 @@ export async function writeSecrets(
 ): Promise<void> {
   const providerId = providerForModelRef(model)
   const apiKeyEnv = KNOWN_PROVIDERS[providerId].apiKeyEnv
-  const lines: string[] = []
   if (apiKey !== undefined && apiKeyEnv !== null) {
-    lines.push(`${apiKeyEnv}=${apiKey}`)
+    createSecretsStoreForAgent(join(root, 'secrets.json')).set(providerId, { type: 'api_key', key: apiKey })
   }
-  const body = lines.length > 0 ? `${lines.join('\n')}\n` : ''
-  await writeFile(join(root, SECRETS_FILE), body)
 
   const channelTokens: Record<string, Record<string, Secret>> = {}
   if (discordBotToken !== undefined && discordBotToken !== '') {
@@ -621,6 +616,12 @@ export async function writeSecrets(
     merged[adapterId] = priorSlot as Channels[string]
   }
   backend.writeChannelsSync(merged)
+}
+
+export async function readExistingProviderApiKey(root: string, providerId: KnownProviderId): Promise<string | null> {
+  const provider = KNOWN_PROVIDERS[providerId]
+  if (provider.apiKeyEnv === null) return null
+  return new SecretsBackend(join(root, 'secrets.json')).tryReadProviderApiKeySync(providerId)
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
