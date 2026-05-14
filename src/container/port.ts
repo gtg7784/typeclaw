@@ -13,7 +13,7 @@ import { containerNameFromCwd, defaultDockerExec, type DockerExec } from './shar
 // works: containers started before this change used `-p 8973:8973`, and after
 // the upgrade `docker port <name> 8973/tcp` still resolves correctly.
 export const CONTAINER_PORT = 8973
-export const TUI_TOKEN_LABEL = 'com.typeclaw.tui-token'
+export const TUI_TOKEN_LABEL = 'dev.typeclaw.tui-token'
 
 // Asks the kernel for a free TCP port. When `preferred` is supplied, tries
 // that port first; if it's already bound, falls back to a kernel-assigned

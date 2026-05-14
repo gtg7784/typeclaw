@@ -144,7 +144,7 @@ describe('planStart', () => {
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true, tuiToken: 'token-123' })
 
-    expect(plan.runArgs).toContain('com.typeclaw.tui-token=token-123')
+    expect(plan.runArgs).toContain('dev.typeclaw.tui-token=token-123')
     expect(plan.runArgs).toContain('TYPECLAW_TUI_TOKEN=token-123')
   })
 
