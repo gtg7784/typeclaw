@@ -109,7 +109,7 @@ function labelValue(runArgs: string[], key: string): string | undefined {
 }
 
 describe('planStart', () => {
-  test('publishes the TUI websocket port on host loopback only', async () => {
+  test('publishes the TUI websocket port on host loopback by default', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeFile(join(root, '.env'), 'FIREWORKS_API_KEY=fw_test\n')
@@ -127,6 +127,25 @@ describe('planStart', () => {
     expect(plan.runArgs).toContain(join(root, '.env'))
     expect(plan.runArgs).toContain(`${root}:/agent`)
     expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
+  })
+
+  test('can publish the TUI websocket port on all host interfaces', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true, publishHost: '0.0.0.0' })
+
+    expect(plan.runArgs).toContain('0.0.0.0:8973:8973')
+  })
+
+  test('injects a TUI websocket token when one is supplied', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true, tuiToken: 'token-123' })
+
+    expect(plan.runArgs).toContain('com.typeclaw.tui-token=token-123')
+    expect(plan.runArgs).toContain('TYPECLAW_TUI_TOKEN=token-123')
   })
 
   test('adds hostd HTTP control env when restart transport is available', async () => {
@@ -885,7 +904,11 @@ type ContainerScenario =
       drainAfterInspectCalls?: number
     }
 
-function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerScenario }): {
+function fakeDockerExec(scenario: {
+  imageExists: boolean
+  container: ContainerScenario
+  dockerPlatformName?: string
+}): {
   exec: DockerExec
   calls: RecordedCall[]
 } {
@@ -907,6 +930,9 @@ function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerSc
     if (args[0] === 'image' && args[1] === 'inspect') {
       return { exitCode: scenario.imageExists ? 0 : 1, stdout: '', stderr: '' }
     }
+    if (args[0] === 'version') {
+      return { exitCode: 0, stdout: `${scenario.dockerPlatformName ?? 'Docker Engine'}\n`, stderr: '' }
+    }
     if (args[0] === 'inspect') {
       if (rmReturned && containerState.exists) {
         inspectsAfterRm += 1
@@ -921,6 +947,9 @@ function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerSc
       const format = args[args.indexOf('--format') + 1] ?? ''
       if (format.includes('.Id')) {
         return { exitCode: 0, stdout: 'fake-running-id-123456\n', stderr: '' }
+      }
+      if (format.includes('.Config.Labels')) {
+        return { exitCode: 0, stdout: 'fake-tui-token\n', stderr: '' }
       }
       return { exitCode: 0, stdout: `${containerState.running}\n`, stderr: '' }
     }
@@ -974,6 +1003,29 @@ function fakeDockerExec(scenario: { imageExists: boolean; container: ContainerSc
 }
 
 describe('start (composition)', () => {
+  test('publishes on all host interfaces for Docker Desktop', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({
+      imageExists: true,
+      container: { exists: false },
+      dockerPlatformName: 'Docker Desktop 4.42.0',
+    })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const runCall = calls.find((call) => call.args[0] === 'run')
+    expect(runCall?.args).toContain('0.0.0.0:8973:8973')
+  })
+
   test('refreshes Dockerfile from the template on every start, even without --build', async () => {
     // given: a stale Dockerfile and an existing image (no rebuild needed)
     await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# no git\n')
