@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { config, configSchema, type Config } from '@/config'
+import { config, configSchema, migrateLegacyConfigShape, type Config } from '@/config'
 import { DEFAULT_MODEL_REF, KNOWN_PROVIDERS, providerForModelRef, type KnownModelRef } from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
 import { type Channels, type Secret, SecretsBackend } from '@/secrets'
@@ -484,7 +484,7 @@ export async function writeDockerAssets(root: string): Promise<DockerAssetsResul
     const typeclawConfig = await readTypeclawConfig(root)
     await writeFile(
       join(root, DOCKERFILE),
-      buildDockerfile(typeclawConfig.dockerfile, { baseImageVersion: resolveBaseImageVersion(root) }),
+      buildDockerfile(typeclawConfig.docker.file, { baseImageVersion: resolveBaseImageVersion(root) }),
       { flag: 'wx' },
     ).catch(ignoreExists)
 
@@ -502,7 +502,7 @@ async function readPackageJson(root: string): Promise<{ name?: string; dependenc
 async function readTypeclawConfig(root: string): Promise<Config> {
   try {
     const raw = await readFile(join(root, CONFIG_FILE), 'utf8')
-    return configSchema.parse(JSON.parse(raw))
+    return configSchema.parse(migrateLegacyConfigShape(JSON.parse(raw)).json)
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return configSchema.parse({})
     throw error

@@ -47,16 +47,25 @@ async function writeDockerfile(dir: string): Promise<void> {
   await writeFile(join(dir, 'Dockerfile'), 'FROM oven/bun:1-slim\n')
 }
 
+type DockerfileBlock = {
+  append?: string[]
+  ffmpeg?: boolean | string
+  gh?: boolean | string
+  python?: boolean
+  tmux?: boolean | string
+}
+
+type GitignoreBlock = { append?: string[] }
+
 type ScaffoldedConfig = {
   mounts?: Array<{ name: string; path: string; readOnly?: boolean; description?: string }>
-  dockerfile?: {
-    append?: string[]
-    ffmpeg?: boolean | string
-    gh?: boolean | string
-    python?: boolean
-    tmux?: boolean | string
-  }
-  gitignore?: { append?: string[] }
+  // Legacy shape: tests written before the docker/git namespace migration still
+  // pass `dockerfile`/`gitignore` at the top level. The helper accepts both and
+  // exercises the on-disk migration path implicitly when callers pass legacy.
+  dockerfile?: DockerfileBlock
+  gitignore?: GitignoreBlock
+  docker?: { file?: DockerfileBlock }
+  git?: { ignore?: GitignoreBlock }
   network?: { blockInternal?: boolean; autoAllowResolvers?: boolean; allow?: string[] }
 }
 
@@ -67,6 +76,8 @@ async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}
     mounts: overrides.mounts ?? [],
     ...(overrides.dockerfile ? { dockerfile: overrides.dockerfile } : {}),
     ...(overrides.gitignore ? { gitignore: overrides.gitignore } : {}),
+    ...(overrides.docker ? { docker: overrides.docker } : {}),
+    ...(overrides.git ? { git: overrides.git } : {}),
     ...(overrides.network ? { network: overrides.network } : {}),
   }
   await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
@@ -702,7 +713,7 @@ describe('refreshGitignore', () => {
   test('writes custom append entries from typeclaw.json before the managed template', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'typeclaw-gitignore-refresh-'))
     try {
-      await writeTypeclawConfig(dir, { gitignore: { append: ['scratch/', '*.local.log'] } })
+      await writeTypeclawConfig(dir, { git: { ignore: { append: ['scratch/', '*.local.log'] } } })
 
       await refreshGitignore(dir)
 

@@ -390,7 +390,7 @@ function loadConfigStrictForTemplate(
   const result = validateConfig(cwd)
   if (!result.ok) return null
   const cfg = loadConfigSync(cwd)
-  return { dockerfile: cfg.dockerfile, gitignore: cfg.gitignore }
+  return { dockerfile: cfg.docker.file, gitignore: cfg.git.ignore }
 }
 
 async function safeRead(path: string): Promise<string | null> {

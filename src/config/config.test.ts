@@ -225,30 +225,30 @@ describe('networkSchema', () => {
   })
 })
 
-describe('dockerfileSchema', () => {
+describe('docker.file schema', () => {
   const FULL_DEFAULTS = { ffmpeg: false, gh: true, python: true, tmux: true, append: [] }
 
   test('defaults to a fully-populated object when omitted (omitted == empty object)', () => {
     const omitted = configSchema.parse({ model: VALID_MODEL })
-    const present = configSchema.parse({ model: VALID_MODEL, dockerfile: {} })
+    const present = configSchema.parse({ model: VALID_MODEL, docker: { file: {} } })
 
-    expect(omitted.dockerfile).toEqual(FULL_DEFAULTS)
-    expect(present.dockerfile).toEqual(FULL_DEFAULTS)
+    expect(omitted.docker.file).toEqual(FULL_DEFAULTS)
+    expect(present.docker.file).toEqual(FULL_DEFAULTS)
   })
 
   test('accepts custom Dockerfile lines in append order', () => {
     const parsed = configSchema.parse({
       model: VALID_MODEL,
-      dockerfile: { append: ['RUN apt-get update', 'ENV CUSTOM_TOOL=1'] },
+      docker: { file: { append: ['RUN apt-get update', 'ENV CUSTOM_TOOL=1'] } },
     })
-    expect(parsed.dockerfile.append).toEqual(['RUN apt-get update', 'ENV CUSTOM_TOOL=1'])
+    expect(parsed.docker.file.append).toEqual(['RUN apt-get update', 'ENV CUSTOM_TOOL=1'])
   })
 
   test('rejects multiline append entries so each array item maps to one Dockerfile line', () => {
     expect(() =>
       configSchema.parse({
         model: VALID_MODEL,
-        dockerfile: { append: ['RUN printf "one\ntwo"'] },
+        docker: { file: { append: ['RUN printf "one\ntwo"'] } },
       }),
     ).toThrow(/single Dockerfile lines/)
   })
@@ -256,9 +256,9 @@ describe('dockerfileSchema', () => {
   test('feature toggles accept boolean and version-string forms; partial overrides preserve other defaults', () => {
     const parsed = configSchema.parse({
       model: VALID_MODEL,
-      dockerfile: { tmux: false, gh: '2.40.0', ffmpeg: true },
+      docker: { file: { tmux: false, gh: '2.40.0', ffmpeg: true } },
     })
-    expect(parsed.dockerfile).toEqual({
+    expect(parsed.docker.file).toEqual({
       ffmpeg: true,
       gh: '2.40.0',
       python: true,
@@ -268,36 +268,46 @@ describe('dockerfileSchema', () => {
   })
 
   test('python is boolean-only (string version is not a meaningful apt pin for the python3 meta-package)', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, dockerfile: { python: '3.11' } })).toThrow()
+    expect(() => configSchema.parse({ model: VALID_MODEL, docker: { file: { python: '3.11' } } })).toThrow()
+  })
+
+  test('empty docker object resolves to defaulted docker.file', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, docker: {} })
+    expect(parsed.docker.file).toEqual(FULL_DEFAULTS)
   })
 })
 
-describe('gitignoreSchema', () => {
+describe('git.ignore schema', () => {
   test('defaults to an empty append array when omitted', () => {
     const parsed = configSchema.parse({ model: VALID_MODEL })
-    expect(parsed.gitignore).toEqual({ append: [] })
+    expect(parsed.git.ignore).toEqual({ append: [] })
   })
 
   test('accepts custom gitignore entries in append order', () => {
     const parsed = configSchema.parse({
       model: VALID_MODEL,
-      gitignore: { append: ['scratch/', '*.local.log'] },
+      git: { ignore: { append: ['scratch/', '*.local.log'] } },
     })
-    expect(parsed.gitignore.append).toEqual(['scratch/', '*.local.log'])
+    expect(parsed.git.ignore.append).toEqual(['scratch/', '*.local.log'])
   })
 
-  test('defaults append to an empty array when gitignore object is present', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, gitignore: {} })
-    expect(parsed.gitignore).toEqual({ append: [] })
+  test('defaults append to an empty array when git.ignore object is present', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, git: { ignore: {} } })
+    expect(parsed.git.ignore).toEqual({ append: [] })
   })
 
   test('rejects multiline append entries so each array item maps to one gitignore line', () => {
     expect(() =>
       configSchema.parse({
         model: VALID_MODEL,
-        gitignore: { append: ['scratch/\n*.local.log'] },
+        git: { ignore: { append: ['scratch/\n*.local.log'] } },
       }),
     ).toThrow(/single gitignore lines/)
+  })
+
+  test('empty git object resolves to defaulted git.ignore', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, git: {} })
+    expect(parsed.git.ignore).toEqual({ append: [] })
   })
 })
 
@@ -347,6 +357,18 @@ describe('migrateLegacyConfigShape', () => {
     })
   })
 
+  test('migrated config parses cleanly through configSchema', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      dockerfile: { ffmpeg: true, append: ['ENV X=1'] },
+      gitignore: { append: ['scratch/'] },
+    })
+    const parsed = configSchema.parse(result.json)
+    expect(parsed.docker.file.ffmpeg).toBe(true)
+    expect(parsed.docker.file.append).toEqual(['ENV X=1'])
+    expect(parsed.git.ignore.append).toEqual(['scratch/'])
+  })
+
   test('drops legacy dockerfile when new docker.file already present (new shape wins)', () => {
     const result = migrateLegacyConfigShape({
       model: VALID_MODEL,
@@ -390,6 +412,69 @@ describe('migrateLegacyConfigShape', () => {
     expect(migrateLegacyConfigShape(null)).toEqual({ json: null, changed: false })
     expect(migrateLegacyConfigShape([])).toEqual({ json: [], changed: false })
     expect(migrateLegacyConfigShape('string')).toEqual({ json: 'string', changed: false })
+  })
+
+  test('loadConfigSync rewrites typeclaw.json on disk when legacy keys are present', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-'))
+    try {
+      await writeFile(
+        join(cwd, 'typeclaw.json'),
+        JSON.stringify({
+          model: VALID_MODEL,
+          dockerfile: { ffmpeg: true, append: ['ENV X=1'] },
+          gitignore: { append: ['scratch/'] },
+        }),
+      )
+
+      const cfg = loadConfigSync(cwd)
+      expect(cfg.docker.file.ffmpeg).toBe(true)
+      expect(cfg.git.ignore.append).toEqual(['scratch/'])
+
+      const onDisk = JSON.parse(await Bun.file(join(cwd, 'typeclaw.json')).text())
+      expect(onDisk).not.toHaveProperty('dockerfile')
+      expect(onDisk).not.toHaveProperty('gitignore')
+      expect(onDisk.docker.file.ffmpeg).toBe(true)
+      expect(onDisk.git.ignore.append).toEqual(['scratch/'])
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('loadConfigSync does not touch the file when no legacy keys are present', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-noop-'))
+    try {
+      const original = `${JSON.stringify({ model: VALID_MODEL, port: 9001 }, null, 4)}\n`
+      await writeFile(join(cwd, 'typeclaw.json'), original)
+
+      loadConfigSync(cwd)
+
+      const onDisk = await Bun.file(join(cwd, 'typeclaw.json')).text()
+      expect(onDisk).toBe(original)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('validateConfig also performs the on-disk rewrite', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-validate-'))
+    try {
+      await writeFile(
+        join(cwd, 'typeclaw.json'),
+        JSON.stringify({
+          model: VALID_MODEL,
+          dockerfile: { ffmpeg: true },
+        }),
+      )
+
+      const result = validateConfig(cwd)
+      expect(result.ok).toBe(true)
+
+      const onDisk = JSON.parse(await Bun.file(join(cwd, 'typeclaw.json')).text())
+      expect(onDisk).not.toHaveProperty('dockerfile')
+      expect(onDisk.docker.file.ffmpeg).toBe(true)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
   })
 })
 
@@ -733,11 +818,12 @@ describe('plugin config layout', () => {
     })
   })
 
-  test('extractPluginConfigs treats portForward as a known top-level key (not a plugin block)', () => {
+  test('extractPluginConfigs treats portForward, docker, and git as known top-level keys (not plugin blocks)', () => {
     const result = extractPluginConfigs({
       model: VALID_MODEL,
       portForward: { allow: '*' },
-      dockerfile: { append: [] },
+      docker: { file: { append: [] } },
+      git: { ignore: { append: [] } },
       'standup-log': { schedule: '0 17 * * 5' },
     })
     expect(result).toEqual({ 'standup-log': { schedule: '0 17 * * 5' } })
