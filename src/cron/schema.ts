@@ -11,6 +11,16 @@ const baseJob = z.object({
   schedule: z.string().min(1),
   enabled: z.boolean().default(true),
   timezone: z.string().optional(),
+  scheduledByRole: z.string().optional(),
+  // Audit snapshot of the SessionOrigin that scheduled this job. Persisted
+  // as opaque z.unknown() because SessionOrigin is recursive (a cron origin
+  // can contain a subagent origin can contain another cron origin, etc.)
+  // and we do not want to mirror that union in the cron schema. The cron
+  // consumer reads this back as-is and stamps it into the firing session's
+  // origin without further validation -- if it's malformed, role
+  // resolution falls back to `guest` via the same path that handles
+  // missing fields.
+  scheduledByOrigin: z.unknown().optional(),
 })
 
 const promptJob = baseJob.extend({
@@ -71,6 +81,13 @@ export function parseCronFile(raw: unknown, options: ParseCronOptions = {}): Par
         return { ok: false, reason: `job ${job.id}: invalid timezone "${job.timezone}": ${message}` }
       }
       return { ok: false, reason: `job ${job.id}: invalid schedule "${job.schedule}": ${message}` }
+    }
+
+    if (job.scheduledByRole === undefined) {
+      return {
+        ok: false,
+        reason: `job ${job.id}: missing 'scheduledByRole'. Add "scheduledByRole": "owner" if you authored this entry manually.`,
+      }
     }
 
     if (job.kind === 'prompt' && job.subagent !== undefined && options.subagents !== undefined) {

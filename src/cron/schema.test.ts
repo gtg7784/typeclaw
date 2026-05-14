@@ -129,13 +129,21 @@ describe('parseCronFile', () => {
   test('rejects duplicate job ids', () => {
     const result = parseCronFile({
       jobs: [
-        { id: 'same', schedule: '* * * * *', kind: 'prompt', prompt: 'a' },
-        { id: 'same', schedule: '0 * * * *', kind: 'prompt', prompt: 'b' },
+        { id: 'same', schedule: '* * * * *', kind: 'prompt', prompt: 'a', scheduledByRole: 'owner' },
+        { id: 'same', schedule: '0 * * * *', kind: 'prompt', prompt: 'b', scheduledByRole: 'owner' },
       ],
     })
     if (result.ok) throw new Error('expected failure')
     expect(result.reason).toMatch(/duplicate/i)
     expect(result.reason).toMatch(/same/)
+  })
+
+  test('rejects a job without scheduledByRole (boot-time legacy detection)', () => {
+    const result = parseCronFile({
+      jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+    })
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/scheduledByRole/)
   })
 
   test('accepts an empty file', () => {
@@ -146,8 +154,15 @@ describe('parseCronFile', () => {
   test('accepts a valid mixed file', () => {
     const result = parseCronFile({
       jobs: [
-        { id: 'a', schedule: '30 23 * * *', kind: 'prompt', prompt: 'x', timezone: 'Asia/Seoul' },
-        { id: 'b', schedule: '0 * * * *', kind: 'exec', command: ['echo', 'hi'] },
+        {
+          id: 'a',
+          schedule: '30 23 * * *',
+          kind: 'prompt',
+          prompt: 'x',
+          timezone: 'Asia/Seoul',
+          scheduledByRole: 'owner',
+        },
+        { id: 'b', schedule: '0 * * * *', kind: 'exec', command: ['echo', 'hi'], scheduledByRole: 'owner' },
       ],
     })
     if (!result.ok) throw new Error(`expected ok, got: ${result.reason}`)
@@ -165,7 +180,18 @@ describe('parseCronFile with subagents registry', () => {
 
   test('accepts a prompt job referencing a registered subagent with no payload', () => {
     const result = parseCronFile(
-      { jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', subagent: 'greeter' }] },
+      {
+        jobs: [
+          {
+            id: 'j',
+            schedule: '* * * * *',
+            kind: 'prompt',
+            prompt: 'x',
+            subagent: 'greeter',
+            scheduledByRole: 'owner',
+          },
+        ],
+      },
       { subagents: registry },
     )
     expect(result.ok).toBe(true)
@@ -173,7 +199,18 @@ describe('parseCronFile with subagents registry', () => {
 
   test('rejects a prompt job referencing an unknown subagent', () => {
     const result = parseCronFile(
-      { jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', subagent: 'no-such-thing' }] },
+      {
+        jobs: [
+          {
+            id: 'j',
+            schedule: '* * * * *',
+            kind: 'prompt',
+            prompt: 'x',
+            subagent: 'no-such-thing',
+            scheduledByRole: 'owner',
+          },
+        ],
+      },
       { subagents: registry },
     )
     if (result.ok) throw new Error('expected failure')
@@ -191,6 +228,7 @@ describe('parseCronFile with subagents registry', () => {
             prompt: 'x',
             subagent: 'memory-logger',
             payload: { id: 42 },
+            scheduledByRole: 'owner',
           },
         ],
       },
@@ -204,7 +242,15 @@ describe('parseCronFile with subagents registry', () => {
     const result = parseCronFile(
       {
         jobs: [
-          { id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', subagent: 'greeter', payload: { extra: 1 } },
+          {
+            id: 'j',
+            schedule: '* * * * *',
+            kind: 'prompt',
+            prompt: 'x',
+            subagent: 'greeter',
+            payload: { extra: 1 },
+            scheduledByRole: 'owner',
+          },
         ],
       },
       { subagents: registry },
@@ -215,7 +261,16 @@ describe('parseCronFile with subagents registry', () => {
 
   test('skips registry validation when no subagents option is provided (raw parse path)', () => {
     const result = parseCronFile({
-      jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x', subagent: 'no-such-thing' }],
+      jobs: [
+        {
+          id: 'j',
+          schedule: '* * * * *',
+          kind: 'prompt',
+          prompt: 'x',
+          subagent: 'no-such-thing',
+          scheduledByRole: 'owner',
+        },
+      ],
     })
     expect(result.ok).toBe(true)
   })

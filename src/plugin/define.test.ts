@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 
 import { z } from 'zod'
 
+import { noopPermissionService } from '@/permissions'
+
 import { definePlugin, readTool, writeTool } from './define'
 
 describe('definePlugin', () => {
@@ -20,6 +22,7 @@ describe('definePlugin', () => {
       agentDir: '/tmp',
       config: { count: 42 },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
+      permissions: noopPermissionService,
       spawnSubagent: async () => {},
     })
     expect(captured.value).toBe(42)

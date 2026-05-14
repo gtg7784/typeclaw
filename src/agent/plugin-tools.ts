@@ -30,6 +30,8 @@ import type {
   ToolResult,
 } from '@/plugin'
 
+import type { SessionOrigin } from './session-origin'
+
 type AnyAgentTool =
   | typeof piReadTool
   | typeof piBashTool
@@ -73,12 +75,17 @@ export type WrapToolOptions = {
   sessionId: string
   logger: PluginLogger
   hooks: HookBus
+  // Called at tool-execute time (not at wrap time) so channel sessions whose
+  // origin mutates per turn surface the current-turn `lastInboundAuthorId`
+  // to `tool.before`. Sessions with a fixed origin can pass `() => origin`.
+  getOrigin?: () => SessionOrigin | undefined
 }
 
 export type WrapSystemToolOptions = {
   agentDir: string
   sessionId: string
   hooks: HookBus
+  getOrigin?: () => SessionOrigin | undefined
 }
 
 export function zodToToolParameters(schema: z.ZodType<unknown>): TSchema {
@@ -101,11 +108,13 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
       }
 
       const mutableArgs = validated.data as Record<string, unknown>
+      const liveOrigin = opts.getOrigin?.()
       const before: ToolBeforeEvent = {
         tool: opts.toolName,
         sessionId: opts.sessionId,
         callId: toolCallId,
         args: mutableArgs,
+        ...(liveOrigin !== undefined ? { origin: liveOrigin } : {}),
       }
       const blockResult = await opts.hooks.runToolBefore(before)
       if (blockResult !== undefined) {
@@ -151,11 +160,13 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
     parameters: withGuardAcknowledgements(tool.name, tool.parameters),
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const mutableArgs = params as Record<string, unknown>
+      const liveOrigin = opts.getOrigin?.()
       const blockResult = await opts.hooks.runToolBefore({
         tool: tool.name,
         sessionId: opts.sessionId,
         callId: toolCallId,
         args: mutableArgs,
+        ...(liveOrigin !== undefined ? { origin: liveOrigin } : {}),
       })
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
@@ -198,11 +209,13 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
     parameters: withGuardAcknowledgements(tool.name, tool.parameters),
     async execute(toolCallId, params, signal, onUpdate) {
       const mutableArgs = params as Record<string, unknown>
+      const liveOrigin = opts.getOrigin?.()
       const blockResult = await opts.hooks.runToolBefore({
         tool: tool.name,
         sessionId: opts.sessionId,
         callId: toolCallId,
         args: mutableArgs,
+        ...(liveOrigin !== undefined ? { origin: liveOrigin } : {}),
       })
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)

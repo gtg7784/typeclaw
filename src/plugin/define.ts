@@ -6,9 +6,11 @@ type DefinePluginSpec<S extends z.ZodType<unknown> | undefined> =
   S extends z.ZodType<infer T>
     ? {
         configSchema: S
+        permissions?: readonly string[]
         plugin: (ctx: PluginContext<T>) => Promise<PluginExports>
       }
     : {
+        permissions?: readonly string[]
         plugin: (ctx: PluginContext<unknown>) => Promise<PluginExports>
       }
 

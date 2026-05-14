@@ -6,6 +6,7 @@ import type { Model } from '@mariozechner/pi-ai'
 import { z } from 'zod'
 
 import { channelsSchema } from '@/channels/schema'
+import { rolesConfigSchema } from '@/permissions/schema'
 
 import {
   DEFAULT_MODEL_REF,
@@ -225,6 +226,7 @@ export const configSchema = z
     network: networkSchema,
     docker: dockerSchema,
     git: gitSchema,
+    roles: rolesConfigSchema.optional(),
   })
   .catchall(z.unknown())
 
@@ -316,6 +318,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   network: 'restart-required',
   'docker.file': 'restart-required',
   'git.ignore': 'restart-required',
+  roles: 'restart-required',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -375,11 +378,13 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'model',
     'mounts',
     'plugins',
+    'alias',
     'channels',
     'portForward',
     'network',
     'docker',
     'git',
+    'roles',
   ])
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {

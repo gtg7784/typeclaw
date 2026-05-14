@@ -306,7 +306,7 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
       await Bun.write(
         join(agentDir, 'cron.json'),
         JSON.stringify({
-          jobs: [{ id: 'user-job', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+          jobs: [{ id: 'user-job', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
         }),
       )
       await Bun.write(

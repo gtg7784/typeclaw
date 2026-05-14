@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
+import { noopPermissionService } from '@/permissions'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
 import agentBrowserPlugin, { __resetProxyForTesting, __waitForProxyBindForTesting } from './index'
@@ -40,6 +41,7 @@ describe('agent-browser plugin', () => {
         agentDir: '/agent',
         config: undefined,
         logger,
+        permissions: noopPermissionService,
         spawnSubagent: async () => {},
         isBooted: () => true,
       }),
@@ -65,6 +67,7 @@ async function bootPlugin(agentDir: string) {
       agentDir,
       config: undefined,
       logger: createPluginLogger('agent-browser'),
+      permissions: noopPermissionService,
       spawnSubagent: async () => {},
       isBooted: () => true,
     }),

@@ -1,6 +1,7 @@
 import type { z } from 'zod'
 
 import type { SessionOrigin } from '@/agent/session-origin'
+import type { PermissionService } from '@/permissions'
 
 export type ContentPart = { type: 'text'; text: string } | { type: 'image'; mimeType: string; data: string }
 
@@ -132,6 +133,7 @@ export type ToolBeforeEvent = {
   sessionId: string
   callId: string
   args: Record<string, unknown>
+  origin?: SessionOrigin
 }
 
 export type ToolBeforeResult = void | undefined | { block: true; reason: string }
@@ -168,13 +170,25 @@ export type PluginLogger = {
   error: (msg: string) => void
 }
 
+export type SpawnSubagentOptions = {
+  // Identifies the spawning session so the subagent's session origin carries
+  // parent provenance. Hook handlers that own this context (e.g. session.idle,
+  // session.turn.end) should pass at minimum `parentSessionId` and
+  // `spawnedByOrigin: event.origin`. The runtime resolves `spawnedByRole`
+  // from the origin via the PermissionService, so the spawning session's
+  // role is inherited rather than forged from outside.
+  parentSessionId?: string
+  spawnedByOrigin?: SessionOrigin
+}
+
 export type PluginContext<TConfig = never> = {
   readonly name: string
   readonly version: string | undefined
   readonly agentDir: string
   readonly config: TConfig
   readonly logger: PluginLogger
-  spawnSubagent: (name: string, payload?: unknown) => Promise<void>
+  readonly permissions: PermissionService
+  spawnSubagent: (name: string, payload?: unknown, options?: SpawnSubagentOptions) => Promise<void>
 }
 
 export type PluginExports = {
@@ -233,5 +247,6 @@ export type PluginFixResult = {
 
 export type DefinedPlugin<TConfig = never> = {
   readonly configSchema?: z.ZodType<TConfig>
+  readonly permissions?: readonly string[]
   readonly plugin: (ctx: PluginContext<TConfig>) => Promise<PluginExports>
 }

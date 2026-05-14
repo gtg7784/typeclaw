@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import { noopPermissionService } from '@/permissions'
+
 import { createPluginContext } from './context'
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -12,6 +14,7 @@ describe('createPluginContext', () => {
       agentDir: '/x',
       config: { k: 1 },
       logger: noopLogger,
+      permissions: noopPermissionService,
       spawnSubagent: async () => {},
       isBooted: () => true,
     })
@@ -28,6 +31,7 @@ describe('createPluginContext', () => {
       agentDir: '/x',
       config: undefined as never,
       logger: noopLogger,
+      permissions: noopPermissionService,
       spawnSubagent: async () => {},
       isBooted: () => false,
     })
@@ -42,6 +46,7 @@ describe('createPluginContext', () => {
       agentDir: '/x',
       config: undefined as never,
       logger: noopLogger,
+      permissions: noopPermissionService,
       spawnSubagent: async (name, payload) => {
         calls.push({ name, payload })
       },

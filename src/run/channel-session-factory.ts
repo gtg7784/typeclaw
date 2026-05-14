@@ -35,7 +35,7 @@ export type BuildChannelSessionFactoryDeps = {
 // "channel-aware" sessions that need the same full plumbing.
 export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps): CreateSessionForChannel {
   const createSession = deps.createSession ?? defaultCreateSession
-  return async ({ existingSessionId, existingSessionFile, origin }) => {
+  return async ({ existingSessionId, existingSessionFile, origin, originRef }) => {
     const sessionDir = deps.sessionFactory.sessionDir()
     const sessionManager =
       existingSessionId !== undefined
@@ -49,6 +49,7 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
       stream: deps.stream,
       channelRouter: deps.getChannelRouter(),
       origin,
+      originRef,
       ...(snap.hasAnyPluginContent
         ? {
             plugins: {

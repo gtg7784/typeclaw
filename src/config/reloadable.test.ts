@@ -207,7 +207,7 @@ describe('FIELD_EFFECTS coverage', () => {
   test('every FIELD_EFFECTS entry is reachable from a parsed default config or is a known optional path', () => {
     const parsed = configSchema.parse({ $schema: './x.json' }) as Record<string, unknown>
     const schemaPaths = new Set(enumeratePaths(parsed))
-    const stale = Object.keys(FIELD_EFFECTS).filter((p) => !schemaPaths.has(p))
+    const stale = Object.keys(FIELD_EFFECTS).filter((p) => !schemaPaths.has(p) && !KNOWN_OPTIONAL_PATHS.has(p))
     expect(stale).toEqual([])
   })
 })
@@ -229,3 +229,5 @@ function enumeratePaths(obj: Record<string, unknown>, prefix = ''): string[] {
 function shouldRecurse(path: string): boolean {
   return path === 'docker' || path === 'git'
 }
+
+const KNOWN_OPTIONAL_PATHS = new Set<string>(['roles'])

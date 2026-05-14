@@ -1,6 +1,8 @@
-import type { PluginContext, PluginLogger } from './types'
+import type { PermissionService } from '@/permissions'
 
-export type SpawnSubagentFn = (name: string, payload?: unknown) => Promise<void>
+import type { PluginContext, PluginLogger, SpawnSubagentOptions } from './types'
+
+export type SpawnSubagentFn = (name: string, payload?: unknown, options?: SpawnSubagentOptions) => Promise<void>
 
 export type CreatePluginContextOptions<TConfig> = {
   name: string
@@ -8,6 +10,7 @@ export type CreatePluginContextOptions<TConfig> = {
   agentDir: string
   config: TConfig
   logger: PluginLogger
+  permissions: PermissionService
   spawnSubagent: SpawnSubagentFn
   isBooted: () => boolean
 }
@@ -19,13 +22,14 @@ export function createPluginContext<TConfig>(opts: CreatePluginContextOptions<TC
     agentDir: opts.agentDir,
     config: opts.config,
     logger: opts.logger,
-    spawnSubagent: async (name: string, payload?: unknown) => {
+    permissions: opts.permissions,
+    spawnSubagent: async (name: string, payload?: unknown, options?: SpawnSubagentOptions) => {
       if (!opts.isBooted()) {
         throw new Error(
           `plugin ${opts.name}: spawnSubagent("${name}") called before boot completed; subagent registry is not yet wired`,
         )
       }
-      await opts.spawnSubagent(name, payload)
+      await opts.spawnSubagent(name, payload, options)
     },
   })
 }

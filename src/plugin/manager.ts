@@ -1,6 +1,12 @@
 import { z } from 'zod'
 
 import type { CronJob } from '@/cron'
+import {
+  createPermissionService,
+  findUnknownPermissions,
+  type PermissionService,
+  type RolesConfig,
+} from '@/permissions'
 
 import { createPluginContext, createPluginLogger, type SpawnSubagentFn } from './context'
 import { createHookBus, type HookBus } from './hooks'
@@ -13,6 +19,7 @@ export type LoadPluginsOptions = {
   agentDir: string
   configsByName: Record<string, unknown>
   loadEntry?: LoadPluginEntryFn
+  roles?: RolesConfig
   // Bundled plugins resolved by the runtime (not from typeclaw.json). Loaded
   // before user-declared `entries` so a config block named after a bundled
   // plugin (e.g. "memory") is consumed by the bundled plugin, and so plugin-
@@ -23,6 +30,8 @@ export type LoadPluginsOptions = {
 export type LoadPluginsResult = {
   registry: PluginRegistry
   hooks: HookBus
+  permissions: PermissionService
+  declaredPermissions: readonly string[]
   loadedPlugins: { name: string; version: string | undefined; source: string }[]
   markBooted: () => void
   setSpawnSubagent: (fn: SpawnSubagentFn) => void
@@ -45,6 +54,23 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
       opts.entries.map(async (entry) => ({ entry, resolved: await loadEntry(entry, opts.agentDir) })),
     )),
   ]
+
+  const declaredPermissions = collectDeclaredPermissions(allPlugins)
+  const permissions = createPermissionService({
+    ...(opts.roles !== undefined ? { roles: opts.roles } : {}),
+    pluginPermissions: declaredPermissions,
+  })
+
+  // Non-fatal: surface user-declared `permissions[]` strings that aren't in
+  // the known set, so a typo like `security.bypass.secretExfilBach` is
+  // visible at boot rather than silently failing to bypass the matching
+  // guard. We log instead of throw because the runtime still functions --
+  // the unknown string just never matches anything.
+  for (const warning of findUnknownPermissions(opts.roles, declaredPermissions)) {
+    console.warn(
+      `[permissions] role "${warning.role}" declares unknown permission "${warning.permission}" — ${warning.hint}`,
+    )
+  }
 
   for (const { entry, resolved } of allPlugins) {
     if (loaded.find((l) => l.name === resolved.name)) {
@@ -72,6 +98,7 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
       agentDir: opts.agentDir,
       config: validatedConfig as never,
       logger,
+      permissions,
       spawnSubagent: (name, payload) => spawnSubagentImpl(name, payload),
       isBooted: () => booted,
     })
@@ -106,6 +133,8 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
   return {
     registry,
     hooks,
+    permissions,
+    declaredPermissions,
     loadedPlugins: loaded,
     markBooted: () => {
       booted = true
@@ -114,6 +143,18 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
       spawnSubagentImpl = fn
     },
   }
+}
+
+function collectDeclaredPermissions(
+  plugins: readonly { entry: string; resolved: ResolvedPlugin }[],
+): readonly string[] {
+  const out: string[] = []
+  for (const { resolved } of plugins) {
+    for (const perm of resolved.defined.permissions ?? []) {
+      if (!out.includes(perm)) out.push(perm)
+    }
+  }
+  return out
 }
 
 export function summarizeLoaded(loaded: LoadPluginsResult['loadedPlugins'], registry: PluginRegistry): string {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
+import { noopPermissionService } from '@/permissions'
 import type { PluginContext, PluginExports, ToolAfterEvent } from '@/plugin'
 
 import toolResultCapPlugin from './index'
@@ -19,6 +20,7 @@ function makeCtx(overrides: { config: unknown }): {
       warn: (m) => logs.push(`warn:${m}`),
       error: (m) => logs.push(`error:${m}`),
     },
+    permissions: noopPermissionService,
     spawnSubagent: async () => {},
   }
   return { ctx, logs }

@@ -1,6 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, createSessionWithDispose } from '@/agent'
+import type { SessionOrigin } from '@/agent/session-origin'
 import {
   createSubagentConsumer,
   defaultCreateSessionForSubagent,
@@ -98,6 +99,7 @@ export async function startAgent({
     agentDir: cwd,
     configsByName: pluginConfigsByName,
     bundled: BUNDLED_PLUGINS,
+    ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
   const pluginRegistry = pluginsLoaded.registry
   const pluginHooks = pluginsLoaded.hooks
@@ -153,10 +155,12 @@ export async function startAgent({
     const entry = snap.pluginSubagentByShim.get(subagent)
     if (entry) {
       const sessionId = `subagent-${entry.pluginName}-${crypto.randomUUID()}`
-      const origin = {
+      const origin: SessionOrigin = {
         kind: 'subagent' as const,
         subagent: subagentOptions?.name ?? entry.subagentName,
         parentSessionId: subagentOptions?.parentSessionId ?? '<unknown>',
+        ...(subagentOptions?.spawnedByRole !== undefined ? { spawnedByRole: subagentOptions.spawnedByRole } : {}),
+        ...(subagentOptions?.spawnedByOrigin !== undefined ? { spawnedByOrigin: subagentOptions.spawnedByOrigin } : {}),
       }
       const created = await createSessionWithDispose({
         systemPromptOverride: entry.pluginSubagent.systemPrompt,
@@ -213,12 +217,23 @@ export async function startAgent({
       const snap = pluginRuntime.get()
       const sessionManager = SessionManager.create(cwd, sessionFactory.sessionDir())
       const sessionId = sessionManager.getSessionId()
+      const cronOrigin: SessionOrigin = {
+        kind: 'cron',
+        jobId: job.id,
+        jobKind: 'prompt',
+        ...(job.scheduledByRole !== undefined ? { scheduledByRole: job.scheduledByRole } : {}),
+        // Honor the persisted audit snapshot when present (TUI-authored
+        // crons, or jobs scheduled by a future `cron_schedule` tool).
+        // Hand-authored entries fall back to the config-file synthetic
+        // marker so the audit trail records "user edited cron.json".
+        scheduledByOrigin: (job.scheduledByOrigin as SessionOrigin | undefined) ?? { kind: 'config-file' },
+      }
       const session = await createSession({
         reloadRegistry,
         sessionManager,
         stream,
         channelRouter: channelManager.router,
-        origin: { kind: 'cron', jobId: job.id, jobKind: 'prompt' },
+        origin: cronOrigin,
         ...(snap.hasAnyPluginContent
           ? {
               plugins: {
@@ -236,7 +251,7 @@ export async function startAgent({
         dispose: () => session.dispose(),
         sessionId,
         agentDir: cwd,
-        origin: { kind: 'cron' as const, jobId: job.id, jobKind: 'prompt' as const },
+        origin: cronOrigin,
         ...(snap.hasAnyPluginContent ? { hooks: snap.hooks } : {}),
         getTranscriptPath: () => sessionManager.getSessionFile(),
       }
@@ -264,13 +279,24 @@ export async function startAgent({
   reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
   await channelManager.start()
 
-  pluginsLoaded.setSpawnSubagent(async (name, payload) => {
+  pluginsLoaded.setSpawnSubagent(async (name, payload, options) => {
+    // Resolve the spawning session's role from its origin so the subagent
+    // inherits it. Callers (hooks like session.idle) pass the parent origin
+    // verbatim; we look up the role rather than letting the caller forge it,
+    // closing the laundering vector the design doc calls out for cron.
+    const spawnedByRole =
+      options?.spawnedByOrigin !== undefined
+        ? pluginsLoaded.permissions.resolveRole(options.spawnedByOrigin)
+        : undefined
     await invokeSubagent(name, {
       registry: pluginRuntime.get().subagents,
       createSessionForSubagent,
       agentDir: cwd,
       userPrompt: '',
       payload,
+      ...(options?.parentSessionId !== undefined ? { parentSessionId: options.parentSessionId } : {}),
+      ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
+      ...(options?.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
     })
   })
   pluginsLoaded.markBooted()
