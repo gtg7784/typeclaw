@@ -14,7 +14,7 @@ describe('decideExistingApiKeyReuse', () => {
     })
 
     expect(decision).toBe('reuse')
-    expect(messages).toEqual(['Reuse existing OPENAI_API_KEY from .env?'])
+    expect(messages).toEqual(['Reuse existing OpenAI API key from secrets.json?'])
   })
 
   test('prompts for a new API key when the user declines reuse', async () => {

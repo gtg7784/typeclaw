@@ -69,7 +69,7 @@ export const init = defineCommand({
     const llmAuth = await collectLLMAuth(provider, existingApiKey)
 
     const channelChoice = await select({
-      message: 'Pick a channel to wire (you can add more later by editing typeclaw.json + .env)',
+      message: 'Pick a channel to wire (you can add more later by editing typeclaw.json + secrets.json)',
       options: [
         { value: 'slack', label: 'Slack' },
         { value: 'discord', label: 'Discord' },
@@ -437,7 +437,7 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
 }
 
 // Resolves how the user wants to authenticate to the chosen provider:
-// - api-key only (e.g. Fireworks): prompt for the key, write to .env.
+// - api-key only (e.g. Fireworks): prompt for the key, write to secrets.json.
 // - oauth only (e.g. openai-codex): run the browser flow inline, write
 //   secrets.json. No API key prompt at all.
 // - both supported (no providers ship this today, but Anthropic will when
@@ -457,7 +457,7 @@ async function collectLLMAuth(
     process.exit(0)
   }
   if (existingKeyDecision === 'reuse' && existingApiKey !== null) {
-    log.info(`Using existing ${provider.apiKeyEnv} from .env.`)
+    log.info(`Using existing ${provider.name} API key from secrets.json.`)
     return { kind: 'api-key', apiKey: existingApiKey }
   }
 
@@ -466,7 +466,7 @@ async function collectLLMAuth(
     const choice = await select<'api-key' | 'oauth'>({
       message: `How do you want to authenticate to ${provider.name}?`,
       options: [
-        { value: 'api-key', label: 'API key', hint: `saved to .env as ${provider.apiKeyEnv}` },
+        { value: 'api-key', label: 'API key', hint: 'saved to secrets.json' },
         { value: 'oauth', label: 'OAuth (browser login)', hint: 'saved to secrets.json' },
       ],
       initialValue: 'api-key',
@@ -484,7 +484,7 @@ async function collectLLMAuth(
 
   if (method === 'api-key') {
     const apiKey = await password({
-      message: `Put your ${provider.name} API key (will be saved to .env as ${provider.apiKeyEnv})`,
+      message: `Put your ${provider.name} API key (will be saved to secrets.json)`,
       validate: (value) => (value && value.length > 0 ? undefined : 'API key is required'),
     })
     if (isCancel(apiKey)) {
@@ -504,7 +504,7 @@ export async function decideExistingApiKeyReuse(
 ): Promise<'reuse' | 'prompt' | 'cancel'> {
   if (!providerSupportsApiKey(provider) || existingApiKey === null) return 'prompt'
 
-  const reuse = await askReuse(`Reuse existing ${provider.apiKeyEnv} from .env?`)
+  const reuse = await askReuse(`Reuse existing ${provider.name} API key from secrets.json?`)
   if (isCancel(reuse)) return 'cancel'
   return reuse === true ? 'reuse' : 'prompt'
 }
