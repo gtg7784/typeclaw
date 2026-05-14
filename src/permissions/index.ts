@@ -18,9 +18,11 @@ export {
 } from './match-rule'
 export {
   createPermissionService,
+  findUnknownPermissions,
   noopPermissionService,
   type CreatePermissionServiceOptions,
   type PermissionService,
+  type UnknownPermissionWarning,
 } from './permissions'
 export { matchesOrigin, type MatchableOrigin } from './resolve'
 export { MATCH_RULE_JSON_SCHEMA_PATTERN, rolesConfigSchema, type RoleConfig, type RolesConfig } from './schema'

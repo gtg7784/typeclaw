@@ -1,6 +1,6 @@
 import type { SessionOrigin } from '@/agent/session-origin'
 
-import { BUILTIN_ROLE_NAMES, BUILTIN_ROLES, expandOwnerWildcard, isBuiltinRoleName } from './builtins'
+import { BUILTIN_ROLE_NAMES, BUILTIN_ROLES, CORE_PERMISSIONS, expandOwnerWildcard, isBuiltinRoleName } from './builtins'
 import type { MatchRule } from './match-rule'
 import { matchesOrigin } from './resolve'
 import type { RoleConfig, RolesConfig } from './schema'
@@ -9,6 +9,12 @@ export type PermissionService = {
   has(origin: SessionOrigin | undefined, permission: string): boolean
   resolveRole(origin: SessionOrigin | undefined): string
   describe(origin: SessionOrigin | undefined): { role: string; permissions: readonly string[] }
+}
+
+export type UnknownPermissionWarning = {
+  role: string
+  permission: string
+  hint: string
 }
 
 export const noopPermissionService: PermissionService = {
@@ -26,6 +32,61 @@ type ResolvedRole = {
 export type CreatePermissionServiceOptions = {
   roles?: RolesConfig
   pluginPermissions?: readonly string[]
+}
+
+// Returns warnings for user-declared `permissions[]` strings that aren't
+// in the known universe (core permissions ∪ plugin-declared). Non-fatal;
+// the runtime still resolves the role with the unknown string in its
+// permission list -- `has()` checks for that exact string and would return
+// true if someone happened to check for it. The warning surfaces typos
+// like `security.bypass.secretExfilBach` before they silently fail to
+// gate the corresponding guard.
+export function findUnknownPermissions(
+  roles: RolesConfig | undefined,
+  pluginPermissions: readonly string[],
+): UnknownPermissionWarning[] {
+  if (!roles) return []
+  const known = new Set<string>([...Object.values(CORE_PERMISSIONS), ...pluginPermissions])
+  const out: UnknownPermissionWarning[] = []
+  for (const [role, config] of Object.entries(roles)) {
+    if (config.permissions === undefined) continue
+    for (const perm of config.permissions) {
+      if (!known.has(perm)) {
+        out.push({ role, permission: perm, hint: closestPermission(perm, known) })
+      }
+    }
+  }
+  return out
+}
+
+function closestPermission(target: string, known: ReadonlySet<string>): string {
+  let best: { name: string; distance: number } | null = null
+  for (const name of known) {
+    const d = levenshtein(target, name)
+    if (best === null || d < best.distance) best = { name, distance: d }
+  }
+  if (best === null || best.distance > Math.max(3, Math.floor(target.length * 0.25))) {
+    return 'no close match in known permissions; check spelling'
+  }
+  return `did you mean '${best.name}'?`
+}
+
+function levenshtein(a: string, b: string): number {
+  const la = a.length
+  const lb = b.length
+  if (la === 0) return lb
+  if (lb === 0) return la
+  const prev = new Array<number>(lb + 1)
+  const curr = new Array<number>(lb + 1)
+  for (let j = 0; j <= lb; j++) prev[j] = j
+  for (let i = 1; i <= la; i++) {
+    curr[0] = i
+    for (let j = 1; j <= lb; j++) {
+      curr[j] = Math.min(prev[j]! + 1, curr[j - 1]! + 1, prev[j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1))
+    }
+    for (let j = 0; j <= lb; j++) prev[j] = curr[j]!
+  }
+  return prev[lb]!
 }
 
 export function createPermissionService(opts: CreatePermissionServiceOptions = {}): PermissionService {

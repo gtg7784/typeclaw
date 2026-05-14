@@ -1,7 +1,12 @@
 import { z } from 'zod'
 
 import type { CronJob } from '@/cron'
-import { createPermissionService, type PermissionService, type RolesConfig } from '@/permissions'
+import {
+  createPermissionService,
+  findUnknownPermissions,
+  type PermissionService,
+  type RolesConfig,
+} from '@/permissions'
 
 import { createPluginContext, createPluginLogger, type SpawnSubagentFn } from './context'
 import { createHookBus, type HookBus } from './hooks'
@@ -55,6 +60,17 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
     ...(opts.roles !== undefined ? { roles: opts.roles } : {}),
     pluginPermissions: declaredPermissions,
   })
+
+  // Non-fatal: surface user-declared `permissions[]` strings that aren't in
+  // the known set, so a typo like `security.bypass.secretExfilBach` is
+  // visible at boot rather than silently failing to bypass the matching
+  // guard. We log instead of throw because the runtime still functions --
+  // the unknown string just never matches anything.
+  for (const warning of findUnknownPermissions(opts.roles, declaredPermissions)) {
+    console.warn(
+      `[permissions] role "${warning.role}" declares unknown permission "${warning.permission}" — ${warning.hint}`,
+    )
+  }
 
   for (const { entry, resolved } of allPlugins) {
     if (loaded.find((l) => l.name === resolved.name)) {
