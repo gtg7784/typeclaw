@@ -87,6 +87,8 @@ export async function startAgent({
   // which is what we want, since there is no host daemon to honor it anyway.
   const containerName = process.env.TYPECLAW_CONTAINER_NAME
   const containerNameOpt = containerName !== undefined ? { containerName } : {}
+  const tuiToken = process.env.TYPECLAW_TUI_TOKEN
+  const tuiTokenOpt = tuiToken !== undefined && tuiToken !== '' ? { tuiToken } : {}
   reloadRegistry.register(createConfigReloadable({ cwd }))
 
   const pluginConfigsByName = loadPluginConfigsSync(cwd)
@@ -312,6 +314,7 @@ export async function startAgent({
     agentDir: cwd,
     pluginRuntime,
     ...containerNameOpt,
+    ...tuiTokenOpt,
     ...containerBrokerOpt,
   }).start()
 

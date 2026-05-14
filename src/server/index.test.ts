@@ -147,6 +147,40 @@ async function connect(url: string): Promise<{
 }
 
 describe('createServer tool event forwarding', () => {
+  test('rejects TUI websocket upgrades without the expected token', async () => {
+    const built = createServer({ port: 0, createSession: async () => createFakeSession(), tuiToken: 'secret' }).start()
+    server = built
+
+    const ws = new WebSocket(`ws://localhost:${built.port}`)
+
+    await new Promise<void>((resolve) => ws.addEventListener('close', () => resolve(), { once: true }))
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
+  })
+
+  test('accepts TUI websocket upgrades with the expected token', async () => {
+    const built = createServer({ port: 0, createSession: async () => createFakeSession(), tuiToken: 'secret' }).start()
+    server = built
+
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}?token=secret`)
+
+    await expect(waitFor((m) => m.type === 'connected')).resolves.toMatchObject({ type: 'connected' })
+    ws.close()
+  })
+
+  test('sends an error frame when session creation fails during websocket open', async () => {
+    const built = createServer({
+      port: 0,
+      createSession: async () => {
+        throw new Error('auth missing')
+      },
+    }).start()
+    server = built
+
+    const { waitFor } = await connect(`ws://localhost:${built.port}`)
+
+    await expect(waitFor((m) => m.type === 'error')).resolves.toEqual({ type: 'error', message: 'auth missing' })
+  })
+
   test('forwards toolCallId, name, and args from tool_execution_start', async () => {
     const session = createFakeSession()
     const { url } = await startWithSession(session)
