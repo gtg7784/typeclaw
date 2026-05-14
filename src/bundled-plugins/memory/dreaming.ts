@@ -183,8 +183,10 @@ export async function commitMemorySnapshot(cwd: string): Promise<void> {
     return
   }
 
+  const message = await buildCommitMessage(bun, cwd, staged)
+
   const commit = bun.spawn({
-    cmd: ['git', 'commit', '-m', 'Dream', '--only', '--', ...staged],
+    cmd: ['git', 'commit', '-m', message, '--only', '--', ...staged],
     cwd,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -192,6 +194,120 @@ export async function commitMemorySnapshot(cwd: string): Promise<void> {
   await commit.exited
 
   await applySkipWorktree(bun, cwd)
+}
+
+// Pool of emojis sampled into every dream commit. The pool is small and
+// thematically coherent (sleep + cognition) so `git log --oneline` reads like a
+// dream journal. Exported for tests.
+export const DREAM_EMOJI_POOL = ['💤', '🌙', '⭐', '🛌', '😴', '🧠', '💭', '🔮'] as const
+export type DreamEmoji = (typeof DREAM_EMOJI_POOL)[number]
+
+// Random pick is deliberate (not seeded). Independent draw per commit gives the
+// log surface maximum visual variety; correctness does not depend on the
+// emoji.
+function pickDreamEmoji(): DreamEmoji {
+  const i = Math.floor(Math.random() * DREAM_EMOJI_POOL.length)
+  return DREAM_EMOJI_POOL[i] ?? DREAM_EMOJI_POOL[0]
+}
+
+// Build `dream: <summary> <emoji>` from what is actually staged in the
+// snapshot. The summary is derived from the staged diff (ground truth of what
+// is being committed), not from the handler's intent — so a partial commit
+// reports honestly.
+//
+// Classification:
+//   - `N fragments` when daily-stream files (memory/yyyy-MM-dd.md) added lines
+//   - `+ new skill 'x'` / `+ N new skills` when memory/skills/<name>/SKILL.md
+//     paths are newly added in this commit (status A, not M)
+//   - `MEMORY.md only` when only MEMORY.md changed
+//   - `watermarks only` as the fallback (e.g. only .dreaming-state.json moved)
+export async function buildCommitMessage(
+  bun: { spawn: typeof Bun.spawn },
+  cwd: string,
+  staged: string[],
+  emojiPicker: () => DreamEmoji = pickDreamEmoji,
+): Promise<string> {
+  const summary = await buildDreamSummary(bun, cwd, staged)
+  return `dream: ${summary} ${emojiPicker()}`
+}
+
+const STREAM_FILE_RELATIVE = /^memory\/\d{4}-\d{2}-\d{2}\.md$/
+const SKILL_FILE_RELATIVE = /^memory\/skills\/([^/]+)\/SKILL\.md$/
+
+async function buildDreamSummary(bun: { spawn: typeof Bun.spawn }, cwd: string, staged: string[]): Promise<string> {
+  // numstat: `<added>\t<deleted>\t<path>` per line. Use NUL-terminated so paths
+  // with whitespace round-trip; -z switches the record separator to NUL.
+  const numstat = bun.spawn({
+    cmd: ['git', 'diff', '--cached', '--numstat', '-z', '--', ...staged],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const raw = await new Response(numstat.stdout).text()
+  if ((await numstat.exited) !== 0) return 'snapshot'
+
+  let fragmentLines = 0
+  let touchedMemoryMd = false
+  for (const record of raw.split('\0')) {
+    if (record.length === 0) continue
+    // Each record is `<added>\t<deleted>\t<path>`; binary files report `-`
+    // instead of integers — treat those as 0 since memory artifacts are text.
+    const [addedStr = '', , path = ''] = record.split('\t')
+    const added = Number.parseInt(addedStr, 10)
+    if (!Number.isFinite(added)) continue
+    if (path === 'MEMORY.md') {
+      touchedMemoryMd = true
+    } else if (STREAM_FILE_RELATIVE.test(path)) {
+      fragmentLines += added
+    }
+  }
+
+  // Newly-added muscle-memory skills (status A). Refinements (status M) are
+  // not announced — they ride under the fragment count.
+  const newSkills = await listNewlyAddedSkills(bun, cwd, staged)
+
+  const parts: string[] = []
+  if (fragmentLines > 0) {
+    parts.push(`${fragmentLines} fragment${fragmentLines === 1 ? '' : 's'}`)
+  } else if (touchedMemoryMd && newSkills.length === 0) {
+    parts.push('MEMORY.md only')
+  }
+  if (newSkills.length === 1) {
+    parts.push(`new skill '${newSkills[0]}'`)
+  } else if (newSkills.length > 1) {
+    parts.push(`${newSkills.length} new skills`)
+  }
+
+  if (parts.length === 0) return 'watermarks only'
+  return parts.join(' + ')
+}
+
+async function listNewlyAddedSkills(
+  bun: { spawn: typeof Bun.spawn },
+  cwd: string,
+  staged: string[],
+): Promise<string[]> {
+  const proc = bun.spawn({
+    cmd: ['git', 'diff', '--cached', '--name-status', '-z', '--', ...staged],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const raw = await new Response(proc.stdout).text()
+  if ((await proc.exited) !== 0) return []
+
+  // `--name-status -z` interleaves status and path as separate NUL records:
+  // `A\0path\0M\0other\0...`. Pair them up.
+  const tokens = raw.split('\0').filter((t) => t.length > 0)
+  const names: string[] = []
+  for (let i = 0; i + 1 < tokens.length; i += 2) {
+    const status = tokens[i] ?? ''
+    const path = tokens[i + 1] ?? ''
+    if (status !== 'A') continue
+    const match = SKILL_FILE_RELATIVE.exec(path)
+    if (match) names.push(match[1] ?? '')
+  }
+  return names.filter((n) => n.length > 0)
 }
 
 async function listTrackedSnapshotFiles(bun: { spawn: typeof Bun.spawn }, cwd: string): Promise<string[]> {

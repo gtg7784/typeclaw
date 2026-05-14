@@ -43,7 +43,7 @@ The bundled `memory` plugin turns lived experience into reusable knowledge. No m
 
 1. **Observe.** After every idle turn, a `memory-logger` subagent reads the transcript and appends notable fragments to `memory/yyyy-MM-dd.md`. Cheap, frequent, lossy by design.
 2. **Dream.** On a cron schedule (default 4am), a `dreaming` subagent consolidates daily streams into `MEMORY.md`, and — when it spots a procedure worth remembering — writes it as **muscle memory**: a new skill at `memory/skills/<name>/SKILL.md`.
-3. **Apply.** Tomorrow's prompt sees the updated `MEMORY.md`. Muscle-memory skills sit alongside bundled and user-installed ones, loaded on demand. Every dream is `git commit -m Dream`'d, so growth is auditable.
+3. **Apply.** Tomorrow's prompt sees the updated `MEMORY.md`. Muscle-memory skills sit alongside bundled and user-installed ones, loaded on demand. Every dream is committed with a one-line summary — e.g. `dream: 3 fragments + new skill 'pr-review' 🔮` — so growth is auditable.
 
 See [`src/bundled-plugins/memory/README.md`](./src/bundled-plugins/memory/README.md) for the full contract.
 
