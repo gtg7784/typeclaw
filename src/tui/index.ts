@@ -7,11 +7,14 @@ import { colors, editorTheme, markdownTheme } from './theme'
 export type ClientFactory = (url: string) => Promise<Client>
 export type TerminalFactory = () => Terminal
 
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 30_000
+
 export type TuiOptions = {
   url: string
   initialPrompt?: string
   createClient?: ClientFactory
   createTerminal?: TerminalFactory
+  handshakeTimeoutMs?: number
   exit?: (code: number) => void
 }
 
@@ -20,13 +23,15 @@ export function createTui({
   initialPrompt,
   createClient = createClientDefault,
   createTerminal = () => new ProcessTerminal(),
+  handshakeTimeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS,
   exit = process.exit.bind(process),
 }: TuiOptions) {
   async function run(): Promise<void> {
     const terminal = createTerminal()
     const tui = new TUI(terminal)
+    const displayUrl = redactUrl(url)
 
-    const status = new Text(colors.dim(`connecting to ${url}...`), 0, 0)
+    const status = new Text(colors.dim(`connecting to ${displayUrl}...`), 0, 0)
     tui.addChild(status)
     tui.start()
     tui.requestRender()
@@ -39,14 +44,13 @@ export function createTui({
       throw err
     })
 
-    const sessionId = await new Promise<string>((resolve) => {
-      let off: (() => void) | undefined
-      off = client.onMessage((msg) => {
-        if (msg.type === 'connected') {
-          off?.()
-          resolve(msg.sessionId)
-        }
-      })
+    const sessionId = await waitForConnected(client, displayUrl, handshakeTimeoutMs).catch((err) => {
+      status.setText(colors.red(`connection error: ${err instanceof Error ? err.message : String(err)}`))
+      tui.requestRender()
+      client.close()
+      tui.stop()
+      exit(1)
+      throw err
     })
     status.setText(colors.dim(`session: ${sessionId}`))
     tui.requestRender()
@@ -222,4 +226,52 @@ export function createTui({
   }
 
   return { run }
+}
+
+function redactUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.searchParams.has('token')) parsed.searchParams.set('token', '<redacted>')
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
+async function waitForConnected(client: Client, url: string, timeoutMs: number): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup()
+      reject(new Error(`timed out waiting for connected message from ${url} after ${timeoutMs}ms`))
+    }, timeoutMs)
+    const cleanupFns: Array<() => void> = []
+    const cleanup = () => {
+      clearTimeout(timer)
+      for (const fn of cleanupFns.splice(0)) fn()
+    }
+    cleanupFns.push(
+      client.onMessage((msg) => {
+        if (msg.type === 'connected') {
+          cleanup()
+          resolve(msg.sessionId)
+        }
+        if (msg.type === 'error') {
+          cleanup()
+          reject(new Error(msg.message))
+        }
+      }),
+    )
+    cleanupFns.push(
+      client.onClose(() => {
+        cleanup()
+        reject(new Error(`connection to ${url} closed before the session was ready`))
+      }),
+    )
+    cleanupFns.push(
+      client.onError((err) => {
+        cleanup()
+        reject(err instanceof Error ? err : new Error(`connection to ${url} failed`))
+      }),
+    )
+  })
 }
