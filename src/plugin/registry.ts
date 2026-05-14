@@ -150,6 +150,13 @@ function assertNotEmpty(kind: string, value: string, pluginName: string): void {
 }
 
 function toCronJob(globalId: string, spec: PluginCronJob): CronJob {
+  // Plugin-contributed jobs default to `owner` because they are part of the
+  // agent's bundled (or operator-installed) runtime, not user-channel
+  // schedules. Without this default they would resolve to `guest` and the
+  // bundled memory dreaming cron (which writes MEMORY.md, runs git, etc.)
+  // would lose every security bypass. Hand-authored cron.json entries take
+  // a different path and must declare scheduledByRole explicitly.
+  const scheduledByRole: PromptJob['scheduledByRole'] = 'owner'
   if (spec.kind === 'prompt') {
     const job: PromptJob = {
       id: globalId,
@@ -157,6 +164,7 @@ function toCronJob(globalId: string, spec: PluginCronJob): CronJob {
       enabled: spec.enabled ?? true,
       kind: 'prompt',
       prompt: spec.prompt,
+      scheduledByRole,
       ...(spec.timezone !== undefined ? { timezone: spec.timezone } : {}),
       ...(spec.subagent !== undefined ? { subagent: spec.subagent } : {}),
       ...(spec.payload !== undefined ? { payload: spec.payload } : {}),
@@ -169,6 +177,7 @@ function toCronJob(globalId: string, spec: PluginCronJob): CronJob {
     enabled: spec.enabled ?? true,
     kind: 'exec',
     command: spec.command,
+    scheduledByRole,
     ...(spec.timezone !== undefined ? { timezone: spec.timezone } : {}),
   }
 }
