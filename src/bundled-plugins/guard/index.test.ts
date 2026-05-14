@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
+import { noopPermissionService } from '@/permissions'
 import type { ContentPart, HookContext, PluginContext, ToolAfterEvent, ToolBeforeEvent, ToolResult } from '@/plugin'
 
 import guardPlugin from './index'
@@ -384,6 +385,7 @@ function pluginContext(agentDir: string): PluginContext<undefined> {
     agentDir,
     config: undefined,
     logger: noopLogger,
+    permissions: noopPermissionService,
     spawnSubagent: async () => {},
   }
 }

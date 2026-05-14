@@ -3,6 +3,7 @@ import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { noopPermissionService } from '@/permissions'
 import type {
   PluginContext,
   PluginExports,
@@ -48,6 +49,7 @@ async function bootMemoryPlugin(
     agentDir,
     config: parsed.data,
     logger: options.logger ?? createPluginLogger('memory'),
+    permissions: noopPermissionService,
     spawnSubagent: async (name, payload) => {
       const startedAt = Date.now()
       if (spawnDelayMs > 0) await new Promise((r) => setTimeout(r, spawnDelayMs))
@@ -491,6 +493,7 @@ describe('per-agent spawn serialization', () => {
       agentDir,
       config: parsed.data,
       logger: createPluginLogger('m'),
+      permissions: noopPermissionService,
       spawnSubagent: async (name, payload) => {
         const startedAt = Date.now()
         if (firstCall) {
@@ -543,6 +546,7 @@ describe('per-agent spawn serialization', () => {
       agentDir,
       config: parsed.data,
       logger,
+      permissions: noopPermissionService,
       spawnSubagent: async (name, payload) => {
         const startedAt = Date.now()
         if (firstCall) {

@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
+import { noopPermissionService } from '@/permissions'
 import type { PluginContext, PluginExports } from '@/plugin'
 
 import backupPlugin from './index'
@@ -22,6 +23,7 @@ function makeCtx(overrides: { config: unknown }): {
       warn: (m) => logs.push(`warn:${m}`),
       error: (m) => logs.push(`error:${m}`),
     },
+    permissions: noopPermissionService,
     spawnSubagent: async (name, payload) => {
       spawnCalls.push({ name, payload })
     },
