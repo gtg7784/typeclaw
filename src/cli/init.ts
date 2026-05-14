@@ -13,6 +13,7 @@ import {
   findAgentDir,
   isDirectoryNonEmpty,
   isHatched,
+  readExistingProviderApiKey,
   runInit,
   type InitStep,
   type InitStepEvent,
@@ -64,7 +65,8 @@ export const init = defineCommand({
     const selectedModel = await pickModel()
     const provider = KNOWN_PROVIDERS[selectedModel.providerId]
 
-    const llmAuth = await collectLLMAuth(provider)
+    const existingApiKey = await readExistingProviderApiKey(cwd, selectedModel.providerId)
+    const llmAuth = await collectLLMAuth(provider, existingApiKey)
 
     const channelChoice = await select({
       message: 'Pick a channel to wire (you can add more later by editing typeclaw.json + .env)',
@@ -440,9 +442,17 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
 //   secrets.json. No API key prompt at all.
 // - both supported (no providers ship this today, but Anthropic will when
 //   wired): ask "API key or OAuth?" first, then dispatch to the chosen path.
-async function collectLLMAuth(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]): Promise<LLMAuth> {
+async function collectLLMAuth(
+  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+  existingApiKey: string | null,
+): Promise<LLMAuth> {
   const supportsApiKey = providerSupportsApiKey(provider)
   const supportsOAuth = providerSupportsOAuth(provider)
+
+  if (supportsApiKey && existingApiKey !== null) {
+    log.info(`Using existing ${provider.apiKeyEnv} from .env.`)
+    return { kind: 'api-key', apiKey: existingApiKey }
+  }
 
   let method: 'api-key' | 'oauth'
   if (supportsApiKey && supportsOAuth) {

@@ -23,6 +23,7 @@ import {
   isDirectoryNonEmpty,
   isHatched,
   isInitialized,
+  readExistingProviderApiKey,
   runInit,
   scaffold,
   writeDockerAssets,
@@ -1235,11 +1236,36 @@ describe('writeSecrets', () => {
     expect(await readFile(join(root, '.env'), 'utf8')).toBe('OPENAI_API_KEY=sk-default\n')
   })
 
-  test('overwrites an existing .env', async () => {
-    await writeFile(join(root, '.env'), 'OLD=1\n')
+  test('updates the provider key while preserving existing .env entries', async () => {
+    await writeFile(join(root, '.env'), 'OLD=1\nFIREWORKS_API_KEY=fw_old\n')
     await writeSecrets(root, { apiKey: 'fw_new', model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
 
-    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_new\n')
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe('OLD=1\nFIREWORKS_API_KEY=fw_new\n')
+  })
+
+  test('preserves an existing .env when no new provider key is provided', async () => {
+    await writeFile(join(root, '.env'), 'FIREWORKS_API_KEY=fw_existing\nCUSTOM=1\n')
+    await writeSecrets(root, { model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
+
+    expect(await readFile(join(root, '.env'), 'utf8')).toBe('FIREWORKS_API_KEY=fw_existing\nCUSTOM=1\n')
+  })
+
+  test('reads an existing provider API key from .env', async () => {
+    await writeFile(join(root, '.env'), '# local secrets\nOPENAI_API_KEY=openai-existing-key\n')
+
+    expect(await readExistingProviderApiKey(root, 'openai')).toBe('openai-existing-key')
+    expect(await readExistingProviderApiKey(root, 'fireworks')).toBe(null)
+  })
+
+  test('ignores blank provider API keys in .env', async () => {
+    await writeFile(join(root, '.env'), 'OPENAI_API_KEY=\nFIREWORKS_API_KEY=   \n')
+
+    expect(await readExistingProviderApiKey(root, 'openai')).toBe(null)
+    expect(await readExistingProviderApiKey(root, 'fireworks')).toBe(null)
+  })
+
+  test('returns null when reading a provider API key without .env', async () => {
+    expect(await readExistingProviderApiKey(root, 'openai')).toBe(null)
   })
 
   test('writes telegram-bot.token to secrets.json#channels (not .env) when telegramBotToken is provided', async () => {

@@ -4,7 +4,13 @@ import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { config, configSchema, migrateLegacyConfigShape, type Config } from '@/config'
-import { DEFAULT_MODEL_REF, KNOWN_PROVIDERS, providerForModelRef, type KnownModelRef } from '@/config/providers'
+import {
+  DEFAULT_MODEL_REF,
+  KNOWN_PROVIDERS,
+  providerForModelRef,
+  type KnownModelRef,
+  type KnownProviderId,
+} from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
 import { type Channels, type Secret, SecretsBackend } from '@/secrets'
 import { createTui } from '@/tui'
@@ -590,12 +596,7 @@ export async function writeSecrets(
 ): Promise<void> {
   const providerId = providerForModelRef(model)
   const apiKeyEnv = KNOWN_PROVIDERS[providerId].apiKeyEnv
-  const lines: string[] = []
-  if (apiKey !== undefined && apiKeyEnv !== null) {
-    lines.push(`${apiKeyEnv}=${apiKey}`)
-  }
-  const body = lines.length > 0 ? `${lines.join('\n')}\n` : ''
-  await writeFile(join(root, SECRETS_FILE), body)
+  await writeEnvFile(root, apiKeyEnv === null || apiKey === undefined ? undefined : { name: apiKeyEnv, value: apiKey })
 
   const channelTokens: Record<string, Record<string, Secret>> = {}
   if (discordBotToken !== undefined && discordBotToken !== '') {
@@ -621,6 +622,64 @@ export async function writeSecrets(
     merged[adapterId] = priorSlot as Channels[string]
   }
   backend.writeChannelsSync(merged)
+}
+
+export async function readExistingProviderApiKey(root: string, providerId: KnownProviderId): Promise<string | null> {
+  const apiKeyEnv = KNOWN_PROVIDERS[providerId].apiKeyEnv
+  if (apiKeyEnv === null) return null
+  const env = await readEnvFile(root)
+  const value = env.values.get(apiKeyEnv)
+  return value !== undefined && value.trim() !== '' ? value : null
+}
+
+async function writeEnvFile(root: string, apiKey: { name: string; value: string } | undefined): Promise<void> {
+  const env = await readEnvFile(root)
+  if (apiKey === undefined) {
+    await writeFile(join(root, SECRETS_FILE), env.body)
+    return
+  }
+
+  const lines = env.lines.slice()
+  const existingLine = env.entries.get(apiKey.name)
+  if (existingLine !== undefined) {
+    lines[existingLine] = `${apiKey.name}=${apiKey.value}`
+  } else {
+    lines.push(`${apiKey.name}=${apiKey.value}`)
+  }
+  await writeFile(join(root, SECRETS_FILE), lines.length > 0 ? `${lines.join('\n')}\n` : '')
+}
+
+async function readEnvFile(
+  root: string,
+): Promise<{ body: string; lines: string[]; entries: Map<string, number>; values: Map<string, string> }> {
+  let body: string
+  try {
+    body = await readFile(join(root, SECRETS_FILE), 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    body = ''
+  }
+
+  const lines = body === '' ? [] : body.replace(/\n$/, '').split('\n')
+  const entries = new Map<string, number>()
+  const values = new Map<string, string>()
+  for (const [index, line] of lines.entries()) {
+    const parsed = parseEnvLine(line)
+    if (parsed === null) continue
+    entries.set(parsed.name, index)
+    values.set(parsed.name, parsed.value)
+  }
+  return { body, lines, entries, values }
+}
+
+function parseEnvLine(line: string): { name: string; value: string } | null {
+  const trimmed = line.trimStart()
+  if (trimmed === '' || trimmed.startsWith('#')) return null
+  const separator = line.indexOf('=')
+  if (separator <= 0) return null
+  const name = line.slice(0, separator).trim()
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) return null
+  return { name, value: line.slice(separator + 1) }
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
