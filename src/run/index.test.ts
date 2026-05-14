@@ -62,6 +62,32 @@ describe('startAgent', () => {
     expect(calls[0]?.initialPrompt).toBe('hello')
   })
 
+  test('passes the container-provided TUI token to an attached local tui', async () => {
+    const original = process.env.TYPECLAW_TUI_TOKEN
+    process.env.TYPECLAW_TUI_TOKEN = 'local-tui-token'
+    try {
+      const calls: TuiOptions[] = []
+      const fakeTui: TuiFactory = (opts) => {
+        calls.push(opts)
+        return { run: () => new Promise<void>(() => {}) }
+      }
+
+      running = await startAgent({ port: 0, attachTui: true, createTui: fakeTui, loadCron: noCron })
+
+      expect(calls).toHaveLength(1)
+      const url = new URL(calls[0]!.url)
+      expect(url.hostname).toBe('localhost')
+      expect(url.port).toBe(String(running.server.port))
+      expect(url.searchParams.get('token')).toBe('local-tui-token')
+    } finally {
+      if (original === undefined) {
+        delete process.env.TYPECLAW_TUI_TOKEN
+      } else {
+        process.env.TYPECLAW_TUI_TOKEN = original
+      }
+    }
+  })
+
   test('does not instantiate a tui when attachTui is false', async () => {
     const calls: TuiOptions[] = []
     const fakeTui: TuiFactory = (opts) => {

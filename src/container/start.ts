@@ -22,7 +22,7 @@ import { refreshPackageJson } from '@/init/packagejson'
 import { runBunUpdate, type UpdateRunner } from '@/init/run-bun-install'
 import { migrateKakaotalkCredentials } from '@/secrets'
 
-import { CONTAINER_PORT, findFreePort, isPortAllocatedError } from './port'
+import { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, isPortAllocatedError, resolveTuiToken } from './port'
 import {
   classifyRmStderr,
   cleanupRunCorpse,
@@ -57,6 +57,7 @@ export type StartPlan = {
   runArgs: string[]
   needsBuild: boolean
   hostPort: number
+  tuiToken: string | null
 }
 
 export type PlanStartOptions = {
@@ -65,6 +66,8 @@ export type PlanStartOptions = {
   imageExists: boolean
   forceBuild?: boolean
   hostdControl?: HostDaemonControl
+  publishHost?: string
+  tuiToken?: string | null
 }
 
 export type HostDaemonControl = {
@@ -127,6 +130,7 @@ export type StartResult =
       containerId: string
       built: boolean
       hostPort: number
+      tuiToken: string | null
       hostd: HostDaemonStatus
       // True when the container was already running and start() became a no-op.
       // Callers that want to distinguish "I just launched it" from "it was up
@@ -298,7 +302,17 @@ export async function start({
       : { state: 'disabled' as const }
     let hostdControl = hostd.state === 'registered' ? hostd.control : undefined
 
-    let plan = await planStart({ cwd, hostPort, imageExists: imageExisted, forceBuild, hostdControl })
+    const publishHost = await resolvePublishHost(exec)
+    const tuiToken = randomBytes(32).toString('base64url')
+    let plan = await planStart({
+      cwd,
+      hostPort,
+      imageExists: imageExisted,
+      forceBuild,
+      hostdControl,
+      publishHost,
+      tuiToken,
+    })
 
     let built = false
     if (plan.needsBuild) {
@@ -347,7 +361,15 @@ export async function start({
         hostd = await registerWithDaemon({ cwd, containerName, cliEntry, hostPort, reuseCurrentHostDaemon })
         hostdControl = hostd.state === 'registered' ? hostd.control : undefined
       }
-      plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false, hostdControl })
+      plan = await planStart({
+        cwd,
+        hostPort,
+        imageExists: true,
+        forceBuild: false,
+        hostdControl,
+        publishHost,
+        tuiToken,
+      })
       run = await execRunWithConflictRetry(exec, plan.runArgs, cwd, containerName)
     }
 
@@ -370,6 +392,7 @@ export async function start({
       containerId,
       built,
       hostPort,
+      tuiToken,
       hostd: stripHostDaemonControl(hostd),
       alreadyRunning: false,
       autoUpgrade: upgrade,
@@ -403,6 +426,8 @@ export async function planStart({
   imageExists,
   forceBuild = false,
   hostdControl,
+  publishHost = '127.0.0.1',
+  tuiToken = null,
 }: PlanStartOptions): Promise<StartPlan> {
   const containerName = containerNameFromCwd(cwd)
   const imageTag = imageTagFromCwd(cwd)
@@ -416,7 +441,7 @@ export async function planStart({
   // the start() preflight force-removes any lingering corpse before the next
   // launch — so the only state Docker ever sees in `docker ps -a` is either
   // a running container or one the user has not started again yet.
-  const runArgs = ['run', '-d', '--name', containerName, '-p', `127.0.0.1:${hostPort}:${CONTAINER_PORT}`]
+  const runArgs = ['run', '-d', '--name', containerName, '-p', `${publishHost}:${hostPort}:${CONTAINER_PORT}`]
 
   // Network egress filter: when `typeclaw.json#network.blockInternal` is true,
   // grant the container CAP_NET_ADMIN at boot so the entrypoint shim can
@@ -442,6 +467,9 @@ export async function planStart({
 
   for (const [key, value] of Object.entries(composeLabels(cwd, containerName))) {
     runArgs.push('--label', `${key}=${value}`)
+  }
+  if (tuiToken !== null) {
+    runArgs.push('--label', `${TUI_TOKEN_LABEL}=${tuiToken}`, '-e', `TYPECLAW_TUI_TOKEN=${tuiToken}`)
   }
 
   if (existsSync(join(cwd, ENV_FILE))) {
@@ -493,7 +521,14 @@ export async function planStart({
     runArgs,
     needsBuild: forceBuild || !imageExists,
     hostPort,
+    tuiToken,
   }
+}
+
+async function resolvePublishHost(exec: DockerExec): Promise<string> {
+  const result = await exec(['version', '--format', '{{.Server.Platform.Name}}'])
+  if (result.exitCode === 0 && result.stdout.toLowerCase().includes('docker desktop')) return '0.0.0.0'
+  return '127.0.0.1'
 }
 
 export async function refreshDockerfile(cwd: string): Promise<void> {
@@ -623,13 +658,15 @@ async function reportAlreadyRunning(exec: DockerExec, cwd: string, containerName
       reason: `Container ${containerName} is running but its published host port could not be resolved.`,
     }
   }
-  const plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false })
+  const tuiToken = await resolveTuiToken({ cwd, exec })
+  const plan = await planStart({ cwd, hostPort, imageExists: true, forceBuild: false, tuiToken })
   return {
     ok: true,
     plan,
     containerId,
     built: false,
     hostPort,
+    tuiToken,
     hostd: { state: 'disabled' },
     alreadyRunning: true,
     autoUpgrade: { kind: 'skipped-already-running' },

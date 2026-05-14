@@ -13,6 +13,7 @@ import { containerNameFromCwd, defaultDockerExec, type DockerExec } from './shar
 // works: containers started before this change used `-p 8973:8973`, and after
 // the upgrade `docker port <name> 8973/tcp` still resolves correctly.
 export const CONTAINER_PORT = 8973
+export const TUI_TOKEN_LABEL = 'dev.typeclaw.tui-token'
 
 // Asks the kernel for a free TCP port. When `preferred` is supplied, tries
 // that port first; if it's already bound, falls back to a kernel-assigned
@@ -100,6 +101,15 @@ export async function resolveHostPort(options: ResolveHostPortOptions): Promise<
 
   if (options.fallbackPort !== undefined) return options.fallbackPort
   return loadConfigSync(options.cwd).port
+}
+
+export async function resolveTuiToken(options: { cwd: string; exec?: DockerExec }): Promise<string | null> {
+  const exec = options.exec ?? defaultDockerExec
+  const containerName = containerNameFromCwd(options.cwd)
+  const result = await exec(['inspect', '--format', `{{ index .Config.Labels "${TUI_TOKEN_LABEL}" }}`, containerName])
+  if (result.exitCode !== 0) return null
+  const token = result.stdout.trim()
+  return token.length > 0 && token !== '<no value>' ? token : null
 }
 
 async function queryDockerHostPort(exec: DockerExec, containerName: string): Promise<number | null> {

@@ -87,6 +87,8 @@ export async function startAgent({
   // which is what we want, since there is no host daemon to honor it anyway.
   const containerName = process.env.TYPECLAW_CONTAINER_NAME
   const containerNameOpt = containerName !== undefined ? { containerName } : {}
+  const tuiToken = process.env.TYPECLAW_TUI_TOKEN
+  const tuiTokenOpt = tuiToken !== undefined && tuiToken !== '' ? { tuiToken } : {}
   reloadRegistry.register(createConfigReloadable({ cwd }))
 
   const pluginConfigsByName = loadPluginConfigsSync(cwd)
@@ -312,6 +314,7 @@ export async function startAgent({
     agentDir: cwd,
     pluginRuntime,
     ...containerNameOpt,
+    ...tuiTokenOpt,
     ...containerBrokerOpt,
   }).start()
 
@@ -343,7 +346,9 @@ export async function startAgent({
     }
   }
 
-  const url = `ws://localhost:${server.port}`
+  const serverPort = server.port
+  if (serverPort === undefined) throw new Error('server did not report a listening port')
+  const url = buildLocalTuiUrl(serverPort, tuiTokenOpt.tuiToken ?? null)
   const tui = createTui({ url, initialPrompt })
   const tuiPromise = tui.run()
   return {
@@ -359,6 +364,13 @@ export async function startAgent({
     channelManager,
     stop,
   }
+}
+
+function buildLocalTuiUrl(port: number, token: string | null): string {
+  if (token === null) return `ws://localhost:${port}`
+  const url = new URL(`ws://localhost:${port}`)
+  url.searchParams.set('token', token)
+  return url.toString()
 }
 
 async function disposeMaterializedSkills(pluginRuntime: PluginRuntime): Promise<void> {

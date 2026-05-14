@@ -95,8 +95,9 @@ function fakeClient(options: FakeClientOptions = {}): FakeClient {
     },
     onClose: (fn) => {
       closeListeners.add(fn)
+      return () => closeListeners.delete(fn)
     },
-    onError: () => {},
+    onError: () => () => false,
     send: (msg) => {
       sent.push(msg)
       if (msg.type === 'prompt' && autoPromptStarted) {
@@ -120,6 +121,53 @@ function fakeClient(options: FakeClientOptions = {}): FakeClient {
 const flush = () => new Promise<void>((resolve) => setTimeout(resolve, 30))
 
 describe('createTui', () => {
+  test('exits when the server closes before sending connected', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    let exitCode: number | undefined
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      handshakeTimeoutMs: 2_000,
+      exit: (code) => {
+        exitCode = code
+      },
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    client.triggerClose()
+
+    // then
+    await expect(runPromise).rejects.toThrow('closed before the session was ready')
+    expect(exitCode).toBe(1)
+  })
+
+  test('exits when the server never sends connected', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    let exitCode: number | undefined
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      handshakeTimeoutMs: 20,
+      exit: (code) => {
+        exitCode = code
+      },
+    })
+
+    // when / then
+    await expect(tui.run()).rejects.toThrow('timed out waiting for connected message')
+    expect(exitCode).toBe(1)
+  })
+
   test('renders the initial prompt as a user history line and sends it to the server', async () => {
     // given
     const terminal = new FakeTerminal()

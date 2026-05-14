@@ -1,6 +1,6 @@
 import { defineCommand } from 'citty'
 
-import { resolveHostPort } from '@/container'
+import { resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir } from '@/init'
 import { createTui } from '@/tui'
 
@@ -18,7 +18,7 @@ export const tui = defineCommand({
     url: {
       type: 'string',
       description:
-        "agent websocket url (defaults to ws://localhost:<host port> discovered from the running container's published port)",
+        "agent websocket url (defaults to ws://127.0.0.1:<host port> discovered from the running container's published port)",
     },
   },
   async run({ args }) {
@@ -31,5 +31,8 @@ export const tui = defineCommand({
 async function defaultUrl(): Promise<string> {
   const cwd = findAgentDir(process.cwd()) ?? process.cwd()
   const port = await resolveHostPort({ cwd })
-  return `ws://localhost:${port}`
+  const token = await resolveTuiToken({ cwd })
+  const url = new URL(`ws://127.0.0.1:${port}`)
+  if (token !== null) url.searchParams.set('token', token)
+  return url.toString()
 }

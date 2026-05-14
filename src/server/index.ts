@@ -31,6 +31,7 @@ export type ServerOptions = {
   agentDir?: string
   pluginRuntime?: PluginRuntime
   containerName?: string
+  tuiToken?: string
   // Optional in-process portbroker handler. When provided, requests to the
   // /portbroker WS path are routed to it instead of being treated as TUI
   // sessions. Omit to keep TUI-only behavior (used by tests + non-container
@@ -82,6 +83,7 @@ export function createServer({
   agentDir,
   pluginRuntime,
   containerName,
+  tuiToken,
   containerBroker,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
@@ -97,6 +99,9 @@ export function createServer({
           if (server.upgrade(req, { data })) return
           return new Response('upgrade failed', { status: 400 })
         }
+        if (isWebSocketUpgrade(req) && tuiToken !== undefined && url.searchParams.get('token') !== tuiToken) {
+          return new Response('unauthorized', { status: 401 })
+        }
         const sessionId = crypto.randomUUID()
         const data: TuiWsData = { kind: 'tui', sessionId }
         if (server.upgrade(req, { data })) return
@@ -109,73 +114,80 @@ export function createServer({
             return
           }
           const ws = rawWs as Ws
-          const sessionManager = sessionFactory?.createPersisted()
-          const sessionFileId = sessionManager?.getSessionId() ?? ws.data.sessionId
-          // Snapshot the runtime once so the entire session lifecycle for this
-          // ws connection sees one consistent generation of registry+hooks. A
-          // reload landing mid-connection swaps the live pointer; this session
-          // keeps using the snapshot it was created with until close.
-          const runtimeSnapshot = pluginRuntime?.get()
-          const pluginsWiring =
-            runtimeSnapshot !== undefined && agentDir !== undefined
-              ? {
-                  registry: runtimeSnapshot.registry,
-                  hooks: runtimeSnapshot.hooks,
-                  sessionId: sessionFileId,
-                  agentDir,
-                }
-              : undefined
-          const origin: SessionOrigin = { kind: 'tui', sessionId: sessionFileId }
-          const result = await createSession({
-            reloadRegistry,
-            sessionManager,
-            origin,
-            ...(stream ? { stream } : {}),
-            ...(channelRouter ? { channelRouter } : {}),
-            ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
-            ...(containerName !== undefined ? { containerName } : {}),
-          })
-          const session = 'session' in result ? result.session : result
-          const dispose = 'session' in result && result.dispose ? result.dispose : async () => {}
-
-          const state: SessionState = {
-            session,
-            sessionFileId,
-            origin,
-            sessionManager,
-            drainQueue: [],
-            draining: false,
-            unsubBroadcast: null,
-            unsubPrompts: null,
-            runtimeSnapshot: runtimeSnapshot ?? null,
-            dispose,
-          }
-          sessionStates.set(ws, state)
-
-          if (runtimeSnapshot !== undefined && agentDir !== undefined) {
-            await runtimeSnapshot.hooks.runSessionStart({ sessionId: sessionFileId, agentDir })
-          }
-
-          forwardSessionEvents(ws, session)
-
-          if (stream) {
-            state.unsubPrompts = stream.subscribe({ target: { kind: 'session', sessionId: sessionFileId } }, (msg) =>
-              enqueuePrompt(ws, state, msg, agentDir),
-            )
-
-            state.unsubBroadcast = stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
-              const payload: ServerMessage = {
-                type: 'notification',
-                payload: msg.payload,
-                ...(msg.replyTo !== undefined ? { replyTo: msg.replyTo } : {}),
-                ...(msg.meta !== undefined ? { meta: msg.meta } : {}),
-              }
-              send(ws, payload)
+          try {
+            const sessionManager = sessionFactory?.createPersisted()
+            const sessionFileId = sessionManager?.getSessionId() ?? ws.data.sessionId
+            // Snapshot the runtime once so the entire session lifecycle for this
+            // ws connection sees one consistent generation of registry+hooks. A
+            // reload landing mid-connection swaps the live pointer; this session
+            // keeps using the snapshot it was created with until close.
+            const runtimeSnapshot = pluginRuntime?.get()
+            const pluginsWiring =
+              runtimeSnapshot !== undefined && agentDir !== undefined
+                ? {
+                    registry: runtimeSnapshot.registry,
+                    hooks: runtimeSnapshot.hooks,
+                    sessionId: sessionFileId,
+                    agentDir,
+                  }
+                : undefined
+            const origin: SessionOrigin = { kind: 'tui', sessionId: sessionFileId }
+            const result = await createSession({
+              reloadRegistry,
+              sessionManager,
+              origin,
+              ...(stream ? { stream } : {}),
+              ...(channelRouter ? { channelRouter } : {}),
+              ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
+              ...(containerName !== undefined ? { containerName } : {}),
             })
-          }
+            const session = 'session' in result ? result.session : result
+            const dispose = 'session' in result && result.dispose ? result.dispose : async () => {}
 
-          send(ws, { type: 'connected', sessionId: sessionFileId })
-          console.log(`session ${sessionFileId}: open`)
+            const state: SessionState = {
+              session,
+              sessionFileId,
+              origin,
+              sessionManager,
+              drainQueue: [],
+              draining: false,
+              unsubBroadcast: null,
+              unsubPrompts: null,
+              runtimeSnapshot: runtimeSnapshot ?? null,
+              dispose,
+            }
+            sessionStates.set(ws, state)
+
+            if (runtimeSnapshot !== undefined && agentDir !== undefined) {
+              await runtimeSnapshot.hooks.runSessionStart({ sessionId: sessionFileId, agentDir })
+            }
+
+            forwardSessionEvents(ws, session)
+
+            if (stream) {
+              state.unsubPrompts = stream.subscribe({ target: { kind: 'session', sessionId: sessionFileId } }, (msg) =>
+                enqueuePrompt(ws, state, msg, agentDir),
+              )
+
+              state.unsubBroadcast = stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
+                const payload: ServerMessage = {
+                  type: 'notification',
+                  payload: msg.payload,
+                  ...(msg.replyTo !== undefined ? { replyTo: msg.replyTo } : {}),
+                  ...(msg.meta !== undefined ? { meta: msg.meta } : {}),
+                }
+                send(ws, payload)
+              })
+            }
+
+            send(ws, { type: 'connected', sessionId: sessionFileId })
+            console.log(`session ${sessionFileId}: open`)
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            console.error(`session ${ws.data.sessionId}: open failed: ${message}`)
+            send(ws, { type: 'error', message })
+            ws.close()
+          }
         },
         async message(rawWs, raw) {
           if (rawWs.data.kind === 'portbroker') {
@@ -287,6 +299,10 @@ export function createServer({
   }
 
   return { start }
+}
+
+function isWebSocketUpgrade(req: Request): boolean {
+  return req.headers.get('upgrade')?.toLowerCase() === 'websocket'
 }
 
 function forwardSessionEvents(ws: Ws, session: AgentSession): void {
