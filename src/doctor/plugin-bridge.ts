@@ -87,6 +87,7 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
     }
   }
   const ws = new WebSocket(url)
+  const displayUrl = redactUrl(url)
   try {
     await new Promise<void>((resolve, reject) => {
       // `timer` is declared up front so `cleanup` can reference it without
@@ -98,6 +99,7 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
         if (timer !== undefined) clearTimeout(timer)
         ws.removeEventListener('open', onOpen)
         ws.removeEventListener('error', onError)
+        ws.removeEventListener('close', onClose)
       }
       const onOpen = () => {
         cleanup()
@@ -105,7 +107,11 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
       }
       const onError = (err: unknown) => {
         cleanup()
-        reject(err instanceof Error ? err : new Error(`failed to connect to ${url}`))
+        reject(new Error(`failed to connect to ${displayUrl}: ${err instanceof Error ? err.message : String(err)}`))
+      }
+      const onClose = () => {
+        cleanup()
+        reject(new Error(`connection to ${displayUrl} closed before opening`))
       }
       // Bun's WebSocket has no built-in connect timeout. Without this, a TCP
       // handshake that completes but never produces an Upgrade response
@@ -118,10 +124,11 @@ async function dial(opts: PluginBridgeOptions): Promise<DialResult> {
         try {
           ws.close()
         } catch {}
-        reject(new Error(`websocket connect timeout after ${timeoutMs}ms`))
+        reject(new Error(`timed out connecting to ${displayUrl} after ${timeoutMs}ms`))
       }, timeoutMs)
       ws.addEventListener('open', onOpen, { once: true })
       ws.addEventListener('error', onError, { once: true })
+      ws.addEventListener('close', onClose, { once: true })
     })
   } catch (err) {
     return { kind: 'unreachable', reason: err instanceof Error ? err.message : String(err) }
@@ -133,6 +140,16 @@ function buildBridgeUrl(port: number, token: string | null): string {
   const url = new URL(`ws://127.0.0.1:${port}`)
   if (token !== null) url.searchParams.set('token', token)
   return url.toString()
+}
+
+function redactUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.searchParams.has('token')) parsed.searchParams.set('token', '<redacted>')
+    return parsed.toString()
+  } catch {
+    return url
+  }
 }
 
 async function withRequest<R extends { kind: string }>(

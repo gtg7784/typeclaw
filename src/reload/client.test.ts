@@ -92,6 +92,17 @@ describe('requestReload', () => {
     await expect(requestReload({ url: 'ws://localhost:1', timeoutMs: 200 })).rejects.toThrow()
   })
 
+  test('redacts tokenized URLs in connection errors', async () => {
+    try {
+      await requestReload({ url: 'ws://localhost:1?token=secret-token', timeoutMs: 200 })
+      throw new Error('expected requestReload to reject')
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      expect(message).toContain('token=%3Credacted%3E')
+      expect(message).not.toContain('secret-token')
+    }
+  })
+
   test('rejects when no reload_result arrives before the timeout', async () => {
     const { url } = startStubServer(() => {})
 

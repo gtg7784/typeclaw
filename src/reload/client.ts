@@ -16,22 +16,36 @@ export async function requestReload({
   timeoutMs = DEFAULT_TIMEOUT_MS,
 }: RequestReloadOptions): Promise<ReloadResult[]> {
   const ws = new WebSocket(url)
+  const displayUrl = redactUrl(url)
 
   await new Promise<void>((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined
     const onOpen = () => {
       cleanup()
       resolve()
     }
     const onError = (err: unknown) => {
       cleanup()
-      reject(err instanceof Error ? err : new Error(`failed to connect to ${url}`))
+      reject(new Error(`failed to connect to ${displayUrl}: ${err instanceof Error ? err.message : String(err)}`))
+    }
+    const onClose = () => {
+      cleanup()
+      reject(new Error(`connection to ${displayUrl} closed before opening`))
     }
     const cleanup = () => {
+      if (timer !== undefined) clearTimeout(timer)
       ws.removeEventListener('open', onOpen)
       ws.removeEventListener('error', onError)
+      ws.removeEventListener('close', onClose)
     }
+    timer = setTimeout(() => {
+      cleanup()
+      ws.close()
+      reject(new Error(`timed out connecting to ${displayUrl} after ${timeoutMs}ms`))
+    }, timeoutMs)
     ws.addEventListener('open', onOpen, { once: true })
     ws.addEventListener('error', onError, { once: true })
+    ws.addEventListener('close', onClose, { once: true })
   })
 
   try {
@@ -55,5 +69,15 @@ export async function requestReload({
     })
   } finally {
     ws.close()
+  }
+}
+
+function redactUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.searchParams.has('token')) parsed.searchParams.set('token', '<redacted>')
+    return parsed.toString()
+  } catch {
+    return url
   }
 }

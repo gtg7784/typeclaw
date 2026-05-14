@@ -346,7 +346,9 @@ export async function startAgent({
     }
   }
 
-  const url = `ws://localhost:${server.port}`
+  const serverPort = server.port
+  if (serverPort === undefined) throw new Error('server did not report a listening port')
+  const url = buildLocalTuiUrl(serverPort, tuiTokenOpt.tuiToken ?? null)
   const tui = createTui({ url, initialPrompt })
   const tuiPromise = tui.run()
   return {
@@ -362,6 +364,13 @@ export async function startAgent({
     channelManager,
     stop,
   }
+}
+
+function buildLocalTuiUrl(port: number, token: string | null): string {
+  if (token === null) return `ws://localhost:${port}`
+  const url = new URL(`ws://localhost:${port}`)
+  url.searchParams.set('token', token)
+  return url.toString()
 }
 
 async function disposeMaterializedSkills(pluginRuntime: PluginRuntime): Promise<void> {
