@@ -4,7 +4,15 @@ import { createServer, type Server } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { CONTAINER_PORT, findFreePort, isPortAllocatedError, parseDockerPortOutput, resolveHostPort } from './port'
+import {
+  CONTAINER_PORT,
+  TUI_TOKEN_LABEL,
+  findFreePort,
+  isPortAllocatedError,
+  parseDockerPortOutput,
+  resolveHostPort,
+  resolveTuiToken,
+} from './port'
 import type { DockerExec } from './shared'
 
 let root: string
@@ -212,5 +220,26 @@ describe('resolveHostPort', () => {
     await resolveHostPort({ cwd: folder, exec, retryMs: 0 })
 
     expect(calls[0]!.args[1]).toBe('shadowclaw')
+  })
+})
+
+describe('resolveTuiToken', () => {
+  test('reads the TUI token from the running container label', async () => {
+    const { exec, calls } = fakeExec(() => ({ exitCode: 0, stdout: 'token-123\n', stderr: '' }))
+    const folder = join(root, 'coder')
+    await mkdir(folder)
+
+    const token = await resolveTuiToken({ cwd: folder, exec })
+
+    expect(token).toBe('token-123')
+    expect(calls[0]!.args).toEqual(['inspect', '--format', `{{ index .Config.Labels "${TUI_TOKEN_LABEL}" }}`, 'coder'])
+  })
+
+  test('returns null when the running container has no TUI token label', async () => {
+    const { exec } = fakeExec(() => ({ exitCode: 0, stdout: '<no value>\n', stderr: '' }))
+    const folder = join(root, 'coder')
+    await mkdir(folder)
+
+    await expect(resolveTuiToken({ cwd: folder, exec })).resolves.toBeNull()
   })
 })
