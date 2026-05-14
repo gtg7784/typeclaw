@@ -147,27 +147,6 @@ describe('createConfigReloadable', () => {
     expect(diff.restartRequired.map((c) => c.path)).toEqual(['git.ignore'])
   })
 
-  test('field fence: permissions.gateChannelRespond change lands in `applied`', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A }))
-    const reloadable = createConfigReloadable({ cwd })
-    await reloadable.reload()
-
-    await writeFile(
-      join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL_A, permissions: { gateChannelRespond: true } }),
-    )
-    const result = await reloadable.reload()
-
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    const diff = result.details as {
-      applied: { path: string }[]
-      restartRequired: unknown[]
-      ignored: unknown[]
-    }
-    expect(diff.applied.map((c) => c.path)).toEqual(['permissions.gateChannelRespond'])
-  })
-
   test('field fence: $schema change is ignored', async () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, $schema: './a.json' }))
     const reloadable = createConfigReloadable({ cwd })

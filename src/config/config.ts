@@ -204,23 +204,6 @@ export const networkSchema = z
 
 export type NetworkConfig = z.infer<typeof networkSchema>
 
-// Top-level `permissions` block. `gateChannelRespond` defaults to `false`
-// so existing configs keep their pre-permissions behavior: the router
-// only consults `channels.<adapter>.allow[]` to decide whether to engage.
-// When `true`, the router additionally requires
-// `permissions.has(partialOrigin, 'channel.respond')` — every inbound is
-// gated by BOTH `allow[]` AND the resolved role's permissions. The opt-in
-// is per-typeclaw (not per-adapter) on purpose: rolling it out
-// adapter-by-adapter would surface inconsistencies in which `roles` block
-// matched a given inbound.
-export const permissionsConfigSchema = z
-  .object({
-    gateChannelRespond: z.boolean().default(false),
-  })
-  .default({ gateChannelRespond: false })
-
-export type PermissionsConfig = z.infer<typeof permissionsConfigSchema>
-
 export const configSchema = z
   .object({
     $schema: z.string().optional(),
@@ -244,7 +227,6 @@ export const configSchema = z
     docker: dockerSchema,
     git: gitSchema,
     roles: rolesConfigSchema.optional(),
-    permissions: permissionsConfigSchema,
   })
   .catchall(z.unknown())
 
@@ -337,7 +319,6 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   'docker.file': 'restart-required',
   'git.ignore': 'restart-required',
   roles: 'restart-required',
-  'permissions.gateChannelRespond': 'applied',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so

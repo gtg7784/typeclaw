@@ -51,13 +51,13 @@ export type ChannelManagerOptions = {
   createKakaotalkAdapter?: typeof createKakaotalkAdapter
   createSlackAdapter?: typeof createSlackBotAdapter
   createTelegramAdapter?: typeof createTelegramBotAdapter
-  // Dual-path wake-up gate. When both are provided AND the flag returns
-  // true, the router gates every inbound by `channel.respond` in addition
-  // to `channels.<adapter>.allow[]`. Omitting either reverts to
-  // `allow[]`-only. Production wiring (src/run/index.ts) always passes
-  // both; tests that don't exercise the gate omit them.
+  // Wake-up gate: forwarded to the router, which calls
+  // `permissions.has(origin, 'channel.respond')` BEFORE creating a
+  // session for any inbound. Optional here to keep direct manager-level
+  // tests easy to spin up; production wiring in src/run/index.ts always
+  // passes `pluginsLoaded.permissions`. Omitting it falls through to the
+  // router's grant-all default — see CreateChannelRouterOptions.
   permissions?: PermissionService
-  gateChannelRespond?: () => boolean
 }
 
 export type ChannelManager = {
@@ -91,7 +91,6 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     ...(options.aliasesRef ? { configuredAliases: options.aliasesRef } : {}),
     ...(options.createSessionForChannel ? { createSessionForChannel: options.createSessionForChannel } : {}),
     ...(options.permissions ? { permissions: options.permissions } : {}),
-    ...(options.gateChannelRespond ? { gateChannelRespond: options.gateChannelRespond } : {}),
   })
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createKakaotalk = options.createKakaotalkAdapter ?? createKakaotalkAdapter
