@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { createKeyStore } from '@/secrets/keys'
+
 import {
   kakaotalkConfigDir,
   kakaotalkSecretsPath,
@@ -11,6 +13,13 @@ import {
   type LoginFlowResult,
   runKakaotalkBootstrap,
 } from './kakaotalk-auth'
+
+function isolatedKeyStore(agentDir: string): { keyStore: ReturnType<typeof createKeyStore>; containerName: string } {
+  return {
+    keyStore: createKeyStore({ keysDir: join(agentDir, '.test-keys') }),
+    containerName: 'test-agent',
+  }
+}
 
 describe('kakaotalkConfigDir', () => {
   test('places credentials under the agent workspace, not the user home', () => {
@@ -48,19 +57,32 @@ describe('runKakaotalkBootstrap', () => {
         agentDir,
         callbacks: { onPasscode: () => {} },
         loginFlow: fake,
+        ...isolatedKeyStore(agentDir),
       })
       expect(result).toEqual({ ok: true })
       const stored = JSON.parse(await readFile(kakaotalkSecretsPath(agentDir), 'utf8')) as {
         channels: {
           kakaotalk: {
             currentAccount: string
-            accounts: Record<string, { user_id: string; auth_method: string; oauth_token: string }>
+            accounts: Record<
+              string,
+              {
+                user_id: string
+                auth_method: string
+                oauth_token: string
+                email?: string
+                encryptedPassword?: { kid: string; v: number; alg: string }
+              }
+            >
           }
         }
       }
       expect(stored.channels.kakaotalk.currentAccount).toBe('user-1')
       expect(stored.channels.kakaotalk.accounts['user-1']?.oauth_token).toBe('oauth-abc')
       expect(stored.channels.kakaotalk.accounts['user-1']?.auth_method).toBe('login')
+      expect(stored.channels.kakaotalk.accounts['user-1']?.email).toBe('user@example.com')
+      expect(stored.channels.kakaotalk.accounts['user-1']?.encryptedPassword?.v).toBe(1)
+      expect(stored.channels.kakaotalk.accounts['user-1']?.encryptedPassword?.alg).toBe('AES-256-GCM')
       await expect(readFile(join(kakaotalkConfigDir(agentDir), 'kakaotalk-credentials.json'), 'utf8')).rejects.toThrow()
     } finally {
       await rm(agentDir, { recursive: true, force: true })
@@ -81,6 +103,7 @@ describe('runKakaotalkBootstrap', () => {
         agentDir,
         callbacks: { onPasscode: () => {} },
         loginFlow: fake,
+        ...isolatedKeyStore(agentDir),
       })
       expect(result.ok).toBe(false)
       if (result.ok) return
@@ -102,6 +125,7 @@ describe('runKakaotalkBootstrap', () => {
         agentDir,
         callbacks: { onPasscode: () => {} },
         loginFlow: fake,
+        ...isolatedKeyStore(agentDir),
       })
       expect(result.ok).toBe(false)
       if (result.ok) return
@@ -125,6 +149,7 @@ describe('runKakaotalkBootstrap', () => {
         agentDir,
         callbacks: { onPasscode: (code) => codes.push(code) },
         loginFlow: fake,
+        ...isolatedKeyStore(agentDir),
       })
       expect(codes).toEqual(['1234'])
     } finally {
@@ -166,6 +191,7 @@ describe('runKakaotalkBootstrap', () => {
         agentDir,
         callbacks: { onPasscode: () => {} },
         loginFlow: fake,
+        ...isolatedKeyStore(agentDir),
       })
       expect(received).toBe('previous-uuid')
     } finally {
@@ -192,6 +218,7 @@ describe('runKakaotalkBootstrap', () => {
         agentDir,
         callbacks: { onPasscode: () => {} },
         loginFlow: fake,
+        ...isolatedKeyStore(agentDir),
       })
       expect(result).toEqual({ ok: true })
       const stored = JSON.parse(await readFile(kakaotalkSecretsPath(agentDir), 'utf8')) as {

@@ -93,4 +93,141 @@ describe('SecretsKakaoCredentialStore host mode', () => {
       expect(Object.keys(loaded.accounts).sort()).toEqual(['user-1', 'user-2'])
     })
   })
+
+  test('setAccount preserves email and encryptedPassword from the prior on-disk record', async () => {
+    await withStore(async (store, secretsPath) => {
+      await store.setAccount(account('user-1'))
+      const seeded = JSON.parse(await readFile(secretsPath, 'utf8'))
+      seeded.channels.kakaotalk.accounts['user-1'].email = 'user@example.com'
+      seeded.channels.kakaotalk.accounts['user-1'].encryptedPassword = {
+        v: 1,
+        alg: 'AES-256-GCM',
+        kid: 'sha256:0123456789abcdef',
+        iv: 'aXY=',
+        ciphertext: 'Y3Q=',
+        authTag: 'YXQ=',
+        createdAt: '2026-05-14T00:00:00.000Z',
+      }
+      await Bun.write(secretsPath, JSON.stringify(seeded))
+
+      await store.setAccount(account('user-1', { oauth_token: 'oauth-refreshed' }))
+
+      const raw = JSON.parse(await readFile(secretsPath, 'utf8'))
+      const persisted = raw.channels.kakaotalk.accounts['user-1']
+      expect(persisted.oauth_token).toBe('oauth-refreshed')
+      expect(persisted.email).toBe('user@example.com')
+      expect(persisted.encryptedPassword?.kid).toBe('sha256:0123456789abcdef')
+    })
+  })
+
+  test('save() round-trips email and encryptedPassword from the prior on-disk record', async () => {
+    await withStore(async (store, secretsPath) => {
+      await store.setAccount(account('user-1'))
+      const seeded = JSON.parse(await readFile(secretsPath, 'utf8'))
+      seeded.channels.kakaotalk.accounts['user-1'].email = 'user@example.com'
+      seeded.channels.kakaotalk.accounts['user-1'].encryptedPassword = {
+        v: 1,
+        alg: 'AES-256-GCM',
+        kid: 'sha256:0123456789abcdef',
+        iv: 'aXY=',
+        ciphertext: 'Y3Q=',
+        authTag: 'YXQ=',
+        createdAt: '2026-05-14T00:00:00.000Z',
+      }
+      await Bun.write(secretsPath, JSON.stringify(seeded))
+
+      const cfg = await store.load()
+      await store.save({
+        current_account: cfg.current_account,
+        accounts: {
+          ...cfg.accounts,
+          'user-1': { ...cfg.accounts['user-1']!, oauth_token: 'oauth-from-sdk' },
+        },
+      })
+
+      const raw = JSON.parse(await readFile(secretsPath, 'utf8'))
+      const persisted = raw.channels.kakaotalk.accounts['user-1']
+      expect(persisted.oauth_token).toBe('oauth-from-sdk')
+      expect(persisted.email).toBe('user@example.com')
+      expect(persisted.encryptedPassword?.kid).toBe('sha256:0123456789abcdef')
+    })
+  })
+
+  test('setAccount on a fresh account writes the upstream slice as-is', async () => {
+    await withStore(async (store, secretsPath) => {
+      await store.setAccount(account('user-1'))
+      const raw = JSON.parse(await readFile(secretsPath, 'utf8'))
+      const persisted = raw.channels.kakaotalk.accounts['user-1']
+      expect(persisted.email).toBeUndefined()
+      expect(persisted.encryptedPassword).toBeUndefined()
+    })
+  })
+
+  test('getAccountWithRenewalFields surfaces email and encryptedPassword typed as the extended record', async () => {
+    await withStore(async (store, secretsPath) => {
+      await store.setAccount(account('user-1'))
+      const seeded = JSON.parse(await readFile(secretsPath, 'utf8'))
+      seeded.channels.kakaotalk.accounts['user-1'].email = 'user@example.com'
+      seeded.channels.kakaotalk.accounts['user-1'].encryptedPassword = {
+        v: 1,
+        alg: 'AES-256-GCM',
+        kid: 'sha256:0123456789abcdef',
+        iv: 'aXY=',
+        ciphertext: 'Y3Q=',
+        authTag: 'YXQ=',
+        createdAt: '2026-05-14T00:00:00.000Z',
+      }
+      await Bun.write(secretsPath, JSON.stringify(seeded))
+
+      const extended = await store.getAccountWithRenewalFields()
+      expect(extended?.email).toBe('user@example.com')
+      expect(extended?.encryptedPassword?.kid).toBe('sha256:0123456789abcdef')
+      expect(extended?.encryptedPassword?.v).toBe(1)
+      expect(extended?.encryptedPassword?.alg).toBe('AES-256-GCM')
+    })
+  })
+
+  test('getAccount() strips email + encryptedPassword from the runtime object so SDK callers do not see them', async () => {
+    await withStore(async (store, secretsPath) => {
+      await store.setAccount(account('user-1'))
+      const seeded = JSON.parse(await readFile(secretsPath, 'utf8'))
+      seeded.channels.kakaotalk.accounts['user-1'].email = 'user@example.com'
+      seeded.channels.kakaotalk.accounts['user-1'].encryptedPassword = {
+        v: 1,
+        alg: 'AES-256-GCM',
+        kid: 'sha256:0123456789abcdef',
+        iv: 'aXY=',
+        ciphertext: 'Y3Q=',
+        authTag: 'YXQ=',
+        createdAt: '2026-05-14T00:00:00.000Z',
+      }
+      await Bun.write(secretsPath, JSON.stringify(seeded))
+
+      const upstream = await store.getAccount()
+      expect(upstream).not.toBeNull()
+      expect((upstream as unknown as { email?: string }).email).toBeUndefined()
+      expect((upstream as unknown as { encryptedPassword?: unknown }).encryptedPassword).toBeUndefined()
+    })
+  })
+
+  test('getAccountWithRenewalFields accepts an explicit account id (multi-account selection)', async () => {
+    await withStore(async (store, secretsPath) => {
+      await store.setAccount(account('user-1'))
+      await store.setAccount(account('user-2'))
+      const seeded = JSON.parse(await readFile(secretsPath, 'utf8'))
+      seeded.channels.kakaotalk.accounts['user-2'].email = 'second@example.com'
+      await Bun.write(secretsPath, JSON.stringify(seeded))
+
+      const account2 = await store.getAccountWithRenewalFields('user-2')
+      expect(account2?.email).toBe('second@example.com')
+      const account1 = await store.getAccountWithRenewalFields('user-1')
+      expect(account1?.email).toBeUndefined()
+    })
+  })
+
+  test('getAccountWithRenewalFields returns null when the store has no current account', async () => {
+    await withStore(async (store) => {
+      expect(await store.getAccountWithRenewalFields()).toBeNull()
+    })
+  })
 })

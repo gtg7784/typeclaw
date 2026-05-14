@@ -40,6 +40,22 @@ const telegramBotChannelSchema = z.object({
   token: secretFieldSchema.optional(),
 })
 
+// Encrypted password envelope produced by src/secrets/encryption.ts. Optional
+// in the schema because legacy v2 accounts (pre-renewal feature) don't have
+// one; the renewal cron treats a missing envelope as "reauth required" and
+// degrades to logged warnings rather than crashing.
+const kakaoEncryptedPasswordSchema = z
+  .object({
+    v: z.literal(1),
+    alg: z.literal('AES-256-GCM'),
+    kid: z.string(),
+    iv: z.string(),
+    ciphertext: z.string(),
+    authTag: z.string(),
+    createdAt: z.string(),
+  })
+  .strict()
+
 export const kakaoAccountRecordSchema = z.object({
   account_id: z.string(),
   oauth_token: z.string(),
@@ -50,7 +66,14 @@ export const kakaoAccountRecordSchema = z.object({
   auth_method: z.union([z.literal('login'), z.literal('extract')]).optional(),
   created_at: z.string(),
   updated_at: z.string(),
+  // Renewal-feature additions. Both optional to preserve compatibility with
+  // legacy accounts; renewal degrades to "reauth required" when either is
+  // absent. See src/secrets/kakao-renewal.ts.
+  email: z.string().optional(),
+  encryptedPassword: kakaoEncryptedPasswordSchema.optional(),
 })
+
+export type KakaoEncryptedPassword = z.infer<typeof kakaoEncryptedPasswordSchema>
 
 export const kakaoPendingLoginRecordSchema = z.object({
   device_uuid: z.string(),

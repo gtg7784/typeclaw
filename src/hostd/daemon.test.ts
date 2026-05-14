@@ -9,6 +9,7 @@ import type { KakaoChannelBlock } from '@/secrets/schema'
 
 import { send, sendHttp } from './client'
 import { startDaemon, type Daemon, type PortbrokerCallbacks, type PortbrokerStartInput } from './daemon'
+import type { KakaoRenewalCallbacks, KakaoRenewalStartInput } from './kakao-renewal-manager'
 import { registrationFilePath, registrationsDir, socketPath } from './paths'
 import type { HttpInfoResult, ListResult, VersionResult } from './protocol'
 
@@ -651,6 +652,77 @@ describe('startDaemon', () => {
     expect(startCalls[0]?.cwd).toBe('/agent/with-broker')
     expect(startCalls[0]?.wsHostPort).toBe(54321)
     expect(startCalls[0]?.brokerToken).toBe('btok')
+  })
+
+  test('register invokes kakaoRenewal.start with the registered container and cwd', async () => {
+    const starts: KakaoRenewalStartInput[] = []
+    const kakaoRenewal: KakaoRenewalCallbacks = {
+      start: (input) => {
+        starts.push(input)
+      },
+      stop: async () => {},
+      drain: async () => {},
+    }
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, kakaoRenewal })
+
+    await send({ kind: 'register', containerName: 'kakao-agent', cwd: '/agent/kakao' })
+
+    expect(starts).toEqual([{ containerName: 'kakao-agent', cwd: '/agent/kakao' }])
+  })
+
+  test('deregister awaits kakaoRenewal.stop for that container', async () => {
+    const stopCalls: string[] = []
+    const kakaoRenewal: KakaoRenewalCallbacks = {
+      start: () => {},
+      stop: async (name) => {
+        stopCalls.push(name)
+      },
+      drain: async () => {},
+    }
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, kakaoRenewal })
+
+    await send({ kind: 'register', containerName: 'kakao-agent', cwd: '/agent/kakao' })
+    await send({ kind: 'deregister', containerName: 'kakao-agent' })
+
+    expect(stopCalls).toEqual(['kakao-agent'])
+  })
+
+  test('daemon.stop() drains kakaoRenewal across all registered containers', async () => {
+    const stopCalls: string[] = []
+    const kakaoRenewal: KakaoRenewalCallbacks = {
+      start: () => {},
+      stop: async (name) => {
+        stopCalls.push(name)
+      },
+      drain: async () => {},
+    }
+    const d = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, kakaoRenewal })
+
+    await send({ kind: 'register', containerName: 'a', cwd: '/agent/a' })
+    await send({ kind: 'register', containerName: 'b', cwd: '/agent/b' })
+    await d.stop()
+
+    expect(stopCalls.sort()).toEqual(['a', 'b'])
+  })
+
+  test('boot-time restore invokes kakaoRenewal.start for persisted registrations', async () => {
+    const starts: KakaoRenewalStartInput[] = []
+    const kakaoRenewal: KakaoRenewalCallbacks = {
+      start: (input) => {
+        starts.push(input)
+      },
+      stop: async () => {},
+      drain: async () => {},
+    }
+
+    const d1 = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, kakaoRenewal })
+    await send({ kind: 'register', containerName: 'persistent-kakao', cwd: '/agent/pk', restartToken: 't' })
+    await d1.stop()
+
+    starts.length = 0
+    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, kakaoRenewal })
+
+    expect(starts).toEqual([{ containerName: 'persistent-kakao', cwd: '/agent/pk' }])
   })
 
   test('HTTP control falls back to an ephemeral port when the preferred port is busy', async () => {

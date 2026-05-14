@@ -1,7 +1,11 @@
 import { createRequire } from 'node:module'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
+import { containerNameFromCwd } from '@/container'
+import { keysDir } from '@/hostd/paths'
+import { encrypt } from '@/secrets/encryption'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
+import { createKeyStore, type KeyStore } from '@/secrets/keys'
 
 export type KakaotalkBootstrapStatus = { ok: true } | { ok: false; reason: string }
 
@@ -15,6 +19,13 @@ export type KakaotalkLoginInput = {
   agentDir: string
   callbacks: KakaotalkLoginCallbacks
   loginFlow?: LoginFlowFn
+  // Test seam: inject a custom keystore (typically pointing at a tmpdir).
+  // Production uses ~/.typeclaw/keys/<containerName>.key.
+  keyStore?: KeyStore
+  // Test seam: override the containerName used to bind the encrypted
+  // password's AAD. Production derives it from basename(agentDir) via
+  // containerNameFromCwd to match what `typeclaw start` registers with hostd.
+  containerName?: string
 }
 
 export type LoginFlowOptions = {
@@ -82,6 +93,10 @@ export async function runKakaotalkBootstrap(input: KakaotalkLoginInput): Promise
 
     const now = new Date().toISOString()
     const accountId = result.credentials.user_id || 'default'
+    const containerName = input.containerName ?? containerNameFromCwd(resolve(input.agentDir))
+    const keyStore = input.keyStore ?? createKeyStore({ keysDir: keysDir() })
+    const key = await keyStore.ensure(containerName)
+    const encryptedPassword = encrypt(input.password, key, { containerName, accountId })
     await credManager.setAccount({
       account_id: accountId,
       oauth_token: result.credentials.access_token,
@@ -92,6 +107,8 @@ export async function runKakaotalkBootstrap(input: KakaotalkLoginInput): Promise
       auth_method: 'login',
       created_at: now,
       updated_at: now,
+      email: input.email,
+      encryptedPassword,
     })
     await credManager.setCurrentAccount(accountId)
     await credManager.clearPendingLogin()

@@ -14,6 +14,7 @@ import {
   type KakaotalkAuthResult,
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
+import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 
 import { c, done, errorLine } from './ui'
 
@@ -68,6 +69,44 @@ const addSub = defineCommand({
   },
 })
 
+// Only adapters with an interactive credential flow appear here. Bot tokens
+// (Discord/Slack/Telegram) are rotated by editing secrets.json or .env
+// directly — they don't need a guided CLI flow because there's no
+// passcode-on-phone equivalent. KakaoTalk is the only adapter that does, so
+// it's the only adapter that needs `reauth`.
+const REAUTHABLE_ADAPTERS = ['kakaotalk'] as const
+type ReauthableAdapter = (typeof REAUTHABLE_ADAPTERS)[number]
+
+const reauthSub = defineCommand({
+  meta: {
+    name: 'reauth',
+    description:
+      're-authenticate a channel adapter (currently only `kakaotalk`). Use after a stale-token 401 or to rotate the saved password.',
+  },
+  args: {
+    adapter: {
+      type: 'positional',
+      description: `which adapter to re-authenticate (${REAUTHABLE_ADAPTERS.join(' | ')})`,
+      required: false,
+    },
+  },
+  async run({ args }) {
+    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+
+    if (!isInitialized(cwd)) {
+      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first, or cd into an agent folder.'))
+      process.exit(1)
+    }
+
+    const configured = await readConfiguredChannels(cwd)
+    const adapter = await resolveReauthableAdapter(args.adapter, configured)
+
+    intro(`Re-authenticating channel: ${CHANNEL_LABELS[adapter]}`)
+
+    await runReauth(cwd, adapter)
+  },
+})
+
 export const channelCommand = defineCommand({
   meta: {
     name: 'channel',
@@ -75,8 +114,161 @@ export const channelCommand = defineCommand({
   },
   subCommands: {
     add: addSub,
+    reauth: reauthSub,
   },
 })
+
+async function resolveReauthableAdapter(
+  requested: string | undefined,
+  configured: Set<ChannelKind>,
+): Promise<ReauthableAdapter> {
+  if (requested !== undefined) {
+    if (!isReauthableAdapter(requested)) {
+      console.error(
+        errorLine(`Adapter "${requested}" does not support reauth. Supported: ${REAUTHABLE_ADAPTERS.join(', ')}.`),
+      )
+      process.exit(1)
+    }
+    if (!configured.has(requested)) {
+      console.error(
+        errorLine(
+          `${CHANNEL_LABELS[requested]} ("${requested}") is not configured in typeclaw.json. Run \`typeclaw channel add ${requested}\` first.`,
+        ),
+      )
+      process.exit(1)
+    }
+    return requested
+  }
+
+  const available = REAUTHABLE_ADAPTERS.filter((kind) => configured.has(kind))
+  if (available.length === 0) {
+    console.error(
+      errorLine(
+        `No reauth-capable channels are configured. Run \`typeclaw channel add ${REAUTHABLE_ADAPTERS[0]}\` first.`,
+      ),
+    )
+    process.exit(1)
+  }
+  if (available.length === 1) return available[0]!
+
+  const selected = await select<ReauthableAdapter>({
+    message: 'Pick a channel to re-authenticate',
+    options: available.map((kind) => ({ value: kind, label: CHANNEL_LABELS[kind] })),
+    initialValue: available[0],
+  })
+  if (isCancel(selected)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return selected
+}
+
+function isReauthableAdapter(value: string): value is ReauthableAdapter {
+  return (REAUTHABLE_ADAPTERS as ReadonlyArray<string>).includes(value)
+}
+
+async function runReauth(cwd: string, adapter: ReauthableAdapter): Promise<void> {
+  switch (adapter) {
+    case 'kakaotalk':
+      await runKakaotalkReauth(cwd)
+      return
+  }
+}
+
+async function runKakaotalkReauth(cwd: string): Promise<void> {
+  const existingEmail = await readExistingKakaotalkEmail(cwd)
+  const creds = await promptKakaotalkCredentials({ defaultEmail: existingEmail })
+
+  const s = spinner()
+  s.start('Logging in to KakaoTalk...')
+  const result = await runKakaotalkBootstrap({
+    email: creds.email,
+    password: creds.password,
+    agentDir: cwd,
+    callbacks: {
+      onPasscode: (code) => log.info(`Confirm this passcode on your phone: ${code}`),
+    },
+  })
+  if (!result.ok) {
+    s.stop(`KakaoTalk login failed: ${result.reason}`)
+    process.exit(1)
+  }
+  s.stop('KakaoTalk credentials refreshed in secrets.json.')
+
+  await maybePromptReauthRefresh(cwd, 'kakaotalk')
+}
+
+async function readExistingKakaotalkEmail(cwd: string): Promise<string | undefined> {
+  try {
+    const store = new SecretsKakaoCredentialStore({ mode: 'host', secretsPath: `${cwd}/secrets.json` })
+    const account = await store.getAccountWithRenewalFields()
+    return account?.email ?? undefined
+  } catch {
+    // First-time reauth or a brand-new agent dir: no account yet, prompt from scratch.
+    return undefined
+  }
+}
+
+// The renewed tokens are already on disk via secrets.json. What still needs
+// to happen depends on the running adapter's state:
+//   - Container NOT running → nothing to do; next `typeclaw start` picks them up.
+//   - Container running, adapter previously 401'd → `typeclaw reload` re-runs
+//     startAdapter, which loads the fresh tokens.
+//   - Container running, adapter currently live (e.g. proactive rotation) →
+//     reload will report `restart-required` because tokens are captured at
+//     start time; `typeclaw restart` is needed to actually pick them up.
+// We can't reliably distinguish the last two cases from outside the container
+// without calling reload first, so the next-step hints surface both paths.
+async function maybePromptReauthRefresh(cwd: string, adapter: ReauthableAdapter): Promise<void> {
+  const label = CHANNEL_LABELS[adapter]
+  const current = await status({ cwd }).catch(() => null)
+  if (current === null || current.kind !== 'running') {
+    done({
+      title: c.green(`${label} re-authenticated.`),
+      hints: [
+        { label: 'Start the agent:', command: 'typeclaw start' },
+        { label: 'Then check status:', command: 'typeclaw status' },
+      ],
+    })
+    return
+  }
+
+  const restartNow = await confirm({
+    message:
+      'The agent container is running. Restart it now so the adapter picks up the fresh credentials (recommended)?',
+    initialValue: true,
+  })
+  if (isCancel(restartNow) || !restartNow) {
+    done({
+      title: c.green(`${label} re-authenticated.`),
+      hints: [
+        { label: 'Try a live reload first:', command: 'typeclaw reload' },
+        { label: 'If reload reports restart-required:', command: 'typeclaw restart' },
+      ],
+    })
+    return
+  }
+
+  const stopped = await stop({ cwd })
+  if (!stopped.ok) {
+    console.error(errorLine(`Restart failed during stop: ${stopped.reason}`))
+    process.exit(1)
+  }
+  const started = await start({ cwd, preferredHostPort: config.port, cliEntry: process.argv[1] })
+  if (!started.ok) {
+    console.error(errorLine(`Restart failed during start: ${started.reason}`))
+    process.exit(1)
+  }
+  done({
+    title: c.green(
+      `${label} re-authenticated. Restarted ${started.plan.containerName} on host port ${started.hostPort}.`,
+    ),
+    hints: [
+      { label: 'Attach TUI:', command: 'typeclaw tui' },
+      { label: 'Follow logs:', command: 'typeclaw logs -f' },
+    ],
+  })
+}
 
 function validateAdapterArg(adapter: string, configured: Set<ChannelKind>): ChannelKind {
   if (!isChannelKind(adapter)) {
@@ -282,20 +474,24 @@ async function promptTelegramToken(): Promise<string> {
   return token
 }
 
-async function promptKakaotalkCredentials(): Promise<{ email: string; password: string }> {
+async function promptKakaotalkCredentials(
+  opts: { defaultEmail?: string } = {},
+): Promise<{ email: string; password: string }> {
   note(
     [
       'KakaoTalk authentication uses a personal account, registered as a',
       'tablet sub-device. Messages will be sent and received under this',
       'account. Use a non-primary account if possible.',
       '',
-      'After you submit the password, KakaoTalk may ask you to confirm a',
-      'passcode on your phone. Watch the screen for the code.',
+      'On reauth, the existing device_uuid is preserved automatically, so',
+      'subsequent logins for the same account typically skip the phone',
+      'passcode confirmation.',
     ].join('\n'),
     'About to log in to KakaoTalk',
   )
   const email = await text({
     message: 'KakaoTalk email',
+    ...(opts.defaultEmail !== undefined ? { initialValue: opts.defaultEmail, placeholder: opts.defaultEmail } : {}),
     validate: (value) => (value && value.length > 0 ? undefined : 'Email is required'),
   })
   if (isCancel(email)) {
