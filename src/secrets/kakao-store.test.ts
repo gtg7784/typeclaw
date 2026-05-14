@@ -162,4 +162,49 @@ describe('SecretsKakaoCredentialStore host mode', () => {
       expect(persisted.encryptedPassword).toBeUndefined()
     })
   })
+
+  test('getAccountWithRenewalFields surfaces email and encryptedPassword typed as the extended record', async () => {
+    await withStore(async (store, secretsPath) => {
+      await store.setAccount(account('user-1'))
+      const seeded = JSON.parse(await readFile(secretsPath, 'utf8'))
+      seeded.channels.kakaotalk.accounts['user-1'].email = 'user@example.com'
+      seeded.channels.kakaotalk.accounts['user-1'].encryptedPassword = {
+        v: 1,
+        alg: 'AES-256-GCM',
+        kid: 'sha256:0123456789abcdef',
+        iv: 'aXY=',
+        ciphertext: 'Y3Q=',
+        authTag: 'YXQ=',
+        createdAt: '2026-05-14T00:00:00.000Z',
+      }
+      await Bun.write(secretsPath, JSON.stringify(seeded))
+
+      const extended = await store.getAccountWithRenewalFields()
+      expect(extended?.email).toBe('user@example.com')
+      expect(extended?.encryptedPassword?.kid).toBe('sha256:0123456789abcdef')
+      expect(extended?.encryptedPassword?.v).toBe(1)
+      expect(extended?.encryptedPassword?.alg).toBe('AES-256-GCM')
+    })
+  })
+
+  test('getAccountWithRenewalFields accepts an explicit account id (multi-account selection)', async () => {
+    await withStore(async (store, secretsPath) => {
+      await store.setAccount(account('user-1'))
+      await store.setAccount(account('user-2'))
+      const seeded = JSON.parse(await readFile(secretsPath, 'utf8'))
+      seeded.channels.kakaotalk.accounts['user-2'].email = 'second@example.com'
+      await Bun.write(secretsPath, JSON.stringify(seeded))
+
+      const account2 = await store.getAccountWithRenewalFields('user-2')
+      expect(account2?.email).toBe('second@example.com')
+      const account1 = await store.getAccountWithRenewalFields('user-1')
+      expect(account1?.email).toBeUndefined()
+    })
+  })
+
+  test('getAccountWithRenewalFields returns null when the store has no current account', async () => {
+    await withStore(async (store) => {
+      expect(await store.getAccountWithRenewalFields()).toBeNull()
+    })
+  })
 })

@@ -45,6 +45,17 @@ export class SecretsKakaoCredentialStore {
     return config.accounts[config.current_account] ?? null
   }
 
+  // Same as getAccount but preserves the typeclaw-only renewal fields
+  // (email + encryptedPassword). Use this when the caller cares about
+  // those fields; the bare getAccount() returns the upstream-shaped slice
+  // that the agent-messenger SDK consumes via load()/save().
+  async getAccountWithRenewalFields(id?: string): Promise<KakaoChannelBlock['accounts'][string] | null> {
+    const block = this.readBlock()
+    const accountId = id ?? block.currentAccount
+    if (!accountId) return null
+    return block.accounts[accountId] ?? null
+  }
+
   async setAccount(account: SetKakaoAccountInput): Promise<void> {
     await this.writeBlock((block) => {
       const merged = mergeUpstreamAccount(account, block.accounts[account.account_id])
