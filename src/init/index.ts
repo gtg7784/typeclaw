@@ -702,18 +702,22 @@ export async function readExistingProviderApiKey(root: string, providerId: Known
 }
 
 // Detects whether the requested channel already has usable credentials in
-// `secrets.json#channels`, so the init wizard can offer to reuse them instead
-// of re-prompting for tokens. Mirrors `readExistingProviderApiKey`: returns
-// `true` only when ALL fields required to wire the adapter are present and
-// non-empty. Partial slots (e.g. `slack-bot` with `botToken` but no
-// `appToken`) return `false` so the wizard falls through to the normal
-// prompts and the missing field gets filled in.
+// `secrets.json#channels`, so the init wizard can offer to reuse them
+// instead of re-prompting for tokens. Mirrors `readExistingProviderApiKey`:
+// returns `true` only when ALL fields the adapter needs are present in a
+// shape `hydrateChannelEnvFromSecrets` would inject at runtime — both the
+// `{ value }` form and the `{ env }` env-binding form count, matching the
+// runtime resolution rules in `src/secrets/resolve.ts`. Partial slots (e.g.
+// `slack-bot` with `botToken` but no `appToken`) return `false` so the
+// missing field gets filled in by the normal prompt.
 //
-// KakaoTalk is structured differently: a usable block requires a non-null
-// `currentAccount` with a matching entry in `accounts`. The token-renewal
-// pipeline can mint a fresh access_token from those without re-running
-// `attemptLogin`, so we treat any complete block as reusable regardless of
-// the `oauth_token`'s freshness.
+// KakaoTalk reuse is stricter: a usable block requires both a complete
+// account (currentAccount + matching entry in accounts) AND the renewal
+// fields (email + encryptedPassword) the hostd renewal cron needs to mint
+// fresh tokens unattended (`src/secrets/kakao-renewal.ts`). Without those,
+// the saved `oauth_token` will work only until KakaoTalk's ~7-day TTL
+// expires, after which the user has to run `typeclaw channel reauth
+// kakaotalk` anyway — better to re-auth now during init.
 export async function hasExistingChannelSecrets(
   root: string,
   channel: 'discord' | 'slack' | 'telegram' | 'kakaotalk',
@@ -722,14 +726,11 @@ export async function hasExistingChannelSecrets(
   if (channels === null) return false
   switch (channel) {
     case 'discord':
-      return resolvedSecretValue(channels['discord-bot'], 'token') !== null
+      return hasSecretField(channels['discord-bot'], 'token')
     case 'slack':
-      return (
-        resolvedSecretValue(channels['slack-bot'], 'botToken') !== null &&
-        resolvedSecretValue(channels['slack-bot'], 'appToken') !== null
-      )
+      return hasSecretField(channels['slack-bot'], 'botToken') && hasSecretField(channels['slack-bot'], 'appToken')
     case 'telegram':
-      return resolvedSecretValue(channels['telegram-bot'], 'token') !== null
+      return hasSecretField(channels['telegram-bot'], 'token')
     case 'kakaotalk': {
       const block = channels.kakaotalk
       if (!isObjectRecord(block)) return false
@@ -737,25 +738,31 @@ export async function hasExistingChannelSecrets(
       if (typeof current !== 'string' || current.length === 0) return false
       const accounts = (block as { accounts?: unknown }).accounts
       if (!isObjectRecord(accounts)) return false
-      return current in accounts
+      const account = accounts[current]
+      if (!isObjectRecord(account)) return false
+      const email = (account as { email?: unknown }).email
+      const encryptedPassword = (account as { encryptedPassword?: unknown }).encryptedPassword
+      return typeof email === 'string' && email.length > 0 && isObjectRecord(encryptedPassword)
     }
   }
 }
 
-// Returns the resolved Secret value (string shorthand or `{ value }` object)
-// from a channel slot, or null when the field is missing or empty. Empty
-// strings count as missing — same policy as resolveSecret's env-wins layer,
-// applied to the on-disk value alone (env resolution is not relevant at
-// init-time, where we're checking whether to re-prompt the user).
-function resolvedSecretValue(slot: unknown, field: string): string | null {
-  if (!isObjectRecord(slot)) return null
+// Accepts either the `{ value }` form (resolves to a literal at runtime) or
+// the `{ env }` form (resolves at runtime by reading `process.env[<env>]`).
+// String shorthand is sugar for `{ value }`. The schema already rejects
+// empty strings via `z.string().min(1)`, so the length checks here are
+// defense-in-depth against forward-compat shape drift.
+function hasSecretField(slot: unknown, field: string): boolean {
+  if (!isObjectRecord(slot)) return false
   const secret = slot[field]
-  if (typeof secret === 'string') return secret.length > 0 ? secret : null
+  if (typeof secret === 'string') return secret.length > 0
   if (isObjectRecord(secret)) {
     const value = (secret as { value?: unknown }).value
-    if (typeof value === 'string' && value.length > 0) return value
+    if (typeof value === 'string' && value.length > 0) return true
+    const env = (secret as { env?: unknown }).env
+    if (typeof env === 'string' && env.length > 0) return true
   }
-  return null
+  return false
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

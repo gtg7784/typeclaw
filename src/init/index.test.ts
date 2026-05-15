@@ -1374,7 +1374,56 @@ describe('hasExistingChannelSecrets', () => {
     expect(await hasExistingChannelSecrets(root, 'discord')).toBe(false)
   })
 
-  test('returns true when kakaotalk has currentAccount with a matching accounts entry', async () => {
+  test('returns true when env-bound Secret is recorded under the field', async () => {
+    await seedChannels({ 'discord-bot': { token: { env: 'CUSTOM_DISCORD_ENV' } } })
+    expect(await hasExistingChannelSecrets(root, 'discord')).toBe(true)
+  })
+
+  test('returns true when slack-bot has BOTH fields env-bound', async () => {
+    await seedChannels({
+      'slack-bot': { botToken: { env: 'MY_SLACK_BOT' }, appToken: { env: 'MY_SLACK_APP' } },
+    })
+    expect(await hasExistingChannelSecrets(root, 'slack')).toBe(true)
+  })
+
+  test('returns true when slack-bot mixes value-bound and env-bound fields', async () => {
+    await seedChannels({
+      'slack-bot': { botToken: { value: 'xoxb-1' }, appToken: { env: 'MY_SLACK_APP' } },
+    })
+    expect(await hasExistingChannelSecrets(root, 'slack')).toBe(true)
+  })
+
+  test('returns true when kakaotalk has a full account record with renewal fields (email + encryptedPassword)', async () => {
+    await seedChannels({
+      kakaotalk: {
+        currentAccount: 'acc-1',
+        accounts: {
+          'acc-1': {
+            account_id: 'acc-1',
+            oauth_token: 'tok',
+            user_id: 'u1',
+            device_uuid: 'd1',
+            device_type: 'tablet',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+            email: 'user@example.com',
+            encryptedPassword: {
+              v: 1,
+              alg: 'AES-256-GCM',
+              kid: 'k1',
+              iv: 'iv1',
+              ciphertext: 'ct1',
+              authTag: 'tag1',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          },
+        },
+      },
+    })
+    expect(await hasExistingChannelSecrets(root, 'kakaotalk')).toBe(true)
+  })
+
+  test('returns false when kakaotalk account lacks renewal fields (legacy block, no unattended renewal possible)', async () => {
     await seedChannels({
       kakaotalk: {
         currentAccount: 'acc-1',
@@ -1391,7 +1440,7 @@ describe('hasExistingChannelSecrets', () => {
         },
       },
     })
-    expect(await hasExistingChannelSecrets(root, 'kakaotalk')).toBe(true)
+    expect(await hasExistingChannelSecrets(root, 'kakaotalk')).toBe(false)
   })
 
   test('returns false when kakaotalk currentAccount is null or missing from accounts', async () => {
