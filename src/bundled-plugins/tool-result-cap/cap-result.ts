@@ -3,7 +3,7 @@ import type { ContentPart, ToolResult } from '@/plugin'
 export type CapOptions = {
   imageMaxBytes: number
   textMaxBytes: number
-  exemptTools: ReadonlySet<string>
+  exemptTools?: ReadonlySet<string>
 }
 
 export type CapStats = {
@@ -12,23 +12,32 @@ export type CapStats = {
   bytesElided: number
 }
 
-// Sentinel marker used in both image and text replacement payloads so a future
-// pass (or the LLM itself) can recognize that a value was capped rather than
-// truthfully short. Plain English on purpose — these strings get fed to the
-// model on every turn, and unfamiliar tokens cost reasoning bandwidth.
 const ELIDED_MARKER = '[tool-result-cap: '
 
-export function capToolResult(tool: string, result: ToolResult, options: CapOptions): CapStats {
-  const stats: CapStats = { imagesReplaced: 0, textsTruncated: 0, bytesElided: 0 }
-  if (options.exemptTools.has(tool)) return stats
+// A capped text part is exactly the placeholder we generated: starts with
+// `[tool-result-cap: `, ends with `]`, and contains no inner `]`. The shape
+// check exists for idempotency so a previously-capped entry survives a second
+// pass untouched — but tight enough that real tool output that merely STARTS
+// with the marker (e.g. quotes a prior placeholder then continues with more
+// content) still gets capped on its trailing bulk. A prefix-only check would
+// be an oversized-text bypass.
+const ELIDED_PLACEHOLDER_PATTERN = /^\[tool-result-cap: [^\]]*\]$/
 
-  for (let i = 0; i < result.content.length; i++) {
-    const part = result.content[i]
+function isElidedPlaceholderText(text: string): boolean {
+  return ELIDED_PLACEHOLDER_PATTERN.test(text)
+}
+
+export function capContentParts(tool: string, content: ContentPart[], options: CapOptions): CapStats {
+  const stats: CapStats = { imagesReplaced: 0, textsTruncated: 0, bytesElided: 0 }
+  if (options.exemptTools?.has(tool)) return stats
+
+  for (let i = 0; i < content.length; i++) {
+    const part = content[i]
     if (!part) continue
     if (part.type === 'image') {
       const size = part.data.length
       if (size <= options.imageMaxBytes) continue
-      result.content[i] = {
+      content[i] = {
         type: 'text',
         text: `${ELIDED_MARKER}image ${part.mimeType} elided, ${size} bytes of base64 exceeded imageMaxBytes=${options.imageMaxBytes}]`,
       }
@@ -39,18 +48,21 @@ export function capToolResult(tool: string, result: ToolResult, options: CapOpti
     if (part.type === 'text') {
       const size = part.text.length
       if (size <= options.textMaxBytes) continue
-      // Keep a head slice of the original text so the LLM still has a hint of
-      // shape (e.g. "fetched HTML starts with <!DOCTYPE..."). Tail is dropped.
+      if (isElidedPlaceholderText(part.text)) continue
       const head = part.text.slice(0, options.textMaxBytes)
       const elided = size - options.textMaxBytes
       const replacement: ContentPart = {
         type: 'text',
         text: `${head}\n\n${ELIDED_MARKER}${elided} bytes truncated from text part; original was ${size} bytes, textMaxBytes=${options.textMaxBytes}]`,
       }
-      result.content[i] = replacement
+      content[i] = replacement
       stats.textsTruncated += 1
       stats.bytesElided += elided
     }
   }
   return stats
+}
+
+export function capToolResult(tool: string, result: ToolResult, options: CapOptions): CapStats {
+  return capContentParts(tool, result.content, options)
 }

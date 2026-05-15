@@ -3,7 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { noopPermissionService } from '@/permissions'
 import type { PluginContext, PluginExports, ToolAfterEvent } from '@/plugin'
 
-import toolResultCapPlugin from './index'
+import toolResultCapPlugin, { resolveCapOptionsFromConfig } from './index'
 
 function makeCtx(overrides: { config: unknown }): {
   ctx: PluginContext<any>
@@ -149,5 +149,27 @@ describe('tool-result-cap plugin', () => {
 
     expect(event.result.content[0]).toEqual({ type: 'image', mimeType: 'image/png', data: 'A'.repeat(5000) })
     expect(logs).toEqual([])
+  })
+})
+
+describe('resolveCapOptionsFromConfig', () => {
+  test('returns null when enabled is false (load-time cap disabled)', () => {
+    expect(resolveCapOptionsFromConfig({ enabled: false })).toBeNull()
+  })
+
+  test('returns options with defaults applied for undefined config block', () => {
+    const opts = resolveCapOptionsFromConfig(undefined)
+    expect(opts).not.toBeNull()
+    expect(opts!.imageMaxBytes).toBe(262_144)
+    expect(opts!.textMaxBytes).toBe(65_536)
+    expect(opts!.exemptTools?.size).toBe(0)
+  })
+
+  test('honors user overrides and materializes exemptTools as a Set', () => {
+    const opts = resolveCapOptionsFromConfig({ imageMaxBytes: 32_768, textMaxBytes: 8_192, exemptTools: ['read'] })
+    expect(opts).not.toBeNull()
+    expect(opts!.imageMaxBytes).toBe(32_768)
+    expect(opts!.textMaxBytes).toBe(8_192)
+    expect(opts!.exemptTools?.has('read')).toBe(true)
   })
 })

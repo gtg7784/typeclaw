@@ -15,6 +15,8 @@ The result is a session JSONL file that's tens of megabytes on disk but mostly o
 
 `tool-result-cap` registers a `tool.after` hook that inspects every tool's result and, in place, replaces oversized image/text parts with a short placeholder before pi-coding-agent appends the entry to the JSONL. The cap happens at the wire-format level, so the bloat never reaches disk or the LLM in the first place.
 
+For sessions that already contain oversized tool results from before this plugin was active (or before its limits were tightened), the **channel session factory also runs the same cap policy at rehydrate time**: just before `SessionManager.open(path)` reads the JSONL, the file is scanned for oversized `toolResult` entries and those entries are rewritten in place. The pass is idempotent and skipped entirely when `tool-result-cap.enabled` is `false`. **`typeclaw restart` is therefore the single user-facing recovery action for a poisoned channel session** — no scrubber subcommand, no manual surgery on `channels/sessions.json`.
+
 ## Config
 
 ```json
@@ -57,11 +59,14 @@ Plugin hook order is the order plugins are listed in `src/run/bundled-plugins.ts
 
 ## What it contributes
 
-| Kind | Name         | Notes                                                                                                                                  |
-| ---- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Hook | `tool.after` | Walks `event.result.content` and replaces oversized image/text parts in place. Logs one `info` line per capped call, silent otherwise. |
+| Kind                 | Name                          | Notes                                                                                                                                                                                                                                                                                                                       |
+| -------------------- | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Hook                 | `tool.after`                  | Walks `event.result.content` and replaces oversized image/text parts in place. Logs one `info` line per capped call, silent otherwise.                                                                                                                                                                                      |
+| Load-time pass       | `capJsonlFileInPlace`         | Called by `src/run/channel-session-factory.ts` before `SessionManager.open(path)` on every channel-session rehydrate. Walks JSONL entries, applies the same `capToolResult` per `toolResult` message, and rewrites the file atomically (temp + rename) when any entry mutated. Idempotent; passes malformed lines verbatim. |
+| Config-bridge helper | `resolveCapOptionsFromConfig` | Parses the `tool-result-cap` config block through the plugin's `configSchema` and returns the runtime `CapOptions` (or `null` when `enabled: false`). Lets non-plugin call sites share the same disable rule as the `tool.after` hook.                                                                                      |
 
 ## Tests
 
 - `cap-result.test.ts` — pure-function unit tests for the capping logic (image replacement, text truncation, mixed parts, exempt tools, empty results, in-place mutation invariant).
-- `index.test.ts` — composition tests (config schema defaults and validation, hook registration, disabled-mode short-circuit, logging on cap, silence on no-op).
+- `cap-jsonl.test.ts` — load-time pass: rewrite-on-mutation, no-write-when-clean, idempotency, exemptTools respected, non-toolResult entries preserved, malformed-line passthrough, missing-file safety, multi-entry batching, text truncation in JSONL form.
+- `index.test.ts` — composition tests (config schema defaults and validation, hook registration, disabled-mode short-circuit, logging on cap, silence on no-op, `resolveCapOptionsFromConfig` semantics).

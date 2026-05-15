@@ -1,12 +1,24 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession as defaultCreateSession } from '@/agent'
+import { capJsonlFileInPlace } from '@/bundled-plugins/tool-result-cap/cap-jsonl'
+import type { CapOptions } from '@/bundled-plugins/tool-result-cap/cap-result'
 import type { CreateSessionForChannel, ChannelRouter } from '@/channels'
 import type { ReloadRegistry } from '@/reload'
 import type { SessionFactory } from '@/sessions'
 import type { Stream } from '@/stream'
 
 import type { PluginRuntime } from './plugin-runtime'
+
+export type FactoryLogger = {
+  info: (message: string) => void
+  warn: (message: string) => void
+}
+
+const consoleLogger: FactoryLogger = {
+  info: (m) => console.info(m),
+  warn: (m) => console.warn(m),
+}
 
 export type BuildChannelSessionFactoryDeps = {
   cwd: string
@@ -20,10 +32,28 @@ export type BuildChannelSessionFactoryDeps = {
   // their inbound messages came from.
   getChannelRouter: () => ChannelRouter
   containerName?: string
+  // When set, rehydrating a session JSONL caps oversized tool results in the
+  // file before pi-coding-agent reads it. `null` disables the load-time pass
+  // (tool-result-cap.enabled=false in config, or no plugin block at all).
+  rehydrateCapOptions: CapOptions | null
+  logger?: FactoryLogger
   // Test seam: lets a fake stand in for the agent session creator so tests
   // can assert exactly which CreateSessionOptions the factory builds without
   // needing a live LLM, plugin runtime, or session manager on disk.
   createSession?: typeof defaultCreateSession
+}
+
+// Tight basename validation so a tampered or corrupt channels/sessions.json
+// can't point the load-time rewrite (or SessionManager.open) at a file
+// outside `sessionDir`. We never receive sessionFile from a remote source
+// during normal operation, but the file is operator-editable, so defense-
+// in-depth is cheap. Match pi-coding-agent's filename convention loosely:
+// no path separators, no NUL, must end in `.jsonl`.
+function isValidSessionFileBasename(name: string): boolean {
+  if (name.length === 0 || name.length > 255) return false
+  if (name.includes('/') || name.includes('\\') || name.includes('\0')) return false
+  if (name === '.' || name === '..' || name.startsWith('.')) return false
+  return name.endsWith('.jsonl')
 }
 
 // The production wiring for channel-routed sessions. Channel inbounds arrive
@@ -35,11 +65,19 @@ export type BuildChannelSessionFactoryDeps = {
 // "channel-aware" sessions that need the same full plumbing.
 export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps): CreateSessionForChannel {
   const createSession = deps.createSession ?? defaultCreateSession
+  const logger = deps.logger ?? consoleLogger
   return async ({ existingSessionId, existingSessionFile, origin, originRef }) => {
     const sessionDir = deps.sessionFactory.sessionDir()
     const sessionManager =
       existingSessionId !== undefined
-        ? tryReopenOrCreate(deps.cwd, sessionDir, existingSessionId, existingSessionFile)
+        ? tryReopenOrCreate(
+            deps.cwd,
+            sessionDir,
+            existingSessionId,
+            existingSessionFile,
+            deps.rehydrateCapOptions,
+            logger,
+          )
         : SessionManager.create(deps.cwd, sessionDir)
 
     const snap = deps.pluginRuntime.get()
@@ -87,18 +125,43 @@ function tryReopenOrCreate(
   sessionDir: string,
   existingSessionId: string,
   existingSessionFile: string | undefined,
+  capOptions: CapOptions | null,
+  logger: FactoryLogger,
 ): SessionManager {
   if (existingSessionFile === undefined) {
-    console.warn(
+    logger.warn(
       `[channels] session ${existingSessionId} has no sessionFile (v2 mapping not yet migrated); creating new`,
     )
     return SessionManager.create(cwd, sessionDir)
   }
+  if (!isValidSessionFileBasename(existingSessionFile)) {
+    logger.warn(
+      `[channels] session ${existingSessionId} has invalid sessionFile (${JSON.stringify(existingSessionFile)}); creating new`,
+    )
+    return SessionManager.create(cwd, sessionDir)
+  }
+  const path = `${sessionDir}/${existingSessionFile}`
+  if (capOptions !== null) {
+    try {
+      const stats = capJsonlFileInPlace(path, capOptions)
+      if (stats.entriesMutated > 0) {
+        logger.info(
+          `[channels] rehydrate-cap ${existingSessionFile}: entriesMutated=${stats.entriesMutated} imagesReplaced=${stats.imagesReplaced} textsTruncated=${stats.textsTruncated} bytesElided=${stats.bytesElided}`,
+        )
+      }
+    } catch (err) {
+      // Capping is best-effort: if the rewrite fails, fall through to the
+      // regular open path so the session still rehydrates uncapped rather
+      // than being killed by a transient FS error.
+      const reason = err instanceof Error ? err.message : String(err)
+      logger.warn(`[channels] rehydrate-cap failed for ${existingSessionFile}: ${reason}; continuing with open`)
+    }
+  }
   try {
-    return SessionManager.open(`${sessionDir}/${existingSessionFile}`)
+    return SessionManager.open(path)
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
-    console.warn(
+    logger.warn(
       `[channels] could not rehydrate session ${existingSessionId} from ${existingSessionFile}: ${reason}; creating new`,
     )
     return SessionManager.create(cwd, sessionDir)
