@@ -246,7 +246,7 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
     try {
       await Bun.write(
         join(agentDir, 'typeclaw.json'),
-        JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
+        JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
       )
       const factoryCalls: Array<{ cwd: string; file: CronFile }> = []
       const createSchedulerFor: SchedulerFactory = (opts) => {
@@ -275,7 +275,7 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
       await Bun.write(
         join(agentDir, 'typeclaw.json'),
         JSON.stringify({
-          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
           memory: { idleMs: 30000, dreaming: { schedule: '0 4 * * *' } },
         }),
       )
@@ -312,7 +312,7 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
       await Bun.write(
         join(agentDir, 'typeclaw.json'),
         JSON.stringify({
-          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
           memory: { idleMs: 30000, dreaming: { schedule: '0 4 * * *' } },
         }),
       )
@@ -345,7 +345,7 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
       await Bun.write(
         join(agentDir, 'typeclaw.json'),
         JSON.stringify({
-          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
           memory: { idleMs: 30000, dreaming: { schedule: '0 4 * * *' } },
         }),
       )

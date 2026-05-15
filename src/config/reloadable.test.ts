@@ -64,7 +64,10 @@ describe('createConfigReloadable', () => {
     const reloadable = createConfigReloadable({ cwd })
     await reloadable.reload()
 
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'not-a-known-model', port: 9999 }))
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ models: { default: 'not-a-known-model' }, port: 9999 }),
+    )
     const result = await reloadable.reload()
 
     expect(result.ok).toBe(false)

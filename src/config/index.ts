@@ -12,10 +12,12 @@ export {
   loadConfigSync,
   loadPluginConfigsSync,
   migrateLegacyConfigShape,
+  modelsSchema,
   mountSchema,
   portForwardSchema,
   reloadConfig,
   resolveModel,
+  resolveProfile,
   validateConfig,
   validateMount,
   type Config,
@@ -27,8 +29,10 @@ export {
   type GitignoreConfig,
   type MigrationResult,
   type MigrationStep,
+  type Models,
   type Mount,
   type PortForward,
+  type ResolvedProfile,
   type ValidateConfigResult,
 } from './config'
 export { type KnownModelRef, type KnownProviderId } from './providers'

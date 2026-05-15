@@ -19,6 +19,10 @@ export type RunSession = (override?: { userPrompt?: string }) => Promise<void>
 
 export type Subagent<P = unknown> = {
   systemPrompt: string
+  // Model profile this subagent prefers. Resolved against `config.models` at
+  // session construction. Unknown profile names fall back to `default` with
+  // a warning. See `Subagent` in `@/plugin/types` for the full contract.
+  profile?: string
   tools?: AgentSessionTools
   customTools?: ToolDefinition[]
   payloadSchema?: z.ZodType<P>
@@ -82,6 +86,7 @@ export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subage
     },
     ...(subagent.tools ? { tools: subagent.tools } : {}),
     customTools: subagent.customTools ?? [],
+    ...(subagent.profile !== undefined ? { profile: subagent.profile } : {}),
   })
 
 type NormalizedSubagentSession = {

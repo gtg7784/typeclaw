@@ -54,7 +54,7 @@ You yourself cannot run `typeclaw restart` — that is a host-stage command and 
 
 > **Top-level keys not in this table are not "ignored unknowns" anymore** — they are reserved for **plugin config blocks**. The schema's `catchall(z.unknown())` preserves them, and the plugin loader hands each block to its owning plugin's `configSchema` for validation. The bundled memory plugin owns `memory` at the top level — see the `typeclaw-memory` skill for that block's semantics. Do not write a top-level key unless you know which plugin owns it.
 
-Within the well-known ten (`$schema`, `port`, `model`, `mounts`, `plugins`, `alias`, `channels`, `portForward`, `docker`, `git`), **fields the schema doesn't predeclare are silently dropped**. Legacy top-level `dockerfile` and `gitignore` keys are migrated to `docker.file` / `git.ignore` automatically the first time the CLI loads the file — see **Legacy migration** below. Do not invent runtime fields like `provider`, `apiKey`, `temperature`, `maxTokens`, `systemPrompt`, `tools`, `timeout`, etc. — those are not plugin blocks, they are imaginary. If the user asks for one, say it is not yet supported and (if it makes sense) suggest they file a request.
+Within the well-known ten (`$schema`, `port`, `models`, `mounts`, `plugins`, `alias`, `channels`, `portForward`, `docker`, `git`), **fields the schema doesn't predeclare are silently dropped**. Legacy top-level `dockerfile` and `gitignore` keys are migrated to `docker.file` / `git.ignore` automatically the first time the CLI loads the file — see **Legacy migration** below. Do not invent runtime fields like `provider`, `apiKey`, `temperature`, `maxTokens`, `systemPrompt`, `tools`, `timeout`, etc. — those are not plugin blocks, they are imaginary. If the user asks for one, say it is not yet supported and (if it makes sense) suggest they file a request.
 
 A scaffolded `typeclaw.json` looks like:
 
@@ -491,7 +491,7 @@ What this means for you:
 
 ## Plugin config blocks
 
-Top-level keys in `typeclaw.json` that are **not** in the well-known ten (`$schema`, `port`, `model`, `mounts`, `plugins`, `alias`, `channels`, `portForward`, `docker`, `git`) are treated as plugin config blocks. The schema preserves them via `catchall(z.unknown())`, and `extractPluginConfigs` hands each block to the owning plugin's `configSchema` for validation at boot.
+Top-level keys in `typeclaw.json` that are **not** in the well-known ten (`$schema`, `port`, `models`, `mounts`, `plugins`, `alias`, `channels`, `portForward`, `docker`, `git`) are treated as plugin config blocks. The schema preserves them via `catchall(z.unknown())`, and `extractPluginConfigs` hands each block to the owning plugin's `configSchema` for validation at boot.
 
 This skill does **not** document individual plugin blocks. For schema, defaults, and reload semantics of a specific plugin's config, defer to that plugin's own skill:
 

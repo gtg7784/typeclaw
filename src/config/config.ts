@@ -205,11 +205,41 @@ export const networkSchema = z
 
 export type NetworkConfig = z.infer<typeof networkSchema>
 
+// `models` is a map from profile name to a single curated model ref. The
+// `default` profile is mandatory; every other profile is optional and falls
+// back to `default` at resolution time (see `resolveProfile`).
+//
+// Profile names are open strings; the runtime recognizes a handful of
+// well-known names by convention (`default`, `fast`, `deep`, `vision`) but
+// any string is valid. Subagents may declare a static profile preference;
+// callers may override per-spawn. Unknown profile names resolve to `default`
+// with a one-time warning at session construction.
+//
+// The pre-multi-model schema had a single `model: KnownModelRef` at the top
+// level. `migrateLegacyConfigShape` rewrites that to `models: { default: ... }`
+// on first load (and writes the result back to disk + commits via
+// `persistMigratedConfig`), so every downstream consumer sees the new shape.
+export const modelsSchema = z
+  .record(z.string().min(1), z.enum(knownModelRefs))
+  .refine((m) => 'default' in m, { message: 'models.default is required' })
+
+// Zod's `z.record(..., refine)` doesn't refine the inferred type — the inferred
+// shape is `Record<string, KnownModelRef>` where every access is `T | undefined`.
+// The runtime guarantee (the `refine` above) is that `default` is present, so
+// we narrow the type here. Every consumer (auth.ts, agent/index.ts,
+// resolveProfile) reads `models.default` on the hot path; without this
+// narrowing they all have to assert or `?? throw`, which is noise around an
+// invariant the schema already enforces.
+export type Models = Record<string, KnownModelRef> & { default: KnownModelRef }
+
 export const configSchema = z
   .object({
     $schema: z.string().optional(),
     port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
-    model: z.enum(knownModelRefs).default(DEFAULT_MODEL_REF),
+    // `default(() => ...)` ensures every parsed config has at least
+    // `models.default`. Direct `.default({ default: ... })` would short-circuit
+    // the refinement, so we lean on the lazy thunk form.
+    models: modelsSchema.default(() => ({ default: DEFAULT_MODEL_REF })) as unknown as z.ZodType<Models>,
     // Defaults to `[]` so the field can be omitted from `typeclaw.json` (no
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.
@@ -239,6 +269,28 @@ export function resolveModel(ref: KnownModelRef): Model<'openai-completions'> | 
   const providerId = ref.slice(0, slash) as KnownProviderId
   const modelId = ref.slice(slash + 1)
   return KNOWN_PROVIDERS[providerId].models[modelId as never]
+}
+
+// Resolves a profile name (e.g. `fast`, `deep`, `vision`) to a concrete model
+// ref. Unknown profiles fall back to `default` so callers can pass through
+// arbitrary subagent-declared or user-overridden strings without crashing.
+// Returns the resolved ref plus whether it came from the requested profile or
+// from the `default` fallback, so the caller can warn once per session
+// instead of every prompt.
+export type ResolvedProfile = {
+  ref: KnownModelRef
+  profile: string
+  fellBackToDefault: boolean
+}
+
+export function resolveProfile(models: Models, name: string | undefined): ResolvedProfile {
+  const requested = name ?? 'default'
+  const ref = models[requested]
+  if (ref !== undefined) {
+    return { ref, profile: requested, fellBackToDefault: false }
+  }
+  const fallback = models.default
+  return { ref: fallback, profile: 'default', fellBackToDefault: true }
 }
 
 // Resolves a mount's `path` field to an absolute host path, mirroring shell
@@ -309,7 +361,7 @@ export type FieldEffect = 'applied' | 'restart-required' | 'ignored'
 
 export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   $schema: 'ignored',
-  model: 'applied',
+  models: 'applied',
   port: 'restart-required',
   mounts: 'restart-required',
   plugins: 'restart-required',
@@ -376,7 +428,7 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
   const known = new Set([
     '$schema',
     'port',
-    'model',
+    'models',
     'mounts',
     'plugins',
     'alias',
@@ -468,6 +520,8 @@ export type MigrationStep =
   | { kind: 'gitignore-to-git-ignore' }
   | { kind: 'channels-allow-to-roles-member-match'; rules: string[]; dropped: string[] }
   | { kind: 'strip-permissions-gate-channel-respond' }
+  | { kind: 'model-to-models'; ref: string }
+  | { kind: 'drop-stale-model'; ref: string }
 
 export type MigrationResult = { json: unknown; changed: boolean; applied: MigrationStep[] }
 
@@ -481,7 +535,21 @@ export function migrateLegacyConfigShape(json: unknown): MigrationResult {
   const hasLegacyGitignore = 'gitignore' in obj
   const channelsAllowMigration = collectChannelsAllowMigration(obj)
   const hasLegacyGateChannelRespond = isPlainObject(obj.permissions) && 'gateChannelRespond' in obj.permissions
-  if (!hasLegacyDockerfile && !hasLegacyGitignore && !channelsAllowMigration.found && !hasLegacyGateChannelRespond) {
+  // The pre-multi-model schema had a top-level `model: KnownModelRef` and no
+  // `models` key. Detecting the legacy shape requires both: `model` present
+  // AND `models` absent. If both coexist (user hand-edited after auto-migrate
+  // but didn't delete the legacy key), `models` wins and `model` is dropped
+  // silently — same precedence rule as the dockerfile/gitignore migrations.
+  const hasLegacyModel = 'model' in obj && !('models' in obj) && typeof obj.model === 'string'
+  const hasStaleModelAlongsideModels = 'model' in obj && 'models' in obj
+  if (
+    !hasLegacyDockerfile &&
+    !hasLegacyGitignore &&
+    !channelsAllowMigration.found &&
+    !hasLegacyGateChannelRespond &&
+    !hasLegacyModel &&
+    !hasStaleModelAlongsideModels
+  ) {
     return { json, changed: false, applied: [] }
   }
 
@@ -524,6 +592,22 @@ export function migrateLegacyConfigShape(json: unknown): MigrationResult {
       next.permissions = perms
     }
     applied.push({ kind: 'strip-permissions-gate-channel-respond' })
+  }
+  if (hasLegacyModel) {
+    const ref = next.model as string
+    delete next.model
+    next.models = { default: ref }
+    applied.push({ kind: 'model-to-models', ref })
+  } else if (hasStaleModelAlongsideModels) {
+    // `models` wins (per the same precedence rule as dockerfile/gitignore), but
+    // the drop is still a tracked migration step so the disk rewrite gets a
+    // commit instead of silently dirtying the worktree. Without this, the
+    // file would be rewritten by persistMigratedConfig and no commit would
+    // fire (buildConfigMigrationCommitMessage returns null for empty applied
+    // lists), contradicting the invariant in persistMigratedConfig's comment.
+    const ref = typeof next.model === 'string' ? next.model : ''
+    delete next.model
+    applied.push({ kind: 'drop-stale-model', ref })
   }
   return { json: next, changed: true, applied }
 }
@@ -573,6 +657,10 @@ function shortStepLabel(step: MigrationStep): string {
       return 'lift channels.<adapter>.allow[] → roles.member.match[]'
     case 'strip-permissions-gate-channel-respond':
       return 'drop permissions.gateChannelRespond'
+    case 'model-to-models':
+      return 'lift model → models.default'
+    case 'drop-stale-model':
+      return 'drop stale legacy model alongside models'
   }
 }
 
@@ -590,6 +678,12 @@ function describeStep(step: MigrationStep): string {
     }
     case 'strip-permissions-gate-channel-respond':
       return 'drop permissions.gateChannelRespond (removed key)'
+    case 'model-to-models':
+      return `lift top-level model into models.default: ${step.ref}`
+    case 'drop-stale-model':
+      return step.ref !== ''
+        ? `drop stale top-level model (${step.ref}) — models block takes precedence`
+        : 'drop stale top-level model — models block takes precedence'
   }
 }
 

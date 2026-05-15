@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { __resetConfigForTesting, reloadConfig } from '@/config/config'
 import { parseSecretsFile } from '@/secrets/schema'
 
-import { getAuth, resetAuthForTesting } from './auth'
+import { getAuth, getAuthFor, resetAuthForTesting } from './auth'
 
 describe('getAuth', () => {
   let prevOpenai: string | undefined
@@ -54,7 +54,7 @@ describe('getAuth', () => {
   test('env-wins: FIREWORKS_API_KEY satisfies hasAuth without persisting to secrets.json', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
+      JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
     )
     reloadConfig(cwd)
     process.env.FIREWORKS_API_KEY = 'fw_test'
@@ -71,7 +71,7 @@ describe('getAuth', () => {
   })
 
   test('env-wins: ZAI_API_KEY satisfies hasAuth for zai (paygo) without persisting to secrets.json', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'zai/glm-4.6' }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'zai/glm-4.6' } }))
     reloadConfig(cwd)
     process.env.ZAI_API_KEY = 'zai_test'
 
@@ -86,7 +86,7 @@ describe('getAuth', () => {
   })
 
   test('env-wins: ZAI_CODING_API_KEY satisfies hasAuth for zai-coding (subscription) and does not bleed into zai', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'zai-coding/glm-5.1' }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'zai-coding/glm-5.1' } }))
     reloadConfig(cwd)
     process.env.ZAI_CODING_API_KEY = 'zai_coding_test'
 
@@ -100,7 +100,7 @@ describe('getAuth', () => {
   })
 
   test('env-wins: OPENAI_API_KEY satisfies hasAuth without persisting to secrets.json', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'openai/gpt-5.4-nano' } }))
     reloadConfig(cwd)
     process.env.OPENAI_API_KEY = 'sk-test'
 
@@ -117,7 +117,7 @@ describe('getAuth', () => {
   test('env wins over file value when both are set', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
+      JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
     )
     await writeFile(
       join(cwd, 'secrets.json'),
@@ -138,7 +138,7 @@ describe('getAuth', () => {
   test('file value is used when env var is unset', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
+      JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
     )
     await writeFile(
       join(cwd, 'secrets.json'),
@@ -163,7 +163,7 @@ describe('getAuth', () => {
   test('does NOT strip .env after layering env-resolved api-key in-memory', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
+      JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
     )
     const original = 'FIREWORKS_API_KEY=fw_from_env\nUNRELATED=keep-me\n'
     await writeFile(join(cwd, '.env'), original)
@@ -176,7 +176,7 @@ describe('getAuth', () => {
   })
 
   test('preserves an existing OAuth credential and ignores the .env key', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'openai/gpt-5.4-nano' } }))
     const oauthCredential = {
       type: 'oauth' as const,
       access_token: 'tok',
@@ -197,7 +197,7 @@ describe('getAuth', () => {
   })
 
   test('does not touch .env when an OAuth credential already owns the provider slot', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'openai/gpt-5.4-nano' } }))
     const oauthCredential = {
       type: 'oauth' as const,
       access_token: 'tok',
@@ -219,7 +219,7 @@ describe('getAuth', () => {
   })
 
   test('falls back to a dummy in-memory storage when the provider env var is missing under NODE_ENV=test', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'openai/gpt-5.4-nano' } }))
     reloadConfig(cwd)
     process.env.NODE_ENV = 'test'
 
@@ -230,7 +230,7 @@ describe('getAuth', () => {
   })
 
   test('caches the auth object across calls', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'openai/gpt-5.4-nano' } }))
     reloadConfig(cwd)
     process.env.OPENAI_API_KEY = 'sk-test'
 
@@ -243,7 +243,7 @@ describe('getAuth', () => {
   test('legacy v1 envelope is read on first boot (transparent upgrade)', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }),
+      JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
     )
     await writeFile(
       join(cwd, 'secrets.json'),
@@ -259,7 +259,7 @@ describe('getAuth', () => {
   })
 
   test('migrates a legacy auth.json to secrets.json on first getAuth()', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'openai/gpt-5.4-nano' }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'openai/gpt-5.4-nano' } }))
     await writeFile(
       join(cwd, 'auth.json'),
       JSON.stringify({
@@ -287,3 +287,113 @@ async function readSecretsFile(path: string): Promise<{ providers: Record<string
   if (!result.ok) throw new Error(`secrets.json failed to parse: ${result.reason}`)
   return result.file
 }
+
+describe('getAuthFor — per-provider lazy resolution', () => {
+  let prevOpenai: string | undefined
+  let prevFireworks: string | undefined
+  let prevNodeEnv: string | undefined
+  let prevCwd: string
+  let cwd: string
+
+  beforeEach(async () => {
+    prevOpenai = process.env.OPENAI_API_KEY
+    prevFireworks = process.env.FIREWORKS_API_KEY
+    prevNodeEnv = process.env.NODE_ENV
+    delete process.env.OPENAI_API_KEY
+    delete process.env.FIREWORKS_API_KEY
+    cwd = await mkdtemp(join(tmpdir(), 'typeclaw-authfor-'))
+    prevCwd = process.cwd()
+    process.chdir(cwd)
+    resetAuthForTesting()
+  })
+
+  afterEach(async () => {
+    if (prevOpenai === undefined) delete process.env.OPENAI_API_KEY
+    else process.env.OPENAI_API_KEY = prevOpenai
+    if (prevFireworks === undefined) delete process.env.FIREWORKS_API_KEY
+    else process.env.FIREWORKS_API_KEY = prevFireworks
+    if (prevNodeEnv === undefined) delete process.env.NODE_ENV
+    else process.env.NODE_ENV = prevNodeEnv
+    resetAuthForTesting()
+    __resetConfigForTesting()
+    process.chdir(prevCwd)
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  test('returns the requested provider when called with an explicit providerId', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        models: {
+          default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          fast: 'openai/gpt-5.4-nano',
+        },
+      }),
+    )
+    reloadConfig(cwd)
+    process.env.FIREWORKS_API_KEY = 'fw_test'
+    process.env.OPENAI_API_KEY = 'sk_test'
+
+    const fireworksAuth = getAuthFor('fireworks')
+    const openaiAuth = getAuthFor('openai')
+
+    expect(fireworksAuth.authStorage.hasAuth('fireworks')).toBe(true)
+    expect(openaiAuth.authStorage.hasAuth('openai')).toBe(true)
+  })
+
+  test('caches per-provider so repeated calls return the same instance', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
+    )
+    reloadConfig(cwd)
+    process.env.FIREWORKS_API_KEY = 'fw_test'
+
+    const a = getAuthFor('fireworks')
+    const b = getAuthFor('fireworks')
+
+    expect(a).toBe(b)
+    expect(a.authStorage).toBe(b.authStorage)
+    expect(a.modelRegistry).toBe(b.modelRegistry)
+  })
+
+  test('different providers get separate Auth instances (independent caches)', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        models: {
+          default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          fast: 'openai/gpt-5.4-nano',
+        },
+      }),
+    )
+    reloadConfig(cwd)
+    process.env.FIREWORKS_API_KEY = 'fw_test'
+    process.env.OPENAI_API_KEY = 'sk_test'
+
+    const fireworks = getAuthFor('fireworks')
+    const openai = getAuthFor('openai')
+
+    expect(fireworks).not.toBe(openai)
+    expect(fireworks.authStorage).not.toBe(openai.authStorage)
+  })
+
+  test('getAuth() back-compat shim resolves to the default profile provider', async () => {
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        models: {
+          default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          fast: 'openai/gpt-5.4-nano',
+        },
+      }),
+    )
+    reloadConfig(cwd)
+    process.env.FIREWORKS_API_KEY = 'fw_test'
+
+    const shimAuth = getAuth()
+    const direct = getAuthFor('fireworks')
+
+    expect(shimAuth).toBe(direct)
+  })
+})

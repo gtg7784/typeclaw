@@ -23,12 +23,18 @@ function secretsJsonPath(): string {
   return join(process.cwd(), 'secrets.json')
 }
 
-let cached: Auth | null = null
+// Per-provider cache. Sessions that use a profile mapped to provider X share
+// a single AuthStorage + ModelRegistry for that provider; first use of a new
+// provider lazily resolves its credentials. This replaces the singleton
+// `getAuth()` from before multi-model — the singleton couldn't represent
+// "auth for `default` is OpenAI, auth for `vision` is Fireworks" without
+// constructing both at boot.
+const cached = new Map<KnownProviderId, Auth>()
 
-export function getAuth(): Auth {
-  if (cached) return cached
+export function getAuthFor(providerId: KnownProviderId): Auth {
+  const existing = cached.get(providerId)
+  if (existing) return existing
 
-  const providerId = providerForModelRef(getConfig().model)
   const provider = KNOWN_PROVIDERS[providerId]
 
   if (process.env.NODE_ENV === 'test' && !hasAnyCredentialInEnv(provider.apiKeyEnv)) {
@@ -37,8 +43,9 @@ export function getAuth(): Auth {
       authStorage.setRuntimeApiKey(provider.id, TEST_DUMMY_API_KEY)
     }
     const modelRegistry = ModelRegistry.create(authStorage)
-    cached = { authStorage, modelRegistry }
-    return cached
+    const auth = { authStorage, modelRegistry }
+    cached.set(providerId, auth)
+    return auth
   }
 
   const authStorage = createSecretsStoreForAgent(secretsJsonPath())
@@ -53,16 +60,11 @@ export function getAuth(): Auth {
   // is set. OAuth credentials in the file still take precedence on read
   // because AuthStorage's hasAuth checks runtimeOverrides first only for
   // api-key-shaped credentials — OAuth on disk wins on its own.
-  //
-  // The previous code branch that wrote the env value into secrets.json and
-  // stripped the matching `.env` line has been removed. Env values stay in
-  // env; the file stays user-owned. See src/secrets/hydrate.ts for the same
-  // policy on the channels side.
   if (supportsApiKey(provider) && provider.apiKeyEnv) {
     const envKey = process.env[provider.apiKeyEnv]
     if (envKey !== undefined && envKey !== '') {
-      const existing = authStorage.get(provider.id)
-      if (existing === undefined || existing.type === 'api_key') {
+      const existingCred = authStorage.get(provider.id)
+      if (existingCred === undefined || existingCred.type === 'api_key') {
         authStorage.setRuntimeApiKey(provider.id, envKey)
       }
     }
@@ -74,12 +76,20 @@ export function getAuth(): Auth {
   }
 
   const modelRegistry = ModelRegistry.create(authStorage)
-  cached = { authStorage, modelRegistry }
-  return cached
+  const auth = { authStorage, modelRegistry }
+  cached.set(providerId, auth)
+  return auth
+}
+
+// Back-compat shim for callers that still want the `default` profile's auth
+// (the main session path). Equivalent to `getAuthFor(provider-of-default)`.
+export function getAuth(): Auth {
+  const defaultRef = getConfig().models.default
+  return getAuthFor(providerForModelRef(defaultRef))
 }
 
 export function resetAuthForTesting(): void {
-  cached = null
+  cached.clear()
 }
 
 function hasAnyCredentialInEnv(apiKeyEnv: string | null): boolean {
@@ -88,19 +98,32 @@ function hasAnyCredentialInEnv(apiKeyEnv: string | null): boolean {
 
 function missingCredentialMessage(providerId: KnownProviderId): string {
   const provider = KNOWN_PROVIDERS[providerId]
-  const ref = getConfig().model
-  const slash = ref.indexOf('/')
+  const defaultRef = getConfig().models.default
+  const defaultProviderId = providerForModelRef(defaultRef)
+  // For the `default` profile, name the model in the error message (matches
+  // pre-multi-model behavior). For any other profile, the user is mixing
+  // providers across profiles and the error must name the failing provider
+  // without claiming it's tied to the `default` model.
+  const isDefault = defaultProviderId === providerId
+  const ref = isDefault ? defaultRef : null
   const modelName =
-    (provider.models as Record<string, { name: string }>)[ref.slice(slash + 1)]?.name ?? ref.slice(slash + 1)
+    ref !== null
+      ? ((provider.models as Record<string, { name: string }>)[ref.slice(ref.indexOf('/') + 1)]?.name ??
+        ref.slice(ref.indexOf('/') + 1))
+      : null
 
   const oauthOnly = supportsOAuth(provider) && !supportsApiKey(provider)
   const apiKeyOnly = supportsApiKey(provider) && !supportsOAuth(provider)
 
   if (oauthOnly) {
-    return `No credentials for ${provider.name}. Run \`typeclaw init\` and pick "OAuth" to log in to ${modelName}.`
+    return modelName
+      ? `No credentials for ${provider.name}. Run \`typeclaw init\` and pick "OAuth" to log in to ${modelName}.`
+      : `No credentials for ${provider.name} (referenced by a non-default profile). Run \`typeclaw init\` and pick "OAuth" to log in.`
   }
   if (apiKeyOnly && provider.apiKeyEnv) {
-    return `Set ${provider.apiKeyEnv} in .env (or secrets.json#providers.${provider.id}.key.value) to use ${modelName} via ${provider.name}.`
+    return modelName
+      ? `Set ${provider.apiKeyEnv} in .env (or secrets.json#providers.${provider.id}.key.value) to use ${modelName} via ${provider.name}.`
+      : `Set ${provider.apiKeyEnv} in .env (or secrets.json#providers.${provider.id}.key.value) to use ${provider.name} (referenced by a non-default profile).`
   }
   return `No credentials for ${provider.name}. Either set ${provider.apiKeyEnv ?? '<api-key-env>'} in .env or run \`typeclaw init\` and pick "OAuth".`
 }

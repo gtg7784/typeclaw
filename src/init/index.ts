@@ -383,7 +383,7 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   // users would feel obligated to maintain values they never set.
   const config: Record<string, unknown> = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
-    model: options.model ?? DEFAULT_MODEL_REF,
+    models: { default: options.model ?? DEFAULT_MODEL_REF },
   }
   const channels: Record<string, Record<string, never>> = {}
   if (options.withDiscord) channels['discord-bot'] = {}

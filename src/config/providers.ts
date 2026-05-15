@@ -22,8 +22,9 @@ type KnownProvider = {
 }
 
 // Curated allowlist of providers + models that are wired into the agent
-// runtime. The values here back the Zod enum on `configSchema.model`, so any
-// model the user can put in `typeclaw.json` MUST appear here verbatim. The
+// runtime. The values here back the Zod enum on every entry in
+// `configSchema.models`, so any model the user can put in `typeclaw.json`
+// (under any profile name) MUST appear here verbatim. The
 // init-time picker may surface additional models from models.dev, but it
 // resolves them through this list before scaffolding (anything missing falls
 // back to a curated default).
