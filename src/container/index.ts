@@ -1,5 +1,10 @@
 export { logs, planLogs, type LogsPlan, type LogsResult } from './logs'
 export { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, resolveHostPort, resolveTuiToken } from './port'
+export {
+  requireContainerRunning,
+  type RequireContainerRunningOptions,
+  type RequireContainerRunningResult,
+} from './require-running'
 export { planShell, shell, type ShellPlan, type ShellResult } from './shell'
 export { status, type ContainerStatus, type StatusOptions } from './status'
 export {
