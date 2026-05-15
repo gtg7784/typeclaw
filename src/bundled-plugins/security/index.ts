@@ -10,8 +10,34 @@ import { checkSecretExfilReadGuard } from './policies/secret-exfil-read'
 import { checkSessionSearchSecretsGuard } from './policies/session-search-secrets'
 import { checkSsrfGuard } from './policies/ssrf'
 import { checkSystemPromptLeakGuard } from './policies/system-prompt-leak'
+import type { SecurityBlock } from './policy'
 
 export { SECURITY_PERMISSIONS, type SecurityPermission } from './permissions'
+
+// Maps each guard permission to a one-line hint about which built-in roles
+// already carry it. Kept next to the hook so adding a new bypass permission
+// forces a same-file edit — the hint is part of the permission's contract,
+// not optional documentation. `owner` always carries every `security.bypass.*`
+// via the wildcard expansion in builtins.ts.
+const BYPASS_ROLE_HINT: Record<string, string> = {
+  [SECURITY_PERMISSIONS.bypassSecretExfilBash]: 'owner and trusted have it by default',
+  [SECURITY_PERMISSIONS.bypassGitExfil]: 'only owner has it by default',
+  [SECURITY_PERMISSIONS.bypassGitRemoteTainted]: 'only owner has it by default',
+  [SECURITY_PERMISSIONS.bypassSecretExfilRead]: 'only owner has it by default',
+  [SECURITY_PERMISSIONS.bypassSsrf]: 'only owner has it by default',
+  [SECURITY_PERMISSIONS.bypassSessionSearchSecrets]: 'only owner has it by default',
+  [SECURITY_PERMISSIONS.bypassSystemPromptLeak]: 'only owner has it by default',
+  [SECURITY_PERMISSIONS.bypassOutboundSecret]: 'only owner has it by default',
+}
+
+function withPermissionHint(result: SecurityBlock | undefined, permission: string): SecurityBlock | undefined {
+  if (!result) return result
+  const hint = BYPASS_ROLE_HINT[permission] ?? 'no built-in role carries it'
+  return {
+    block: true,
+    reason: `${result.reason} Or run as a role carrying \`${permission}\` (${hint}); see the \`typeclaw-permissions\` skill.`,
+  }
+}
 
 export default definePlugin({
   permissions: Object.values(SECURITY_PERMISSIONS),
@@ -36,29 +62,55 @@ export default definePlugin({
           permittedBypass: can(SECURITY_PERMISSIONS.bypassGitExfil),
         })
 
-        const checks = [
+        const checks: (SecurityBlock | undefined)[] = [
           can(SECURITY_PERMISSIONS.bypassGitRemoteTainted)
             ? undefined
-            : checkGitRemoteTaintedGuard({ tool: event.tool, args: event.args, sessionId: event.sessionId }),
+            : withPermissionHint(
+                checkGitRemoteTaintedGuard({ tool: event.tool, args: event.args, sessionId: event.sessionId }),
+                SECURITY_PERMISSIONS.bypassGitRemoteTainted,
+              ),
           can(SECURITY_PERMISSIONS.bypassSecretExfilBash)
             ? undefined
-            : checkSecretExfilBashGuard({ tool: event.tool, args: event.args }),
+            : withPermissionHint(
+                checkSecretExfilBashGuard({ tool: event.tool, args: event.args }),
+                SECURITY_PERMISSIONS.bypassSecretExfilBash,
+              ),
           can(SECURITY_PERMISSIONS.bypassGitExfil)
             ? undefined
-            : checkGitExfilGuard({ tool: event.tool, args: event.args, sessionId: event.sessionId }),
+            : withPermissionHint(
+                checkGitExfilGuard({ tool: event.tool, args: event.args, sessionId: event.sessionId }),
+                SECURITY_PERMISSIONS.bypassGitExfil,
+              ),
           can(SECURITY_PERMISSIONS.bypassSecretExfilRead)
             ? undefined
-            : checkSecretExfilReadGuard({ tool: event.tool, args: event.args }),
-          can(SECURITY_PERMISSIONS.bypassSsrf) ? undefined : checkSsrfGuard({ tool: event.tool, args: event.args }),
+            : withPermissionHint(
+                checkSecretExfilReadGuard({ tool: event.tool, args: event.args }),
+                SECURITY_PERMISSIONS.bypassSecretExfilRead,
+              ),
+          can(SECURITY_PERMISSIONS.bypassSsrf)
+            ? undefined
+            : withPermissionHint(
+                checkSsrfGuard({ tool: event.tool, args: event.args }),
+                SECURITY_PERMISSIONS.bypassSsrf,
+              ),
           can(SECURITY_PERMISSIONS.bypassSessionSearchSecrets)
             ? undefined
-            : checkSessionSearchSecretsGuard({ tool: event.tool, args: event.args }),
+            : withPermissionHint(
+                checkSessionSearchSecretsGuard({ tool: event.tool, args: event.args }),
+                SECURITY_PERMISSIONS.bypassSessionSearchSecrets,
+              ),
           can(SECURITY_PERMISSIONS.bypassSystemPromptLeak)
             ? undefined
-            : checkSystemPromptLeakGuard({ tool: event.tool, args: event.args }),
+            : withPermissionHint(
+                checkSystemPromptLeakGuard({ tool: event.tool, args: event.args }),
+                SECURITY_PERMISSIONS.bypassSystemPromptLeak,
+              ),
           can(SECURITY_PERMISSIONS.bypassOutboundSecret)
             ? undefined
-            : checkOutboundSecretGuard({ tool: event.tool, args: event.args }),
+            : withPermissionHint(
+                checkOutboundSecretGuard({ tool: event.tool, args: event.args }),
+                SECURITY_PERMISSIONS.bypassOutboundSecret,
+              ),
         ]
         for (const result of checks) {
           if (result) return result

@@ -384,6 +384,44 @@ describe('security plugin wiring', () => {
     expect(result?.reason).toContain('secretExfilBash')
   })
 
+  test('block reason names the missing permission and the role hint', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(toolEvent('bash', { command: 'env' }), hookContext('/agent'))
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('Or run as a role carrying `security.bypass.secretExfilBash`')
+    expect(result?.reason).toContain('owner and trusted have it by default')
+    expect(result?.reason).toContain('typeclaw-permissions')
+  })
+
+  test('owner-only permission block reason names the owner-only hint', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(toolEvent('webfetch', { url: 'http://127.0.0.1:8080/admin' }), hookContext('/agent'))
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('Or run as a role carrying `security.bypass.ssrf`')
+    expect(result?.reason).toContain('only owner has it by default')
+  })
+
+  test('a permission-bypassed actor sees no block and therefore no permission hint', async () => {
+    const permissions = createPermissionService({
+      roles: {
+        member: {
+          match: [{ kind: 'channel', platform: 'slack', workspace: 'T0', chat: 'C0' }],
+          permissions: ['channel.respond', SECURITY_PERMISSIONS.bypassSecretExfilBash],
+        },
+      },
+    })
+    const hook = await toolBeforeHookWith(permissions)
+    const slackOrigin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    }
+    const result = await hook({ ...toolEvent('bash', { command: 'env' }), origin: slackOrigin }, hookContext('/agent'))
+    expect(result).toBeUndefined()
+  })
+
   test('session.end clears taint so a later session with the same ID is not falsely blocked', async () => {
     const before = await toolBeforeHook()
     const end = await sessionEndHook()

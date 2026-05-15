@@ -7,6 +7,7 @@ import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent
 
 import type { ChannelRouter } from '@/channels/router'
 import { getConfig, resolveModel } from '@/config'
+import type { PermissionService } from '@/permissions'
 import type {
   BuiltinToolRef,
   HookBus,
@@ -25,7 +26,7 @@ import { renderGitNudge } from './git-nudge'
 import { resolveBuiltinToolRefs, wrapPluginTool, wrapSystemAgentTool, wrapSystemTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
-import { renderSessionOrigin, type SessionOrigin } from './session-origin'
+import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
 import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
@@ -94,6 +95,13 @@ export type CreateSessionOptions = {
   // Enables the `restart` tool. Set when the agent is running inside a
   // typeclaw-managed container. Read from TYPECLAW_CONTAINER_NAME at the call site.
   containerName?: string
+  // The permission service the runtime resolved at boot. When provided, the
+  // resolved role and permission list for `options.origin` (or
+  // `options.originRef.current` at creation time) are rendered into the
+  // system prompt under `## Your role in this session` for non-TUI sessions.
+  // Omitting it falls back to the previous behavior (no role annotation),
+  // which is what tests and stand-alone callers want.
+  permissions?: PermissionService
 }
 
 export type CreateSessionResult = {
@@ -122,10 +130,11 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 
   const resourceLoader =
     options.systemPromptOverride !== undefined
-      ? await createOverrideResourceLoader(options.systemPromptOverride, options.origin)
+      ? await createOverrideResourceLoader(options.systemPromptOverride, options.origin, options.permissions)
       : await createResourceLoader({
           ...(options.plugins ? { plugins: options.plugins, materializedSkills } : {}),
           ...(options.origin ? { origin: options.origin } : {}),
+          ...(options.permissions ? { permissions: options.permissions } : {}),
         })
 
   const getOrigin: () => SessionOrigin | undefined =
@@ -401,9 +410,10 @@ function makePluginLogger(pluginName: string) {
 export async function createOverrideResourceLoader(
   systemPrompt: string,
   origin?: SessionOrigin,
+  permissions?: PermissionService,
 ): Promise<DefaultResourceLoader> {
   const loader = new DefaultResourceLoader({
-    systemPromptOverride: () => withOrigin(systemPrompt, origin),
+    systemPromptOverride: () => withOrigin(systemPrompt, origin, permissions),
     appendSystemPromptOverride: () => [],
   })
   await loader.reload()
@@ -415,6 +425,7 @@ export type CreateResourceLoaderOptions = {
   plugins?: PluginSessionWiring
   materializedSkills?: MaterializedSkills | null
   origin?: SessionOrigin
+  permissions?: PermissionService
 }
 
 export async function createResourceLoader(options: CreateResourceLoaderOptions = {}): Promise<DefaultResourceLoader> {
@@ -466,7 +477,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   }
 
   const loader = new DefaultResourceLoader({
-    systemPromptOverride: () => withOrigin(systemPrompt, options.origin),
+    systemPromptOverride: () => withOrigin(systemPrompt, options.origin, options.permissions),
     appendSystemPromptOverride: () => [],
     additionalSkillPaths,
   })
@@ -474,9 +485,23 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   return loader
 }
 
-function withOrigin(systemPrompt: string, origin: SessionOrigin | undefined): string {
+function withOrigin(
+  systemPrompt: string,
+  origin: SessionOrigin | undefined,
+  permissions: PermissionService | undefined,
+): string {
   if (!origin) return systemPrompt
-  return `${systemPrompt}\n\n${renderSessionOrigin(origin)}`
+  const roleContext = resolveRoleContext(origin, permissions)
+  return `${systemPrompt}\n\n${renderSessionOrigin(origin, Date.now(), roleContext)}`
+}
+
+function resolveRoleContext(
+  origin: SessionOrigin,
+  permissions: PermissionService | undefined,
+): SessionRoleContext | undefined {
+  if (permissions === undefined) return undefined
+  if (origin.kind === 'tui') return undefined
+  return permissions.describe(origin)
 }
 
 export function getBundledSkillsDir(): string {

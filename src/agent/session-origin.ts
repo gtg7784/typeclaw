@@ -52,17 +52,58 @@ export type SessionOrigin =
 export const PARTICIPANTS_TOP_K = 10
 export const PARTICIPANTS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
-export function renderSessionOrigin(origin: SessionOrigin, now: number = Date.now()): string {
+// Compact description of the role the runtime resolved for this session at
+// creation time. Rendered as a single block under the origin text for
+// non-TUI sessions so the agent knows what it can and cannot do without
+// having to call into the PermissionService itself. TUI is omitted because
+// TUI is always `owner` by construction — annotating it would add noise to
+// every interactive session for zero new information.
+//
+// For channel sessions this is a session-creation snapshot. The router
+// re-resolves per-turn for tool gating, but the system prompt is not
+// regenerated mid-session; the role line is accurate at admission and the
+// `typeclaw-permissions` skill spells out how to interpret it on later
+// turns when a different speaker may have spoken last.
+export type SessionRoleContext = {
+  role: string
+  permissions: readonly string[]
+}
+
+export function renderSessionOrigin(
+  origin: SessionOrigin,
+  now: number = Date.now(),
+  roleContext?: SessionRoleContext,
+): string {
   switch (origin.kind) {
     case 'tui':
       return renderTuiOrigin()
     case 'cron':
-      return renderCronOrigin(origin)
+      return withRoleContext(renderCronOrigin(origin), roleContext)
     case 'channel':
-      return renderChannelOrigin(origin, now)
+      return withRoleContext(renderChannelOrigin(origin, now), roleContext)
     case 'subagent':
-      return renderSubagentOrigin(origin)
+      return withRoleContext(renderSubagentOrigin(origin), roleContext)
   }
+}
+
+function withRoleContext(block: string, ctx: SessionRoleContext | undefined): string {
+  if (ctx === undefined) return block
+  return `${block}\n\n${renderRoleContext(ctx)}`
+}
+
+function renderRoleContext(ctx: SessionRoleContext): string {
+  const permList = ctx.permissions.length === 0 ? 'none' : ctx.permissions.map((p) => `\`${p}\``).join(', ')
+  return [
+    '## Your role in this session',
+    '',
+    `Role: \`${ctx.role}\`. Permissions: ${permList}.`,
+    '',
+    'This is the role the runtime resolved at session creation. Tool calls',
+    'and channel admission are gated by these permissions; a `blocked:` or',
+    '"denied by permissions" message means the current actor lacks the',
+    'permission the guard was looking for. See the `typeclaw-permissions`',
+    'skill for what each role can do and how to grant access.',
+  ].join('\n')
 }
 
 function renderTuiOrigin(): string {

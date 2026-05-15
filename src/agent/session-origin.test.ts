@@ -434,4 +434,80 @@ describe('renderSessionOrigin', () => {
     expect(out).not.toContain('This channel has')
     expect(out).not.toContain('members:')
   })
+
+  test('TUI origin does not render the role block even when role context is passed', () => {
+    const out = renderSessionOrigin({ kind: 'tui', sessionId: 'ses_abc' }, undefined, {
+      role: 'owner',
+      permissions: ['channel.respond', 'cron.schedule'],
+    })
+
+    expect(out).not.toContain('Your role in this session')
+    expect(out).not.toContain('`owner`')
+  })
+
+  test('cron origin appends the role block when role context is provided', () => {
+    const out = renderSessionOrigin({ kind: 'cron', jobId: 'job-42', jobKind: 'prompt' }, undefined, {
+      role: 'trusted',
+      permissions: ['channel.respond', 'cron.schedule', 'security.bypass.secretExfilBash'],
+    })
+
+    expect(out).toContain('## Your role in this session')
+    expect(out).toContain('Role: `trusted`.')
+    expect(out).toContain('`channel.respond`')
+    expect(out).toContain('`security.bypass.secretExfilBash`')
+    expect(out).toContain('typeclaw-permissions')
+    expect(out.indexOf('## Session origin')).toBeLessThan(out.indexOf('## Your role in this session'))
+  })
+
+  test('channel origin appends the role block under the existing channel content', () => {
+    const out = renderSessionOrigin(
+      {
+        kind: 'channel',
+        adapter: 'slack-bot',
+        workspace: 'T0123',
+        chat: 'C0ABCDE',
+        thread: null,
+      },
+      undefined,
+      { role: 'member', permissions: ['channel.respond'] },
+    )
+
+    expect(out).toContain('## Session origin')
+    expect(out).toContain('## Your role in this session')
+    expect(out).toContain('Role: `member`.')
+    expect(out).toContain('Permissions: `channel.respond`.')
+    expect(out.indexOf('Be concise')).toBeLessThan(out.indexOf('## Your role in this session'))
+  })
+
+  test('subagent origin appends the role block', () => {
+    const out = renderSessionOrigin(
+      { kind: 'subagent', subagent: 'memory-logger', parentSessionId: 'ses_parent' },
+      undefined,
+      { role: 'owner', permissions: ['channel.respond', 'cron.schedule', 'cron.modify'] },
+    )
+
+    expect(out).toContain('## Your role in this session')
+    expect(out).toContain('Role: `owner`.')
+  })
+
+  test('role block renders "none" when the resolved role has no permissions (guest)', () => {
+    const out = renderSessionOrigin(
+      {
+        kind: 'channel',
+        adapter: 'discord-bot',
+        workspace: '111',
+        chat: '222',
+        thread: null,
+      },
+      undefined,
+      { role: 'guest', permissions: [] },
+    )
+
+    expect(out).toContain('Role: `guest`. Permissions: none.')
+  })
+
+  test('omitting roleContext preserves the pre-existing rendering (no role block)', () => {
+    const withoutCtx = renderSessionOrigin({ kind: 'cron', jobId: 'job-x', jobKind: 'prompt' })
+    expect(withoutCtx).not.toContain('Your role in this session')
+  })
 })

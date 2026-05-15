@@ -145,6 +145,7 @@ export async function startAgent({
       pluginRuntime,
       getChannelRouter: () => channelManager.router,
       rehydrateCapOptions: resolveCapOptionsFromConfig(pluginConfigsByName['tool-result-cap']),
+      permissions: pluginsLoaded.permissions,
       ...containerNameOpt,
     }),
     permissions: pluginsLoaded.permissions,
@@ -169,6 +170,7 @@ export async function startAgent({
         systemPromptOverride: entry.pluginSubagent.systemPrompt,
         channelRouter: channelManager.router,
         origin,
+        permissions: pluginsLoaded.permissions,
         plugins: {
           registry: snap.registry,
           hooks: snap.hooks,
@@ -237,6 +239,7 @@ export async function startAgent({
         stream,
         channelRouter: channelManager.router,
         origin: cronOrigin,
+        permissions: pluginsLoaded.permissions,
         ...(snap.hasAnyPluginContent
           ? {
               plugins: {
