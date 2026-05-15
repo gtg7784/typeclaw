@@ -202,6 +202,151 @@ describe('loadMemory undreamed-tail filtering', () => {
   })
 })
 
+describe('loadMemory self-session fragment filtering', () => {
+  test('drops fragments authored by the current session', async () => {
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      [
+        '<!-- fragment source=ses_self entry=e1 -->',
+        '## already in this session history',
+        'body',
+        '',
+        '<!-- fragment source=ses_other entry=e2 -->',
+        '## from a sibling session',
+        'body',
+      ].join('\n'),
+    )
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self' })
+
+    expect(section).not.toContain('already in this session history')
+    expect(section).toContain('from a sibling session')
+  })
+
+  test('keeps fragments from other sessions on the same day intact', async () => {
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      [
+        '<!-- fragment source=ses_a entry=e1 -->',
+        '## session A note',
+        'body A',
+        '',
+        '<!-- fragment source=ses_b entry=e2 -->',
+        '## session B note',
+        'body B',
+      ].join('\n'),
+    )
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self_not_present' })
+
+    expect(section).toContain('session A note')
+    expect(section).toContain('session B note')
+  })
+
+  test('omits a stream subsection entirely when every fragment came from the current session', async () => {
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      [
+        '<!-- fragment source=ses_self entry=e1 -->',
+        '## one',
+        'body',
+        '',
+        '<!-- fragment source=ses_self entry=e2 -->',
+        '## two',
+        'body',
+      ].join('\n'),
+    )
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self' })
+
+    expect(section).not.toContain('## memory/2026-04-27.md')
+  })
+
+  test('keeps all fragments when currentSessionId is not provided', async () => {
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      ['<!-- fragment source=ses_a entry=e1 -->', '## one', 'body'].join('\n'),
+    )
+
+    const section = await loadMemory(agentDir)
+
+    expect(section).toContain('## one')
+  })
+
+  test('preserves a fragment from another session even when sandwiched between self-fragments', async () => {
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      [
+        '<!-- fragment source=ses_self entry=e1 -->',
+        '## self before',
+        'body',
+        '',
+        '<!-- fragment source=ses_other entry=e2 -->',
+        '## other in the middle',
+        'body',
+        '',
+        '<!-- fragment source=ses_self entry=e3 -->',
+        '## self after',
+        'body',
+      ].join('\n'),
+    )
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self' })
+
+    expect(section).not.toContain('self before')
+    expect(section).not.toContain('self after')
+    expect(section).toContain('other in the middle')
+  })
+
+  test('preserves preamble content before the first fragment marker', async () => {
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      [
+        'hand-written intro paragraph',
+        'second intro line',
+        '',
+        '<!-- fragment source=ses_self entry=e1 -->',
+        '## self note',
+        'body',
+      ].join('\n'),
+    )
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self' })
+
+    expect(section).toContain('hand-written intro paragraph')
+    expect(section).toContain('second intro line')
+    expect(section).not.toContain('self note')
+  })
+
+  test('a watermark line between self-fragment and other-fragment does not drop the other-fragment', async () => {
+    await mkdir(join(agentDir, 'memory'))
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.md'),
+      [
+        '<!-- fragment source=ses_self entry=e1 -->',
+        '## self',
+        'body',
+        '',
+        '<!-- watermark source=ses_self entry=e1 -->',
+        '<!-- fragment source=ses_other entry=e2 -->',
+        '## other',
+        'body',
+      ].join('\n'),
+    )
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self' })
+
+    expect(section).not.toContain('## self')
+    expect(section).toContain('## other')
+  })
+})
+
 describe('loadMemory watermark stripping', () => {
   test('strips bare watermark comments from injected stream content', async () => {
     await mkdir(join(agentDir, 'memory'))
