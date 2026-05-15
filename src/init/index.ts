@@ -121,6 +121,14 @@ export type InitOptions = {
   slackBotToken?: string
   slackAppToken?: string
   telegramBotToken?: string
+  // When reusing existing channel credentials from a pre-init `secrets.json`,
+  // the CLI passes `with<Adapter>: true` without a corresponding token so the
+  // scaffolded `typeclaw.json` wires the adapter while `writeSecrets` leaves
+  // the existing slot in `secrets.json#channels` untouched. Defaults below
+  // mirror the legacy derivation (`<token> !== undefined && !== ''`).
+  withDiscord?: boolean
+  withSlack?: boolean
+  withTelegram?: boolean
   withKakaotalk?: boolean
   runKakaotalkAuth?: KakaotalkAuthRunner
   onProgress?: (event: InitStepEvent) => void
@@ -146,6 +154,9 @@ export async function runInit({
   slackBotToken,
   slackAppToken,
   telegramBotToken,
+  withDiscord,
+  withSlack,
+  withTelegram,
   withKakaotalk = false,
   runKakaotalkAuth,
   onProgress,
@@ -208,9 +219,9 @@ export async function runInit({
     }
   }
 
-  const wantsDiscord = discordBotToken !== undefined && discordBotToken !== ''
-  const wantsSlack = slackBotToken !== undefined && slackBotToken !== ''
-  const wantsTelegram = telegramBotToken !== undefined && telegramBotToken !== ''
+  const wantsDiscord = withDiscord ?? (discordBotToken !== undefined && discordBotToken !== '')
+  const wantsSlack = withSlack ?? (slackBotToken !== undefined && slackBotToken !== '')
+  const wantsTelegram = withTelegram ?? (telegramBotToken !== undefined && telegramBotToken !== '')
   emit({ step: 'scaffold', phase: 'start' })
   await scaffold(cwd, {
     model,
@@ -688,6 +699,63 @@ export async function readExistingProviderApiKey(root: string, providerId: Known
   const provider = KNOWN_PROVIDERS[providerId]
   if (provider.apiKeyEnv === null) return null
   return new SecretsBackend(join(root, 'secrets.json')).tryReadProviderApiKeySync(providerId)
+}
+
+// Detects whether the requested channel already has usable credentials in
+// `secrets.json#channels`, so the init wizard can offer to reuse them instead
+// of re-prompting for tokens. Mirrors `readExistingProviderApiKey`: returns
+// `true` only when ALL fields required to wire the adapter are present and
+// non-empty. Partial slots (e.g. `slack-bot` with `botToken` but no
+// `appToken`) return `false` so the wizard falls through to the normal
+// prompts and the missing field gets filled in.
+//
+// KakaoTalk is structured differently: a usable block requires a non-null
+// `currentAccount` with a matching entry in `accounts`. The token-renewal
+// pipeline can mint a fresh access_token from those without re-running
+// `attemptLogin`, so we treat any complete block as reusable regardless of
+// the `oauth_token`'s freshness.
+export async function hasExistingChannelSecrets(
+  root: string,
+  channel: 'discord' | 'slack' | 'telegram' | 'kakaotalk',
+): Promise<boolean> {
+  const channels = new SecretsBackend(join(root, 'secrets.json')).tryReadChannelsSync()
+  if (channels === null) return false
+  switch (channel) {
+    case 'discord':
+      return resolvedSecretValue(channels['discord-bot'], 'token') !== null
+    case 'slack':
+      return (
+        resolvedSecretValue(channels['slack-bot'], 'botToken') !== null &&
+        resolvedSecretValue(channels['slack-bot'], 'appToken') !== null
+      )
+    case 'telegram':
+      return resolvedSecretValue(channels['telegram-bot'], 'token') !== null
+    case 'kakaotalk': {
+      const block = channels.kakaotalk
+      if (!isObjectRecord(block)) return false
+      const current = (block as { currentAccount?: unknown }).currentAccount
+      if (typeof current !== 'string' || current.length === 0) return false
+      const accounts = (block as { accounts?: unknown }).accounts
+      if (!isObjectRecord(accounts)) return false
+      return current in accounts
+    }
+  }
+}
+
+// Returns the resolved Secret value (string shorthand or `{ value }` object)
+// from a channel slot, or null when the field is missing or empty. Empty
+// strings count as missing — same policy as resolveSecret's env-wins layer,
+// applied to the on-disk value alone (env resolution is not relevant at
+// init-time, where we're checking whether to re-prompt the user).
+function resolvedSecretValue(slot: unknown, field: string): string | null {
+  if (!isObjectRecord(slot)) return null
+  const secret = slot[field]
+  if (typeof secret === 'string') return secret.length > 0 ? secret : null
+  if (isObjectRecord(secret)) {
+    const value = (secret as { value?: unknown }).value
+    if (typeof value === 'string' && value.length > 0) return value
+  }
+  return null
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

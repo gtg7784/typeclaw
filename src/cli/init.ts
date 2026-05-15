@@ -11,6 +11,7 @@ import {
 import type { DockerAvailability } from '@/container'
 import {
   findAgentDir,
+  hasExistingChannelSecrets,
   isDirectoryNonEmpty,
   isHatched,
   readExistingProviderApiKey,
@@ -78,7 +79,7 @@ export const init = defineCommand({
     log.info('Press ESC at any prompt to go back to the previous step.')
 
     const collected = await collectWizardInputs(cwd, defaultWizardPrompts)
-    const { model, llmAuth, vision, channelSecrets } = collected
+    const { model, llmAuth, vision, channelChoice, reuseExistingChannel, channelSecrets } = collected
     const { discordBotToken, slackBotToken, slackAppToken, telegramBotToken, kakaotalkEmail, kakaotalkPassword } =
       channelSecrets
 
@@ -86,7 +87,16 @@ export const init = defineCommand({
     //   - git backup (url + PAT) — Phase 10
     //   - cron.json scaffolding — Phase 9
     //   - compose.yml registration in $HOME/.typeclaw — Phase 12
-    const wantsKakaotalk = kakaotalkEmail !== undefined && kakaotalkPassword !== undefined
+
+    // Reuse means: wire the adapter in typeclaw.json but skip the prompt for
+    // fresh tokens / fresh kakaotalk login. `with<Adapter>` flags carry that
+    // intent down to scaffold(); writeSecrets / runKakaotalkAuth see no new
+    // input and leave the existing secrets.json slot untouched.
+    const reuseDiscord = reuseExistingChannel && channelChoice === 'discord'
+    const reuseSlack = reuseExistingChannel && channelChoice === 'slack'
+    const reuseTelegram = reuseExistingChannel && channelChoice === 'telegram'
+    const reuseKakaotalk = reuseExistingChannel && channelChoice === 'kakaotalk'
+    const wantsKakaotalk = (kakaotalkEmail !== undefined && kakaotalkPassword !== undefined) || reuseKakaotalk
     let hatchingOk = false
     let preflightFailure: Extract<DockerAvailability, { ok: false }> | null = null
     try {
@@ -99,18 +109,25 @@ export const init = defineCommand({
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
         ...(telegramBotToken !== undefined ? { telegramBotToken } : {}),
+        ...(reuseDiscord ? { withDiscord: true } : {}),
+        ...(reuseSlack ? { withSlack: true } : {}),
+        ...(reuseTelegram ? { withTelegram: true } : {}),
         ...(wantsKakaotalk
           ? {
               withKakaotalk: true,
-              runKakaotalkAuth: ({ cwd: agentDir }) =>
-                runKakaotalkBootstrap({
-                  email: kakaotalkEmail!,
-                  password: kakaotalkPassword!,
-                  agentDir,
-                  callbacks: {
-                    onPasscode: (code) => log.info(`Confirm this passcode on your phone: ${code}`),
-                  },
-                }),
+              ...(reuseKakaotalk
+                ? {}
+                : {
+                    runKakaotalkAuth: ({ cwd: agentDir }) =>
+                      runKakaotalkBootstrap({
+                        email: kakaotalkEmail!,
+                        password: kakaotalkPassword!,
+                        agentDir,
+                        callbacks: {
+                          onPasscode: (code) => log.info(`Confirm this passcode on your phone: ${code}`),
+                        },
+                      }),
+                  }),
             }
           : {}),
         onProgress: reportProgress(
@@ -158,6 +175,8 @@ interface WizardState {
   visionAuthMethod?: 'api-key' | 'oauth'
   visionLlmAuth?: LLMAuth
   channelChoice?: ChannelChoice
+  channelReuseOffered?: boolean
+  channelReuseExisting?: boolean
 }
 
 type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'kakaotalk' | 'none'
@@ -173,6 +192,8 @@ interface CollectedInputs {
     model: ModelOption
     llmAuth: LLMAuth
   }
+  channelChoice: ChannelChoice
+  reuseExistingChannel: boolean
   channelSecrets: {
     discordBotToken?: string
     slackBotToken?: string
@@ -194,6 +215,7 @@ type StepId =
   | 'pick-vision-auth-method'
   | 'enter-vision-api-key'
   | 'pick-channel'
+  | 'reuse-existing-channel'
   | 'channel-flow'
 
 export interface WizardPrompts {
@@ -225,6 +247,8 @@ export interface WizardPrompts {
     initial: KnownModelRef | undefined,
   ) => Promise<StepResult<ModelOption>>
   pickChannel: (initial: ChannelChoice | undefined) => Promise<StepResult<ChannelChoice>>
+  hasExistingChannelSecrets: (cwd: string, channel: Exclude<ChannelChoice, 'none'>) => Promise<boolean>
+  askReuseExistingChannel: (channel: Exclude<ChannelChoice, 'none'>) => Promise<StepResult<'reuse' | 'prompt'>>
   runChannelFlow: (choice: ChannelChoice) => Promise<StepResult<CollectedInputs['channelSecrets']>>
   buildOAuthAuth: (provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]) => LLMAuth
 }
@@ -240,6 +264,8 @@ export const defaultWizardPrompts: WizardPrompts = {
   pickVisionProvider,
   pickVisionModel,
   pickChannel,
+  hasExistingChannelSecrets,
+  askReuseExistingChannel,
   runChannelFlow,
   buildOAuthAuth: (provider) => ({
     kind: 'oauth',
@@ -422,7 +448,36 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
           step = stepBeforePickChannel(state)
           break
         }
+        if (state.channelChoice !== result.value) {
+          state.channelReuseOffered = undefined
+          state.channelReuseExisting = undefined
+        }
         state.channelChoice = result.value
+        step = result.value === 'none' ? 'channel-flow' : 'reuse-existing-channel'
+        break
+      }
+
+      case 'reuse-existing-channel': {
+        const choice = state.channelChoice as Exclude<ChannelChoice, 'none'>
+        const present = await prompts.hasExistingChannelSecrets(cwd, choice)
+        if (!present) {
+          state.channelReuseOffered = false
+          state.channelReuseExisting = false
+          step = 'channel-flow'
+          break
+        }
+        state.channelReuseOffered = true
+        const decision = await prompts.askReuseExistingChannel(choice)
+        if (decision.kind === 'back') {
+          step = 'pick-channel'
+          break
+        }
+        if (decision.value === 'reuse') {
+          log.info(`Using existing ${channelDisplayName(choice)} credentials from secrets.json.`)
+          state.channelReuseExisting = true
+          return finalize(state, {})
+        }
+        state.channelReuseExisting = false
         step = 'channel-flow'
         break
       }
@@ -430,19 +485,38 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
       case 'channel-flow': {
         const result = await prompts.runChannelFlow(state.channelChoice!)
         if (result.kind === 'back') {
-          step = 'pick-channel'
+          step = state.channelReuseOffered === true ? 'reuse-existing-channel' : 'pick-channel'
           break
         }
-        return {
-          model: state.model!,
-          llmAuth: state.llmAuth!,
-          ...(state.visionModel !== undefined && state.visionLlmAuth !== undefined
-            ? { vision: { model: state.visionModel, llmAuth: state.visionLlmAuth } }
-            : {}),
-          channelSecrets: result.value,
-        }
+        return finalize(state, result.value)
       }
     }
+  }
+}
+
+function finalize(state: WizardState, channelSecrets: CollectedInputs['channelSecrets']): CollectedInputs {
+  return {
+    model: state.model!,
+    llmAuth: state.llmAuth!,
+    ...(state.visionModel !== undefined && state.visionLlmAuth !== undefined
+      ? { vision: { model: state.visionModel, llmAuth: state.visionLlmAuth } }
+      : {}),
+    channelChoice: state.channelChoice ?? 'none',
+    reuseExistingChannel: state.channelReuseExisting === true,
+    channelSecrets,
+  }
+}
+
+function channelDisplayName(choice: Exclude<ChannelChoice, 'none'>): string {
+  switch (choice) {
+    case 'slack':
+      return 'Slack'
+    case 'discord':
+      return 'Discord'
+    case 'telegram':
+      return 'Telegram'
+    case 'kakaotalk':
+      return 'KakaoTalk'
   }
 }
 
@@ -524,6 +598,17 @@ async function askReuseExistingKey(
   const reuse = await confirm({
     message: `Reuse existing ${provider.name} API key from secrets.json?`,
     initialValue: initial ?? true,
+  })
+  if (isCancel(reuse)) return back()
+  return value(reuse === true ? 'reuse' : 'prompt')
+}
+
+async function askReuseExistingChannel(
+  channel: Exclude<ChannelChoice, 'none'>,
+): Promise<StepResult<'reuse' | 'prompt'>> {
+  const reuse = await confirm({
+    message: `Reuse existing ${channelDisplayName(channel)} credentials from secrets.json?`,
+    initialValue: true,
   })
   if (isCancel(reuse)) return back()
   return value(reuse === true ? 'reuse' : 'prompt')
