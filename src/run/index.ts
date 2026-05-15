@@ -185,6 +185,7 @@ export async function startAgent({
           ...(entry.pluginSubagent.customTools ? { customTools: entry.pluginSubagent.customTools } : {}),
           toolNamePrefix: `__plugin_${entry.pluginName}_${entry.subagentName}`,
         },
+        ...(entry.pluginSubagent.profile !== undefined ? { profile: entry.pluginSubagent.profile } : {}),
       })
       return {
         ...created,

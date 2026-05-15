@@ -541,6 +541,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
 
   return {
     systemPrompt: DREAMING_SYSTEM_PROMPT,
+    profile: 'deep',
     tools: [readTool, writeTool, lsTool],
     payloadSchema: dreamingPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,

@@ -41,6 +41,13 @@ export type RunSession = (override?: { userPrompt?: string }) => Promise<void>
 
 export type Subagent<P = unknown> = {
   systemPrompt: string
+  // Model profile this subagent prefers. Resolved against `models` in
+  // typeclaw.json at session construction. Unknown profile names fall back to
+  // `default` with a warning. Well-known names: `default`, `fast`, `deep`,
+  // `vision`. Subagents that want a specific tier (e.g. memory-logger wants
+  // `fast`, dreaming wants `deep`) declare it here so the user only has to
+  // map tier → model in config rather than wire each subagent individually.
+  profile?: string
   tools?: BuiltinToolRef[]
   customTools?: Tool<any>[]
   payloadSchema?: z.ZodType<P>

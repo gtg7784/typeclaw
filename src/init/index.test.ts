@@ -713,14 +713,14 @@ describe('scaffold', () => {
     expect(existsSync(join(root, 'memory'))).toBe(false)
   })
 
-  test('writes typeclaw.json with only $schema and model (no defaults duplicated)', async () => {
+  test('writes typeclaw.json with only $schema and models.default (no defaults duplicated)', async () => {
     await scaffold(root)
 
     const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
     expect(raw.endsWith('\n')).toBe(true)
     expect(JSON.parse(raw)).toEqual({
       $schema: './node_modules/typeclaw/typeclaw.schema.json',
-      model: 'openai/gpt-5.4-nano',
+      models: { default: 'openai/gpt-5.4-nano' },
     })
   })
 

@@ -72,7 +72,7 @@ type ScaffoldedConfig = {
 async function writeTypeclawConfig(dir: string, overrides: ScaffoldedConfig = {}): Promise<void> {
   const config = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
-    model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+    models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
     mounts: overrides.mounts ?? [],
     ...(overrides.dockerfile ? { dockerfile: overrides.dockerfile } : {}),
     ...(overrides.gitignore ? { gitignore: overrides.gitignore } : {}),
@@ -428,7 +428,7 @@ describe('planStart mounts', () => {
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     await writeFile(
       join(root, 'typeclaw.json'),
-      `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })}\n`,
+      `${JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } })}\n`,
     )
 
     const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
@@ -1416,7 +1416,7 @@ describe('start (composition)', () => {
       join(root, 'typeclaw.json'),
       `${JSON.stringify(
         {
-          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
           channels: { 'slack-bot': { allow: ['team:T0123'] } },
         },
         null,
@@ -1464,7 +1464,7 @@ describe('start (composition)', () => {
       join(root, 'typeclaw.json'),
       `${JSON.stringify(
         {
-          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
           roles: { member: { match: ['slack:T0123'] } },
         },
         null,
@@ -1490,6 +1490,42 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
     expect(headAfter).toBe(headBefore)
+  })
+
+  test('start auto-commits the typeclaw.json model→models.default migration (multi-model regression)', async () => {
+    // given: an agent folder with the legacy top-level `model` key, already committed
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(
+      join(root, 'typeclaw.json'),
+      `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' }, null, 2)}\n`,
+    )
+    await runGit(root, ['add', '.gitignore', 'package.json', 'packages/.gitkeep', 'typeclaw.json'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    expect(result.ok).toBe(true)
+    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
+    expect(subjects).toContain('typeclaw.json: lift model → models.default')
+    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfter).not.toBe(headBefore)
+    const onDisk = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8'))
+    expect(onDisk).not.toHaveProperty('model')
+    expect(onDisk.models).toEqual({ default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' })
+    const tracked = JSON.parse(await runGit(root, ['show', 'HEAD:typeclaw.json']))
+    expect(tracked).toEqual(onDisk)
   })
 
   test('auto-commits bun.lock drift on start (e.g. after a typeclaw CLI upgrade rewrote it)', async () => {

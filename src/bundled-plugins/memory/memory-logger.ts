@@ -228,6 +228,7 @@ export function createMemoryLoggerSubagent(
   const logger = options.logger ?? consoleLogger
   return {
     systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
+    profile: 'fast',
     tools: [readTool],
     customTools: [appendTool],
     payloadSchema: memoryLoggerPayloadSchema,

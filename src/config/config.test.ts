@@ -13,28 +13,104 @@ import {
   loadPluginConfigsSync,
   migrateLegacyConfigShape,
   mountSchema,
+  resolveProfile,
   validateConfig,
   validateMount,
+  type Models,
 } from './config'
 
 const isRoot = typeof process.getuid === 'function' && process.getuid() === 0
 
 const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
+const VALID_MODEL_2 = 'openai/gpt-5.4-nano'
+
+describe('configSchema models field', () => {
+  test('defaults to { default: <DEFAULT_MODEL_REF> } when omitted', () => {
+    const parsed = configSchema.parse({})
+    expect(parsed.models).toEqual({ default: 'openai/gpt-5.4-nano' })
+  })
+
+  test('accepts a single-key models map (just default)', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
+    expect(parsed.models).toEqual({ default: VALID_MODEL })
+  })
+
+  test('accepts multiple profiles', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL, fast: VALID_MODEL_2, deep: VALID_MODEL, vision: VALID_MODEL_2 },
+    })
+    expect(parsed.models.default).toBe(VALID_MODEL)
+    expect(parsed.models.fast).toBe(VALID_MODEL_2)
+    expect(parsed.models.deep).toBe(VALID_MODEL)
+    expect(parsed.models.vision).toBe(VALID_MODEL_2)
+  })
+
+  test('accepts user-defined profile names alongside well-known ones', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL, 'cheap-batch': VALID_MODEL_2 },
+    })
+    expect(parsed.models['cheap-batch']).toBe(VALID_MODEL_2)
+  })
+
+  test('rejects models map without default', () => {
+    expect(() => configSchema.parse({ models: { fast: VALID_MODEL } })).toThrow()
+  })
+
+  test('rejects unknown model refs', () => {
+    expect(() => configSchema.parse({ models: { default: 'not-a-real-model' } })).toThrow()
+  })
+
+  test('rejects empty profile names', () => {
+    expect(() => configSchema.parse({ models: { '': VALID_MODEL } })).toThrow()
+  })
+})
+
+describe('resolveProfile', () => {
+  const models: Models = { default: VALID_MODEL, fast: VALID_MODEL_2 }
+
+  test('returns the requested profile when present', () => {
+    const result = resolveProfile(models, 'fast')
+    expect(result.ref).toBe(VALID_MODEL_2)
+    expect(result.profile).toBe('fast')
+    expect(result.fellBackToDefault).toBe(false)
+  })
+
+  test('returns default when name is undefined', () => {
+    const result = resolveProfile(models, undefined)
+    expect(result.ref).toBe(VALID_MODEL)
+    expect(result.profile).toBe('default')
+    expect(result.fellBackToDefault).toBe(false)
+  })
+
+  test('returns default when name is "default"', () => {
+    const result = resolveProfile(models, 'default')
+    expect(result.ref).toBe(VALID_MODEL)
+    expect(result.profile).toBe('default')
+    expect(result.fellBackToDefault).toBe(false)
+  })
+
+  test('falls back to default when requested profile is missing, flagging the fallback', () => {
+    const result = resolveProfile(models, 'deep')
+    expect(result.ref).toBe(VALID_MODEL)
+    expect(result.profile).toBe('default')
+    expect(result.fellBackToDefault).toBe(true)
+  })
+})
 
 describe('configSchema', () => {
   test('defaults mounts to [] when omitted (predating the field is fine)', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
     expect(parsed.mounts).toEqual([])
   })
 
   test('accepts config with empty mounts array', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, mounts: [] })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, mounts: [] })
     expect(parsed.mounts).toEqual([])
   })
 
   test('accepts config with one mount, defaulting readOnly to false', () => {
     const parsed = configSchema.parse({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       mounts: [{ name: 'projects', path: '~/projects' }],
     })
     expect(parsed.mounts).toEqual([{ name: 'projects', path: '~/projects', readOnly: false }])
@@ -42,7 +118,7 @@ describe('configSchema', () => {
 
   test('preserves readOnly: true when provided', () => {
     const parsed = configSchema.parse({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       mounts: [{ name: 'notes', path: '~/notes', readOnly: true }],
     })
     expect(parsed.mounts[0]?.readOnly).toBe(true)
@@ -50,7 +126,7 @@ describe('configSchema', () => {
 
   test('preserves description when provided', () => {
     const parsed = configSchema.parse({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       mounts: [{ name: 'src', path: '~/src', description: 'monorepo' }],
     })
     expect(parsed.mounts[0]?.description).toBe('monorepo')
@@ -59,33 +135,33 @@ describe('configSchema', () => {
 
 describe('configSchema alias field', () => {
   test('defaults to [] when omitted', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
     expect(parsed.alias).toEqual([])
   })
 
   test('accepts a non-empty alias array', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, alias: ['bongbong', '봉봉'] })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, alias: ['bongbong', '봉봉'] })
     expect(parsed.alias).toEqual(['bongbong', '봉봉'])
   })
 
   test('trims surrounding whitespace from each entry', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, alias: ['  bongbong  ', '\t봉봉\n'] })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, alias: ['  bongbong  ', '\t봉봉\n'] })
     expect(parsed.alias).toEqual(['bongbong', '봉봉'])
   })
 
   test('rejects empty-string entries', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, alias: [''] })).toThrow()
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, alias: [''] })).toThrow()
   })
 
   test('rejects whitespace-only entries (would otherwise match every message after trim)', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, alias: ['   '] })).toThrow()
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, alias: ['   '] })).toThrow()
   })
 })
 
 describe('configSchema preserves unknown top-level keys (plugin config blocks)', () => {
   test('a top-level "memory" block survives the schema as unknown (consumed by the bundled memory plugin)', () => {
     const parsed = configSchema.parse({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       memory: { idleMs: 60_000, dreaming: { schedule: '30 3 * * *' } },
     })
     expect(parsed['memory']).toEqual({ idleMs: 60_000, dreaming: { schedule: '30 3 * * *' } })
@@ -93,7 +169,7 @@ describe('configSchema preserves unknown top-level keys (plugin config blocks)',
 
   test('agentBrowser is treated as plugin/user config instead of a core key', () => {
     const configs = extractPluginConfigs({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       agentBrowser: { dashboardProxy: false },
       customPlugin: { enabled: true },
     })
@@ -104,42 +180,47 @@ describe('configSchema preserves unknown top-level keys (plugin config blocks)',
 
 describe('portForwardSchema', () => {
   test('defaults to allow:* when omitted', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
     expect(parsed.portForward).toEqual({ allow: '*' })
   })
 
   test('accepts allow:* with no deny', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: '*' } })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, portForward: { allow: '*' } })
     expect(parsed.portForward).toEqual({ allow: '*' })
   })
 
   test('accepts allow:* with deny list', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: '*', deny: [9229, 9999] } })
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      portForward: { allow: '*', deny: [9229, 9999] },
+    })
     expect(parsed.portForward).toEqual({ allow: '*', deny: [9229, 9999] })
   })
 
   test('accepts allow as number array (allowlist mode)', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: [3000, 5173] } })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, portForward: { allow: [3000, 5173] } })
     expect(parsed.portForward).toEqual({ allow: [3000, 5173] })
   })
 
   test('accepts allow:[] as off-switch', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, portForward: { allow: [] } })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, portForward: { allow: [] } })
     expect(parsed.portForward).toEqual({ allow: [] })
   })
 
   test('rejects deny combined with allow:number[] so user typos do not silently drop the deny rule', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, portForward: { allow: [3000], deny: [9000] } })).toThrow(
-      /portForward\.deny is only meaningful when allow is/,
-    )
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, portForward: { allow: [3000], deny: [9000] } }),
+    ).toThrow(/portForward\.deny is only meaningful when allow is/)
   })
 
   test('rejects out-of-range port numbers in allow', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, portForward: { allow: [99999] } })).toThrow()
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, portForward: { allow: [99999] } })).toThrow()
   })
 
   test('rejects out-of-range port numbers in deny', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, portForward: { allow: '*', deny: [0] } })).toThrow()
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, portForward: { allow: '*', deny: [0] } }),
+    ).toThrow()
   })
 })
 
@@ -147,78 +228,89 @@ describe('networkSchema', () => {
   const FULL_DEFAULTS = { blockInternal: true, autoAllowResolvers: true, allow: [] as string[] }
 
   test('defaults to blockInternal:true, autoAllowResolvers:true, allow:[] when omitted (egress filter on for every agent unless opted out)', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
     expect(parsed.network).toEqual(FULL_DEFAULTS)
   })
 
   test('accepts an empty network object, inheriting all field defaults', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, network: {} })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, network: {} })
     expect(parsed.network).toEqual(FULL_DEFAULTS)
   })
 
   test('preserves blockInternal:false when explicitly opted out', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, network: { blockInternal: false } })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, network: { blockInternal: false } })
     expect(parsed.network.blockInternal).toBe(false)
   })
 
   test('preserves blockInternal:true when explicitly set (redundant with default, but harmless)', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, network: { blockInternal: true } })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, network: { blockInternal: true } })
     expect(parsed.network.blockInternal).toBe(true)
   })
 
   test('rejects non-boolean blockInternal', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { blockInternal: 'yes' } })).toThrow()
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { blockInternal: 1 } })).toThrow()
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, network: { blockInternal: 'yes' } })).toThrow()
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, network: { blockInternal: 1 } })).toThrow()
   })
 
   test('preserves autoAllowResolvers:false when explicitly opted out (closed filter for users who configure DNS via .env)', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, network: { autoAllowResolvers: false } })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, network: { autoAllowResolvers: false } })
     expect(parsed.network.autoAllowResolvers).toBe(false)
   })
 
   test('rejects non-boolean autoAllowResolvers', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { autoAllowResolvers: 'yes' } })).toThrow()
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, network: { autoAllowResolvers: 'yes' } }),
+    ).toThrow()
   })
 
   test('accepts bare IPv4 addresses in allow (single-host carve-out: AWS VPC DNS at 10.0.0.2, internal API server, etc.)', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, network: { allow: ['10.0.0.2', '10.210.1.42'] } })
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      network: { allow: ['10.0.0.2', '10.210.1.42'] },
+    })
     expect(parsed.network.allow).toEqual(['10.0.0.2', '10.210.1.42'])
   })
 
   test('accepts IPv4 CIDR ranges in allow (VPC subnet, ECS task subnet, etc.)', () => {
     const parsed = configSchema.parse({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       network: { allow: ['10.210.0.0/16', '172.20.0.0/24', '192.168.42.0/28'] },
     })
     expect(parsed.network.allow).toEqual(['10.210.0.0/16', '172.20.0.0/24', '192.168.42.0/28'])
   })
 
   test('rejects non-IPv4 strings in allow (bare hostname, garbage, etc.)', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['not-a-cidr'] } })).toThrow()
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['example.com'] } })).toThrow()
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, network: { allow: ['not-a-cidr'] } })).toThrow()
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, network: { allow: ['example.com'] } }),
+    ).toThrow()
   })
 
   test('rejects out-of-range IPv4 octets in allow (typo guard)', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['10.0.0.300'] } })).toThrow()
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['999.0.0.0/8'] } })).toThrow()
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, network: { allow: ['10.0.0.300'] } })).toThrow()
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, network: { allow: ['999.0.0.0/8'] } }),
+    ).toThrow()
   })
 
   test('rejects out-of-range CIDR prefix lengths in allow', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['10.0.0.0/33'] } })).toThrow()
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, network: { allow: ['10.0.0.0/33'] } }),
+    ).toThrow()
   })
 
   test('rejects IPv6 addresses in allow (scope is IPv4-only; IPv6 block list is not punched through)', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['fe80::1'] } })).toThrow()
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: ['fc00::/7'] } })).toThrow()
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, network: { allow: ['fe80::1'] } })).toThrow()
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, network: { allow: ['fc00::/7'] } })).toThrow()
   })
 
   test('rejects non-array allow', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, network: { allow: '10.0.0.0/8' } })).toThrow()
+    expect(() => configSchema.parse({ models: { default: VALID_MODEL }, network: { allow: '10.0.0.0/8' } })).toThrow()
   })
 
   test('does not leak into the plugin config map', () => {
     const plugins = extractPluginConfigs({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       network: { blockInternal: true, autoAllowResolvers: true, allow: [] },
       'my-plugin': { x: 1 },
     })
@@ -231,8 +323,8 @@ describe('docker.file schema', () => {
   const FULL_DEFAULTS = { ffmpeg: false, gh: true, python: true, tmux: true, append: [] }
 
   test('defaults to a fully-populated object when omitted (omitted == empty object)', () => {
-    const omitted = configSchema.parse({ model: VALID_MODEL })
-    const present = configSchema.parse({ model: VALID_MODEL, docker: { file: {} } })
+    const omitted = configSchema.parse({ models: { default: VALID_MODEL } })
+    const present = configSchema.parse({ models: { default: VALID_MODEL }, docker: { file: {} } })
 
     expect(omitted.docker.file).toEqual(FULL_DEFAULTS)
     expect(present.docker.file).toEqual(FULL_DEFAULTS)
@@ -240,7 +332,7 @@ describe('docker.file schema', () => {
 
   test('accepts custom Dockerfile lines in append order', () => {
     const parsed = configSchema.parse({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       docker: { file: { append: ['RUN apt-get update', 'ENV CUSTOM_TOOL=1'] } },
     })
     expect(parsed.docker.file.append).toEqual(['RUN apt-get update', 'ENV CUSTOM_TOOL=1'])
@@ -249,7 +341,7 @@ describe('docker.file schema', () => {
   test('rejects multiline append entries so each array item maps to one Dockerfile line', () => {
     expect(() =>
       configSchema.parse({
-        model: VALID_MODEL,
+        models: { default: VALID_MODEL },
         docker: { file: { append: ['RUN printf "one\ntwo"'] } },
       }),
     ).toThrow(/single Dockerfile lines/)
@@ -257,7 +349,7 @@ describe('docker.file schema', () => {
 
   test('feature toggles accept boolean and version-string forms; partial overrides preserve other defaults', () => {
     const parsed = configSchema.parse({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       docker: { file: { tmux: false, gh: '2.40.0', ffmpeg: true } },
     })
     expect(parsed.docker.file).toEqual({
@@ -270,52 +362,54 @@ describe('docker.file schema', () => {
   })
 
   test('python is boolean-only (string version is not a meaningful apt pin for the python3 meta-package)', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, docker: { file: { python: '3.11' } } })).toThrow()
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, docker: { file: { python: '3.11' } } }),
+    ).toThrow()
   })
 
   test('empty docker object resolves to defaulted docker.file', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, docker: {} })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, docker: {} })
     expect(parsed.docker.file).toEqual(FULL_DEFAULTS)
   })
 })
 
 describe('git.ignore schema', () => {
   test('defaults to an empty append array when omitted', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
     expect(parsed.git.ignore).toEqual({ append: [] })
   })
 
   test('accepts custom gitignore entries in append order', () => {
     const parsed = configSchema.parse({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       git: { ignore: { append: ['scratch/', '*.local.log'] } },
     })
     expect(parsed.git.ignore.append).toEqual(['scratch/', '*.local.log'])
   })
 
   test('defaults append to an empty array when git.ignore object is present', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, git: { ignore: {} } })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, git: { ignore: {} } })
     expect(parsed.git.ignore).toEqual({ append: [] })
   })
 
   test('rejects multiline append entries so each array item maps to one gitignore line', () => {
     expect(() =>
       configSchema.parse({
-        model: VALID_MODEL,
+        models: { default: VALID_MODEL },
         git: { ignore: { append: ['scratch/\n*.local.log'] } },
       }),
     ).toThrow(/single gitignore lines/)
   })
 
   test('empty git object resolves to defaulted git.ignore', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, git: {} })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL }, git: {} })
     expect(parsed.git.ignore).toEqual({ append: [] })
   })
 })
 
 describe('migrateLegacyConfigShape', () => {
   test('returns input unchanged when neither legacy key is present', () => {
-    const input = { model: VALID_MODEL, port: 9001 }
+    const input = { models: { default: VALID_MODEL }, port: 9001 }
     const result = migrateLegacyConfigShape(input)
     expect(result.changed).toBe(false)
     expect(result.json).toBe(input)
@@ -323,37 +417,37 @@ describe('migrateLegacyConfigShape', () => {
 
   test('moves legacy dockerfile into docker.file', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       dockerfile: { ffmpeg: true, append: ['ENV X=1'] },
     })
     expect(result.changed).toBe(true)
     expect(result.json).toEqual({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       docker: { file: { ffmpeg: true, append: ['ENV X=1'] } },
     })
   })
 
   test('moves legacy gitignore into git.ignore', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       gitignore: { append: ['scratch/'] },
     })
     expect(result.changed).toBe(true)
     expect(result.json).toEqual({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       git: { ignore: { append: ['scratch/'] } },
     })
   })
 
   test('migrates both legacy keys in a single pass', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       dockerfile: { ffmpeg: true },
       gitignore: { append: ['scratch/'] },
     })
     expect(result.changed).toBe(true)
     expect(result.json).toEqual({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       docker: { file: { ffmpeg: true } },
       git: { ignore: { append: ['scratch/'] } },
     })
@@ -361,7 +455,7 @@ describe('migrateLegacyConfigShape', () => {
 
   test('migrated config parses cleanly through configSchema', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       dockerfile: { ffmpeg: true, append: ['ENV X=1'] },
       gitignore: { append: ['scratch/'] },
     })
@@ -373,39 +467,39 @@ describe('migrateLegacyConfigShape', () => {
 
   test('drops legacy dockerfile when new docker.file already present (new shape wins)', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       dockerfile: { ffmpeg: false, append: ['LEGACY'] },
       docker: { file: { ffmpeg: true, append: ['NEW'] } },
     })
     expect(result.changed).toBe(true)
     expect(result.json).toEqual({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       docker: { file: { ffmpeg: true, append: ['NEW'] } },
     })
   })
 
   test('drops legacy gitignore when new git.ignore already present (new shape wins)', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       gitignore: { append: ['LEGACY'] },
       git: { ignore: { append: ['NEW'] } },
     })
     expect(result.changed).toBe(true)
     expect(result.json).toEqual({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       git: { ignore: { append: ['NEW'] } },
     })
   })
 
   test('merges legacy dockerfile into existing docker namespace that lacks file', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       dockerfile: { ffmpeg: true },
       docker: { somethingElse: 'future' },
     })
     expect(result.changed).toBe(true)
     expect(result.json).toEqual({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       docker: { somethingElse: 'future', file: { ffmpeg: true } },
     })
   })
@@ -422,7 +516,7 @@ describe('migrateLegacyConfigShape', () => {
       await writeFile(
         join(cwd, 'typeclaw.json'),
         JSON.stringify({
-          model: VALID_MODEL,
+          models: { default: VALID_MODEL },
           dockerfile: { ffmpeg: true, append: ['ENV X=1'] },
           gitignore: { append: ['scratch/'] },
         }),
@@ -442,10 +536,27 @@ describe('migrateLegacyConfigShape', () => {
     }
   })
 
+  test('loadConfigSync rewrites typeclaw.json on disk when legacy `model` is present', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-model-'))
+    try {
+      await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, port: 9001 }))
+
+      const cfg = loadConfigSync(cwd)
+      expect(cfg.models).toEqual({ default: VALID_MODEL })
+
+      const onDisk = JSON.parse(await Bun.file(join(cwd, 'typeclaw.json')).text())
+      expect(onDisk).not.toHaveProperty('model')
+      expect(onDisk.models).toEqual({ default: VALID_MODEL })
+      expect(onDisk.port).toBe(9001)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
   test('loadConfigSync does not touch the file when no legacy keys are present', async () => {
     const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-noop-'))
     try {
-      const original = `${JSON.stringify({ model: VALID_MODEL, port: 9001 }, null, 4)}\n`
+      const original = `${JSON.stringify({ models: { default: VALID_MODEL }, port: 9001 }, null, 4)}\n`
       await writeFile(join(cwd, 'typeclaw.json'), original)
 
       loadConfigSync(cwd)
@@ -463,7 +574,7 @@ describe('migrateLegacyConfigShape', () => {
       await writeFile(
         join(cwd, 'typeclaw.json'),
         JSON.stringify({
-          model: VALID_MODEL,
+          models: { default: VALID_MODEL },
           dockerfile: { ffmpeg: true },
         }),
       )
@@ -481,7 +592,7 @@ describe('migrateLegacyConfigShape', () => {
 
   test('translates channels.<adapter>.allow into roles.member.match and strips the allow field', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       channels: {
         'slack-bot': { allow: ['team:T0123', '*'] },
         'discord-bot': { allow: ['guild:9999/1', 'dm:*'] },
@@ -498,7 +609,7 @@ describe('migrateLegacyConfigShape', () => {
 
   test('appends to an existing roles.member.match and deduplicates', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       channels: { 'slack-bot': { allow: ['team:T0123', '*'] } },
       roles: { member: { match: ['*', 'discord:9999'] } },
     })
@@ -509,7 +620,7 @@ describe('migrateLegacyConfigShape', () => {
 
   test('preserves kakao rules verbatim', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       channels: { kakaotalk: { allow: ['kakao:dm/*', 'kakao:12345'] } },
     })
     const json = result.json as Record<string, unknown>
@@ -521,7 +632,7 @@ describe('migrateLegacyConfigShape', () => {
 
   test('drops channel:<id> rules with a warning and keeps other rules', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       channels: { 'slack-bot': { allow: ['channel:C123', 'team:T0123'] } },
     })
     const json = result.json as Record<string, unknown>
@@ -531,7 +642,7 @@ describe('migrateLegacyConfigShape', () => {
 
   test('is idempotent: running twice produces the same shape as once', () => {
     const input = {
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       channels: { 'slack-bot': { allow: ['team:T0123'], engagement: { trigger: ['dm'] } } },
     }
     const first = migrateLegacyConfigShape(input)
@@ -542,7 +653,7 @@ describe('migrateLegacyConfigShape', () => {
 
   test('preserves adapter siblings (engagement/history/enabled) when stripping allow', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       channels: {
         'discord-bot': {
           allow: ['*'],
@@ -561,7 +672,7 @@ describe('migrateLegacyConfigShape', () => {
 
   test('migrated channels-allow config parses cleanly through configSchema', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       channels: { 'slack-bot': { allow: ['team:T0123'] } },
     })
     const parsed = configSchema.parse(result.json)
@@ -571,7 +682,7 @@ describe('migrateLegacyConfigShape', () => {
 
   test('strips permissions.gateChannelRespond when present', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       permissions: { gateChannelRespond: true },
     })
     expect(result.changed).toBe(true)
@@ -580,13 +691,13 @@ describe('migrateLegacyConfigShape', () => {
   })
 
   test('returns applied: [] when nothing migrated', () => {
-    const result = migrateLegacyConfigShape({ model: VALID_MODEL, port: 9001 })
+    const result = migrateLegacyConfigShape({ models: { default: VALID_MODEL }, port: 9001 })
     expect(result.applied).toEqual([])
   })
 
   test('names each applied step in order — drives commit-message body', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       dockerfile: { ffmpeg: true },
       gitignore: { append: ['scratch/'] },
       channels: { 'slack-bot': { allow: ['team:T0123'] } },
@@ -602,7 +713,7 @@ describe('migrateLegacyConfigShape', () => {
 
   test('channels-allow step carries translated rules and dropped warnings', () => {
     const result = migrateLegacyConfigShape({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       channels: { 'slack-bot': { allow: ['team:T0123', 'channel:C123'] } },
     })
     const step = result.applied.find((s) => s.kind === 'channels-allow-to-roles-member-match')
@@ -610,6 +721,43 @@ describe('migrateLegacyConfigShape', () => {
     expect(step.rules).toEqual(['slack:T0123'])
     expect(step.dropped.length).toBe(1)
     expect(step.dropped[0]).toContain('channel:C123')
+  })
+
+  test('lifts legacy top-level model into models.default', () => {
+    const result = migrateLegacyConfigShape({ model: VALID_MODEL, port: 9001 })
+    expect(result.changed).toBe(true)
+    const json = result.json as Record<string, unknown>
+    expect(json).not.toHaveProperty('model')
+    expect(json.models).toEqual({ default: VALID_MODEL })
+    expect(json.port).toBe(9001)
+    expect(result.applied).toEqual([{ kind: 'model-to-models', ref: VALID_MODEL }])
+  })
+
+  test('drops legacy `model` when `models` already exists (new shape wins) and records drop-stale-model step', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      models: { default: VALID_MODEL_2, fast: VALID_MODEL },
+    })
+    expect(result.changed).toBe(true)
+    const json = result.json as Record<string, unknown>
+    expect(json).not.toHaveProperty('model')
+    expect(json.models).toEqual({ default: VALID_MODEL_2, fast: VALID_MODEL })
+    // drop-stale-model step is recorded so persistMigratedConfig commits the
+    // rewrite — without the step, applied: [] would silently dirty the worktree.
+    expect(result.applied).toEqual([{ kind: 'drop-stale-model', ref: VALID_MODEL }])
+  })
+
+  test('drop-stale-model commit message names the dropped ref so audit trail is clear', () => {
+    const msg = buildConfigMigrationCommitMessage([{ kind: 'drop-stale-model', ref: VALID_MODEL }])
+    expect(msg).not.toBeNull()
+    expect(msg).toContain('drop stale legacy model alongside models')
+    expect(msg).toContain(VALID_MODEL)
+  })
+
+  test('non-string legacy model values are ignored (schema will reject downstream)', () => {
+    const result = migrateLegacyConfigShape({ model: 123 })
+    expect(result.changed).toBe(false)
+    expect(result.applied).toEqual([])
   })
 })
 
@@ -671,7 +819,7 @@ describe('persistMigratedConfig commits the migration on every entry point', () 
     await gitInitForCommitTests(cwd)
     const legacyJson = `${JSON.stringify(
       {
-        model: VALID_MODEL,
+        models: { default: VALID_MODEL },
         channels: { 'slack-bot': { allow: ['team:T0123'] } },
       },
       null,
@@ -755,7 +903,7 @@ describe('persistMigratedConfig commits the migration on every entry point', () 
     const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-nogit-commit-'))
     try {
       const legacyJson = `${JSON.stringify(
-        { model: VALID_MODEL, channels: { 'slack-bot': { allow: ['team:T0123'] } } },
+        { models: { default: VALID_MODEL }, channels: { 'slack-bot': { allow: ['team:T0123'] } } },
         null,
         2,
       )}\n`
@@ -874,7 +1022,7 @@ describe('validateConfig', () => {
   })
 
   test('returns ok for a valid config', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, mounts: [] }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: VALID_MODEL }, mounts: [] }))
     const result = validateConfig(cwd)
     expect(result.ok).toBe(true)
   })
@@ -884,7 +1032,7 @@ describe('validateConfig', () => {
     await mkdir(mountDir)
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL, mounts: [{ name: 'projects', path: mountDir }] }),
+      JSON.stringify({ models: { default: VALID_MODEL }, mounts: [{ name: 'projects', path: mountDir }] }),
     )
     const result = validateConfig(cwd)
     expect(result.ok).toBe(true)
@@ -893,7 +1041,7 @@ describe('validateConfig', () => {
   test('fails when a mount path does not exist on the host', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL, mounts: [{ name: 'projects', path: join(cwd, 'missing') }] }),
+      JSON.stringify({ models: { default: VALID_MODEL }, mounts: [{ name: 'projects', path: join(cwd, 'missing') }] }),
     )
     const result = validateConfig(cwd)
     expect(result.ok).toBe(false)
@@ -907,7 +1055,7 @@ describe('validateConfig', () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
       JSON.stringify({
-        model: VALID_MODEL,
+        models: { default: VALID_MODEL },
         mounts: [
           { name: 'first', path: join(cwd, 'missing-1') },
           { name: 'second', path: join(cwd, 'missing-2') },
@@ -933,7 +1081,7 @@ describe('validateConfig', () => {
   })
 
   test('returns ok when mounts is omitted (defaults to [])', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: VALID_MODEL } }))
     const result = validateConfig(cwd)
     expect(result.ok).toBe(true)
   })
@@ -941,7 +1089,7 @@ describe('validateConfig', () => {
   test('fails when a mount name violates the pattern', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
-      JSON.stringify({ model: VALID_MODEL, mounts: [{ name: 'Bad Name', path: '/x' }] }),
+      JSON.stringify({ models: { default: VALID_MODEL }, mounts: [{ name: 'Bad Name', path: '/x' }] }),
     )
     const result = validateConfig(cwd)
     expect(result.ok).toBe(false)
@@ -951,7 +1099,10 @@ describe('validateConfig', () => {
   })
 
   test('fails when port is out of range', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, mounts: [], port: 99999 }))
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ models: { default: VALID_MODEL }, mounts: [], port: 99999 }),
+    )
     const result = validateConfig(cwd)
     expect(result.ok).toBe(false)
   })
@@ -1095,7 +1246,7 @@ describe('loadConfigSync', () => {
   })
 
   test('reads port from disk', async () => {
-    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, port: 9999 }))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: VALID_MODEL }, port: 9999 }))
     const cfg = loadConfigSync(cwd)
     expect(cfg.port).toBe(9999)
   })
@@ -1105,11 +1256,11 @@ describe('loadConfigSync', () => {
     expect(() => loadConfigSync(cwd)).toThrow(/not valid JSON/)
   })
 
-  test('throws on schema-invalid config (e.g. invalid model name)', async () => {
+  test('throws on schema-invalid config (e.g. invalid model name in models.default)', async () => {
     await writeFile(
       join(cwd, 'typeclaw.json'),
       JSON.stringify({
-        model: 'not-a-known-model',
+        models: { default: 'not-a-known-model' },
       }),
     )
     expect(() => loadConfigSync(cwd)).toThrow(/typeclaw\.json is invalid/)
@@ -1118,13 +1269,13 @@ describe('loadConfigSync', () => {
 
 describe('plugin config layout', () => {
   test('plugins defaults to [] when omitted', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
     expect(parsed.plugins).toEqual([])
   })
 
   test('plugins accepts an array of strings', () => {
     const parsed = configSchema.parse({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       plugins: ['typeclaw-plugin-foo', './plugins/local'],
     })
     expect(parsed.plugins).toEqual(['typeclaw-plugin-foo', './plugins/local'])
@@ -1132,7 +1283,7 @@ describe('plugin config layout', () => {
 
   test('catchall preserves unknown top-level keys (per-plugin config blocks)', () => {
     const parsed = configSchema.parse({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       plugins: ['typeclaw-plugin-standup-log'],
       'standup-log': { schedule: '0 17 * * 5' },
     }) as Record<string, unknown>
@@ -1143,7 +1294,7 @@ describe('plugin config layout', () => {
     const result = extractPluginConfigs({
       $schema: 'x',
       port: 1,
-      model: 'm',
+      models: { default: VALID_MODEL },
       mounts: [],
       plugins: [],
       memory: { idleMs: 5000 },
@@ -1157,7 +1308,7 @@ describe('plugin config layout', () => {
 
   test('extractPluginConfigs treats portForward, docker, and git as known top-level keys (not plugin blocks)', () => {
     const result = extractPluginConfigs({
-      model: VALID_MODEL,
+      models: { default: VALID_MODEL },
       portForward: { allow: '*' },
       docker: { file: { append: [] } },
       git: { ignore: { append: [] } },
@@ -1172,7 +1323,7 @@ describe('plugin config layout', () => {
       await writeFile(
         join(cwd, 'typeclaw.json'),
         JSON.stringify({
-          model: VALID_MODEL,
+          models: { default: VALID_MODEL },
           plugins: ['typeclaw-plugin-foo'],
           foo: { bar: 1 },
         }),

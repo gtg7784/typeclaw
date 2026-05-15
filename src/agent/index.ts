@@ -6,7 +6,8 @@ import { createAgentSession, DefaultResourceLoader, SessionManager } from '@mari
 import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent'
 
 import type { ChannelRouter } from '@/channels/router'
-import { getConfig, resolveModel } from '@/config'
+import { getConfig, resolveModel, resolveProfile } from '@/config'
+import { providerForModelRef } from '@/config/providers'
 import type { PermissionService } from '@/permissions'
 import type {
   BuiltinToolRef,
@@ -20,9 +21,10 @@ import { materializeSkills } from '@/plugin'
 import type { ReloadRegistry } from '@/reload'
 import type { Stream } from '@/stream'
 
-import { getAuth } from './auth'
+import { getAuthFor } from './auth'
 import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
+import { lookAtTool } from './multimodal'
 import { resolveBuiltinToolRefs, wrapPluginTool, wrapSystemAgentTool, wrapSystemTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
@@ -110,6 +112,13 @@ export type CreateSessionOptions = {
   // prompt is not regenerated; see `typeclaw-permissions` skill for how the
   // agent should interpret the snapshot on later turns.
   permissions?: PermissionService
+  // Model profile name. Resolved against `config.models` to pick the concrete
+  // model ref this session binds to. Unknown profile names fall back to
+  // `default` with a one-time console warning. Omitted → `default`. Threaded
+  // through from the caller (subagent declarations, future per-spawn tool
+  // overrides) so different sessions on the same agent can run different
+  // models without per-session config edits.
+  profile?: string
 }
 
 export type CreateSessionResult = {
@@ -123,7 +132,11 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
 }
 
 export async function createSessionWithDispose(options: CreateSessionOptions = {}): Promise<CreateSessionResult> {
-  const { authStorage, modelRegistry } = getAuth()
+  const resolved = resolveProfile(getConfig().models, options.profile)
+  if (resolved.fellBackToDefault && options.profile !== undefined && options.profile !== 'default') {
+    warnProfileFallbackOnce(options.profile, resolved.ref)
+  }
+  const { authStorage, modelRegistry } = getAuthFor(providerForModelRef(resolved.ref))
 
   const materializedSkills =
     options.plugins && options.plugins.registry.skills.length > 0
@@ -175,6 +188,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
         : [
             websearchTool,
             webfetchTool,
+            lookAtTool,
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
             ...buildChannelTools(options.channelRouter, options.origin),
@@ -190,7 +204,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           ]
   const customTools = [...wrapSystemTools(customSystemTools, options.plugins, getOrigin), ...pluginCustomTools]
 
-  const model = resolveModel(getConfig().model)
+  const model = resolveModel(resolved.ref)
   const { session } = await createAgentSession({
     model,
     sessionManager,
@@ -530,4 +544,26 @@ function resolveRoleContext(
 
 export function getBundledSkillsDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), '..', 'skills')
+}
+
+// Profile-fallback warning is fired once per (profile, ref) pair per process.
+// Without rate-limiting, every memory-logger spawn (~every idle event) would
+// emit a fresh warning when the user has only `default` configured — tens of
+// warnings per channel session is noise the operator will learn to ignore.
+// The pair includes `ref` so a config reload that changes `default` re-warns.
+const profileFallbackWarned = new Set<string>()
+
+function warnProfileFallbackOnce(profile: string, ref: string): void {
+  const key = `${profile}\x00${ref}`
+  if (profileFallbackWarned.has(key)) return
+  profileFallbackWarned.add(key)
+  console.warn(
+    `[agent] unknown model profile "${profile}"; falling back to "default" (${ref}). Add it under \`models\` in typeclaw.json to remove this warning. (further occurrences suppressed)`,
+  )
+}
+
+// Test-only: clear the rate-limit cache so a test can assert the warning fires
+// once after rate-limit reset.
+export function __resetProfileFallbackWarningsForTesting(): void {
+  profileFallbackWarned.clear()
 }
