@@ -579,6 +579,83 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('do not echo them back as outbound mentions')
   })
 
+  test('Slack participants block renders `<@id> (name)` addressing per line (angle-id)', () => {
+    const now = Date.now()
+    const participants: ChannelParticipant[] = [
+      {
+        authorId: 'U_ALICE',
+        authorName: 'alice',
+        firstMessageAt: now - 1000,
+        lastMessageAt: now - 1000,
+        messageCount: 5,
+      },
+    ]
+    const out = renderSessionOrigin(
+      { kind: 'channel', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: null, participants },
+      now,
+    )
+    expect(out).toContain('- <@U_ALICE> (alice) —')
+    expect(out).toContain('`<@authorId>` works for any author you have seen')
+  })
+
+  test('Telegram participants block renders `name (id)` addressing per line and trailing prose uses `@username`', () => {
+    const now = Date.now()
+    const participants: ChannelParticipant[] = [
+      {
+        authorId: '12345',
+        authorName: 'alice',
+        firstMessageAt: now - 1000,
+        lastMessageAt: now - 1000,
+        messageCount: 5,
+      },
+    ]
+    const out = renderSessionOrigin(
+      { kind: 'channel', adapter: 'telegram-bot', workspace: '-100', chat: '-100', thread: null, participants },
+      now,
+    )
+    expect(out).toContain('- alice (12345) —')
+    expect(out).not.toContain('<@12345>')
+    expect(out).toContain('`@username`')
+    expect(out).toContain('SEPARATE field')
+    expect(out).not.toContain('`<@authorId>` works for any author')
+  })
+
+  test('KakaoTalk participants block renders `name (id)` addressing per line and trailing prose teaches display-name addressing', () => {
+    const now = Date.now()
+    const participants: ChannelParticipant[] = [
+      { authorId: 'k_42', authorName: 'alice', firstMessageAt: now - 1000, lastMessageAt: now - 1000, messageCount: 5 },
+    ]
+    const out = renderSessionOrigin(
+      { kind: 'channel', adapter: 'kakaotalk', workspace: '@kakao-group', chat: '123', thread: null, participants },
+      now,
+    )
+    expect(out).toContain('- alice (k_42) —')
+    expect(out).not.toContain('<@k_42>')
+    expect(out).toContain('display name as plain text')
+    expect(out).toContain('must not be echoed back')
+    expect(out).not.toContain('`<@authorId>` works for any author')
+  })
+
+  test('Discord participants block keeps `<@id> (name)` addressing (regression guard for angle-id behavior)', () => {
+    const now = Date.now()
+    const participants: ChannelParticipant[] = [
+      {
+        authorId: '999',
+        authorName: 'Winky',
+        firstMessageAt: now - 1000,
+        lastMessageAt: now - 1000,
+        messageCount: 5,
+        isBot: true,
+      },
+    ]
+    const out = renderSessionOrigin(
+      { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: '222', thread: null, participants },
+      now,
+    )
+    expect(out).toContain('- <@999> (Winky) —')
+    expect(out).toContain('`<@authorId>` works for any author you have seen')
+  })
+
   test('non-angle-id adapters do not include the angle-id worked example anchored on a real participant', () => {
     // given: a real peer bot participant whose authorId would otherwise be
     // rendered as `<@999> hello` for angle-id adapters

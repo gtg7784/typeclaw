@@ -247,7 +247,7 @@ function renderChannelOrigin(
     ...renderMentionGuidance(platformInfo, origin.participants ?? [], now),
   )
 
-  const participantsBlock = renderParticipants(origin.participants ?? [], now)
+  const participantsBlock = renderParticipants(origin.participants ?? [], platformInfo, now)
   const membershipLine = renderMembershipSummary(origin, now)
   if (membershipLine !== null) lines.push('', membershipLine)
   if (participantsBlock) lines.push('', participantsBlock)
@@ -334,26 +334,22 @@ function renderConversationLine(origin: {
   return `Conversation: ${chatLabel} in ${workspaceLabel}.`
 }
 
-function renderParticipants(participants: readonly ChannelParticipant[], now: number): string {
+function renderParticipants(
+  participants: readonly ChannelParticipant[],
+  platformInfo: PlatformInfo,
+  now: number,
+): string {
   const cutoff = now - PARTICIPANTS_MAX_AGE_MS
   const fresh = participants.filter((p) => p.lastMessageAt >= cutoff)
   if (fresh.length === 0) return ''
 
   const top = [...fresh].sort((a, b) => b.lastMessageAt - a.lastMessageAt).slice(0, PARTICIPANTS_TOP_K)
 
-  // Format flipped from `name (id: 123)` to `<@123> (name)` so the model sees
-  // the SAME shape it will need to emit when addressing someone — copy-paste
-  // the leading `<@id>` token verbatim. The previous format presented the
-  // human-readable name first and the ID parenthetically, which (combined
-  // with `<@id> (name) [bot]:` in inbound message lines) trained the model
-  // to treat `<@id>` as Discord's render-time decoration rather than syntax
-  // it must produce. Symptom in the wild: 돌쇠 addressing Winky as "Winky님"
-  // (plain text), which never trips Winky's `isBotMention` check, so Winky
-  // observes silently and the conversation stalls.
   const lines = ['## Recent participants (last 7 days, top 10 by recency)', '']
   for (const p of top) {
     const ago = formatAgo(now - p.lastMessageAt)
-    lines.push(`- <@${p.authorId}> (${p.authorName}) — last message: ${ago}, total: ${p.messageCount}`)
+    const addressing = renderParticipantAddressing(p, platformInfo)
+    lines.push(`- ${addressing} — last message: ${ago}, total: ${p.messageCount}`)
   }
   lines.push(
     '',
@@ -363,12 +359,69 @@ function renderParticipants(participants: readonly ChannelParticipant[], now: nu
     'This is **not** the full guild member list, and **not** an audit log',
     'of everyone who ever spoke here.',
     '',
-    "If a sender in the current turn isn't in the list, you can still",
-    'address them — `<@authorId>` works for any author you have seen,',
-    'even once. The list is a convenience for "who\'s been around lately,"',
-    'not an exhaustive directory.',
+    ...renderParticipantsTrailing(platformInfo),
   )
   return lines.join('\n')
+}
+
+// Per-line addressing token shown for each participant. The shape must match
+// what the model will need to emit when addressing that participant, so the
+// model can copy-paste the leading token verbatim. The previous unconditional
+// `<@id> (name)` format trained the model toward angle-id syntax on every
+// platform — correct for Discord/Slack, wrong for KakaoTalk (no in-band
+// mention syntax) and Telegram (uses `@username`, where `authorId` is a
+// numeric id and NOT the username). See issue #188.
+//
+// Symptom in the wild before PR #183 + this fix: 돌쇠 addressing Winky as
+// "Winky님" (plain text) on Discord, which never trips Winky's `isBotMention`
+// check, so Winky observes silently and the conversation stalls. The
+// angle-id branch here is exactly the fix for that case; the at-username
+// and alias branches keep the platform contract honest for KakaoTalk and
+// Telegram instead of self-contradicting the per-adapter mention guidance
+// produced by `renderMentionGuidance`.
+function renderParticipantAddressing(p: ChannelParticipant, platformInfo: PlatformInfo): string {
+  switch (platformInfo.mentionMode) {
+    case 'angle-id':
+      return `<@${p.authorId}> (${p.authorName})`
+    case 'at-username':
+    case 'alias':
+      return `${p.authorName} (${p.authorId})`
+  }
+}
+
+// Closing prose for the participants block. Mirrors the per-platform branch
+// in `renderParticipantAddressing` so the trailing "address them" guidance
+// matches the format the bullet points just demonstrated. The previous
+// unconditional `<@authorId>` prose was the second voice in the
+// self-contradiction noted in issue #188 — it told KakaoTalk/Telegram
+// sessions to address peers with a syntax `renderMentionGuidance` had
+// just told them not to use.
+function renderParticipantsTrailing(platformInfo: PlatformInfo): string[] {
+  switch (platformInfo.mentionMode) {
+    case 'angle-id':
+      return [
+        "If a sender in the current turn isn't in the list, you can still",
+        'address them — `<@authorId>` works for any author you have seen,',
+        'even once. The list is a convenience for "who\'s been around lately,"',
+        'not an exhaustive directory.',
+      ]
+    case 'at-username':
+      return [
+        "If a sender in the current turn isn't in the list, you can still",
+        'address them by `@username` — Telegram usernames are a SEPARATE field',
+        'from the numeric `authorId` shown in parentheses above, and not every',
+        'user has one. The list is a convenience for "who\'s been around',
+        'lately," not an exhaustive directory.',
+      ]
+    case 'alias':
+      return [
+        "If a sender in the current turn isn't in the list, you can still",
+        'address them by display name as plain text — KakaoTalk has no in-band',
+        'mention syntax, so the `authorId` shown in parentheses above is for',
+        'your reference only and must not be echoed back. The list is a',
+        'convenience for "who\'s been around lately," not an exhaustive directory.',
+      ]
+  }
 }
 
 function formatAgo(ms: number): string {
