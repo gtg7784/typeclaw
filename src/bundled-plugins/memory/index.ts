@@ -193,6 +193,7 @@ export default definePlugin({
         // grown by `bufferBytes` since the last run, so busy channel sessions
         // (which rarely go idle) still produce memory updates.
         'session.idle': async (event) => {
+          if (event.origin?.kind === 'subagent') return
           lastIdleEvent.set(event.sessionId, {
             parentTranscriptPath: event.parentTranscriptPath,
             ...(event.origin !== undefined ? { origin: event.origin } : {}),
@@ -214,6 +215,7 @@ export default definePlugin({
           }
         },
         'session.end': async (event) => {
+          if (event.origin?.kind === 'subagent') return
           cancelTimer(event.sessionId)
           await fireMemoryLogger(event.sessionId, 'session-end')
           lastIdleEvent.delete(event.sessionId)

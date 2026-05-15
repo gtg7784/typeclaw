@@ -232,6 +232,26 @@ describe('session.idle hook (debouncer)', () => {
 
     expect(spawned).toHaveLength(0)
   })
+
+  test('does NOT spawn for subagent-origin idle events (prevents memory-logger self-recursion)', async () => {
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, { idleMs: 1000 })
+    const origin: SessionIdleEvent['origin'] = {
+      kind: 'subagent',
+      subagent: 'memory-logger',
+      parentSessionId: 'ses_parent',
+    }
+    const event: SessionIdleEvent = {
+      sessionId: 'ses_subagent',
+      parentTranscriptPath: '/tmp/subagent-transcript.jsonl',
+      idleMs: 0,
+      origin,
+    }
+    await exports.hooks!['session.idle']!(event, { agentDir, pluginName: 'memory', logger: createPluginLogger('m') })
+
+    await new Promise((r) => setTimeout(r, 1200))
+
+    expect(spawned).toHaveLength(0)
+  })
 })
 
 describe('session.end hook', () => {
@@ -253,6 +273,21 @@ describe('session.end hook', () => {
       pluginName: 'memory',
       logger: createPluginLogger('m'),
     })
+    expect(spawned).toHaveLength(0)
+  })
+
+  test('does NOT spawn for subagent-origin end events (prevents memory-logger self-recursion)', async () => {
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, { idleMs: 10_000 })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+
+    await exports.hooks!['session.end']!(
+      {
+        sessionId: 'ses_subagent',
+        origin: { kind: 'subagent', subagent: 'memory-logger', parentSessionId: 'ses_parent' },
+      } as SessionEndEvent,
+      ctx,
+    )
+
     expect(spawned).toHaveLength(0)
   })
 
