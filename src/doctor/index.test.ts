@@ -265,7 +265,13 @@ describe('runDoctor', () => {
 test('buildCommitMessage formats subject + bullets', async () => {
   const { buildCommitMessage } = await import('./commit')
   const msg = buildCommitMessage([
-    { name: 'agent-folder.required-dirs', source: 'static', ok: true, summary: 'created workspace/', changedPaths: [] },
+    {
+      name: 'agent-folder.dockerfile-managed',
+      source: 'static',
+      ok: true,
+      summary: 'refreshed Dockerfile from template',
+      changedPaths: [],
+    },
     {
       name: 'memory.daily-stream-current',
       source: 'plugin',
@@ -277,7 +283,7 @@ test('buildCommitMessage formats subject + bullets', async () => {
   ])
   const lines = msg.split('\n')
   expect(lines[0]).toBe('typeclaw doctor: auto-fix 2 issues')
-  expect(msg).toContain('- [static] agent-folder.required-dirs: created workspace/')
+  expect(msg).toContain('- [static] agent-folder.dockerfile-managed: refreshed Dockerfile from template')
   expect(msg).toContain('- [plugin] memory.daily-stream-current: created memory/2026-05-12.md')
 })
 
