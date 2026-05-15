@@ -31,3 +31,4 @@ export {
   type ComposeStopResult,
   type StopSuccess,
 } from './stop'
+export { composeUsage, type ComposeUsageEvent, type ComposeUsageOptions, type ComposeUsageResult } from './usage'

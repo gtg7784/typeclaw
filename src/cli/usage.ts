@@ -1,27 +1,17 @@
 import { defineCommand } from 'citty'
 
 import { findAgentDir } from '@/init'
-import { runUsage, startOfDaysAgo, startOfToday } from '@/usage'
+import { runUsage } from '@/usage'
 import { formatJson, formatReport } from '@/usage/report'
+
+import { parseSince, parseUntil, USAGE_COMMON_ARGS } from './usage-args'
 
 const SUBCOMMANDS = ['daily', 'session', 'models'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 type View = 'summary' | Subcommand
 
 const COMMON_ARGS = {
-  json: {
-    type: 'boolean' as const,
-    description: 'emit the usage report as JSON',
-    default: false,
-  },
-  since: {
-    type: 'string' as const,
-    description: "ISO date or relative duration ('today', '7d', '30d')",
-  },
-  until: {
-    type: 'string' as const,
-    description: 'ISO date upper bound (exclusive)',
-  },
+  ...USAGE_COMMON_ARGS,
   cwd: {
     type: 'string' as const,
     description: 'override the agent folder',
@@ -63,8 +53,8 @@ export const usageCommand = defineCommand({
 async function emit(view: View, args: Record<string, unknown>): Promise<void> {
   const cwdArg = typeof args.cwd === 'string' && args.cwd.length > 0 ? args.cwd : process.cwd()
   const agentDir = findAgentDir(cwdArg) ?? cwdArg
-  const since = parseSince(args.since, 'since')
-  const until = parseUntil(args.until, 'until')
+  const since = parseSince(args.since, 'typeclaw usage')
+  const until = parseUntil(args.until, 'typeclaw usage')
   const limit = parseLimit(args.limit)
 
   const report = await runUsage({
@@ -98,36 +88,6 @@ function resolveTerminalWidth(): number | undefined {
   if (env === undefined || env === '') return undefined
   const n = Number(env)
   return Number.isFinite(n) && n > 0 ? n : undefined
-}
-
-function parseSince(value: unknown, flag: string): number | undefined {
-  if (value === undefined || value === null) return undefined
-  if (typeof value !== 'string' || value.length === 0) return undefined
-  if (value === 'today') return startOfToday()
-  const days = /^(\d+)d$/.exec(value)
-  if (days) {
-    const n = Number(days[1])
-    if (n <= 0) exitInvalid(flag, value, "duration must be at least 1 day (e.g. '1d', '7d')")
-    // `Nd` means "last N calendar days INCLUDING today" → window starts
-    // midnight (N-1) days before today.
-    return startOfDaysAgo(n - 1)
-  }
-  const ms = Date.parse(value)
-  if (Number.isFinite(ms)) return ms
-  exitInvalid(flag, value, "expected ISO date, 'today', or '<n>d' (e.g. 7d)")
-}
-
-function parseUntil(value: unknown, flag: string): number | undefined {
-  if (value === undefined || value === null) return undefined
-  if (typeof value !== 'string' || value.length === 0) return undefined
-  const ms = Date.parse(value)
-  if (Number.isFinite(ms)) return ms
-  exitInvalid(flag, value, 'expected ISO date (e.g. 2026-05-01)')
-}
-
-function exitInvalid(flag: string, value: string, hint: string): never {
-  process.stderr.write(`typeclaw usage: invalid --${flag} value "${value}"; ${hint}\n`)
-  process.exit(2)
 }
 
 function parseLimit(value: unknown): number | undefined {
