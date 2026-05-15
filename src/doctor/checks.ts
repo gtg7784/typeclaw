@@ -23,8 +23,6 @@ import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 
 import type { DoctorCheck } from './types'
 
-const REQUIRED_DIRS = ['workspace', 'sessions', '.agents/skills', 'mounts', 'packages'] as const
-
 export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): DoctorCheck[] {
   const dockerExec = opts.dockerExec ?? defaultDockerExec
 
@@ -32,7 +30,6 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): Docto
     dockerDaemon(dockerExec),
     bunRuntime(),
     agentFolderInitialized(),
-    agentFolderRequiredDirs(),
     agentFolderDockerfileTemplate(),
     agentFolderGitignoreTemplate(),
     agentFolderNodeModules(),
@@ -98,36 +95,6 @@ function agentFolderInitialized(): DoctorCheck {
         message: 'no typeclaw.json found in or above current directory',
         details: ['Host-stage checks unrelated to the agent folder still ran.'],
         fix: { description: 'Run `typeclaw init` in the directory you want to use as an agent folder.' },
-      }
-    },
-  }
-}
-
-function agentFolderRequiredDirs(): DoctorCheck {
-  return {
-    name: 'agent-folder.required-dirs',
-    category: 'agent-folder',
-    description: 'required agent directories exist',
-    applies: (ctx) => ctx.hasAgentFolder,
-    async run(ctx) {
-      const missing = REQUIRED_DIRS.filter((d) => !existsSync(join(ctx.cwd, d)))
-      if (missing.length === 0) return { status: 'ok', message: 'all required directories present' }
-      return {
-        status: 'warning',
-        message: `${missing.length} required ${missing.length === 1 ? 'directory' : 'directories'} missing`,
-        details: missing.map((d) => `missing: ${d}/`),
-        fix: {
-          description: `Create the missing directories (${missing.map((d) => `${d}/`).join(', ')}).`,
-          autoFix: async () => {
-            for (const d of missing) {
-              mkdirSync(join(ctx.cwd, d), { recursive: true })
-            }
-            return {
-              summary: `created ${missing.map((d) => `${d}/`).join(', ')}`,
-              changedPaths: missing.map((d) => `${d}/`),
-            }
-          },
-        },
       }
     },
   }
