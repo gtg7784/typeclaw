@@ -1,6 +1,7 @@
 import type { z } from 'zod'
 
 import type { SessionOrigin } from '@/agent/session-origin'
+import type { ToolResultBudget } from '@/agent/tool-result-budget'
 import type { PermissionService } from '@/permissions'
 
 export type ContentPart = { type: 'text'; text: string } | { type: 'image'; mimeType: string; data: string }
@@ -58,6 +59,16 @@ export type Subagent<P = unknown> = {
   // parentSessionId so different parent sessions run in parallel while
   // duplicate runs against the same session deduplicate.
   inFlightKey?: (payload: P) => string
+  // Defensive ceiling on cumulative bytes of tool-result text per subagent
+  // run, applied to the named tools only. Once exceeded, subsequent calls to
+  // those tools short-circuit with a fixed message instructing the agent to
+  // stop reading. See `src/agent/tool-result-budget.ts` for the full
+  // rationale; the short version is: a single broken tool (e.g. find_entry
+  // failing because of a schema mismatch) can cause an agent to fall back to
+  // chunked reads of huge files, ballooning subagent token cost. The budget
+  // bounds the blast radius without changing per-call semantics for healthy
+  // runs.
+  toolResultBudget?: ToolResultBudget
 }
 
 // Cron job map keys are local; the runtime prefixes with `__plugin_<plugin-name>_`

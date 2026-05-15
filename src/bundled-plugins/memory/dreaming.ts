@@ -545,6 +545,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
     tools: [readTool, writeTool, lsTool],
     payloadSchema: dreamingPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,
+    toolResultBudget: { maxTotalBytes: 512 * 1024, toolNames: ['read'] },
     handler: async (ctx, runSession) => {
       await ensureMemoryFiles(ctx.payload.agentDir)
       const state = await loadDreamingState(ctx.payload.agentDir)

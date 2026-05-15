@@ -17,6 +17,39 @@ export const memoryLoggerPayloadSchema = z.object({
   origin: z.custom<SessionOrigin>().optional(),
 })
 
+// Recovery message for the read-budget short-circuit. The watermark contract
+// in MEMORY_LOGGER_SYSTEM_PROMPT requires a trailing watermark marker on every
+// run, but once read is short-circuited the subagent cannot keep scanning to
+// pick a "latest evaluated entry id". `find_entry` and `append` are not
+// budgeted, so the recovery is: call find_entry on the transcript to learn
+// `totalLines` without re-reading content, then append a watermark pointing
+// at any entry id the subagent already saw earlier in the run. When zero
+// transcript content has been read (budget consumed entirely on MEMORY.md or
+// the stream file), no advancement is possible and the run should exit
+// silently — that is the explicit second branch below. Both branches are
+// safer than the prior generic "advance to the latest id you have seen"
+// hint, which was self-contradictory in the zero-content case.
+export function memoryLoggerExhaustedMessage(used: number, max: number): string {
+  const usedKb = Math.round(used / 1024)
+  const maxKb = Math.round(max / 1024)
+  return [
+    `[read budget exhausted: used ${usedKb}KB of ${maxKb}KB this run]`,
+    '',
+    'Stop reading. The session has consumed its byte budget across read calls.',
+    'Do not call `read` again — every subsequent call will return this same notice.',
+    '',
+    'Recovery (in order):',
+    '1. If you already saw at least one transcript entry id in earlier read output,',
+    '   call `append` to write `<!-- watermark source=<sessionId> entry=<that id> -->`',
+    '   as the last line of the daily stream, then exit.',
+    '2. If you saw NO transcript entries (the budget was consumed on MEMORY.md and',
+    '   the daily stream file before you reached the transcript), exit immediately',
+    '   WITHOUT writing a watermark. The next run will retry from the same point.',
+    '',
+    'Do not invent or reuse a watermark id. Do not call `read` again.',
+  ].join('\n')
+}
+
 export type MemoryLoggerPayload = z.infer<typeof memoryLoggerPayloadSchema>
 
 export function isMemoryLoggerPayload(value: unknown): value is MemoryLoggerPayload {
@@ -247,6 +280,11 @@ export function createMemoryLoggerSubagent(
     customTools: [findEntryTool, appendTool],
     payloadSchema: memoryLoggerPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,
+    toolResultBudget: {
+      maxTotalBytes: 256 * 1024,
+      toolNames: ['read'],
+      exhaustedMessage: memoryLoggerExhaustedMessage,
+    },
     handler: async (ctx, runSession) => {
       const today = formatLocalDate()
       const streamFile = join(ctx.payload.agentDir, 'memory', `${today}.md`)
