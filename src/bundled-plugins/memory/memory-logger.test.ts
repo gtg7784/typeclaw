@@ -341,6 +341,38 @@ describe('memoryLoggerSubagent', () => {
     expect(runSessionCalls[0]!.userPrompt!).toContain('watermrk')
   })
 
+  test("handler picks up YESTERDAY'S watermark when today's stream is missing (midnight-rollover case)", async () => {
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+    const today = formatLocalDate()
+    const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const yyyy = yesterday.getFullYear()
+    const mm = String(yesterday.getMonth() + 1).padStart(2, '0')
+    const dd = String(yesterday.getDate()).padStart(2, '0')
+    const yesterdayName = `${yyyy}-${mm}-${dd}.md`
+    expect(yesterdayName).not.toBe(`${today}.md`)
+    writeFileSync(
+      join(agentDir, 'memory', yesterdayName),
+      [
+        '<!-- fragment source=ses_abc entry=yesterday-morning -->',
+        '## body',
+        '',
+        '<!-- watermark source=ses_abc entry=yesterday-evening -->',
+        '',
+      ].join('\n'),
+    )
+
+    const { runSessionCalls } = await invokeWith(
+      { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+      agentDir,
+    )
+
+    const prompt = runSessionCalls[0]!.userPrompt!
+    expect(prompt).toContain('yesterday-evening')
+    expect(prompt).not.toContain('Watermark: none')
+  })
+
   test('handler instructs the subagent to write a trailing watermark marker on every run', async () => {
     const agentDir = makeAgentDir()
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')

@@ -8,7 +8,7 @@ import { formatLocalDate } from '@/shared'
 
 import { appendTool } from './append-tool'
 import { findEntryTool } from './find-entry-tool'
-import { readWatermark } from './watermark'
+import { readLatestWatermark } from './watermark'
 
 export const memoryLoggerPayloadSchema = z.object({
   parentSessionId: z.string().min(1),
@@ -287,8 +287,9 @@ export function createMemoryLoggerSubagent(
     },
     handler: async (ctx, runSession) => {
       const today = formatLocalDate()
-      const streamFile = join(ctx.payload.agentDir, 'memory', `${today}.md`)
-      const watermark = readWatermark(streamFile, ctx.payload.parentSessionId)
+      const memoryDir = join(ctx.payload.agentDir, 'memory')
+      const streamFile = join(memoryDir, `${today}.md`)
+      const watermark = readLatestWatermark(memoryDir, ctx.payload.parentSessionId)
       const start = Date.now()
       logger.info(
         `[memory-logger] ${ctx.payload.parentSessionId} start stream=${today}.md watermark=${watermark ?? 'none'}`,
