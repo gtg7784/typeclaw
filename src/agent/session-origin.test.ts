@@ -517,4 +517,101 @@ describe('renderSessionOrigin', () => {
     const withoutCtx = renderSessionOrigin({ kind: 'cron', jobId: 'job-x', jobKind: 'prompt' })
     expect(withoutCtx).not.toContain('Your role in this session')
   })
+
+  test('Slack channel origin names Slack as the platform and teaches angle-id mention syntax', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    })
+    expect(out).toContain('Slack channel session')
+    expect(out).toContain('Slack syntax `<@USER_ID>`')
+    expect(out).not.toContain('Discord channel session')
+    expect(out).not.toContain('Telegram syntax')
+    expect(out).not.toContain('KakaoTalk has no in-band')
+  })
+
+  test('Discord channel origin names Discord and teaches angle-id mention syntax', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'discord-bot',
+      workspace: '111',
+      chat: '222',
+      thread: null,
+    })
+    expect(out).toContain('Discord channel session')
+    expect(out).toContain('Discord syntax `<@USER_ID>`')
+    expect(out).not.toContain('Slack channel session')
+  })
+
+  test('Telegram channel origin names Telegram and teaches @username mention syntax (NOT angle-id)', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'telegram-bot',
+      workspace: '-100123',
+      chat: '-100123',
+      thread: null,
+    })
+    expect(out).toContain('Telegram channel session')
+    expect(out).toContain('Telegram syntax `@username`')
+    expect(out).not.toContain('Discord channel session')
+    expect(out).not.toContain('Slack syntax')
+    expect(out).not.toContain('Discord syntax')
+    expect(out).toContain('do not echo them back as outbound mentions')
+  })
+
+  test('KakaoTalk channel origin names KakaoTalk and teaches alias/display-name mention (NOT angle-id)', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'kakaotalk',
+      workspace: '@kakao-group',
+      chat: '123',
+      thread: null,
+    })
+    expect(out).toContain('KakaoTalk channel session')
+    expect(out).toContain('KakaoTalk has no in-band mention syntax')
+    expect(out).not.toContain('Discord channel session')
+    expect(out).not.toContain('Slack syntax')
+    expect(out).not.toContain('Discord syntax')
+    expect(out).not.toContain('Telegram syntax')
+    expect(out).toContain('do not echo them back as outbound mentions')
+  })
+
+  test('non-angle-id adapters do not include the angle-id worked example anchored on a real participant', () => {
+    // given: a real peer bot participant whose authorId would otherwise be
+    // rendered as `<@999> hello` for angle-id adapters
+    const now = Date.now()
+    const participants: ChannelParticipant[] = [
+      {
+        authorId: '999',
+        authorName: 'Winky',
+        firstMessageAt: now - 1000,
+        lastMessageAt: now - 1000,
+        messageCount: 5,
+        isBot: true,
+      },
+    ]
+
+    // when: KakaoTalk session with the same participant set
+    const kakao = renderSessionOrigin(
+      { kind: 'channel', adapter: 'kakaotalk', workspace: '@kakao-group', chat: '123', thread: null, participants },
+      now,
+    )
+
+    // then: the model is told NOT to emit `<@999> hello` and is given KakaoTalk-specific guidance
+    expect(kakao).not.toContain('<@999> hello')
+    expect(kakao).toContain('KakaoTalk has no in-band mention syntax')
+
+    // when: Telegram session with the same participant set
+    const telegram = renderSessionOrigin(
+      { kind: 'channel', adapter: 'telegram-bot', workspace: '-100', chat: '-100', thread: null, participants },
+      now,
+    )
+
+    // then: the model is told NOT to emit `<@999> hello` and is given Telegram-specific guidance
+    expect(telegram).not.toContain('<@999> hello')
+    expect(telegram).toContain('@username')
+  })
 })

@@ -52,6 +52,40 @@ export type SessionOrigin =
 export const PARTICIPANTS_TOP_K = 10
 export const PARTICIPANTS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
 
+// Each adapter renders mentions differently and the model has to copy the
+// exact shape to actually notify a peer. Until this table existed, the
+// channel origin block hardcoded Discord syntax (`<@USER_ID>`) for every
+// non-Slack adapter, which silently misled KakaoTalk and Telegram sessions
+// into emitting addressing tokens that the platform doesn't recognise. The
+// participants block kept rendering `<@authorId> (name)` lines for the
+// same reason — see `renderParticipants`.
+//
+// `mentionMode` semantics:
+//   - 'angle-id'     — Slack/Discord: `<@USER_ID>` where USER_ID is the
+//                      raw `authorId` we already surface in participants.
+//   - 'at-username'  — Telegram: `@username` plain text. The numeric
+//                      `authorId` is NOT what gets mentioned; usernames are
+//                      a separate field that not every user has.
+//   - 'alias'        — KakaoTalk: type the bot's alias as plain text. The
+//                      adapter's classifier (`kakaotalk-classify.ts`) does
+//                      a substring match against configured aliases; there
+//                      is no in-band syntax to copy.
+type PlatformInfo = {
+  displayName: string
+  mentionMode: 'angle-id' | 'at-username' | 'alias'
+}
+
+const PLATFORM_INFO: Record<AdapterId, PlatformInfo> = {
+  'slack-bot': { displayName: 'Slack', mentionMode: 'angle-id' },
+  'discord-bot': { displayName: 'Discord', mentionMode: 'angle-id' },
+  'telegram-bot': { displayName: 'Telegram', mentionMode: 'at-username' },
+  kakaotalk: { displayName: 'KakaoTalk', mentionMode: 'alias' },
+}
+
+function getPlatformInfo(adapter: AdapterId): PlatformInfo {
+  return PLATFORM_INFO[adapter]
+}
+
 // Compact description of the role the runtime resolved for this session at
 // creation time. Rendered as a single block under the origin text for
 // non-TUI sessions so the agent knows what it can and cannot do without
@@ -171,11 +205,11 @@ function renderChannelOrigin(
   // only `text` and pulls addressing from this origin. We point the model at
   // it as the default, and keep channel_send as the escape hatch for posting
   // elsewhere (different chat, breaking out of the thread on purpose, etc.).
-  const platform = origin.adapter === 'slack-bot' ? 'Slack' : 'Discord'
+  const platformInfo = getPlatformInfo(origin.adapter)
   const lines: string[] = [
     '## Session origin',
     '',
-    `You are responding inside a ${platform} channel session. There is no human`,
+    `You are responding inside a ${platformInfo.displayName} channel session. There is no human`,
     'attached to a console here — your only way to communicate with the user',
     'is a tool call. Plain-text output is invisible.',
   ]
@@ -210,8 +244,7 @@ function renderChannelOrigin(
     "matching the channel's `allow` rules are accepted (the tool returns",
     '`{ ok: false }` otherwise).',
     '',
-    `To mention someone in your reply, use ${platform} syntax \`<@USER_ID>\`.`,
-    ...renderMentionExample(origin.participants ?? [], platform, now),
+    ...renderMentionGuidance(platformInfo, origin.participants ?? [], now),
   )
 
   const participantsBlock = renderParticipants(origin.participants ?? [], now)
@@ -242,23 +275,11 @@ function renderMembershipSummary(
   return `This channel has approximately ${total} members (about ${membership.humans} humans, ${membership.bots} bots — the bot count is approximate, the full member list was not enumerated because it exceeds the 50-member cap).${caveat} The 10 most recent speakers are listed below.`
 }
 
-function renderMentionExample(
+function renderMentionGuidance(
+  platformInfo: PlatformInfo,
   participants: readonly ChannelParticipant[],
-  platform: 'Discord' | 'Slack',
   now: number,
 ): string[] {
-  // Concrete worked example anchored on a REAL participant when possible.
-  // Models reliably copy concrete examples; abstract `<@USER_ID>` placeholders
-  // get treated as generic instructions and ignored. Prefer a peer bot for
-  // the example because that's the addressing case where plain-text names
-  // silently fail (the human path is forgiving — humans see their name and
-  // respond regardless of mention syntax). Fall back to any non-self
-  // participant, then to a generic placeholder if the channel is brand new.
-  //
-  // Apply the SAME staleness cutoff as `renderParticipants` so we never name
-  // someone in the example who isn't shown in the participants block — that
-  // would surface a "ghost" name from >7d ago and confuse the model about
-  // who is actually around.
   const cutoff = now - PARTICIPANTS_MAX_AGE_MS
   const fresh = [...participants]
     .filter((p) => p.lastMessageAt >= cutoff)
@@ -267,11 +288,32 @@ function renderMentionExample(
   const anyPeer = peerBot ?? fresh[0]
   const exampleId = anyPeer?.authorId ?? '123456789'
   const exampleName = anyPeer?.authorName ?? 'PeerBot'
-  return [
-    `For example, to address ${exampleName} in this conversation, write \`<@${exampleId}> hello\` —`,
-    `**not** "${exampleName} hello". Plain-text names do not notify the recipient on ${platform},`,
-    'and other bots in this channel will not see the message as addressed to them.',
-  ]
+
+  switch (platformInfo.mentionMode) {
+    case 'angle-id':
+      return [
+        `To mention someone in your reply, use ${platformInfo.displayName} syntax \`<@USER_ID>\`.`,
+        `For example, to address ${exampleName} in this conversation, write \`<@${exampleId}> hello\` —`,
+        `**not** "${exampleName} hello". Plain-text names do not notify the recipient on ${platformInfo.displayName},`,
+        'and other bots in this channel will not see the message as addressed to them.',
+      ]
+    case 'at-username':
+      return [
+        `To mention someone in your reply, use Telegram syntax \`@username\` in plain text.`,
+        `Telegram usernames are a SEPARATE field from \`authorId\`. The \`<@id>\` tokens you see in the participants`,
+        'block below are a typeclaw convention for parsing inbound mentions — do not echo them back as outbound mentions.',
+        'If you only know an author by their display name and they have no `@username`, address them by display name',
+        'and they will see the message via the reply context.',
+      ]
+    case 'alias':
+      return [
+        'KakaoTalk has no in-band mention syntax. To address someone, just type their display name as plain text;',
+        "the participants block below shows display names. To get the BOT's attention from outside this session,",
+        "a user types one of the bot's configured aliases — they do not need to copy any token from the participants list.",
+        `The \`<@id>\` tokens in the participants block below are a typeclaw convention for parsing inbound mentions —`,
+        'do not echo them back as outbound mentions; KakaoTalk would render them as literal text.',
+      ]
+  }
 }
 
 function renderConversationLine(origin: {
