@@ -24,6 +24,7 @@ import type { Stream } from '@/stream'
 import { getAuthFor } from './auth'
 import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
+import { lookAtTool } from './multimodal'
 import { resolveBuiltinToolRefs, wrapPluginTool, wrapSystemAgentTool, wrapSystemTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
@@ -187,6 +188,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
         : [
             websearchTool,
             webfetchTool,
+            lookAtTool,
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
             ...buildChannelTools(options.channelRouter, options.origin),
