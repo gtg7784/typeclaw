@@ -33,6 +33,7 @@ import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
 import { createRestartTool } from './tools/restart'
 import { createStreamSnapshotTool } from './tools/stream-snapshot'
+import { createUsageTool } from './tools/usage'
 import { webfetchTool } from './tools/webfetch'
 import { websearchTool } from './tools/websearch'
 
@@ -94,6 +95,10 @@ export type CreateSessionOptions = {
   // Enables the `restart` tool. Set when the agent is running inside a
   // typeclaw-managed container. Read from TYPECLAW_CONTAINER_NAME at the call site.
   containerName?: string
+  // Enables the `usage` tool. The path to the agent folder so the tool can
+  // scan `<agentDir>/sessions/*.jsonl` for historical token counts. Tests and
+  // ad-hoc sessions can omit it; the tool is simply not registered.
+  agentDir?: string
 }
 
 export type CreateSessionResult = {
@@ -150,6 +155,11 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // container-restarting broadcast.
   const sessionManager = options.sessionManager ?? SessionManager.inMemory()
 
+  // Late-bound holder: the `usage` tool needs the live AgentSession to read
+  // `getSessionStats()`, but customSystemTools is materialized before
+  // createAgentSession() returns. Same shape as originRef.
+  const sessionHolder: { current: AgentSession | undefined } = { current: undefined }
+
   const customSystemTools =
     options.customTools !== undefined
       ? options.customTools
@@ -170,6 +180,9 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
                   }),
                 ]
               : []),
+            ...(options.agentDir !== undefined
+              ? [createUsageTool({ agentDir: options.agentDir, getSession: () => sessionHolder.current })]
+              : []),
           ]
   const customTools = [...wrapSystemTools(customSystemTools, options.plugins, getOrigin), ...pluginCustomTools]
 
@@ -184,6 +197,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     ...(tools ? { tools } : {}),
     customTools,
   })
+  sessionHolder.current = session
 
   const unsubRestart = subscribeRestartNotice(options.stream, sessionManager)
 

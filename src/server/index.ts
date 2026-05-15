@@ -140,6 +140,7 @@ export function createServer({
               ...(channelRouter ? { channelRouter } : {}),
               ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
               ...(containerName !== undefined ? { containerName } : {}),
+              ...(agentDir !== undefined ? { agentDir } : {}),
             })
             const session = 'session' in result ? result.session : result
             const dispose = 'session' in result && result.dispose ? result.dispose : async () => {}

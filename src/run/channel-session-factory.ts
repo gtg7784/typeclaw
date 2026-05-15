@@ -61,6 +61,7 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
           }
         : {}),
       ...(deps.containerName !== undefined ? { containerName: deps.containerName } : {}),
+      agentDir: deps.cwd,
     })
 
     return {
