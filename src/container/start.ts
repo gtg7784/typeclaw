@@ -3,7 +3,13 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
-import { configSchema, expandMountPath, migrateLegacyConfigShape, type Config } from '@/config'
+import {
+  buildConfigMigrationCommitMessage,
+  configSchema,
+  expandMountPath,
+  migrateLegacyConfigShape,
+  type Config,
+} from '@/config'
 import { send as sendToDaemon } from '@/hostd/client'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
@@ -179,6 +185,15 @@ export async function start({
     // one-shot and idempotent — once `workspaces` is set, refreshPackageJson
     // is a no-op, so users who never edit their agent folder pay zero cost on
     // subsequent starts and users who customized `workspaces` are not clobbered.
+    //
+    // typeclaw.json is migrated explicitly here (before any other read path)
+    // so the on-disk rewrite and its git commit are paired in one place.
+    // loadConfigSync / validateConfig still apply the migration on first read
+    // from other entry points (TUI, hostd, doctor, plugin loaders) — but their
+    // persistence is best-effort and uncommitted, because committing from a
+    // hot read path would surprise callers that don't expect git side effects.
+    // start() is the single coordination point where the commit lives.
+    await migrateAndCommitConfig(cwd)
     await refreshGitignore(cwd)
     const pkgRefresh = await refreshPackageJson(cwd)
     await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
@@ -542,6 +557,40 @@ export async function refreshDockerfile(cwd: string): Promise<void> {
 export async function refreshGitignore(cwd: string): Promise<void> {
   const cfg = await loadTypeclawConfig(cwd)
   await writeFile(join(cwd, GITIGNORE_FILE), buildGitignore(cfg.git.ignore))
+}
+
+// Reads typeclaw.json, runs the legacy-shape migration, writes the result
+// back, and commits with a step-aware message. No-op when the file is
+// missing, not JSON, or already in canonical shape — i.e. on every start
+// after the first one that observed legacy keys. The write goes through
+// the same writeFile path as persistMigratedConfig in src/config/config.ts,
+// but committed here because typeclaw.json is tracked in git (unlike
+// Dockerfile/secrets.json) and silent disk drift becomes invisible mixed-in
+// commits the moment any other tool touches the repo.
+export async function migrateAndCommitConfig(cwd: string): Promise<void> {
+  const configPath = join(cwd, CONFIG_FILE)
+  let raw: string
+  try {
+    raw = await readFile(configPath, 'utf8')
+  } catch {
+    return
+  }
+
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    return
+  }
+
+  const result = migrateLegacyConfigShape(parsed)
+  if (!result.changed) return
+
+  const message = buildConfigMigrationCommitMessage(result.applied)
+  if (message === null) return
+
+  await writeFile(configPath, `${JSON.stringify(result.json, null, 2)}\n`)
+  await commitSystemFile(cwd, CONFIG_FILE, message)
 }
 
 // Commits TypeClaw-owned system file(s) if any are dirty in git. Skips silently

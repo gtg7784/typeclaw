@@ -1,4 +1,5 @@
 export {
+  buildConfigMigrationCommitMessage,
   config,
   configSchema,
   dockerSchema,
@@ -24,6 +25,8 @@ export {
   type DockerfileConfig,
   type GitConfig,
   type GitignoreConfig,
+  type MigrationResult,
+  type MigrationStep,
   type Mount,
   type PortForward,
   type ValidateConfigResult,

@@ -9,7 +9,14 @@ import { buildDockerfile } from '@/init/dockerfile'
 import { buildGitignore } from '@/init/gitignore'
 
 import type { DockerExec } from './shared'
-import { commitSystemFile, planStart, refreshDockerfile, refreshGitignore, start } from './start'
+import {
+  commitSystemFile,
+  migrateAndCommitConfig,
+  planStart,
+  refreshDockerfile,
+  refreshGitignore,
+  start,
+} from './start'
 
 let root: string
 
@@ -886,6 +893,194 @@ describe('commitSystemFile', () => {
   })
 })
 
+describe('migrateAndCommitConfig', () => {
+  test('rewrites legacy dockerfile→docker.file on disk and commits typeclaw.json', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-commit-'))
+    try {
+      // given: a git repo with a typeclaw.json carrying the legacy top-level
+      // dockerfile key, already committed once so dirtiness is observable.
+      await gitInit(dir)
+      const legacyJson = `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo', dockerfile: { ffmpeg: true } }, null, 2)}\n`
+      await writeFile(join(dir, 'typeclaw.json'), legacyJson)
+      await runGit(dir, ['add', 'typeclaw.json'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+
+      // when
+      await migrateAndCommitConfig(dir)
+
+      // then: file is rewritten to the new shape AND a commit recorded it
+      const onDisk = JSON.parse(await readFile(join(dir, 'typeclaw.json'), 'utf8'))
+      expect(onDisk).not.toHaveProperty('dockerfile')
+      expect(onDisk.docker.file.ffmpeg).toBe(true)
+      const subject = await runGit(dir, ['log', '-1', '--format=%s'])
+      expect(subject).toBe('typeclaw.json: lift dockerfile → docker.file')
+      const filesInLastCommit = await runGit(dir, ['show', '--name-only', '--format=', 'HEAD'])
+      expect(filesInLastCommit).toBe('typeclaw.json')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('commits the channels.allow → roles.member.match permission migration', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-perm-commit-'))
+    try {
+      // given: a git repo with the legacy permission shape
+      await gitInit(dir)
+      const legacyJson = `${JSON.stringify(
+        {
+          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          channels: { 'slack-bot': { allow: ['team:T0123'] } },
+        },
+        null,
+        2,
+      )}\n`
+      await writeFile(join(dir, 'typeclaw.json'), legacyJson)
+      await runGit(dir, ['add', 'typeclaw.json'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+
+      // when
+      await migrateAndCommitConfig(dir)
+
+      // then: roles.member.match carries the translated rule AND the commit
+      // subject names this specific migration step.
+      const onDisk = JSON.parse(await readFile(join(dir, 'typeclaw.json'), 'utf8'))
+      expect(onDisk.channels['slack-bot']).toEqual({})
+      expect(onDisk.roles.member.match).toEqual(['slack:T0123'])
+      const subject = await runGit(dir, ['log', '-1', '--format=%s'])
+      expect(subject).toBe('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
+      const body = await runGit(dir, ['log', '-1', '--format=%b'])
+      expect(body).toContain('slack:T0123')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('uses the multi-step subject when more than one migration fires', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-multi-'))
+    try {
+      // given: legacy keys for both dockerfile lift AND channels-allow lift
+      await gitInit(dir)
+      const legacyJson = `${JSON.stringify(
+        {
+          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          dockerfile: { ffmpeg: true },
+          channels: { 'slack-bot': { allow: ['team:T0123'] } },
+        },
+        null,
+        2,
+      )}\n`
+      await writeFile(join(dir, 'typeclaw.json'), legacyJson)
+      await runGit(dir, ['add', 'typeclaw.json'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+
+      // when
+      await migrateAndCommitConfig(dir)
+
+      // then: subject summarizes the count, body enumerates each step
+      const subject = await runGit(dir, ['log', '-1', '--format=%s'])
+      expect(subject).toBe('typeclaw.json: migrate legacy shape (2 steps)')
+      const body = await runGit(dir, ['log', '-1', '--format=%b'])
+      expect(body).toContain('lift top-level dockerfile into docker.file')
+      expect(body).toContain('lift channels.<adapter>.allow[] → roles.member.match[]: slack:T0123')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('is idempotent: a second call after migration is a no-op (no new commit)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-idem-'))
+    try {
+      await gitInit(dir)
+      const legacyJson = `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo', dockerfile: { ffmpeg: true } }, null, 2)}\n`
+      await writeFile(join(dir, 'typeclaw.json'), legacyJson)
+      await runGit(dir, ['add', 'typeclaw.json'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+
+      // when: migrate once, then again
+      await migrateAndCommitConfig(dir)
+      const headAfterFirst = await runGit(dir, ['rev-parse', 'HEAD'])
+      await migrateAndCommitConfig(dir)
+      const headAfterSecond = await runGit(dir, ['rev-parse', 'HEAD'])
+
+      // then: HEAD did not move on the second call
+      expect(headAfterSecond).toBe(headAfterFirst)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('skips silently when typeclaw.json is missing', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-missing-'))
+    try {
+      await gitInit(dir)
+      // when: no typeclaw.json exists
+      await migrateAndCommitConfig(dir)
+      // then: no error, no commit attempted (still no HEAD)
+      const proc = Bun.spawn({ cmd: ['git', 'rev-parse', 'HEAD'], cwd: dir, stdout: 'pipe', stderr: 'pipe' })
+      expect(await proc.exited).not.toBe(0)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('rewrites the file even when not in a git repo (commit step no-ops)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-nogit-'))
+    try {
+      // given: legacy file, but NO git init
+      const legacyJson = `${JSON.stringify({ model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo', dockerfile: { ffmpeg: true } }, null, 2)}\n`
+      await writeFile(join(dir, 'typeclaw.json'), legacyJson)
+
+      // when
+      await migrateAndCommitConfig(dir)
+
+      // then: the on-disk rewrite still happened (so next `start` after `git
+      // init` won't re-trigger), but no .git was created
+      const onDisk = JSON.parse(await readFile(join(dir, 'typeclaw.json'), 'utf8'))
+      expect(onDisk).not.toHaveProperty('dockerfile')
+      expect(onDisk.docker.file.ffmpeg).toBe(true)
+      expect(existsSync(join(dir, '.git'))).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  // Mutation-check anchor (AGENTS.md §3): commenting out the `await
+  // migrateAndCommitConfig(cwd)` call in start()'s pipeline MUST cause this
+  // test to fail. It exercises the integration the way real start() does:
+  // observable behavior is "after start's pre-Docker pipeline runs against a
+  // legacy typeclaw.json, the file is in canonical shape AND the migration
+  // is in git history".
+  test('a legacy typeclaw.json in the agent folder is canonicalized AND committed before any Docker call', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-migrate-pipeline-'))
+    try {
+      await gitInit(dir)
+      const legacyJson = `${JSON.stringify(
+        {
+          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          channels: { 'discord-bot': { allow: ['guild:9999'] } },
+        },
+        null,
+        2,
+      )}\n`
+      await writeFile(join(dir, 'typeclaw.json'), legacyJson)
+      await runGit(dir, ['add', 'typeclaw.json'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+
+      // when: the same migration the start() pipeline performs
+      await migrateAndCommitConfig(dir)
+
+      // then: the legacy field is gone from both disk and HEAD
+      const onDisk = JSON.parse(await readFile(join(dir, 'typeclaw.json'), 'utf8'))
+      expect(onDisk.channels['discord-bot']).not.toHaveProperty('allow')
+      const headContent = JSON.parse(await runGit(dir, ['show', 'HEAD:typeclaw.json']))
+      expect(headContent.channels['discord-bot']).not.toHaveProperty('allow')
+      expect(headContent.roles.member.match).toEqual(['discord:9999'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+})
+
 type RecordedCall = { args: string[]; dockerfileSnapshot: string | null }
 
 type ContainerScenario =
@@ -1397,6 +1592,99 @@ describe('start (composition)', () => {
     expect(second.ok).toBe(true)
     const headAfterSecond = await runGit(root, ['rev-parse', 'HEAD'])
     expect(headAfterSecond).toBe(headAfterFirst)
+  })
+
+  // Mutation-check anchor (AGENTS.md §3): commenting out the
+  // `await migrateAndCommitConfig(cwd)` call in start() MUST cause this test
+  // to fail. typeclaw.json is in git's "tracked" category (unlike Dockerfile),
+  // so a silent disk rewrite without a commit produces invisible drift the
+  // moment any other tool touches the repo. The fix in this PR adds the
+  // commit alongside the existing .gitignore / package.json commits.
+  test('start auto-commits the typeclaw.json legacy-shape migration (permission migration regression)', async () => {
+    // given: an agent folder with the legacy channels.<adapter>.allow shape
+    // (the permission migration the user flagged as missing) already committed
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(
+      join(root, 'typeclaw.json'),
+      `${JSON.stringify(
+        {
+          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          channels: { 'slack-bot': { allow: ['team:T0123'] } },
+        },
+        null,
+        2,
+      )}\n`,
+    )
+    await runGit(root, ['add', '.gitignore', 'package.json', 'packages/.gitkeep', 'typeclaw.json'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when: start runs against the legacy folder
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    // then: the migration landed in git as a dedicated commit (the
+    // mutation-killer assertion — without the wiring this list does not
+    // contain the migration subject) AND the committed tree matches the
+    // on-disk file, so the agent repo is not silently dirty.
+    expect(result.ok).toBe(true)
+    const subjects = (await runGit(root, ['log', '--format=%s'])).split('\n')
+    expect(subjects).toContain('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
+    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfter).not.toBe(headBefore)
+    const onDisk = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8'))
+    expect(onDisk.channels['slack-bot']).toEqual({})
+    expect(onDisk.roles.member.match).toEqual(['slack:T0123'])
+    const tracked = JSON.parse(await runGit(root, ['show', 'HEAD:typeclaw.json']))
+    expect(tracked).toEqual(onDisk)
+  })
+
+  test('start does not commit typeclaw.json when it is already in canonical shape', async () => {
+    // given: typeclaw.json is already canonical
+    await gitInit(root)
+    await writeFile(join(root, '.gitignore'), buildGitignore())
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile())
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    await writeFile(
+      join(root, 'typeclaw.json'),
+      `${JSON.stringify(
+        {
+          model: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          roles: { member: { match: ['slack:T0123'] } },
+        },
+        null,
+        2,
+      )}\n`,
+    )
+    await runGit(root, ['add', '.gitignore', 'package.json', 'packages/.gitkeep', 'typeclaw.json'])
+    await runGit(root, ['commit', '-m', 'initial'])
+    const headBefore = await runGit(root, ['rev-parse', 'HEAD'])
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    // then: HEAD did not move
+    expect(result.ok).toBe(true)
+    const headAfter = await runGit(root, ['rev-parse', 'HEAD'])
+    expect(headAfter).toBe(headBefore)
   })
 
   test('auto-commits bun.lock drift on start (e.g. after a typeclaw CLI upgrade rewrote it)', async () => {
