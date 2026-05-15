@@ -4,7 +4,7 @@ import { z } from 'zod'
 
 import type { Subagent, SubagentRegistry } from '@/agent/subagents'
 
-import { cronFileSchema, parseCronFile } from './schema'
+import { buildCronMigrationCommitMessage, cronFileSchema, migrateLegacyCronShape, parseCronFile } from './schema'
 
 describe('cronFileSchema', () => {
   test('accepts an empty jobs list', () => {
@@ -273,5 +273,107 @@ describe('parseCronFile with subagents registry', () => {
       ],
     })
     expect(result.ok).toBe(true)
+  })
+})
+
+describe('migrateLegacyCronShape', () => {
+  test('returns changed=false on canonical input (every job has scheduledByRole)', () => {
+    const input = {
+      jobs: [
+        { id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' },
+        { id: 'b', schedule: '0 * * * *', kind: 'exec', command: ['echo', 'hi'], scheduledByRole: 'trusted' },
+      ],
+    }
+    const result = migrateLegacyCronShape(input)
+    expect(result.changed).toBe(false)
+    expect(result.applied).toEqual([])
+    expect(result.json).toBe(input)
+  })
+
+  test('stamps scheduledByRole: "owner" on jobs missing it', () => {
+    const input = {
+      jobs: [{ id: 'minute-status-log', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+    }
+    const result = migrateLegacyCronShape(input)
+    expect(result.changed).toBe(true)
+    expect(result.applied).toEqual([{ kind: 'stamp-scheduled-by-role-owner', jobIds: ['minute-status-log'] }])
+    const job = (result.json as { jobs: Array<{ scheduledByRole: string }> }).jobs[0]
+    expect(job?.scheduledByRole).toBe('owner')
+  })
+
+  test('leaves existing scheduledByRole values untouched (does not coerce non-owner to owner)', () => {
+    const input = {
+      jobs: [
+        { id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'trusted' },
+        { id: 'b', schedule: '0 * * * *', kind: 'prompt', prompt: 'y' },
+      ],
+    }
+    const result = migrateLegacyCronShape(input)
+    expect(result.changed).toBe(true)
+    const jobs = (result.json as { jobs: Array<{ id: string; scheduledByRole: string }> }).jobs
+    expect(jobs[0]?.scheduledByRole).toBe('trusted')
+    expect(jobs[1]?.scheduledByRole).toBe('owner')
+    expect(result.applied[0]).toEqual({ kind: 'stamp-scheduled-by-role-owner', jobIds: ['b'] })
+  })
+
+  test('produces output that survives parseCronFile (round-trip)', () => {
+    const legacy = {
+      jobs: [
+        { id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x' },
+        { id: 'b', schedule: '0 0 * * *', kind: 'exec', command: ['echo', 'hi'] },
+      ],
+    }
+    const migrated = migrateLegacyCronShape(legacy)
+    const parsed = parseCronFile(migrated.json)
+    expect(parsed.ok).toBe(true)
+  })
+
+  test('is idempotent: a second pass over migrated output reports changed=false', () => {
+    const first = migrateLegacyCronShape({
+      jobs: [{ id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+    })
+    const second = migrateLegacyCronShape(first.json)
+    expect(second.changed).toBe(false)
+  })
+
+  test('no-ops on non-object input (defensive — JSON.parse can return arrays/primitives)', () => {
+    expect(migrateLegacyCronShape(null).changed).toBe(false)
+    expect(migrateLegacyCronShape([]).changed).toBe(false)
+    expect(migrateLegacyCronShape('x').changed).toBe(false)
+    expect(migrateLegacyCronShape(42).changed).toBe(false)
+  })
+
+  test('no-ops when `jobs` is missing or not an array', () => {
+    expect(migrateLegacyCronShape({}).changed).toBe(false)
+    expect(migrateLegacyCronShape({ jobs: 'oops' }).changed).toBe(false)
+    expect(migrateLegacyCronShape({ jobs: null }).changed).toBe(false)
+  })
+
+  test('preserves $schema and other top-level fields when rewriting', () => {
+    const input = {
+      $schema: 'https://example.com/cron.schema.json',
+      jobs: [{ id: 'a', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+    }
+    const result = migrateLegacyCronShape(input)
+    expect((result.json as { $schema: string }).$schema).toBe('https://example.com/cron.schema.json')
+  })
+})
+
+describe('buildCronMigrationCommitMessage', () => {
+  test('returns null when no steps applied (do-not-commit signal)', () => {
+    expect(buildCronMigrationCommitMessage([])).toBe(null)
+  })
+
+  test('produces a single-step subject naming the job count', () => {
+    const msg = buildCronMigrationCommitMessage([{ kind: 'stamp-scheduled-by-role-owner', jobIds: ['a', 'b', 'c'] }])
+    expect(msg).toContain('cron.json:')
+    expect(msg).toContain('3 legacy jobs')
+    expect(msg).toContain('a, b, c')
+  })
+
+  test('singularizes "job" when only one id', () => {
+    const msg = buildCronMigrationCommitMessage([{ kind: 'stamp-scheduled-by-role-owner', jobIds: ['only-one'] }])
+    expect(msg).toContain('1 legacy job')
+    expect(msg).not.toContain('1 legacy jobs')
   })
 })
