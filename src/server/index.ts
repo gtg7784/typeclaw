@@ -12,6 +12,7 @@ import type { ChannelRouter } from '@/channels/router'
 import type { HookBus } from '@/plugin'
 import type { BrokerWsData, ContainerBroker } from '@/portbroker'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
+import type { ClaimController, ClaimResultEvent } from '@/role-claim'
 import type { PluginRuntime, PluginRuntimeState } from '@/run/plugin-runtime'
 import type { SessionFactory } from '@/sessions'
 import type { ClientMessage, PromptDelivery, QueueStateItem, ReloadResultPayload, ServerMessage } from '@/shared'
@@ -47,6 +48,12 @@ export type ServerOptions = {
   // which writes to stdout/stderr so `typeclaw logs` surfaces every event.
   // Tests inject a fake logger to assert on captured output.
   logger?: ServerLogger
+  // Optional role-claim controller. When set, the server accepts
+  // `claim_start` / `claim_cancel` from TUI-class WS clients (the host
+  // CLI's `typeclaw role claim` command in particular), and pushes
+  // `claim_started` / `claim_completed` / `claim_error` back over the
+  // same connection. Omitted in tests that don't exercise the flow.
+  claimController?: ClaimController
 }
 
 const consoleLogger: ServerLogger = {
@@ -77,6 +84,8 @@ type SessionState = {
   draining: boolean
   unsubBroadcast: Unsubscribe | null
   unsubPrompts: Unsubscribe | null
+  unsubClaim: Unsubscribe | null
+  activeClaimCode: string | null
   // Captured at session open so close-time hooks fire against the same
   // generation that ran session.start. A plugin reload mid-connection does
   // not re-target this session's lifecycle hooks.
@@ -102,6 +111,7 @@ export function createServer({
   tuiToken,
   containerBroker,
   logger = consoleLogger,
+  claimController,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
 
@@ -170,6 +180,8 @@ export function createServer({
               draining: false,
               unsubBroadcast: null,
               unsubPrompts: null,
+              unsubClaim: null,
+              activeClaimCode: null,
               runtimeSnapshot: runtimeSnapshot ?? null,
               dispose,
             }
@@ -214,6 +226,73 @@ export function createServer({
           const ws = rawWs as Ws
           const msg = JSON.parse(String(raw)) as ClientMessage
           const state = sessionStates.get(ws)
+
+          if (msg.type === 'claim_start') {
+            if (!state) return
+            if (!claimController) {
+              send(ws, {
+                type: 'claim_error',
+                payload: { code: msg.code, reason: 'role-claim is not enabled on this agent' },
+              })
+              return
+            }
+            if (state.unsubClaim) {
+              state.unsubClaim()
+              state.unsubClaim = null
+            }
+            const result = claimController.startClaim({
+              code: msg.code,
+              role: msg.role,
+              ttlMs: msg.ttlMs,
+              ...(msg.channel !== undefined ? { channel: msg.channel } : {}),
+            })
+            if (!result.ok) {
+              send(ws, { type: 'claim_error', payload: { code: msg.code, reason: result.reason } })
+              return
+            }
+            state.activeClaimCode = msg.code
+            state.unsubClaim = claimController.onResult((event: ClaimResultEvent) => {
+              if (event.kind === 'completed' && event.code === msg.code) {
+                send(ws, {
+                  type: 'claim_completed',
+                  payload: {
+                    code: event.code,
+                    role: event.role,
+                    matchRule: event.matchRule,
+                    adapter: event.adapter,
+                    authorId: event.authorId,
+                  },
+                })
+              } else if (event.kind === 'error' && event.code === msg.code) {
+                send(ws, { type: 'claim_error', payload: { code: event.code, reason: event.reason } })
+              } else if (event.kind === 'cancelled' && event.code === msg.code) {
+                send(ws, { type: 'claim_error', payload: { code: event.code, reason: 'cancelled' } })
+              }
+            })
+            send(ws, {
+              type: 'claim_started',
+              payload: {
+                code: msg.code,
+                role: msg.role,
+                ...(msg.channel !== undefined ? { channel: msg.channel } : {}),
+                expiresAt: result.expiresAt,
+              },
+            })
+            return
+          }
+
+          if (msg.type === 'claim_cancel') {
+            if (!state || !claimController) return
+            if (state.activeClaimCode !== null) {
+              claimController.cancelClaim(state.activeClaimCode)
+              state.activeClaimCode = null
+            }
+            if (state.unsubClaim) {
+              state.unsubClaim()
+              state.unsubClaim = null
+            }
+            return
+          }
 
           if (msg.type === 'reload') {
             await handleReload(ws, reloadAll, reloadRegistry, msg.scope)
@@ -297,6 +376,10 @@ export function createServer({
           const state = sessionStates.get(ws)
           state?.unsubBroadcast?.()
           state?.unsubPrompts?.()
+          state?.unsubClaim?.()
+          if (state?.activeClaimCode !== null && state?.activeClaimCode !== undefined && claimController) {
+            claimController.cancelClaim(state.activeClaimCode)
+          }
           try {
             if (state && state.runtimeSnapshot !== null) {
               await state.runtimeSnapshot.hooks.runSessionEnd({ sessionId: state.sessionFileId, origin: state.origin })

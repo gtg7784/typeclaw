@@ -1,4 +1,8 @@
 export {
+  type ClaimCompletedPayload,
+  type ClaimErrorPayload,
+  type ClaimRoleChoice,
+  type ClaimStartedPayload,
   type ClientMessage,
   type DoctorCheckPayload,
   type DoctorFixPayload,

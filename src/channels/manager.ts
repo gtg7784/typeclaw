@@ -9,7 +9,7 @@ import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/disc
 import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
 import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
-import { createChannelRouter, type ChannelRouter, type CreateSessionForChannel } from './router'
+import { createChannelRouter, type ChannelRouter, type ClaimHandler, type CreateSessionForChannel } from './router'
 import { ADAPTER_IDS, type AdapterId, type ChannelAdapterConfig, type ChannelsConfig } from './schema'
 
 export type ChannelManagerLogger = {
@@ -58,6 +58,10 @@ export type ChannelManagerOptions = {
   // passes `pluginsLoaded.permissions`. Omitting it falls through to the
   // router's grant-all default — see CreateChannelRouterOptions.
   permissions?: PermissionService
+  // Forwarded to the router; intercepts DM inbounds carrying a role-claim
+  // code. Production wiring sets this from the role-claim subsystem (see
+  // src/run/index.ts). Tests typically omit it.
+  claimHandler?: ClaimHandler
 }
 
 export type ChannelManager = {
@@ -91,6 +95,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     ...(options.aliasesRef ? { configuredAliases: options.aliasesRef } : {}),
     ...(options.createSessionForChannel ? { createSessionForChannel: options.createSessionForChannel } : {}),
     ...(options.permissions ? { permissions: options.permissions } : {}),
+    ...(options.claimHandler ? { claimHandler: options.claimHandler } : {}),
   })
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createKakaotalk = options.createKakaotalkAdapter ?? createKakaotalkAdapter

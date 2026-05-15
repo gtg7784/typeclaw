@@ -22,6 +22,8 @@ export type DoctorFixPayload =
   | { ok: true; checkId: string; summary: string; changedPaths: string[] }
   | { ok: false; checkId: string; error: string }
 
+export type ClaimRoleChoice = 'owner' | 'member' | 'trusted' | (string & {})
+
 export type ClientMessage =
   | { type: 'prompt'; text: string; delivery?: PromptDelivery }
   | { type: 'reload'; scope?: string }
@@ -29,8 +31,30 @@ export type ClientMessage =
   | { type: 'queue_cancel'; messageId: string }
   | { type: 'doctor'; requestId: DoctorRequestId }
   | { type: 'doctor_fix'; requestId: DoctorRequestId; checkId: string }
+  | { type: 'claim_start'; code: string; role: ClaimRoleChoice; channel?: string; ttlMs: number }
+  | { type: 'claim_cancel' }
 
 export type QueueStateItem = { id: string; text: string; ts: number }
+
+export type ClaimStartedPayload = {
+  code: string
+  role: string
+  channel?: string
+  expiresAt: number
+}
+
+export type ClaimCompletedPayload = {
+  code: string
+  role: string
+  matchRule: string
+  adapter: string
+  authorId: string
+}
+
+export type ClaimErrorPayload = {
+  code: string
+  reason: string
+}
 
 export type ServerMessage =
   | { type: 'connected'; sessionId: string }
@@ -45,3 +69,6 @@ export type ServerMessage =
   | { type: 'prompt_started'; messageId: string; text: string }
   | { type: 'doctor_result'; requestId: DoctorRequestId; checks: DoctorCheckPayload[] }
   | { type: 'doctor_fix_result'; requestId: DoctorRequestId; result: DoctorFixPayload }
+  | { type: 'claim_started'; payload: ClaimStartedPayload }
+  | { type: 'claim_completed'; payload: ClaimCompletedPayload }
+  | { type: 'claim_error'; payload: ClaimErrorPayload }

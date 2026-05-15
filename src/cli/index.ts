@@ -23,6 +23,7 @@ const main = defineCommand({
     shell: () => import('./shell').then((m) => m.shellCommand),
     compose: () => import('./compose').then((m) => m.composeCommand),
     channel: () => import('./channel').then((m) => m.channelCommand),
+    role: () => import('./role').then((m) => m.roleCommand),
     doctor: () => import('./doctor').then((m) => m.doctorCommand),
     usage: () => import('./usage').then((m) => m.usageCommand),
     _hostd: () => import('./hostd').then((m) => m.hostdCommand),
