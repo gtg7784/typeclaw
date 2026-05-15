@@ -456,3 +456,82 @@ describe('formatReport cache hit rate column', () => {
   })
   /* eslint-enable no-control-regex */
 })
+
+describe('formatReport Sent column (provider-billed volume = input + cacheRead)', () => {
+  const ts = new Date('2026-05-10T10:00:00').getTime()
+
+  async function reportWithCache(input: number, cacheRead: number) {
+    await writeSessionFile(`sent-${input}-${cacheRead}`, [
+      {
+        type: 'message',
+        id: 'm1',
+        parentId: null,
+        timestamp: new Date(ts).toISOString(),
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'hi' }],
+          api: 'fake',
+          provider: 'p',
+          model: 'x',
+          usage: {
+            input,
+            output: 50,
+            cacheRead,
+            cacheWrite: 0,
+            totalTokens: input + 50 + cacheRead,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
+          },
+          stopReason: 'stop',
+          timestamp: ts,
+        },
+      },
+    ])
+    return runUsage({ agentDir })
+  }
+
+  test('renders a `Sent` column in tabular views', async () => {
+    const report = await reportWithCache(900, 100)
+    const out = formatReport(report, { view: 'models' })
+    expect(out).toMatch(/Sent/)
+  })
+
+  test('Sent equals input + cacheRead for a row (warm session: small input, large cache)', async () => {
+    // given: a warm session that shipped 84,000 tokens of context per turn,
+    // 99% of which hit the prompt cache. The dashboard bills this as 84k
+    // (volume shipped); the In column alone shows only 1k (cache misses).
+    const report = await reportWithCache(1_000, 83_000)
+    const out = formatReport(report, { view: 'models' })
+
+    // then: the Sent column must reflect the true 84k volume so a user
+    // reading the report sees the same magnitude their provider invoice does.
+    expect(out).toMatch(/\b84k\b/)
+    expect(out).toMatch(/99%/)
+  })
+
+  test('Sent equals input on cold-start turns (no cache reads)', async () => {
+    // given: a cold-start turn where the full prompt was billed fresh
+    const report = await reportWithCache(82_697, 0)
+    const out = formatReport(report, { view: 'models' })
+
+    // then: Sent matches input verbatim. We assert presence rather than
+    // exact ordering because both `In` and `Sent` show the same magnitude
+    // for cold-start rows.
+    expect(out).toMatch(/83k/)
+    expect(out).toMatch(/0%/)
+  })
+
+  test('summary headline includes Sent total', async () => {
+    const report = await reportWithCache(1_000, 99_000)
+    const out = formatReport(report, { view: 'summary' })
+    expect(out).toMatch(/Sent:/)
+    // 1k + 99k = 100k; format rounds to "100k"
+    expect(out).toMatch(/Sent:\s*100k/)
+  })
+
+  test('Sent appears in the daily view footer Total row', async () => {
+    const report = await reportWithCache(500, 9_500)
+    const out = formatReport(report, { view: 'daily' })
+    // 500 + 9500 = 10000 = "10k"
+    expect(out).toMatch(/\b10k\b/)
+  })
+})
