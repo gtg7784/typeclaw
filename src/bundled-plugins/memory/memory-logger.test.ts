@@ -176,6 +176,21 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(lower).toMatch(/byte-equivalent|content-equality|same daily stream/)
     expect(lower).toMatch(/refuse.*fragment|reject.*fragment/)
   })
+
+  test('teaches the subagent to use find_entry to jump past the watermark instead of scrolling from line 1', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('find_entry')
+    expect(lower).toMatch(/before .*read|use find_entry before|find_entry.*then.*read/)
+  })
+
+  test('explains the read tool truncates large files so scrolling from line 1 is expensive', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/truncat\w+.*(50 ?KB|2000 lines)/i)
+  })
+
+  test('forbids re-emitting the input watermark id as the new watermark id', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/never write the same watermark id|advance the watermark|move forward each run/)
+  })
 })
 
 describe('memoryLoggerSubagent', () => {
@@ -183,11 +198,14 @@ describe('memoryLoggerSubagent', () => {
     expect(memoryLoggerSubagent.systemPrompt).toBe(MEMORY_LOGGER_SYSTEM_PROMPT)
   })
 
-  test('declares one built-in tool (read) and one custom tool (append)', () => {
+  test('declares one built-in tool (read) and two custom tools (find_entry, append)', () => {
     expect(memoryLoggerSubagent.tools).toBeDefined()
     expect(memoryLoggerSubagent.tools!.length).toBe(1)
     expect(memoryLoggerSubagent.customTools).toBeDefined()
-    expect(memoryLoggerSubagent.customTools!.length).toBe(1)
+    expect(memoryLoggerSubagent.customTools!.length).toBe(2)
+    const descriptions = memoryLoggerSubagent.customTools!.map((t) => t.description)
+    expect(descriptions.some((d) => d.includes('Locate a session-transcript entry'))).toBe(true)
+    expect(descriptions.some((d) => d.includes('Append content to a file'))).toBe(true)
   })
 
   test('declares an inFlightKey that keys on agentDir (so two concurrent sessions for the same agent serialize)', () => {
