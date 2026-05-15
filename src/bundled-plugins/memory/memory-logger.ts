@@ -7,6 +7,7 @@ import { type Subagent, readTool } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
 import { appendTool } from './append-tool'
+import { findEntryTool } from './find-entry-tool'
 import { readWatermark } from './watermark'
 
 export const memoryLoggerPayloadSchema = z.object({
@@ -28,7 +29,21 @@ Your job is to read a session transcript and capture, as fragments, everything m
 
 A separate \`dreaming\` subagent runs later. It consolidates your fragments into long-term memory, dedupes, drops near-duplicates, resolves contradictions, and decides what generalizes. **You are the additive layer; dreaming is the filter.** This division of labor is the whole point: capture broadly here, and let dreaming throw away what doesn't last.
 
-You have exactly two tools: \`read\` and \`append\`. You cannot run shell commands, overwrite files, or edit existing content.
+You have exactly three tools: \`read\`, \`find_entry\`, and \`append\`. You cannot run shell commands, overwrite files, or edit existing content.
+
+# Reading the transcript past the watermark
+
+Session transcripts are JSONL files where each line is an entry with an \`id\` field. They are often large (hundreds of KB). The \`read\` tool truncates output to 50 KB or 2000 lines, whichever comes first, and tells you the line range it returned plus the offset to continue. If you start \`read\` at \`offset=1\` on a 500 KB transcript, the first call returns roughly the first 10% of the file, the next call (\`offset=<next>\`) returns the following slice, and so on. Scrolling through a long prefix that you've already consolidated past is wasted tokens.
+
+**Always use \`find_entry\` before \`read\` when a watermark is set.** It scans the JSONL file for the line whose own \`id\` field equals a given entry id and returns the line number, the total line count, and the offset to pass to \`read\` so you resume immediately after the watermark. It matches \`"id":"<entryId>"\` exactly, so \`parentId\` references to the same id do not confuse it. It returns a "not found" string (no throw) when the watermark id is not in the file — that can happen if a parent session was compacted; treat it as "start from offset=1" or, if the transcript is huge and obviously unrelated, write the watermark forward and skip the run.
+
+Typical flow with a watermark:
+
+1. \`find_entry(path=<transcript>, entryId=<watermark>)\` → returns \`line=N, totalLines=T, offset=N+1\`.
+2. \`read(path=<transcript>, offset=N+1)\` → returns the chunk starting AT the first unread entry. Repeat with the next offset until the read tool's continuation notice stops appearing.
+3. As you read, track the most recent \`id\` you see. That is your new watermark value — write it into the trailing watermark marker at the end of your appended output.
+
+Never write the same watermark id you were given as input. If the transcript has no new entries past the watermark, evaluate the entries you can see, then advance the watermark to the latest \`id\` in the transcript (which is on line \`totalLines\` from \`find_entry\`'s reply). The whole point of the watermark is to move forward each run.
 
 # Capture philosophy: when in doubt, capture
 
@@ -228,9 +243,8 @@ export function createMemoryLoggerSubagent(
   const logger = options.logger ?? consoleLogger
   return {
     systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
-    profile: 'fast',
     tools: [readTool],
-    customTools: [appendTool],
+    customTools: [findEntryTool, appendTool],
     payloadSchema: memoryLoggerPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,
     handler: async (ctx, runSession) => {
