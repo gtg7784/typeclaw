@@ -1,7 +1,7 @@
 import { styleText } from 'node:util'
 
 import type { ModelUsage, UsageTotals } from './aggregate'
-import { formatCost, formatTokens, isoDay, tokensInOut } from './format'
+import { formatCacheHitRate, formatCost, formatTokens, isoDay } from './format'
 import type { UsageReport } from './index'
 
 export type FormatOptions = {
@@ -50,7 +50,8 @@ function renderSummary(report: UsageReport, ctx: RenderCtx): string {
   sections.push(
     `${dim('Sessions:', ctx)} ${color('cyan', String(aggregation.bySession.length), ctx)}` +
       `  ${dim('Messages:', ctx)} ${color('cyan', String(total.messageCount), ctx)}` +
-      `  ${dim('Tokens:', ctx)} ${tokensInOut(total)}` +
+      `  ${dim('In:', ctx)} ${formatTokens(total.input)}` +
+      `  ${dim('Out:', ctx)} ${formatTokens(total.output)}` +
       `  ${dim('Cost:', ctx)} ${colorCost(total.cost, ctx)}`,
   )
 
@@ -166,13 +167,14 @@ const ELLIPSIS = '…'
 
 function renderTotalsTable(rows: Row[], ctx: RenderCtx, opts: { extraHeader?: string } = {}): string {
   const hasExtra = opts.extraHeader !== undefined
-  const headers = ['Item', 'Msgs', 'In/Out', 'Cache R/W', 'Cost', ...(hasExtra ? [opts.extraHeader!] : [])]
+  const headers = ['Item', 'Msgs', 'In', 'Out', 'Cache %', 'Cost', ...(hasExtra ? [opts.extraHeader!] : [])]
 
   const dataCells: string[][] = rows.map((r) => [
     r.label,
     String(r.totals.messageCount),
-    tokensInOut(r.totals),
-    colorCache(r.totals.cacheRead, r.totals.cacheWrite, ctx),
+    formatTokens(r.totals.input),
+    formatTokens(r.totals.output),
+    colorCacheHitRate(r.totals.input, r.totals.cacheRead, ctx),
     colorCost(r.totals.cost, ctx),
     ...(hasExtra ? [r.extra ?? ''] : []),
   ])
@@ -306,11 +308,17 @@ function colorCost(cost: number, ctx: RenderCtx): string {
   return color('green', text, ctx)
 }
 
-function colorCache(read: number, write: number, ctx: RenderCtx): string {
-  const r = formatTokens(read)
-  const w = formatTokens(write)
-  const dimZero = (text: string, value: number) => (value === 0 ? dim(text, ctx) : text)
-  return `${dimZero(r, read)} / ${dimZero(w, write)}`
+// Color thresholds for cache hit rate. ≥50% is "this row is benefiting from
+// caching" (green); <50% but non-zero stays default; literal zero or no-input
+// rows fade to dim so the eye lands on the meaningful numbers.
+function colorCacheHitRate(input: number, cacheRead: number, ctx: RenderCtx): string {
+  const text = formatCacheHitRate(input, cacheRead)
+  if (text === '—') return dim(text, ctx)
+  const total = input + cacheRead
+  const ratio = cacheRead / total
+  if (ratio >= 0.5) return color('green', text, ctx)
+  if (ratio === 0) return dim(text, ctx)
+  return text
 }
 
 // ANSI escape sequences would inflate column widths and break alignment under

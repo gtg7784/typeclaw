@@ -1,5 +1,3 @@
-import type { UsageTotals } from './aggregate'
-
 export function formatTokens(n: number): string {
   if (n === 0) return '0'
   const abs = Math.abs(n)
@@ -16,8 +14,11 @@ export function formatCost(usd: number): string {
   return `$${usd.toFixed(2)}`
 }
 
-export function tokensInOut(t: UsageTotals): string {
-  return `${formatTokens(t.input)} / ${formatTokens(t.output)}`
+export function formatCacheHitRate(input: number, cacheRead: number): string {
+  const total = input + cacheRead
+  if (total <= 0) return '—'
+  const pct = Math.round((cacheRead / total) * 100)
+  return `${pct}%`
 }
 
 export function isoDay(ts: number): string {

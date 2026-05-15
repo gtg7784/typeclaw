@@ -276,14 +276,14 @@ describe('formatReport narrow-terminal rendering', () => {
   const provider = 'someverylongprovider'
   const longModel = 'kimi-k2-instruct-with-a-very-long-suffix'
 
-  test('always shows Cache R/W column (no longer drops on narrow terminals)', async () => {
+  test('always shows Cache % column (no longer drops on narrow terminals)', async () => {
     const ts = new Date('2026-05-10T10:00:00').getTime()
     await writeSessionFile('cache001', [
       assistantEntry({ id: 'm1', ts, provider: 'fireworks', model: 'kimi-k2', input: 1000, output: 200, cost: 0.04 }),
     ])
     const report = await runUsage({ agentDir })
     const out = formatReport(report, { view: 'models', terminalWidth: 60 })
-    expect(out).toMatch(/Cache R\/W/)
+    expect(out).toMatch(/Cache %/)
   })
 
   test('truncates a long model name with an ellipsis and strips the provider prefix', async () => {
@@ -370,6 +370,84 @@ describe('formatReport colors', () => {
     const report = await reportWithCost(0.05)
     const out = formatReport(report, { view: 'models', useColor: true })
     expect(out).toMatch(/\u001b\[2mfireworks\/\u001b\[22mkimi-k2/)
+  })
+  /* eslint-enable no-control-regex */
+})
+
+describe('formatReport cache hit rate column', () => {
+  const ts = new Date('2026-05-10T10:00:00').getTime()
+
+  async function reportWithCache(input: number, cacheRead: number) {
+    await writeSessionFile(`hit-${input}-${cacheRead}`, [
+      {
+        type: 'message',
+        id: 'm1',
+        parentId: null,
+        timestamp: new Date(ts).toISOString(),
+        message: {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'hi' }],
+          api: 'fake',
+          provider: 'p',
+          model: 'x',
+          usage: {
+            input,
+            output: 50,
+            cacheRead,
+            cacheWrite: 0,
+            totalTokens: input + 50 + cacheRead,
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.01 },
+          },
+          stopReason: 'stop',
+          timestamp: ts,
+        },
+      },
+    ])
+    return runUsage({ agentDir })
+  }
+
+  test('renders the column header as `Cache %`', async () => {
+    const report = await reportWithCache(900, 100)
+    const out = formatReport(report, { view: 'models' })
+    expect(out).toMatch(/Cache %/)
+    expect(out).not.toMatch(/Cache R\/W/)
+  })
+
+  test('computes hit rate as cacheRead / (input + cacheRead) rounded to whole percent', async () => {
+    const report = await reportWithCache(900, 100)
+    const out = formatReport(report, { view: 'models' })
+    expect(out).toMatch(/10%/)
+  })
+
+  test('reports 0% when no cache hits', async () => {
+    const report = await reportWithCache(1000, 0)
+    const out = formatReport(report, { view: 'models' })
+    expect(out).toMatch(/0%/)
+  })
+
+  test('reports 100% when every input token was cached', async () => {
+    const report = await reportWithCache(0, 1000)
+    const out = formatReport(report, { view: 'models' })
+    expect(out).toMatch(/100%/)
+  })
+
+  test('shows em-dash for a row with no input and no cache reads', async () => {
+    const report = await reportWithCache(0, 0)
+    const out = formatReport(report, { view: 'models' })
+    expect(out).toMatch(/—/)
+  })
+
+  /* eslint-disable no-control-regex -- ANSI escape sequences are deliberately matched here. */
+  test('hit rate ≥50% colored green', async () => {
+    const report = await reportWithCache(400, 600)
+    const out = formatReport(report, { view: 'models', useColor: true })
+    expect(out).toMatch(/\u001b\[32m60%\u001b\[39m/)
+  })
+
+  test('hit rate of 0% is dimmed', async () => {
+    const report = await reportWithCache(1000, 0)
+    const out = formatReport(report, { view: 'models', useColor: true })
+    expect(out).toMatch(/\u001b\[2m0%\u001b\[22m/)
   })
   /* eslint-enable no-control-regex */
 })
