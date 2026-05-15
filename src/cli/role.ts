@@ -1,7 +1,7 @@
 import { intro, note, outro, spinner } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
-import { resolveHostPort, resolveTuiToken } from '@/container'
+import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir } from '@/init'
 import { runClaimSession } from '@/role-claim'
 
@@ -131,6 +131,11 @@ export const roleCommand = defineCommand({
 
 async function defaultUrl(): Promise<string> {
   const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+  const precheck = await requireContainerRunning({ cwd })
+  if (!precheck.ok) {
+    console.error(errorLine(precheck.reason))
+    process.exit(1)
+  }
   const port = await resolveHostPort({ cwd })
   const token = await resolveTuiToken({ cwd })
   const url = new URL(`ws://127.0.0.1:${port}`)
