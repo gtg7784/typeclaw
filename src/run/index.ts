@@ -246,7 +246,6 @@ export async function startAgent({
             }
           : {}),
         ...containerNameOpt,
-        agentDir: cwd,
       })
       return {
         prompt: (text) => session.prompt(text),
