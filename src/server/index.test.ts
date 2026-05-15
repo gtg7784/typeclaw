@@ -9,7 +9,7 @@ import type { SessionFactory } from '@/sessions'
 import type { ServerMessage } from '@/shared'
 import { createStream } from '@/stream'
 
-import { createServer } from './index'
+import { createServer, type ServerLogger } from './index'
 
 function makeRuntime(opts: { registry: PluginRegistry; hooks: HookBus }): PluginRuntime {
   return createPluginRuntime({
@@ -95,6 +95,7 @@ async function startWithSession(
     agentDir?: string
     pluginRegistry?: PluginRegistry
     pluginHooks?: HookBus
+    logger?: ServerLogger
   } = {},
 ): Promise<{ url: string }> {
   const pluginRuntime =
@@ -108,6 +109,7 @@ async function startWithSession(
     ...(extra.sessionFactory ? { sessionFactory: extra.sessionFactory } : {}),
     ...(extra.agentDir !== undefined ? { agentDir: extra.agentDir } : {}),
     ...(pluginRuntime ? { pluginRuntime } : {}),
+    ...(extra.logger ? { logger: extra.logger } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
@@ -820,6 +822,112 @@ describe('createServer fires session.idle hook after every prompt completion', (
     const done = await waitFor((m) => m.type === 'done')
 
     expect(done.type).toBe('done')
+    ws.close()
+  })
+})
+
+describe('createServer surfaces LLM errors to logger', () => {
+  function stubSessionFactory(): SessionFactory {
+    return {
+      sessionDir: () => '/tmp/test-sessions',
+      createPersisted: () =>
+        ({
+          getSessionId: () => 'ses_fake',
+          getSessionFile: () => undefined,
+        }) as unknown as SessionManager,
+    }
+  }
+
+  const silentLogger: ServerLogger = { info: () => {}, warn: () => {}, error: () => {} }
+
+  test('logs to logger.error when session.prompt() throws in the drain-loop path (so typeclaw logs surfaces the failure)', async () => {
+    const errors: string[] = []
+    const session = createFakeSession()
+    const stream = createStream()
+
+    const { url } = await startWithSession(session, {
+      stream,
+      sessionFactory: stubSessionFactory(),
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    stream.publish({
+      target: { kind: 'session', sessionId: 'ses_fake' },
+      payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
+    })
+    await new Promise((r) => setTimeout(r, 10))
+    session.rejectPrompt(new Error('llm boom'))
+    const errFrame = await waitFor((m) => m.type === 'error')
+
+    if (errFrame.type !== 'error') throw new Error('unreachable')
+    expect(errFrame.message).toBe('llm boom')
+    expect(errors.some((e) => /\[server\] ses_fake: prompt failed: llm boom/.test(e))).toBe(true)
+    ws.close()
+  })
+
+  test('logs to logger.error when session.prompt() throws in the fallback path (no stream)', async () => {
+    const errors: string[] = []
+    const session = createFakeSession()
+
+    const { url } = await startWithSession(session, {
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    const { ws, waitFor } = await connect(url)
+    const opened = await waitFor((m) => m.type === 'connected')
+    if (opened.type !== 'connected') throw new Error('unreachable')
+
+    ws.send(JSON.stringify({ type: 'prompt', text: 'hello' }))
+    await new Promise((r) => setTimeout(r, 10))
+    session.rejectPrompt(new Error('fallback boom'))
+    const errFrame = await waitFor((m) => m.type === 'error')
+
+    if (errFrame.type !== 'error') throw new Error('unreachable')
+    expect(errFrame.message).toBe('fallback boom')
+    expect(errors.some((e) => /\[server\] .+: prompt failed: fallback boom/.test(e))).toBe(true)
+    ws.close()
+  })
+
+  test('logs to logger.error when the assistant message ends with stopReason: error (non-throwing upstream LLM failure)', async () => {
+    const errors: string[] = []
+    const session = createFakeSession()
+
+    const { url } = await startWithSession(session, {
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    session.emit({
+      type: 'message_end',
+      message: { role: 'assistant', stopReason: 'error', errorMessage: 'billing: account inactive' },
+    } as unknown as Parameters<typeof session.emit>[0])
+
+    const errFrame = await waitFor((m) => m.type === 'error')
+    if (errFrame.type !== 'error') throw new Error('unreachable')
+    expect(errFrame.message).toBe('billing: account inactive')
+    expect(errors.some((e) => /\[server\] .+: LLM call failed: billing: account inactive/.test(e))).toBe(true)
+    ws.close()
+  })
+
+  test('does not log when the assistant message ends with stopReason: aborted (user pressed Escape)', async () => {
+    const errors: string[] = []
+    const session = createFakeSession()
+
+    const { url } = await startWithSession(session, {
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    session.emit({
+      type: 'message_end',
+      message: { role: 'assistant', stopReason: 'aborted' },
+    } as unknown as Parameters<typeof session.emit>[0])
+
+    await new Promise((r) => setTimeout(r, 20))
+    expect(errors).toEqual([])
     ws.close()
   })
 })
