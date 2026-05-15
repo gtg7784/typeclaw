@@ -10,6 +10,7 @@ import {
   type SubagentConsumer,
   type SubagentRegistry,
 } from '@/agent/subagents'
+import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
 import { createChannelManager, createChannelsReloadable, type ChannelManager } from '@/channels'
 import { createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync } from '@/config'
 import {
@@ -143,6 +144,7 @@ export async function startAgent({
       reloadRegistry,
       pluginRuntime,
       getChannelRouter: () => channelManager.router,
+      rehydrateCapOptions: resolveCapOptionsFromConfig(pluginConfigsByName['tool-result-cap']),
       ...containerNameOpt,
     }),
     permissions: pluginsLoaded.permissions,

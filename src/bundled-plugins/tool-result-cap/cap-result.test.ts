@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ToolResult } from '@/plugin'
 
-import { capToolResult } from './cap-result'
+import { capContentParts, capToolResult } from './cap-result'
 
 const baseOptions = {
   imageMaxBytes: 100,
@@ -124,5 +124,59 @@ describe('capToolResult', () => {
     const stats = capToolResult('read', result, baseOptions)
 
     expect(stats).toEqual({ imagesReplaced: 0, textsTruncated: 0, bytesElided: 0 })
+  })
+
+  test('is idempotent even when the placeholder text exceeds textMaxBytes', () => {
+    const result: ToolResult = {
+      content: [{ type: 'image', mimeType: 'image/png', data: 'A'.repeat(500) }],
+    }
+    const tinyTextOptions = { ...baseOptions, textMaxBytes: 30 }
+
+    const firstStats = capToolResult('read', result, tinyTextOptions)
+    const afterFirst = JSON.stringify(result.content)
+    const secondStats = capToolResult('read', result, tinyTextOptions)
+
+    expect(firstStats.imagesReplaced).toBe(1)
+    expect(secondStats.imagesReplaced).toBe(0)
+    expect(secondStats.textsTruncated).toBe(0)
+    expect(JSON.stringify(result.content)).toBe(afterFirst)
+  })
+
+  test('still caps oversized text that merely starts with the elided marker', () => {
+    // Real tool output that happens to begin with the marker prefix (e.g. it
+    // quotes a prior placeholder) followed by megabytes of legitimate content
+    // MUST get truncated. A prefix-only idempotency check would let this
+    // bypass the cap entirely. See cap-result.ts ELIDED_PLACEHOLDER_PATTERN.
+    const result: ToolResult = {
+      content: [{ type: 'text', text: `[tool-result-cap: quoted prior placeholder] ${'X'.repeat(500)}` }],
+    }
+
+    const stats = capToolResult('webfetch', result, baseOptions)
+
+    expect(stats.textsTruncated).toBe(1)
+    const part = result.content[0] as { type: 'text'; text: string }
+    expect(part.text.length).toBeLessThan(500)
+    expect(part.text).toContain('tool-result-cap')
+  })
+
+  test('treats exemptTools as optional and defaults to no exemption', () => {
+    const result: ToolResult = {
+      content: [{ type: 'image', mimeType: 'image/png', data: 'A'.repeat(500) }],
+    }
+
+    const stats = capToolResult('read', result, { imageMaxBytes: 100, textMaxBytes: 50 })
+
+    expect(stats.imagesReplaced).toBe(1)
+  })
+})
+
+describe('capContentParts', () => {
+  test('operates on a content array directly without a ToolResult wrapper', () => {
+    const content: ToolResult['content'] = [{ type: 'image', mimeType: 'image/png', data: 'A'.repeat(500) }]
+
+    const stats = capContentParts('read', content, baseOptions)
+
+    expect(stats.imagesReplaced).toBe(1)
+    expect(content[0]?.type).toBe('text')
   })
 })

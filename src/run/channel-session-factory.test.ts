@@ -77,6 +77,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       pluginRuntime: makeEmptyRuntime(),
       getChannelRouter: () => router,
       createSession: fakeCreateSession,
+      rehydrateCapOptions: null,
     })
 
     await factory({
@@ -107,6 +108,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
         captured = options
         return STUB_SESSION
       },
+      rehydrateCapOptions: null,
     })
 
     await factory({
@@ -135,6 +137,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
         captured = options
         return STUB_SESSION
       },
+      rehydrateCapOptions: null,
     })
 
     await factory({
@@ -163,6 +166,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
         captured = options
         return STUB_SESSION
       },
+      rehydrateCapOptions: null,
     })
 
     await factory({
@@ -201,6 +205,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
         captured = options
         return STUB_SESSION
       },
+      rehydrateCapOptions: null,
     })
 
     await factory({
@@ -232,6 +237,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
         captured = options
         return STUB_SESSION
       },
+      rehydrateCapOptions: null,
     })
 
     router = makeFakeRouter()
@@ -262,6 +268,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
         capturedSm = options?.sessionManager ?? null
         return STUB_SESSION
       },
+      rehydrateCapOptions: null,
     })
 
     await factory({
@@ -286,6 +293,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       pluginRuntime: runtime,
       getChannelRouter: makeFakeRouter,
       createSession: async () => STUB_SESSION,
+      rehydrateCapOptions: null,
     })
 
     const result = await factory({
@@ -311,6 +319,7 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
       pluginRuntime: makeEmptyRuntime(),
       getChannelRouter: makeFakeRouter,
       createSession: async () => STUB_SESSION,
+      rehydrateCapOptions: null,
     })
 
     const result = await factory({
@@ -321,5 +330,157 @@ describe('buildChannelSessionFactory — production wiring contract', () => {
     })
 
     expect(result.hooks).toBeUndefined()
+  })
+
+  test('caps oversized tool results in the JSONL before pi-coding-agent opens it', async () => {
+    const { mkdirSync, writeFileSync, readFileSync } = await import('node:fs')
+    const tmp = mkdtempSync(join(tmpdir(), 'channel-session-factory-'))
+    const sessionDir = join(tmp, 'sessions')
+    mkdirSync(sessionDir, { recursive: true })
+    const sessionFile = 'poisoned.jsonl'
+    const sessionPath = join(sessionDir, sessionFile)
+    const lines = [
+      JSON.stringify({ type: 'session', id: 'poisoned-id', timestamp: '2026-05-12T00:00:00Z', cwd: tmp, version: 3 }),
+      JSON.stringify({
+        type: 'message',
+        id: 'e1',
+        parentId: null,
+        timestamp: '2026-05-12T00:00:01Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'functions.read:1',
+          toolName: 'read',
+          content: [{ type: 'image', mimeType: 'image/png', data: 'A'.repeat(5000) }],
+        },
+      }),
+    ]
+    writeFileSync(sessionPath, `${lines.join('\n')}\n`)
+    const capLogs: string[] = []
+    const warnLogs: string[] = []
+
+    const factory = buildChannelSessionFactory({
+      cwd: tmp,
+      sessionFactory: makeFakeSessionFactory(sessionDir),
+      stream: makeFakeStream(),
+      reloadRegistry: makeFakeReloadRegistry(),
+      pluginRuntime: makeEmptyRuntime(),
+      getChannelRouter: makeFakeRouter,
+      createSession: async () => STUB_SESSION,
+      rehydrateCapOptions: { imageMaxBytes: 100, textMaxBytes: 100, exemptTools: new Set() },
+      logger: { info: (msg) => capLogs.push(msg), warn: (msg) => warnLogs.push(msg) },
+    })
+
+    await factory({
+      key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
+      existingSessionId: 'poisoned-id',
+      existingSessionFile: sessionFile,
+      participants: [],
+      origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
+    })
+
+    const after = readFileSync(sessionPath, 'utf8')
+    expect(after).not.toContain('A'.repeat(5000))
+    expect(after).toContain('tool-result-cap')
+    expect(capLogs.some((l) => l.includes('rehydrate-cap'))).toBe(true)
+  })
+
+  test('leaves the JSONL untouched when rehydrateCapOptions is null', async () => {
+    const { mkdirSync, writeFileSync, readFileSync } = await import('node:fs')
+    const tmp = mkdtempSync(join(tmpdir(), 'channel-session-factory-'))
+    const sessionDir = join(tmp, 'sessions')
+    mkdirSync(sessionDir, { recursive: true })
+    const sessionFile = 'untouched.jsonl'
+    const sessionPath = join(sessionDir, sessionFile)
+    const original = `${JSON.stringify({
+      type: 'session',
+      id: 'untouched-id',
+      timestamp: '2026-05-12T00:00:00Z',
+      cwd: tmp,
+      version: 3,
+    })}\n${JSON.stringify({
+      type: 'message',
+      id: 'e1',
+      parentId: null,
+      timestamp: '2026-05-12T00:00:01Z',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'functions.read:1',
+        toolName: 'read',
+        content: [{ type: 'image', mimeType: 'image/png', data: 'A'.repeat(5000) }],
+      },
+    })}\n`
+    writeFileSync(sessionPath, original)
+
+    const factory = buildChannelSessionFactory({
+      cwd: tmp,
+      sessionFactory: makeFakeSessionFactory(sessionDir),
+      stream: makeFakeStream(),
+      reloadRegistry: makeFakeReloadRegistry(),
+      pluginRuntime: makeEmptyRuntime(),
+      getChannelRouter: makeFakeRouter,
+      createSession: async () => STUB_SESSION,
+      rehydrateCapOptions: null,
+    })
+
+    await factory({
+      key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
+      existingSessionId: 'untouched-id',
+      existingSessionFile: sessionFile,
+      participants: [],
+      origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
+    })
+
+    expect(readFileSync(sessionPath, 'utf8')).toBe(original)
+  })
+
+  test('rejects path-traversal sessionFile and falls back to a fresh session', async () => {
+    const { mkdirSync, writeFileSync, readFileSync, existsSync } = await import('node:fs')
+    const tmp = mkdtempSync(join(tmpdir(), 'channel-session-factory-'))
+    const sessionDir = join(tmp, 'sessions')
+    mkdirSync(sessionDir, { recursive: true })
+    // A bystander file outside sessions/ that the cap pass must never touch
+    // even if a tampered channels/sessions.json#sessionFile points at it.
+    const bystander = join(tmp, 'bystander.jsonl')
+    const bystanderContent = `${JSON.stringify({
+      type: 'message',
+      id: 'b1',
+      parentId: null,
+      timestamp: '2026-05-12T00:00:01Z',
+      message: {
+        role: 'toolResult',
+        toolCallId: 'functions.read:1',
+        toolName: 'read',
+        content: [{ type: 'image', mimeType: 'image/png', data: 'A'.repeat(5000) }],
+      },
+    })}\n`
+    writeFileSync(bystander, bystanderContent)
+    const warnLogs: string[] = []
+
+    const factory = buildChannelSessionFactory({
+      cwd: tmp,
+      sessionFactory: makeFakeSessionFactory(sessionDir),
+      stream: makeFakeStream(),
+      reloadRegistry: makeFakeReloadRegistry(),
+      pluginRuntime: makeEmptyRuntime(),
+      getChannelRouter: makeFakeRouter,
+      createSession: async () => STUB_SESSION,
+      rehydrateCapOptions: { imageMaxBytes: 100, textMaxBytes: 100, exemptTools: new Set() },
+      logger: { info: () => {}, warn: (msg) => warnLogs.push(msg) },
+    })
+
+    await factory({
+      key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
+      existingSessionId: 'malicious',
+      existingSessionFile: '../bystander.jsonl',
+      participants: [],
+      origin: { kind: 'channel', adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null, participants: [] },
+      originRef: { current: undefined },
+    })
+
+    expect(readFileSync(bystander, 'utf8')).toBe(bystanderContent)
+    expect(existsSync(join(sessionDir, '../bystander.jsonl.cap.tmp'))).toBe(false)
+    expect(warnLogs.some((l) => l.includes('invalid sessionFile'))).toBe(true)
   })
 })
