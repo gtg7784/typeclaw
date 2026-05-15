@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -654,6 +655,165 @@ describe('buildConfigMigrationCommitMessage', () => {
     expect(msg).toContain('channel:C123')
   })
 })
+
+// Closes the gap from PR #179 where typeclaw.json migrations were committed
+// only when invoked from `typeclaw start`. The hostd daemon, doctor, tui,
+// reload, and compose code paths all reach loadConfigSync / validateConfig /
+// loadPluginConfigsSync via independent routes; this describe block asserts
+// the commit follows every one of them.
+//
+// Mutation-check anchor (AGENTS.md §3): removing the commitSystemFileSync
+// call inside persistMigratedConfig MUST cause every test in this block to
+// fail at the commit-subject assertion.
+describe('persistMigratedConfig commits the migration on every entry point', () => {
+  async function setupLegacyAgentFolder(prefix: string): Promise<string> {
+    const cwd = await mkdtemp(join(tmpdir(), prefix))
+    await gitInitForCommitTests(cwd)
+    const legacyJson = `${JSON.stringify(
+      {
+        model: VALID_MODEL,
+        channels: { 'slack-bot': { allow: ['team:T0123'] } },
+      },
+      null,
+      2,
+    )}\n`
+    await writeFile(join(cwd, 'typeclaw.json'), legacyJson)
+    await runGitForCommitTests(cwd, ['add', 'typeclaw.json'])
+    await runGitForCommitTests(cwd, ['commit', '-m', 'initial'])
+    return cwd
+  }
+
+  test('loadConfigSync triggers the typeclaw.json migration commit', async () => {
+    // given: a legacy typeclaw.json committed to a fresh git repo
+    const cwd = await setupLegacyAgentFolder('typeclaw-load-commit-')
+    try {
+      // when: ANY entry point reads the config (e.g. cli/tui, cli/reload)
+      loadConfigSync(cwd)
+
+      // then: the migration commit landed in git history
+      const subjects = (await runGitForCommitTests(cwd, ['log', '--format=%s'])).split('\n')
+      expect(subjects).toContain('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
+      const onDisk = JSON.parse(await readFileText(join(cwd, 'typeclaw.json')))
+      const tracked = JSON.parse(await runGitForCommitTests(cwd, ['show', 'HEAD:typeclaw.json']))
+      expect(tracked).toEqual(onDisk)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('validateConfig triggers the typeclaw.json migration commit', async () => {
+    // given: the same legacy folder (validateConfig is what hostd's restart
+    // RPC handler calls before stop()+start())
+    const cwd = await setupLegacyAgentFolder('typeclaw-validate-commit-')
+    try {
+      // when: validateConfig is invoked (the hostd-restart codepath)
+      const result = validateConfig(cwd)
+
+      // then: it succeeds AND the commit landed
+      expect(result.ok).toBe(true)
+      const subjects = (await runGitForCommitTests(cwd, ['log', '--format=%s'])).split('\n')
+      expect(subjects).toContain('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('loadPluginConfigsSync triggers the typeclaw.json migration commit', async () => {
+    // given: a legacy folder (loadPluginConfigsSync is what container-stage
+    // `typeclaw run` calls to build the plugin-config map)
+    const cwd = await setupLegacyAgentFolder('typeclaw-pluginload-commit-')
+    try {
+      // when
+      loadPluginConfigsSync(cwd)
+
+      // then
+      const subjects = (await runGitForCommitTests(cwd, ['log', '--format=%s'])).split('\n')
+      expect(subjects).toContain('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('a second read after migration is a no-op (idempotent — no duplicate commit)', async () => {
+    const cwd = await setupLegacyAgentFolder('typeclaw-idem-commit-')
+    try {
+      // when: the same entry point is hit twice in succession
+      loadConfigSync(cwd)
+      const headAfterFirst = await runGitForCommitTests(cwd, ['rev-parse', 'HEAD'])
+      loadConfigSync(cwd)
+      const headAfterSecond = await runGitForCommitTests(cwd, ['rev-parse', 'HEAD'])
+
+      // then: the second call observed canonical shape and did not commit again
+      expect(headAfterSecond).toBe(headAfterFirst)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('on a non-git folder the migration still rewrites the file (commit silently skipped)', async () => {
+    // given: a legacy file in a folder with NO .git
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-nogit-commit-'))
+    try {
+      const legacyJson = `${JSON.stringify(
+        { model: VALID_MODEL, channels: { 'slack-bot': { allow: ['team:T0123'] } } },
+        null,
+        2,
+      )}\n`
+      await writeFile(join(cwd, 'typeclaw.json'), legacyJson)
+
+      // when
+      loadConfigSync(cwd)
+
+      // then: the rewrite happened (next start will see canonical), no .git was created
+      const onDisk = JSON.parse(await readFileText(join(cwd, 'typeclaw.json')))
+      expect(onDisk.channels['slack-bot']).toEqual({})
+      expect(onDisk.roles.member.match).toEqual(['slack:T0123'])
+      expect(existsSync(join(cwd, '.git'))).toBe(false)
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('regression: hostd-style read (kakaoChannelConfigured) commits the migration', async () => {
+    // given: simulates the user-reported bug — a long-running hostd daemon
+    // calls loadConfigSync(cwd) on every kakao-renewal tick. Before this fix
+    // those reads silently rewrote typeclaw.json without committing.
+    const cwd = await setupLegacyAgentFolder('typeclaw-hostd-style-commit-')
+    try {
+      // when: the same call shape the daemon's kakaoChannelConfigured uses
+      const cfg = loadConfigSync(cwd)
+      expect(cfg.channels?.['kakaotalk' as keyof typeof cfg.channels]).toBeUndefined()
+
+      // then: the commit landed in the user's agent repo
+      const headContent = JSON.parse(await runGitForCommitTests(cwd, ['show', 'HEAD:typeclaw.json']))
+      expect(headContent.channels['slack-bot']).toEqual({})
+      expect(headContent.roles.member.match).toEqual(['slack:T0123'])
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+})
+
+async function gitInitForCommitTests(cwd: string): Promise<void> {
+  for (const cmd of [
+    ['init', '-b', 'main'],
+    ['config', 'user.name', 'Test User'],
+    ['config', 'user.email', 'test@example.com'],
+  ]) {
+    const proc = Bun.spawn({ cmd: ['git', ...cmd], cwd, stdout: 'pipe', stderr: 'pipe' })
+    await proc.exited
+  }
+}
+
+async function runGitForCommitTests(cwd: string, args: string[]): Promise<string> {
+  const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  await proc.exited
+  return (await new Response(proc.stdout).text()).trim()
+}
+
+async function readFileText(path: string): Promise<string> {
+  return Bun.file(path).text()
+}
 
 describe('mountSchema name validation', () => {
   test.each([
