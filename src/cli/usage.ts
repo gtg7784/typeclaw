@@ -22,11 +22,6 @@ const COMMON_ARGS = {
     type: 'string' as const,
     description: 'ISO date upper bound (exclusive)',
   },
-  compact: {
-    type: 'boolean' as const,
-    description: 'force compact mode (drops cache columns)',
-    default: false,
-  },
   cwd: {
     type: 'string' as const,
     description: 'override the agent folder',
@@ -84,14 +79,25 @@ async function emit(view: View, args: Record<string, unknown>): Promise<void> {
   }
 
   const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined
-  const compact = args.compact === true || (process.stdout.columns ?? 120) < 100
+  const terminalWidth = resolveTerminalWidth()
   const text = formatReport(report, {
     useColor,
-    compact,
     view,
+    ...(terminalWidth !== undefined ? { terminalWidth } : {}),
     ...(limit !== undefined ? { limit } : {}),
   })
   process.stdout.write(`${text}\n`)
+}
+
+function resolveTerminalWidth(): number | undefined {
+  // process.stdout.columns is undefined when stdout is not a TTY (piped to
+  // less/grep/file). Fall back to $COLUMNS so users can force a width when
+  // piping, and so tests with an inherited COLUMNS env var see the override.
+  if (process.stdout.columns !== undefined) return process.stdout.columns
+  const env = process.env.COLUMNS
+  if (env === undefined || env === '') return undefined
+  const n = Number(env)
+  return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
 function parseSince(value: unknown, flag: string): number | undefined {

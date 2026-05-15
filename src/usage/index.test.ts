@@ -271,3 +271,62 @@ describe('runUsage filesystem robustness', () => {
     expect(report.warnings).toEqual([])
   })
 })
+
+describe('formatReport narrow-terminal rendering', () => {
+  const provider = 'someverylongprovider'
+  const longModel = 'kimi-k2-instruct-with-a-very-long-suffix'
+
+  test('always shows Cache R/W column (no longer drops on narrow terminals)', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeSessionFile('cache001', [
+      assistantEntry({ id: 'm1', ts, provider: 'fireworks', model: 'kimi-k2', input: 1000, output: 200, cost: 0.04 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'models', terminalWidth: 60 })
+    expect(out).toMatch(/Cache R\/W/)
+  })
+
+  test('truncates a long model name with an ellipsis and strips the provider prefix', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeSessionFile('trunc001', [
+      assistantEntry({ id: 'm1', ts, provider, model: longModel, input: 100, output: 10, cost: 0.01 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'models', terminalWidth: 60 })
+    expect(out).toMatch(/…/)
+    expect(out).not.toMatch(new RegExp(`${provider}/`))
+    expect(out).toMatch(/kimi/)
+  })
+
+  test('does not truncate when the terminal is wide enough', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeSessionFile('wide0001', [
+      assistantEntry({ id: 'm1', ts, provider, model: longModel, input: 100, output: 10, cost: 0.01 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'models', terminalWidth: 200 })
+    expect(out).not.toMatch(/…/)
+    expect(out).toMatch(new RegExp(`${provider}/${longModel}`))
+  })
+
+  test('does not truncate when terminalWidth is omitted', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeSessionFile('omit0001', [
+      assistantEntry({ id: 'm1', ts, provider, model: longModel, input: 100, output: 10, cost: 0.01 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'models' })
+    expect(out).not.toMatch(/…/)
+    expect(out).toMatch(new RegExp(`${provider}/${longModel}`))
+  })
+
+  test('session view truncates the single-model extra column on narrow terminals', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeSessionFile('sess0001', [
+      assistantEntry({ id: 'm1', ts, provider, model: longModel, input: 100, output: 10, cost: 0.01 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'session', terminalWidth: 70 })
+    expect(out).toMatch(/…/)
+  })
+})
