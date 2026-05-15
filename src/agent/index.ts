@@ -483,7 +483,10 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
     systemPrompt = `${systemPrompt}\n\n${gitNudge}`
   }
 
-  const memorySection = await loadMemory(agentDir, options.origin !== undefined ? { origin: options.origin } : {})
+  const memorySection = await loadMemory(agentDir, {
+    ...(options.origin !== undefined ? { origin: options.origin } : {}),
+    ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
+  })
   systemPrompt = `${systemPrompt}\n\n${memorySection}`
 
   const additionalSkillPaths = [getBundledSkillsDir()]
