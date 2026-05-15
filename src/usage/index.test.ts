@@ -330,3 +330,46 @@ describe('formatReport narrow-terminal rendering', () => {
     expect(out).toMatch(/…/)
   })
 })
+
+describe('formatReport colors', () => {
+  const ts = new Date('2026-05-10T10:00:00').getTime()
+
+  async function reportWithCost(cost: number) {
+    await writeSessionFile(`c${cost}`.replace(/\./g, ''), [
+      assistantEntry({ id: 'm1', ts, provider: 'fireworks', model: 'kimi-k2', input: 100, output: 10, cost }),
+    ])
+    return runUsage({ agentDir })
+  }
+
+  /* eslint-disable no-control-regex -- ANSI escape sequences are deliberately matched here. */
+  test('emits no ANSI when useColor is false', async () => {
+    const report = await reportWithCost(0.05)
+    const out = formatReport(report, { view: 'models', useColor: false })
+    expect(out.match(/\u001b\[/)).toBeNull()
+  })
+
+  test('costs under $1 get green (32m) when useColor is true', async () => {
+    const report = await reportWithCost(0.05)
+    const out = formatReport(report, { view: 'models', useColor: true })
+    expect(out).toMatch(/\u001b\[32m\$0\.050\u001b\[39m/)
+  })
+
+  test('costs >= $1 get yellow (33m)', async () => {
+    const report = await reportWithCost(2.5)
+    const out = formatReport(report, { view: 'models', useColor: true })
+    expect(out).toMatch(/\u001b\[33m\$2\.50\u001b\[39m/)
+  })
+
+  test('zero cost is dim (2m)', async () => {
+    const report = await reportWithCost(0)
+    const out = formatReport(report, { view: 'models', useColor: true })
+    expect(out).toMatch(/\u001b\[2m\$0\.00\u001b\[22m/)
+  })
+
+  test('provider prefix is dimmed; model id stays default color', async () => {
+    const report = await reportWithCost(0.05)
+    const out = formatReport(report, { view: 'models', useColor: true })
+    expect(out).toMatch(/\u001b\[2mfireworks\/\u001b\[22mkimi-k2/)
+  })
+  /* eslint-enable no-control-regex */
+})

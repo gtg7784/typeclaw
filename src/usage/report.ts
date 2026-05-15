@@ -1,6 +1,6 @@
 import { styleText } from 'node:util'
 
-import type { ModelUsage, SessionUsage, UsageTotals } from './aggregate'
+import type { ModelUsage, UsageTotals } from './aggregate'
 import { formatCost, formatTokens, isoDay, tokensInOut } from './format'
 import type { UsageReport } from './index'
 
@@ -38,7 +38,7 @@ type RenderCtx = { useColor: boolean; terminalWidth: number }
 function renderSummary(report: UsageReport, ctx: RenderCtx): string {
   const { aggregation } = report
   const sections: string[] = []
-  sections.push(header(`USAGE — ${report.agentDir}`, ctx))
+  sections.push(header(`USAGE`, ctx) + ' ' + dim(`— ${report.agentDir}`, ctx))
   sections.push(dim(`Timezone: ${report.timezone}`, ctx))
 
   if (aggregation.bySession.length === 0) {
@@ -48,10 +48,10 @@ function renderSummary(report: UsageReport, ctx: RenderCtx): string {
 
   const total = aggregation.total
   sections.push(
-    `${dim('Sessions:', ctx)} ${aggregation.bySession.length}` +
-      `  ${dim('Messages:', ctx)} ${total.messageCount}` +
+    `${dim('Sessions:', ctx)} ${color('cyan', String(aggregation.bySession.length), ctx)}` +
+      `  ${dim('Messages:', ctx)} ${color('cyan', String(total.messageCount), ctx)}` +
       `  ${dim('Tokens:', ctx)} ${tokensInOut(total)}` +
-      `  ${dim('Cost:', ctx)} ${formatCost(total.cost)}`,
+      `  ${dim('Cost:', ctx)} ${colorCost(total.cost, ctx)}`,
   )
 
   if (aggregation.byDay.length > 0) {
@@ -71,7 +71,7 @@ function renderSummary(report: UsageReport, ctx: RenderCtx): string {
     sections.push(header('By model', ctx))
     sections.push(
       renderTotalsTable(
-        aggregation.byModel.map((m) => ({ label: modelLabel(m), modelId: m.model, totals: m })),
+        aggregation.byModel.map((m) => ({ label: colorModelLabel(m, ctx), modelId: m.model, totals: m })),
         ctx,
       ),
     )
@@ -90,9 +90,9 @@ function renderDaily(report: UsageReport, ctx: RenderCtx, limit: number | undefi
   const days = limit !== undefined ? report.aggregation.byDay.slice(-limit) : report.aggregation.byDay
   if (days.length === 0) return dim('No usage in range.', ctx)
   const lines = [
-    header(`USAGE BY DAY — ${report.agentDir}`, ctx),
+    sectionTitle(`USAGE BY DAY`, report.agentDir, ctx),
     renderTotalsTable(
-      days.map((d) => ({ label: d.date, totals: d })),
+      days.map((d) => ({ label: dim(d.date, ctx), totals: d })),
       ctx,
     ),
   ]
@@ -106,14 +106,14 @@ function renderSessions(report: UsageReport, ctx: RenderCtx, limit: number): str
     const firstModel = s.models[0]
     const extra = s.models.length > 1 ? `${s.models.length} models` : modelIdFromKey(firstModel)
     return {
-      label: `${s.sessionId.slice(0, 12)}  ${dim(isoDay(s.firstAt), ctx)}`,
+      label: `${color('magenta', s.sessionId.slice(0, 12), ctx)}  ${dim(isoDay(s.firstAt), ctx)}`,
       totals: s,
       extra,
       extraTruncatable: s.models.length === 1,
     }
   })
   return [
-    header(`USAGE BY SESSION (top ${limit} by cost) — ${report.agentDir}`, ctx),
+    sectionTitle(`USAGE BY SESSION`, report.agentDir, ctx, `(top ${limit} by cost)`),
     renderTotalsTable(rows, ctx, { extraHeader: 'Model' }),
   ].join('\n')
 }
@@ -122,16 +122,22 @@ function renderModels(report: UsageReport, ctx: RenderCtx, limit: number | undef
   const models = limit !== undefined ? report.aggregation.byModel.slice(0, limit) : report.aggregation.byModel
   if (models.length === 0) return dim('No models in range.', ctx)
   return [
-    header(`USAGE BY MODEL — ${report.agentDir}`, ctx),
+    sectionTitle(`USAGE BY MODEL`, report.agentDir, ctx),
     renderTotalsTable(
-      models.map((m) => ({ label: modelLabel(m), modelId: m.model, totals: m })),
+      models.map((m) => ({ label: colorModelLabel(m, ctx), modelId: m.model, totals: m })),
       ctx,
     ),
   ].join('\n')
 }
 
-function modelLabel(m: ModelUsage): string {
-  return `${m.provider}/${m.model}`
+function sectionTitle(title: string, agentDir: string, ctx: RenderCtx, suffix?: string): string {
+  const t = header(title, ctx)
+  const path = dim(`— ${agentDir}`, ctx)
+  return suffix !== undefined ? `${t} ${dim(suffix, ctx)} ${path}` : `${t} ${path}`
+}
+
+function colorModelLabel(m: ModelUsage, ctx: RenderCtx): string {
+  return `${dim(`${m.provider}/`, ctx)}${m.model}`
 }
 
 function modelIdFromKey(key: string | undefined): string {
@@ -166,8 +172,8 @@ function renderTotalsTable(rows: Row[], ctx: RenderCtx, opts: { extraHeader?: st
     r.label,
     String(r.totals.messageCount),
     tokensInOut(r.totals),
-    `${formatTokens(r.totals.cacheRead)} / ${formatTokens(r.totals.cacheWrite)}`,
-    formatCost(r.totals.cost),
+    colorCache(r.totals.cacheRead, r.totals.cacheWrite, ctx),
+    colorCost(r.totals.cost, ctx),
     ...(hasExtra ? [r.extra ?? ''] : []),
   ])
 
@@ -203,10 +209,10 @@ function renderTotalsTable(rows: Row[], ctx: RenderCtx, opts: { extraHeader?: st
 
   const truncatedBody = rows.map((r, rowIdx) => {
     const cells = [...dataCells[rowIdx]!]
-    cells[itemColIdx] = fitItemCell(cells[itemColIdx]!, r, itemBudget)
+    cells[itemColIdx] = fitItemCell(cells[itemColIdx]!, r, itemBudget, ctx)
     if (extraColIdx !== -1) {
       const allow = r.extraTruncatable !== false
-      cells[extraColIdx] = allow ? truncateTail(cells[extraColIdx]!, extraBudget) : cells[extraColIdx]!
+      cells[extraColIdx] = allow ? truncateTail(cells[extraColIdx]!, extraBudget, ctx) : cells[extraColIdx]!
     }
     return cells
   })
@@ -214,27 +220,33 @@ function renderTotalsTable(rows: Row[], ctx: RenderCtx, opts: { extraHeader?: st
   return alignTable([headers, ...truncatedBody], ctx)
 }
 
-function fitItemCell(label: string, row: Row, budget: number): string {
+function fitItemCell(label: string, row: Row, budget: number, ctx: RenderCtx): string {
   const visible = stripAnsi(label).length
   if (visible <= budget) return label
   // Model row: try dropping `provider/` first; if the bare model id still
   // doesn't fit, ellipsize it. Falls through to a plain tail truncation for
-  // anything else.
+  // anything else. The bare model id has no embedded ANSI so truncateTail
+  // is safe on it.
   if (row.modelId !== undefined && row.modelId.length > 0) {
     if (row.modelId.length <= budget) return row.modelId
-    return truncateTail(row.modelId, budget)
+    return truncateTail(row.modelId, budget, ctx)
   }
-  return truncateTail(label, budget)
+  return truncateTail(label, budget, ctx)
 }
 
-function truncateTail(text: string, budget: number): string {
-  const visible = stripAnsi(text).length
-  if (visible <= budget) return text
-  if (budget <= 1) return ELLIPSIS
-  // Slice the visible characters of the raw string; ANSI sequences are not
-  // present on the labels we truncate (model names, model ids, "N models"),
-  // so a substring on the raw value is safe.
-  return `${text.slice(0, budget - 1)}${ELLIPSIS}`
+function truncateTail(text: string, budget: number, ctx: RenderCtx): string {
+  const plain = stripAnsi(text)
+  if (plain.length <= budget) return text
+  if (budget <= 1) return colorEllipsis(ctx)
+  // The colored labels we render do not interleave ANSI sequences in the
+  // middle of visible characters — coloring is always wrap-the-whole-cell
+  // or wrap-a-prefix. For the truncation path we slice the plain text and
+  // re-color uniformly, which keeps the math honest.
+  return `${plain.slice(0, budget - 1)}${colorEllipsis(ctx)}`
+}
+
+function colorEllipsis(ctx: RenderCtx): string {
+  return dim(ELLIPSIS, ctx)
 }
 
 function computeNaturalWidths(table: string[][]): number[] {
@@ -282,6 +294,23 @@ function dim(text: string, ctx: RenderCtx): string {
 function color(modifier: Parameters<typeof styleText>[0], text: string, ctx: RenderCtx): string {
   if (!ctx.useColor) return text
   return styleText(modifier, text)
+}
+
+// Cost over $1 gets yellow (visual "this is the big number"); positive costs
+// under $1 are green; literal zero is dim so it fades into the background.
+// Not a budget alarm — see PR notes; explicit budgets are out of scope.
+function colorCost(cost: number, ctx: RenderCtx): string {
+  const text = formatCost(cost)
+  if (cost === 0) return dim(text, ctx)
+  if (cost >= 1) return color('yellow', text, ctx)
+  return color('green', text, ctx)
+}
+
+function colorCache(read: number, write: number, ctx: RenderCtx): string {
+  const r = formatTokens(read)
+  const w = formatTokens(write)
+  const dimZero = (text: string, value: number) => (value === 0 ? dim(text, ctx) : text)
+  return `${dimZero(r, read)} / ${dimZero(w, write)}`
 }
 
 // ANSI escape sequences would inflate column widths and break alignment under
