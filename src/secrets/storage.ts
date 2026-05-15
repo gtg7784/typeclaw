@@ -175,6 +175,74 @@ export class SecretsBackend implements AuthStorageBackend {
     }
   }
 
+  // Returns a shallow snapshot of the `providers` slice. Used by post-init CLI
+  // commands (`typeclaw provider list/remove`, `typeclaw model list`) that need
+  // to inspect what's on disk without forcing AuthStorage's env-wins flatten —
+  // we want to show users which providers are file-backed vs env-overridden,
+  // and the flatten path collapses that distinction.
+  tryReadProvidersSync(): Providers {
+    if (!existsSync(this.secretsPath)) return {}
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      return { ...this.readEnvelope().providers }
+    } finally {
+      release?.()
+    }
+  }
+
+  // Atomic provider credential write. Idempotent at the type level: callers
+  // pass the full `ProviderCredential` (api_key or oauth), and the entry is
+  // merged into `providers.<id>` verbatim — same shape the schema accepts on
+  // read. Used by `typeclaw provider add/set` to write api-key credentials
+  // without going through AuthStorage's flatten/unflatten round-trip.
+  // OAuth flows MUST continue to go through `AuthStorage.login()` so refresh
+  // tokens land in the correct shape; this method is api-key oriented.
+  writeProviderCredentialSync(providerId: string, credential: ProviderCredential): void {
+    this.ensureParentDir()
+    this.ensureFileExists()
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      const envelope = this.readEnvelope()
+      const next: SecretsFile = {
+        ...envelope,
+        $schema: envelope.$schema ?? SCHEMA_REL,
+        version: SECRETS_FILE_VERSION,
+        providers: { ...envelope.providers, [providerId]: credential },
+      }
+      this.writeEnvelopeAtomic(next)
+    } finally {
+      release?.()
+    }
+  }
+
+  // Removes `providers.<id>` from the envelope. Returns `true` when the
+  // provider was present and removed, `false` when nothing changed (idempotent
+  // on the CLI side — `provider remove fireworks` twice should not error on
+  // the second call). The file is rewritten only when something changed so
+  // canonical-shape reads pay zero cost.
+  removeProviderCredentialSync(providerId: string): boolean {
+    if (!existsSync(this.secretsPath)) return false
+    let release: (() => void) | undefined
+    try {
+      release = this.acquireSyncLockWithRetry()
+      const envelope = this.readEnvelope()
+      if (!(providerId in envelope.providers)) return false
+      const { [providerId]: _removed, ...rest } = envelope.providers
+      const next: SecretsFile = {
+        ...envelope,
+        $schema: envelope.$schema ?? SCHEMA_REL,
+        version: SECRETS_FILE_VERSION,
+        providers: rest,
+      }
+      this.writeEnvelopeAtomic(next)
+      return true
+    } finally {
+      release?.()
+    }
+  }
+
   writeChannelsSync(next: Channels): void {
     this.ensureParentDir()
     this.ensureFileExists()
