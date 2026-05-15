@@ -713,7 +713,7 @@ describe('scaffold', () => {
     expect(existsSync(join(root, 'memory'))).toBe(false)
   })
 
-  test('writes typeclaw.json with $schema, model, and network.blockInternal=true (security-relevant, kept visible for discoverability)', async () => {
+  test('writes typeclaw.json with only $schema and model (no defaults duplicated)', async () => {
     await scaffold(root)
 
     const raw = await readFile(join(root, 'typeclaw.json'), 'utf8')
@@ -721,17 +721,16 @@ describe('scaffold', () => {
     expect(JSON.parse(raw)).toEqual({
       $schema: './node_modules/typeclaw/typeclaw.schema.json',
       model: 'openai/gpt-5.4-nano',
-      network: { blockInternal: true },
     })
   })
 
-  test('omits fields whose defaults are already provided by configSchema or the bundled plugin (except network, which is security-relevant and discovery-worthy)', async () => {
+  test('omits every field whose default is already provided by configSchema or a bundled plugin', async () => {
     await scaffold(root)
 
     const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
     expect(cfg.mounts).toBeUndefined()
     expect(cfg.memory).toBeUndefined()
-    expect(cfg.network).toEqual({ blockInternal: true })
+    expect(cfg.network).toBeUndefined()
   })
 
   test('writes cron.json with an empty jobs array and $schema reference', async () => {
