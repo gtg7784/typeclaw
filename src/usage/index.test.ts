@@ -235,4 +235,39 @@ describe('formatReport', () => {
     expect(parsed.agentDir).toBe(agentDir)
     expect(parsed.aggregation).toBeDefined()
   })
+
+  test('report includes a timezone field', async () => {
+    const report = await runUsage({ agentDir })
+    expect(typeof report.timezone).toBe('string')
+    expect(report.timezone.length).toBeGreaterThan(0)
+  })
+
+  test('summary output shows the timezone in the header', async () => {
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report)
+    expect(out).toMatch(/Timezone:/)
+  })
+})
+
+describe('runUsage filesystem robustness', () => {
+  test('skips a directory whose name ends in .jsonl and warns', async () => {
+    const sessionsDir = join(agentDir, 'sessions')
+    await mkdir(join(sessionsDir, 'oops.jsonl'), { recursive: true })
+    const report = await runUsage({ agentDir })
+    expect(report.aggregation.total.messageCount).toBe(0)
+    expect(report.warnings.some((w) => /non-file/i.test(w))).toBe(true)
+  })
+
+  test('silently skips an unterminated trailing line and does not warn', async () => {
+    const sessionsDir = join(agentDir, 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    const good = JSON.stringify(
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 10, output: 5, cost: 0.001 }),
+    )
+    await writeFile(join(sessionsDir, '2026-05-10_partial.jsonl'), `${good}\n{"type":"message","mes`)
+    const report = await runUsage({ agentDir })
+    expect(report.aggregation.total.messageCount).toBe(1)
+    expect(report.warnings).toEqual([])
+  })
 })

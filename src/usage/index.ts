@@ -11,6 +11,11 @@ export type UsageReport = {
   generatedAt: number
   agentDir: string
   range: { since: number | null; until: number | null }
+  // The process timezone used by the date helpers (startOfToday,
+  // startOfDaysAgo) and by per-day grouping. Container processes default to
+  // UTC; host CLI uses the user's local TZ. Surfaced explicitly so consumers
+  // (humans, --json, downstream tooling) can interpret "today" unambiguously.
+  timezone: string
   aggregation: Aggregation
   warnings: string[]
 }
@@ -35,8 +40,17 @@ export async function runUsage(opts: RunUsageOptions): Promise<UsageReport> {
     generatedAt: Date.now(),
     agentDir: opts.agentDir,
     range: { since: opts.since ?? null, until: opts.until ?? null },
+    timezone: processTimezone(),
     aggregation,
     warnings,
+  }
+}
+
+function processTimezone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+  } catch {
+    return process.env.TZ ?? 'UTC'
   }
 }
 

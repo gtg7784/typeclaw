@@ -28,47 +28,76 @@ export type ScanOptions = {
 // JSON parse failures are routed to onWarn and skipped rather than thrown — a
 // crashed mid-line write should not bomb the whole report.
 export async function* scanAssistantRows(opts: ScanOptions): AsyncGenerator<AssistantRow> {
-  const files = await listJsonlFiles(opts.sessionsDir)
+  const files = await listJsonlFiles(opts.sessionsDir, opts.onWarn)
   for (const file of files) {
     yield* readSessionFile(file, opts)
   }
 }
 
-async function listJsonlFiles(dir: string): Promise<string[]> {
-  let entries: string[]
+async function listJsonlFiles(dir: string, onWarn: ScanOptions['onWarn']): Promise<string[]> {
+  let entries
   try {
-    entries = await readdir(dir)
+    entries = await readdir(dir, { withFileTypes: true, encoding: 'utf8' })
   } catch (err) {
     if (isNoEntError(err)) return []
     throw err
   }
-  return entries.filter((e) => e.endsWith('.jsonl')).map((e) => join(dir, e))
+  const files: string[] = []
+  for (const entry of entries) {
+    const name = entry.name
+    if (!name.endsWith('.jsonl')) continue
+    if (!entry.isFile() && !entry.isSymbolicLink()) {
+      onWarn?.(`skipping non-file in sessions/: ${name}`)
+      continue
+    }
+    files.push(join(dir, name))
+  }
+  return files
 }
 
 async function* readSessionFile(file: string, opts: ScanOptions): AsyncGenerator<AssistantRow> {
   const basename = file.split('/').pop() ?? file
-  const stream = Bun.file(file).stream()
+  let stream: ReadableStream<Uint8Array>
+  try {
+    stream = Bun.file(file).stream()
+  } catch (err) {
+    opts.onWarn?.(`could not open ${basename}: ${describeFileError(err)}`)
+    return
+  }
   const decoder = new TextDecoder()
   let buf = ''
-  for await (const chunk of stream) {
-    buf += decoder.decode(chunk, { stream: true })
-    let nl = buf.indexOf('\n')
-    while (nl !== -1) {
-      const line = buf.slice(0, nl)
-      buf = buf.slice(nl + 1)
-      const row = parseLine(line, file, basename, opts)
-      if (row !== null) yield row
-      nl = buf.indexOf('\n')
+  try {
+    for await (const chunk of stream) {
+      buf += decoder.decode(chunk, { stream: true })
+      let nl = buf.indexOf('\n')
+      while (nl !== -1) {
+        const line = buf.slice(0, nl)
+        buf = buf.slice(nl + 1)
+        const row = parseLine(line, file, basename, opts)
+        if (row !== null) yield row
+        nl = buf.indexOf('\n')
+      }
     }
+  } catch (err) {
+    opts.onWarn?.(`error reading ${basename}: ${describeFileError(err)}`)
+    return
   }
-  // Tail line with no terminating \n (JSONL writer hasn't flushed yet).
+  // Tail line with no terminating \n: only emit if it parses cleanly so a
+  // half-written record from a live writer is silently skipped (parseLine
+  // returns null and does NOT warn for the tail).
   if (buf.length > 0) {
-    const row = parseLine(buf, file, basename, opts)
+    const row = parseLine(buf, file, basename, opts, { isTail: true })
     if (row !== null) yield row
   }
 }
 
-function parseLine(line: string, file: string, basename: string, opts: ScanOptions): AssistantRow | null {
+function parseLine(
+  line: string,
+  file: string,
+  basename: string,
+  opts: ScanOptions,
+  ctx: { isTail?: boolean } = {},
+): AssistantRow | null {
   const trimmed = line.trim()
   if (trimmed === '') return null
 
@@ -76,7 +105,8 @@ function parseLine(line: string, file: string, basename: string, opts: ScanOptio
   try {
     entry = JSON.parse(trimmed)
   } catch {
-    opts.onWarn?.(`skipping malformed JSONL line in ${basename}`)
+    // Silently skip the trailing tail: a live writer may be mid-append.
+    if (ctx.isTail !== true) opts.onWarn?.(`skipping malformed JSONL line in ${basename}`)
     return null
   }
 
@@ -148,4 +178,9 @@ function numberOrZero(value: unknown): number {
 
 function isNoEntError(err: unknown): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === 'ENOENT'
+}
+
+function describeFileError(err: unknown): string {
+  if (err instanceof Error) return err.message
+  return String(err)
 }

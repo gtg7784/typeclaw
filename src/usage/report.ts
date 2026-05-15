@@ -38,6 +38,7 @@ function renderSummary(report: UsageReport, ctx: RenderCtx): string {
   const { aggregation } = report
   const sections: string[] = []
   sections.push(header(`USAGE — ${report.agentDir}`, ctx))
+  sections.push(dim(`Timezone: ${report.timezone}`, ctx))
 
   if (aggregation.bySession.length === 0) {
     sections.push(dim('No assistant turns recorded yet.', ctx))
