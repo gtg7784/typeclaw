@@ -208,6 +208,23 @@ describe('memoryLoggerSubagent', () => {
     expect(descriptions.some((d) => d.includes('Append content to a file'))).toBe(true)
   })
 
+  test('declares a defensive tool-result byte budget on the read tool so a malfunctioning find_entry cannot cause unbounded chunked reads', () => {
+    expect(memoryLoggerSubagent.toolResultBudget).toBeDefined()
+    expect(memoryLoggerSubagent.toolResultBudget!.maxTotalBytes).toBeGreaterThanOrEqual(64 * 1024)
+    expect(memoryLoggerSubagent.toolResultBudget!.maxTotalBytes).toBeLessThanOrEqual(1024 * 1024)
+  })
+
+  test('budgets ONLY the read tool so the append / find_entry recovery path stays open after exhaustion', () => {
+    expect([...memoryLoggerSubagent.toolResultBudget!.toolNames]).toEqual(['read'])
+  })
+
+  test('exhausted-budget message tells the subagent to exit silently when no transcript content was read (never invent a watermark)', () => {
+    const msg = memoryLoggerSubagent.toolResultBudget!.exhaustedMessage!(256 * 1024, 256 * 1024)
+    expect(msg).toContain('exit immediately')
+    expect(msg).toContain('WITHOUT writing a watermark')
+    expect(msg).toContain('Do not invent or reuse a watermark id')
+  })
+
   test('declares an inFlightKey that keys on agentDir (so two concurrent sessions for the same agent serialize)', () => {
     expect(memoryLoggerSubagent.inFlightKey).toBeDefined()
     const key = memoryLoggerSubagent.inFlightKey!({

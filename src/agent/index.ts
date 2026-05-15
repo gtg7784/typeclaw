@@ -31,6 +31,12 @@ import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
+import {
+  createBudgetState,
+  type ToolResultBudget,
+  wrapAgentToolWithBudget,
+  wrapToolDefinitionWithBudget,
+} from './tool-result-budget'
 import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReplyTool } from './tools/channel-reply'
@@ -120,6 +126,19 @@ export type CreateSessionOptions = {
   // overrides) so different sessions on the same agent can run different
   // models without per-session config edits.
   profile?: string
+  // Defensive ceiling on cumulative bytes of tool-result text per session,
+  // applied to the named tools only. See `src/agent/tool-result-budget.ts`
+  // for the rationale. Intended for subagents that read large files
+  // (memory-logger, dreaming); leaving this undefined disables the budget
+  // entirely, which is the right default for TUI / channel / plugin-tool
+  // sessions where the human (or hooks) bound tool-result size.
+  toolResultBudget?: ToolResultBudget
+  // Optional override for the message returned to the agent once
+  // `toolResultBudget` is exhausted. Subagents whose recovery path differs
+  // from the default ("advance the watermark from a recent id you have
+  // already seen") provide their own here. See `ToolResultBudget` for the
+  // shared shape.
+  toolResultBudgetMessage?: ToolResultBudget['exhaustedMessage']
 }
 
 export type CreateSessionResult = {
@@ -169,11 +188,29 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins, getOrigin)
     : wrapRegistryTools(options.plugins, getOrigin)
 
-  const tools = wrapSystemAgentTools(
+  // Per-run budget state for the tool-result byte ceiling. Allocated once per
+  // session creation and threaded into every wrapped tool so they share the
+  // same counter. Only used when the session declares a budget; the wrappers
+  // pass non-listed tools through unchanged, so the counter stays at zero for
+  // sessions without a budget configured.
+  const sessionBudget: ToolResultBudget | undefined = options.toolResultBudget
+    ? options.toolResultBudgetMessage !== undefined
+      ? { ...options.toolResultBudget, exhaustedMessage: options.toolResultBudgetMessage }
+      : options.toolResultBudget
+    : undefined
+  const sessionBudgetState = sessionBudget ? createBudgetState() : undefined
+
+  const hookWrappedTools = wrapSystemAgentTools(
     options.tools ?? (subagentBuiltinTools as AgentSessionTools | undefined),
     options.plugins,
     getOrigin,
   )
+  const tools =
+    sessionBudget && sessionBudgetState && hookWrappedTools
+      ? (hookWrappedTools.map((t) =>
+          wrapAgentToolWithBudget(t, sessionBudget, sessionBudgetState),
+        ) as typeof hookWrappedTools)
+      : hookWrappedTools
 
   // Hoisted above tool construction so the restart tool can be wired with the
   // session's stable identity (sessionManager.getSessionId()). Subscribers use
@@ -203,7 +240,11 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
                 ]
               : []),
           ]
-  const customTools = [...wrapSystemTools(customSystemTools, options.plugins, getOrigin), ...pluginCustomTools]
+  const customToolsPreBudget = [...wrapSystemTools(customSystemTools, options.plugins, getOrigin), ...pluginCustomTools]
+  const customTools =
+    sessionBudget && sessionBudgetState
+      ? customToolsPreBudget.map((t) => wrapToolDefinitionWithBudget(t, sessionBudget, sessionBudgetState))
+      : customToolsPreBudget
 
   const model = resolveModel(resolved.ref)
   const { session } = await createAgentSession({

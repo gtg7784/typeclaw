@@ -95,6 +95,18 @@ describe('dreaming subagent declarations', () => {
     expect(sub.customTools).toBeUndefined()
   })
 
+  test('declares a defensive tool-result byte budget on the read tool so a runaway multi-day stream read cannot balloon subagent token cost', () => {
+    const sub = createDreamingSubagent()
+    expect(sub.toolResultBudget).toBeDefined()
+    expect(sub.toolResultBudget!.maxTotalBytes).toBeGreaterThanOrEqual(128 * 1024)
+    expect(sub.toolResultBudget!.maxTotalBytes).toBeLessThanOrEqual(2 * 1024 * 1024)
+  })
+
+  test('budgets ONLY the read tool so write/ls stay unaffected when the budget exhausts', () => {
+    const sub = createDreamingSubagent()
+    expect([...sub.toolResultBudget!.toolNames]).toEqual(['read'])
+  })
+
   test('teaches the dreaming session about muscle memory in the system prompt', () => {
     const sub = createDreamingSubagent()
     expect(sub.systemPrompt).toContain('Muscle memory')

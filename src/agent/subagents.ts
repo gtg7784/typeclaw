@@ -6,6 +6,7 @@ import type { Stream, Unsubscribe } from '@/stream'
 
 import { type AgentSession, createSession } from './index'
 import type { SessionOrigin } from './session-origin'
+import type { ToolResultBudget } from './tool-result-budget'
 
 type AgentSessionTools = NonNullable<Parameters<typeof createSession>[0]>['tools']
 
@@ -27,6 +28,7 @@ export type Subagent<P = unknown> = {
   customTools?: ToolDefinition[]
   payloadSchema?: z.ZodType<P>
   handler?: (ctx: SubagentContext<P>, runSession: RunSession) => Promise<void>
+  toolResultBudget?: ToolResultBudget
 }
 
 export type SubagentRegistry = Readonly<Record<string, Subagent<any>>>
@@ -87,6 +89,7 @@ export const defaultCreateSessionForSubagent: CreateSessionForSubagent = (subage
     ...(subagent.tools ? { tools: subagent.tools } : {}),
     customTools: subagent.customTools ?? [],
     ...(subagent.profile !== undefined ? { profile: subagent.profile } : {}),
+    ...(subagent.toolResultBudget !== undefined ? { toolResultBudget: subagent.toolResultBudget } : {}),
   })
 
 type NormalizedSubagentSession = {
