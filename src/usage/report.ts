@@ -52,30 +52,26 @@ function renderSummary(report: UsageReport, ctx: RenderCtx): string {
       `  ${dim('Messages:', ctx)} ${color('cyan', String(total.messageCount), ctx)}` +
       `  ${dim('In:', ctx)} ${formatTokens(total.input)}` +
       `  ${dim('Out:', ctx)} ${formatTokens(total.output)}` +
-      `  ${dim('Cost:', ctx)} ${colorCost(total.cost, ctx)}`,
+      `  ${dim('Cost:', ctx)} ${formatCost(total.cost)}`,
   )
 
   if (aggregation.byDay.length > 0) {
     sections.push('')
     sections.push(header('By day (most recent first)', ctx))
     const recent = aggregation.byDay.slice(-7).reverse()
-    sections.push(
-      renderTotalsTable(
-        recent.map((d) => ({ label: d.date, totals: d })),
-        ctx,
-      ),
-    )
+    const dayRows = recent.map((d) => ({ label: d.date, totals: d as UsageTotals }))
+    sections.push(renderTotalsTable(dayRows, ctx, { total: totalOfRows(dayRows) }))
   }
 
   if (aggregation.byModel.length > 0) {
     sections.push('')
     sections.push(header('By model', ctx))
-    sections.push(
-      renderTotalsTable(
-        aggregation.byModel.map((m) => ({ label: colorModelLabel(m, ctx), modelId: m.model, totals: m })),
-        ctx,
-      ),
-    )
+    const modelRows = aggregation.byModel.map((m) => ({
+      label: colorModelLabel(m, ctx),
+      modelId: m.model,
+      totals: m as UsageTotals,
+    }))
+    sections.push(renderTotalsTable(modelRows, ctx, { total: totalOfRows(modelRows) }))
   }
 
   if (report.warnings.length > 0) {
@@ -90,14 +86,11 @@ function renderSummary(report: UsageReport, ctx: RenderCtx): string {
 function renderDaily(report: UsageReport, ctx: RenderCtx, limit: number | undefined): string {
   const days = limit !== undefined ? report.aggregation.byDay.slice(-limit) : report.aggregation.byDay
   if (days.length === 0) return dim('No usage in range.', ctx)
-  const lines = [
+  const rows = days.map((d) => ({ label: dim(d.date, ctx), totals: d as UsageTotals }))
+  return [
     sectionTitle(`USAGE BY DAY`, report.agentDir, ctx),
-    renderTotalsTable(
-      days.map((d) => ({ label: dim(d.date, ctx), totals: d })),
-      ctx,
-    ),
-  ]
-  return lines.join('\n')
+    renderTotalsTable(rows, ctx, { total: totalOfRows(rows) }),
+  ].join('\n')
 }
 
 function renderSessions(report: UsageReport, ctx: RenderCtx, limit: number): string {
@@ -108,26 +101,28 @@ function renderSessions(report: UsageReport, ctx: RenderCtx, limit: number): str
     const extra = s.models.length > 1 ? `${s.models.length} models` : modelIdFromKey(firstModel)
     return {
       label: `${color('magenta', s.sessionId.slice(0, 12), ctx)}  ${dim(isoDay(s.firstAt), ctx)}`,
-      totals: s,
+      totals: s as UsageTotals,
       extra,
       extraTruncatable: s.models.length === 1,
     }
   })
   return [
     sectionTitle(`USAGE BY SESSION`, report.agentDir, ctx, `(top ${limit} by cost)`),
-    renderTotalsTable(rows, ctx, { extraHeader: 'Model' }),
+    renderTotalsTable(rows, ctx, { extraHeader: 'Model', total: totalOfRows(rows) }),
   ].join('\n')
 }
 
 function renderModels(report: UsageReport, ctx: RenderCtx, limit: number | undefined): string {
   const models = limit !== undefined ? report.aggregation.byModel.slice(0, limit) : report.aggregation.byModel
   if (models.length === 0) return dim('No models in range.', ctx)
+  const rows = models.map((m) => ({
+    label: colorModelLabel(m, ctx),
+    modelId: m.model,
+    totals: m as UsageTotals,
+  }))
   return [
     sectionTitle(`USAGE BY MODEL`, report.agentDir, ctx),
-    renderTotalsTable(
-      models.map((m) => ({ label: colorModelLabel(m, ctx), modelId: m.model, totals: m })),
-      ctx,
-    ),
+    renderTotalsTable(rows, ctx, { total: totalOfRows(rows) }),
   ].join('\n')
 }
 
@@ -165,7 +160,36 @@ const COL_GAP = 2
 const MIN_ITEM_WIDTH = 14
 const ELLIPSIS = '…'
 
-function renderTotalsTable(rows: Row[], ctx: RenderCtx, opts: { extraHeader?: string } = {}): string {
+// Sum of rendered rows. Tokscale-style "Total" footer: always represents
+// what the user sees on screen, not lifetime totals across rows that were
+// sliced/filtered out.
+function totalOfRows(rows: Row[]): UsageTotals {
+  const acc: UsageTotals = {
+    messageCount: 0,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 0,
+    cost: 0,
+  }
+  for (const r of rows) {
+    acc.messageCount += r.totals.messageCount
+    acc.input += r.totals.input
+    acc.output += r.totals.output
+    acc.cacheRead += r.totals.cacheRead
+    acc.cacheWrite += r.totals.cacheWrite
+    acc.totalTokens += r.totals.totalTokens
+    acc.cost += r.totals.cost
+  }
+  return acc
+}
+
+function renderTotalsTable(
+  rows: Row[],
+  ctx: RenderCtx,
+  opts: { extraHeader?: string; total?: UsageTotals } = {},
+): string {
   const hasExtra = opts.extraHeader !== undefined
   const headers = ['Item', 'Msgs', 'In', 'Out', 'Cache %', 'Cost', ...(hasExtra ? [opts.extraHeader!] : [])]
 
@@ -174,15 +198,29 @@ function renderTotalsTable(rows: Row[], ctx: RenderCtx, opts: { extraHeader?: st
     String(r.totals.messageCount),
     formatTokens(r.totals.input),
     formatTokens(r.totals.output),
-    colorCacheHitRate(r.totals.input, r.totals.cacheRead, ctx),
-    colorCost(r.totals.cost, ctx),
+    formatCacheHitRate(r.totals.input, r.totals.cacheRead),
+    formatCost(r.totals.cost),
     ...(hasExtra ? [r.extra ?? ''] : []),
   ])
+
+  const totalCells: string[] | undefined =
+    opts.total !== undefined
+      ? [
+          'Total',
+          String(opts.total.messageCount),
+          formatTokens(opts.total.input),
+          formatTokens(opts.total.output),
+          formatCacheHitRate(opts.total.input, opts.total.cacheRead),
+          formatCost(opts.total.cost),
+          ...(hasExtra ? [''] : []),
+        ]
+      : undefined
 
   const itemColIdx = 0
   const extraColIdx = hasExtra ? headers.length - 1 : -1
 
-  const naturalWidths = computeNaturalWidths([headers, ...dataCells])
+  const widthRows = totalCells !== undefined ? [headers, ...dataCells, totalCells] : [headers, ...dataCells]
+  const naturalWidths = computeNaturalWidths(widthRows)
   const fixedWidth =
     naturalWidths.reduce((a, b) => a + b, 0) -
     naturalWidths[itemColIdx]! -
@@ -219,7 +257,8 @@ function renderTotalsTable(rows: Row[], ctx: RenderCtx, opts: { extraHeader?: st
     return cells
   })
 
-  return alignTable([headers, ...truncatedBody], ctx)
+  const table = totalCells !== undefined ? [headers, ...truncatedBody, totalCells] : [headers, ...truncatedBody]
+  return alignTable(table, ctx, totalCells !== undefined ? { totalRowIdx: table.length - 1 } : {})
 }
 
 function fitItemCell(label: string, row: Row, budget: number, ctx: RenderCtx): string {
@@ -266,7 +305,7 @@ function computeNaturalWidths(table: string[][]): number[] {
   return widths
 }
 
-function alignTable(table: string[][], ctx: RenderCtx): string {
+function alignTable(table: string[][], ctx: RenderCtx, opts: { totalRowIdx?: number } = {}): string {
   if (table.length === 0) return ''
   const widths = computeNaturalWidths(table)
   const lines: string[] = []
@@ -276,7 +315,13 @@ function alignTable(table: string[][], ctx: RenderCtx): string {
       return c === 0 ? cell + ' '.repeat(pad) : ' '.repeat(pad) + cell
     })
     const line = cells.join('  ')
-    lines.push(idx === 0 ? bold(line, ctx) : line)
+    if (idx === 0) {
+      lines.push(color('cyan', line, ctx))
+    } else if (opts.totalRowIdx !== undefined && idx === opts.totalRowIdx) {
+      lines.push(color('yellow', bold(line, ctx), ctx))
+    } else {
+      lines.push(line)
+    }
   })
   return lines.join('\n')
 }
@@ -296,29 +341,6 @@ function dim(text: string, ctx: RenderCtx): string {
 function color(modifier: Parameters<typeof styleText>[0], text: string, ctx: RenderCtx): string {
   if (!ctx.useColor) return text
   return styleText(modifier, text)
-}
-
-// Cost over $1 gets yellow (visual "this is the big number"); positive costs
-// under $1 are green; literal zero is dim so it fades into the background.
-// Not a budget alarm — see PR notes; explicit budgets are out of scope.
-function colorCost(cost: number, ctx: RenderCtx): string {
-  const text = formatCost(cost)
-  if (cost === 0) return dim(text, ctx)
-  if (cost >= 1) return color('yellow', text, ctx)
-  return color('green', text, ctx)
-}
-
-// Color thresholds for cache hit rate. ≥50% is "this row is benefiting from
-// caching" (green); <50% but non-zero stays default; literal zero or no-input
-// rows fade to dim so the eye lands on the meaningful numbers.
-function colorCacheHitRate(input: number, cacheRead: number, ctx: RenderCtx): string {
-  const text = formatCacheHitRate(input, cacheRead)
-  if (text === '—') return dim(text, ctx)
-  const total = input + cacheRead
-  const ratio = cacheRead / total
-  if (ratio >= 0.5) return color('green', text, ctx)
-  if (ratio === 0) return dim(text, ctx)
-  return text
 }
 
 // ANSI escape sequences would inflate column widths and break alignment under

@@ -331,7 +331,7 @@ describe('formatReport narrow-terminal rendering', () => {
   })
 })
 
-describe('formatReport colors', () => {
+describe('formatReport colors (tokscale-matched palette)', () => {
   const ts = new Date('2026-05-10T10:00:00').getTime()
 
   async function reportWithCost(cost: number) {
@@ -348,22 +348,31 @@ describe('formatReport colors', () => {
     expect(out.match(/\u001b\[/)).toBeNull()
   })
 
-  test('costs under $1 get green (32m) when useColor is true', async () => {
+  test('column header row is cyan (36m)', async () => {
     const report = await reportWithCost(0.05)
     const out = formatReport(report, { view: 'models', useColor: true })
-    expect(out).toMatch(/\u001b\[32m\$0\.050\u001b\[39m/)
+    expect(out).toMatch(/\u001b\[36m[^\u001b]*Item[^\u001b]*Msgs[^\u001b]*In[^\u001b]*Out/)
   })
 
-  test('costs >= $1 get yellow (33m)', async () => {
-    const report = await reportWithCost(2.5)
-    const out = formatReport(report, { view: 'models', useColor: true })
-    expect(out).toMatch(/\u001b\[33m\$2\.50\u001b\[39m/)
+  test('cost values are NOT colored by value (tokscale match: plain default)', async () => {
+    for (const cost of [0, 0.05, 2.5]) {
+      const r = await reportWithCost(cost)
+      const out = formatReport(r, { view: 'models', useColor: true })
+      // Cost should not be wrapped in green (32m), yellow on its own (33m), or
+      // dim (2m) for value-tier reasons. The Total footer is yellow, but row
+      // costs are plain.
+      const costPattern = new RegExp(`\\u001b\\[(32|33)m\\$[0-9.]+\\u001b\\[39m`)
+      // The Total row also contains $cost in yellow, so we strip the table's
+      // last line before matching to isolate the data row's coloring.
+      const dataRow = out.split('\n').slice(0, -1).join('\n')
+      expect(dataRow.match(costPattern)).toBeNull()
+    }
   })
 
-  test('zero cost is dim (2m)', async () => {
-    const report = await reportWithCost(0)
+  test('Total footer row is yellow + bold (33m + 1m wrapping the whole row)', async () => {
+    const report = await reportWithCost(0.05)
     const out = formatReport(report, { view: 'models', useColor: true })
-    expect(out).toMatch(/\u001b\[2m\$0\.00\u001b\[22m/)
+    expect(out).toMatch(/\u001b\[33m\u001b\[1m[^\u001b]*Total/)
   })
 
   test('provider prefix is dimmed; model id stays default color', async () => {
@@ -438,16 +447,12 @@ describe('formatReport cache hit rate column', () => {
   })
 
   /* eslint-disable no-control-regex -- ANSI escape sequences are deliberately matched here. */
-  test('hit rate ≥50% colored green', async () => {
+  test('cache % values are NOT colored by value (tokscale match: plain default)', async () => {
     const report = await reportWithCache(400, 600)
     const out = formatReport(report, { view: 'models', useColor: true })
-    expect(out).toMatch(/\u001b\[32m60%\u001b\[39m/)
-  })
-
-  test('hit rate of 0% is dimmed', async () => {
-    const report = await reportWithCache(1000, 0)
-    const out = formatReport(report, { view: 'models', useColor: true })
-    expect(out).toMatch(/\u001b\[2m0%\u001b\[22m/)
+    // Strip the Total footer (yellow), then assert no green wrapping a "60%".
+    const dataRow = out.split('\n').slice(0, -1).join('\n')
+    expect(dataRow.match(/\u001b\[32m60%\u001b\[39m/)).toBeNull()
   })
   /* eslint-enable no-control-regex */
 })
