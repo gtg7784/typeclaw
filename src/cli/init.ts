@@ -26,6 +26,17 @@ import { makeOAuthLoginRunner } from '@/init/oauth-login'
 
 import { c, done, errorLine } from './ui'
 
+// ESC and Ctrl+C both produce clack's cancel symbol (the keypress layer
+// aliases both to the same "cancel" action — there's no way to tell them
+// apart through @clack/prompts). The wizard treats every cancel as "go
+// back to the previous step": each step that runs an interactive prompt
+// either advances with a value or rewinds. Rewinding past the first
+// interactive step aborts the init cleanly. Users who want to abort
+// mid-wizard can hit ESC repeatedly until they're back to the start.
+export type StepResult<T> = { kind: 'value'; value: T } | { kind: 'back' }
+const back = <T>(): StepResult<T> => ({ kind: 'back' })
+const value = <T>(v: T): StepResult<T> => ({ kind: 'value', value: v })
+
 export const init = defineCommand({
   meta: {
     name: 'init',
@@ -61,209 +72,17 @@ export const init = defineCommand({
     }
 
     intro('Initializing TypeClaw...')
+    log.info('Press ESC at any prompt to go back to the previous step.')
 
-    const selectedModel = await pickModel()
-    const provider = KNOWN_PROVIDERS[selectedModel.providerId]
-
-    const existingApiKey = await readExistingProviderApiKey(cwd, selectedModel.providerId)
-    const llmAuth = await collectLLMAuth(provider, existingApiKey)
-
-    const channelChoice = await select({
-      message: 'Pick a channel to wire (you can add more later by editing typeclaw.json + secrets.json)',
-      options: [
-        { value: 'slack', label: 'Slack' },
-        { value: 'discord', label: 'Discord' },
-        { value: 'telegram', label: 'Telegram' },
-        { value: 'kakaotalk', label: 'KakaoTalk' },
-        { value: 'none', label: 'Skip — no channel right now' },
-      ],
-      initialValue: 'slack' as const,
-    })
-    if (isCancel(channelChoice)) {
+    const collected = await collectWizardInputs(cwd, defaultWizardPrompts)
+    if (collected === null) {
       cancel('Aborted.')
       process.exit(0)
     }
 
-    let discordBotToken: string | undefined
-    let slackBotToken: string | undefined
-    let slackAppToken: string | undefined
-    let telegramBotToken: string | undefined
-    let kakaotalkEmail: string | undefined
-    let kakaotalkPassword: string | undefined
-
-    if (channelChoice === 'discord') {
-      note(
-        [
-          'https://discord.com/developers/applications',
-          'New Application → Bot tab → Reset Token.',
-          'Enable the MESSAGE CONTENT intent.',
-        ].join('\n'),
-        'Get a Discord bot token',
-      )
-      const token = await password({
-        message: 'Discord bot token',
-        validate: (value) => (value && value.length > 0 ? undefined : 'Token is required'),
-      })
-      if (isCancel(token)) {
-        cancel('Aborted.')
-        process.exit(0)
-      }
-      discordBotToken = token
-    }
-
-    if (channelChoice === 'kakaotalk') {
-      note(
-        [
-          'KakaoTalk authentication uses a personal account, registered as a',
-          'tablet sub-device. Messages will be sent and received under this',
-          'account. Use a non-primary account if possible.',
-          '',
-          'After you submit the password, KakaoTalk may ask you to confirm a',
-          'passcode on your phone. Watch the screen for the code.',
-        ].join('\n'),
-        'About to log in to KakaoTalk',
-      )
-      const email = await text({
-        message: 'KakaoTalk email',
-        validate: (value) => (value && value.length > 0 ? undefined : 'Email is required'),
-      })
-      if (isCancel(email)) {
-        cancel('Aborted.')
-        process.exit(0)
-      }
-      const pwd = await password({
-        message: 'KakaoTalk password',
-        validate: (value) => (value && value.length > 0 ? undefined : 'Password is required'),
-      })
-      if (isCancel(pwd)) {
-        cancel('Aborted.')
-        process.exit(0)
-      }
-      kakaotalkEmail = email
-      kakaotalkPassword = pwd
-    }
-
-    if (channelChoice === 'slack') {
-      note(
-        [
-          '1. https://api.slack.com/apps → Create New App → From a manifest.',
-          '   Pick your workspace, then paste this JSON manifest:',
-          '',
-          '   {',
-          '     "display_information": { "name": "TypeClaw" },',
-          '     "features": {',
-          '       "bot_user": { "display_name": "TypeClaw", "always_online": true }',
-          '     },',
-          '     "oauth_config": {',
-          '       "scopes": {',
-          '         "bot": [',
-          '           "app_mentions:read", "chat:write", "users:read", "files:read",',
-          '           "channels:history", "channels:read",',
-          '           "groups:history",   "groups:read",',
-          '           "im:history",       "im:read",',
-          '           "mpim:history",     "mpim:read"',
-          '         ]',
-          '       }',
-          '     },',
-          '     "settings": {',
-          '       "event_subscriptions": {',
-          '         "bot_events": [',
-          '           "app_mention",',
-          '           "message.channels", "message.groups",',
-          '           "message.im",       "message.mpim"',
-          '         ]',
-          '       },',
-          '       "socket_mode_enabled": true',
-          '     }',
-          '   }',
-          '',
-          '2. Install to Workspace, then OAuth & Permissions →',
-          '   copy the Bot User OAuth Token (xoxb-...).',
-          '3. Basic Information → App-Level Tokens → Generate Token and',
-          '   Scopes, add the connections:write scope, and copy the',
-          '   token (xapp-...). Socket Mode needs this; the manifest',
-          '   cannot grant it.',
-          '4. Invite the bot to any private channel or DM you want it in:',
-          '   /invite @TypeClaw',
-        ].join('\n'),
-        'Get a Slack bot',
-      )
-      const botToken = await password({
-        message: 'Slack bot token (xoxb-...)',
-        validate: (value) =>
-          value && value.length > 0
-            ? value.startsWith('xoxb-')
-              ? undefined
-              : 'Bot token must start with "xoxb-"'
-            : 'Token is required',
-      })
-      if (isCancel(botToken)) {
-        cancel('Aborted.')
-        process.exit(0)
-      }
-      slackBotToken = botToken
-      note(
-        [
-          'Slack does not accept connections:write inside the manifest, so',
-          'this token has to be generated by hand:',
-          '',
-          '1. Basic Information → App-Level Tokens → Generate Token and Scopes.',
-          '2. Token Name: anything (e.g. "socket-mode").',
-          '3. Add Scope → connections:write → Generate.',
-          '4. Copy the xapp-... token shown once on screen.',
-          '   (You cannot retrieve it later — only revoke and regenerate.)',
-        ].join('\n'),
-        'Generate the Slack app-level token',
-      )
-      const appToken = await password({
-        message: 'Slack app-level token (xapp-...) — Socket Mode requires this',
-        validate: (value) =>
-          value && value.length > 0
-            ? value.startsWith('xapp-')
-              ? undefined
-              : 'App-level token must start with "xapp-"'
-            : 'Token is required',
-      })
-      if (isCancel(appToken)) {
-        cancel('Aborted.')
-        process.exit(0)
-      }
-      slackAppToken = appToken
-    }
-
-    if (channelChoice === 'telegram') {
-      note(
-        [
-          'Open Telegram and message @BotFather.',
-          '/newbot → pick a name and username, copy the HTTP API token',
-          '  (looks like 1234567890:ABCdef...).',
-          'In @BotFather: /setprivacy → Disable, so the bot can see group messages.',
-        ].join('\n'),
-        'Get a Telegram bot token',
-      )
-      const token = await password({
-        message: 'Telegram bot token',
-        validate: (value) =>
-          value && value.length > 0
-            ? /^\d+:/.test(value)
-              ? undefined
-              : 'Bot token must look like "<digits>:<secret>" (from @BotFather)'
-            : 'Token is required',
-      })
-      if (isCancel(token)) {
-        cancel('Aborted.')
-        process.exit(0)
-      }
-      telegramBotToken = token
-      note(
-        [
-          'Open https://t.me/<your_bot_username> (the username you picked in /newbot, ends in "bot").',
-          'Tap Start in the chat — the agent will reply once it hatches.',
-          'For groups: add the bot to the group, then @mention it or reply to its messages.',
-        ].join('\n'),
-        'Send your first message',
-      )
-    }
+    const { model, llmAuth, channelSecrets } = collected
+    const { discordBotToken, slackBotToken, slackAppToken, telegramBotToken, kakaotalkEmail, kakaotalkPassword } =
+      channelSecrets
 
     // TODO: add remaining wizard steps from TypeClaw.md once their runtime lands:
     //   - git backup (url + PAT) — Phase 10
@@ -276,7 +95,7 @@ export const init = defineCommand({
       await runInit({
         cwd,
         llmAuth,
-        model: selectedModel.ref,
+        model: model.ref,
         cliEntry: process.argv[1],
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
@@ -326,6 +145,508 @@ export const init = defineCommand({
     }
   },
 })
+
+interface WizardState {
+  catalog?: { options: ModelOption[]; source: 'models.dev' | 'curated'; warning?: string }
+  providerId?: KnownProviderId
+  model?: ModelOption
+  reuseExisting?: boolean
+  authMethod?: 'api-key' | 'oauth'
+  llmAuth?: LLMAuth
+  channelChoice?: ChannelChoice
+}
+
+type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'kakaotalk' | 'none'
+
+interface CollectedInputs {
+  model: ModelOption
+  llmAuth: LLMAuth
+  channelSecrets: {
+    discordBotToken?: string
+    slackBotToken?: string
+    slackAppToken?: string
+    telegramBotToken?: string
+    kakaotalkEmail?: string
+    kakaotalkPassword?: string
+  }
+}
+
+type StepId =
+  | 'pick-provider'
+  | 'pick-model'
+  | 'reuse-existing-key'
+  | 'pick-auth-method'
+  | 'enter-api-key'
+  | 'pick-channel'
+  | 'channel-flow'
+
+export interface WizardPrompts {
+  loadCatalog: () => Promise<NonNullable<WizardState['catalog']>>
+  readExistingApiKey: (cwd: string, providerId: KnownProviderId) => Promise<string | null>
+  pickProvider: (options: ModelOption[], initial: KnownProviderId | undefined) => Promise<StepResult<KnownProviderId>>
+  pickModel: (
+    options: ModelOption[],
+    providerId: KnownProviderId,
+    initial: KnownModelRef | undefined,
+  ) => Promise<StepResult<ModelOption>>
+  askReuseExistingKey: (
+    provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+    existingApiKey: string | null,
+    initial: boolean | undefined,
+  ) => Promise<StepResult<'reuse' | 'prompt'>>
+  pickAuthMethod: (
+    provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+    initial: 'api-key' | 'oauth' | undefined,
+  ) => Promise<StepResult<'api-key' | 'oauth'>>
+  askApiKey: (provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]) => Promise<StepResult<string>>
+  pickChannel: (initial: ChannelChoice | undefined) => Promise<StepResult<ChannelChoice>>
+  runChannelFlow: (choice: ChannelChoice) => Promise<StepResult<CollectedInputs['channelSecrets']>>
+  buildOAuthAuth: (provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]) => LLMAuth
+}
+
+export const defaultWizardPrompts: WizardPrompts = {
+  loadCatalog,
+  readExistingApiKey: readExistingProviderApiKey,
+  pickProvider,
+  pickModel: pickModelForProvider,
+  askReuseExistingKey,
+  pickAuthMethod,
+  askApiKey,
+  pickChannel,
+  runChannelFlow,
+  buildOAuthAuth: (provider) => ({
+    kind: 'oauth',
+    runLogin: makeOAuthLoginRunner(buildOAuthCallbacks(provider.name)),
+  }),
+}
+
+export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): Promise<CollectedInputs | null> {
+  const catalog = await prompts.loadCatalog()
+  const state: WizardState = { catalog }
+  let step: StepId = 'pick-provider'
+
+  while (true) {
+    switch (step) {
+      case 'pick-provider': {
+        const result = await prompts.pickProvider(catalog.options, state.providerId)
+        if (result.kind === 'back') return null
+        if (state.providerId !== result.value) {
+          state.model = undefined
+          state.reuseExisting = undefined
+          state.authMethod = undefined
+          state.llmAuth = undefined
+        }
+        state.providerId = result.value
+        step = 'pick-model'
+        break
+      }
+
+      case 'pick-model': {
+        const result = await prompts.pickModel(catalog.options, state.providerId!, state.model?.ref)
+        if (result.kind === 'back') {
+          step = 'pick-provider'
+          break
+        }
+        state.model = result.value
+        step = 'reuse-existing-key'
+        break
+      }
+
+      case 'reuse-existing-key': {
+        const provider = KNOWN_PROVIDERS[state.providerId!]
+        const existingApiKey = await prompts.readExistingApiKey(cwd, state.providerId!)
+        const decision = await prompts.askReuseExistingKey(provider, existingApiKey, state.reuseExisting)
+        if (decision.kind === 'back') {
+          step = 'pick-model'
+          break
+        }
+        if (decision.value === 'reuse' && existingApiKey !== null) {
+          log.info(`Using existing ${provider.name} API key from secrets.json.`)
+          state.llmAuth = { kind: 'api-key', apiKey: existingApiKey }
+          state.reuseExisting = true
+          step = 'pick-channel'
+          break
+        }
+        state.reuseExisting = false
+        state.llmAuth = undefined
+        step = 'pick-auth-method'
+        break
+      }
+
+      case 'pick-auth-method': {
+        const provider = KNOWN_PROVIDERS[state.providerId!]
+        const result = await prompts.pickAuthMethod(provider, state.authMethod)
+        if (result.kind === 'back') {
+          step = 'reuse-existing-key'
+          break
+        }
+        state.authMethod = result.value
+        if (result.value === 'oauth') {
+          state.llmAuth = prompts.buildOAuthAuth(provider)
+          step = 'pick-channel'
+        } else {
+          step = 'enter-api-key'
+        }
+        break
+      }
+
+      case 'enter-api-key': {
+        const provider = KNOWN_PROVIDERS[state.providerId!]
+        const result = await prompts.askApiKey(provider)
+        if (result.kind === 'back') {
+          step = 'pick-auth-method'
+          break
+        }
+        state.llmAuth = { kind: 'api-key', apiKey: result.value }
+        step = 'pick-channel'
+        break
+      }
+
+      case 'pick-channel': {
+        const result = await prompts.pickChannel(state.channelChoice)
+        if (result.kind === 'back') {
+          if (state.reuseExisting === true) {
+            step = 'reuse-existing-key'
+          } else if (state.authMethod === 'api-key') {
+            step = 'enter-api-key'
+          } else {
+            step = 'pick-auth-method'
+          }
+          break
+        }
+        state.channelChoice = result.value
+        step = 'channel-flow'
+        break
+      }
+
+      case 'channel-flow': {
+        const result = await prompts.runChannelFlow(state.channelChoice!)
+        if (result.kind === 'back') {
+          step = 'pick-channel'
+          break
+        }
+        return {
+          model: state.model!,
+          llmAuth: state.llmAuth!,
+          channelSecrets: result.value,
+        }
+      }
+    }
+  }
+}
+
+async function loadCatalog(): Promise<NonNullable<WizardState['catalog']>> {
+  const s = spinner()
+  s.start('Loading model catalog from models.dev...')
+  const { options, source, warning } = await fetchModelOptions()
+  if (source === 'curated') {
+    s.stop(`Using built-in catalog (models.dev unavailable: ${warning ?? 'unknown'})`)
+  } else {
+    s.stop('Loaded model catalog.')
+  }
+  return warning !== undefined ? { options, source, warning } : { options, source }
+}
+
+async function pickProvider(
+  options: ModelOption[],
+  initial: KnownProviderId | undefined,
+): Promise<StepResult<KnownProviderId>> {
+  const providers = uniqueProviders(options)
+  const choice = await select({
+    message: 'Pick an LLM provider',
+    options: providers.map((id) => ({ value: id, label: KNOWN_PROVIDERS[id].name, hint: providerAuthHint(id) })),
+    initialValue: initial ?? providers[0],
+  })
+  if (isCancel(choice)) return back()
+  return value(choice)
+}
+
+async function pickModelForProvider(
+  options: ModelOption[],
+  providerId: KnownProviderId,
+  initial: KnownModelRef | undefined,
+): Promise<StepResult<ModelOption>> {
+  const candidates = options.filter((o) => o.providerId === providerId)
+  const choice = await select<KnownModelRef>({
+    message: `Pick a ${KNOWN_PROVIDERS[providerId].name} model`,
+    options: candidates.map((o) => ({
+      value: o.ref,
+      label: o.modelName,
+      hint: formatModelHint(o),
+    })),
+    initialValue: initial ?? candidates[0]?.ref,
+  })
+  if (isCancel(choice)) return back()
+  const picked = candidates.find((o) => o.ref === choice)
+  if (!picked) throw new Error(`Internal error: picked model ${choice} not in candidates`)
+  return value(picked)
+}
+
+async function askReuseExistingKey(
+  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+  existingApiKey: string | null,
+  initial: boolean | undefined,
+): Promise<StepResult<'reuse' | 'prompt'>> {
+  if (!providerSupportsApiKey(provider) || existingApiKey === null) return value('prompt')
+  const reuse = await confirm({
+    message: `Reuse existing ${provider.name} API key from secrets.json?`,
+    initialValue: initial ?? true,
+  })
+  if (isCancel(reuse)) return back()
+  return value(reuse === true ? 'reuse' : 'prompt')
+}
+
+async function pickAuthMethod(
+  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+  initial: 'api-key' | 'oauth' | undefined,
+): Promise<StepResult<'api-key' | 'oauth'>> {
+  const supportsApiKey = providerSupportsApiKey(provider)
+  const supportsOAuth = providerSupportsOAuth(provider)
+  if (supportsApiKey && supportsOAuth) {
+    const choice = await select<'api-key' | 'oauth'>({
+      message: `How do you want to authenticate to ${provider.name}?`,
+      options: [
+        { value: 'api-key', label: 'API key', hint: 'saved to secrets.json' },
+        { value: 'oauth', label: 'OAuth (browser login)', hint: 'saved to secrets.json' },
+      ],
+      initialValue: initial ?? 'api-key',
+    })
+    if (isCancel(choice)) return back()
+    return value(choice)
+  }
+  // Single-method providers: no prompt to back out of, so always advance.
+  return value(supportsOAuth ? 'oauth' : 'api-key')
+}
+
+async function askApiKey(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]): Promise<StepResult<string>> {
+  const apiKey = await password({
+    message: `Put your ${provider.name} API key (will be saved to secrets.json)`,
+    validate: (v) => (v && v.length > 0 ? undefined : 'API key is required'),
+  })
+  if (isCancel(apiKey)) return back()
+  return value(apiKey)
+}
+
+async function pickChannel(initial: ChannelChoice | undefined): Promise<StepResult<ChannelChoice>> {
+  const choice = await select<ChannelChoice>({
+    message: 'Pick a channel to wire (you can add more later by editing typeclaw.json + secrets.json)',
+    options: [
+      { value: 'slack', label: 'Slack' },
+      { value: 'discord', label: 'Discord' },
+      { value: 'telegram', label: 'Telegram' },
+      { value: 'kakaotalk', label: 'KakaoTalk' },
+      { value: 'none', label: 'Skip — no channel right now' },
+    ],
+    initialValue: initial ?? 'slack',
+  })
+  if (isCancel(choice)) return back()
+  return value(choice)
+}
+
+async function runChannelFlow(choice: ChannelChoice): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+  switch (choice) {
+    case 'none':
+      return value({})
+    case 'discord':
+      return runDiscordFlow()
+    case 'kakaotalk':
+      return runKakaotalkFlow()
+    case 'slack':
+      return runSlackFlow()
+    case 'telegram':
+      return runTelegramFlow()
+  }
+}
+
+async function runDiscordFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+  note(
+    [
+      'https://discord.com/developers/applications',
+      'New Application → Bot tab → Reset Token.',
+      'Enable the MESSAGE CONTENT intent.',
+    ].join('\n'),
+    'Get a Discord bot token',
+  )
+  const token = await password({
+    message: 'Discord bot token',
+    validate: (v) => (v && v.length > 0 ? undefined : 'Token is required'),
+  })
+  if (isCancel(token)) return back()
+  return value({ discordBotToken: token })
+}
+
+async function runKakaotalkFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+  // Sub-flow with its own back-aware loop: ESC on the password prompt
+  // returns to the email prompt; ESC on the email prompt unwinds to the
+  // channel picker.
+  type SubStep = 'email' | 'password'
+  let sub: SubStep = 'email'
+  let email: string | undefined
+  let pwd: string | undefined
+
+  note(
+    [
+      'KakaoTalk authentication uses a personal account, registered as a',
+      'tablet sub-device. Messages will be sent and received under this',
+      'account. Use a non-primary account if possible.',
+      '',
+      'After you submit the password, KakaoTalk may ask you to confirm a',
+      'passcode on your phone. Watch the screen for the code.',
+    ].join('\n'),
+    'About to log in to KakaoTalk',
+  )
+
+  while (true) {
+    if (sub === 'email') {
+      const input = await text({
+        message: 'KakaoTalk email',
+        ...(email !== undefined ? { initialValue: email } : {}),
+        validate: (v) => (v && v.length > 0 ? undefined : 'Email is required'),
+      })
+      if (isCancel(input)) return back()
+      email = input
+      sub = 'password'
+      continue
+    }
+    const input = await password({
+      message: 'KakaoTalk password',
+      validate: (v) => (v && v.length > 0 ? undefined : 'Password is required'),
+    })
+    if (isCancel(input)) {
+      sub = 'email'
+      continue
+    }
+    pwd = input
+    return value({ kakaotalkEmail: email, kakaotalkPassword: pwd })
+  }
+}
+
+async function runSlackFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+  type SubStep = 'bot' | 'app'
+  let sub: SubStep = 'bot'
+  let botToken: string | undefined
+
+  note(
+    [
+      '1. https://api.slack.com/apps → Create New App → From a manifest.',
+      '   Pick your workspace, then paste this JSON manifest:',
+      '',
+      '   {',
+      '     "display_information": { "name": "TypeClaw" },',
+      '     "features": {',
+      '       "bot_user": { "display_name": "TypeClaw", "always_online": true }',
+      '     },',
+      '     "oauth_config": {',
+      '       "scopes": {',
+      '         "bot": [',
+      '           "app_mentions:read", "chat:write", "users:read", "files:read",',
+      '           "channels:history", "channels:read",',
+      '           "groups:history",   "groups:read",',
+      '           "im:history",       "im:read",',
+      '           "mpim:history",     "mpim:read"',
+      '         ]',
+      '       }',
+      '     },',
+      '     "settings": {',
+      '       "event_subscriptions": {',
+      '         "bot_events": [',
+      '           "app_mention",',
+      '           "message.channels", "message.groups",',
+      '           "message.im",       "message.mpim"',
+      '         ]',
+      '       },',
+      '       "socket_mode_enabled": true',
+      '     }',
+      '   }',
+      '',
+      '2. Install to Workspace, then OAuth & Permissions →',
+      '   copy the Bot User OAuth Token (xoxb-...).',
+      '3. Basic Information → App-Level Tokens → Generate Token and',
+      '   Scopes, add the connections:write scope, and copy the',
+      '   token (xapp-...). Socket Mode needs this; the manifest',
+      '   cannot grant it.',
+      '4. Invite the bot to any private channel or DM you want it in:',
+      '   /invite @TypeClaw',
+    ].join('\n'),
+    'Get a Slack bot',
+  )
+
+  while (true) {
+    if (sub === 'bot') {
+      const input = await password({
+        message: 'Slack bot token (xoxb-...)',
+        validate: (v) =>
+          v && v.length > 0
+            ? v.startsWith('xoxb-')
+              ? undefined
+              : 'Bot token must start with "xoxb-"'
+            : 'Token is required',
+      })
+      if (isCancel(input)) return back()
+      botToken = input
+      note(
+        [
+          'Slack does not accept connections:write inside the manifest, so',
+          'this token has to be generated by hand:',
+          '',
+          '1. Basic Information → App-Level Tokens → Generate Token and Scopes.',
+          '2. Token Name: anything (e.g. "socket-mode").',
+          '3. Add Scope → connections:write → Generate.',
+          '4. Copy the xapp-... token shown once on screen.',
+          '   (You cannot retrieve it later — only revoke and regenerate.)',
+        ].join('\n'),
+        'Generate the Slack app-level token',
+      )
+      sub = 'app'
+      continue
+    }
+    const input = await password({
+      message: 'Slack app-level token (xapp-...) — Socket Mode requires this',
+      validate: (v) =>
+        v && v.length > 0
+          ? v.startsWith('xapp-')
+            ? undefined
+            : 'App-level token must start with "xapp-"'
+          : 'Token is required',
+    })
+    if (isCancel(input)) {
+      sub = 'bot'
+      continue
+    }
+    return value({ slackBotToken: botToken!, slackAppToken: input })
+  }
+}
+
+async function runTelegramFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+  note(
+    [
+      'Open Telegram and message @BotFather.',
+      '/newbot → pick a name and username, copy the HTTP API token',
+      '  (looks like 1234567890:ABCdef...).',
+      'In @BotFather: /setprivacy → Disable, so the bot can see group messages.',
+    ].join('\n'),
+    'Get a Telegram bot token',
+  )
+  const token = await password({
+    message: 'Telegram bot token',
+    validate: (v) =>
+      v && v.length > 0
+        ? /^\d+:/.test(v)
+          ? undefined
+          : 'Bot token must look like "<digits>:<secret>" (from @BotFather)'
+        : 'Token is required',
+  })
+  if (isCancel(token)) return back()
+  note(
+    [
+      'Open https://t.me/<your_bot_username> (the username you picked in /newbot, ends in "bot").',
+      'Tap Start in the chat — the agent will reply once it hatches.',
+      'For groups: add the bot to the group, then @mention it or reply to its messages.',
+    ].join('\n'),
+    'Send your first message',
+  )
+  return value({ telegramBotToken: token })
+}
 
 function reportProgress(
   onHatchingDone: (ok: boolean) => void,
@@ -436,67 +757,6 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
   }
 }
 
-// Resolves how the user wants to authenticate to the chosen provider:
-// - api-key only (e.g. Fireworks): prompt for the key, write to secrets.json.
-// - oauth only (e.g. openai-codex): run the browser flow inline, write
-//   secrets.json. No API key prompt at all.
-// - both supported (no providers ship this today, but Anthropic will when
-//   wired): ask "API key or OAuth?" first, then dispatch to the chosen path.
-async function collectLLMAuth(
-  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
-  existingApiKey: string | null,
-): Promise<LLMAuth> {
-  const supportsApiKey = providerSupportsApiKey(provider)
-  const supportsOAuth = providerSupportsOAuth(provider)
-
-  const existingKeyDecision = await decideExistingApiKeyReuse(provider, existingApiKey, (message) =>
-    confirm({ message, initialValue: true }),
-  )
-  if (existingKeyDecision === 'cancel') {
-    cancel('Aborted.')
-    process.exit(0)
-  }
-  if (existingKeyDecision === 'reuse' && existingApiKey !== null) {
-    log.info(`Using existing ${provider.name} API key from secrets.json.`)
-    return { kind: 'api-key', apiKey: existingApiKey }
-  }
-
-  let method: 'api-key' | 'oauth'
-  if (supportsApiKey && supportsOAuth) {
-    const choice = await select<'api-key' | 'oauth'>({
-      message: `How do you want to authenticate to ${provider.name}?`,
-      options: [
-        { value: 'api-key', label: 'API key', hint: 'saved to secrets.json' },
-        { value: 'oauth', label: 'OAuth (browser login)', hint: 'saved to secrets.json' },
-      ],
-      initialValue: 'api-key',
-    })
-    if (isCancel(choice)) {
-      cancel('Aborted.')
-      process.exit(0)
-    }
-    method = choice
-  } else if (supportsOAuth) {
-    method = 'oauth'
-  } else {
-    method = 'api-key'
-  }
-
-  if (method === 'api-key') {
-    const apiKey = await password({
-      message: `Put your ${provider.name} API key (will be saved to secrets.json)`,
-      validate: (value) => (value && value.length > 0 ? undefined : 'API key is required'),
-    })
-    if (isCancel(apiKey)) {
-      cancel('Aborted.')
-      process.exit(0)
-    }
-    return { kind: 'api-key', apiKey }
-  }
-
-  return { kind: 'oauth', runLogin: makeOAuthLoginRunner(buildOAuthCallbacks(provider.name)) }
-}
-
 export async function decideExistingApiKeyReuse(
   provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
   existingApiKey: string | null,
@@ -538,50 +798,6 @@ function buildOAuthCallbacks(providerName: string) {
       return value
     },
   }
-}
-
-// Two-step provider+model picker. We split it because most users have a key
-// for exactly one provider — asking them to scroll through a flat list of
-// every (provider, model) pair would surface options they can't use.
-async function pickModel(): Promise<ModelOption> {
-  const s = spinner()
-  s.start('Loading model catalog from models.dev...')
-  const { options, source, warning } = await fetchModelOptions()
-  if (source === 'curated') {
-    s.stop(`Using built-in catalog (models.dev unavailable: ${warning ?? 'unknown'})`)
-  } else {
-    s.stop('Loaded model catalog.')
-  }
-
-  const providers = uniqueProviders(options)
-  const providerChoice = await select({
-    message: 'Pick an LLM provider',
-    options: providers.map((id) => ({ value: id, label: KNOWN_PROVIDERS[id].name, hint: providerAuthHint(id) })),
-    initialValue: providers[0],
-  })
-  if (isCancel(providerChoice)) {
-    cancel('Aborted.')
-    process.exit(0)
-  }
-
-  const candidates = options.filter((o) => o.providerId === providerChoice)
-  const modelChoice = await select<KnownModelRef>({
-    message: `Pick a ${KNOWN_PROVIDERS[providerChoice].name} model`,
-    options: candidates.map((o) => ({
-      value: o.ref,
-      label: o.modelName,
-      hint: formatModelHint(o),
-    })),
-    initialValue: candidates[0]?.ref,
-  })
-  if (isCancel(modelChoice)) {
-    cancel('Aborted.')
-    process.exit(0)
-  }
-
-  const picked = candidates.find((o) => o.ref === modelChoice)
-  if (!picked) throw new Error(`Internal error: picked model ${modelChoice} not in candidates`)
-  return picked
 }
 
 function uniqueProviders(options: ModelOption[]): KnownProviderId[] {
