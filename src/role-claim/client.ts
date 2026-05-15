@@ -33,6 +33,7 @@ export async function runClaimSession(opts: ClaimSessionOptions): Promise<ClaimS
   const ws = new WebSocket(opts.url)
   const displayUrl = redactUrl(opts.url)
   await waitForOpen(ws, displayUrl, connectTimeoutMs)
+  await waitForConnected(ws, displayUrl, connectTimeoutMs)
 
   try {
     const request: ClientMessage = {
@@ -81,6 +82,51 @@ async function waitForOpen(ws: WebSocket, displayUrl: string, timeoutMs: number)
     }
     ws.addEventListener('open', onOpen, { once: true })
     ws.addEventListener('error', onError, { once: true })
+    ws.addEventListener('close', onClose, { once: true })
+  })
+}
+
+// The server's WS `open` handler is async (it awaits createSession) and only
+// registers per-ws state and sends `connected` after that resolves. Bun
+// delivers any client messages received before `open` completes, but the
+// server's `claim_start` handler silently drops messages when state is null.
+// Waiting here mirrors what the TUI client does (see src/tui/index.ts) and
+// fixes the hatching-time hang where the spinner stayed on "Generating your
+// claim code..." until the ttl expired.
+async function waitForConnected(ws: WebSocket, displayUrl: string, timeoutMs: number): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup()
+      ws.close()
+      reject(new Error(`timed out waiting for connected message from ${displayUrl} after ${timeoutMs}ms`))
+    }, timeoutMs)
+    const onMessage = (event: MessageEvent): void => {
+      let msg: ServerMessage
+      try {
+        msg = JSON.parse(String(event.data)) as ServerMessage
+      } catch {
+        return
+      }
+      if (msg.type === 'connected') {
+        cleanup()
+        resolve()
+        return
+      }
+      if (msg.type === 'error') {
+        cleanup()
+        reject(new Error(`server rejected connection to ${displayUrl}: ${msg.message}`))
+      }
+    }
+    const onClose = () => {
+      cleanup()
+      reject(new Error(`connection to ${displayUrl} closed before the session was ready`))
+    }
+    const cleanup = () => {
+      clearTimeout(timer)
+      ws.removeEventListener('message', onMessage)
+      ws.removeEventListener('close', onClose)
+    }
+    ws.addEventListener('message', onMessage)
     ws.addEventListener('close', onClose, { once: true })
   })
 }
