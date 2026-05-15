@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  buildConfigMigrationCommitMessage,
   configSchema,
   extractPluginConfigs,
   expandMountPath,
@@ -409,9 +410,9 @@ describe('migrateLegacyConfigShape', () => {
   })
 
   test('non-object inputs are returned unchanged', () => {
-    expect(migrateLegacyConfigShape(null)).toEqual({ json: null, changed: false })
-    expect(migrateLegacyConfigShape([])).toEqual({ json: [], changed: false })
-    expect(migrateLegacyConfigShape('string')).toEqual({ json: 'string', changed: false })
+    expect(migrateLegacyConfigShape(null)).toEqual({ json: null, changed: false, applied: [] })
+    expect(migrateLegacyConfigShape([])).toEqual({ json: [], changed: false, applied: [] })
+    expect(migrateLegacyConfigShape('string')).toEqual({ json: 'string', changed: false, applied: [] })
   })
 
   test('loadConfigSync rewrites typeclaw.json on disk when legacy keys are present', async () => {
@@ -575,6 +576,82 @@ describe('migrateLegacyConfigShape', () => {
     expect(result.changed).toBe(true)
     const json = result.json as Record<string, unknown>
     expect(json).not.toHaveProperty('permissions')
+  })
+
+  test('returns applied: [] when nothing migrated', () => {
+    const result = migrateLegacyConfigShape({ model: VALID_MODEL, port: 9001 })
+    expect(result.applied).toEqual([])
+  })
+
+  test('names each applied step in order — drives commit-message body', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      dockerfile: { ffmpeg: true },
+      gitignore: { append: ['scratch/'] },
+      channels: { 'slack-bot': { allow: ['team:T0123'] } },
+      permissions: { gateChannelRespond: true },
+    })
+    expect(result.applied.map((s) => s.kind)).toEqual([
+      'dockerfile-to-docker-file',
+      'gitignore-to-git-ignore',
+      'channels-allow-to-roles-member-match',
+      'strip-permissions-gate-channel-respond',
+    ])
+  })
+
+  test('channels-allow step carries translated rules and dropped warnings', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      channels: { 'slack-bot': { allow: ['team:T0123', 'channel:C123'] } },
+    })
+    const step = result.applied.find((s) => s.kind === 'channels-allow-to-roles-member-match')
+    if (step?.kind !== 'channels-allow-to-roles-member-match') throw new Error('expected channels-allow step')
+    expect(step.rules).toEqual(['slack:T0123'])
+    expect(step.dropped.length).toBe(1)
+    expect(step.dropped[0]).toContain('channel:C123')
+  })
+})
+
+describe('buildConfigMigrationCommitMessage', () => {
+  test('returns null when no steps applied (no commit should be made)', () => {
+    expect(buildConfigMigrationCommitMessage([])).toBeNull()
+  })
+
+  test('single-step migration produces a specific subject', () => {
+    const msg = buildConfigMigrationCommitMessage([{ kind: 'dockerfile-to-docker-file' }])
+    expect(msg).toContain('typeclaw.json: lift dockerfile → docker.file')
+  })
+
+  test('single-step channels-allow names the specific permission migration', () => {
+    const msg = buildConfigMigrationCommitMessage([
+      { kind: 'channels-allow-to-roles-member-match', rules: ['slack:T0123'], dropped: [] },
+    ])
+    expect(msg?.split('\n')[0]).toBe('typeclaw.json: lift channels.<adapter>.allow[] → roles.member.match[]')
+    expect(msg).toContain('slack:T0123')
+  })
+
+  test('multi-step migration falls back to a count subject and enumerates each step in body', () => {
+    const msg = buildConfigMigrationCommitMessage([
+      { kind: 'dockerfile-to-docker-file' },
+      { kind: 'gitignore-to-git-ignore' },
+    ])
+    if (msg === null) throw new Error('expected a commit message')
+    const lines = msg.split('\n')
+    expect(lines[0]).toBe('typeclaw.json: migrate legacy shape (2 steps)')
+    expect(msg).toContain('lift top-level dockerfile into docker.file')
+    expect(msg).toContain('lift top-level gitignore into git.ignore')
+  })
+
+  test('surfaces dropped legacy rules in the body so silent drops are auditable', () => {
+    const msg = buildConfigMigrationCommitMessage([
+      {
+        kind: 'channels-allow-to-roles-member-match',
+        rules: ['slack:T0123'],
+        dropped: ["channels.slack-bot.allow[]: dropped 'channel:C123' (workspace coordinate required)"],
+      },
+    ])
+    expect(msg).toContain('warning:')
+    expect(msg).toContain('channel:C123')
   })
 })
 

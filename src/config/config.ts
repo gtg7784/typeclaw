@@ -453,9 +453,23 @@ export function loadConfigSync(cwd: string): Config {
 // Either way, the new shape is the source of truth — losing the legacy
 // duplicate is the right call because it would otherwise be shadowed at
 // parse time anyway (`configSchema` has no `dockerfile`/`gitignore` keys).
-export function migrateLegacyConfigShape(json: unknown): { json: unknown; changed: boolean } {
+//
+// The returned `applied` array names each migration step that fired, so
+// callers in `typeclaw start` can build a meaningful git commit message
+// instead of a generic "migrate legacy shape" subject. `changed` is the
+// boolean equivalent of `applied.length > 0` and is preserved for back-compat
+// with the many call sites that only care whether ANY rewrite happened.
+export type MigrationStep =
+  | { kind: 'dockerfile-to-docker-file' }
+  | { kind: 'gitignore-to-git-ignore' }
+  | { kind: 'channels-allow-to-roles-member-match'; rules: string[]; dropped: string[] }
+  | { kind: 'strip-permissions-gate-channel-respond' }
+
+export type MigrationResult = { json: unknown; changed: boolean; applied: MigrationStep[] }
+
+export function migrateLegacyConfigShape(json: unknown): MigrationResult {
   if (typeof json !== 'object' || json === null || Array.isArray(json)) {
-    return { json, changed: false }
+    return { json, changed: false, applied: [] }
   }
 
   const obj = json as Record<string, unknown>
@@ -464,9 +478,10 @@ export function migrateLegacyConfigShape(json: unknown): { json: unknown; change
   const channelsAllowMigration = collectChannelsAllowMigration(obj)
   const hasLegacyGateChannelRespond = isPlainObject(obj.permissions) && 'gateChannelRespond' in obj.permissions
   if (!hasLegacyDockerfile && !hasLegacyGitignore && !channelsAllowMigration.found && !hasLegacyGateChannelRespond) {
-    return { json, changed: false }
+    return { json, changed: false, applied: [] }
   }
 
+  const applied: MigrationStep[] = []
   const next: Record<string, unknown> = { ...obj }
   if (hasLegacyDockerfile) {
     const legacy = next.dockerfile
@@ -476,6 +491,7 @@ export function migrateLegacyConfigShape(json: unknown): { json: unknown; change
     } else if (isPlainObject(next.docker) && !('file' in next.docker)) {
       next.docker = { ...next.docker, file: legacy }
     }
+    applied.push({ kind: 'dockerfile-to-docker-file' })
   }
   if (hasLegacyGitignore) {
     const legacy = next.gitignore
@@ -485,9 +501,15 @@ export function migrateLegacyConfigShape(json: unknown): { json: unknown; change
     } else if (isPlainObject(next.git) && !('ignore' in next.git)) {
       next.git = { ...next.git, ignore: legacy }
     }
+    applied.push({ kind: 'gitignore-to-git-ignore' })
   }
   if (channelsAllowMigration.found) {
     applyChannelsAllowMigration(next, channelsAllowMigration)
+    applied.push({
+      kind: 'channels-allow-to-roles-member-match',
+      rules: channelsAllowMigration.rules,
+      dropped: channelsAllowMigration.warnings,
+    })
   }
   if (hasLegacyGateChannelRespond) {
     const perms = { ...(next.permissions as Record<string, unknown>) }
@@ -497,8 +519,74 @@ export function migrateLegacyConfigShape(json: unknown): { json: unknown; change
     } else {
       next.permissions = perms
     }
+    applied.push({ kind: 'strip-permissions-gate-channel-respond' })
   }
-  return { json: next, changed: true }
+  return { json: next, changed: true, applied }
+}
+
+// Builds a meaningful one-line git commit subject for a typeclaw.json
+// migration. Single-step migrations get a specific subject; multi-step ones
+// fall back to a stable summary subject with the count. The body (after the
+// blank line) enumerates each step so `git log -p typeclaw.json` is an
+// auditable trail of what legacy shapes the agent has graduated from.
+//
+// Returns null when no steps were applied — callers should not commit in
+// that case. Keeping the null branch here (vs an empty string) makes the
+// "nothing happened" case impossible to misuse at the call site.
+export function buildConfigMigrationCommitMessage(applied: readonly MigrationStep[]): string | null {
+  const first = applied[0]
+  if (first === undefined) return null
+
+  const subject =
+    applied.length === 1
+      ? `typeclaw.json: ${shortStepLabel(first)}`
+      : `typeclaw.json: migrate legacy shape (${applied.length} steps)`
+
+  const bodyLines: string[] = applied.map((step) => `- ${describeStep(step)}`)
+
+  // Surface dropped rules in the commit body so a user inspecting `git log -p`
+  // sees exactly which legacy entries had to be hand-re-added (the lossy
+  // `channel:<id>` case). Without this, the silent-drop is invisible after
+  // the fact.
+  for (const step of applied) {
+    if (step.kind === 'channels-allow-to-roles-member-match' && step.dropped.length > 0) {
+      for (const warning of step.dropped) {
+        bodyLines.push(`  warning: ${warning}`)
+      }
+    }
+  }
+
+  return `${subject}\n\n${bodyLines.join('\n')}\n`
+}
+
+function shortStepLabel(step: MigrationStep): string {
+  switch (step.kind) {
+    case 'dockerfile-to-docker-file':
+      return 'lift dockerfile → docker.file'
+    case 'gitignore-to-git-ignore':
+      return 'lift gitignore → git.ignore'
+    case 'channels-allow-to-roles-member-match':
+      return 'lift channels.<adapter>.allow[] → roles.member.match[]'
+    case 'strip-permissions-gate-channel-respond':
+      return 'drop permissions.gateChannelRespond'
+  }
+}
+
+function describeStep(step: MigrationStep): string {
+  switch (step.kind) {
+    case 'dockerfile-to-docker-file':
+      return 'lift top-level dockerfile into docker.file'
+    case 'gitignore-to-git-ignore':
+      return 'lift top-level gitignore into git.ignore'
+    case 'channels-allow-to-roles-member-match': {
+      if (step.rules.length === 0) {
+        return 'strip channels.<adapter>.allow[] (no translatable rules)'
+      }
+      return `lift channels.<adapter>.allow[] → roles.member.match[]: ${step.rules.join(', ')}`
+    }
+    case 'strip-permissions-gate-channel-respond':
+      return 'drop permissions.gateChannelRespond (removed key)'
+  }
 }
 
 // Channels.<adapter>.allow[] → roles.member.match[] migration.
