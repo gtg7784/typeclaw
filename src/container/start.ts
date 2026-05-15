@@ -244,7 +244,7 @@ export async function start({
     // line resolves against the agent's installed node_modules/typeclaw —
     // ensures the base image's CLI version matches the runtime the
     // container will actually load.
-    await refreshDockerfile(cwd)
+    const dockerfileRefresh = await refreshDockerfile(cwd)
     await migrateKakaotalkCredentials(cwd)
 
     if (state.exists) {
@@ -315,7 +315,7 @@ export async function start({
       cwd,
       hostPort,
       imageExists: imageExisted,
-      forceBuild,
+      forceBuild: forceBuild || dockerfileRefresh.changed,
       hostdControl,
       publishHost,
       tuiToken,
@@ -538,12 +538,20 @@ async function resolvePublishHost(exec: DockerExec): Promise<string> {
   return '127.0.0.1'
 }
 
-export async function refreshDockerfile(cwd: string): Promise<void> {
+// The `changed` return drives auto-rebuild in start() so users don't need to
+// pass `--build` after a CLI upgrade or after editing `typeclaw.json#docker.*`.
+// Comparing rendered contents (rather than tracking a separate state file) is
+// the cheapest correct signal: the build context for `docker build` is the
+// Dockerfile itself, so equal contents definitionally produce an equivalent
+// image.
+export async function refreshDockerfile(cwd: string): Promise<{ changed: boolean }> {
   const cfg = await loadTypeclawConfig(cwd)
-  await writeFile(
-    join(cwd, DOCKERFILE),
-    buildDockerfile(cfg.docker.file, { baseImageVersion: resolveBaseImageVersion(cwd) }),
-  )
+  const next = buildDockerfile(cfg.docker.file, { baseImageVersion: resolveBaseImageVersion(cwd) })
+  const path = join(cwd, DOCKERFILE)
+  const prev = await readFile(path, 'utf8').catch(() => null)
+  if (prev === next) return { changed: false }
+  await writeFile(path, next)
+  return { changed: true }
 }
 
 export async function refreshGitignore(cwd: string): Promise<void> {

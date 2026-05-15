@@ -698,6 +698,48 @@ describe('refreshDockerfile', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test('returns changed=true when overwriting a stale Dockerfile', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-changed-'))
+    try {
+      await writeFile(join(dir, 'Dockerfile'), 'FROM stale\n')
+
+      const result = await refreshDockerfile(dir)
+
+      expect(result.changed).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('returns changed=true when no Dockerfile exists yet', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-fresh-changed-'))
+    try {
+      const result = await refreshDockerfile(dir)
+
+      expect(result.changed).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('returns changed=false when the on-disk Dockerfile already matches the template', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-refresh-noop-'))
+    try {
+      // given: a Dockerfile already rendered from the current template
+      await refreshDockerfile(dir)
+      const firstMtime = (await readFile(join(dir, 'Dockerfile'), 'utf8')).length
+
+      // when: refreshDockerfile runs a second time against the identical content
+      const result = await refreshDockerfile(dir)
+
+      // then: no change reported, and the file is not rewritten (still parses the same)
+      expect(result.changed).toBe(false)
+      expect((await readFile(join(dir, 'Dockerfile'), 'utf8')).length).toBe(firstMtime)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('refreshGitignore', () => {
@@ -1729,7 +1771,8 @@ describe('start (composition)', () => {
   })
 
   test('forceBuild=false skips build entirely when image already exists', async () => {
-    await writeDockerfile(root)
+    // given: a Dockerfile already matching the current template, so refreshDockerfile is a no-op
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile(undefined, { baseImageVersion: '0.1.0' }))
     await writePackageJson(root, { typeclaw: '^0.1.0' })
     const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
 
@@ -1745,6 +1788,55 @@ describe('start (composition)', () => {
     expect(result.ok).toBe(true)
     expect(calls.find((c) => c.args[0] === 'build')).toBeUndefined()
     expect(calls.find((c) => c.args[0] === 'run')).toBeDefined()
+  })
+
+  test('auto-rebuilds when the Dockerfile template differs from disk, even without --build', async () => {
+    // given: a stale Dockerfile and an image that already exists from a prior build
+    await writeFile(join(root, 'Dockerfile'), 'FROM stale\n# old template\n')
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when: start runs WITHOUT forceBuild
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    // then: the build ran against the refreshed Dockerfile, and built=true was reported
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.built).toBe(true)
+    const buildCall = calls.find((c) => c.args[0] === 'build')
+    expect(buildCall).toBeDefined()
+    expect(buildCall!.dockerfileSnapshot).toBe(buildDockerfile(undefined, { baseImageVersion: '0.1.0' }))
+    expect(buildCall!.dockerfileSnapshot).not.toContain('FROM stale')
+  })
+
+  test('skips build when the on-disk Dockerfile already matches the template and the image exists', async () => {
+    // given: a Dockerfile already at the rendered-template value and an existing image
+    await writeFile(join(root, 'Dockerfile'), buildDockerfile(undefined, { baseImageVersion: '0.1.0' }))
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+    const { exec, calls } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: noEnsureDeps,
+      ...bypassVerify,
+    })
+
+    // then: no rebuild — the change-driven auto-rebuild path stays inert when nothing drifted
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.built).toBe(false)
+    expect(calls.find((c) => c.args[0] === 'build')).toBeUndefined()
   })
 
   test('is idempotent when a container with the same name is already running', async () => {
