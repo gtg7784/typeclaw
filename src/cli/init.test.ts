@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, mock, test } from 'bun:test'
 
 import { KNOWN_PROVIDERS, type KnownProviderId } from '@/config/providers'
 import type { LLMAuth } from '@/init'
@@ -113,6 +113,8 @@ describe('collectWizardInputs back-aware flow', () => {
       pickVisionProvider: async () => ({ kind: 'value', value: 'skip' }),
       pickVisionModel: async () => ({ kind: 'value', value: openaiModel }),
       pickChannel: async () => ({ kind: 'value', value: 'none' }),
+      hasExistingChannelSecrets: async () => false,
+      askReuseExistingChannel: async () => ({ kind: 'value', value: 'prompt' }),
       runChannelFlow: async () => ({ kind: 'value', value: {} }),
       buildOAuthAuth: () => ({ kind: 'oauth', runLogin: async () => ({ ok: true }) }) as LLMAuth,
       ...overrides,
@@ -563,5 +565,169 @@ describe('collectWizardInputs back-aware flow', () => {
 
     expect(calls).toEqual(['pick-channel', 'channel-flow', 'pick-channel', 'channel-flow'])
     expect(result.channelSecrets).toEqual({ discordBotToken: 'tok' })
+  })
+
+  test('existing channel secrets: prompts to reuse and skips channel-flow on accept', async () => {
+    const calls: string[] = []
+    const prompts = makePrompts({
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'discord' }
+      },
+      hasExistingChannelSecrets: async (_cwd, channel) => channel === 'discord',
+      askReuseExistingChannel: async () => {
+        calls.push('reuse-existing-channel')
+        return { kind: 'value', value: 'reuse' }
+      },
+      runChannelFlow: async () => {
+        calls.push('channel-flow')
+        return { kind: 'value', value: { discordBotToken: 'tok' } }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual(['pick-channel', 'reuse-existing-channel'])
+    expect(calls).not.toContain('channel-flow')
+    expect(result.reuseExistingChannel).toBe(true)
+    expect(result.channelChoice).toBe('discord')
+    expect(result.channelSecrets).toEqual({})
+  })
+
+  test('existing channel secrets: declining reuse falls through to channel-flow', async () => {
+    const calls: string[] = []
+    const prompts = makePrompts({
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'discord' }
+      },
+      hasExistingChannelSecrets: async () => true,
+      askReuseExistingChannel: async () => {
+        calls.push('reuse-existing-channel')
+        return { kind: 'value', value: 'prompt' }
+      },
+      runChannelFlow: async () => {
+        calls.push('channel-flow')
+        return { kind: 'value', value: { discordBotToken: 'new-tok' } }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual(['pick-channel', 'reuse-existing-channel', 'channel-flow'])
+    expect(result.reuseExistingChannel).toBe(false)
+    expect(result.channelSecrets).toEqual({ discordBotToken: 'new-tok' })
+  })
+
+  test('no existing channel secrets: reuse prompt is suppressed entirely', async () => {
+    const calls: string[] = []
+    const askReuse = mock(async () => ({ kind: 'value' as const, value: 'reuse' as const }))
+    const prompts = makePrompts({
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'discord' }
+      },
+      hasExistingChannelSecrets: async () => false,
+      askReuseExistingChannel: askReuse,
+      runChannelFlow: async () => {
+        calls.push('channel-flow')
+        return { kind: 'value', value: { discordBotToken: 'tok' } }
+      },
+    })
+
+    await collectWizardInputs('/agent', prompts)
+
+    expect(askReuse).not.toHaveBeenCalled()
+    expect(calls).toEqual(['pick-channel', 'channel-flow'])
+  })
+
+  test('back from reuse-existing-channel returns to pick-channel', async () => {
+    const calls: string[] = []
+    let reuseBacked = false
+    const prompts = makePrompts({
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'discord' }
+      },
+      hasExistingChannelSecrets: async () => true,
+      askReuseExistingChannel: async () => {
+        calls.push('reuse-existing-channel')
+        if (!reuseBacked) {
+          reuseBacked = true
+          return { kind: 'back' }
+        }
+        return { kind: 'value', value: 'reuse' }
+      },
+    })
+
+    await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual(['pick-channel', 'reuse-existing-channel', 'pick-channel', 'reuse-existing-channel'])
+  })
+
+  test('back from channel-flow returns to reuse-existing-channel when reuse was offered', async () => {
+    const calls: string[] = []
+    let flowBacked = false
+    const prompts = makePrompts({
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'discord' }
+      },
+      hasExistingChannelSecrets: async () => true,
+      askReuseExistingChannel: async () => {
+        calls.push('reuse-existing-channel')
+        return { kind: 'value', value: 'prompt' }
+      },
+      runChannelFlow: async () => {
+        calls.push('channel-flow')
+        if (!flowBacked) {
+          flowBacked = true
+          return { kind: 'back' }
+        }
+        return { kind: 'value', value: { discordBotToken: 'tok' } }
+      },
+    })
+
+    await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual([
+      'pick-channel',
+      'reuse-existing-channel',
+      'channel-flow',
+      'reuse-existing-channel',
+      'channel-flow',
+    ])
+  })
+
+  test('changing channel after declining reuse clears the offered state so telegram skips reuse prompt', async () => {
+    const calls: string[] = []
+    let pickCount = 0
+    let reuseBacked = false
+    const prompts = makePrompts({
+      pickChannel: async () => {
+        pickCount += 1
+        calls.push(`pick-channel:${pickCount}`)
+        return { kind: 'value', value: pickCount === 1 ? 'discord' : 'telegram' }
+      },
+      hasExistingChannelSecrets: async (_cwd, channel) => channel === 'discord',
+      askReuseExistingChannel: async () => {
+        calls.push('reuse-existing-channel')
+        if (!reuseBacked) {
+          reuseBacked = true
+          return { kind: 'back' }
+        }
+        return { kind: 'value', value: 'prompt' }
+      },
+      runChannelFlow: async (choice) => {
+        calls.push(`channel-flow:${choice}`)
+        return { kind: 'value', value: choice === 'telegram' ? { telegramBotToken: 'tg' } : { discordBotToken: 'd' } }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(result.channelChoice).toBe('telegram')
+    expect(result.channelSecrets).toEqual({ telegramBotToken: 'tg' })
+    expect(calls).toEqual(['pick-channel:1', 'reuse-existing-channel', 'pick-channel:2', 'channel-flow:telegram'])
   })
 })

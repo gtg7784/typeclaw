@@ -121,6 +121,14 @@ export type InitOptions = {
   slackBotToken?: string
   slackAppToken?: string
   telegramBotToken?: string
+  // When reusing existing channel credentials from a pre-init `secrets.json`,
+  // the CLI passes `with<Adapter>: true` without a corresponding token so the
+  // scaffolded `typeclaw.json` wires the adapter while `writeSecrets` leaves
+  // the existing slot in `secrets.json#channels` untouched. Defaults below
+  // mirror the legacy derivation (`<token> !== undefined && !== ''`).
+  withDiscord?: boolean
+  withSlack?: boolean
+  withTelegram?: boolean
   withKakaotalk?: boolean
   runKakaotalkAuth?: KakaotalkAuthRunner
   onProgress?: (event: InitStepEvent) => void
@@ -146,6 +154,9 @@ export async function runInit({
   slackBotToken,
   slackAppToken,
   telegramBotToken,
+  withDiscord,
+  withSlack,
+  withTelegram,
   withKakaotalk = false,
   runKakaotalkAuth,
   onProgress,
@@ -208,9 +219,9 @@ export async function runInit({
     }
   }
 
-  const wantsDiscord = discordBotToken !== undefined && discordBotToken !== ''
-  const wantsSlack = slackBotToken !== undefined && slackBotToken !== ''
-  const wantsTelegram = telegramBotToken !== undefined && telegramBotToken !== ''
+  const wantsDiscord = withDiscord ?? (discordBotToken !== undefined && discordBotToken !== '')
+  const wantsSlack = withSlack ?? (slackBotToken !== undefined && slackBotToken !== '')
+  const wantsTelegram = withTelegram ?? (telegramBotToken !== undefined && telegramBotToken !== '')
   emit({ step: 'scaffold', phase: 'start' })
   await scaffold(cwd, {
     model,
@@ -688,6 +699,70 @@ export async function readExistingProviderApiKey(root: string, providerId: Known
   const provider = KNOWN_PROVIDERS[providerId]
   if (provider.apiKeyEnv === null) return null
   return new SecretsBackend(join(root, 'secrets.json')).tryReadProviderApiKeySync(providerId)
+}
+
+// Detects whether the requested channel already has usable credentials in
+// `secrets.json#channels`, so the init wizard can offer to reuse them
+// instead of re-prompting for tokens. Mirrors `readExistingProviderApiKey`:
+// returns `true` only when ALL fields the adapter needs are present in a
+// shape `hydrateChannelEnvFromSecrets` would inject at runtime — both the
+// `{ value }` form and the `{ env }` env-binding form count, matching the
+// runtime resolution rules in `src/secrets/resolve.ts`. Partial slots (e.g.
+// `slack-bot` with `botToken` but no `appToken`) return `false` so the
+// missing field gets filled in by the normal prompt.
+//
+// KakaoTalk reuse is stricter: a usable block requires both a complete
+// account (currentAccount + matching entry in accounts) AND the renewal
+// fields (email + encryptedPassword) the hostd renewal cron needs to mint
+// fresh tokens unattended (`src/secrets/kakao-renewal.ts`). Without those,
+// the saved `oauth_token` will work only until KakaoTalk's ~7-day TTL
+// expires, after which the user has to run `typeclaw channel reauth
+// kakaotalk` anyway — better to re-auth now during init.
+export async function hasExistingChannelSecrets(
+  root: string,
+  channel: 'discord' | 'slack' | 'telegram' | 'kakaotalk',
+): Promise<boolean> {
+  const channels = new SecretsBackend(join(root, 'secrets.json')).tryReadChannelsSync()
+  if (channels === null) return false
+  switch (channel) {
+    case 'discord':
+      return hasSecretField(channels['discord-bot'], 'token')
+    case 'slack':
+      return hasSecretField(channels['slack-bot'], 'botToken') && hasSecretField(channels['slack-bot'], 'appToken')
+    case 'telegram':
+      return hasSecretField(channels['telegram-bot'], 'token')
+    case 'kakaotalk': {
+      const block = channels.kakaotalk
+      if (!isObjectRecord(block)) return false
+      const current = (block as { currentAccount?: unknown }).currentAccount
+      if (typeof current !== 'string' || current.length === 0) return false
+      const accounts = (block as { accounts?: unknown }).accounts
+      if (!isObjectRecord(accounts)) return false
+      const account = accounts[current]
+      if (!isObjectRecord(account)) return false
+      const email = (account as { email?: unknown }).email
+      const encryptedPassword = (account as { encryptedPassword?: unknown }).encryptedPassword
+      return typeof email === 'string' && email.length > 0 && isObjectRecord(encryptedPassword)
+    }
+  }
+}
+
+// Accepts either the `{ value }` form (resolves to a literal at runtime) or
+// the `{ env }` form (resolves at runtime by reading `process.env[<env>]`).
+// String shorthand is sugar for `{ value }`. The schema already rejects
+// empty strings via `z.string().min(1)`, so the length checks here are
+// defense-in-depth against forward-compat shape drift.
+function hasSecretField(slot: unknown, field: string): boolean {
+  if (!isObjectRecord(slot)) return false
+  const secret = slot[field]
+  if (typeof secret === 'string') return secret.length > 0
+  if (isObjectRecord(secret)) {
+    const value = (secret as { value?: unknown }).value
+    if (typeof value === 'string' && value.length > 0) return true
+    const env = (secret as { env?: unknown }).env
+    if (typeof env === 'string' && env.length > 0) return true
+  }
+  return false
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {

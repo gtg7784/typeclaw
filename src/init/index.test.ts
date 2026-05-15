@@ -15,6 +15,7 @@ import { buildGitignore } from './gitignore'
 import {
   defaultRunHatching,
   findAgentDir,
+  hasExistingChannelSecrets,
   type HatchingResult,
   type HatchRunner,
   initGitRepo,
@@ -1326,6 +1327,252 @@ describe('writeSecrets', () => {
 
     expect((await readSecrets(root)).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_test' } })
     expect((await readSecrets(root)).channels).toEqual({})
+  })
+})
+
+describe('hasExistingChannelSecrets', () => {
+  async function seedChannels(channels: Record<string, unknown>): Promise<void> {
+    await writeFile(join(root, 'secrets.json'), `${JSON.stringify({ version: 2, providers: {}, channels }, null, 2)}\n`)
+  }
+
+  test('returns false when secrets.json does not exist', async () => {
+    expect(await hasExistingChannelSecrets(root, 'discord')).toBe(false)
+    expect(await hasExistingChannelSecrets(root, 'slack')).toBe(false)
+    expect(await hasExistingChannelSecrets(root, 'telegram')).toBe(false)
+    expect(await hasExistingChannelSecrets(root, 'kakaotalk')).toBe(false)
+  })
+
+  test('returns true when discord-bot.token is present', async () => {
+    await seedChannels({ 'discord-bot': { token: { value: 'discord-existing' } } })
+    expect(await hasExistingChannelSecrets(root, 'discord')).toBe(true)
+  })
+
+  test('accepts the string-shorthand Secret shape', async () => {
+    await seedChannels({ 'discord-bot': { token: 'discord-shorthand' } })
+    expect(await hasExistingChannelSecrets(root, 'discord')).toBe(true)
+  })
+
+  test('returns true when slack-bot has BOTH botToken and appToken', async () => {
+    await seedChannels({
+      'slack-bot': { botToken: { value: 'xoxb-1' }, appToken: { value: 'xapp-1' } },
+    })
+    expect(await hasExistingChannelSecrets(root, 'slack')).toBe(true)
+  })
+
+  test('returns false when slack-bot has only botToken (partial slot)', async () => {
+    await seedChannels({ 'slack-bot': { botToken: { value: 'xoxb-1' } } })
+    expect(await hasExistingChannelSecrets(root, 'slack')).toBe(false)
+  })
+
+  test('returns true when telegram-bot.token is present', async () => {
+    await seedChannels({ 'telegram-bot': { token: { value: '123:abc' } } })
+    expect(await hasExistingChannelSecrets(root, 'telegram')).toBe(true)
+  })
+
+  test('returns false when the relevant slot is empty', async () => {
+    await seedChannels({ 'discord-bot': {} })
+    expect(await hasExistingChannelSecrets(root, 'discord')).toBe(false)
+  })
+
+  test('returns true when env-bound Secret is recorded under the field', async () => {
+    await seedChannels({ 'discord-bot': { token: { env: 'CUSTOM_DISCORD_ENV' } } })
+    expect(await hasExistingChannelSecrets(root, 'discord')).toBe(true)
+  })
+
+  test('returns true when slack-bot has BOTH fields env-bound', async () => {
+    await seedChannels({
+      'slack-bot': { botToken: { env: 'MY_SLACK_BOT' }, appToken: { env: 'MY_SLACK_APP' } },
+    })
+    expect(await hasExistingChannelSecrets(root, 'slack')).toBe(true)
+  })
+
+  test('returns true when slack-bot mixes value-bound and env-bound fields', async () => {
+    await seedChannels({
+      'slack-bot': { botToken: { value: 'xoxb-1' }, appToken: { env: 'MY_SLACK_APP' } },
+    })
+    expect(await hasExistingChannelSecrets(root, 'slack')).toBe(true)
+  })
+
+  test('returns true when kakaotalk has a full account record with renewal fields (email + encryptedPassword)', async () => {
+    await seedChannels({
+      kakaotalk: {
+        currentAccount: 'acc-1',
+        accounts: {
+          'acc-1': {
+            account_id: 'acc-1',
+            oauth_token: 'tok',
+            user_id: 'u1',
+            device_uuid: 'd1',
+            device_type: 'tablet',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+            email: 'user@example.com',
+            encryptedPassword: {
+              v: 1,
+              alg: 'AES-256-GCM',
+              kid: 'k1',
+              iv: 'iv1',
+              ciphertext: 'ct1',
+              authTag: 'tag1',
+              createdAt: '2026-01-01T00:00:00Z',
+            },
+          },
+        },
+      },
+    })
+    expect(await hasExistingChannelSecrets(root, 'kakaotalk')).toBe(true)
+  })
+
+  test('returns false when kakaotalk account lacks renewal fields (legacy block, no unattended renewal possible)', async () => {
+    await seedChannels({
+      kakaotalk: {
+        currentAccount: 'acc-1',
+        accounts: {
+          'acc-1': {
+            account_id: 'acc-1',
+            oauth_token: 'tok',
+            user_id: 'u1',
+            device_uuid: 'd1',
+            device_type: 'tablet',
+            created_at: '2026-01-01T00:00:00Z',
+            updated_at: '2026-01-01T00:00:00Z',
+          },
+        },
+      },
+    })
+    expect(await hasExistingChannelSecrets(root, 'kakaotalk')).toBe(false)
+  })
+
+  test('returns false when kakaotalk currentAccount is null or missing from accounts', async () => {
+    await seedChannels({ kakaotalk: { currentAccount: null, accounts: {} } })
+    expect(await hasExistingChannelSecrets(root, 'kakaotalk')).toBe(false)
+
+    await seedChannels({ kakaotalk: { currentAccount: 'acc-missing', accounts: {} } })
+    expect(await hasExistingChannelSecrets(root, 'kakaotalk')).toBe(false)
+  })
+})
+
+describe('channel secret reuse (init re-run preserves existing tokens)', () => {
+  test('omitting discordBotToken on a re-run preserves the existing slot', async () => {
+    await writeSecrets(root, { apiKey: 'fw1', discordBotToken: 'discord-old' })
+    await writeSecrets(root, { apiKey: 'fw2' })
+
+    const secrets = await readSecrets(root)
+    expect(secrets.channels?.['discord-bot']).toEqual({ token: { value: 'discord-old' } })
+  })
+
+  test('omitting slack tokens on a re-run preserves both botToken and appToken', async () => {
+    await writeSecrets(root, { apiKey: 'fw1', slackBotToken: 'xoxb-old', slackAppToken: 'xapp-old' })
+    await writeSecrets(root, { apiKey: 'fw2' })
+
+    const secrets = await readSecrets(root)
+    expect(secrets.channels?.['slack-bot']).toEqual({
+      botToken: { value: 'xoxb-old' },
+      appToken: { value: 'xapp-old' },
+    })
+  })
+
+  test('omitting telegramBotToken on a re-run preserves the existing slot', async () => {
+    await writeSecrets(root, { apiKey: 'fw1', telegramBotToken: '111:old' })
+    await writeSecrets(root, { apiKey: 'fw2' })
+
+    const secrets = await readSecrets(root)
+    expect(secrets.channels?.['telegram-bot']).toEqual({ token: { value: '111:old' } })
+  })
+
+  test('runInit with withDiscord=true and no token wires the adapter in typeclaw.json without overwriting the existing slot', async () => {
+    await writeSecrets(root, { apiKey: 'fw_seed', discordBotToken: 'discord-existing' })
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_seed',
+      withDiscord: true,
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, unknown>
+    }
+    expect(config.channels?.['discord-bot']).toEqual({})
+
+    const secrets = await readSecrets(root)
+    expect(secrets.channels?.['discord-bot']).toEqual({ token: { value: 'discord-existing' } })
+  })
+
+  test('runInit with withSlack=true and no tokens wires slack without disturbing existing botToken/appToken', async () => {
+    await writeSecrets(root, { apiKey: 'fw_seed', slackBotToken: 'xoxb-existing', slackAppToken: 'xapp-existing' })
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_seed',
+      withSlack: true,
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, unknown>
+    }
+    expect(config.channels?.['slack-bot']).toEqual({})
+
+    const secrets = await readSecrets(root)
+    expect(secrets.channels?.['slack-bot']).toEqual({
+      botToken: { value: 'xoxb-existing' },
+      appToken: { value: 'xapp-existing' },
+    })
+  })
+
+  test('runInit with withKakaotalk=true and no runKakaotalkAuth wires kakaotalk without re-authenticating', async () => {
+    await writeFile(
+      join(root, 'secrets.json'),
+      `${JSON.stringify(
+        {
+          version: 2,
+          providers: { fireworks: { type: 'api_key', key: { value: 'fw_seed' } } },
+          channels: {
+            kakaotalk: {
+              currentAccount: 'acc-1',
+              accounts: {
+                'acc-1': {
+                  account_id: 'acc-1',
+                  oauth_token: 'tok',
+                  user_id: 'u1',
+                  device_uuid: 'd1',
+                  device_type: 'tablet',
+                  created_at: '2026-01-01T00:00:00Z',
+                  updated_at: '2026-01-01T00:00:00Z',
+                },
+              },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    )
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_seed',
+      withKakaotalk: true,
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, unknown>
+    }
+    expect(config.channels?.kakaotalk).toEqual({})
+
+    const secrets = await readSecrets(root)
+    expect(secrets.channels?.kakaotalk).toMatchObject({
+      currentAccount: 'acc-1',
+      accounts: { 'acc-1': { oauth_token: 'tok' } },
+    })
   })
 })
 
