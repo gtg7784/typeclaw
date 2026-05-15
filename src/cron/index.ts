@@ -1,10 +1,17 @@
 import { existsSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { SubagentRegistry } from '@/agent/subagents'
+import { commitSystemFile } from '@/git/system-commit'
 
-import { type CronFile, parseCronFile } from './schema'
+import {
+  buildCronMigrationCommitMessage,
+  type CronFile,
+  type CronMigrationStep,
+  migrateLegacyCronShape,
+  parseCronFile,
+} from './schema'
 
 export { createCronReloadable, type CreateCronReloadableOptions } from './reloadable'
 export {
@@ -15,7 +22,18 @@ export {
   type CronSession,
 } from './consumer'
 export { createScheduler, type JobDiff, type Scheduler, type SchedulerLogger } from './scheduler'
-export { cronFileSchema, cronJobSchema, type CronFile, type CronJob, type ExecJob, type PromptJob } from './schema'
+export {
+  buildCronMigrationCommitMessage,
+  cronFileSchema,
+  cronJobSchema,
+  type CronFile,
+  type CronJob,
+  type CronMigrationResult,
+  type CronMigrationStep,
+  type ExecJob,
+  migrateLegacyCronShape,
+  type PromptJob,
+} from './schema'
 
 const CRON_FILE = 'cron.json'
 
@@ -43,10 +61,33 @@ export async function loadCron(agentDir: string, options: LoadCronOptions = {}):
     return { ok: false, reason: `cron.json is not valid JSON: ${errorMessage(err)}` }
   }
 
-  const result = parseCronFile(parsed, options.subagents !== undefined ? { subagents: options.subagents } : {})
+  const migrated = migrateLegacyCronShape(parsed)
+  if (migrated.changed) {
+    await persistMigratedCron(path, migrated.json, agentDir, migrated.applied)
+  }
+
+  const result = parseCronFile(migrated.json, options.subagents !== undefined ? { subagents: options.subagents } : {})
   if (!result.ok) return { ok: false, reason: result.reason }
 
   return { ok: true, file: result.file }
+}
+
+async function persistMigratedCron(
+  path: string,
+  json: unknown,
+  agentDir: string,
+  applied: readonly CronMigrationStep[],
+): Promise<void> {
+  try {
+    await writeFile(path, `${JSON.stringify(json, null, 2)}\n`)
+  } catch {
+    return
+  }
+
+  const message = buildCronMigrationCommitMessage(applied)
+  if (message !== null) {
+    await commitSystemFile(agentDir, CRON_FILE, message)
+  }
 }
 
 function errorMessage(err: unknown): string {
