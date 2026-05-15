@@ -12,6 +12,8 @@ import { getAuth, resetAuthForTesting } from './auth'
 describe('getAuth', () => {
   let prevOpenai: string | undefined
   let prevFireworks: string | undefined
+  let prevZai: string | undefined
+  let prevZaiCoding: string | undefined
   let prevNodeEnv: string | undefined
   let prevCwd: string
   let cwd: string
@@ -19,9 +21,13 @@ describe('getAuth', () => {
   beforeEach(async () => {
     prevOpenai = process.env.OPENAI_API_KEY
     prevFireworks = process.env.FIREWORKS_API_KEY
+    prevZai = process.env.ZAI_API_KEY
+    prevZaiCoding = process.env.ZAI_CODING_API_KEY
     prevNodeEnv = process.env.NODE_ENV
     delete process.env.OPENAI_API_KEY
     delete process.env.FIREWORKS_API_KEY
+    delete process.env.ZAI_API_KEY
+    delete process.env.ZAI_CODING_API_KEY
     cwd = await mkdtemp(join(tmpdir(), 'typeclaw-auth-'))
     prevCwd = process.cwd()
     process.chdir(cwd)
@@ -33,6 +39,10 @@ describe('getAuth', () => {
     else process.env.OPENAI_API_KEY = prevOpenai
     if (prevFireworks === undefined) delete process.env.FIREWORKS_API_KEY
     else process.env.FIREWORKS_API_KEY = prevFireworks
+    if (prevZai === undefined) delete process.env.ZAI_API_KEY
+    else process.env.ZAI_API_KEY = prevZai
+    if (prevZaiCoding === undefined) delete process.env.ZAI_CODING_API_KEY
+    else process.env.ZAI_CODING_API_KEY = prevZaiCoding
     if (prevNodeEnv === undefined) delete process.env.NODE_ENV
     else process.env.NODE_ENV = prevNodeEnv
     resetAuthForTesting()
@@ -58,6 +68,35 @@ describe('getAuth', () => {
       const file = await readSecretsFile(join(cwd, 'secrets.json'))
       expect(file.providers).toEqual({})
     }
+  })
+
+  test('env-wins: ZAI_API_KEY satisfies hasAuth for zai (paygo) without persisting to secrets.json', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'zai/glm-4.6' }))
+    reloadConfig(cwd)
+    process.env.ZAI_API_KEY = 'zai_test'
+
+    const auth = getAuth()
+
+    expect(auth.authStorage.hasAuth('zai')).toBe(true)
+    expect(await auth.authStorage.getApiKey('zai')).toBe('zai_test')
+    if (existsSync(join(cwd, 'secrets.json'))) {
+      const file = await readSecretsFile(join(cwd, 'secrets.json'))
+      expect(file.providers).toEqual({})
+    }
+  })
+
+  test('env-wins: ZAI_CODING_API_KEY satisfies hasAuth for zai-coding (subscription) and does not bleed into zai', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: 'zai-coding/glm-5.1' }))
+    reloadConfig(cwd)
+    process.env.ZAI_CODING_API_KEY = 'zai_coding_test'
+
+    const auth = getAuth()
+
+    expect(auth.authStorage.hasAuth('zai-coding')).toBe(true)
+    expect(await auth.authStorage.getApiKey('zai-coding')).toBe('zai_coding_test')
+    // The paygo provider must not pick up the coding-plan key: distinct env
+    // vars guarantee the two billing surfaces stay isolated.
+    expect(auth.authStorage.hasAuth('zai')).toBe(false)
   })
 
   test('env-wins: OPENAI_API_KEY satisfies hasAuth without persisting to secrets.json', async () => {
