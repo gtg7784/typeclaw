@@ -3,13 +3,8 @@ import { existsSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, resolve } from 'node:path'
 
-import {
-  buildConfigMigrationCommitMessage,
-  configSchema,
-  expandMountPath,
-  migrateLegacyConfigShape,
-  type Config,
-} from '@/config'
+import { expandMountPath, loadConfigSync, type Config } from '@/config'
+import { commitSystemFile as commitSystemFileShared } from '@/git/system-commit'
 import { send as sendToDaemon } from '@/hostd/client'
 import type { HttpInfoResult } from '@/hostd/protocol'
 import { ensureDaemon } from '@/hostd/spawn'
@@ -36,7 +31,6 @@ import {
   defaultDockerExec,
   type DockerExec,
   type DockerExecResult,
-  getBun,
   imageTagFromCwd,
   isContainerNameConflict,
   sanitizeDockerStderr,
@@ -47,7 +41,6 @@ import { buildCrashReason, createVerifyRunning, type VerifyRunningFn } from './v
 const PACKAGE_FILE = 'package.json'
 const BUN_LOCK_FILE = 'bun.lock'
 const DEPENDENCY_FILES = [PACKAGE_FILE, BUN_LOCK_FILE] as const
-const CONFIG_FILE = 'typeclaw.json'
 const ENV_FILE = '.env'
 const COMPOSE_PROJECT = 'typeclaw'
 const CONTAINER_HOSTD_HOST = 'host.docker.internal'
@@ -186,14 +179,13 @@ export async function start({
     // is a no-op, so users who never edit their agent folder pay zero cost on
     // subsequent starts and users who customized `workspaces` are not clobbered.
     //
-    // typeclaw.json is migrated explicitly here (before any other read path)
-    // so the on-disk rewrite and its git commit are paired in one place.
-    // loadConfigSync / validateConfig still apply the migration on first read
-    // from other entry points (TUI, hostd, doctor, plugin loaders) — but their
-    // persistence is best-effort and uncommitted, because committing from a
-    // hot read path would surprise callers that don't expect git side effects.
-    // start() is the single coordination point where the commit lives.
-    await migrateAndCommitConfig(cwd)
+    // typeclaw.json migration is NOT triggered explicitly here — it follows
+    // the disk rewrite via persistMigratedConfig (src/config/config.ts), so
+    // every entry point that reads typeclaw.json (host CLI, hostd daemon,
+    // container runtime) also produces the commit. start() therefore only
+    // needs to orchestrate the .gitignore / package.json side; the
+    // refreshGitignore call below reads typeclaw.json and will incidentally
+    // trigger the migration commit if the file was legacy.
     await refreshGitignore(cwd)
     const pkgRefresh = await refreshPackageJson(cwd)
     await commitSystemFile(cwd, GITIGNORE_FILE, 'Update .gitignore')
@@ -559,77 +551,13 @@ export async function refreshGitignore(cwd: string): Promise<void> {
   await writeFile(join(cwd, GITIGNORE_FILE), buildGitignore(cfg.git.ignore))
 }
 
-// Reads typeclaw.json, runs the legacy-shape migration, writes the result
-// back, and commits with a step-aware message. No-op when the file is
-// missing, not JSON, or already in canonical shape — i.e. on every start
-// after the first one that observed legacy keys. The write goes through
-// the same writeFile path as persistMigratedConfig in src/config/config.ts,
-// but committed here because typeclaw.json is tracked in git (unlike
-// Dockerfile/secrets.json) and silent disk drift becomes invisible mixed-in
-// commits the moment any other tool touches the repo.
-export async function migrateAndCommitConfig(cwd: string): Promise<void> {
-  const configPath = join(cwd, CONFIG_FILE)
-  let raw: string
-  try {
-    raw = await readFile(configPath, 'utf8')
-  } catch {
-    return
-  }
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return
-  }
-
-  const result = migrateLegacyConfigShape(parsed)
-  if (!result.changed) return
-
-  const message = buildConfigMigrationCommitMessage(result.applied)
-  if (message === null) return
-
-  await writeFile(configPath, `${JSON.stringify(result.json, null, 2)}\n`)
-  await commitSystemFile(cwd, CONFIG_FILE, message)
-}
-
-// Commits TypeClaw-owned system file(s) if any are dirty in git. Skips silently
-// when the agent folder is not a git repo, when bun is unavailable, or when
-// every named file is clean (no changes since last commit). Uses the user's
-// global git config for authorship — TypeClaw does not impersonate the user
-// here. Accepts a single file or an array; the array form produces a single
-// atomic commit covering all listed paths, used for migrations that touch
-// multiple files together (e.g. enabling bun workspaces writes both
-// package.json and packages/.gitkeep in one commit).
-export async function commitSystemFile(cwd: string, file: string | readonly string[], message: string): Promise<void> {
-  const files = typeof file === 'string' ? [file] : file
-  if (files.length === 0) return
-
-  const bun = getBun()
-  if (!bun) return
-  if (!existsSync(join(cwd, '.git'))) return
-
-  const status = bun.spawn({
-    cmd: ['git', 'status', '--porcelain', '--', ...files],
-    cwd,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-  if ((await status.exited) !== 0) return
-  const dirty = (await new Response(status.stdout).text()).trim().length > 0
-  if (!dirty) return
-
-  const add = bun.spawn({ cmd: ['git', 'add', '--', ...files], cwd, stdout: 'pipe', stderr: 'pipe' })
-  if ((await add.exited) !== 0) return
-
-  const commit = bun.spawn({
-    cmd: ['git', 'commit', '-m', message, '--only', '--', ...files],
-    cwd,
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-  await commit.exited
-}
+// Re-exported from src/git/system-commit.ts so existing call sites
+// (refreshGitignore wiring, doctor/commit.ts comment references, test
+// imports) keep working under the original name. New code should import
+// directly from @/git/system-commit instead. The sync sibling lives
+// alongside in that module and is used by persistMigratedConfig to pair
+// the migration write with a commit on every read path, not only here.
+export const commitSystemFile = commitSystemFileShared
 
 async function imageExists(exec: DockerExec, tag: string): Promise<boolean> {
   const result = await exec(['image', 'inspect', tag])
@@ -779,7 +707,13 @@ async function detectDevSource(cwd: string): Promise<string | null> {
 // invalid mount entry — must surface so the user sees they configured a mount
 // that won't be applied.
 async function loadTypeclawConfig(cwd: string): Promise<Config> {
-  return configSchema.parse(await loadConfigJson(cwd))
+  // Goes through the shared loadConfigSync so the legacy-shape migration
+  // (and its paired git commit via persistMigratedConfig) follows every
+  // start() read path — refreshGitignore, the docker run argv builder, and
+  // the daemon-register payload all eventually land here. The function is
+  // declared async only to preserve the existing await sites; the work is
+  // synchronous under the hood.
+  return loadConfigSync(cwd)
 }
 
 async function registerWithDaemon({
@@ -824,16 +758,6 @@ async function useCurrentHostDaemon(): Promise<{ ok: true; httpPort: number } | 
     return { ok: false, reason: 'daemon did not report an HTTP control port' }
   }
   return { ok: true, httpPort: result.port }
-}
-
-async function loadConfigJson(cwd: string): Promise<unknown> {
-  let raw: string
-  try {
-    raw = await readFile(join(cwd, CONFIG_FILE), 'utf8')
-  } catch {
-    return {}
-  }
-  return migrateLegacyConfigShape(JSON.parse(raw)).json
 }
 
 type PreparedHostDaemonStatus =

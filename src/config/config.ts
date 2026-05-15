@@ -6,6 +6,7 @@ import type { Model } from '@mariozechner/pi-ai'
 import { z } from 'zod'
 
 import { channelsSchema } from '@/channels/schema'
+import { commitSystemFileSync } from '@/git/system-commit'
 import { rolesConfigSchema } from '@/permissions/schema'
 
 import {
@@ -408,6 +409,9 @@ export function loadPluginConfigsSync(cwd: string): Record<string, unknown> {
     return {}
   }
   const migrated = migrateLegacyConfigShape(json)
+  if (migrated.changed) {
+    persistMigratedConfig(cwd, migrated.json, migrated.applied)
+  }
   return extractPluginConfigs(migrated.json)
 }
 
@@ -429,7 +433,7 @@ export function loadConfigSync(cwd: string): Config {
 
   const migrated = migrateLegacyConfigShape(json)
   if (migrated.changed) {
-    persistMigratedConfig(cwd, migrated.json)
+    persistMigratedConfig(cwd, migrated.json, migrated.applied)
   }
 
   const result = configSchema.safeParse(migrated.json)
@@ -716,14 +720,34 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function persistMigratedConfig(cwd: string, json: unknown): void {
+function persistMigratedConfig(cwd: string, json: unknown, applied: readonly MigrationStep[]): void {
   try {
     writeFileSync(join(cwd, CONFIG_FILE), `${JSON.stringify(json, null, 2)}\n`)
   } catch {
     // Best-effort write-back: the migration is also applied in-memory on every
     // load, so a read-only filesystem (e.g. snapshotted CI checkout) just
     // means the rewrite retries next start. Surfacing the error would brick
-    // load paths the user didn't ask to mutate.
+    // load paths the user didn't ask to mutate. Bail before the commit step
+    // too — without the write there's nothing to commit.
+    return
+  }
+
+  // Pair the disk rewrite with a git commit so the agent folder is never
+  // silently dirty after a legacy-shape migration. typeclaw.json is in
+  // git's "tracked" category (unlike Dockerfile, which is regenerated on
+  // every start and intentionally gitignored), so an uncommitted rewrite
+  // gets mixed into unrelated commits the moment any other tool touches
+  // the repo. commitSystemFileSync no-ops on non-git folders, missing
+  // Bun, and clean files, so canonical-shape reads pay zero cost.
+  //
+  // Called from every entry point that reads typeclaw.json (host CLI,
+  // hostd daemon, container runtime) so the commit follows the rewrite
+  // wherever it happens — not only from `typeclaw start`. The earlier
+  // design that committed only in start() missed the long-running hostd
+  // daemon, doctor, tui, reload, and compose paths.
+  const message = buildConfigMigrationCommitMessage(applied)
+  if (message !== null) {
+    commitSystemFileSync(cwd, CONFIG_FILE, message)
   }
 }
 
@@ -757,7 +781,7 @@ export function validateConfig(cwd: string): ValidateConfigResult {
 
   const migrated = migrateLegacyConfigShape(json)
   if (migrated.changed) {
-    persistMigratedConfig(cwd, migrated.json)
+    persistMigratedConfig(cwd, migrated.json, migrated.applied)
   }
 
   const result = configSchema.safeParse(migrated.json)
