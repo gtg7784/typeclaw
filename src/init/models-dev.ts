@@ -14,6 +14,11 @@ const PROVIDER_TO_MODELS_DEV: Record<KnownProviderId, string> = {
   // entries are surfaced regardless of upstream membership.
   'openai-codex': 'openai',
   fireworks: 'fireworks-ai',
+  zai: 'zai',
+  // zai-coding (GLM Coding Plan) is a billing surface, not a separate model
+  // catalog. models.dev tracks the underlying model metadata under `zai`,
+  // so we route lookups there. The curated entries still get surfaced.
+  'zai-coding': 'zai',
 }
 
 export type ModelOption = {

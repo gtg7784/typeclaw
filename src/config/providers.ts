@@ -187,6 +187,144 @@ export const KNOWN_PROVIDERS = {
       },
     },
   },
+  // Z.AI (ZhipuAI / BigModel) general pay-as-you-go API. OpenAI-compatible
+  // (Bearer auth + /chat/completions shape), so models go through pi-ai's
+  // `openai-completions` adapter with a custom baseUrl — same trick as
+  // Fireworks. Costs and context windows mirror docs.z.ai/guides/overview/
+  // pricing as of 2026-05-15.
+  //
+  // The split with `zai-coding` below mirrors how we model `openai` /
+  // `openai-codex`: same upstream vendor, two distinct billing surfaces
+  // (paygo vs subscription), two distinct base URLs, two distinct env vars
+  // so a user can hold both keys simultaneously without collisions.
+  zai: {
+    id: 'zai',
+    name: 'Z.AI',
+    baseUrl: 'https://api.z.ai/api/paas/v4',
+    auth: ['api-key'],
+    apiKeyEnv: 'ZAI_API_KEY',
+    oauthProviderId: null,
+    models: {
+      'glm-4.5-air': {
+        id: 'glm-4.5-air',
+        name: 'GLM-4.5-Air',
+        api: 'openai-completions',
+        provider: 'zai',
+        baseUrl: 'https://api.z.ai/api/paas/v4',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.2, output: 1.1, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 96000,
+      },
+      'glm-4.6': {
+        id: 'glm-4.6',
+        name: 'GLM-4.6',
+        api: 'openai-completions',
+        provider: 'zai',
+        baseUrl: 'https://api.z.ai/api/paas/v4',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 128000,
+      },
+      'glm-4.7': {
+        id: 'glm-4.7',
+        name: 'GLM-4.7',
+        api: 'openai-completions',
+        provider: 'zai',
+        baseUrl: 'https://api.z.ai/api/paas/v4',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 128000,
+      },
+    },
+  },
+  // Z.AI GLM Coding Plan subscription. Same vendor, same key format, but a
+  // distinct base URL (/api/coding/paas/v4) and a separate billing surface
+  // — using a Coding Plan key against the paygo endpoint returns error 1113
+  // ("insufficient balance"). Distinct env var (`ZAI_CODING_API_KEY`) so a
+  // user can hold both a paygo and a Coding Plan key on different accounts.
+  //
+  // Model lineup is exactly the five models the Coding Plan docs name as
+  // "All plans support" plus GLM-5 (Pro/Max only per docs). Listing other
+  // GLM models here would silently bill against the wrong surface.
+  'zai-coding': {
+    id: 'zai-coding',
+    name: 'Z.AI (GLM Coding Plan)',
+    baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+    auth: ['api-key'],
+    apiKeyEnv: 'ZAI_CODING_API_KEY',
+    oauthProviderId: null,
+    models: {
+      'glm-4.5-air': {
+        id: 'glm-4.5-air',
+        name: 'GLM-4.5-Air',
+        api: 'openai-completions',
+        provider: 'zai-coding',
+        baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.2, output: 1.1, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128000,
+        maxTokens: 96000,
+      },
+      'glm-4.7': {
+        id: 'glm-4.7',
+        name: 'GLM-4.7',
+        api: 'openai-completions',
+        provider: 'zai-coding',
+        baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 0.6, output: 2.2, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 128000,
+      },
+      // GLM-5 access is Pro/Max tier only per docs.z.ai/devpack — Lite
+      // subscribers will see a quota error. We still list it because we
+      // can't introspect plan tier from the key alone.
+      'glm-5': {
+        id: 'glm-5',
+        name: 'GLM-5',
+        api: 'openai-completions',
+        provider: 'zai-coding',
+        baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 1.0, output: 3.2, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 128000,
+      },
+      'glm-5-turbo': {
+        id: 'glm-5-turbo',
+        name: 'GLM-5-Turbo',
+        api: 'openai-completions',
+        provider: 'zai-coding',
+        baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 1.2, output: 4.0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 128000,
+      },
+      'glm-5.1': {
+        id: 'glm-5.1',
+        name: 'GLM-5.1',
+        api: 'openai-completions',
+        provider: 'zai-coding',
+        baseUrl: 'https://api.z.ai/api/coding/paas/v4',
+        reasoning: true,
+        input: ['text'],
+        cost: { input: 1.4, output: 4.4, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 128000,
+      },
+    },
+  },
 } as const satisfies Record<string, KnownProvider>
 
 export type KnownProviderId = keyof typeof KNOWN_PROVIDERS
