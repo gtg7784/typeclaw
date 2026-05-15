@@ -24,6 +24,7 @@ const main = defineCommand({
     compose: () => import('./compose').then((m) => m.composeCommand),
     channel: () => import('./channel').then((m) => m.channelCommand),
     doctor: () => import('./doctor').then((m) => m.doctorCommand),
+    usage: () => import('./usage').then((m) => m.usageCommand),
     _hostd: () => import('./hostd').then((m) => m.hostdCommand),
   },
 })
