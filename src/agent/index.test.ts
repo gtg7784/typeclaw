@@ -109,7 +109,7 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('SOUL.md')
   })
 
-  test('does NOT inject MEMORY.md or memory/ stream contents (owned by the bundled memory plugin via session.prompt hook)', async () => {
+  test('injects MEMORY.md and undreamed daily-stream contents under a # Memory section', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), 'Neo prefers terse replies.')
     await mkdir(join(agentDir, 'memory'))
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'tuesday-fragment-marker')
@@ -117,9 +117,112 @@ describe('createResourceLoader', () => {
     const loader = await createResourceLoader({ agentDir })
 
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).not.toContain('Neo prefers terse replies.')
-    expect(prompt).not.toContain('tuesday-fragment-marker')
-    expect(prompt).not.toContain('## memory/2026-04-27.md')
+    expect(prompt).toContain('# Memory')
+    expect(prompt).toContain('Neo prefers terse replies.')
+    expect(prompt).toContain('tuesday-fragment-marker')
+    expect(prompt).toContain('## memory/2026-04-27.md')
+  })
+
+  test('places the memory section AFTER gitNudge so the dirty-files list stays in the cache prefix relative to the most-volatile memory region', async () => {
+    // given: a git repo with a dirty tracked file so gitNudge renders, AND a
+    // populated MEMORY.md so the memory section renders content.
+    await initGitRepo(agentDir)
+    await writeFile(join(agentDir, 'tracked.md'), 'initial')
+    await runGit(agentDir, ['add', '.'])
+    await runGit(agentDir, ['commit', '-q', '-m', 'init'])
+    await writeFile(join(agentDir, 'tracked.md'), 'dirty edit')
+    await writeFile(join(agentDir, 'MEMORY.md'), 'memory-content-marker')
+
+    const loader = await createResourceLoader({ agentDir })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    const nudgeIdx = prompt.indexOf('tracked.md')
+    const memoryIdx = prompt.indexOf('memory-content-marker')
+    expect(nudgeIdx).toBeGreaterThan(-1)
+    expect(memoryIdx).toBeGreaterThan(-1)
+    expect(nudgeIdx).toBeLessThan(memoryIdx)
+  })
+
+  test('full cache-suffix ordering: role block < gitNudge < memory section, when all three render', async () => {
+    // given: dirty git repo (gitNudge renders), populated MEMORY.md (memory
+    // section renders), and a channel origin with a permission service that
+    // produces a role block.
+    await initGitRepo(agentDir)
+    await writeFile(join(agentDir, 'tracked.md'), 'initial')
+    await runGit(agentDir, ['add', '.'])
+    await runGit(agentDir, ['commit', '-q', '-m', 'init'])
+    await writeFile(join(agentDir, 'tracked.md'), 'dirty edit')
+    await writeFile(join(agentDir, 'MEMORY.md'), 'memory-content-marker')
+    const { createPermissionService } = await import('@/permissions')
+    const permissions = createPermissionService({
+      roles: {
+        member: {
+          match: [{ kind: 'channel', platform: 'slack', workspace: 'T0', chat: 'C0' }],
+          permissions: ['channel.respond'],
+        },
+      },
+    })
+    const origin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    }
+
+    const loader = await createResourceLoader({ agentDir, origin, permissions })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    const roleIdx = prompt.indexOf('## Your role in this session')
+    const nudgeIdx = prompt.indexOf('tracked.md')
+    const memoryIdx = prompt.indexOf('memory-content-marker')
+    expect(roleIdx).toBeGreaterThan(-1)
+    expect(nudgeIdx).toBeGreaterThan(-1)
+    expect(memoryIdx).toBeGreaterThan(-1)
+    expect(roleIdx).toBeLessThan(nudgeIdx)
+    expect(nudgeIdx).toBeLessThan(memoryIdx)
+  })
+
+  test('memory section is NOT visible to plugin session.prompt hooks (intentional: memory injection is core-owned and runs after all plugin hooks)', async () => {
+    // The security plugin's applyPromptInjectionDefense scans `event.prompt`
+    // for attack patterns during the session.prompt hook chain. After this PR
+    // memory is appended in createResourceLoader AFTER runSessionPrompt fires,
+    // so no plugin hook can see the memory bytes. This is a deliberate
+    // trade-off: memory injection is positionally constrained for prompt-cache
+    // stability, and prompt-injection mitigation for memory content is handled
+    // by loadMemory's own boundary framing (load-memory.ts MEMORY_FRAMING +
+    // CHANNEL_MEMORY_BOUNDARY) rather than by the security plugin's scanner.
+    //
+    // This test pins the contract so a future contributor who reintroduces a
+    // session.prompt hook for memory (and silently undoes the cache-suffix
+    // fix) sees the assertion fail and has to make the trade-off explicit.
+    await writeFile(join(agentDir, 'MEMORY.md'), 'attacker-controlled-marker')
+    const { createHookBus } = await import('@/plugin')
+    const { emptyRegistry } = await import('@/plugin/registry')
+    const hooks = createHookBus()
+    let promptSeenByHook = ''
+    hooks.registerAll(
+      'test-observer',
+      agentDir,
+      { info: () => {}, warn: () => {}, error: () => {} },
+      {
+        'session.prompt': (event) => {
+          promptSeenByHook = event.prompt
+        },
+      },
+    )
+    const plugins = {
+      registry: emptyRegistry(),
+      hooks,
+      sessionId: 'ses_test',
+      agentDir,
+    }
+
+    const loader = await createResourceLoader({ agentDir, plugins })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('attacker-controlled-marker')
+    expect(promptSeenByHook).not.toContain('attacker-controlled-marker')
   })
 
   test('exposes the typeclaw-cron bundled skill to the agent', async () => {

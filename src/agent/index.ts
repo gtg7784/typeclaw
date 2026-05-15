@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { createAgentSession, DefaultResourceLoader, SessionManager } from '@mariozechner/pi-coding-agent'
 import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent'
 
+import { loadMemory } from '@/bundled-plugins/memory/load-memory'
 import type { ChannelRouter } from '@/channels/router'
 import { getConfig, resolveModel, resolveProfile } from '@/config'
 import { providerForModelRef } from '@/config/providers'
@@ -462,21 +463,28 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
     systemPrompt = event.prompt
   }
 
-  // Origin block (and the optional role/permissions sub-block) is appended
-  // BEFORE gitNudge so the dirty-files snapshot remains the agent's most
-  // recent context and keeps its cache-suffix position. Putting the role
-  // block after gitNudge would shift the dirty snapshot out of suffix
-  // position and re-fragment the cacheable prefix shared by clean-worktree
-  // sessions.
+  // Cache-suffix ordering: least-volatile sections first, most-volatile last.
+  // This minimises the number of cached prompt bytes invalidated when a
+  // section changes (the provider's prompt cache hits up to the first byte
+  // that differs).
+  //
+  // 1. origin block — stable across all sessions of the same kind.
+  // 2. gitNudge — rare changes; agent folders force-commit sessions/ and
+  //    memory/ after every turn, so the dirty-files list is empty most of
+  //    the time.
+  // 3. memorySection — most volatile: MEMORY.md grows on every dream cycle
+  //    and memory/yyyy-MM-dd.md grows after every channel turn that triggers
+  //    memory-logger. Pinning it to the end keeps everything above it
+  //    cacheable across session resurrections.
   systemPrompt = withOrigin(systemPrompt, options.origin, options.permissions)
 
-  // Appended last so the dirty-files snapshot is the most-recent context the
-  // agent reads, and so its bytes sit in the cache-suffix region rather than
-  // splitting the cacheable prefix shared by clean-worktree sessions.
   const gitNudge = await renderGitNudge(agentDir)
   if (gitNudge !== '') {
     systemPrompt = `${systemPrompt}\n\n${gitNudge}`
   }
+
+  const memorySection = await loadMemory(agentDir, options.origin !== undefined ? { origin: options.origin } : {})
+  systemPrompt = `${systemPrompt}\n\n${memorySection}`
 
   const additionalSkillPaths = [getBundledSkillsDir()]
   // pi-coding-agent's DefaultResourceLoader auto-discovers <agentDir>/skills/

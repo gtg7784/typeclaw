@@ -9,7 +9,6 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { definePlugin } from '@/plugin'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
-import { loadMemory } from './load-memory'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 
 const DEFAULT_IDLE_MS = 10_000
@@ -181,10 +180,18 @@ export default definePlugin({
         },
       },
       hooks: {
-        'session.prompt': async (event) => {
-          const memorySection = await loadMemory(ctx.agentDir, { origin: event.origin })
-          event.prompt = `${event.prompt}\n\n${memorySection}`
-        },
+        // Memory injection lives in core (`createResourceLoader` calls `loadMemory`
+        // directly, appended LAST in the system prompt). It does not run from a
+        // plugin hook because positioning matters for cache-prefix stability:
+        // the daily-stream file grows after every channel turn (memory-logger
+        // appends a fragment + watermark) and MEMORY.md changes on every dream.
+        // A volatile region in the middle of the system prompt invalidates the
+        // entire cacheable suffix below it on every session resurrection
+        // (channel sessions evicted by idle GC, container restarts). Pinning
+        // memory to the bottom of the system prompt keeps everything above it
+        // cacheable across resurrections, at the cost of re-billing only the
+        // memory section itself when it grows.
+        //
         // Core fires `session.idle` immediately after every prompt completion;
         // the plugin owns the debounce timer so memory-logger only spawns
         // after the user has been quiet for `idleMs`. Re-arming a still-armed
