@@ -158,7 +158,8 @@ export async function startAgent({
     const snap = pluginRuntime.get()
     const entry = snap.pluginSubagentByShim.get(subagent)
     if (entry) {
-      const sessionId = `subagent-${entry.pluginName}-${crypto.randomUUID()}`
+      const sessionManager = SessionManager.create(cwd, sessionFactory.sessionDir())
+      const sessionId = sessionManager.getSessionId()
       const origin: SessionOrigin = {
         kind: 'subagent' as const,
         subagent: subagentOptions?.name ?? entry.subagentName,
@@ -168,6 +169,7 @@ export async function startAgent({
       }
       const created = await createSessionWithDispose({
         systemPromptOverride: entry.pluginSubagent.systemPrompt,
+        sessionManager,
         channelRouter: channelManager.router,
         origin,
         permissions: pluginsLoaded.permissions,
@@ -190,6 +192,7 @@ export async function startAgent({
         sessionId,
         agentDir: cwd,
         origin,
+        getTranscriptPath: () => sessionManager.getSessionFile(),
       }
     }
     return defaultCreateSessionForSubagent(subagent, subagentOptions)

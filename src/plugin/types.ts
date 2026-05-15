@@ -89,6 +89,7 @@ export type SessionStartEvent = {
 
 export type SessionEndEvent = {
   sessionId: string
+  origin?: SessionOrigin
 }
 
 export type SessionIdleEvent = {

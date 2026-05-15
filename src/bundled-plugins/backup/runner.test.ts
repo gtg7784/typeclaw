@@ -94,6 +94,77 @@ describe('runBackup', () => {
     expect(addF?.args).toEqual(['add', '-f', '--', 'sessions/a.jsonl'])
   })
 
+  test('re-stages sessions/ paths that appeared during pickCommitMessage', async () => {
+    // given: pickCommitMessage simulates spawning a `backup-message` subagent
+    // that writes a NEW session JSONL into sessions/ after the initial status.
+    // The runner must capture that file with a second force-add pass; otherwise
+    // it sits dirty until the next backup cycle and creates a steady-state of
+    // one-cycle-behind orphan commits.
+    const cwd = await makeRepo()
+    await mkdir(join(cwd, 'sessions'))
+    await writeFile(join(cwd, 'sessions', 'pre.jsonl'), '{}')
+
+    const firstStatus = '?? sessions/pre.jsonl\n M src/foo.ts\n'
+    const secondStatus = '?? sessions/pre.jsonl\n?? sessions/late.jsonl\n M src/foo.ts\n'
+    let statusCalls = 0
+    let messagePicked = false
+
+    const { spawn, calls } = makeSpawn((args) => {
+      if (args[0] === 'status') {
+        statusCalls += 1
+        return okResult(statusCalls === 1 ? firstStatus : secondStatus)
+      }
+      if (args[0] === 'add' && args[1] === '--') return okResult()
+      if (args[0] === 'add' && args[1] === '-f') return okResult()
+      if (args[0] === 'diff' && args[2] === '--quiet') return failResult('', 1)
+      if (args[0] === 'diff' && args[2] === '--stat') return okResult('foo.ts | 1 +')
+      if (args[0] === 'commit') return okResult()
+      if (args[0] === 'rev-parse') return failResult('no upstream', 128)
+      return okResult()
+    })
+
+    const deps: BackupRunnerDeps = {
+      gitSpawn: spawn,
+      pickCommitMessage: async () => {
+        // when: simulate the late file appearing during message synthesis
+        await writeFile(join(cwd, 'sessions', 'late.jsonl'), '{}')
+        messagePicked = true
+        return 'chore: backup'
+      },
+    }
+
+    // when
+    const result = await runBackup({ cwd, pushToOrigin: true }, deps)
+
+    // then: backup completes, AND the late sessions/ file was force-added
+    expect(messagePicked).toBe(true)
+    expect(result).toEqual({ ok: true, kind: 'committed' })
+
+    const addFCalls = calls.filter((c) => c.args[0] === 'add' && c.args[1] === '-f')
+    expect(addFCalls).toHaveLength(2)
+    // first add-f stages the pre-existing file (from the initial status)
+    expect(addFCalls[0]?.args).toEqual(['add', '-f', '--', 'sessions/pre.jsonl'])
+    // second add-f (post-message) captures BOTH the pre-existing file and the
+    // late one. We don't care about ordering, only that both paths are present.
+    const lateAddPaths = addFCalls[1]?.args.slice(3) ?? []
+    expect(lateAddPaths).toContain('sessions/late.jsonl')
+    expect(lateAddPaths).toContain('sessions/pre.jsonl')
+
+    // and: there are exactly TWO status calls — one before staging, one after
+    // pickCommitMessage returns. Asserting the count keeps a future "optimize"
+    // pass from collapsing them back into one and reintroducing the bug.
+    expect(statusCalls).toBe(2)
+
+    // and: the second status happened AFTER pickCommitMessage returned.
+    // The relative ordering of git calls captures the load-bearing sequence.
+    const statusIndices = calls.flatMap((c, i) => (c.args[0] === 'status' ? [i] : []))
+    const addFIndices = calls.flatMap((c, i) => (c.args[0] === 'add' && c.args[1] === '-f' ? [i] : []))
+    const commitIdx = calls.findIndex((c) => c.args[0] === 'commit')
+    expect(statusIndices[1]).toBeGreaterThan(addFIndices[0]!)
+    expect(addFIndices[1]).toBeGreaterThan(statusIndices[1]!)
+    expect(commitIdx).toBeGreaterThan(addFIndices[1]!)
+  })
+
   test('skips push when there is no upstream', async () => {
     const cwd = await makeRepo()
     const { spawn, calls } = makeSpawn((args) => {

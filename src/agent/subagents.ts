@@ -165,11 +165,12 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
           sessionId,
           parentTranscriptPath: getTranscriptPath?.(),
           idleMs: 0,
+          ...(origin !== undefined ? { origin } : {}),
         })
       }
     } finally {
       if (hooks && sessionId !== undefined) {
-        await hooks.runSessionEnd({ sessionId })
+        await hooks.runSessionEnd({ sessionId, ...(origin !== undefined ? { origin } : {}) })
       }
       session.dispose()
       await dispose()

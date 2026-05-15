@@ -147,11 +147,15 @@ async function runPrompt(
         sessionId: session.sessionId,
         parentTranscriptPath: session.getTranscriptPath?.(),
         idleMs: 0,
+        ...(session.origin !== undefined ? { origin: session.origin } : {}),
       })
     }
   } finally {
     if (session.hooks && session.sessionId !== undefined) {
-      await session.hooks.runSessionEnd({ sessionId: session.sessionId })
+      await session.hooks.runSessionEnd({
+        sessionId: session.sessionId,
+        ...(session.origin !== undefined ? { origin: session.origin } : {}),
+      })
     }
     session.dispose?.()
   }

@@ -299,7 +299,7 @@ export function createServer({
           state?.unsubPrompts?.()
           try {
             if (state && state.runtimeSnapshot !== null) {
-              await state.runtimeSnapshot.hooks.runSessionEnd({ sessionId: state.sessionFileId })
+              await state.runtimeSnapshot.hooks.runSessionEnd({ sessionId: state.sessionFileId, origin: state.origin })
             }
           } finally {
             if (state) {

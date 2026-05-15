@@ -84,6 +84,28 @@ export async function runBackup(options: BackupRunnerOptions, deps: BackupRunner
     diffstat: diffstat.stdout.slice(0, 4096),
   })
 
+  // `pickCommitMessage` may spawn a subagent (the backup plugin's
+  // `backup-message`) whose session JSONL lands under `sessions/` after we
+  // already staged. Without this second pass that file would sit dirty in
+  // the worktree until the NEXT backup cycle, which would then commit it
+  // and create another orphan via the same path — a steady-state of
+  // one-cycle-behind churn. Re-status, filter to `sessions/` additions
+  // only (don't accidentally stage user work that arrived during the
+  // window), and force-add anything new.
+  const reStatus = await deps.gitSpawn(['status', '--porcelain=v1', '--untracked-files=all'], {
+    cwd,
+    timeoutMs: COMMIT_TIMEOUT_MS,
+  })
+  if (reStatus.exitCode === 0) {
+    const lateForce = filterForceAdd(parsePorcelain(reStatus.stdout)).filter((p) => existsSync(join(cwd, p)))
+    if (lateForce.length > 0) {
+      const lateAdd = await deps.gitSpawn(['add', '-f', '--', ...lateForce], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
+      if (lateAdd.exitCode !== 0) {
+        return { ok: false, kind: 'commit-failed', reason: `git add -f (post-message) failed: ${shortErr(lateAdd)}` }
+      }
+    }
+  }
+
   const safeMessage = sanitizeCommitMessage(message)
   const commit = await deps.gitSpawn(['commit', '-m', safeMessage], { cwd, timeoutMs: COMMIT_TIMEOUT_MS })
   if (commit.exitCode !== 0)
