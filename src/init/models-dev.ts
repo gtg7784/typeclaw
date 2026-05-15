@@ -30,6 +30,13 @@ export type ModelOption = {
   reasoning: boolean
   contextWindow: number | null
   curated: boolean
+  // True iff the model accepts image input. Sourced from the curated
+  // `Model.input` array (which is the source of truth — pi-ai consumes it
+  // directly) with a fallback to models.dev's `modalities.input` when the
+  // curated entry omits the field. The init wizard uses this to decide
+  // whether to prompt for a separate `vision` profile after the user picks
+  // a text-only `default` model.
+  supportsVision: boolean
 }
 
 type ModelsDevModel = {
@@ -120,7 +127,10 @@ function buildOption(ref: KnownModelRef, opts: BuildOptionOpts): ModelOption {
   const modelId = ref.slice(slash + 1)
   const provider = KNOWN_PROVIDERS[providerId]
   const curatedModel = (
-    provider.models as Record<string, { name: string; contextWindow?: number; reasoning?: boolean }>
+    provider.models as Record<
+      string,
+      { name: string; contextWindow?: number; reasoning?: boolean; input?: ReadonlyArray<string> }
+    >
   )[modelId]
   return {
     ref,
@@ -131,5 +141,15 @@ function buildOption(ref: KnownModelRef, opts: BuildOptionOpts): ModelOption {
     reasoning: opts.upstream?.reasoning ?? curatedModel?.reasoning ?? false,
     contextWindow: opts.upstream?.limit?.context ?? curatedModel?.contextWindow ?? null,
     curated: opts.curated,
+    supportsVision: resolveSupportsVision(curatedModel?.input, opts.upstream?.modalities?.input),
   }
+}
+
+function resolveSupportsVision(
+  curatedInput: ReadonlyArray<string> | undefined,
+  upstreamInput: ReadonlyArray<string> | undefined,
+): boolean {
+  if (curatedInput !== undefined) return curatedInput.includes('image')
+  if (upstreamInput !== undefined) return upstreamInput.includes('image')
+  return false
 }
