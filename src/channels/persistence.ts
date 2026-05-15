@@ -6,7 +6,7 @@ import type { ChannelParticipant } from '@/agent/session-origin'
 import type { AdapterId } from './schema'
 import type { ChannelKey } from './types'
 
-const FILE_VERSION = 3
+const FILE_VERSION = 4
 
 // `sessionFile` is the basename (not the full path) of the JSONL transcript
 // for this (adapter, workspace, chat, thread) tuple. pi-coding-agent writes
@@ -25,9 +25,15 @@ export type ChannelSessionRecord = {
   workspace: string
   chat: string
   thread: string | null
-  sessionId: string
+  sessionId?: string
   sessionFile?: string
+  lastInboundAt?: number
   participants: ChannelParticipant[]
+}
+
+type FileV4 = {
+  version: 4
+  sessions: ChannelSessionRecord[]
 }
 
 type FileV3 = {
@@ -41,11 +47,13 @@ type FileV2 = {
 }
 
 export type ChannelSessionsLogger = {
+  info: (msg: string) => void
   warn: (msg: string) => void
   error: (msg: string) => void
 }
 
 const consoleLogger: ChannelSessionsLogger = {
+  info: (m) => console.log(m),
   warn: (m) => console.warn(m),
   error: (m) => console.error(m),
 }
@@ -82,17 +90,25 @@ export async function loadChannelSessions(
   }
   const version = (parsed as { version?: unknown }).version
   if (version === FILE_VERSION) {
-    const file = parsed as FileV3
+    const file = parsed as FileV4
     if (!Array.isArray(file.sessions)) return []
     return file.sessions.filter(isValidRecord)
+  }
+  if (version === 3) {
+    const file = parsed as FileV3
+    if (!Array.isArray(file.sessions)) return []
+    return migrateV3ToV4(file.sessions.filter(isValidRecord), logger)
   }
   if (version === 2) {
     const file = parsed as FileV2
     if (!Array.isArray(file.sessions)) return []
     const v2Records = file.sessions.filter(isValidV2Record)
-    return await migrateV2Records(agentDir, v2Records, logger)
+    const v3Records = await migrateV2Records(agentDir, v2Records, logger)
+    return migrateV3ToV4(v3Records, logger)
   }
-  logger.warn(`[channels] ${path} version ${String(version)} not supported (expected 2 or ${FILE_VERSION}); ignored`)
+  logger.warn(
+    `[channels] ${path} version ${String(version)} not supported (expected 2, 3, or ${FILE_VERSION}); ignored`,
+  )
   return []
 }
 
@@ -102,7 +118,7 @@ export async function saveChannelSessions(
   logger: ChannelSessionsLogger = consoleLogger,
 ): Promise<void> {
   const path = channelsSessionsPath(agentDir)
-  const payload: FileV3 = { version: FILE_VERSION, sessions: dedupe(sessions) }
+  const payload: FileV4 = { version: FILE_VERSION, sessions: dedupe(sessions) }
   try {
     await mkdir(dirname(path), { recursive: true })
     const tmp = `${path}.tmp`
@@ -123,7 +139,7 @@ export async function saveChannelSessions(
 // we'll be migrated forward.)
 async function migrateV2Records(
   agentDir: string,
-  v2Records: readonly Omit<ChannelSessionRecord, 'sessionFile'>[],
+  v2Records: readonly (Omit<ChannelSessionRecord, 'sessionFile' | 'sessionId'> & { sessionId: string })[],
   logger: ChannelSessionsLogger,
 ): Promise<ChannelSessionRecord[]> {
   if (v2Records.length === 0) return []
@@ -160,6 +176,13 @@ async function migrateV2Records(
   })
 }
 
+function migrateV3ToV4(v3Records: ChannelSessionRecord[], logger: ChannelSessionsLogger): ChannelSessionRecord[] {
+  logger.info(
+    `[channels] v3→v4: ${v3Records.length} record(s) migrated; first post-upgrade inbound will force fresh session`,
+  )
+  return v3Records.map((r) => ({ ...r, lastInboundAt: 0 }))
+}
+
 function dedupe(sessions: readonly ChannelSessionRecord[]): ChannelSessionRecord[] {
   const seen = new Map<string, ChannelSessionRecord>()
   for (const s of sessions) {
@@ -185,7 +208,9 @@ function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v)
 }
 
-function isValidV2Record(v: unknown): v is Omit<ChannelSessionRecord, 'sessionFile'> {
+function isValidV2Record(
+  v: unknown,
+): v is Omit<ChannelSessionRecord, 'sessionFile' | 'sessionId'> & { sessionId: string } {
   if (!isObject(v)) return false
   const r = v as Record<string, unknown>
   return (
@@ -199,9 +224,18 @@ function isValidV2Record(v: unknown): v is Omit<ChannelSessionRecord, 'sessionFi
 }
 
 function isValidRecord(v: unknown): v is ChannelSessionRecord {
-  if (!isValidV2Record(v)) return false
+  if (!isObject(v)) return false
   const r = v as Record<string, unknown>
-  return r.sessionFile === undefined || typeof r.sessionFile === 'string'
+  return (
+    typeof r.adapter === 'string' &&
+    typeof r.workspace === 'string' &&
+    typeof r.chat === 'string' &&
+    (r.thread === null || typeof r.thread === 'string') &&
+    (r.sessionId === undefined || typeof r.sessionId === 'string') &&
+    (r.sessionFile === undefined || typeof r.sessionFile === 'string') &&
+    (r.lastInboundAt === undefined || typeof r.lastInboundAt === 'number') &&
+    Array.isArray(r.participants)
+  )
 }
 
 function describe(err: unknown): string {
