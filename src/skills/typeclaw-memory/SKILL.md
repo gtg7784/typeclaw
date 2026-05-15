@@ -74,7 +74,7 @@ If the undreamed tails contain only watermarks, or every new fragment is already
 
 ### What gets injected into your prompt every turn
 
-The plugin's `session.prompt` hook appends a `# Memory` section to your system prompt with:
+Core's `createResourceLoader` appends a `# Memory` section as the LAST block of your system prompt (after `gitNudge`) by calling `loadMemory`. It is pinned to the cache-suffix end so growth in the daily stream invalidates only the memory section itself, not the skills/tools/history above. The section contains:
 
 - `MEMORY.md` (truncated to 12 KB; if larger, the rest is dropped with a `[truncated]` marker)
 - The **undreamed tails** of each `memory/yyyy-MM-dd.md`, with bare watermark lines stripped (they are bookkeeping for the memory-logger, no signal for you)
