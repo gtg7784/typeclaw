@@ -7,6 +7,7 @@ import {
   composeStart,
   composeStatus,
   composeStop,
+  composeUsage,
   type AgentResult,
   type ComposeDoctorReport,
 } from '@/compose'
@@ -14,7 +15,9 @@ import { config } from '@/config'
 import { formatJson, formatReport } from '@/doctor'
 
 import { formatComposeStatus } from './compose-status'
+import { formatComposeUsage, formatComposeUsageJson } from './compose-usage'
 import { c, spinner } from './ui'
+import { parseSince, parseUntil } from './usage-args'
 
 const startSub = defineCommand({
   meta: { name: 'start', description: 'start every agent in immediate subdirectories of cwd' },
@@ -166,6 +169,35 @@ const logsSub = defineCommand({
   },
 })
 
+const usageSub = defineCommand({
+  meta: {
+    name: 'usage',
+    description: 'report LLM token usage and cost across every agent in immediate subdirectories of cwd',
+  },
+  args: {
+    json: { type: 'boolean', description: 'emit the usage report as JSON', default: false },
+    since: { type: 'string', description: "ISO date or relative duration ('today', '7d', '30d')" },
+    until: { type: 'string', description: 'ISO date upper bound (exclusive)' },
+  },
+  async run({ args }) {
+    const since = parseSince(args.since, 'typeclaw compose usage')
+    const until = parseUntil(args.until, 'typeclaw compose usage')
+    const result = await composeUsage({
+      rootCwd: process.cwd(),
+      ...(since !== undefined ? { since } : {}),
+      ...(until !== undefined ? { until } : {}),
+    })
+    if (args.json) {
+      process.stdout.write(`${formatComposeUsageJson(result)}\n`)
+      return
+    }
+    const useColor = Boolean(process.stdout.isTTY) && process.env.NO_COLOR === undefined
+    process.stdout.write(`${formatComposeUsage(result, { useColor })}\n`)
+    const anyFailed = result.results.some((r) => !r.ok)
+    if (anyFailed) process.exit(1)
+  },
+})
+
 const doctorSub = defineCommand({
   meta: { name: 'doctor', description: 'diagnose every agent in immediate subdirectories of cwd' },
   args: {
@@ -212,6 +244,7 @@ export const composeCommand = defineCommand({
     restart: restartSub,
     status: statusSub,
     logs: logsSub,
+    usage: usageSub,
     doctor: doctorSub,
   },
 })
