@@ -109,7 +109,7 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('SOUL.md')
   })
 
-  test('does NOT inject MEMORY.md or memory/ stream contents (owned by the bundled memory plugin via session.prompt hook)', async () => {
+  test('injects MEMORY.md and undreamed daily-stream contents under a # Memory section', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), 'Neo prefers terse replies.')
     await mkdir(join(agentDir, 'memory'))
     await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'tuesday-fragment-marker')
@@ -117,9 +117,30 @@ describe('createResourceLoader', () => {
     const loader = await createResourceLoader({ agentDir })
 
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).not.toContain('Neo prefers terse replies.')
-    expect(prompt).not.toContain('tuesday-fragment-marker')
-    expect(prompt).not.toContain('## memory/2026-04-27.md')
+    expect(prompt).toContain('# Memory')
+    expect(prompt).toContain('Neo prefers terse replies.')
+    expect(prompt).toContain('tuesday-fragment-marker')
+    expect(prompt).toContain('## memory/2026-04-27.md')
+  })
+
+  test('places the memory section AFTER gitNudge so the dirty-files list stays in the cache prefix relative to the most-volatile memory region', async () => {
+    // given: a git repo with a dirty tracked file so gitNudge renders, AND a
+    // populated MEMORY.md so the memory section renders content.
+    await initGitRepo(agentDir)
+    await writeFile(join(agentDir, 'tracked.md'), 'initial')
+    await runGit(agentDir, ['add', '.'])
+    await runGit(agentDir, ['commit', '-q', '-m', 'init'])
+    await writeFile(join(agentDir, 'tracked.md'), 'dirty edit')
+    await writeFile(join(agentDir, 'MEMORY.md'), 'memory-content-marker')
+
+    const loader = await createResourceLoader({ agentDir })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    const nudgeIdx = prompt.indexOf('tracked.md')
+    const memoryIdx = prompt.indexOf('memory-content-marker')
+    expect(nudgeIdx).toBeGreaterThan(-1)
+    expect(memoryIdx).toBeGreaterThan(-1)
+    expect(nudgeIdx).toBeLessThan(memoryIdx)
   })
 
   test('exposes the typeclaw-cron bundled skill to the agent', async () => {

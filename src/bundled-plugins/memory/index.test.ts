@@ -4,14 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { noopPermissionService } from '@/permissions'
-import type {
-  PluginContext,
-  PluginExports,
-  PluginLogger,
-  SessionEndEvent,
-  SessionIdleEvent,
-  SessionPromptEvent,
-} from '@/plugin'
+import type { PluginContext, PluginExports, PluginLogger, SessionEndEvent, SessionIdleEvent } from '@/plugin'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
 import memoryPlugin from './index'
@@ -122,13 +115,10 @@ describe('memory plugin shape', () => {
   })
 })
 
-describe('session.prompt hook', () => {
-  test('appends loadMemory output to the system prompt', async () => {
+describe('session.prompt hook (removed)', () => {
+  test('does NOT expose a session.prompt hook; memory injection is owned by core createResourceLoader so it can be positioned at the cache-suffix end of the system prompt', async () => {
     const { exports } = await bootMemoryPlugin(agentDir, {})
-    const event: SessionPromptEvent = { prompt: 'BASE PROMPT', sessionId: 'ses_1', agentDir }
-    await exports.hooks!['session.prompt']!(event, { agentDir, pluginName: 'memory', logger: createPluginLogger('m') })
-    expect(event.prompt.startsWith('BASE PROMPT\n\n')).toBe(true)
-    expect(event.prompt).toContain('# Memory')
+    expect(exports.hooks?.['session.prompt']).toBeUndefined()
   })
 })
 
