@@ -753,7 +753,7 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
   if (event.result.ok) {
     console.log('Hatched. 🐣')
   } else {
-    console.error(`Hatching failed: ${event.result.reason}`)
+    console.error(errorLine(`Hatching failed: ${event.result.reason}`))
   }
 }
 

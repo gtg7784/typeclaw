@@ -4,6 +4,8 @@ import { CONTAINER_PORT } from '@/container'
 import { isInitialized } from '@/init'
 import { startAgent } from '@/run'
 
+import { errorLine } from './ui'
+
 export const run = defineCommand({
   meta: {
     name: 'run',
@@ -31,7 +33,7 @@ export const run = defineCommand({
   },
   async run({ args }) {
     if (!isInitialized(process.cwd())) {
-      console.error('TypeClaw config file not found. Run `typeclaw init` first.')
+      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first.'))
       process.exit(1)
     }
 
