@@ -112,7 +112,16 @@ describe('createResourceLoader', () => {
   test('injects MEMORY.md and undreamed daily-stream contents under a # Memory section', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), 'Neo prefers terse replies.')
     await mkdir(join(agentDir, 'memory'))
-    await writeFile(join(agentDir, 'memory', '2026-04-27.md'), 'tuesday-fragment-marker')
+    const fragmentEvent = JSON.stringify({
+      type: 'fragment',
+      id: 'evt-1',
+      ts: '2026-04-27T12:00:00.000Z',
+      source: 'sess-1',
+      entry: 'ent-1',
+      topic: 'tuesday-fragment-marker',
+      body: 'tuesday-fragment-body',
+    })
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentEvent + '\n')
 
     const loader = await createResourceLoader({ agentDir })
 
@@ -120,7 +129,7 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('# Memory')
     expect(prompt).toContain('Neo prefers terse replies.')
     expect(prompt).toContain('tuesday-fragment-marker')
-    expect(prompt).toContain('## memory/2026-04-27.md')
+    expect(prompt).toContain('## memory/2026-04-27.jsonl')
   })
 
   test('places the memory section AFTER gitNudge so the dirty-files list stays in the cache prefix relative to the most-volatile memory region', async () => {

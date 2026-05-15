@@ -18,6 +18,14 @@ import {
 const silentLogger: MemoryLoggerLogger = { info: () => {}, warn: () => {}, error: () => {} }
 const silentSubagent = createMemoryLoggerSubagent({ logger: silentLogger })
 
+function fragment(source: string, entry: string, id = `f-${entry}`): string {
+  return `${JSON.stringify({ type: 'fragment', id, ts: '2026-05-16T12:00:00.000Z', source, entry, topic: 'T', body: 'B' })}\n`
+}
+
+function watermark(source: string, entry: string, id = `w-${entry}`): string {
+  return `${JSON.stringify({ type: 'watermark', id, ts: '2026-05-16T12:00:00.000Z', source, entry })}\n`
+}
+
 function makeAgentDir(): string {
   const root = mkdtempSync(join(tmpdir(), 'memory-agent-'))
   mkdirSync(join(root, 'memory'))
@@ -89,8 +97,9 @@ describe('isMemoryLoggerPayload', () => {
 })
 
 describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
-  test('declares the fragment marker format', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/<!-- fragment source=.+ entry=.+ -->/)
+  test('declares the append tool fragment input schema', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('{topic, body, source, entry, latestEntryId}')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('you never write raw JSON')
   })
 
   test('requires every fragment to be evidence-anchored and self-contained', () => {
@@ -131,9 +140,9 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('watermark')
   })
 
-  test('declares a separate trailing watermark marker (not stamped on the last fragment)', () => {
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/<!-- watermark source=.+ entry=.+ -->/)
-    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toMatch(/last marker|trailing watermark|after.*fragments/)
+  test('declares latestEntryId as the watermark argument instead of a raw marker', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toContain('latestEntryId')
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('you no longer emit a separate watermark marker')
   })
 
   test('forbids stamping every fragment with the same "latest evaluated" entry id (the winky bug)', () => {
@@ -145,14 +154,15 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/anchors.*evidence|specific.*entry that anchors/i)
   })
 
-  test('explains that the watermark entry= is the latest evaluated entry, regardless of fragment anchors', () => {
+  test('explains that latestEntryId is the latest evaluated entry, regardless of fragment anchors', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toMatch(/latest.*entry.*evaluated|regardless.*anchored/i)
   })
 
-  test('requires exactly one watermark marker per run (never zero, never multiple)', () => {
+  test('documents the zero-fragments watermark-advance path', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
-    expect(lower).toMatch(/exactly one.*watermark|one watermark per run/i)
+    expect(lower).toContain('zero-fragments path')
+    expect(lower).toContain('watermark-advance tool')
   })
 
   test('forbids quoting credential values verbatim and explains why', () => {
@@ -198,14 +208,15 @@ describe('memoryLoggerSubagent', () => {
     expect(memoryLoggerSubagent.systemPrompt).toBe(MEMORY_LOGGER_SYSTEM_PROMPT)
   })
 
-  test('declares one built-in tool (read) and two custom tools (find_entry, append)', () => {
+  test('declares one built-in tool (read) and three custom tools (find_entry, append, watermark advance)', () => {
     expect(memoryLoggerSubagent.tools).toBeDefined()
     expect(memoryLoggerSubagent.tools!.length).toBe(1)
     expect(memoryLoggerSubagent.customTools).toBeDefined()
-    expect(memoryLoggerSubagent.customTools!.length).toBe(2)
+    expect(memoryLoggerSubagent.customTools!.length).toBe(3)
     const descriptions = memoryLoggerSubagent.customTools!.map((t) => t.description)
     expect(descriptions.some((d) => d.includes('Locate a session-transcript entry'))).toBe(true)
-    expect(descriptions.some((d) => d.includes('Append content to a file'))).toBe(true)
+    expect(descriptions.some((d) => d.includes('Append a memory fragment'))).toBe(true)
+    expect(descriptions.some((d) => d.includes('Advance the daily-stream watermark'))).toBe(true)
   })
 
   test('declares a defensive tool-result byte budget on the read tool so a malfunctioning find_entry cannot cause unbounded chunked reads', () => {
@@ -277,7 +288,7 @@ describe('memoryLoggerSubagent', () => {
     const prompt = runSessionCalls[0]!.userPrompt!
     expect(prompt).toContain(transcript)
     expect(prompt).toContain('ses_abc')
-    expect(prompt).toMatch(/memory\/\d{4}-\d{2}-\d{2}\.md/)
+    expect(prompt).toMatch(/memory\/\d{4}-\d{2}-\d{2}\.jsonl/)
   })
 
   test('handler includes channel location and participants in the initial prompt', async () => {
@@ -328,10 +339,7 @@ describe('memoryLoggerSubagent', () => {
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
     const today = formatLocalDate()
-    writeFileSync(
-      join(agentDir, 'memory', `${today}.md`),
-      ['<!-- fragment source=ses_abc entry=watermrk -->', '## prior', 'body', ''].join('\n'),
-    )
+    writeFileSync(join(agentDir, 'memory', `${today}.jsonl`), fragment('ses_abc', 'watermrk'))
 
     const { runSessionCalls } = await invokeWith(
       { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
@@ -350,17 +358,11 @@ describe('memoryLoggerSubagent', () => {
     const yyyy = yesterday.getFullYear()
     const mm = String(yesterday.getMonth() + 1).padStart(2, '0')
     const dd = String(yesterday.getDate()).padStart(2, '0')
-    const yesterdayName = `${yyyy}-${mm}-${dd}.md`
-    expect(yesterdayName).not.toBe(`${today}.md`)
+    const yesterdayName = `${yyyy}-${mm}-${dd}.jsonl`
+    expect(yesterdayName).not.toBe(`${today}.jsonl`)
     writeFileSync(
       join(agentDir, 'memory', yesterdayName),
-      [
-        '<!-- fragment source=ses_abc entry=yesterday-morning -->',
-        '## body',
-        '',
-        '<!-- watermark source=ses_abc entry=yesterday-evening -->',
-        '',
-      ].join('\n'),
+      [fragment('ses_abc', 'yesterday-morning'), watermark('ses_abc', 'yesterday-evening')].join(''),
     )
 
     const { runSessionCalls } = await invokeWith(
@@ -373,7 +375,7 @@ describe('memoryLoggerSubagent', () => {
     expect(prompt).not.toContain('Watermark: none')
   })
 
-  test('handler instructs the subagent to write a trailing watermark marker on every run', async () => {
+  test('handler instructs the subagent to pass latestEntryId or use the watermark-advance tool', async () => {
     const agentDir = makeAgentDir()
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
@@ -384,8 +386,9 @@ describe('memoryLoggerSubagent', () => {
     )
 
     const prompt = runSessionCalls[0]!.userPrompt!
-    expect(prompt).toMatch(/<!-- watermark source=ses_abc entry=<latestEntryId> -->/)
-    expect(prompt.toLowerCase()).toMatch(/regardless of how many fragments|trailing watermark/)
+    expect(prompt).toContain('latestEntryId')
+    expect(prompt).toContain('watermark-advance tool')
+    expect(prompt).toContain('ses_abc')
   })
 
   test('handler instructs the subagent that each fragment carries its own evidence-anchor entry id', async () => {
