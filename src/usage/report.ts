@@ -52,6 +52,7 @@ function renderSummary(report: UsageReport, ctx: RenderCtx): string {
       `  ${dim('Messages:', ctx)} ${color('cyan', String(total.messageCount), ctx)}` +
       `  ${dim('In:', ctx)} ${formatTokens(total.input)}` +
       `  ${dim('Out:', ctx)} ${formatTokens(total.output)}` +
+      `  ${dim('Sent:', ctx)} ${formatTokens(total.input + total.cacheRead)}` +
       `  ${dim('Cost:', ctx)} ${formatCost(total.cost)}`,
   )
 
@@ -191,13 +192,14 @@ function renderTotalsTable(
   opts: { extraHeader?: string; total?: UsageTotals } = {},
 ): string {
   const hasExtra = opts.extraHeader !== undefined
-  const headers = ['Item', 'Msgs', 'In', 'Out', 'Cache %', 'Cost', ...(hasExtra ? [opts.extraHeader!] : [])]
+  const headers = ['Item', 'Msgs', 'In', 'Out', 'Sent', 'Cache %', 'Cost', ...(hasExtra ? [opts.extraHeader!] : [])]
 
   const dataCells: string[][] = rows.map((r) => [
     r.label,
     String(r.totals.messageCount),
     formatTokens(r.totals.input),
     formatTokens(r.totals.output),
+    formatTokens(r.totals.input + r.totals.cacheRead),
     formatCacheHitRate(r.totals.input, r.totals.cacheRead),
     formatCost(r.totals.cost),
     ...(hasExtra ? [r.extra ?? ''] : []),
@@ -210,6 +212,7 @@ function renderTotalsTable(
           String(opts.total.messageCount),
           formatTokens(opts.total.input),
           formatTokens(opts.total.output),
+          formatTokens(opts.total.input + opts.total.cacheRead),
           formatCacheHitRate(opts.total.input, opts.total.cacheRead),
           formatCost(opts.total.cost),
           ...(hasExtra ? [''] : []),
