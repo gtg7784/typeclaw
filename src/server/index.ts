@@ -20,6 +20,12 @@ import type { Stream, StreamMessage, StreamMessageId, Unsubscribe } from '@/stre
 export type ReloadAllFn = () => Promise<ReloadAllResult>
 export type CreateSessionFn = (options?: CreateSessionOptions) => Promise<AgentSession | CreateSessionResult>
 
+export type ServerLogger = {
+  info: (msg: string) => void
+  warn: (msg: string) => void
+  error: (msg: string) => void
+}
+
 export type ServerOptions = {
   port: number
   reloadAll?: ReloadAllFn
@@ -37,6 +43,16 @@ export type ServerOptions = {
   // sessions. Omit to keep TUI-only behavior (used by tests + non-container
   // dev runs).
   containerBroker?: ContainerBroker
+  // Optional logger for server-side events. Defaults to `consoleLogger`
+  // which writes to stdout/stderr so `typeclaw logs` surfaces every event.
+  // Tests inject a fake logger to assert on captured output.
+  logger?: ServerLogger
+}
+
+const consoleLogger: ServerLogger = {
+  info: (m) => console.log(m),
+  warn: (m) => console.warn(m),
+  error: (m) => console.error(m),
 }
 
 export type Server = ReturnType<typeof createServer>
@@ -85,6 +101,7 @@ export function createServer({
   containerName,
   tuiToken,
   containerBroker,
+  logger = consoleLogger,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
 
@@ -162,11 +179,11 @@ export function createServer({
               await runtimeSnapshot.hooks.runSessionStart({ sessionId: sessionFileId, agentDir })
             }
 
-            forwardSessionEvents(ws, session)
+            forwardSessionEvents(ws, session, logger, sessionFileId)
 
             if (stream) {
               state.unsubPrompts = stream.subscribe({ target: { kind: 'session', sessionId: sessionFileId } }, (msg) =>
-                enqueuePrompt(ws, state, msg, agentDir),
+                enqueuePrompt(ws, state, msg, agentDir, logger),
               )
 
               state.unsubBroadcast = stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
@@ -250,7 +267,9 @@ export function createServer({
               await state.session.prompt(msg.text)
               send(ws, { type: 'done' })
             } catch (err) {
-              send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
+              const message = err instanceof Error ? err.message : String(err)
+              logger.error(`[server] ${state.sessionFileId}: prompt failed: ${message}`)
+              send(ws, { type: 'error', message })
             }
             if (fallbackHooks !== undefined && agentDir !== undefined) {
               await fallbackHooks.runSessionTurnEnd({
@@ -305,7 +324,7 @@ function isWebSocketUpgrade(req: Request): boolean {
   return req.headers.get('upgrade')?.toLowerCase() === 'websocket'
 }
 
-function forwardSessionEvents(ws: Ws, session: AgentSession): void {
+function forwardSessionEvents(ws: Ws, session: AgentSession, logger: ServerLogger, sessionFileId: string): void {
   const toolStartedAt = new Map<string, number>()
 
   session.subscribe((event) => {
@@ -323,7 +342,7 @@ function forwardSessionEvents(ws: Ws, session: AgentSession): void {
         // because no text deltas were ever emitted, which looks like a freeze.
         // The server's existing try/catch around `session.prompt()` only
         // catches throws, so it never sees these.
-        forwardAssistantError(ws, event.message)
+        forwardAssistantError(ws, event.message, logger, sessionFileId)
         break
       case 'tool_execution_start':
         toolStartedAt.set(event.toolCallId, Date.now())
@@ -352,7 +371,7 @@ function forwardSessionEvents(ws: Ws, session: AgentSession): void {
   })
 }
 
-function forwardAssistantError(ws: Ws, message: unknown): void {
+function forwardAssistantError(ws: Ws, message: unknown, logger: ServerLogger, sessionFileId: string): void {
   if (typeof message !== 'object' || message === null) return
   const m = message as { role?: string; stopReason?: string; errorMessage?: string }
   if (m.role !== 'assistant') return
@@ -361,10 +380,17 @@ function forwardAssistantError(ws: Ws, message: unknown): void {
   // error message because the TUI already shows abort feedback elsewhere.
   if (m.stopReason === 'aborted') return
   const text = typeof m.errorMessage === 'string' && m.errorMessage.length > 0 ? m.errorMessage : 'LLM call failed'
+  logger.error(`[server] ${sessionFileId}: LLM call failed: ${text}`)
   send(ws, { type: 'error', message: text })
 }
 
-function enqueuePrompt(ws: Ws, state: SessionState, msg: StreamMessage, agentDir: string | undefined): void {
+function enqueuePrompt(
+  ws: Ws,
+  state: SessionState,
+  msg: StreamMessage,
+  agentDir: string | undefined,
+  logger: ServerLogger,
+): void {
   const payload = msg.payload as { kind?: string; text?: string; delivery?: PromptDelivery }
   if (payload?.kind !== 'prompt' || typeof payload.text !== 'string') return
   const delivery: PromptDelivery = payload.delivery ?? 'queue'
@@ -380,7 +406,7 @@ function enqueuePrompt(ws: Ws, state: SessionState, msg: StreamMessage, agentDir
     ts: msg.ts,
   })
   pushQueueState(ws, state)
-  void drain(ws, state, agentDir)
+  void drain(ws, state, agentDir, logger)
 }
 
 // `session.idle` semantically means "the agent finished a prompt and is now
@@ -416,7 +442,7 @@ function makeTurnHookCallers(
   }
 }
 
-async function drain(ws: Ws, state: SessionState, agentDir: string | undefined): Promise<void> {
+async function drain(ws: Ws, state: SessionState, agentDir: string | undefined, logger: ServerLogger): Promise<void> {
   if (state.draining) return
   state.draining = true
   const fireIdle = makeIdleHookCaller(state)
@@ -433,7 +459,9 @@ async function drain(ws: Ws, state: SessionState, agentDir: string | undefined):
         await state.session.prompt(item.text)
         send(ws, { type: 'done' })
       } catch (err) {
-        send(ws, { type: 'error', message: err instanceof Error ? err.message : String(err) })
+        const message = err instanceof Error ? err.message : String(err)
+        logger.error(`[server] ${state.sessionFileId}: prompt failed: ${message}`)
+        send(ws, { type: 'error', message })
       }
       await fireTurnEnd()
       await fireIdle()
