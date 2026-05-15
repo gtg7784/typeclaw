@@ -60,6 +60,7 @@ describe('collectWizardInputs back-aware flow', () => {
     contextWindow: 256000,
     reasoning: true,
     curated: true,
+    supportsVision: true,
   }
   const openaiModel: ModelOption = {
     providerId: 'openai',
@@ -70,6 +71,7 @@ describe('collectWizardInputs back-aware flow', () => {
     contextWindow: 128000,
     reasoning: false,
     curated: true,
+    supportsVision: true,
   }
   const codexModel: ModelOption = {
     providerId: 'openai-codex',
@@ -80,6 +82,18 @@ describe('collectWizardInputs back-aware flow', () => {
     contextWindow: 128000,
     reasoning: true,
     curated: true,
+    supportsVision: true,
+  }
+  const zaiTextOnlyModel: ModelOption = {
+    providerId: 'zai',
+    providerName: 'Z.AI',
+    modelId: 'glm-4.6',
+    modelName: 'GLM-4.6',
+    ref: 'zai/glm-4.6',
+    contextWindow: 200000,
+    reasoning: true,
+    curated: true,
+    supportsVision: false,
   }
 
   function makeRecorder(): { steps: string[]; record: (name: string) => void } {
@@ -96,6 +110,8 @@ describe('collectWizardInputs back-aware flow', () => {
       askReuseExistingKey: async () => ({ kind: 'value', value: 'prompt' }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'api-key' }),
       askApiKey: async () => ({ kind: 'value', value: 'sk_test' }),
+      pickVisionProvider: async () => ({ kind: 'value', value: 'skip' }),
+      pickVisionModel: async () => ({ kind: 'value', value: openaiModel }),
       pickChannel: async () => ({ kind: 'value', value: 'none' }),
       runChannelFlow: async () => ({ kind: 'value', value: {} }),
       buildOAuthAuth: () => ({ kind: 'oauth', runLogin: async () => ({ ok: true }) }) as LLMAuth,
@@ -370,6 +386,159 @@ describe('collectWizardInputs back-aware flow', () => {
 
     expect(catalogLoads).toBe(1)
     expect(providerCallCount).toBe(2)
+  })
+
+  test('text-only default model: vision picker runs after auth, before pick-channel', async () => {
+    const calls: string[] = []
+    const prompts = makePrompts({
+      loadCatalog: async () => ({ options: [zaiTextOnlyModel, openaiModel], source: 'curated' }),
+      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
+      askApiKey: async () => {
+        calls.push('enter-api-key')
+        return { kind: 'value', value: 'zai_key' }
+      },
+      pickVisionProvider: async (options) => {
+        calls.push('pick-vision-provider')
+        // Vision picker MUST be fed only vision-capable models.
+        expect(options.every((o) => o.supportsVision)).toBe(true)
+        expect(options.some((o) => o.ref === zaiTextOnlyModel.ref)).toBe(false)
+        return { kind: 'value', value: 'openai' as KnownProviderId }
+      },
+      pickVisionModel: async () => {
+        calls.push('pick-vision-model')
+        return { kind: 'value', value: openaiModel }
+      },
+      pickAuthMethod: async (_provider, _initial) => {
+        calls.push('pick-auth-method')
+        return { kind: 'value', value: 'api-key' }
+      },
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'none' }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual([
+      'pick-auth-method',
+      'enter-api-key',
+      'pick-vision-provider',
+      'pick-vision-model',
+      'pick-auth-method',
+      'enter-api-key',
+      'pick-channel',
+    ])
+    expect(result!.vision?.model.ref).toBe(openaiModel.ref)
+    expect(result!.vision?.llmAuth).toEqual({ kind: 'api-key', apiKey: 'zai_key' })
+  })
+
+  test('vision-capable default model: vision picker is skipped entirely', async () => {
+    const calls: string[] = []
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'fireworks' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: fireworksModel }),
+      pickVisionProvider: async () => {
+        calls.push('pick-vision-provider')
+        return { kind: 'value', value: 'skip' }
+      },
+      pickVisionModel: async () => {
+        calls.push('pick-vision-model')
+        return { kind: 'value', value: openaiModel }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual([])
+    expect(result!.vision).toBeUndefined()
+  })
+
+  test('vision skip returns no vision profile', async () => {
+    const prompts = makePrompts({
+      loadCatalog: async () => ({ options: [zaiTextOnlyModel, openaiModel], source: 'curated' }),
+      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
+      pickVisionProvider: async () => ({ kind: 'value', value: 'skip' }),
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(result!.vision).toBeUndefined()
+  })
+
+  test('vision provider matches default provider: reuses default credentials, no auth prompt', async () => {
+    const calls: string[] = []
+    const visionOpenAI: ModelOption = { ...openaiModel, ref: 'openai/gpt-5.4', modelId: 'gpt-5.4' }
+    const prompts = makePrompts({
+      loadCatalog: async () => ({ options: [zaiTextOnlyModel, visionOpenAI], source: 'curated' }),
+      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
+      askApiKey: async () => {
+        calls.push('enter-api-key')
+        return { kind: 'value', value: 'zai_key' }
+      },
+      pickVisionProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickVisionModel: async () => ({ kind: 'value', value: { ...zaiTextOnlyModel, supportsVision: true } }),
+      pickAuthMethod: async () => {
+        calls.push('pick-auth-method')
+        return { kind: 'value', value: 'api-key' }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual(['pick-auth-method', 'enter-api-key'])
+    expect(result!.vision?.llmAuth).toEqual({ kind: 'api-key', apiKey: 'zai_key' })
+  })
+
+  test('vision provider with existing key in secrets.json: reuses without re-prompting', async () => {
+    const calls: string[] = []
+    const prompts = makePrompts({
+      loadCatalog: async () => ({ options: [zaiTextOnlyModel, openaiModel], source: 'curated' }),
+      readExistingApiKey: async (_cwd, providerId) => (providerId === 'openai' ? 'sk_existing_openai' : null),
+      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
+      askApiKey: async () => ({ kind: 'value', value: 'zai_key' }),
+      pickVisionProvider: async () => ({ kind: 'value', value: 'openai' as KnownProviderId }),
+      pickVisionModel: async () => ({ kind: 'value', value: openaiModel }),
+      pickAuthMethod: async () => {
+        calls.push('pick-auth-method')
+        return { kind: 'value', value: 'api-key' }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual(['pick-auth-method'])
+    expect(result!.vision?.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk_existing_openai' })
+  })
+
+  test('back from pick-vision-provider returns to the auth-finalizing step', async () => {
+    const calls: string[] = []
+    let backed = false
+    const prompts = makePrompts({
+      loadCatalog: async () => ({ options: [zaiTextOnlyModel, openaiModel], source: 'curated' }),
+      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
+      askApiKey: async () => {
+        calls.push('enter-api-key')
+        return { kind: 'value', value: 'zai_key' }
+      },
+      pickVisionProvider: async () => {
+        calls.push('pick-vision-provider')
+        if (!backed) {
+          backed = true
+          return { kind: 'back' }
+        }
+        return { kind: 'value', value: 'skip' }
+      },
+    })
+
+    await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual(['enter-api-key', 'pick-vision-provider', 'enter-api-key', 'pick-vision-provider'])
   })
 
   test('back from channel-flow returns to pick-channel', async () => {

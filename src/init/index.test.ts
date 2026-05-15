@@ -724,6 +724,15 @@ describe('scaffold', () => {
     })
   })
 
+  test('writes models.vision when visionModel is passed alongside the default model', async () => {
+    await scaffold(root, { model: 'zai/glm-4.6', visionModel: 'openai/gpt-5.4-nano' })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      models: Record<string, string>
+    }
+    expect(cfg.models).toEqual({ default: 'zai/glm-4.6', vision: 'openai/gpt-5.4-nano' })
+  })
+
   test('omits every field whose default is already provided by configSchema or a bundled plugin', async () => {
     await scaffold(root)
 
@@ -1208,6 +1217,33 @@ describe('writeSecrets', () => {
     expect((await readSecrets(root)).providers?.openai).toEqual({
       type: 'api_key',
       key: { value: 'openai-default-key' },
+    })
+  })
+
+  test('writes a second provider API key when vision profile uses a different provider', async () => {
+    await writeSecrets(root, {
+      apiKey: 'zai_key',
+      model: 'zai/glm-4.6',
+      visionModel: 'openai/gpt-5.4-nano',
+      visionApiKey: 'openai_vision_key',
+    })
+
+    const providers = (await readSecrets(root)).providers
+    expect(providers?.zai).toEqual({ type: 'api_key', key: { value: 'zai_key' } })
+    expect(providers?.openai).toEqual({ type: 'api_key', key: { value: 'openai_vision_key' } })
+  })
+
+  test('does NOT write a second provider key when vision provider matches the default provider', async () => {
+    await writeSecrets(root, {
+      apiKey: 'openai_key',
+      model: 'openai/gpt-5.4-nano',
+      visionModel: 'openai/gpt-5.4',
+      visionApiKey: 'should_not_overwrite',
+    })
+
+    expect((await readSecrets(root)).providers?.openai).toEqual({
+      type: 'api_key',
+      key: { value: 'openai_key' },
     })
   })
 

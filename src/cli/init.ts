@@ -78,7 +78,7 @@ export const init = defineCommand({
     log.info('Press ESC at any prompt to go back to the previous step.')
 
     const collected = await collectWizardInputs(cwd, defaultWizardPrompts)
-    const { model, llmAuth, channelSecrets } = collected
+    const { model, llmAuth, vision, channelSecrets } = collected
     const { discordBotToken, slackBotToken, slackAppToken, telegramBotToken, kakaotalkEmail, kakaotalkPassword } =
       channelSecrets
 
@@ -94,6 +94,7 @@ export const init = defineCommand({
         cwd,
         llmAuth,
         model: model.ref,
+        ...(vision !== undefined ? { visionModel: vision.model.ref, visionAuth: vision.llmAuth } : {}),
         cliEntry: process.argv[1],
         ...(discordBotToken !== undefined ? { discordBotToken } : {}),
         ...(slackBotToken !== undefined ? { slackBotToken, slackAppToken } : {}),
@@ -151,6 +152,11 @@ interface WizardState {
   reuseExisting?: boolean
   authMethod?: 'api-key' | 'oauth'
   llmAuth?: LLMAuth
+  visionProviderId?: KnownProviderId
+  visionModel?: ModelOption
+  visionReuseExisting?: boolean
+  visionAuthMethod?: 'api-key' | 'oauth'
+  visionLlmAuth?: LLMAuth
   channelChoice?: ChannelChoice
 }
 
@@ -159,6 +165,14 @@ type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'kakaotalk' | 'none'
 interface CollectedInputs {
   model: ModelOption
   llmAuth: LLMAuth
+  // Set only when the default model is text-only and the user picked a
+  // vision-capable model for the `vision` profile. `llmAuth` is reused from
+  // the default provider's credentials when the vision provider matches, so
+  // tests can still mint a single auth object and have it cover both.
+  vision?: {
+    model: ModelOption
+    llmAuth: LLMAuth
+  }
   channelSecrets: {
     discordBotToken?: string
     slackBotToken?: string
@@ -175,6 +189,10 @@ type StepId =
   | 'reuse-existing-key'
   | 'pick-auth-method'
   | 'enter-api-key'
+  | 'pick-vision-provider'
+  | 'pick-vision-model'
+  | 'pick-vision-auth-method'
+  | 'enter-vision-api-key'
   | 'pick-channel'
   | 'channel-flow'
 
@@ -197,6 +215,15 @@ export interface WizardPrompts {
     initial: 'api-key' | 'oauth' | undefined,
   ) => Promise<StepResult<'api-key' | 'oauth'>>
   askApiKey: (provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]) => Promise<StepResult<string>>
+  pickVisionProvider: (
+    options: ModelOption[],
+    initial: KnownProviderId | undefined,
+  ) => Promise<StepResult<KnownProviderId | 'skip'>>
+  pickVisionModel: (
+    options: ModelOption[],
+    providerId: KnownProviderId,
+    initial: KnownModelRef | undefined,
+  ) => Promise<StepResult<ModelOption>>
   pickChannel: (initial: ChannelChoice | undefined) => Promise<StepResult<ChannelChoice>>
   runChannelFlow: (choice: ChannelChoice) => Promise<StepResult<CollectedInputs['channelSecrets']>>
   buildOAuthAuth: (provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]) => LLMAuth
@@ -210,6 +237,8 @@ export const defaultWizardPrompts: WizardPrompts = {
   askReuseExistingKey,
   pickAuthMethod,
   askApiKey,
+  pickVisionProvider,
+  pickVisionModel,
   pickChannel,
   runChannelFlow,
   buildOAuthAuth: (provider) => ({
@@ -264,7 +293,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
           log.info(`Using existing ${provider.name} API key from secrets.json.`)
           state.llmAuth = { kind: 'api-key', apiKey: existingApiKey }
           state.reuseExisting = true
-          step = 'pick-channel'
+          step = stepAfterDefaultAuth(state)
           break
         }
         state.reuseExisting = false
@@ -283,7 +312,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
         state.authMethod = result.value
         if (result.value === 'oauth') {
           state.llmAuth = prompts.buildOAuthAuth(provider)
-          step = 'pick-channel'
+          step = stepAfterDefaultAuth(state)
         } else {
           step = 'enter-api-key'
         }
@@ -298,6 +327,91 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
           break
         }
         state.llmAuth = { kind: 'api-key', apiKey: result.value }
+        step = stepAfterDefaultAuth(state)
+        break
+      }
+
+      case 'pick-vision-provider': {
+        const visionOptions = catalog.options.filter((o) => o.supportsVision)
+        const result = await prompts.pickVisionProvider(visionOptions, state.visionProviderId)
+        if (result.kind === 'back') {
+          step = stepBeforeVision(state)
+          break
+        }
+        if (result.value === 'skip') {
+          state.visionProviderId = undefined
+          state.visionModel = undefined
+          state.visionLlmAuth = undefined
+          state.visionReuseExisting = undefined
+          state.visionAuthMethod = undefined
+          step = 'pick-channel'
+          break
+        }
+        if (state.visionProviderId !== result.value) {
+          state.visionModel = undefined
+          state.visionReuseExisting = undefined
+          state.visionAuthMethod = undefined
+          state.visionLlmAuth = undefined
+        }
+        state.visionProviderId = result.value
+        step = 'pick-vision-model'
+        break
+      }
+
+      case 'pick-vision-model': {
+        const visionOptions = catalog.options.filter((o) => o.supportsVision)
+        const result = await prompts.pickVisionModel(visionOptions, state.visionProviderId!, state.visionModel?.ref)
+        if (result.kind === 'back') {
+          step = 'pick-vision-provider'
+          break
+        }
+        state.visionModel = result.value
+        if (state.visionProviderId === state.providerId) {
+          log.info(`Using ${KNOWN_PROVIDERS[state.providerId!].name} credentials for the vision profile.`)
+          state.visionLlmAuth = state.llmAuth
+          state.visionReuseExisting = true
+          step = 'pick-channel'
+          break
+        }
+        const existingVisionKey = await prompts.readExistingApiKey(cwd, state.visionProviderId!)
+        if (existingVisionKey !== null) {
+          log.info(`Using existing ${KNOWN_PROVIDERS[state.visionProviderId!].name} API key from secrets.json.`)
+          state.visionLlmAuth = { kind: 'api-key', apiKey: existingVisionKey }
+          state.visionReuseExisting = true
+          step = 'pick-channel'
+          break
+        }
+        state.visionReuseExisting = false
+        state.visionLlmAuth = undefined
+        step = 'pick-vision-auth-method'
+        break
+      }
+
+      case 'pick-vision-auth-method': {
+        const provider = KNOWN_PROVIDERS[state.visionProviderId!]
+        const result = await prompts.pickAuthMethod(provider, state.visionAuthMethod)
+        if (result.kind === 'back') {
+          step = 'pick-vision-model'
+          break
+        }
+        state.visionAuthMethod = result.value
+        if (result.value === 'oauth') {
+          state.visionLlmAuth = prompts.buildOAuthAuth(provider)
+          step = 'pick-channel'
+        } else {
+          step = 'enter-vision-api-key'
+        }
+        break
+      }
+
+      case 'enter-vision-api-key': {
+        const provider = KNOWN_PROVIDERS[state.visionProviderId!]
+        const result = await prompts.askApiKey(provider)
+        if (result.kind === 'back') {
+          step = 'pick-vision-auth-method'
+          break
+        }
+        state.visionLlmAuth = { kind: 'api-key', apiKey: result.value }
         step = 'pick-channel'
         break
       }
@@ -305,13 +419,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
       case 'pick-channel': {
         const result = await prompts.pickChannel(state.channelChoice)
         if (result.kind === 'back') {
-          if (state.reuseExisting === true) {
-            step = 'reuse-existing-key'
-          } else if (state.authMethod === 'api-key') {
-            step = 'enter-api-key'
-          } else {
-            step = 'pick-auth-method'
-          }
+          step = stepBeforePickChannel(state)
           break
         }
         state.channelChoice = result.value
@@ -328,11 +436,36 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
         return {
           model: state.model!,
           llmAuth: state.llmAuth!,
+          ...(state.visionModel !== undefined && state.visionLlmAuth !== undefined
+            ? { vision: { model: state.visionModel, llmAuth: state.visionLlmAuth } }
+            : {}),
           channelSecrets: result.value,
         }
       }
     }
   }
+}
+
+function stepAfterDefaultAuth(state: WizardState): StepId {
+  return state.model?.supportsVision === false ? 'pick-vision-provider' : 'pick-channel'
+}
+
+function stepBeforeVision(state: WizardState): StepId {
+  if (state.reuseExisting === true) return 'reuse-existing-key'
+  if (state.authMethod === 'api-key') return 'enter-api-key'
+  return 'pick-auth-method'
+}
+
+function stepBeforePickChannel(state: WizardState): StepId {
+  if (state.visionModel !== undefined) {
+    if (state.visionProviderId === state.providerId) return 'pick-vision-model'
+    if (state.visionReuseExisting === true) return 'pick-vision-model'
+    if (state.visionAuthMethod === 'api-key') return 'enter-vision-api-key'
+    if (state.visionAuthMethod === 'oauth') return 'pick-vision-auth-method'
+    return 'pick-vision-model'
+  }
+  if (state.model?.supportsVision === false) return 'pick-vision-provider'
+  return stepBeforeVision(state)
 }
 
 async function loadCatalog(): Promise<NonNullable<WizardState['catalog']>> {
@@ -416,6 +549,52 @@ async function pickAuthMethod(
   }
   // Single-method providers: no prompt to back out of, so always advance.
   return value(supportsOAuth ? 'oauth' : 'api-key')
+}
+
+async function pickVisionProvider(
+  options: ModelOption[],
+  initial: KnownProviderId | undefined,
+): Promise<StepResult<KnownProviderId | 'skip'>> {
+  const providers = uniqueProviders(options)
+  if (providers.length === 0) {
+    log.warn('No vision-capable models available; skipping vision profile.')
+    return value('skip')
+  }
+  const choice = await select<KnownProviderId | 'skip'>({
+    message: 'Your model is text-only. Pick a provider for the `vision` profile (used for image input)',
+    options: [
+      ...providers.map((id) => ({
+        value: id as KnownProviderId | 'skip',
+        label: KNOWN_PROVIDERS[id].name,
+        hint: providerAuthHint(id),
+      })),
+      { value: 'skip', label: 'Skip — no vision support', hint: 'add later with `typeclaw model set vision <ref>`' },
+    ],
+    initialValue: initial ?? providers[0],
+  })
+  if (isCancel(choice)) return back()
+  return value(choice)
+}
+
+async function pickVisionModel(
+  options: ModelOption[],
+  providerId: KnownProviderId,
+  initial: KnownModelRef | undefined,
+): Promise<StepResult<ModelOption>> {
+  const candidates = options.filter((o) => o.providerId === providerId)
+  const choice = await select<KnownModelRef>({
+    message: `Pick a vision-capable ${KNOWN_PROVIDERS[providerId].name} model`,
+    options: candidates.map((o) => ({
+      value: o.ref,
+      label: o.modelName,
+      hint: formatModelHint(o),
+    })),
+    initialValue: initial ?? candidates[0]?.ref,
+  })
+  if (isCancel(choice)) return back()
+  const picked = candidates.find((o) => o.ref === choice)
+  if (!picked) throw new Error(`Internal error: picked vision model ${choice} not in candidates`)
+  return value(picked)
 }
 
 async function askApiKey(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]): Promise<StepResult<string>> {

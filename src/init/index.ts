@@ -109,6 +109,13 @@ export type InitOptions = {
   // defaults to the api-key path with `apiKey` (legacy field, still
   // supported for backwards compat with the old `runInit` signature).
   llmAuth?: LLMAuth
+  // Optional second model + auth, written as `models.vision` when the
+  // default model is text-only. Auth is reused from the default path
+  // when both refer to the same provider; the wizard enforces this
+  // pairing rule, so by the time we get here `visionAuth` is either
+  // (a) absent, or (b) the right auth for `visionModel`'s provider.
+  visionModel?: KnownModelRef
+  visionAuth?: LLMAuth
   apiKey?: string
   discordBotToken?: string
   slackBotToken?: string
@@ -133,6 +140,8 @@ export async function runInit({
   apiKey,
   llmAuth,
   model = DEFAULT_MODEL_REF,
+  visionModel,
+  visionAuth,
   discordBotToken,
   slackBotToken,
   slackAppToken,
@@ -180,12 +189,32 @@ export async function runInit({
     }
   }
 
+  // When the vision profile uses a different provider than the default, its
+  // OAuth login runs here too, before any file write. Same-provider vision
+  // reuses the default auth (no separate login). API-key vision auth is
+  // captured in memory and persisted by writeSecrets() below.
+  if (
+    visionAuth !== undefined &&
+    visionAuth.kind === 'oauth' &&
+    visionModel !== undefined &&
+    providerForModelRef(visionModel) !== providerForModelRef(model)
+  ) {
+    emit({ step: 'oauth-login', phase: 'start' })
+    await mkdir(cwd, { recursive: true })
+    const result = await visionAuth.runLogin({ cwd, model: visionModel })
+    emit({ step: 'oauth-login', phase: 'done', result })
+    if (!result.ok) {
+      throw new Error(`OAuth login failed: ${result.reason}`)
+    }
+  }
+
   const wantsDiscord = discordBotToken !== undefined && discordBotToken !== ''
   const wantsSlack = slackBotToken !== undefined && slackBotToken !== ''
   const wantsTelegram = telegramBotToken !== undefined && telegramBotToken !== ''
   emit({ step: 'scaffold', phase: 'start' })
   await scaffold(cwd, {
     model,
+    ...(visionModel !== undefined ? { visionModel } : {}),
     withDiscord: wantsDiscord,
     withSlack: wantsSlack,
     withTelegram: wantsTelegram,
@@ -197,6 +226,9 @@ export async function runInit({
   await writeSecrets(cwd, {
     model,
     apiKey: resolvedAuth.kind === 'api-key' ? resolvedAuth.apiKey : undefined,
+    ...(visionModel !== undefined && visionAuth?.kind === 'api-key'
+      ? { visionModel, visionApiKey: visionAuth.apiKey }
+      : {}),
     discordBotToken,
     slackBotToken,
     slackAppToken,
@@ -395,6 +427,7 @@ export async function isHatched(dir: string): Promise<boolean> {
 
 export type ScaffoldOptions = {
   model?: KnownModelRef
+  visionModel?: KnownModelRef
   withDiscord?: boolean
   withSlack?: boolean
   withTelegram?: boolean
@@ -416,9 +449,11 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   // `memory.*`) is omitted to keep the scaffold minimal — duplicating defaults
   // here would mean every schema change has to be mirrored in two places, and
   // users would feel obligated to maintain values they never set.
+  const models: Record<string, KnownModelRef> = { default: options.model ?? DEFAULT_MODEL_REF }
+  if (options.visionModel !== undefined) models.vision = options.visionModel
   const config: Record<string, unknown> = {
     $schema: './node_modules/typeclaw/typeclaw.schema.json',
-    models: { default: options.model ?? DEFAULT_MODEL_REF },
+    models,
   }
   const channels: Record<string, Record<string, never>> = {}
   if (options.withDiscord) channels['discord-bot'] = {}
@@ -587,6 +622,8 @@ export async function writeSecrets(
   {
     model = DEFAULT_MODEL_REF,
     apiKey,
+    visionModel,
+    visionApiKey,
     discordBotToken,
     slackBotToken,
     slackAppToken,
@@ -595,6 +632,8 @@ export async function writeSecrets(
     model?: KnownModelRef
     // Omitted on the OAuth path — credentials live in secrets.json via the OAuth runner.
     apiKey?: string
+    visionModel?: KnownModelRef
+    visionApiKey?: string
     discordBotToken?: string
     slackBotToken?: string
     slackAppToken?: string
@@ -603,8 +642,20 @@ export async function writeSecrets(
 ): Promise<void> {
   const providerId = providerForModelRef(model)
   const apiKeyEnv = KNOWN_PROVIDERS[providerId].apiKeyEnv
-  if (apiKey !== undefined && apiKeyEnv !== null) {
-    createSecretsStoreForAgent(join(root, 'secrets.json')).set(providerId, { type: 'api_key', key: apiKey })
+  const wantsDefaultKey = apiKey !== undefined && apiKeyEnv !== null
+  const visionProviderId = visionModel !== undefined ? providerForModelRef(visionModel) : null
+  const wantsVisionKey =
+    visionModel !== undefined &&
+    visionApiKey !== undefined &&
+    visionProviderId !== providerId &&
+    visionProviderId !== null &&
+    KNOWN_PROVIDERS[visionProviderId].apiKeyEnv !== null
+  if (wantsDefaultKey || wantsVisionKey) {
+    const secretsStore = createSecretsStoreForAgent(join(root, 'secrets.json'))
+    if (wantsDefaultKey) secretsStore.set(providerId, { type: 'api_key', key: apiKey! })
+    if (wantsVisionKey) {
+      secretsStore.set(visionProviderId, { type: 'api_key', key: visionApiKey! })
+    }
   }
 
   const channelTokens: Record<string, Record<string, Secret>> = {}

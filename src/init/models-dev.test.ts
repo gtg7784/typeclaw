@@ -19,6 +19,15 @@ describe('curatedOptions', () => {
     expect(kimi).toBeDefined()
     expect(kimi?.providerId).toBe('fireworks')
   })
+
+  test('flags supportsVision based on curated input modality', () => {
+    const options = curatedOptions()
+
+    const openaiNano = options.find((o) => o.ref === 'openai/gpt-5.4-nano')
+    expect(openaiNano?.supportsVision).toBe(true)
+    const glm = options.find((o) => o.ref === 'zai/glm-4.6')
+    expect(glm?.supportsVision).toBe(false)
+  })
 })
 
 describe('fetchModelOptions', () => {
