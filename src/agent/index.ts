@@ -7,6 +7,7 @@ import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent
 
 import type { ChannelRouter } from '@/channels/router'
 import { getConfig, resolveModel } from '@/config'
+import type { PermissionService } from '@/permissions'
 import type {
   BuiltinToolRef,
   HookBus,
@@ -25,7 +26,7 @@ import { renderGitNudge } from './git-nudge'
 import { resolveBuiltinToolRefs, wrapPluginTool, wrapSystemAgentTool, wrapSystemTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
-import { renderSessionOrigin, type SessionOrigin } from './session-origin'
+import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
 import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
@@ -94,6 +95,21 @@ export type CreateSessionOptions = {
   // Enables the `restart` tool. Set when the agent is running inside a
   // typeclaw-managed container. Read from TYPECLAW_CONTAINER_NAME at the call site.
   containerName?: string
+  // The permission service the runtime resolved at boot. When provided, the
+  // resolved role and permission list for `options.origin` are rendered into
+  // the system prompt under `## Your role in this session`. The block is
+  // emitted for channel/cron/subagent sessions, and for TUI sessions only
+  // when the resolved role is not the built-in `owner` (because TUI
+  // resolving to `owner` is the common case and we save tokens on every
+  // interactive session). Omitting `permissions` falls back to the previous
+  // behavior (no role annotation), which is what tests and stand-alone
+  // callers want.
+  //
+  // The role rendered here is a session-creation snapshot. Channel sessions
+  // re-resolve per-turn through `originRef` for tool gating, but the system
+  // prompt is not regenerated; see `typeclaw-permissions` skill for how the
+  // agent should interpret the snapshot on later turns.
+  permissions?: PermissionService
 }
 
 export type CreateSessionResult = {
@@ -122,10 +138,11 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 
   const resourceLoader =
     options.systemPromptOverride !== undefined
-      ? await createOverrideResourceLoader(options.systemPromptOverride, options.origin)
+      ? await createOverrideResourceLoader(options.systemPromptOverride, options.origin, options.permissions)
       : await createResourceLoader({
           ...(options.plugins ? { plugins: options.plugins, materializedSkills } : {}),
           ...(options.origin ? { origin: options.origin } : {}),
+          ...(options.permissions ? { permissions: options.permissions } : {}),
         })
 
   const getOrigin: () => SessionOrigin | undefined =
@@ -401,9 +418,11 @@ function makePluginLogger(pluginName: string) {
 export async function createOverrideResourceLoader(
   systemPrompt: string,
   origin?: SessionOrigin,
+  permissions?: PermissionService,
 ): Promise<DefaultResourceLoader> {
+  const finalPrompt = withOrigin(systemPrompt, origin, permissions)
   const loader = new DefaultResourceLoader({
-    systemPromptOverride: () => withOrigin(systemPrompt, origin),
+    systemPromptOverride: () => finalPrompt,
     appendSystemPromptOverride: () => [],
   })
   await loader.reload()
@@ -415,6 +434,7 @@ export type CreateResourceLoaderOptions = {
   plugins?: PluginSessionWiring
   materializedSkills?: MaterializedSkills | null
   origin?: SessionOrigin
+  permissions?: PermissionService
 }
 
 export async function createResourceLoader(options: CreateResourceLoaderOptions = {}): Promise<DefaultResourceLoader> {
@@ -427,6 +447,14 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
     await options.plugins.hooks.runSessionPrompt(event)
     systemPrompt = event.prompt
   }
+
+  // Origin block (and the optional role/permissions sub-block) is appended
+  // BEFORE gitNudge so the dirty-files snapshot remains the agent's most
+  // recent context and keeps its cache-suffix position. Putting the role
+  // block after gitNudge would shift the dirty snapshot out of suffix
+  // position and re-fragment the cacheable prefix shared by clean-worktree
+  // sessions.
+  systemPrompt = withOrigin(systemPrompt, options.origin, options.permissions)
 
   // Appended last so the dirty-files snapshot is the most-recent context the
   // agent reads, and so its bytes sit in the cache-suffix region rather than
@@ -466,7 +494,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   }
 
   const loader = new DefaultResourceLoader({
-    systemPromptOverride: () => withOrigin(systemPrompt, options.origin),
+    systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
     additionalSkillPaths,
   })
@@ -474,9 +502,30 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   return loader
 }
 
-function withOrigin(systemPrompt: string, origin: SessionOrigin | undefined): string {
+function withOrigin(
+  systemPrompt: string,
+  origin: SessionOrigin | undefined,
+  permissions: PermissionService | undefined,
+): string {
   if (!origin) return systemPrompt
-  return `${systemPrompt}\n\n${renderSessionOrigin(origin)}`
+  const roleContext = resolveRoleContext(origin, permissions)
+  return `${systemPrompt}\n\n${renderSessionOrigin(origin, Date.now(), roleContext)}`
+}
+
+function resolveRoleContext(
+  origin: SessionOrigin,
+  permissions: PermissionService | undefined,
+): SessionRoleContext | undefined {
+  if (permissions === undefined) return undefined
+  const described = permissions.describe(origin)
+  // TUI normally resolves to `owner` via the built-in `owner.match = [tui]`
+  // entry, and we skip the role block in that case to save tokens on every
+  // interactive session. But user-declared roles can match TUI first (the
+  // resolver is first-match-wins in declaration order), so a non-owner TUI
+  // role is possible and the agent needs to see it. The "TUI is always owner"
+  // shorthand in docs is the common case, not an invariant.
+  if (origin.kind === 'tui' && described.role === 'owner') return undefined
+  return described
 }
 
 export function getBundledSkillsDir(): string {
