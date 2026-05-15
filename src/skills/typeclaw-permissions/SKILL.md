@@ -9,7 +9,13 @@ You run under an access-control system that gates which sessions wake you, which
 
 ## The model in one paragraph
 
-Every session you run in has a `SessionOrigin` (TUI / channel / cron / subagent). The runtime resolves that origin to a **role** by walking the `roles` block in `typeclaw.json`, in declaration order, and picking the first role whose `match` rules cover the origin. Each role carries a set of **permissions** — opaque dotted strings like `channel.respond`, `cron.schedule`, `security.bypass.gitExfil`. The runtime checks `permissions.has(origin, '<perm>')` at three places: the channel router (gates `channel.respond` before creating a session for an inbound message), the security plugin's `tool.before` hook (gates each `security.bypass.*` so the corresponding guard can be skipped), and plugin code that opts in. There is no other access-control surface — no per-tool ACL, no file-system isolation, no per-author allowlist outside `match` rules.
+Every session you run in has a `SessionOrigin` (TUI / channel / cron / subagent). How the runtime resolves it to a **role** depends on the origin kind:
+
+- **TUI and channel** sessions resolve by walking the `roles` block in `typeclaw.json` in declaration order and picking the first role whose `match` rules cover the origin. This is the only origin shape that match rules actually grant roles to at runtime.
+- **Cron** sessions resolve from `scheduledByRole`, a string stamped on the cron job record itself (in `cron.json` for hand-authored entries, or by the runtime for plugin-contributed cron). Match rules of the form `cron` parse but never grant a role to a running cron session — provenance wins.
+- **Subagent** sessions resolve from `spawnedByRole`, snapshotted from the spawning session's resolved role at spawn time. Same story: `subagent` / `subagent:<name>` rules parse but don't grant roles at runtime; the spawn provenance is the source of truth.
+
+Each role carries a set of **permissions** — opaque dotted strings like `channel.respond`, `cron.schedule`, `security.bypass.gitExfil`. The runtime checks `permissions.has(origin, '<perm>')` at three places: the channel router (gates `channel.respond` before creating a session for an inbound message), the security plugin's `tool.before` hook (gates each `security.bypass.*` so the corresponding guard can be skipped), and plugin code that opts in. There is no other access-control surface — no per-tool ACL, no file-system isolation, no per-author allowlist outside `match` rules.
 
 ## The four built-in roles
 
@@ -26,7 +32,15 @@ A session that doesn't match anything resolves to `guest`. `guest` has no `chann
 
 ## What your current session sees
 
-The session-creation origin and resolved role are rendered into your system prompt under `## Session origin` for cron / channel / subagent sessions. The line looks like `Your role in this session: \`member\`. Permissions: \`channel.respond\`.`. TUI sessions are not annotated because TUI is always `owner` by construction.
+When the runtime knows your permissions, it prepends a block under your `## Session origin`:
+
+```
+## Your role in this session
+
+Role: `member`. Permissions: `channel.respond`.
+```
+
+The block renders for cron / channel / subagent sessions. For TUI sessions, the block is omitted **when** the resolved role is the built-in `owner` (the common case, so we save tokens on every interactive session) and rendered when a user-declared role matched TUI first (because the resolver is first-match-wins in declaration order, a custom role with `match: ["tui"]` placed before `owner` will demote TUI). If you don't see the block in a TUI session, treat yourself as `owner`.
 
 **The role line reflects the session at creation time.** For channel sessions, the speaker on subsequent turns may resolve to a different role; the runtime updates that internally for tool gating (the channel router and the security plugin re-resolve on each turn), but the system prompt is not regenerated mid-session. If the user asks "what role am I right now in this channel", read `typeclaw.json` `roles` and match their author id against `match[]` yourself — do not parrot the system-prompt line as if it always applied.
 
@@ -38,9 +52,6 @@ The session-creation origin and resolved role are rendered into your system prom
 
 ```
 tui                                # any TUI session
-cron                               # any cron session (resolved by provenance, not by match)
-subagent                           # any subagent session
-subagent:<name>                    # specific subagent (e.g. subagent:memory-logger)
 *                                  # any channel session, any platform
 <platform>:*                       # any chat on this platform (slack | discord | telegram | kakao)
 <platform>:<workspace>             # one workspace, any chat
@@ -50,6 +61,8 @@ kakao:group/*                      # any KakaoTalk group chat
 kakao:open/*                       # any KakaoTalk open chat
 <rule> author:<authorId>           # AND-tighten any of the above to one author
 ```
+
+`cron`, `subagent`, and `subagent:<name>` are also valid parser shapes (they parse without error), but they do **not** grant a role to a running cron or subagent session — those resolve from stamped provenance (`scheduledByRole` / `spawnedByRole`) instead. Don't write those rules expecting them to admit traffic the way channel rules do.
 
 Within a single string, tokens are **AND**'d. Across multiple strings in `match[]`, they're **OR**'d. The platform names are exactly `slack | discord | telegram | kakao`. Workspace and chat coordinates are platform-native IDs (Slack team `T0123`, Discord guild `123456789012345678`, Telegram chat `42`, KakaoTalk chat hash) — **never** display names. If the user gives you a name, you need to resolve it to an ID before writing the match rule.
 

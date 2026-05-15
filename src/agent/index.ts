@@ -96,11 +96,19 @@ export type CreateSessionOptions = {
   // typeclaw-managed container. Read from TYPECLAW_CONTAINER_NAME at the call site.
   containerName?: string
   // The permission service the runtime resolved at boot. When provided, the
-  // resolved role and permission list for `options.origin` (or
-  // `options.originRef.current` at creation time) are rendered into the
-  // system prompt under `## Your role in this session` for non-TUI sessions.
-  // Omitting it falls back to the previous behavior (no role annotation),
-  // which is what tests and stand-alone callers want.
+  // resolved role and permission list for `options.origin` are rendered into
+  // the system prompt under `## Your role in this session`. The block is
+  // emitted for channel/cron/subagent sessions, and for TUI sessions only
+  // when the resolved role is not the built-in `owner` (because TUI
+  // resolving to `owner` is the common case and we save tokens on every
+  // interactive session). Omitting `permissions` falls back to the previous
+  // behavior (no role annotation), which is what tests and stand-alone
+  // callers want.
+  //
+  // The role rendered here is a session-creation snapshot. Channel sessions
+  // re-resolve per-turn through `originRef` for tool gating, but the system
+  // prompt is not regenerated; see `typeclaw-permissions` skill for how the
+  // agent should interpret the snapshot on later turns.
   permissions?: PermissionService
 }
 
@@ -412,8 +420,9 @@ export async function createOverrideResourceLoader(
   origin?: SessionOrigin,
   permissions?: PermissionService,
 ): Promise<DefaultResourceLoader> {
+  const finalPrompt = withOrigin(systemPrompt, origin, permissions)
   const loader = new DefaultResourceLoader({
-    systemPromptOverride: () => withOrigin(systemPrompt, origin, permissions),
+    systemPromptOverride: () => finalPrompt,
     appendSystemPromptOverride: () => [],
   })
   await loader.reload()
@@ -438,6 +447,14 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
     await options.plugins.hooks.runSessionPrompt(event)
     systemPrompt = event.prompt
   }
+
+  // Origin block (and the optional role/permissions sub-block) is appended
+  // BEFORE gitNudge so the dirty-files snapshot remains the agent's most
+  // recent context and keeps its cache-suffix position. Putting the role
+  // block after gitNudge would shift the dirty snapshot out of suffix
+  // position and re-fragment the cacheable prefix shared by clean-worktree
+  // sessions.
+  systemPrompt = withOrigin(systemPrompt, options.origin, options.permissions)
 
   // Appended last so the dirty-files snapshot is the most-recent context the
   // agent reads, and so its bytes sit in the cache-suffix region rather than
@@ -477,7 +494,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   }
 
   const loader = new DefaultResourceLoader({
-    systemPromptOverride: () => withOrigin(systemPrompt, options.origin, options.permissions),
+    systemPromptOverride: () => systemPrompt,
     appendSystemPromptOverride: () => [],
     additionalSkillPaths,
   })
@@ -500,8 +517,15 @@ function resolveRoleContext(
   permissions: PermissionService | undefined,
 ): SessionRoleContext | undefined {
   if (permissions === undefined) return undefined
-  if (origin.kind === 'tui') return undefined
-  return permissions.describe(origin)
+  const described = permissions.describe(origin)
+  // TUI normally resolves to `owner` via the built-in `owner.match = [tui]`
+  // entry, and we skip the role block in that case to save tokens on every
+  // interactive session. But user-declared roles can match TUI first (the
+  // resolver is first-match-wins in declaration order), so a non-owner TUI
+  // role is possible and the agent needs to see it. The "TUI is always owner"
+  // shorthand in docs is the common case, not an invariant.
+  if (origin.kind === 'tui' && described.role === 'owner') return undefined
+  return described
 }
 
 export function getBundledSkillsDir(): string {

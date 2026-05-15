@@ -435,14 +435,21 @@ describe('renderSessionOrigin', () => {
     expect(out).not.toContain('members:')
   })
 
-  test('TUI origin does not render the role block even when role context is passed', () => {
+  test('TUI origin renders the role block when role context is passed (caller decides when to omit it for owner)', () => {
     const out = renderSessionOrigin({ kind: 'tui', sessionId: 'ses_abc' }, undefined, {
-      role: 'owner',
-      permissions: ['channel.respond', 'cron.schedule'],
+      role: 'guest',
+      permissions: [],
     })
 
+    expect(out).toContain('## Your role in this session')
+    expect(out).toContain('`guest`')
+  })
+
+  test('TUI origin without role context preserves the prior bare rendering', () => {
+    const out = renderSessionOrigin({ kind: 'tui', sessionId: 'ses_abc' })
+
     expect(out).not.toContain('Your role in this session')
-    expect(out).not.toContain('`owner`')
+    expect(out).toContain('## Session origin')
   })
 
   test('cron origin appends the role block when role context is provided', () => {
@@ -452,7 +459,7 @@ describe('renderSessionOrigin', () => {
     })
 
     expect(out).toContain('## Your role in this session')
-    expect(out).toContain('Role: `trusted`.')
+    expect(out).toContain('`trusted`')
     expect(out).toContain('`channel.respond`')
     expect(out).toContain('`security.bypass.secretExfilBash`')
     expect(out).toContain('typeclaw-permissions')
@@ -474,8 +481,8 @@ describe('renderSessionOrigin', () => {
 
     expect(out).toContain('## Session origin')
     expect(out).toContain('## Your role in this session')
-    expect(out).toContain('Role: `member`.')
-    expect(out).toContain('Permissions: `channel.respond`.')
+    expect(out).toContain('`member`')
+    expect(out).toContain('`channel.respond`')
     expect(out.indexOf('Be concise')).toBeLessThan(out.indexOf('## Your role in this session'))
   })
 
@@ -487,7 +494,7 @@ describe('renderSessionOrigin', () => {
     )
 
     expect(out).toContain('## Your role in this session')
-    expect(out).toContain('Role: `owner`.')
+    expect(out).toContain('`owner`')
   })
 
   test('role block renders "none" when the resolved role has no permissions (guest)', () => {

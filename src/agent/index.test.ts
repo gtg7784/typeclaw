@@ -330,6 +330,125 @@ describe('createResourceLoader', () => {
     // then
     expect(capturedOrigin).toEqual(origin)
   })
+
+  test('renders the role/permissions block when a PermissionService is provided for a channel session', async () => {
+    // given: a permission service with an author-scoped member rule
+    const { createPermissionService } = await import('@/permissions')
+    const permissions = createPermissionService({
+      roles: {
+        member: {
+          match: [{ kind: 'channel', platform: 'slack', workspace: 'T0', chat: 'C0', author: 'U_ME' }],
+          permissions: ['channel.respond'],
+        },
+      },
+    })
+    const origin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+      lastInboundAuthorId: 'U_ME',
+    }
+
+    // when
+    const loader = await createResourceLoader({ agentDir, origin, permissions })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('## Your role in this session')
+    expect(prompt).toContain('`member`')
+    expect(prompt).toContain('`channel.respond`')
+  })
+
+  test('omits the role block when permissions is not provided (preserves prior behavior)', async () => {
+    // given: a channel origin but no permission service
+    const origin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    }
+
+    // when
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('## Your role in this session')
+  })
+
+  test('places the role block before the gitNudge so dirty-files stays in the cache suffix', async () => {
+    // given: a git repo with a dirty tracked file so gitNudge will render,
+    // plus a permission service that will produce a role block
+    await initGitRepo(agentDir)
+    await writeFile(join(agentDir, 'tracked.md'), 'initial')
+    await runGit(agentDir, ['add', '.'])
+    await runGit(agentDir, ['commit', '-q', '-m', 'init'])
+    await writeFile(join(agentDir, 'tracked.md'), 'dirty edit')
+
+    const { createPermissionService } = await import('@/permissions')
+    const permissions = createPermissionService({
+      roles: {
+        member: {
+          match: [{ kind: 'channel', platform: 'slack', workspace: 'T0', chat: 'C0' }],
+          permissions: ['channel.respond'],
+        },
+      },
+    })
+    const origin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    }
+
+    // when
+    const loader = await createResourceLoader({ agentDir, origin, permissions })
+
+    // then: role block appears, gitNudge appears, and gitNudge is AFTER the role block
+    const prompt = loader.getSystemPrompt() ?? ''
+    const roleIdx = prompt.indexOf('## Your role in this session')
+    const nudgeIdx = prompt.indexOf('tracked.md')
+    expect(roleIdx).toBeGreaterThan(-1)
+    expect(nudgeIdx).toBeGreaterThan(-1)
+    expect(roleIdx).toBeLessThan(nudgeIdx)
+  })
+
+  test('TUI session resolving to owner does not render the role block (token-saving common case)', async () => {
+    // given: no user roles declared, so TUI resolves to built-in owner
+    const { createPermissionService } = await import('@/permissions')
+    const permissions = createPermissionService({})
+    const origin: SessionOrigin = { kind: 'tui', sessionId: 'ses_t' }
+
+    // when
+    const loader = await createResourceLoader({ agentDir, origin, permissions })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('## Your role in this session')
+  })
+
+  test('TUI session demoted by a user-declared role DOES render the role block', async () => {
+    // given: a custom role declared BEFORE owner with match: ['tui']
+    const { createPermissionService } = await import('@/permissions')
+    const permissions = createPermissionService({
+      roles: {
+        guest: { match: [{ kind: 'tui' }], permissions: [] },
+      },
+    })
+    const origin: SessionOrigin = { kind: 'tui', sessionId: 'ses_t' }
+
+    // when
+    const loader = await createResourceLoader({ agentDir, origin, permissions })
+
+    // then: the agent sees its demoted role
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('## Your role in this session')
+    expect(prompt).toContain('`guest`')
+  })
 })
 
 describe('createOverrideResourceLoader', () => {

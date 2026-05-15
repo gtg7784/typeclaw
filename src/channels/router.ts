@@ -501,7 +501,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return membership
   }
 
-  const ensureLive = async (key: ChannelKey, triggeringMessageId?: string): Promise<LiveSession> => {
+  const ensureLive = async (
+    key: ChannelKey,
+    triggeringMessageId?: string,
+    triggeringAuthorId?: string,
+  ): Promise<LiveSession> => {
     const keyId = channelKeyId(key)
     const existing = liveSessions.get(keyId)
     if (existing && !existing.destroyed) return existing
@@ -520,6 +524,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       logger.info(`[channels] ${keyId}: ensureLive resolved-names`)
       const membership = await membershipForPrompt(key, membershipFetch)
       logger.info(`[channels] ${keyId}: ensureLive resolved-membership`)
+      // The session-creation origin is what the resource loader sees when it
+      // renders the role/permissions block into the system prompt. It must
+      // include the triggering author so author-scoped roles
+      // (`slack:T/C author:U_ME`) resolve to the same role here that the
+      // channel.respond gate just admitted on. Per-turn updates after this
+      // point are handled by `originRef.current = buildLiveOrigin(live)`
+      // before each prompt() call.
       const origin: SessionOrigin = {
         kind: 'channel',
         adapter: key.adapter,
@@ -528,6 +539,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         chat: key.chat,
         ...(resolvedNames.chatName !== undefined ? { chatName: resolvedNames.chatName } : {}),
         thread: key.thread,
+        ...(triggeringAuthorId !== undefined ? { lastInboundAuthorId: triggeringAuthorId } : {}),
         participants,
         ...(membership !== null ? { membership } : {}),
       }
@@ -976,7 +988,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (commandResult.kind !== 'not-command') return
     }
 
-    const live = await ensureLive(key, event.externalMessageId)
+    const live = await ensureLive(key, event.externalMessageId, event.authorId)
 
     const isNewAuthor = !live.participants.some((p) => p.authorId === event.authorId)
     live.participants = updateParticipants(

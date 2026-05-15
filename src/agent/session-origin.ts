@@ -76,7 +76,7 @@ export function renderSessionOrigin(
 ): string {
   switch (origin.kind) {
     case 'tui':
-      return renderTuiOrigin()
+      return withRoleContext(renderTuiOrigin(), roleContext)
     case 'cron':
       return withRoleContext(renderCronOrigin(origin), roleContext)
     case 'channel':

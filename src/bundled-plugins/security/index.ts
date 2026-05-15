@@ -1,6 +1,7 @@
 import { definePlugin } from '@/plugin'
 
 import { SECURITY_PERMISSIONS } from './permissions'
+import type { SecurityPermission } from './permissions'
 import { checkGitExfilGuard, checkGitRemoteTaintedGuard, recordGitRemoteTaintIfAny } from './policies/git-exfil'
 import { checkOutboundSecretGuard } from './policies/outbound-secret-scan'
 import { applyPromptInjectionDefense } from './policies/prompt-injection'
@@ -14,12 +15,15 @@ import type { SecurityBlock } from './policy'
 
 export { SECURITY_PERMISSIONS, type SecurityPermission } from './permissions'
 
-// Maps each guard permission to a one-line hint about which built-in roles
-// already carry it. Kept next to the hook so adding a new bypass permission
-// forces a same-file edit — the hint is part of the permission's contract,
-// not optional documentation. `owner` always carries every `security.bypass.*`
-// via the wildcard expansion in builtins.ts.
-const BYPASS_ROLE_HINT: Record<string, string> = {
+// Maps each security bypass permission to a one-line hint about which
+// built-in roles carry it. The `satisfies` clause is load-bearing: it
+// forces exhaustive coverage of `SecurityPermission` at compile time, so
+// adding a new `SECURITY_PERMISSIONS` entry without a hint here is a type
+// error rather than a silent fallback to the inaccurate default. `owner`
+// always carries every `security.bypass.*` via the wildcard expansion in
+// builtins.ts, so the hint must mention owner even for permissions where
+// it's the only carrier.
+const BYPASS_ROLE_HINT = {
   [SECURITY_PERMISSIONS.bypassSecretExfilBash]: 'owner and trusted have it by default',
   [SECURITY_PERMISSIONS.bypassGitExfil]: 'only owner has it by default',
   [SECURITY_PERMISSIONS.bypassGitRemoteTainted]: 'only owner has it by default',
@@ -28,11 +32,14 @@ const BYPASS_ROLE_HINT: Record<string, string> = {
   [SECURITY_PERMISSIONS.bypassSessionSearchSecrets]: 'only owner has it by default',
   [SECURITY_PERMISSIONS.bypassSystemPromptLeak]: 'only owner has it by default',
   [SECURITY_PERMISSIONS.bypassOutboundSecret]: 'only owner has it by default',
-}
+} as const satisfies Record<SecurityPermission, string>
 
-function withPermissionHint(result: SecurityBlock | undefined, permission: string): SecurityBlock | undefined {
+function withPermissionHint(
+  result: SecurityBlock | undefined,
+  permission: SecurityPermission,
+): SecurityBlock | undefined {
   if (!result) return result
-  const hint = BYPASS_ROLE_HINT[permission] ?? 'no built-in role carries it'
+  const hint = BYPASS_ROLE_HINT[permission]
   return {
     block: true,
     reason: `${result.reason} Or run as a role carrying \`${permission}\` (${hint}); see the \`typeclaw-permissions\` skill.`,

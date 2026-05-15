@@ -384,21 +384,23 @@ describe('security plugin wiring', () => {
     expect(result?.reason).toContain('secretExfilBash')
   })
 
-  test('block reason names the missing permission and the role hint', async () => {
+  test('block reason names the missing permission and points at the typeclaw-permissions skill', async () => {
     const hook = await toolBeforeHook()
     const result = await hook(toolEvent('bash', { command: 'env' }), hookContext('/agent'))
     expect(result?.block).toBe(true)
-    expect(result?.reason).toContain('Or run as a role carrying `security.bypass.secretExfilBash`')
-    expect(result?.reason).toContain('owner and trusted have it by default')
+    expect(result?.reason).toContain('security.bypass.secretExfilBash')
     expect(result?.reason).toContain('typeclaw-permissions')
+    // Mentions trusted because the secretExfilBash bypass is what `trusted` carries by default.
+    expect(result?.reason).toMatch(/trusted/i)
   })
 
-  test('owner-only permission block reason names the owner-only hint', async () => {
+  test('owner-only permission block reason mentions owner without claiming any narrower role carries it', async () => {
     const hook = await toolBeforeHook()
     const result = await hook(toolEvent('webfetch', { url: 'http://127.0.0.1:8080/admin' }), hookContext('/agent'))
     expect(result?.block).toBe(true)
-    expect(result?.reason).toContain('Or run as a role carrying `security.bypass.ssrf`')
-    expect(result?.reason).toContain('only owner has it by default')
+    expect(result?.reason).toContain('security.bypass.ssrf')
+    expect(result?.reason).toMatch(/owner/i)
+    expect(result?.reason).not.toMatch(/trusted/i)
   })
 
   test('a permission-bypassed actor sees no block and therefore no permission hint', async () => {
