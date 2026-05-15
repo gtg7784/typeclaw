@@ -1,6 +1,6 @@
 # typeclaw-plugin-memory
 
-The bundled memory plugin. Owns `MEMORY.md` (long-term memory) and `memory/yyyy-MM-dd.md` (daily streams) plus the two subagents that write them: `memory-logger` and `dreaming`.
+The bundled memory plugin. Owns `MEMORY.md` (long-term memory) and `memory/yyyy-MM-dd.jsonl` (daily streams) plus the two subagents that write them: `memory-logger` and `dreaming`.
 
 This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` entry to add and no opt-out. To configure it, add a `memory` block to `typeclaw.json`.
 
@@ -29,7 +29,7 @@ All fields are **restart-required** — the plugin reads them once at boot.
 
 | Kind     | Name                       | Notes                                                                                                                                                                                                                                                                                                                                                |
 | -------- | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Subagent | `memory-logger`            | Reads a parent transcript past a watermark and appends fragments to `memory/<today>.md`. Coalesced per `agentDir`; the plugin chains spawn calls onto a per-agent Promise so two concurrent channel sessions never race on the same daily stream file.                                                                                               |
+| Subagent | `memory-logger`            | Reads a parent transcript past a watermark and appends fragments to `memory/<today>.jsonl`. Coalesced per `agentDir`; the plugin chains spawn calls onto a per-agent Promise so two concurrent channel sessions never race on the same daily stream file.                                                                                            |
 | Subagent | `dreaming`                 | Reads `MEMORY.md` plus undreamed daily-stream tails, rewrites `MEMORY.md`, optionally writes muscle-memory skills under `memory/skills/<name>/SKILL.md`, advances the per-day watermark, and commits the result with a summary message (`dream: <summary> <emoji>`, e.g. `dream: 3 fragments + new skill 'pr-review' 🔮`). Coalesced per `agentDir`. |
 | Cron job | `__plugin_memory_dreaming` | `kind: 'prompt'`, `subagent: 'dreaming'`, scheduled per `memory.dreaming.schedule`.                                                                                                                                                                                                                                                                  |
 | Hook     | `session.idle`             | Per-session debouncer with size-based ceiling. Resets a `setTimeout(idleMs)` on every event; on fire, calls `ctx.spawnSubagent('memory-logger', ...)`. Also `fs.stat`s the transcript on every event and spawns immediately when growth since the last run reaches `bufferBytes`.                                                                    |
@@ -42,7 +42,7 @@ The rendered `# Memory` section (MEMORY.md + undreamed daily-stream tails) is in
 ## Files on disk
 
 - **`MEMORY.md`** — long-term memory. Created by the dreaming subagent on first run if absent. Force-committed by the runtime; `skip-worktree` flag is set so the human's `git status` stays clean.
-- **`memory/yyyy-MM-dd.md`** — daily fragment streams. Appended to by `memory-logger`. Created on demand. Gitignored at the agent's level but force-committed alongside `MEMORY.md` after each dreaming run.
+- **`memory/yyyy-MM-dd.jsonl`** — daily fragment streams. One event per line, discriminated union of `fragment | watermark | legacy_prose`, lossy-preserving one-shot migration from older `.md` streams. Appended to by `memory-logger`. Created on demand. Gitignored at the agent's level but force-committed alongside `MEMORY.md` after each dreaming run.
 - **`memory/skills/<name>/SKILL.md`** — _muscle memory_. Skills the dreaming subagent distills from repeated procedures it sees in daily streams. Auto-discovered as first-class skills by `createResourceLoader`, and force-committed under the same `memory/` snapshot path as the daily streams. Written or refined with the standard `write` / `edit` tools; the bundled guard plugin enforces the exact `memory/skills/<name>/SKILL.md` path shape, single-segment kebab/snake-case names, matching frontmatter, and symlink/path-traversal safety. There is no runtime skill-delete tool; outright deletion of muscle-memory skills remains a user decision.
 - **`memory/.dreaming-state.json`** — per-day watermarks (line counts already consolidated into `MEMORY.md`). Plain JSON; on malformed input the plugin fails open with empty state.
 
