@@ -88,8 +88,24 @@ export type WrapSystemToolOptions = {
   getOrigin?: () => SessionOrigin | undefined
 }
 
+// Zod 4 emits a top-level `"$schema": "https://json-schema.org/draft/2020-12/schema"`
+// pointer on every converted schema. Ajv v8 (used by pi-ai's runtime tool-argument
+// validator and by ModelRegistry's models.json validator) is configured for
+// Draft 7 and rejects unknown `$schema` URIs with:
+//
+//   no schema with key or ref "https://json-schema.org/draft/2020-12/schema"
+//
+// That error is raised before the tool's execute is even invoked, so the model
+// sees the failure as a tool-call result and reacts by retrying or falling back
+// to other tools. In the memory-logger / dreaming subagents this meant the
+// `find_entry` tool was permanently broken: the subagent kept falling back to
+// `read(offset=1, limit=2000)` and chunked through entire multi-hundred-KB
+// transcripts on every channel turn. Stripping `$schema` is the minimal,
+// converter-version-independent fix; it leaves the actual JSON-schema body
+// untouched and lets Ajv use its default draft.
 export function zodToToolParameters(schema: z.ZodType<unknown>): TSchema {
-  const json = z.toJSONSchema(schema, { io: 'input', reused: 'inline' })
+  const json = z.toJSONSchema(schema, { io: 'input', reused: 'inline' }) as Record<string, unknown>
+  delete json.$schema
   return json as unknown as TSchema
 }
 

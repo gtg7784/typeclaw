@@ -27,6 +27,42 @@ describe('zodToToolParameters', () => {
     expect(json.properties).toHaveProperty('name')
     expect(json.properties).toHaveProperty('age')
   })
+
+  test('strips the $schema URI so Ajv (used by pi-ai) can compile the result', async () => {
+    const schema = z.object({ path: z.string(), entryId: z.string().min(1) })
+    const json = zodToToolParameters(schema) as Record<string, unknown>
+    expect(json.$schema).toBeUndefined()
+
+    const AjvModule = await import('ajv')
+    const Ajv = (AjvModule as unknown as { default?: typeof AjvModule.default }).default ?? AjvModule
+    const ajv = new (Ajv as new (...args: unknown[]) => { compile: (s: unknown) => unknown })({
+      allErrors: true,
+      strict: false,
+      coerceTypes: true,
+    })
+    expect(() => ajv.compile(json)).not.toThrow()
+  })
+
+  test('preserves field-level constraints (format, pattern, minLength) after stripping $schema', () => {
+    const schema = z.object({
+      email: z.string().email(),
+      id: z.string().uuid(),
+      slug: z.string().min(1),
+      pattern: z.string().regex(/^[a-z]+$/),
+    })
+    const json = zodToToolParameters(schema) as unknown as {
+      properties: {
+        email: { format?: string }
+        id: { format?: string }
+        slug: { minLength?: number }
+        pattern: { pattern?: string }
+      }
+    }
+    expect(json.properties.email.format).toBe('email')
+    expect(json.properties.id.format).toBe('uuid')
+    expect(json.properties.slug.minLength).toBe(1)
+    expect(json.properties.pattern.pattern).toBe('^[a-z]+$')
+  })
 })
 
 describe('wrapPluginTool', () => {
