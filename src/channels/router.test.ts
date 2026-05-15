@@ -89,7 +89,6 @@ function messageEntry(message: AssistantMessage): SessionEntry {
 }
 
 const baseConfig: ChannelAdapterConfig = {
-  allow: ['*'],
   engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
   enabled: true,
   history: defaultHistoryConfig(),
@@ -98,6 +97,16 @@ const baseConfig: ChannelAdapterConfig = {
 type SessionFactoryArgs = {
   existingSessionId?: string
   existingSessionFile?: string
+}
+
+// Test-only permission service that grants `channel.respond` to everyone.
+// Most router tests don't exercise the gate; they need a permissive service
+// so the router actually routes. Suites that test the gate inject their
+// own.
+const grantAllPermissions: PermissionService = {
+  has: () => true,
+  resolveRole: () => 'owner',
+  describe: () => ({ role: 'owner', permissions: ['channel.respond'] }),
 }
 
 function makeRouter(
@@ -113,7 +122,6 @@ function makeRouter(
     configuredAliases?: () => readonly string[]
     ensureLiveTimeoutMs?: number
     permissions?: PermissionService
-    gateChannelRespond?: () => boolean
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -124,8 +132,7 @@ function makeRouter(
     configForAdapter: () => options.config ?? baseConfig,
     ...(options.configuredAliases !== undefined ? { configuredAliases: options.configuredAliases } : {}),
     ...(options.ensureLiveTimeoutMs !== undefined ? { ensureLiveTimeoutMs: options.ensureLiveTimeoutMs } : {}),
-    ...(options.permissions !== undefined ? { permissions: options.permissions } : {}),
-    ...(options.gateChannelRespond !== undefined ? { gateChannelRespond: options.gateChannelRespond } : {}),
+    permissions: options.permissions ?? grantAllPermissions,
     now: () => nowRef.value,
     logger: {
       info: (m) => options.logs?.push(`info:${m}`),
@@ -564,7 +571,6 @@ describe('ChannelRouter engagement and prompt composition', () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir, {
       config: {
-        allow: [],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
         history: defaultHistoryConfig(),
@@ -586,7 +592,6 @@ describe('ChannelRouter engagement and prompt composition', () => {
     const logs: string[] = []
     const { router } = makeRouter(dir, {
       config: {
-        allow: ['*'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
         history: defaultHistoryConfig(),
@@ -2399,7 +2404,6 @@ describe('ChannelRouter cold-start prefetch', () => {
     const { router, sessions } = makeRouter(dir, {
       // override defaults to make elision easy to trigger
       config: {
-        allow: ['*'],
         engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
         enabled: true,
         history: { prefetch: { thread: { head: 1, tail: 1 }, channel: { tail: 0 } } },
@@ -2429,7 +2433,6 @@ describe('ChannelRouter cold-start prefetch', () => {
     let historyCalls = 0
     const { router, sessions } = makeRouter(dir, {
       config: {
-        allow: ['*'],
         engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
         enabled: true,
         history: { prefetch: { thread: { head: 0, tail: 0 }, channel: { tail: 0 } } },
@@ -2452,7 +2455,6 @@ describe('ChannelRouter cold-start prefetch', () => {
     const captured: FetchHistoryArgs[] = []
     const { router } = makeRouter(dir, {
       config: {
-        allow: ['*'],
         engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
         enabled: true,
         history: { prefetch: { thread: { head: 2, tail: 5 }, channel: { tail: 8 } } },
@@ -2732,114 +2734,60 @@ describe('ChannelRouter channel.respond gate', () => {
     describe: () => ({ role: 'guest', permissions: [] }),
   })
 
-  test('flag off → router treats inbound as before, even with a deny-all service', async () => {
-    // given: a deny-all permission service but the flag is off
-    const dir = await tempDir()
-    const permissions: PermissionService = {
-      has: () => false,
-      resolveRole: () => 'guest',
-      describe: () => ({ role: 'guest', permissions: [] }),
-    }
-    const { router, sessions } = makeRouter(dir, { permissions, gateChannelRespond: () => false })
-
-    // when
-    await router.route(inbound())
-    await router.__testing!.flushDebounce(KEY)
-
-    // then: gate is bypassed entirely; session created and prompted
-    expect(sessions).toHaveLength(1)
-    expect(sessions[0]!.prompts).toHaveLength(1)
-  })
-
-  test('flag on + author has channel.respond → routes through normally', async () => {
-    // given
+  test('author has channel.respond → routes through normally', async () => {
     const dir = await tempDir()
     const permissions = buildPermissions({ alice: ['channel.respond'] })
-    const { router, sessions } = makeRouter(dir, { permissions, gateChannelRespond: () => true })
+    const { router, sessions } = makeRouter(dir, { permissions })
 
-    // when
     await router.route(inbound({ authorId: 'alice' }))
     await router.__testing!.flushDebounce(KEY)
 
-    // then
     expect(sessions).toHaveLength(1)
     expect(sessions[0]!.prompts).toHaveLength(1)
   })
 
-  test('flag on + author lacks channel.respond → inbound dropped, no session created', async () => {
-    // given: stranger has no permissions
+  test('author lacks channel.respond → inbound dropped, no session created', async () => {
     const dir = await tempDir()
     const logs: string[] = []
     const permissions = buildPermissions({ alice: ['channel.respond'] })
-    const { router, sessions } = makeRouter(dir, {
-      permissions,
-      gateChannelRespond: () => true,
-      logs,
-    })
+    const { router, sessions } = makeRouter(dir, { permissions, logs })
 
-    // when
     await router.route(inbound({ authorId: 'stranger', externalMessageId: 'm-stranger' }))
     await new Promise((r) => setTimeout(r, 10))
 
-    // then: no session, no prompt, and a denial line is logged for audit
     expect(sessions).toHaveLength(0)
     expect(router.liveCount()).toBe(0)
     expect(logs.some((l) => l.includes('denied by permissions') && l.includes('author=stranger'))).toBe(true)
   })
 
-  test('flag on + denied author + later granted author → only the granted one routes', async () => {
-    // given: alice has the permission, stranger does not
+  test('denied author + later granted author → only the granted one routes', async () => {
     const dir = await tempDir()
     const permissions = buildPermissions({ alice: ['channel.respond'] })
-    const { router, sessions } = makeRouter(dir, { permissions, gateChannelRespond: () => true })
+    const { router, sessions } = makeRouter(dir, { permissions })
 
-    // when: stranger posts first, then alice
     await router.route(inbound({ authorId: 'stranger', externalMessageId: 'm-stranger' }))
     await new Promise((r) => setTimeout(r, 5))
     expect(sessions).toHaveLength(0)
     await router.route(inbound({ authorId: 'alice', externalMessageId: 'm-alice' }))
     await router.__testing!.flushDebounce(KEY)
 
-    // then: only alice's turn produced a session and a prompt
     expect(sessions).toHaveLength(1)
     expect(sessions[0]!.prompts).toHaveLength(1)
   })
 
-  test('flag flips live between inbounds (no router recreation)', async () => {
-    // given: starts with flag off so the first inbound goes through despite deny-all
+  test('deny-all permissions service drops every inbound', async () => {
     const dir = await tempDir()
-    let gateOn = false
     const permissions: PermissionService = {
       has: () => false,
       resolveRole: () => 'guest',
       describe: () => ({ role: 'guest', permissions: [] }),
     }
-    const { router, sessions } = makeRouter(dir, { permissions, gateChannelRespond: () => gateOn })
+    const { router, sessions } = makeRouter(dir, { permissions })
 
-    // when: first inbound under flag-off succeeds
-    await router.route(inbound({ externalMessageId: 'm-pre' }))
-    await router.__testing!.flushDebounce(KEY)
-    expect(sessions[0]!.prompts).toHaveLength(1)
-
-    // and: flag flips on, second inbound is denied
-    gateOn = true
-    await router.route(inbound({ externalMessageId: 'm-post' }))
+    await router.route(inbound())
     await new Promise((r) => setTimeout(r, 10))
 
-    // then: still only the pre-flip prompt; the post-flip inbound was dropped
-    expect(sessions[0]!.prompts).toHaveLength(1)
-  })
-
-  test('flag on without a permission service → inbound passes (gate disabled)', async () => {
-    // given
-    const dir = await tempDir()
-    const { router, sessions } = makeRouter(dir, { gateChannelRespond: () => true })
-
-    // when
-    await router.route(inbound())
-    await router.__testing!.flushDebounce(KEY)
-
-    // then
-    expect(sessions).toHaveLength(1)
+    expect(sessions).toHaveLength(0)
+    expect(router.liveCount()).toBe(0)
   })
 })

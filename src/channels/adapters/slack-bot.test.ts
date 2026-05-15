@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { SlackBotClient, SlackFile, SlackMessage } from 'agent-messenger/slackbot'
 
-import { defaultHistoryConfig, isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 import type { FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
 
 import {
@@ -15,30 +15,6 @@ import {
   SLACK_HISTORY_LIMIT_MAX,
 } from './slack-bot'
 import { classifyInbound, type SlackInboundAppMentionEvent } from './slack-bot-classify'
-
-describe('slack-bot adapter (unit-level pure helpers)', () => {
-  test('isAllowed admits a team channel via team:T/C', () => {
-    expect(isAllowed(['team:T0ACME/C0DEPLOY'], 'T0ACME', 'C0DEPLOY')).toBe(true)
-    expect(isAllowed(['team:T0ACME/C0DEPLOY'], 'T0ACME', 'C0OTHER')).toBe(false)
-    expect(isAllowed(['team:T0ACME/C0DEPLOY'], 'T0WIDGET', 'C0DEPLOY')).toBe(false)
-  })
-
-  test('isAllowed admits all team channels via team:*', () => {
-    expect(isAllowed(['team:*'], 'T0ACME', 'C0CHANNEL')).toBe(true)
-    expect(isAllowed(['team:*'], '@dm', 'D0DMID')).toBe(false)
-  })
-
-  test('isAllowed admits Slack DMs only when the rule covers @dm', () => {
-    expect(isAllowed(['team:*'], '@dm', 'D0DMID')).toBe(false)
-    expect(isAllowed(['im:*'], '@dm', 'D0DMID')).toBe(true)
-    expect(isAllowed(['*'], '@dm', 'D0DMID')).toBe(true)
-  })
-
-  test('isAllowed admits a Slack channel by id via channel:C', () => {
-    expect(isAllowed(['channel:C0DEPLOY'], 'T0ACME', 'C0DEPLOY')).toBe(true)
-    expect(isAllowed(['channel:C0DEPLOY'], 'T0WIDGET', 'C0DEPLOY')).toBe(true)
-  })
-})
 
 describe('slack-bot createTypingCallback', () => {
   type SetStatusCall = { channel: string; threadTs: string; status: string }
@@ -74,12 +50,6 @@ describe('slack-bot createTypingCallback', () => {
     const { tracker, calls } = makeFakeTracker()
     const cb = createTypingCallback({
       typingTracker: tracker,
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     // when
@@ -100,12 +70,6 @@ describe('slack-bot createTypingCallback', () => {
     const infos: string[] = []
     const cb = createTypingCallback({
       typingTracker: tracker,
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
     })
     // when
@@ -130,12 +94,6 @@ describe('slack-bot createTypingCallback', () => {
     })
     const cb = createTypingCallback({
       typingTracker: tracker,
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: () => {}, warn: (m) => warns.push(m), error: () => {} },
     })
     // when
@@ -151,47 +109,12 @@ describe('slack-bot createTypingCallback', () => {
     expect(warns.some((m) => m.includes('typing') && m.includes('channel_not_found'))).toBe(true)
   })
 
-  test('skips disallowed channels silently (no API call, no log)', async () => {
-    // given
-    const { tracker, calls } = makeFakeTracker()
-    const infos: string[] = []
-    const warns: string[] = []
-    const cb = createTypingCallback({
-      typingTracker: tracker,
-      configRef: () => ({
-        allow: ['team:T0OTHER'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
-      logger: { info: (m) => infos.push(m), warn: (m) => warns.push(m), error: () => {} },
-    })
-    // when
-    await cb({
-      adapter: 'slack-bot',
-      workspace: 'T0ACME',
-      chat: 'C0CHANNEL',
-      thread: '1700000000.000100',
-      phase: 'tick',
-    })
-    // then
-    expect(calls).toHaveLength(0)
-    expect(infos).toHaveLength(0)
-    expect(warns).toHaveLength(0)
-  })
-
   test('rejects non-slack adapter without API call or logging', async () => {
     // given
     const { tracker, calls } = makeFakeTracker()
     const infos: string[] = []
     const cb = createTypingCallback({
       typingTracker: tracker,
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
     })
     // when
@@ -206,12 +129,6 @@ describe('slack-bot createTypingCallback', () => {
     const { tracker, calls, clears } = makeFakeTracker()
     const cb = createTypingCallback({
       typingTracker: tracker,
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: () => {}, warn: () => {}, error: () => {} },
     })
     // when
@@ -233,12 +150,6 @@ describe('slack-bot createTypingCallback', () => {
     const infos: string[] = []
     const cb = createTypingCallback({
       typingTracker: tracker,
-      configRef: () => ({
-        allow: ['*'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: { info: (m) => infos.push(m), warn: () => {}, error: () => {} },
     })
     // when
@@ -247,32 +158,6 @@ describe('slack-bot createTypingCallback', () => {
     expect(calls).toHaveLength(0)
     expect(clears).toHaveLength(0)
     expect(infos).toHaveLength(0)
-  })
-
-  test('phase=stop is gated by allow rules (denied chats trigger no clear)', async () => {
-    // given
-    const { tracker, calls, clears } = makeFakeTracker()
-    const cb = createTypingCallback({
-      typingTracker: tracker,
-      configRef: () => ({
-        allow: ['team:T0OTHER'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
-      logger: { info: () => {}, warn: () => {}, error: () => {} },
-    })
-    // when
-    await cb({
-      adapter: 'slack-bot',
-      workspace: 'T0ACME',
-      chat: 'C0CHANNEL',
-      thread: '1700000000.000100',
-      phase: 'stop',
-    })
-    // then
-    expect(calls).toHaveLength(0)
-    expect(clears).toHaveLength(0)
   })
 })
 
@@ -666,7 +551,6 @@ describe('slack-bot promoteAppMentionToMessage', () => {
     const verdict = classifyInbound(
       promoted,
       {
-        allow: ['*'],
         engagement: { trigger: ['mention'], stickiness: 'off' },
         enabled: true,
         history: defaultHistoryConfig(),
@@ -705,7 +589,6 @@ describe('createSlackHistoryCallback', () => {
 
   function permissiveConfig(): ChannelAdapterConfig {
     return {
-      allow: ['*'],
       engagement: { trigger: ['mention'], stickiness: 'off' },
       enabled: true,
       history: defaultHistoryConfig(),
@@ -723,7 +606,6 @@ describe('createSlackHistoryCallback', () => {
     })
     const cb = createSlackHistoryCallback({
       token: 'xoxb-tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => 'UBOT',
       fetchImpl: fn,
@@ -752,7 +634,6 @@ describe('createSlackHistoryCallback', () => {
     const { fn, calls } = fakeFetch({ ok: true, messages: [] })
     const cb = createSlackHistoryCallback({
       token: 'xoxb-tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -778,7 +659,6 @@ describe('createSlackHistoryCallback', () => {
     })
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -801,7 +681,6 @@ describe('createSlackHistoryCallback', () => {
     })
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -824,7 +703,6 @@ describe('createSlackHistoryCallback', () => {
     })
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -849,7 +727,6 @@ describe('createSlackHistoryCallback', () => {
     })
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => 'UBOT',
       fetchImpl: fn,
@@ -872,7 +749,6 @@ describe('createSlackHistoryCallback', () => {
     })
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -889,7 +765,6 @@ describe('createSlackHistoryCallback', () => {
     const { fn } = fakeFetch({ ok: true, messages: [], response_metadata: { next_cursor: '' } })
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -906,7 +781,6 @@ describe('createSlackHistoryCallback', () => {
     const { fn, calls } = fakeFetch({ ok: true, messages: [] })
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -923,7 +797,6 @@ describe('createSlackHistoryCallback', () => {
     const { fn, calls } = fakeFetch({ ok: true, messages: [] })
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -940,7 +813,6 @@ describe('createSlackHistoryCallback', () => {
     const { fn } = fakeFetch({ ok: false, error: 'channel_not_found' })
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -958,7 +830,6 @@ describe('createSlackHistoryCallback', () => {
     }) as unknown as typeof fetch
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: permissiveConfig,
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -969,39 +840,11 @@ describe('createSlackHistoryCallback', () => {
     expect(result).toEqual({ ok: false, error: 'network down' })
   })
 
-  test('refuses fetch when chat is not in the allow list', async () => {
-    // given
-    const { fn, calls } = fakeFetch({ ok: true, messages: [] })
-    const cb = createSlackHistoryCallback({
-      token: 'tok',
-      configRef: () => ({
-        allow: ['team:T0OTHER'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
-      logger: silentLogger(),
-      botUserIdRef: () => null,
-      fetchImpl: fn,
-    })
-    // when
-    const result = await cb({ chat: 'C0CHANNEL', thread: null, limit: 10 })
-    // then
-    expect(calls).toHaveLength(0)
-    expect(result).toEqual({ ok: false, error: 'denied by allow rules' })
-  })
-
   test('admits per-channel allow rule (channel:C0) without a workspace at fetch time', async () => {
     // given
     const { fn, calls } = fakeFetch({ ok: true, messages: [] })
     const cb = createSlackHistoryCallback({
       token: 'tok',
-      configRef: (): ChannelAdapterConfig => ({
-        allow: ['channel:C0CHANNEL'],
-        engagement: { trigger: ['mention'], stickiness: 'off' },
-        enabled: true,
-        history: defaultHistoryConfig(),
-      }),
       logger: silentLogger(),
       botUserIdRef: () => null,
       fetchImpl: fn,
@@ -1063,7 +906,6 @@ describe('slack-bot createOutboundCallback', () => {
 
   function permissive(): ChannelAdapterConfig {
     return {
-      allow: ['*'],
       engagement: { trigger: ['mention'], stickiness: 'off' },
       enabled: true,
       history: defaultHistoryConfig(),
@@ -1082,7 +924,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, posts, uploads } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1106,7 +947,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, posts } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1125,7 +965,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, posts } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1148,7 +987,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, posts } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1175,7 +1013,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, posts } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1194,7 +1031,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, posts, uploads } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1210,7 +1046,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, uploads } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1226,7 +1061,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, uploads } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1253,7 +1087,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, uploads } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1266,7 +1099,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, uploads } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1279,7 +1111,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, uploads } = makeFakeClient({ uploadFile: 'reject' })
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1295,7 +1126,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client, uploads } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: async () => {
@@ -1312,7 +1142,6 @@ describe('slack-bot createOutboundCallback', () => {
     const { client } = makeFakeClient()
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1321,39 +1150,12 @@ describe('slack-bot createOutboundCallback', () => {
     expect(result.ok).toBe(false)
   })
 
-  test('denies when allow rules reject the channel without reading the file', async () => {
-    const { client, posts, uploads } = makeFakeClient()
-    let readCalls = 0
-    const restrictive = (): ChannelAdapterConfig => ({
-      allow: ['team:OTHER/*'],
-      engagement: { trigger: ['mention'], stickiness: 'off' },
-      enabled: true,
-      history: defaultHistoryConfig(),
-    })
-    const cb = createOutboundCallback({
-      client,
-      configRef: restrictive,
-      logger: silentLogger(),
-      formatChannelTag: tag,
-      readFile: async (p) => {
-        readCalls++
-        return fakeRead(p)
-      },
-    })
-    const result = await cb(makeMsg({ text: 'hi', attachments: [{ path: '/agent/a.png' }] }))
-    expect(result.ok).toBe(false)
-    expect(posts).toHaveLength(0)
-    expect(uploads).toHaveLength(0)
-    expect(readCalls).toBe(0)
-  })
-
   test('threaded postMessage triggers typingTracker.clearAfterSend so the indicator does not stay stuck', async () => {
     // given
     const { client, posts } = makeFakeClient()
     const clearCalls: Array<{ chat: string; thread: string | null | undefined }> = []
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1376,7 +1178,6 @@ describe('slack-bot createOutboundCallback', () => {
     const clearCalls: Array<{ chat: string; thread: string | null | undefined }> = []
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1396,7 +1197,6 @@ describe('slack-bot createOutboundCallback', () => {
     const clearCalls: Array<{ chat: string; thread: string | null | undefined }> = []
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,
@@ -1424,7 +1224,6 @@ describe('slack-bot createOutboundCallback', () => {
     const clearCalls: Array<unknown> = []
     const cb = createOutboundCallback({
       client,
-      configRef: permissive,
       logger: silentLogger(),
       formatChannelTag: tag,
       readFile: fakeRead,

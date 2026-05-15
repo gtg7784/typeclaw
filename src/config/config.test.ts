@@ -80,30 +80,6 @@ describe('configSchema alias field', () => {
   })
 })
 
-describe('configSchema permissions field', () => {
-  test('defaults gateChannelRespond to false when permissions block is omitted', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL })
-    expect(parsed.permissions.gateChannelRespond).toBe(false)
-  })
-
-  test('defaults gateChannelRespond to false when permissions block is empty', () => {
-    const parsed = configSchema.parse({ model: VALID_MODEL, permissions: {} })
-    expect(parsed.permissions.gateChannelRespond).toBe(false)
-  })
-
-  test('accepts gateChannelRespond: true', () => {
-    const parsed = configSchema.parse({
-      model: VALID_MODEL,
-      permissions: { gateChannelRespond: true },
-    })
-    expect(parsed.permissions.gateChannelRespond).toBe(true)
-  })
-
-  test('rejects non-boolean gateChannelRespond', () => {
-    expect(() => configSchema.parse({ model: VALID_MODEL, permissions: { gateChannelRespond: 'yes' } })).toThrow()
-  })
-})
-
 describe('configSchema preserves unknown top-level keys (plugin config blocks)', () => {
   test('a top-level "memory" block survives the schema as unknown (consumed by the bundled memory plugin)', () => {
     const parsed = configSchema.parse({
@@ -499,6 +475,106 @@ describe('migrateLegacyConfigShape', () => {
     } finally {
       await rm(cwd, { recursive: true, force: true })
     }
+  })
+
+  test('translates channels.<adapter>.allow into roles.member.match and strips the allow field', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      channels: {
+        'slack-bot': { allow: ['team:T0123', '*'] },
+        'discord-bot': { allow: ['guild:9999/1', 'dm:*'] },
+      },
+    })
+    expect(result.changed).toBe(true)
+    const json = result.json as Record<string, unknown>
+    const channels = json.channels as Record<string, Record<string, unknown>>
+    expect(channels['slack-bot']).toEqual({})
+    expect(channels['discord-bot']).toEqual({})
+    const roles = json.roles as Record<string, Record<string, unknown>>
+    expect(roles.member?.match).toEqual(['slack:T0123', '*', 'discord:9999/1', 'discord:dm/*'])
+  })
+
+  test('appends to an existing roles.member.match and deduplicates', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      channels: { 'slack-bot': { allow: ['team:T0123', '*'] } },
+      roles: { member: { match: ['*', 'discord:9999'] } },
+    })
+    const json = result.json as Record<string, unknown>
+    const roles = json.roles as Record<string, Record<string, unknown>>
+    expect(roles.member?.match).toEqual(['*', 'discord:9999', 'slack:T0123'])
+  })
+
+  test('preserves kakao rules verbatim', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      channels: { kakaotalk: { allow: ['kakao:dm/*', 'kakao:12345'] } },
+    })
+    const json = result.json as Record<string, unknown>
+    const roles = json.roles as Record<string, Record<string, unknown>>
+    expect(roles.member?.match).toEqual(['kakao:dm/*', 'kakao:12345'])
+    const channels = json.channels as Record<string, Record<string, unknown>>
+    expect(channels.kakaotalk).toEqual({})
+  })
+
+  test('drops channel:<id> rules with a warning and keeps other rules', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      channels: { 'slack-bot': { allow: ['channel:C123', 'team:T0123'] } },
+    })
+    const json = result.json as Record<string, unknown>
+    const roles = json.roles as Record<string, Record<string, unknown>>
+    expect(roles.member?.match).toEqual(['slack:T0123'])
+  })
+
+  test('is idempotent: running twice produces the same shape as once', () => {
+    const input = {
+      model: VALID_MODEL,
+      channels: { 'slack-bot': { allow: ['team:T0123'], engagement: { trigger: ['dm'] } } },
+    }
+    const first = migrateLegacyConfigShape(input)
+    const second = migrateLegacyConfigShape(first.json)
+    expect(second.changed).toBe(false)
+    expect(second.json).toEqual(first.json)
+  })
+
+  test('preserves adapter siblings (engagement/history/enabled) when stripping allow', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      channels: {
+        'discord-bot': {
+          allow: ['*'],
+          enabled: false,
+          engagement: { trigger: ['dm'] },
+        },
+      },
+    })
+    const json = result.json as Record<string, unknown>
+    const channels = json.channels as Record<string, Record<string, unknown>>
+    expect(channels['discord-bot']).toEqual({
+      enabled: false,
+      engagement: { trigger: ['dm'] },
+    })
+  })
+
+  test('migrated channels-allow config parses cleanly through configSchema', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      channels: { 'slack-bot': { allow: ['team:T0123'] } },
+    })
+    const parsed = configSchema.parse(result.json)
+    expect(parsed.channels['slack-bot']).toBeDefined()
+    expect(parsed.roles?.member?.match).toEqual([{ kind: 'channel', platform: 'slack', workspace: 'T0123' }])
+  })
+
+  test('strips permissions.gateChannelRespond when present', () => {
+    const result = migrateLegacyConfigShape({
+      model: VALID_MODEL,
+      permissions: { gateChannelRespond: true },
+    })
+    expect(result.changed).toBe(true)
+    const json = result.json as Record<string, unknown>
+    expect(json).not.toHaveProperty('permissions')
   })
 })
 

@@ -14,7 +14,7 @@ import {
 import type { KakaoAccountCredentials, KakaoConfig, PendingLoginState } from 'agent-messenger/kakaotalk'
 
 import type { ChannelRouter } from '@/channels/router'
-import { isAllowed, type ChannelAdapterConfig, type KakaotalkAdapterConfig } from '@/channels/schema'
+import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
   FetchHistoryArgs,
@@ -106,7 +106,7 @@ const consoleLogger: KakaotalkAdapterLogger = {
 
 export type KakaotalkAdapterOptions = {
   router: ChannelRouter
-  configRef: () => KakaotalkAdapterConfig
+  configRef: () => ChannelAdapterConfig
   logger?: KakaotalkAdapterLogger
   selfAliasesRef?: () => readonly string[]
   credentialsStore?: KakaoCredentialStore
@@ -162,19 +162,13 @@ function formatLabel(name: string | undefined, id: string, prefix = ''): string 
 
 export function createOutboundCallback(deps: {
   client: Pick<KakaoTalkClient, 'sendMessage'>
-  configRef: () => ChannelAdapterConfig
   logger: KakaotalkAdapterLogger
   formatChannelTag: (workspace: string, chat: string) => Promise<string>
 }): OutboundCallback {
-  const { client, configRef, logger, formatChannelTag } = deps
+  const { client, logger, formatChannelTag } = deps
   return async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'kakaotalk') {
       return { ok: false, error: `unknown adapter: ${msg.adapter}` }
-    }
-    const config = configRef()
-    if (!isAllowed(config.allow, msg.workspace, msg.chat)) {
-      logger.warn(`[kakaotalk] outbound denied by allow rules: ${msg.workspace}/${msg.chat}`)
-      return { ok: false, error: 'denied by allow rules' }
     }
     const text = msg.text ?? ''
     const attachments = msg.attachments ?? []
@@ -214,27 +208,12 @@ export function createOutboundCallback(deps: {
 
 export function createKakaoHistoryCallback(deps: {
   client: Pick<KakaoTalkClient, 'getMessages'>
-  configRef: () => ChannelAdapterConfig
   logger: KakaotalkAdapterLogger
-  channelResolver: Pick<KakaoChannelResolver, 'lookupChat' | 'refresh'>
   authorResolver: Pick<KakaoAuthorResolver, 'resolve'>
   selfUserIdRef: () => string | null
 }): HistoryCallback {
-  const { client, configRef, logger, channelResolver, authorResolver, selfUserIdRef } = deps
+  const { client, logger, authorResolver, selfUserIdRef } = deps
   return async (args: FetchHistoryArgs): Promise<FetchHistoryResult> => {
-    const config = configRef()
-    let lookup = channelResolver.lookupChat(args.chat)
-    if (lookup === null) {
-      await channelResolver.refresh()
-      lookup = channelResolver.lookupChat(args.chat)
-    }
-    // Fallback to the most restrictive bucket (group) when the resolver
-    // can't classify after refresh — keeps allow-rule enforcement strict
-    // rather than defaulting to a permissive bucket.
-    const workspace = lookup?.workspace ?? '@kakao-group'
-    if (!isAllowed(config.allow, workspace, args.chat)) {
-      return { ok: false, error: 'denied by allow rules' }
-    }
     const limit = clampLimit(args.limit, KAKAO_HISTORY_LIMIT_MAX)
     try {
       const messages = await client.getMessages(args.chat, {
@@ -311,16 +290,13 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
 
   const historyCallback = createKakaoHistoryCallback({
     client,
-    configRef: options.configRef,
     logger,
-    channelResolver,
     authorResolver,
     selfUserIdRef: () => selfUserId,
   })
 
   const outboundCallback = createOutboundCallback({
     client,
-    configRef: options.configRef,
     logger,
     formatChannelTag,
   })
@@ -390,10 +366,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
         ...(options.selfAliasesRef ? { selfAliases: options.selfAliasesRef() } : {}),
       })
       if (verdict.kind === 'drop') {
-        const bucket = channelResolver.lookupChat(event.chat_id)?.workspace ?? null
-        logger.info(
-          `[kakaotalk] dropped log_id=${event.log_id} reason=${verdict.reason}${dropHint(verdict.reason, bucket, event.chat_id)}`,
-        )
+        logger.info(`[kakaotalk] dropped log_id=${event.log_id} reason=${verdict.reason}${dropHint(verdict.reason)}`)
         return
       }
 
@@ -666,14 +639,8 @@ function markReadIfSupported(deps: {
   )
 }
 
-function dropHint(
-  reason: InboundDropReason,
-  bucket: '@kakao-dm' | '@kakao-group' | '@kakao-open' | null,
-  chatId: string,
-): string {
+function dropHint(reason: InboundDropReason): string {
   switch (reason) {
-    case 'not_in_allow_list':
-      return ` (add ${suggestedAllowPattern(bucket, chatId)} to channels.kakaotalk.allow to admit this chat)`
     case 'unknown_chat':
       return ' (chat not in cache after refresh and provisional registration; check earlier resolver-refresh-failed warnings)'
     case 'empty_text':
@@ -681,13 +648,6 @@ function dropHint(
     case 'self_author':
       return ''
   }
-}
-
-function suggestedAllowPattern(bucket: '@kakao-dm' | '@kakao-group' | '@kakao-open' | null, chatId: string): string {
-  if (bucket === '@kakao-dm') return `"kakao:dm/*" or "kakao:${chatId}"`
-  if (bucket === '@kakao-group') return `"kakao:group/*" or "kakao:${chatId}"`
-  if (bucket === '@kakao-open') return `"kakao:open/*" or "kakao:${chatId}"`
-  return `"kakao:${chatId}"`
 }
 
 function isKickoutError(err: unknown): boolean {

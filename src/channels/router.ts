@@ -316,16 +316,21 @@ export type CreateChannelRouterOptions = {
   // Test seam: bound the session.idle hook chain so the timeout path is
   // exercisable in tens of milliseconds instead of the 30s default.
   sessionIdleTimeoutMs?: number
-  // Dual-path wake-up gate: when `gateChannelRespond()` returns true,
-  // every inbound is additionally gated by `permissions.has(partialOrigin,
-  // 'channel.respond')` BEFORE ensureLive. The flag is read live so a
-  // reload that flips `permissions.gateChannelRespond` takes effect on the
-  // next inbound without restart. Both fields must be present together —
-  // there is no path where the flag is on but the service is absent (the
-  // factory in src/run/index.ts always pairs them). Omitted entirely =
-  // `channels.<adapter>.allow[]` is the only wake-up gate.
+  // Wake-up gate: every inbound is gated by `permissions.has(partialOrigin,
+  // 'channel.respond')` BEFORE ensureLive. Required by the production
+  // wiring (manager.ts forwards `pluginsLoaded.permissions`); defaulted
+  // to a grant-all service inside the factory so existing direct test
+  // instantiations don't need to inject one. The default is intentionally
+  // permissive — the manager-to-router seam is the place where production
+  // injection is enforced; direct-router tests opt into gate semantics by
+  // passing their own service.
   permissions?: PermissionService
-  gateChannelRespond?: () => boolean
+}
+
+const GRANT_ALL_PERMISSIONS: PermissionService = {
+  has: () => true,
+  resolveRole: () => 'owner',
+  describe: () => ({ role: 'owner', permissions: [CORE_PERMISSIONS.channelRespond] }),
 }
 
 export function createChannelRouter(options: CreateChannelRouterOptions): ChannelRouter {
@@ -335,8 +340,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const resolveChannelNamesTimeoutMs = options.resolveChannelNamesTimeoutMs ?? RESOLVE_CHANNEL_NAMES_TIMEOUT_MS
   const fetchHistoryTimeoutMs = options.fetchHistoryTimeoutMs ?? FETCH_HISTORY_TIMEOUT_MS
   const sessionIdleTimeoutMs = options.sessionIdleTimeoutMs ?? SESSION_IDLE_TIMEOUT_MS
-  const permissions = options.permissions
-  const gateChannelRespond = options.gateChannelRespond
+  const permissions = options.permissions ?? GRANT_ALL_PERMISSIONS
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
@@ -1043,8 +1047,6 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const isChannelRespondDenied = (event: InboundMessage): boolean => {
-    if (gateChannelRespond === undefined || permissions === undefined) return false
-    if (!gateChannelRespond()) return false
     const partial: SessionOrigin = {
       kind: 'channel',
       adapter: event.adapter,

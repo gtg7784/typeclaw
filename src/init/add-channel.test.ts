@@ -19,9 +19,9 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true })
 })
 
-async function readConfig(): Promise<{ channels?: Record<string, { allow: string[] }>; [k: string]: unknown }> {
+async function readConfig(): Promise<{ channels?: Record<string, Record<string, unknown>>; [k: string]: unknown }> {
   return JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
-    channels?: Record<string, { allow: string[] }>
+    channels?: Record<string, Record<string, unknown>>
   }
 }
 
@@ -46,23 +46,11 @@ async function readSecretsChannels(): Promise<Record<string, Record<string, unkn
 }
 
 describe('runAddChannel', () => {
-  test('adds discord-bot to typeclaw.json with allow=["*"] by default', async () => {
+  test('adds discord-bot to typeclaw.json as an empty block (no allow field)', async () => {
     await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-token-x' })
 
     const cfg = await readConfig()
-    expect(cfg.channels?.['discord-bot']?.allow).toEqual(['*'])
-  })
-
-  test('adds discord-bot with allow=[] when allowAll=false', async () => {
-    await runAddChannel({
-      cwd: root,
-      channel: 'discord-bot',
-      discordBotToken: 'discord-token-x',
-      allowAll: false,
-    })
-
-    const cfg = await readConfig()
-    expect(cfg.channels?.['discord-bot']?.allow).toEqual([])
+    expect(cfg.channels?.['discord-bot']).toEqual({})
   })
 
   test('saves discord-bot.token to secrets.json#channels without disturbing the Fireworks provider key', async () => {
@@ -82,7 +70,7 @@ describe('runAddChannel', () => {
     })
 
     const cfg = await readConfig()
-    expect(cfg.channels?.['slack-bot']?.allow).toEqual(['*'])
+    expect(cfg.channels?.['slack-bot']).toEqual({})
     const channels = await readSecretsChannels()
     expect(channels['slack-bot']).toEqual({
       botToken: { value: 'xoxb-bot' },
@@ -95,13 +83,13 @@ describe('runAddChannel', () => {
     await runAddChannel({ cwd: root, channel: 'telegram-bot', telegramBotToken: '123:tg-secret' })
 
     const cfg = await readConfig()
-    expect(cfg.channels?.['telegram-bot']?.allow).toEqual(['*'])
+    expect(cfg.channels?.['telegram-bot']).toEqual({})
     const channels = await readSecretsChannels()
     expect(channels['telegram-bot']).toEqual({ token: { value: '123:tg-secret' } })
     expect((await readSecrets()).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
   })
 
-  test('adds kakaotalk with kakao:dm/* allow by default and runs auth runner', async () => {
+  test('adds kakaotalk as an empty block (no allow field) and runs auth runner', async () => {
     const authCalls: string[] = []
     await runAddChannel({
       cwd: root,
@@ -114,7 +102,7 @@ describe('runAddChannel', () => {
 
     expect(authCalls).toEqual([root])
     const cfg = await readConfig()
-    expect(cfg.channels?.kakaotalk?.allow).toEqual(['kakao:dm/*'])
+    expect(cfg.channels?.kakaotalk).toEqual({})
     expect((await readSecrets()).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
   })
 
@@ -151,18 +139,6 @@ describe('runAddChannel', () => {
     expect(existsSync(join(root, 'workspace', '.agent-messenger', 'kakaotalk-credentials.json'))).toBe(false)
   })
 
-  test('kakaotalk with allowAll=true broadens allow to kakao:*', async () => {
-    await runAddChannel({
-      cwd: root,
-      channel: 'kakaotalk',
-      runKakaotalkAuth: async () => ({ ok: true }),
-      allowAll: true,
-    })
-
-    const cfg = await readConfig()
-    expect(cfg.channels?.kakaotalk?.allow).toEqual(['kakao:*'])
-  })
-
   test('aborts and leaves typeclaw.json + secrets.json untouched when kakaotalk auth fails', async () => {
     const beforeConfig = await readFile(join(root, 'typeclaw.json'), 'utf8')
     const beforeSecrets = await readFile(join(root, 'secrets.json'), 'utf8')
@@ -184,8 +160,8 @@ describe('runAddChannel', () => {
     await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-x' })
 
     const cfg = await readConfig()
-    expect(cfg.channels?.['slack-bot']?.allow).toEqual(['*'])
-    expect(cfg.channels?.['discord-bot']?.allow).toEqual(['*'])
+    expect(cfg.channels?.['slack-bot']).toEqual({})
+    expect(cfg.channels?.['discord-bot']).toEqual({})
     const channels = await readSecretsChannels()
     expect(channels['slack-bot']).toEqual({
       botToken: { value: 'xoxb-x' },

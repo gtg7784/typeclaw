@@ -1,10 +1,10 @@
 import type { KakaoTalkPushMessageEvent } from 'agent-messenger/kakaotalk'
 
 import { matchesAnyAlias } from '@/channels/engagement'
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
-export type InboundDropReason = 'self_author' | 'empty_text' | 'unknown_chat' | 'not_in_allow_list' | 'pre_connect'
+export type InboundDropReason = 'self_author' | 'empty_text' | 'unknown_chat' | 'pre_connect'
 
 export type InboundClassification =
   | { kind: 'drop'; reason: InboundDropReason }
@@ -23,7 +23,7 @@ export type KakaoInboundContext = {
 
 export function classifyInbound(
   event: KakaoTalkPushMessageEvent,
-  config: ChannelAdapterConfig,
+  _config: ChannelAdapterConfig,
   context: KakaoInboundContext,
 ): InboundClassification {
   if (context.selfUserId === null) {
@@ -39,10 +39,6 @@ export function classifyInbound(
   const chatInfo = context.lookupChat(event.chat_id)
   if (chatInfo === null) {
     return { kind: 'drop', reason: 'unknown_chat' }
-  }
-
-  if (!isAllowed(config.allow, chatInfo.workspace, event.chat_id)) {
-    return { kind: 'drop', reason: 'not_in_allow_list' }
   }
 
   // KakaoTalk has no native @-mention syntax in the LOCO protocol that the

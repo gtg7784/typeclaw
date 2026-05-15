@@ -5,13 +5,12 @@ import type {
   DiscordGatewayStickerItem,
 } from 'agent-messenger/discordbot'
 
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
 export type InboundDropReason =
   | 'self_author' // event.author.id === botUserId; we never route our own messages back to ourselves
   | 'empty_content' // SDK delivered content: '' — usually missing MessageContent intent
-  | 'not_in_allow_list' // workspace/channel not admitted by typeclaw.json `channels.discord-bot.allow`
   | 'pre_connect' // bot identity is not known yet, so mention/self/reply classification cannot be trusted
 
 export type InboundClassification =
@@ -26,7 +25,7 @@ export type InboundClassification =
 // forces logging to stay exhaustive.
 export function classifyInbound(
   event: DiscordGatewayMessageCreateEvent,
-  config: ChannelAdapterConfig,
+  _config: ChannelAdapterConfig,
   botUserId: string | null,
 ): InboundClassification {
   // Self-drop is the hard floor: we must never route our own messages back to
@@ -41,9 +40,6 @@ export function classifyInbound(
 
   const isDm = event.guild_id === undefined
   const workspace = isDm ? '@dm' : event.guild_id!
-  if (!isAllowed(config.allow, workspace, event.channel_id)) {
-    return { kind: 'drop', reason: 'not_in_allow_list' }
-  }
 
   if (botUserId === null) {
     return { kind: 'drop', reason: 'pre_connect' }

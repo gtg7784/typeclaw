@@ -1,9 +1,9 @@
 import type { TelegramBotUser, TelegramMessage, TelegramMessageEntity } from 'agent-messenger/telegrambot'
 
-import { isAllowed, type ChannelAdapterConfig } from '@/channels/schema'
+import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
-export type InboundDropReason = 'self_author' | 'no_user' | 'empty_text' | 'not_in_allow_list' | 'pre_connect'
+export type InboundDropReason = 'self_author' | 'no_user' | 'empty_text' | 'pre_connect'
 
 export type InboundClassification =
   | { kind: 'drop'; reason: InboundDropReason }
@@ -13,13 +13,14 @@ export const TELEGRAM_WORKSPACE = 'telegram'
 
 // Telegram has no team/guild concept — every chat is identified by an
 // absolute (signed) numeric id. We pin `workspace` to a single bucket so
-// allow-rules like `tg:*` and `tg:<chat_id>` have a stable key to match
-// against. DMs use `private` chats and route the same way as group chats
-// from the router's perspective; `isDm` is set from `chat.type` so the
-// engagement layer can apply the DM-specific trigger.
+// match rules like `telegram:*` and `telegram:<chat_id>` resolve against
+// a stable key downstream in the permissions service. DMs use `private`
+// chats and route the same way as group chats from the router's
+// perspective; `isDm` is set from `chat.type` so the engagement layer
+// can apply the DM-specific trigger.
 export function classifyInbound(
   event: TelegramMessage,
-  config: ChannelAdapterConfig,
+  _config: ChannelAdapterConfig,
   bot: TelegramBotUser | null,
 ): InboundClassification {
   const author = event.from
@@ -34,9 +35,6 @@ export function classifyInbound(
   if (text === '') return { kind: 'drop', reason: 'empty_text' }
 
   const chat = String(event.chat.id)
-  if (!isAllowed(config.allow, TELEGRAM_WORKSPACE, chat)) {
-    return { kind: 'drop', reason: 'not_in_allow_list' }
-  }
 
   if (bot === null) {
     return { kind: 'drop', reason: 'pre_connect' }

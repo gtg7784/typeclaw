@@ -204,23 +204,6 @@ export const networkSchema = z
 
 export type NetworkConfig = z.infer<typeof networkSchema>
 
-// Top-level `permissions` block. `gateChannelRespond` defaults to `false`
-// so existing configs keep their pre-permissions behavior: the router
-// only consults `channels.<adapter>.allow[]` to decide whether to engage.
-// When `true`, the router additionally requires
-// `permissions.has(partialOrigin, 'channel.respond')` — every inbound is
-// gated by BOTH `allow[]` AND the resolved role's permissions. The opt-in
-// is per-typeclaw (not per-adapter) on purpose: rolling it out
-// adapter-by-adapter would surface inconsistencies in which `roles` block
-// matched a given inbound.
-export const permissionsConfigSchema = z
-  .object({
-    gateChannelRespond: z.boolean().default(false),
-  })
-  .default({ gateChannelRespond: false })
-
-export type PermissionsConfig = z.infer<typeof permissionsConfigSchema>
-
 export const configSchema = z
   .object({
     $schema: z.string().optional(),
@@ -244,7 +227,6 @@ export const configSchema = z
     docker: dockerSchema,
     git: gitSchema,
     roles: rolesConfigSchema.optional(),
-    permissions: permissionsConfigSchema,
   })
   .catchall(z.unknown())
 
@@ -337,7 +319,6 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   'docker.file': 'restart-required',
   'git.ignore': 'restart-required',
   roles: 'restart-required',
-  'permissions.gateChannelRespond': 'applied',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -480,7 +461,9 @@ export function migrateLegacyConfigShape(json: unknown): { json: unknown; change
   const obj = json as Record<string, unknown>
   const hasLegacyDockerfile = 'dockerfile' in obj
   const hasLegacyGitignore = 'gitignore' in obj
-  if (!hasLegacyDockerfile && !hasLegacyGitignore) {
+  const channelsAllowMigration = collectChannelsAllowMigration(obj)
+  const hasLegacyGateChannelRespond = isPlainObject(obj.permissions) && 'gateChannelRespond' in obj.permissions
+  if (!hasLegacyDockerfile && !hasLegacyGitignore && !channelsAllowMigration.found && !hasLegacyGateChannelRespond) {
     return { json, changed: false }
   }
 
@@ -503,7 +486,142 @@ export function migrateLegacyConfigShape(json: unknown): { json: unknown; change
       next.git = { ...next.git, ignore: legacy }
     }
   }
+  if (channelsAllowMigration.found) {
+    applyChannelsAllowMigration(next, channelsAllowMigration)
+  }
+  if (hasLegacyGateChannelRespond) {
+    const perms = { ...(next.permissions as Record<string, unknown>) }
+    delete perms.gateChannelRespond
+    if (Object.keys(perms).length === 0) {
+      delete next.permissions
+    } else {
+      next.permissions = perms
+    }
+  }
   return { json: next, changed: true }
+}
+
+// Channels.<adapter>.allow[] → roles.member.match[] migration.
+//
+// Phase 3 removes the per-adapter allow-list and unifies wake-up gating
+// through `roles.member.match[]` + the `channel.respond` permission. This
+// helper translates legacy `allow` entries into canonical match-rule DSL
+// strings and appends them (deduplicated, preserving declaration order)
+// to `roles.member.match[]`. The `allow` field is then stripped from each
+// adapter block; the block survives — only the field is gone.
+//
+// `channel:<id>` rules cannot round-trip (the DSL forbids
+// wildcard-workspace + specific-chat) and are dropped with a warning. All
+// other shapes translate losslessly per the table in match-rule.ts.
+type ChannelsAllowMigration = {
+  found: boolean
+  rules: string[]
+  warnings: string[]
+}
+
+function collectChannelsAllowMigration(obj: Record<string, unknown>): ChannelsAllowMigration {
+  const out: ChannelsAllowMigration = { found: false, rules: [], warnings: [] }
+  const channels = obj.channels
+  if (!isPlainObject(channels)) return out
+  for (const [adapter, value] of Object.entries(channels)) {
+    if (!isPlainObject(value)) continue
+    if (!('allow' in value)) continue
+    out.found = true
+    const allow = value.allow
+    if (!Array.isArray(allow)) continue
+    for (const entry of allow) {
+      if (typeof entry !== 'string') continue
+      const translated = translateLegacyAllowRule(entry)
+      if (translated.kind === 'rule') {
+        out.rules.push(translated.value)
+      } else {
+        out.warnings.push(`channels.${adapter}.allow[]: dropped '${entry}' (${translated.reason})`)
+      }
+    }
+  }
+  return out
+}
+
+function applyChannelsAllowMigration(next: Record<string, unknown>, migration: ChannelsAllowMigration): void {
+  const channels = next.channels
+  if (isPlainObject(channels)) {
+    const updated: Record<string, unknown> = {}
+    for (const [adapter, value] of Object.entries(channels)) {
+      if (isPlainObject(value) && 'allow' in value) {
+        const { allow: _allow, ...rest } = value
+        updated[adapter] = rest
+      } else {
+        updated[adapter] = value
+      }
+    }
+    next.channels = updated
+  }
+
+  if (migration.rules.length === 0) {
+    for (const warning of migration.warnings) {
+      console.warn(`[config] ${warning}`)
+    }
+    return
+  }
+
+  const roles = isPlainObject(next.roles) ? { ...next.roles } : {}
+  const member = isPlainObject(roles.member) ? { ...roles.member } : {}
+  const existingMatch = Array.isArray(member.match)
+    ? (member.match as unknown[]).filter((m) => typeof m === 'string')
+    : []
+  const seen = new Set<string>(existingMatch as string[])
+  const merged = [...(existingMatch as string[])]
+  for (const rule of migration.rules) {
+    if (!seen.has(rule)) {
+      seen.add(rule)
+      merged.push(rule)
+    }
+  }
+  member.match = merged
+  roles.member = member
+  next.roles = roles
+
+  console.warn(`[config] migrated channels.<adapter>.allow[] -> roles.member.match[]: ${migration.rules.join(', ')}`)
+  for (const warning of migration.warnings) {
+    console.warn(`[config] ${warning}`)
+  }
+}
+
+type TranslatedRule = { kind: 'rule'; value: string } | { kind: 'drop'; reason: string }
+
+function translateLegacyAllowRule(rule: string): TranslatedRule {
+  // Already canonical / cross-platform.
+  if (rule === '*') return { kind: 'rule', value: '*' }
+  if (rule.startsWith('kakao:')) return { kind: 'rule', value: rule }
+
+  // Discord: guild → discord, dm → discord:dm.
+  if (rule === 'guild:*') return { kind: 'rule', value: 'discord:*' }
+  if (rule.startsWith('guild:')) return { kind: 'rule', value: `discord:${rule.slice('guild:'.length)}` }
+  if (rule === 'dm:*') return { kind: 'rule', value: 'discord:dm/*' }
+  if (rule.startsWith('dm:')) return { kind: 'rule', value: `discord:dm/${rule.slice('dm:'.length)}` }
+
+  // Slack: team → slack, im → slack:dm.
+  if (rule === 'team:*') return { kind: 'rule', value: 'slack:*' }
+  if (rule.startsWith('team:')) return { kind: 'rule', value: `slack:${rule.slice('team:'.length)}` }
+  if (rule === 'im:*') return { kind: 'rule', value: 'slack:dm/*' }
+  if (rule.startsWith('im:')) return { kind: 'rule', value: `slack:dm/${rule.slice('im:'.length)}` }
+
+  // Telegram: tg → telegram.
+  if (rule === 'tg:*') return { kind: 'rule', value: 'telegram:*' }
+  if (rule.startsWith('tg:')) return { kind: 'rule', value: `telegram:${rule.slice('tg:'.length)}` }
+
+  // `channel:<id>` had no workspace; canonical DSL rejects wildcard
+  // workspace + specific chat. Drop with a warning so the operator knows
+  // to re-add the rule explicitly with a workspace coordinate.
+  if (rule.startsWith('channel:')) {
+    return {
+      kind: 'drop',
+      reason:
+        'channel:<id> rules require an explicit workspace under the new DSL; re-add as discord:<guild>/<id> or slack:<team>/<id>',
+    }
+  }
+
+  return { kind: 'drop', reason: `unrecognized legacy allow shape '${rule}'` }
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

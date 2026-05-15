@@ -9,7 +9,6 @@ import { classifyInbound } from './discord-bot-classify'
 const BOT_USER_ID = '999'
 
 const baseConfig: ChannelAdapterConfig = {
-  allow: ['*'],
   enabled: true,
   engagement: {
     trigger: ['mention', 'reply', 'dm'],
@@ -148,33 +147,6 @@ describe('classifyInbound — drop paths', () => {
     expect(verdict.payload.text).toBe(
       'two files\n[Discord message with attachment: one.png (image/png) https://cdn.discordapp.com/.../one.png; attachment: two.txt (text/plain) https://cdn.discordapp.com/.../two.txt]',
     )
-  })
-
-  test('drops messages from a workspace not in the allow list with reason=not_in_allow_list', () => {
-    const config: ChannelAdapterConfig = { ...baseConfig, allow: ['guild:other'] }
-    const event = buildEvent({ guild_id: 'g1' })
-
-    const verdict = classifyInbound(event, config, BOT_USER_ID)
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'not_in_allow_list' })
-  })
-
-  test('drops a DM when allow list only covers guild channels', () => {
-    const config: ChannelAdapterConfig = { ...baseConfig, allow: ['guild:*'] }
-    const event = buildEvent({ guild_id: undefined, channel_id: 'dm1' })
-
-    const verdict = classifyInbound(event, config, BOT_USER_ID)
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'not_in_allow_list' })
-  })
-
-  test('drop reasons are checked before allow list (self_author wins over allow filtering)', () => {
-    const config: ChannelAdapterConfig = { ...baseConfig, allow: [] }
-    const event = buildEvent({ author: { id: BOT_USER_ID, username: 'me', bot: true } })
-
-    const verdict = classifyInbound(event, config, BOT_USER_ID)
-
-    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
   })
 
   test('drops messages before bot identity is known with reason=pre_connect', () => {

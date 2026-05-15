@@ -339,7 +339,7 @@ describe('decideEngagement (solo-human fallback)', () => {
     expect(decision).toBe('engage')
   })
 
-  test('engages even when triggers exclude mention/reply/dm (allow-only setup)', () => {
+  test('engages even when triggers exclude mention/reply/dm (trigger-less setup)', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({
       message: inbound(),

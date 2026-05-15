@@ -27,7 +27,6 @@ function fakeFetch(responder: (url: string, init?: RequestInit) => Promise<Respo
 }
 
 const baseConfig: ChannelAdapterConfig = {
-  allow: ['*'],
   enabled: true,
   engagement: {
     trigger: ['mention', 'reply', 'dm'],
@@ -97,7 +96,6 @@ describe('telegram-bot createOutboundCallback', () => {
     const fake = fakeClient()
     const cb = createOutboundCallback({
       client: fake.client,
-      configRef: () => baseConfig,
       logger: silentLogger(),
       formatChannelTag: async () => 'chat=-100123',
     })
@@ -118,7 +116,6 @@ describe('telegram-bot createOutboundCallback', () => {
     const fake = fakeClient()
     const cb = createOutboundCallback({
       client: fake.client,
-      configRef: () => baseConfig,
       logger: silentLogger(),
       formatChannelTag: async () => 'chat=-100123',
     })
@@ -140,7 +137,6 @@ describe('telegram-bot createOutboundCallback', () => {
     const fake = fakeClient()
     const cb = createOutboundCallback({
       client: fake.client,
-      configRef: () => baseConfig,
       logger: silentLogger(),
       formatChannelTag: async () => 'chat=-100123',
     })
@@ -155,7 +151,6 @@ describe('telegram-bot createOutboundCallback', () => {
     const fake = fakeClient()
     const cb = createOutboundCallback({
       client: fake.client,
-      configRef: () => baseConfig,
       logger: silentLogger(),
       formatChannelTag: async () => 'chat=-100123',
     })
@@ -170,7 +165,6 @@ describe('telegram-bot createOutboundCallback', () => {
     const fake = fakeClient()
     const cb = createOutboundCallback({
       client: fake.client,
-      configRef: () => baseConfig,
       logger: silentLogger(),
       formatChannelTag: async () => 'chat=-100123',
     })
@@ -193,7 +187,6 @@ describe('telegram-bot createOutboundCallback', () => {
     const logger = silentLogger()
     const cb = createOutboundCallback({
       client: fake.client,
-      configRef: () => baseConfig,
       logger,
       formatChannelTag: async () => 'chat=-100123',
     })
@@ -214,7 +207,6 @@ describe('telegram-bot createOutboundCallback', () => {
     const logger = silentLogger()
     const cb = createOutboundCallback({
       client: fake.client,
-      configRef: () => baseConfig,
       logger,
       formatChannelTag: async () => 'chat=-100123',
     })
@@ -231,7 +223,6 @@ describe('telegram-bot createOutboundCallback', () => {
     })
     const cb = createOutboundCallback({
       client: fake.client,
-      configRef: () => baseConfig,
       logger: silentLogger(),
       formatChannelTag: async () => 'chat=-100123',
     })
@@ -249,30 +240,10 @@ describe('telegram-bot createOutboundCallback', () => {
     expect(fake.sendMessageCalls).toHaveLength(0)
   })
 
-  test('refuses outbound when allow rules deny the chat (defense-in-depth, in case the agent constructs an outbound on its own)', async () => {
-    const fake = fakeClient()
-    const restrictiveConfig: ChannelAdapterConfig = { ...baseConfig, allow: ['tg:-999'] }
-    const cb = createOutboundCallback({
-      client: fake.client,
-      configRef: () => restrictiveConfig,
-      logger: silentLogger(),
-      formatChannelTag: async () => 'chat=-100123',
-    })
-
-    const result = await cb(buildOutbound())
-
-    expect(result.ok).toBe(false)
-    if (result.ok) throw new Error('expected error')
-    expect(result.error).toContain('denied by allow rules')
-    expect(fake.sendMessageCalls).toHaveLength(0)
-    expect(fake.sendDocumentCalls).toHaveLength(0)
-  })
-
   test('refuses outbound with neither text nor attachments', async () => {
     const fake = fakeClient()
     const cb = createOutboundCallback({
       client: fake.client,
-      configRef: () => baseConfig,
       logger: silentLogger(),
       formatChannelTag: async () => 'chat=-100123',
     })
@@ -289,7 +260,6 @@ describe('telegram-bot createTypingCallback', () => {
     const seen: Array<{ url: string; body: string }> = []
     const cb = createTypingCallback({
       token: 'TGTOKEN',
-      configRef: () => baseConfig,
       logger: silentLogger(),
       fetchImpl: fakeFetch((url, init) => {
         seen.push({ url, body: typeof init?.body === 'string' ? init.body : '' })
@@ -310,7 +280,6 @@ describe('telegram-bot createTypingCallback', () => {
     const seen: Array<{ body: string }> = []
     const cb = createTypingCallback({
       token: 'T',
-      configRef: () => baseConfig,
       logger: silentLogger(),
       fetchImpl: fakeFetch((_url, init) => {
         seen.push({ body: typeof init?.body === 'string' ? init.body : '' })
@@ -328,7 +297,6 @@ describe('telegram-bot createTypingCallback', () => {
     const seen: Array<{ body: string }> = []
     const cb = createTypingCallback({
       token: 'T',
-      configRef: () => baseConfig,
       logger: silentLogger(),
       fetchImpl: fakeFetch((_url, init) => {
         seen.push({ body: typeof init?.body === 'string' ? init.body : '' })
@@ -347,7 +315,6 @@ describe('telegram-bot createTypingCallback', () => {
     let fetchCalled = false
     const cb = createTypingCallback({
       token: 'T',
-      configRef: () => baseConfig,
       logger: silentLogger(),
       fetchImpl: fakeFetch(() => {
         fetchCalled = true
@@ -356,24 +323,6 @@ describe('telegram-bot createTypingCallback', () => {
     })
 
     await cb({ adapter: 'telegram-bot', workspace: 'telegram', chat: '-100123', thread: null, phase: 'stop' })
-
-    expect(fetchCalled).toBe(false)
-  })
-
-  test('no-ops when allow rules deny the chat', async () => {
-    let fetchCalled = false
-    const restrictiveConfig: ChannelAdapterConfig = { ...baseConfig, allow: ['tg:-999'] }
-    const cb = createTypingCallback({
-      token: 'T',
-      configRef: () => restrictiveConfig,
-      logger: silentLogger(),
-      fetchImpl: fakeFetch(() => {
-        fetchCalled = true
-        return new Response('{}', { status: 200 })
-      }),
-    })
-
-    await cb({ adapter: 'telegram-bot', workspace: 'telegram', chat: '-100123', thread: null, phase: 'tick' })
 
     expect(fetchCalled).toBe(false)
   })
