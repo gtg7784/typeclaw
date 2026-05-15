@@ -30,9 +30,12 @@ import { c, done, errorLine } from './ui'
 // aliases both to the same "cancel" action — there's no way to tell them
 // apart through @clack/prompts). The wizard treats every cancel as "go
 // back to the previous step": each step that runs an interactive prompt
-// either advances with a value or rewinds. Rewinding past the first
-// interactive step aborts the init cleanly. Users who want to abort
-// mid-wizard can hit ESC repeatedly until they're back to the start.
+// either advances with a value or rewinds. There is no "go back" target
+// on the very first step (pick-provider), so a `back` there is a no-op
+// that re-displays the same prompt rather than aborting. Users who want
+// to bail out of the wizard kill the process from outside (close the
+// terminal, send SIGTERM); inside an active clack prompt Ctrl+C is also
+// aliased to cancel, so there is no in-wizard abort hotkey.
 export type StepResult<T> = { kind: 'value'; value: T } | { kind: 'back' }
 const back = <T>(): StepResult<T> => ({ kind: 'back' })
 const value = <T>(v: T): StepResult<T> => ({ kind: 'value', value: v })
@@ -75,11 +78,6 @@ export const init = defineCommand({
     log.info('Press ESC at any prompt to go back to the previous step.')
 
     const collected = await collectWizardInputs(cwd, defaultWizardPrompts)
-    if (collected === null) {
-      cancel('Aborted.')
-      process.exit(0)
-    }
-
     const { model, llmAuth, channelSecrets } = collected
     const { discordBotToken, slackBotToken, slackAppToken, telegramBotToken, kakaotalkEmail, kakaotalkPassword } =
       channelSecrets
@@ -220,7 +218,7 @@ export const defaultWizardPrompts: WizardPrompts = {
   }),
 }
 
-export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): Promise<CollectedInputs | null> {
+export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): Promise<CollectedInputs> {
   const catalog = await prompts.loadCatalog()
   const state: WizardState = { catalog }
   let step: StepId = 'pick-provider'
@@ -229,7 +227,9 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
     switch (step) {
       case 'pick-provider': {
         const result = await prompts.pickProvider(catalog.options, state.providerId)
-        if (result.kind === 'back') return null
+        if (result.kind === 'back') {
+          break
+        }
         if (state.providerId !== result.value) {
           state.model = undefined
           state.reuseExisting = undefined

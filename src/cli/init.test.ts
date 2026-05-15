@@ -152,20 +152,25 @@ describe('collectWizardInputs back-aware flow', () => {
       'pick-channel',
       'channel-flow',
     ])
-    expect(result).not.toBeNull()
-    expect(result!.model).toBe(fireworksModel)
-    expect(result!.llmAuth).toEqual({ kind: 'api-key', apiKey: 'fw_test' })
-    expect(result!.channelSecrets).toEqual({})
+    expect(result.model).toBe(fireworksModel)
+    expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'fw_test' })
+    expect(result.channelSecrets).toEqual({})
   })
 
-  test('back from pick-provider aborts (returns null)', async () => {
+  test('back from pick-provider is a no-op that re-asks the same prompt', async () => {
+    let providerCalls = 0
     const prompts = makePrompts({
-      pickProvider: async () => ({ kind: 'back' }),
+      pickProvider: async () => {
+        providerCalls += 1
+        if (providerCalls < 3) return { kind: 'back' }
+        return { kind: 'value', value: 'fireworks' as KnownProviderId }
+      },
     })
 
     const result = await collectWizardInputs('/agent', prompts)
 
-    expect(result).toBeNull()
+    expect(providerCalls).toBe(3)
+    expect(result.model).toBe(fireworksModel)
   })
 
   test('back from pick-model returns to pick-provider, then advances', async () => {
@@ -186,10 +191,9 @@ describe('collectWizardInputs back-aware flow', () => {
       },
     })
 
-    const result = await collectWizardInputs('/agent', prompts)
+    await collectWizardInputs('/agent', prompts)
 
     expect(calls).toEqual(['pick-provider', 'pick-model', 'pick-provider', 'pick-model'])
-    expect(result).not.toBeNull()
   })
 
   test('back from pick-channel returns to enter-api-key when api-key was chosen', async () => {
@@ -389,6 +393,6 @@ describe('collectWizardInputs back-aware flow', () => {
     const result = await collectWizardInputs('/agent', prompts)
 
     expect(calls).toEqual(['pick-channel', 'channel-flow', 'pick-channel', 'channel-flow'])
-    expect(result!.channelSecrets).toEqual({ discordBotToken: 'tok' })
+    expect(result.channelSecrets).toEqual({ discordBotToken: 'tok' })
   })
 })
