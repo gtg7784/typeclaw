@@ -230,4 +230,4 @@ function shouldRecurse(path: string): boolean {
   return path === 'docker' || path === 'git' || path === 'permissions'
 }
 
-const KNOWN_OPTIONAL_PATHS = new Set<string>(['roles'])
+const KNOWN_OPTIONAL_PATHS = new Set<string>(['roles.match', 'roles.permissions'])

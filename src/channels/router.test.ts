@@ -19,6 +19,7 @@ import {
   SESSION_IDLE_MS,
   sliceHeadTail,
   type ChannelRouter,
+  type ClaimHandler,
 } from './router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from './schema'
 import type { ChannelHistoryMessage, ChannelKey, FetchHistoryArgs, HistoryCallback, InboundMessage } from './types'
@@ -107,6 +108,7 @@ const grantAllPermissions: PermissionService = {
   has: () => true,
   resolveRole: () => 'owner',
   describe: () => ({ role: 'owner', permissions: ['channel.respond'] }),
+  replaceRoles: () => {},
 }
 
 function makeRouter(
@@ -122,6 +124,7 @@ function makeRouter(
     configuredAliases?: () => readonly string[]
     ensureLiveTimeoutMs?: number
     permissions?: PermissionService
+    claimHandler?: ClaimHandler
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -132,6 +135,7 @@ function makeRouter(
     configForAdapter: () => options.config ?? baseConfig,
     ...(options.configuredAliases !== undefined ? { configuredAliases: options.configuredAliases } : {}),
     ...(options.ensureLiveTimeoutMs !== undefined ? { ensureLiveTimeoutMs: options.ensureLiveTimeoutMs } : {}),
+    ...(options.claimHandler !== undefined ? { claimHandler: options.claimHandler } : {}),
     permissions: options.permissions ?? grantAllPermissions,
     now: () => nowRef.value,
     logger: {
@@ -2732,6 +2736,7 @@ describe('ChannelRouter channel.respond gate', () => {
     },
     resolveRole: () => 'guest',
     describe: () => ({ role: 'guest', permissions: [] }),
+    replaceRoles: () => {},
   })
 
   test('author has channel.respond → routes through normally', async () => {
@@ -2781,6 +2786,7 @@ describe('ChannelRouter channel.respond gate', () => {
       has: () => false,
       resolveRole: () => 'guest',
       describe: () => ({ role: 'guest', permissions: [] }),
+      replaceRoles: () => {},
     }
     const { router, sessions } = makeRouter(dir, { permissions })
 
@@ -2789,5 +2795,130 @@ describe('ChannelRouter channel.respond gate', () => {
 
     expect(sessions).toHaveLength(0)
     expect(router.liveCount()).toBe(0)
+  })
+})
+
+describe('ChannelRouter role-claim bypass', () => {
+  type SentMsg = { adapter: string; chat: string; text: string | undefined }
+
+  const denyAllPermissions: PermissionService = {
+    has: () => false,
+    resolveRole: () => 'guest',
+    describe: () => ({ role: 'guest', permissions: [] }),
+    replaceRoles: () => {},
+  }
+
+  test('DM with claim code → handler is invoked, reply sent, no session created, gate bypassed', async () => {
+    const dir = await tempDir()
+    const sent: SentMsg[] = []
+    let calls = 0
+    const claimHandler: ClaimHandler = async (input) => {
+      calls++
+      expect(input.isDm).toBe(true)
+      expect(input.text).toContain('claim-')
+      return { kind: 'consumed', reply: 'Welcome owner!' }
+    }
+    const { router, sessions } = makeRouter(dir, {
+      permissions: denyAllPermissions,
+      claimHandler,
+    })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ adapter: msg.adapter, chat: msg.chat, text: msg.text })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ isDm: true, text: 'here you go: claim-AAAA-BBBB' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(calls).toBe(1)
+    expect(sent).toEqual([{ adapter: 'discord-bot', chat: 'c1', text: 'Welcome owner!' }])
+    expect(sessions).toHaveLength(0)
+    expect(router.liveCount()).toBe(0)
+  })
+
+  test('non-DM with claim code → handler NOT invoked, falls through to gate (denied)', async () => {
+    const dir = await tempDir()
+    let calls = 0
+    const claimHandler: ClaimHandler = async () => {
+      calls++
+      return { kind: 'consumed', reply: 'x' }
+    }
+    const { router, sessions } = makeRouter(dir, {
+      permissions: denyAllPermissions,
+      claimHandler,
+    })
+
+    await router.route(inbound({ isDm: false, text: 'claim-AAAA-BBBB' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(calls).toBe(0)
+    expect(sessions).toHaveLength(0)
+  })
+
+  test('DM without a claim code → handler NOT invoked, falls through to gate (denied)', async () => {
+    const dir = await tempDir()
+    let calls = 0
+    const claimHandler: ClaimHandler = async () => {
+      calls++
+      return { kind: 'consumed', reply: 'x' }
+    }
+    const { router, sessions } = makeRouter(dir, {
+      permissions: denyAllPermissions,
+      claimHandler,
+    })
+
+    await router.route(inbound({ isDm: true, text: 'hi there' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(calls).toBe(0)
+    expect(sessions).toHaveLength(0)
+  })
+
+  test('handler returns fallthrough → message proceeds to normal gate (denied here)', async () => {
+    const dir = await tempDir()
+    const claimHandler: ClaimHandler = async () => ({ kind: 'fallthrough' })
+    const { router, sessions } = makeRouter(dir, {
+      permissions: denyAllPermissions,
+      claimHandler,
+    })
+
+    await router.route(inbound({ isDm: true, text: 'claim-AAAA-BBBB' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(sessions).toHaveLength(0)
+  })
+
+  test('handler returns fail → reply sent, no session created', async () => {
+    const dir = await tempDir()
+    const sent: SentMsg[] = []
+    const claimHandler: ClaimHandler = async () => ({
+      kind: 'fail',
+      reply: 'This claim has expired. Run typeclaw role claim again.',
+    })
+    const { router, sessions } = makeRouter(dir, {
+      permissions: denyAllPermissions,
+      claimHandler,
+    })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ adapter: msg.adapter, chat: msg.chat, text: msg.text })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ isDm: true, text: 'claim-AAAA-BBBB' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('expired')
+    expect(sessions).toHaveLength(0)
+  })
+
+  test('no claimHandler registered → claim DMs are dropped by the channel.respond gate', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, { permissions: denyAllPermissions })
+
+    await router.route(inbound({ isDm: true, text: 'claim-AAAA-BBBB' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(sessions).toHaveLength(0)
   })
 })

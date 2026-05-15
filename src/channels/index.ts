@@ -2,6 +2,9 @@ export { createChannelManager, type ChannelManager, type ChannelManagerOptions }
 export {
   createChannelRouter,
   type ChannelRouter,
+  type ClaimHandler,
+  type ClaimHandlerInput,
+  type ClaimHandlerOutcome,
   type CreateChannelRouterOptions,
   type CreateSessionForChannel,
 } from './router'

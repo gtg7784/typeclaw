@@ -319,7 +319,16 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   network: 'restart-required',
   'docker.file': 'restart-required',
   'git.ignore': 'restart-required',
-  roles: 'restart-required',
+  // Split: `match` lists are reload-safe (typeclaw role claim, hand-edits
+  // adding/removing match rules apply without a container restart);
+  // `permissions` lists are restart-required (changing what a role can DO
+  // is a bigger deal than changing WHO fills it, and several consumers —
+  // plugin contexts, the security plugin guards — capture the permissions
+  // contract at boot). The diff machinery in diffConfig() understands
+  // `roles.match` and `roles.permissions` as virtual paths and compares
+  // the corresponding projections of the whole `roles` block.
+  'roles.match': 'applied',
+  'roles.permissions': 'restart-required',
 }
 
 // Stable JSON for value comparison. Fields are small JSON-shaped objects, so
@@ -358,12 +367,27 @@ function diffConfig(before: Config, after: Config): ConfigReloadDiff {
 }
 
 function readPath(obj: unknown, path: string): unknown {
+  if (path === 'roles.match') return projectRoles(obj, 'match')
+  if (path === 'roles.permissions') return projectRoles(obj, 'permissions')
   let cur: unknown = obj
   for (const part of path.split('.')) {
     if (cur === null || cur === undefined) return undefined
     cur = (cur as Record<string, unknown>)[part]
   }
   return cur
+}
+
+function projectRoles(obj: unknown, field: 'match' | 'permissions'): unknown {
+  if (typeof obj !== 'object' || obj === null) return undefined
+  const roles = (obj as Record<string, unknown>).roles
+  if (typeof roles !== 'object' || roles === null) return undefined
+  const projection: Record<string, unknown> = {}
+  for (const [roleName, roleVal] of Object.entries(roles as Record<string, unknown>)) {
+    if (typeof roleVal !== 'object' || roleVal === null) continue
+    const val = (roleVal as Record<string, unknown>)[field]
+    if (val !== undefined) projection[roleName] = val
+  }
+  return projection
 }
 
 // Plugin configs live at the top level of typeclaw.json keyed by plugin name

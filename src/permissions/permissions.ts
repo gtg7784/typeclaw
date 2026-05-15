@@ -9,6 +9,11 @@ export type PermissionService = {
   has(origin: SessionOrigin | undefined, permission: string): boolean
   resolveRole(origin: SessionOrigin | undefined): string
   describe(origin: SessionOrigin | undefined): { role: string; permissions: readonly string[] }
+  // Rebuilds the resolved role table from the given roles config, preserving
+  // the same plugin-permission set captured at construction time. Used by
+  // the config reloadable so role match-rule edits (typeclaw role claim,
+  // hand-edits to typeclaw.json) take effect without a container restart.
+  replaceRoles(roles: RolesConfig | undefined): void
 }
 
 export type UnknownPermissionWarning = {
@@ -21,6 +26,7 @@ export const noopPermissionService: PermissionService = {
   has: () => false,
   resolveRole: () => 'guest',
   describe: () => ({ role: 'guest', permissions: [] }),
+  replaceRoles: () => {},
 }
 
 type ResolvedRole = {
@@ -90,8 +96,9 @@ function levenshtein(a: string, b: string): number {
 }
 
 export function createPermissionService(opts: CreatePermissionServiceOptions = {}): PermissionService {
-  const resolved = buildRoleTable(opts.roles ?? {}, opts.pluginPermissions ?? [])
-  const byName = new Map(resolved.map((r) => [r.name, r]))
+  const pluginPermissions = opts.pluginPermissions ?? []
+  let resolved = buildRoleTable(opts.roles ?? {}, pluginPermissions)
+  let byName = new Map(resolved.map((r) => [r.name, r]))
 
   function resolveRole(origin: SessionOrigin | undefined): string {
     if (origin === undefined) return 'guest'
@@ -130,6 +137,10 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
       const name = resolveRole(origin)
       const role = byName.get(name)
       return { role: name, permissions: role?.permissions ?? [] }
+    },
+    replaceRoles(roles) {
+      resolved = buildRoleTable(roles ?? {}, pluginPermissions)
+      byName = new Map(resolved.map((r) => [r.name, r]))
     },
   }
 }

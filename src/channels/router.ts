@@ -8,6 +8,7 @@ import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { createCommandRegistry } from '@/commands'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
+import { extractClaimCode } from '@/role-claim'
 
 import { decideEngagement, grantStickyForReplyTargets, StickyLedger, type EngagementDecision } from './engagement'
 import {
@@ -325,12 +326,37 @@ export type CreateChannelRouterOptions = {
   // injection is enforced; direct-router tests opt into gate semantics by
   // passing their own service.
   permissions?: PermissionService
+  // Optional role-claim handler. When set, the router intercepts DM
+  // inbounds whose text contains a claim code BEFORE the channel.respond
+  // gate, hands the inbound to the handler, and short-circuits the normal
+  // route path (no session creation, no permission check, no engagement
+  // pipeline). The handler returns the reply text the router should send
+  // back over the same chat, or null to fall through to normal routing
+  // when no pending claim window matches.
+  claimHandler?: ClaimHandler
 }
+
+export type ClaimHandlerInput = {
+  adapter: ChannelKey['adapter']
+  workspace: string
+  chat: string
+  isDm: boolean
+  authorId: string
+  text: string
+}
+
+export type ClaimHandlerOutcome =
+  | { kind: 'consumed'; reply: string }
+  | { kind: 'fail'; reply: string }
+  | { kind: 'fallthrough' }
+
+export type ClaimHandler = (input: ClaimHandlerInput) => Promise<ClaimHandlerOutcome>
 
 const GRANT_ALL_PERMISSIONS: PermissionService = {
   has: () => true,
   resolveRole: () => 'owner',
   describe: () => ({ role: 'owner', permissions: [CORE_PERMISSIONS.channelRespond] }),
+  replaceRoles: () => {},
 }
 
 export function createChannelRouter(options: CreateChannelRouterOptions): ChannelRouter {
@@ -341,6 +367,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const fetchHistoryTimeoutMs = options.fetchHistoryTimeoutMs ?? FETCH_HISTORY_TIMEOUT_MS
   const sessionIdleTimeoutMs = options.sessionIdleTimeoutMs ?? SESSION_IDLE_TIMEOUT_MS
   const permissions = options.permissions ?? GRANT_ALL_PERMISSIONS
+  const claimHandler = options.claimHandler
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
@@ -963,6 +990,35 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       workspace: event.workspace,
       chat: event.chat,
       thread: event.thread,
+    }
+
+    // Role-claim intercept runs BEFORE the channel.respond gate so the
+    // operator can bootstrap permissions on a fresh agent that has no
+    // role match rules yet. Cheap pre-check: only DMs whose text contains
+    // a `claim-` prefix can be claim attempts, and only when a handler
+    // is registered. Everything else falls straight through to the gate.
+    if (claimHandler !== undefined && event.isDm && extractClaimCode(event.text) !== null) {
+      const outcome = await claimHandler({
+        adapter: event.adapter,
+        workspace: event.workspace,
+        chat: event.chat,
+        isDm: event.isDm,
+        authorId: event.authorId,
+        text: event.text,
+      })
+      if (outcome.kind !== 'fallthrough') {
+        logger.info(
+          `[channels] ${channelKeyId(key)}: claim ${outcome.kind} author=${event.authorId} id=${event.externalMessageId}`,
+        )
+        await send({
+          adapter: event.adapter,
+          workspace: event.workspace,
+          chat: event.chat,
+          thread: event.thread,
+          text: outcome.reply,
+        })
+        return
+      }
     }
 
     if (isChannelRespondDenied(event)) {

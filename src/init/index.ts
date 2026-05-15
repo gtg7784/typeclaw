@@ -81,7 +81,15 @@ export type InitStepEvent =
 // portbroker — same path `typeclaw start` takes. When omitted (test fixtures,
 // programmatic callers that never want a daemon), `start()` skips the daemon
 // path entirely and the container runs unmanaged.
-export type HatchRunner = (options: { cwd: string; port: number; cliEntry?: string }) => Promise<HatchingResult>
+export type HatchRunner = (options: {
+  cwd: string
+  port: number
+  cliEntry?: string
+  // Set when the wizard wired at least one channel adapter, so the runner
+  // can offer to run `typeclaw role claim` after the container is ready.
+  // Empty / undefined means "no channels — skip the claim flow".
+  configuredChannels?: readonly ChannelKind[]
+}) => Promise<HatchingResult>
 
 export type KakaotalkAuthRunner = (options: { cwd: string }) => Promise<KakaotalkAuthResult>
 
@@ -223,8 +231,19 @@ export async function runInit({
   const git = await initGitRepo(cwd)
   emit({ step: 'git', phase: 'done', result: git })
 
+  const configuredChannels: ChannelKind[] = []
+  if (wantsDiscord) configuredChannels.push('discord-bot')
+  if (wantsSlack) configuredChannels.push('slack-bot')
+  if (wantsTelegram) configuredChannels.push('telegram-bot')
+  if (withKakaotalk) configuredChannels.push('kakaotalk')
+
   emit({ step: 'hatching', phase: 'start' })
-  const hatching = await runHatching({ cwd, port: config.port, ...(cliEntry !== undefined ? { cliEntry } : {}) })
+  const hatching = await runHatching({
+    cwd,
+    port: config.port,
+    ...(cliEntry !== undefined ? { cliEntry } : {}),
+    ...(configuredChannels.length > 0 ? { configuredChannels } : {}),
+  })
   emit({ step: 'hatching', phase: 'done', result: hatching })
 }
 
@@ -238,16 +257,20 @@ export async function defaultRunHatching({
   cwd,
   port,
   cliEntry,
+  configuredChannels,
   startContainer = start,
   tui: tuiFactory = createTui,
   waitForAgent: waitForAgentFn = waitForAgent,
+  runClaim = defaultRunClaim,
 }: {
   cwd: string
   port: number
   cliEntry?: string
+  configuredChannels?: readonly ChannelKind[]
   startContainer?: typeof start
   tui?: typeof createTui
   waitForAgent?: typeof waitForAgent
+  runClaim?: ClaimRunner
 }): Promise<HatchingResult> {
   try {
     const launch = await startContainer({
@@ -264,6 +287,11 @@ export async function defaultRunHatching({
 
     await waitForAgentFn(`http://127.0.0.1:${hostPort}`, { timeoutMs: 30_000 })
 
+    if (configuredChannels !== undefined && configuredChannels.length > 0) {
+      const url = buildTuiUrl(hostPort, launch.tuiToken)
+      await runClaim({ url, configuredChannels })
+    }
+
     const tui = tuiFactory({
       url: buildTuiUrl(hostPort, launch.tuiToken),
       initialPrompt: HATCHING_PROMPT,
@@ -273,6 +301,13 @@ export async function defaultRunHatching({
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
+}
+
+export type ClaimRunner = (options: { url: string; configuredChannels: readonly ChannelKind[] }) => Promise<void>
+
+const defaultRunClaim: ClaimRunner = async ({ url, configuredChannels }) => {
+  const { runOwnerClaim } = await import('./run-owner-claim')
+  await runOwnerClaim({ url, configuredChannels })
 }
 
 function buildTuiUrl(hostPort: number, token: string | null): string {

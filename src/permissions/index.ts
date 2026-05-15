@@ -24,5 +24,6 @@ export {
   type PermissionService,
   type UnknownPermissionWarning,
 } from './permissions'
+export { grantRole, type GrantOptions, type GrantResult } from './grant'
 export { matchesOrigin, type MatchableOrigin } from './resolve'
 export { MATCH_RULE_JSON_SCHEMA_PATTERN, rolesConfigSchema, type RoleConfig, type RolesConfig } from './schema'

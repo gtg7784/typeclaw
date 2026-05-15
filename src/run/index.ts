@@ -27,6 +27,7 @@ import {
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
 import { createContainerBroker, publishForwardResult } from '@/portbroker'
 import { ReloadRegistry } from '@/reload'
+import { createClaimController } from '@/role-claim'
 import { hydrateChannelEnvFromSecrets } from '@/secrets'
 import { createServer, type Server } from '@/server'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
@@ -91,7 +92,6 @@ export async function startAgent({
   const containerNameOpt = containerName !== undefined ? { containerName } : {}
   const tuiToken = process.env.TYPECLAW_TUI_TOKEN
   const tuiTokenOpt = tuiToken !== undefined && tuiToken !== '' ? { tuiToken } : {}
-  reloadRegistry.register(createConfigReloadable({ cwd }))
 
   const pluginConfigsByName = loadPluginConfigsSync(cwd)
   const cwdConfig = loadConfigSync(cwd)
@@ -102,6 +102,8 @@ export async function startAgent({
     bundled: BUNDLED_PLUGINS,
     ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
+
+  reloadRegistry.register(createConfigReloadable({ cwd, permissions: pluginsLoaded.permissions }))
   const pluginRegistry = pluginsLoaded.registry
   const pluginHooks = pluginsLoaded.hooks
 
@@ -133,6 +135,12 @@ export async function startAgent({
   // stay in env, the file stays user-owned. See src/secrets/hydrate.ts.
   hydrateChannelEnvFromSecrets({ agentDir: cwd })
 
+  const claimController = createClaimController({
+    cwd,
+    permissions: pluginsLoaded.permissions,
+    rolesProvider: () => getConfig().roles,
+  })
+
   const channelManager = createChannelManager({
     agentDir: cwd,
     channelsConfigRef: () => getConfig().channels,
@@ -149,6 +157,7 @@ export async function startAgent({
       ...containerNameOpt,
     }),
     permissions: pluginsLoaded.permissions,
+    claimHandler: claimController.claimHandler,
   })
 
   const createSessionForSubagent: import('@/agent/subagents').CreateSessionForSubagent = async (
@@ -348,6 +357,7 @@ export async function startAgent({
     channelRouter: channelManager.router,
     agentDir: cwd,
     pluginRuntime,
+    claimController,
     ...containerNameOpt,
     ...tuiTokenOpt,
     ...containerBrokerOpt,
