@@ -317,7 +317,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
     // Stickers arrive on a separate listener event in agent-messenger
     // 2.15.0 and have no `message` field. We wrap them into the same
     // MSG-shaped payload classifyInbound expects so the engagement /
-    // allow-list / self-author rules apply identically across plain
+    // self-author / unknown-chat rules apply identically across plain
     // messages and stickers — there is no second classifier to keep in
     // sync.
     await processInbound(emoticonEventToMessageEvent(event))
@@ -332,10 +332,11 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
           // The push event itself proves the chat exists, even when
           // getChats({all:true}) does not surface it (e.g. memo chats,
           // certain open chats, recently-joined groups that haven't
-          // propagated). Register a provisional @kakao-group entry so the
-          // strictest allow rules still apply, but the message is no longer
-          // silently dropped as unknown_chat. The next real refresh
-          // upgrades the entry if the chat is actually a DM or open chat.
+          // propagated). Register a provisional @kakao-group entry (the
+          // strictest workspace bucket — narrowest engagement assumptions)
+          // so the message is no longer silently dropped as unknown_chat.
+          // The next real refresh upgrades the entry if the chat is
+          // actually a DM or open chat.
           channelResolver.ingestProvisional(event.chat_id)
           logger.warn(
             `[kakaotalk] provisional chat=${event.chat_id} log_id=${event.log_id} bucket=@kakao-group reason=not_in_getchats`,
@@ -353,7 +354,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
 
       // Ack the message BEFORE classify/route so the sender's unread "1"
       // (노란숫자) clears even when we drop the message (self-author,
-      // not-in-allow, empty text, etc.). The receiver of a kakao adapter is
+      // unknown chat, empty text, etc.). The receiver of a kakao adapter is
       // expected to behave like a "read it as soon as it arrives" client —
       // the agent has observed the bytes, so the user should see the read
       // acknowledgement regardless of what we decide to do with the message
