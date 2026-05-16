@@ -10,6 +10,7 @@ import {
   isKnownModelRef,
   listAvailableModelRefs,
   listModelProfiles,
+  listRegisteredModelRefs,
   removeProfile,
   setProfile,
 } from './models-mutation'
@@ -41,6 +42,39 @@ describe('listAvailableModelRefs', () => {
     expect(refs).toContain('openai/gpt-5.4-nano')
     expect(refs).toContain('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')
     expect(refs.length).toBeGreaterThan(5)
+  })
+})
+
+describe('listRegisteredModelRefs', () => {
+  test('returns only models whose providers have a secrets.json entry', () => {
+    const refs = listRegisteredModelRefs(root, {})
+    expect(refs).toEqual(['fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'])
+  })
+
+  test('includes models for providers configured purely via env var', () => {
+    const refs = listRegisteredModelRefs(root, { OPENAI_API_KEY: 'sk_test' })
+    expect(refs).toContain('openai/gpt-5.4-nano')
+    expect(refs).toContain('openai/gpt-5.4')
+    expect(refs).toContain('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')
+    expect(refs.every((r) => r.startsWith('openai/') || r.startsWith('fireworks/'))).toBe(true)
+  })
+
+  test('returns empty when no provider is configured (file or env)', async () => {
+    const empty = await mkdtemp(join(tmpdir(), 'typeclaw-models-mutation-empty-'))
+    try {
+      await scaffold(empty, { model: 'openai/gpt-5.4-nano' })
+      expect(listRegisteredModelRefs(empty, {})).toEqual([])
+    } finally {
+      await rm(empty, { recursive: true, force: true })
+    }
+  })
+
+  test('preserves listKnownModelRefs declaration order', () => {
+    const refs = listRegisteredModelRefs(root, { OPENAI_API_KEY: 'sk_test', FIREWORKS_API_KEY: 'fw_test' })
+    const known = listAvailableModelRefs()
+    const indexed = refs.map((r) => known.indexOf(r))
+    const sorted = [...indexed].sort((a, b) => a - b)
+    expect(indexed).toEqual(sorted)
   })
 })
 
