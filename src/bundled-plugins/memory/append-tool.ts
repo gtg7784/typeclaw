@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto'
 import { mkdir } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
@@ -9,6 +8,7 @@ import { formatLocalDate } from '@/shared'
 
 import { fragmentContentHash } from './fragment-parser'
 import { detectSecrets } from './secret-detector'
+import { newEventId, timestampFromId } from './stream-events'
 import type { FragmentEvent, WatermarkEvent } from './stream-events'
 import { appendEvents, readEvents } from './stream-io'
 
@@ -39,10 +39,12 @@ export const appendTool = defineTool({
       )
     }
 
+    const fragmentId = newEventId()
+    const watermarkId = newEventId()
     const fragment: FragmentEvent = {
       type: 'fragment',
-      id: randomUUID(),
-      ts: new Date().toISOString(),
+      id: fragmentId,
+      ts: timestampFromId(fragmentId),
       source,
       entry,
       topic,
@@ -50,8 +52,8 @@ export const appendTool = defineTool({
     }
     const watermark: WatermarkEvent = {
       type: 'watermark',
-      id: randomUUID(),
-      ts: new Date().toISOString(),
+      id: watermarkId,
+      ts: timestampFromId(watermarkId),
       source,
       entry: latestEntryId,
     }
@@ -75,10 +77,11 @@ export const advanceWatermarkTool = defineTool({
   }),
   async execute({ source, latestEntryId }, ctx) {
     const streamPath = dailyStreamPath(ctx.agentDir)
+    const watermarkId = newEventId()
     const watermark: WatermarkEvent = {
       type: 'watermark',
-      id: randomUUID(),
-      ts: new Date().toISOString(),
+      id: watermarkId,
+      ts: timestampFromId(watermarkId),
       source,
       entry: latestEntryId,
     }

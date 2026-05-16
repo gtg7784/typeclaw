@@ -1,11 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
 import {
+  fragmentEventSchema,
   legacyProseEventSchema,
+  newEventId,
   parseEventLine,
   streamEventSchema,
+  timestampFromId,
   watermarkEventSchema,
-  fragmentEventSchema,
 } from './stream-events'
 
 describe('parseEventLine', () => {
@@ -135,6 +137,32 @@ describe('schema exports', () => {
       origin: 'other',
     })
     expect(result.success).toBe(false)
+  })
+
+  test('newEventId produces lexicographically sortable ids in append order', () => {
+    const ids: string[] = []
+    for (let i = 0; i < 100; i++) ids.push(newEventId())
+    const sorted = [...ids].sort()
+    expect(sorted).toEqual(ids)
+  })
+
+  test('newEventId returns canonical 36-char UUID with v7 version nibble', () => {
+    const id = newEventId()
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+  })
+
+  test('timestampFromId round-trips the millisecond at which the id was minted', () => {
+    const before = Date.now()
+    const id = newEventId()
+    const after = Date.now()
+    const recovered = new Date(timestampFromId(id)).getTime()
+    expect(recovered).toBeGreaterThanOrEqual(before)
+    expect(recovered).toBeLessThanOrEqual(after)
+  })
+
+  test('timestampFromId throws on shapes that are not UUIDv7-prefixed', () => {
+    expect(() => timestampFromId('not-a-uuid')).toThrow()
+    expect(() => timestampFromId('zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz')).toThrow()
   })
 
   test('streamEventSchema discriminates by type', () => {
