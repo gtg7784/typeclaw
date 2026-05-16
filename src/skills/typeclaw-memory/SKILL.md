@@ -1,11 +1,11 @@
 ---
 name: typeclaw-memory
-description: Use this skill whenever the user asks what you remember, what you forgot, what you dreamed, why a fact is or isn't in your memory, when memory consolidation happens, or whenever you are about to read or write `MEMORY.md`, anything under `memory/`, or `memory/skills/`. Triggers include "what do you remember", "do you remember X", "forget that", "what did you dream", "when do you dream next", "why did you forget X", "edit MEMORY.md", "add to memory", "your daily streams", "memory-logger", "dreaming", "muscle memory", or any mention of `memory.idleMs` / `memory.dreaming.schedule` in `typeclaw.json`. Read it before you touch any memory file — `MEMORY.md` and `memory/yyyy-MM-dd.md` are runtime-owned, hand-edits are easy to do wrong, and the user almost always means something more specific than "edit memory" when they say it.
+description: Use this skill whenever the user asks what you remember, what you forgot, what you dreamed, why a fact is or isn't in your memory, when memory consolidation happens, or whenever you are about to read or write `MEMORY.md`, anything under `memory/`, or `memory/skills/`. Triggers include "what do you remember", "do you remember X", "forget that", "what did you dream", "when do you dream next", "why did you forget X", "edit MEMORY.md", "add to memory", "your daily streams", "memory-logger", "dreaming", "muscle memory", or any mention of `memory.idleMs` / `memory.dreaming.schedule` in `typeclaw.json`. Read it before you touch any memory file — `MEMORY.md` and `memory/yyyy-MM-dd.jsonl` are runtime-owned, hand-edits are easy to do wrong, and the user almost always means something more specific than "edit memory" when they say it.
 ---
 
 # typeclaw-memory
 
-You have a two-stage memory system, owned by the bundled `memory` plugin (auto-loaded on every TypeClaw agent — there is no `plugins[]` entry to add and no opt-out). Daily observations flow into `memory/yyyy-MM-dd.md` while you are awake; offline reflection consolidates them into `MEMORY.md` and may distill repeated procedures into muscle-memory skills under `memory/skills/`. Both stages are run by subagents the runtime spawns on its own — not tools you call directly.
+You have a two-stage memory system, owned by the bundled `memory` plugin (auto-loaded on every TypeClaw agent — there is no `plugins[]` entry to add and no opt-out). Daily observations flow into `memory/yyyy-MM-dd.jsonl` while you are awake; offline reflection consolidates them into `MEMORY.md` and may distill repeated procedures into muscle-memory skills under `memory/skills/`. Both stages are run by subagents the runtime spawns on its own — not tools you call directly.
 
 This skill exists so you can answer the user's questions about your own memory honestly and so you do not corrupt it by hand-editing.
 
@@ -18,7 +18,7 @@ After every prompt completes, the runtime fires the `session.idle` hook. The mem
 The memory-logger reads:
 
 1. `MEMORY.md` (long-term memory)
-2. The current `memory/yyyy-MM-dd.md` daily stream
+2. The current `memory/yyyy-MM-dd.jsonl` daily stream
 3. The transcript of the parent session past a watermark (the `entry=` value of the last fragment or watermark marker for that session)
 
 It writes zero or more **fragments** to today's stream, plus a watermark marker so the next run knows where to resume. It writes nothing else, and it cannot run shell commands or edit existing content (its only tools are `read` and a custom `append`-only file tool — append never truncates, and a leading `\n` is auto-inserted if the existing file did not end in one).
@@ -43,9 +43,9 @@ The dreaming subagent runs on cron, configured under `memory.dreaming.schedule` 
 When dreaming fires, it reads:
 
 1. `MEMORY.md`
-2. The **undreamed tail** of every `memory/yyyy-MM-dd.md` (the runtime tells it the exact line range — earlier lines are already consolidated into `MEMORY.md` and must NOT be re-read)
+2. The **undreamed fragments** of every `memory/yyyy-MM-dd.jsonl` (the runtime tells it which fragment ids are new — fragments whose ids are already in `memory/.dreaming-state.json#dreamedThrough[date].dreamedIds` have been consolidated and must NOT be re-cited)
 
-It rewrites `MEMORY.md` with the merged result, advances the per-day watermark in `memory/.dreaming-state.json`, optionally writes muscle-memory skills under `memory/skills/<name>/SKILL.md`, then commits the snapshot with a message shaped like `dream: <summary> <emoji>` — e.g. `dream: 3 fragments + new skill 'pr-review' 🔮`. The summary is derived from the staged diff (line additions in daily streams, newly-added skills, etc.), and the emoji is a random pick from a small thematic pool. After the commit, the runtime sets the `skip-worktree` index flag on the tracked memory artifacts so the user's `git status` and `git diff` stay clean. The flag is cleared and re-applied around every commit.
+It rewrites `MEMORY.md` with the merged result, advances the per-day dreamed-id set in `memory/.dreaming-state.json`, optionally writes muscle-memory skills under `memory/skills/<name>/SKILL.md`, **compacts the touched daily streams** (drops superseded watermarks per source and fragments that are in `dreamedIds` but not cited from `MEMORY.md`), then commits the snapshot with a message shaped like `dream: <summary> <emoji>` — e.g. `dream: 3 fragments + new skill 'pr-review' 🔮`. The summary is derived from the staged diff (line additions in daily streams, newly-added skills, etc.), and the emoji is a random pick from a small thematic pool. After the commit, the runtime sets the `skip-worktree` index flag on the tracked memory artifacts so the user's `git status` and `git diff` stay clean. The flag is cleared and re-applied around every commit.
 
 The dreaming subagent has only three tools: `read`, `write`, `ls`. No `bash`. No `edit`. It cannot run shell commands.
 
@@ -58,17 +58,17 @@ The dreaming subagent has only three tools: `read`, `write`, `ls`. No `bash`. No
 <conclusion paragraph in dreaming's own words>
 
 fragments:
-- memory/yyyy-MM-dd:<line>-<line>
-- memory/yyyy-MM-dd:<line>-<line>
+- memory/yyyy-MM-dd#<fragment-id>
+- memory/yyyy-MM-dd#<fragment-id>
 
 ## <topic>
 <conclusion paragraph>
 
 fragments:
-- memory/yyyy-MM-dd:<line>-<line>
+- memory/yyyy-MM-dd#<fragment-id>
 ```
 
-The first line is always `# Memory`. Topics are level-2 headings. Every topic cites the source fragments by `memory/yyyy-MM-dd:<line>-<line>` so any claim is traceable back to the daily stream entry that justified it.
+The first line is always `# Memory`. Topics are level-2 headings. Every topic cites the source fragments by `memory/yyyy-MM-dd#<uuidv7>` (the full id from the fragment event's `id` field) so any claim is traceable back to the daily stream entry that justified it. Citations are id-based, not line-based, so daily streams can be compacted between dreaming runs without invalidating prior references.
 
 If the undreamed tails contain only watermarks, or every new fragment is already represented in `MEMORY.md`, dreaming **does nothing** and exits without writing. The watermark advances either way. "No-op dreaming" is a normal outcome, not a failure.
 
@@ -77,7 +77,7 @@ If the undreamed tails contain only watermarks, or every new fragment is already
 Core's `createResourceLoader` appends a `# Memory` section as the LAST block of your system prompt (after `gitNudge`) by calling `loadMemory`. It is pinned to the cache-suffix end so growth in the daily stream invalidates only the memory section itself, not the skills/tools/history above. The section contains:
 
 - `MEMORY.md` (truncated to 12 KB; if larger, the rest is dropped with a `[truncated]` marker)
-- The **undreamed tails** of each `memory/yyyy-MM-dd.md`, with bare watermark lines stripped (they are bookkeeping for the memory-logger, no signal for you)
+- The **undreamed tails** of each `memory/yyyy-MM-dd.jsonl`, with bare watermark lines stripped (they are bookkeeping for the memory-logger, no signal for you)
 
 Already-consolidated content is not injected twice — once a day's stream is fully dreamed, the loader drops it from the prompt entirely.
 
@@ -86,9 +86,9 @@ If `MEMORY.md` is missing, the section shows `[MISSING] Expected at: <path>`. If
 ## What you must not do
 
 - **Do not edit `MEMORY.md` directly.** It is dreaming-owned. The default system prompt says this verbatim. If you write to `MEMORY.md` from a normal session, your edit will survive only until the next dreaming run, which rewrites the file from scratch using the consolidation logic above. The user's intent is almost never "diff-edit `MEMORY.md`" — see "When the user asks ..." below for the right routings.
-- **Do not write to `memory/yyyy-MM-dd.md`.** Daily streams are memory-logger's territory. The runtime reads watermarks out of these files; a hand-edit in the wrong place silently corrupts the cursor. (`memory/` is gitignored at the agent level but force-committed by the dreaming snapshot — your hand-edit there will not look untracked, but it will still be a bug.)
+- **Do not write to `memory/yyyy-MM-dd.jsonl`.** Daily streams are memory-logger's territory. The runtime reads watermarks out of these files; a hand-edit in the wrong place silently corrupts the cursor. (`memory/` is gitignored at the agent level but force-committed by the dreaming snapshot — your hand-edit there will not look untracked, but it will still be a bug.)
 - **Do not write to `memory/skills/<name>/SKILL.md`.** That is the _muscle memory_ layer, owned exclusively by the dreaming subagent. The `typeclaw-skills` skill says the same thing from the skills-system angle; this skill says it from the memory angle. If you want a hand-authored skill, put it in `.agents/skills/` instead.
-- **Do not write to `memory/.dreaming-state.json`.** It is internal bookkeeping (per-day line counts already consolidated). On malformed input the plugin fails open with empty state, so a wrong edit causes one redundant re-consolidation, but it is still a sign you misunderstood the contract.
+- **Do not write to `memory/.dreaming-state.json`.** It is internal bookkeeping (per-day dreamed-id sets). On malformed input the plugin fails open with empty state, so a wrong edit causes one redundant re-consolidation, but it is still a sign you misunderstood the contract.
 - **Do not promise the user that an `idleMs` or `dreaming.schedule` change took effect just because you edited `typeclaw.json`.** Both fields are **restart-required** — the plugin reads them once at boot, and `reload` does not re-run plugin factories. Tell the user to run `typeclaw restart` (host stage).
 - **Do not invent fragments.** If you find yourself wanting to "seed" a memory by hand, that is a symptom of the previous rules — surface the fact in your reply (so the memory-logger captures it) instead of writing to memory yourself.
 - **Do not echo `[truncated]` or `[MISSING]` markers back at the user as if they were part of remembered content.** They are runtime annotations.
@@ -96,13 +96,13 @@ If `MEMORY.md` is missing, the section shows `[MISSING] Expected at: <path>`. If
 ## When the user asks "what do you remember?"
 
 1. Read `MEMORY.md`. Summarize at the topic level — do not dump the whole file unless asked. Cite specific topics by their level-2 headings.
-2. If relevant to the current task, also read the undreamed-tail of recent `memory/yyyy-MM-dd.md` files for fresh observations not yet consolidated. (Note: these are already in your prompt under `# Memory`, so usually you can just refer to them rather than re-reading.)
+2. If relevant to the current task, also read the undreamed-tail of recent `memory/yyyy-MM-dd.jsonl` files for fresh observations not yet consolidated. (Note: these are already in your prompt under `# Memory`, so usually you can just refer to them rather than re-reading.)
 3. If `MEMORY.md` is `[MISSING]` or `[EMPTY]`, say so plainly. The first dreaming run creates the file; if dreaming has never fired (e.g. no `memory.dreaming.schedule` configured, or fewer than ~24 hours since hatching), there is genuinely nothing yet.
 
 ## When the user asks "do you remember X?"
 
 1. Search `MEMORY.md` and recent daily streams for a fragment matching X.
-2. If you find one: say what you found and cite the source (the topic heading from `MEMORY.md`, or the fragment line range from the daily stream).
+2. If you find one: say what you found and cite the source (the topic heading from `MEMORY.md`, or the `memory/yyyy-MM-dd#<id>` citation from the daily stream).
 3. If you do not find one: say so plainly. **Do not invent a memory** to be helpful. The honest answer is "no, that is not in my memory" — the user can then decide whether to repeat the context now (which the memory-logger will pick up) or skip it.
 
 ## When the user asks "forget X" / "remove X from your memory"
@@ -125,7 +125,7 @@ Stay concrete. Use this map:
 | File / dir                      | What it is                                                                    | Who writes it                                                  | Tracked in git                                               |
 | ------------------------------- | ----------------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------------ |
 | `MEMORY.md`                     | Long-term memory, consolidated topics with fragment citations.                | Dreaming subagent (rewrites in full on each run).              | Yes (force-committed under `dream:` commits, skip-worktree). |
-| `memory/yyyy-MM-dd.md`          | Daily fragment streams. Append-only during the day.                           | Memory-logger subagent (one fragment ≈ one prompt completion). | Gitignored, but force-committed in the dreaming snapshot.    |
+| `memory/yyyy-MM-dd.jsonl`       | Daily fragment streams. Append-only during the day.                           | Memory-logger subagent (one fragment ≈ one prompt completion). | Gitignored, but force-committed in the dreaming snapshot.    |
 | `memory/skills/<name>/SKILL.md` | Muscle-memory skills distilled from recurring procedures.                     | Dreaming subagent only.                                        | Gitignored, force-committed in the dreaming snapshot.        |
 | `memory/.dreaming-state.json`   | Per-day watermarks (line counts already consolidated). Plain JSON, fail-open. | Dreaming subagent.                                             | Gitignored, force-committed in the dreaming snapshot.        |
 
