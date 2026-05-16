@@ -42,7 +42,9 @@ describe('compactDailyStreams: watermark GC', () => {
       watermark('w3', 'ses_a', 'e3'),
     ])
 
-    const stats = await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'])
+    const stats = await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'], {
+      applyFragmentGc: true,
+    })
 
     expect(stats.watermarksDropped).toBe(2)
     expect(stats.filesCompacted).toBe(1)
@@ -59,7 +61,7 @@ describe('compactDailyStreams: watermark GC', () => {
       watermark('w-b2', 'ses_b', 'b2'),
     ])
 
-    await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'])
+    await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'], { applyFragmentGc: true })
 
     const events = await readEvents(path)
     const ids = events.map((e) => e.id).sort()
@@ -70,7 +72,9 @@ describe('compactDailyStreams: watermark GC', () => {
     const path = await writeStream('2026-05-16', [watermark('w-only', 'ses_a', 'e1')])
     const before = await readEvents(path)
 
-    const stats = await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'])
+    const stats = await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'], {
+      applyFragmentGc: true,
+    })
 
     expect(stats.filesCompacted).toBe(0)
     const after = await readEvents(path)
@@ -84,7 +88,7 @@ describe('compactDailyStreams: watermark GC', () => {
       watermark('w3', 'ses_a', '639cc130'),
     ])
 
-    await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'])
+    await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'], { applyFragmentGc: true })
 
     const events = await readEvents(path)
     expect(events).toHaveLength(1)
@@ -103,7 +107,7 @@ describe('compactDailyStreams: fragment GC', () => {
     const state = addDreamedIds(emptyState(), '2026-05-16', ['f-cited', 'f-dreamed-uncited'], 'now')
     const cited = new Map([['2026-05-16', new Set(['f-cited'])]])
 
-    const stats = await compactDailyStreams(agentDir, state, cited, ['2026-05-16'])
+    const stats = await compactDailyStreams(agentDir, state, cited, ['2026-05-16'], { applyFragmentGc: true })
 
     expect(stats.fragmentsDropped).toBe(1)
     expect(stats.filesCompacted).toBe(1)
@@ -115,7 +119,9 @@ describe('compactDailyStreams: fragment GC', () => {
   test('a fragment not yet dreamed always survives (cannot be GCd before evaluation)', async () => {
     const path = await writeStream('2026-05-16', [fragment('f-fresh', 'ses_a')])
 
-    const stats = await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'])
+    const stats = await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'], {
+      applyFragmentGc: true,
+    })
 
     expect(stats.fragmentsDropped).toBe(0)
     expect(stats.filesCompacted).toBe(0)
@@ -129,7 +135,7 @@ describe('compactDailyStreams: fragment GC', () => {
     const state = addDreamedIds(emptyState(), '2026-05-16', ['f-cited'], 'now')
     const cited = new Map([['2026-05-16', new Set(['f-cited'])]])
 
-    const stats = await compactDailyStreams(agentDir, state, cited, ['2026-05-16'])
+    const stats = await compactDailyStreams(agentDir, state, cited, ['2026-05-16'], { applyFragmentGc: true })
 
     expect(stats.fragmentsDropped).toBe(0)
     expect(stats.filesCompacted).toBe(0)
@@ -142,7 +148,7 @@ describe('compactDailyStreams: fragment GC', () => {
     const state = addDreamedIds(emptyState(), '2026-05-16', ['f-uncited-here'], 'now')
     const cited = new Map([['2026-05-15', new Set(['f-uncited-here'])]])
 
-    const stats = await compactDailyStreams(agentDir, state, cited, ['2026-05-16'])
+    const stats = await compactDailyStreams(agentDir, state, cited, ['2026-05-16'], { applyFragmentGc: true })
 
     expect(stats.fragmentsDropped).toBe(1)
     expect(await readEvents(path)).toHaveLength(0)
@@ -169,7 +175,7 @@ describe('compactDailyStreams: combined rules', () => {
       watermark('w12', SES_C, '7e682f27'),
     ])
 
-    await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'])
+    await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'], { applyFragmentGc: true })
 
     const events = await readEvents(path)
     expect(events).toHaveLength(3)
@@ -181,14 +187,48 @@ describe('compactDailyStreams: combined rules', () => {
     const path = await writeStream('2026-05-16', [fragment('f-1', 'ses_a'), watermark('w-1', 'ses_a', 'f-1')])
     const before = await readEvents(path)
 
-    const stats = await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'])
+    const stats = await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-16'], {
+      applyFragmentGc: true,
+    })
 
     expect(stats).toEqual({ filesCompacted: 0, watermarksDropped: 0, fragmentsDropped: 0 })
     expect(await readEvents(path)).toEqual(before)
   })
 
   test('skips files that do not exist on disk without throwing', async () => {
-    const stats = await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-15'])
+    const stats = await compactDailyStreams(agentDir, emptyState(), new Map(), ['2026-05-15'], {
+      applyFragmentGc: true,
+    })
     expect(stats.filesCompacted).toBe(0)
+  })
+})
+
+describe('compactDailyStreams: applyFragmentGc gate', () => {
+  test('with applyFragmentGc=false, fragments survive even when they would be dropped under the rule', async () => {
+    const path = await writeStream('2026-05-16', [fragment('f-dreamed-uncited', 'ses_a')])
+    const state = addDreamedIds(emptyState(), '2026-05-16', ['f-dreamed-uncited'], 'now')
+
+    const stats = await compactDailyStreams(agentDir, state, new Map(), ['2026-05-16'], { applyFragmentGc: false })
+
+    expect(stats.fragmentsDropped).toBe(0)
+    const events = await readEvents(path)
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({ type: 'fragment', id: 'f-dreamed-uncited' })
+  })
+
+  test('with applyFragmentGc=false, watermark GC still runs (watermarks are never citation-dependent)', async () => {
+    const path = await writeStream('2026-05-16', [
+      watermark('w1', 'ses_a', 'e1'),
+      watermark('w2', 'ses_a', 'e2'),
+      fragment('f-dreamed-uncited', 'ses_a'),
+    ])
+    const state = addDreamedIds(emptyState(), '2026-05-16', ['f-dreamed-uncited'], 'now')
+
+    const stats = await compactDailyStreams(agentDir, state, new Map(), ['2026-05-16'], { applyFragmentGc: false })
+
+    expect(stats.watermarksDropped).toBe(1)
+    expect(stats.fragmentsDropped).toBe(0)
+    const events = await readEvents(path)
+    expect(events.map((e) => e.id).sort()).toEqual(['f-dreamed-uncited', 'w2'])
   })
 })

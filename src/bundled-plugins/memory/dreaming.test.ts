@@ -211,26 +211,59 @@ describe('dreaming subagent (compaction wiring)', () => {
     expect(watermarks[0]).toMatchObject({ id: 'w-also-keep-me', entry: 'also-keep-me' })
   })
 
-  test('does NOT compact when MEMORY.md is absent (caller decided not to consolidate this run)', async () => {
+  test('does NOT drop fragments when MEMORY.md was not rewritten this run (the runSession no-op case must not eat memory)', async () => {
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       [fragmentLine('a'), watermarkLine('a'), watermarkLine('b')].join(''),
     )
-    // runSession is a no-op (default capture stub) so no MEMORY.md is written.
+    // runSession is a no-op stub: the LLM decided nothing met the bar this run
+    // and exited without touching MEMORY.md. dreamedIds gets advanced to include
+    // f-a, but f-a must survive because the subagent never had a chance to
+    // promote it into a citation.
 
     await invokeDreaming(agentDir)
 
     const raw = await readFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'utf8')
-    const events = raw.trim().split('\n')
-    // Watermarks still collapse (citation-independent), but fragments survive
-    // because there are no citations pinning them — and dreamedIds is set, so
-    // the only fragment (`f-a`) is dreamed-uncited. WITHOUT MEMORY.md citations,
-    // it would also be dropped — but the contract is: cited from somewhere or
-    // freshly added, otherwise GC'd. So `f-a` IS dropped here.
-    //
-    // Surviving: latest watermark for ses_test only (w-b).
-    expect(events).toHaveLength(1)
-    expect(JSON.parse(events[0]!)).toMatchObject({ type: 'watermark', id: 'w-b' })
+    const events = raw
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { type: string; id: string })
+
+    const fragmentIds = events
+      .filter((e) => e.type === 'fragment')
+      .map((e) => e.id)
+      .sort()
+    const watermarkIds = events
+      .filter((e) => e.type === 'watermark')
+      .map((e) => e.id)
+      .sort()
+
+    expect(fragmentIds).toEqual(['f-a'])
+    expect(watermarkIds).toEqual(['w-b'])
+  })
+
+  test('DOES drop dreamed-but-uncited fragments when MEMORY.md WAS rewritten this run', async () => {
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.jsonl'),
+      [fragmentLine('cited'), fragmentLine('uncited')].join(''),
+    )
+    const runSession: RunSession = async () => {
+      await writeFile(
+        join(agentDir, 'MEMORY.md'),
+        ['# Memory', '', '## kept', 'Conclusion.', '', 'fragments:', '- memory/2026-04-27#f-cited'].join('\n'),
+      )
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    const raw = await readFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'utf8')
+    const fragmentIds = raw
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as { type: string; id: string })
+      .filter((e) => e.type === 'fragment')
+      .map((e) => e.id)
+    expect(fragmentIds).toEqual(['f-cited'])
   })
 
   test('emits a [dreaming] compaction log line when files are rewritten', async () => {

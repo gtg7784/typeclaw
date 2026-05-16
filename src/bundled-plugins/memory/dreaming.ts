@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -103,20 +104,33 @@ export type CompactionStats = {
   fragmentsDropped: number
 }
 
+export type CompactionOptions = {
+  // When false, fragment GC is suppressed (watermark GC still runs). The
+  // handler passes false whenever MEMORY.md was NOT rewritten during this
+  // dreaming pass, because in that case citedIdsByDate reflects the prior
+  // run's citations — not a fresh judgment by THIS run's subagent. Dropping
+  // fragments based on stale citations is fragment-eating-disease: a subagent
+  // that decided "nothing meets the bar this run" would otherwise have its
+  // unconsolidated fragments silently nuked, with no way to ever recover
+  // them. Watermark GC is unaffected because watermarks are never cited.
+  applyFragmentGc: boolean
+}
+
 // Compact the daily stream files touched on this dreaming pass.
 //
-// GC rule 1 (watermarks): keep only the latest watermark per source per file.
-// Nothing cites watermarks, so the only live one for any source is the most
-// recent — that's what readLatestWatermark resolves to anyway.
+// GC rule 1 (watermarks, always applied): keep only the latest watermark per
+// source per file. Nothing cites watermarks, so the only live one for any
+// source is the most recent — that's what readLatestWatermark resolves to
+// anyway.
 //
-// GC rule 2 (fragments): drop fragment events whose id is in dreamedIds but
-// is NOT in citedIds. dreamedIds means the dreaming subagent already saw
-// this fragment; citedIds means MEMORY.md still references it. A fragment
-// in dreamedIds-but-not-citedIds has either been folded into a topic's
-// conclusion paragraph in the subagent's own words or was consciously
-// discarded as not worth promoting; either way, it carries no future
-// information and the bytes are pure overhead in the force-committed git
-// history.
+// GC rule 2 (fragments, gated by applyFragmentGc): drop fragment events
+// whose id is in dreamedIds but is NOT in citedIds. dreamedIds means the
+// dreaming subagent already saw this fragment; citedIds means MEMORY.md
+// still references it. A fragment in dreamedIds-but-not-citedIds has either
+// been folded into a topic's conclusion paragraph in the subagent's own
+// words or was consciously discarded as not worth promoting; either way, it
+// carries no future information and the bytes are pure overhead in the
+// force-committed git history.
 //
 // Atomicity: each file rewrite is tmpfile + rename. Recovery from a crash
 // mid-loop: the per-file rewrite is atomic, dreamedIds is already on disk
@@ -128,6 +142,7 @@ export async function compactDailyStreams(
   state: DreamingState,
   citedIdsByDate: ReadonlyMap<string, ReadonlySet<string>>,
   touchedDates: readonly string[],
+  options: CompactionOptions,
 ): Promise<CompactionStats> {
   const stats: CompactionStats = { filesCompacted: 0, watermarksDropped: 0, fragmentsDropped: 0 }
   const memoryDir = join(agentDir, 'memory')
@@ -160,7 +175,7 @@ export async function compactDailyStreams(
         continue
       }
       if (event.type === 'fragment') {
-        if (dreamedIds.has(event.id) && !citedIds.has(event.id)) {
+        if (options.applyFragmentGc && dreamedIds.has(event.id) && !citedIds.has(event.id)) {
           fragmentsDropped++
           continue
         }
@@ -189,6 +204,15 @@ async function loadCitedIds(agentDir: string): Promise<ReadonlyMap<string, Reado
     return parseCitations(raw)
   } catch {
     return new Map()
+  }
+}
+
+async function safeContentHash(path: string): Promise<string | null> {
+  try {
+    const raw = await readFile(path)
+    return createHash('sha256').update(raw).digest('hex')
+  } catch {
+    return null
   }
 }
 
@@ -664,6 +688,9 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         `[dreaming] start days=${snapshots.undreamed.length} undreamed_fragments=${undreamedFragments} agent_dir=${ctx.payload.agentDir}`,
       )
 
+      const memoryFilePath = join(ctx.payload.agentDir, 'MEMORY.md')
+      const memoryHashBefore = await safeContentHash(memoryFilePath)
+
       try {
         await runSession({ userPrompt: buildInitialPrompt(ctx.payload, snapshots.undreamed) })
       } catch (err) {
@@ -672,16 +699,21 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         throw err
       }
 
+      const memoryHashAfter = await safeContentHash(memoryFilePath)
+      const memoryRewrittenThisRun = memoryHashBefore !== memoryHashAfter
+
       const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)
       logger.info(`[dreaming] dreamed-ids advanced days=${snapshots.undreamed.length}`)
 
       const citedIdsByDate = await loadCitedIds(ctx.payload.agentDir)
       const touchedDates = snapshots.undreamed.map((s) => s.date)
-      const compaction = await compactDailyStreams(ctx.payload.agentDir, advanced, citedIdsByDate, touchedDates)
+      const compaction = await compactDailyStreams(ctx.payload.agentDir, advanced, citedIdsByDate, touchedDates, {
+        applyFragmentGc: memoryRewrittenThisRun,
+      })
       if (compaction.filesCompacted > 0) {
         logger.info(
-          `[dreaming] compaction files=${compaction.filesCompacted} watermarks_dropped=${compaction.watermarksDropped} fragments_dropped=${compaction.fragmentsDropped}`,
+          `[dreaming] compaction files=${compaction.filesCompacted} watermarks_dropped=${compaction.watermarksDropped} fragments_dropped=${compaction.fragmentsDropped} fragment_gc=${memoryRewrittenThisRun ? 'on' : 'off'}`,
         )
       }
 
