@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -7,15 +8,17 @@ import { z } from 'zod'
 import { lsTool, readTool, type Subagent, writeTool } from '@/plugin'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
 
+import { parseCitations } from './citations'
 import {
+  addDreamedIds,
   DREAMING_STATE_FILE,
   type DreamingState,
-  getDreamedLines,
+  getDreamedIds,
   loadDreamingState,
   saveDreamingState,
-  setDreamedLines,
 } from './dreaming-state'
-import { readEvents } from './stream-io'
+import type { StreamEvent } from './stream-events'
+import { readEvents, writeEventsAtomic } from './stream-io'
 
 const STREAM_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
 
@@ -46,18 +49,16 @@ const consoleLogger: DreamingLogger = {
 type StreamSnapshot = {
   date: string
   filename: string
-  totalLines: number
-  dreamedLines: number
+  undreamedIds: string[]
 }
 
 type StreamSnapshots = {
-  all: StreamSnapshot[]
   undreamed: StreamSnapshot[]
 }
 
 async function collectStreamSnapshots(agentDir: string, state: DreamingState): Promise<StreamSnapshots> {
   const memoryDir = join(agentDir, 'memory')
-  if (!existsSync(memoryDir)) return { all: [], undreamed: [] }
+  if (!existsSync(memoryDir)) return { undreamed: [] }
 
   const names = await readdir(memoryDir)
   const dated = names
@@ -66,40 +67,153 @@ async function collectStreamSnapshots(agentDir: string, state: DreamingState): P
     .map(({ name, match }) => ({ name, date: match[1]! }))
     .sort((a, b) => a.date.localeCompare(b.date))
 
-  const all = await Promise.all(
+  const snapshots = await Promise.all(
     dated.map(async ({ name, date }): Promise<StreamSnapshot> => {
-      const totalLines = await countLines(join(memoryDir, name))
-      const dreamedLines = getDreamedLines(state, date)
-      return { date, filename: name, totalLines, dreamedLines }
+      const events = await readEvents(join(memoryDir, name))
+      const dreamedIds = getDreamedIds(state, date)
+      const undreamedIds = collectUndreamedFragmentIds(events, dreamedIds)
+      return { date, filename: name, undreamedIds }
     }),
   )
 
-  // A hand-edited stream that shrank below its watermark is "fully dreamed":
-  // the locked-in design says trust the user's edit and keep the watermark.
-  // The locked-out lines are presumed already consolidated into MEMORY.md.
-  const undreamed = all.filter((s) => s.totalLines > s.dreamedLines)
-  return { all, undreamed }
+  return { undreamed: snapshots.filter((s) => s.undreamedIds.length > 0) }
 }
 
-async function countLines(path: string): Promise<number> {
-  try {
-    const raw = await readFile(path, 'utf8')
-    if (raw.length === 0) return 0
-    // A trailing newline is a separator, not a line. So `"a\nb\n"` is 2 lines,
-    // matching `wc -l` semantics and how an editor displays line numbers.
-    return raw.endsWith('\n') ? raw.split('\n').length - 1 : raw.split('\n').length
-  } catch {
-    return 0
+function collectUndreamedFragmentIds(events: readonly StreamEvent[], dreamedIds: ReadonlySet<string>): string[] {
+  const ids: string[] = []
+  for (const event of events) {
+    if (event.type !== 'fragment') continue
+    if (dreamedIds.has(event.id)) continue
+    ids.push(event.id)
   }
+  return ids
 }
 
-function advanceWatermarks(state: DreamingState, snapshots: StreamSnapshot[]): DreamingState {
+function advanceDreamedIds(state: DreamingState, snapshots: StreamSnapshot[]): DreamingState {
   const ts = formatLocalDateTime()
   let next = state
   for (const snap of snapshots) {
-    next = setDreamedLines(next, snap.date, snap.totalLines, ts)
+    next = addDreamedIds(next, snap.date, snap.undreamedIds, ts)
   }
   return next
+}
+
+export type CompactionStats = {
+  filesCompacted: number
+  watermarksDropped: number
+  fragmentsDropped: number
+}
+
+export type CompactionOptions = {
+  // When false, fragment GC is suppressed (watermark GC still runs). The
+  // handler passes false whenever MEMORY.md was NOT rewritten during this
+  // dreaming pass, because in that case citedIdsByDate reflects the prior
+  // run's citations — not a fresh judgment by THIS run's subagent. Dropping
+  // fragments based on stale citations is fragment-eating-disease: a subagent
+  // that decided "nothing meets the bar this run" would otherwise have its
+  // unconsolidated fragments silently nuked, with no way to ever recover
+  // them. Watermark GC is unaffected because watermarks are never cited.
+  applyFragmentGc: boolean
+}
+
+// Compact the daily stream files touched on this dreaming pass.
+//
+// GC rule 1 (watermarks, always applied): keep only the latest watermark per
+// source per file. Nothing cites watermarks, so the only live one for any
+// source is the most recent — that's what readLatestWatermark resolves to
+// anyway.
+//
+// GC rule 2 (fragments, gated by applyFragmentGc): drop fragment events
+// whose id is in dreamedIds but is NOT in citedIds. dreamedIds means the
+// dreaming subagent already saw this fragment; citedIds means MEMORY.md
+// still references it. A fragment in dreamedIds-but-not-citedIds has either
+// been folded into a topic's conclusion paragraph in the subagent's own
+// words or was consciously discarded as not worth promoting; either way, it
+// carries no future information and the bytes are pure overhead in the
+// force-committed git history.
+//
+// Atomicity: each file rewrite is tmpfile + rename. Recovery from a crash
+// mid-loop: the per-file rewrite is atomic, dreamedIds is already on disk
+// (caller must invoke saveDreamingState before compactDailyStreams), so a
+// later dreaming pass sees the same dreamedIds and the same citedIds and
+// computes the same kept set for any files that weren't yet rewritten.
+export async function compactDailyStreams(
+  agentDir: string,
+  state: DreamingState,
+  citedIdsByDate: ReadonlyMap<string, ReadonlySet<string>>,
+  touchedDates: readonly string[],
+  options: CompactionOptions,
+): Promise<CompactionStats> {
+  const stats: CompactionStats = { filesCompacted: 0, watermarksDropped: 0, fragmentsDropped: 0 }
+  const memoryDir = join(agentDir, 'memory')
+
+  for (const date of touchedDates) {
+    const path = join(memoryDir, `${date}.jsonl`)
+    if (!existsSync(path)) continue
+
+    const events = await readEvents(path)
+    if (events.length === 0) continue
+
+    const dreamedIds = getDreamedIds(state, date)
+    const citedIds = citedIdsByDate.get(date) ?? EMPTY_ID_SET
+
+    const latestWatermarkBySource = new Map<string, string>()
+    for (const event of events) {
+      if (event.type === 'watermark') latestWatermarkBySource.set(event.source, event.id)
+    }
+
+    let watermarksDropped = 0
+    let fragmentsDropped = 0
+    const kept: StreamEvent[] = []
+    for (const event of events) {
+      if (event.type === 'watermark') {
+        if (latestWatermarkBySource.get(event.source) === event.id) {
+          kept.push(event)
+        } else {
+          watermarksDropped++
+        }
+        continue
+      }
+      if (event.type === 'fragment') {
+        if (options.applyFragmentGc && dreamedIds.has(event.id) && !citedIds.has(event.id)) {
+          fragmentsDropped++
+          continue
+        }
+        kept.push(event)
+        continue
+      }
+      kept.push(event)
+    }
+
+    if (watermarksDropped === 0 && fragmentsDropped === 0) continue
+
+    await writeEventsAtomic(path, kept)
+    stats.filesCompacted++
+    stats.watermarksDropped += watermarksDropped
+    stats.fragmentsDropped += fragmentsDropped
+  }
+
+  return stats
+}
+
+const EMPTY_ID_SET: ReadonlySet<string> = new Set()
+
+async function loadCitedIds(agentDir: string): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+  try {
+    const raw = await readFile(join(agentDir, 'MEMORY.md'), 'utf8')
+    return parseCitations(raw)
+  } catch {
+    return new Map()
+  }
+}
+
+async function safeContentHash(path: string): Promise<string | null> {
+  try {
+    const raw = await readFile(path)
+    return createHash('sha256').update(raw).digest('hex')
+  } catch {
+    return null
+  }
 }
 
 const SNAPSHOT_PATHS = ['MEMORY.md', 'memory/'] as const
@@ -374,18 +488,20 @@ You also distill **muscle memory**: when the streams show a repeated multi-step 
 
 **2. Only read the undreamed tail.** The runtime gives you a list like \`memory/2026-04-27.jsonl (lines 43-60)\`. Use \`read\` with \`offset\` set to the first undreamed line. Do not read earlier lines — they have already been consolidated, re-citing them would create duplicate fragment references in MEMORY.md. Treat each JSONL line as one event; consolidate only \`type: "fragment"\` events and ignore \`watermark\` events except as evidence that progress was recorded.
 
-**3. Every entry in MEMORY.md cites its source fragments.** When you consolidate, group fragments by topic and produce a single conclusion paragraph per topic, then list the source fragments below it. Use this exact format:
+**3. Every entry in MEMORY.md cites its source fragments by id.** When you consolidate, group fragments by topic and produce a single conclusion paragraph per topic, then list the source fragments below it. The id is the \`id\` field of the fragment event in the JSONL line you read — a UUIDv7 like \`019e2eca-6fc5-71ef-add9-67a0955a4b35\`. Use this exact format:
 
 \`\`\`
 ## <topic>
 <conclusion paragraph in your own words>
 
 fragments:
-- memory/yyyy-MM-dd:<fragment line range>
-- memory/yyyy-MM-dd:<fragment line range>
+- memory/yyyy-MM-dd#<fragment-id>
+- memory/yyyy-MM-dd#<fragment-id>
 \`\`\`
 
-A fragment with no useful content (a watermark-only marker, a near-duplicate, a session-specific quirk that fails the generalizability bar) is discarded. Never invent fragments. Never cite a fragment that did not appear in the undreamed tail you actually read.
+The date in the prefix is the same as the filename you read the fragment from; the id after \`#\` is the full UUIDv7 from the event's \`id\` field. Do not abbreviate the id. Do not use line numbers — citations are id-based, not line-based, so daily streams can be compacted between dreaming runs without breaking your references.
+
+A fragment with no useful content (a watermark-only marker, a near-duplicate, a session-specific quirk that fails the generalizability bar) is discarded. Never invent fragments. Never cite a fragment id you did not see in the undreamed tail you actually read.
 
 **4. Inherit the memory-logger's standards.** The memory-logger already filtered fragments using strict certainty rules (explicit / deductive / inductive). Your job is consolidation, not loosening the bar. If two fragments contradict, prefer the more recent. If a fragment is ambiguous in isolation but clarified by a later fragment, merge them under one topic. Never promote a single fragment from one day into a stable claim unless its certainty was already \`explicit\` or \`deductive\`.
 
@@ -404,14 +520,14 @@ A fragment with no useful content (a watermark-only marker, a near-duplicate, a 
 <conclusion paragraph>
 
 fragments:
-- memory/yyyy-MM-dd:<line>-<line>
+- memory/yyyy-MM-dd#<fragment-id>
 
 ## <topic>
 <conclusion paragraph>
 
 fragments:
-- memory/yyyy-MM-dd:<line>-<line>
-- memory/yyyy-MM-dd:<line>-<line>
+- memory/yyyy-MM-dd#<fragment-id>
+- memory/yyyy-MM-dd#<fragment-id>
 \`\`\`
 
 The first line is always \`# Memory\`. Topics are level-2 headings. No other top-level structure.
@@ -479,8 +595,8 @@ Use this exact shape — pick one of the two \`proposal:\` lines:
 proposal: cli packages/<name>
 
 fragments:
-- memory/yyyy-MM-dd:<line>-<line>
-- memory/yyyy-MM-dd:<line>-<line>
+- memory/yyyy-MM-dd#<fragment-id>
+- memory/yyyy-MM-dd#<fragment-id>
 \`\`\`
 
 \`\`\`
@@ -490,8 +606,8 @@ fragments:
 proposal: plugin packages/<name>
 
 fragments:
-- memory/yyyy-MM-dd:<line>-<line>
-- memory/yyyy-MM-dd:<line>-<line>
+- memory/yyyy-MM-dd#<fragment-id>
+- memory/yyyy-MM-dd#<fragment-id>
 \`\`\`
 
 The \`proposal:\` line is the contract. \`cli packages/<name>\` means "scaffold a bun package with a \`bin\` entry under that path". \`plugin packages/<name>\` means "scaffold a typeclaw plugin under that path and wire it into \`typeclaw.json\`'s \`plugins\` array". The package name is single-segment kebab-case (same rule as skill names) and must not collide with anything already in \`packages/\` — the main agent will check before scaffolding, but pick a descriptive name (\`standup-log\`, not \`my-cli\`) so the suggestion is actionable on its own.
@@ -527,17 +643,15 @@ function buildInitialPrompt(payload: DreamingPayload, snapshots: StreamSnapshot[
     `Today's local date: ${today}`,
     `Dreaming state: ${join(payload.agentDir, DREAMING_STATE_FILE)}`,
     '',
-    'Undreamed tails to consolidate (read each with `offset` set to the first undreamed line — earlier lines are already in MEMORY.md):',
+    'Undreamed fragments to consolidate. Each entry lists the daily JSONL file and the ids of fragments in that file you have not yet consolidated into MEMORY.md. Read the file, locate each id, and decide what (if anything) belongs in MEMORY.md. Cite by id (memory/yyyy-MM-dd#<id>), not by line number.',
   ]
   for (const snap of snapshots) {
-    const firstLine = snap.dreamedLines + 1
-    lines.push(
-      `- memory/${snap.filename}: read offset=${firstLine}, total file lines=${snap.totalLines} (undreamed: ${firstLine}-${snap.totalLines})`,
-    )
+    lines.push('', `- memory/${snap.filename}:`)
+    for (const id of snap.undreamedIds) lines.push(`    - ${id}`)
   }
   lines.push(
     '',
-    'Dream now. Read MEMORY.md and each undreamed tail listed above. Consolidate the new fragments into long-term memory and write the full new MEMORY.md if anything changed. If nothing meets the bar, stop without writing — the runtime will advance the watermark either way.',
+    'Dream now. Read MEMORY.md and the listed fragments. Consolidate them into long-term memory and write the full new MEMORY.md if anything changed. If nothing meets the bar, stop without writing — the runtime advances the dreamed-id set either way so you will not see these fragments again on the next run.',
   )
   return lines.join('\n')
 }
@@ -568,11 +682,14 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         return
       }
 
-      const undreamedLines = snapshots.undreamed.reduce((sum, s) => sum + (s.totalLines - s.dreamedLines), 0)
+      const undreamedFragments = snapshots.undreamed.reduce((sum, s) => sum + s.undreamedIds.length, 0)
       const start = Date.now()
       logger.info(
-        `[dreaming] start days=${snapshots.undreamed.length} undreamed_lines=${undreamedLines} agent_dir=${ctx.payload.agentDir}`,
+        `[dreaming] start days=${snapshots.undreamed.length} undreamed_fragments=${undreamedFragments} agent_dir=${ctx.payload.agentDir}`,
       )
+
+      const memoryFilePath = join(ctx.payload.agentDir, 'MEMORY.md')
+      const memoryHashBefore = await safeContentHash(memoryFilePath)
 
       try {
         await runSession({ userPrompt: buildInitialPrompt(ctx.payload, snapshots.undreamed) })
@@ -582,9 +699,23 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         throw err
       }
 
-      const advanced = advanceWatermarks(state, snapshots.undreamed)
+      const memoryHashAfter = await safeContentHash(memoryFilePath)
+      const memoryRewrittenThisRun = memoryHashBefore !== memoryHashAfter
+
+      const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)
-      logger.info(`[dreaming] watermarks advanced days=${snapshots.undreamed.length}`)
+      logger.info(`[dreaming] dreamed-ids advanced days=${snapshots.undreamed.length}`)
+
+      const citedIdsByDate = await loadCitedIds(ctx.payload.agentDir)
+      const touchedDates = snapshots.undreamed.map((s) => s.date)
+      const compaction = await compactDailyStreams(ctx.payload.agentDir, advanced, citedIdsByDate, touchedDates, {
+        applyFragmentGc: memoryRewrittenThisRun,
+      })
+      if (compaction.filesCompacted > 0) {
+        logger.info(
+          `[dreaming] compaction files=${compaction.filesCompacted} watermarks_dropped=${compaction.watermarksDropped} fragments_dropped=${compaction.fragmentsDropped} fragment_gc=${memoryRewrittenThisRun ? 'on' : 'off'}`,
+        )
+      }
 
       try {
         await commit(ctx.payload.agentDir)

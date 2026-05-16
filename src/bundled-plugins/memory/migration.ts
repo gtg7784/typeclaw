@@ -1,10 +1,9 @@
-import { randomUUID } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { readdir, readFile, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { loadDreamingState, saveDreamingState, setDreamedLines } from './dreaming-state'
-import { type StreamEvent, streamEventSchema } from './stream-events'
+import { clearDreamedIds, loadDreamingState, saveDreamingState } from './dreaming-state'
+import { newEventId, type StreamEvent, streamEventSchema, timestampFromId } from './stream-events'
 import { writeEventsAtomic as defaultWriteEventsAtomic } from './stream-io'
 
 export type MigrationResult = {
@@ -136,20 +135,22 @@ function parseLegacyMarkdown(content: string): StreamEvent[] {
 
     addLegacyProse(events, content.slice(cursor, next.match.index))
     if (next.kind === 'fragment') {
+      const id = newEventId()
       events.push({
         type: 'fragment',
-        id: randomUUID(),
-        ts: new Date().toISOString(),
+        id,
+        ts: timestampFromId(id),
         source: next.match[1]!,
         entry: next.match[2]!,
         topic: next.match[3]!,
         body: next.match[4]!,
       })
     } else {
+      const id = newEventId()
       events.push({
         type: 'watermark',
-        id: randomUUID(),
-        ts: new Date().toISOString(),
+        id,
+        ts: timestampFromId(id),
         source: next.match[1]!,
         entry: next.match[2]!,
       })
@@ -211,7 +212,7 @@ async function resetDreamingWatermarks(agentDir: string, dates: readonly string[
   let state = await loadDreamingState(agentDir)
   const ts = new Date().toISOString()
   for (const date of dates) {
-    state = setDreamedLines(state, date, 0, ts)
+    state = clearDreamedIds(state, date, ts)
   }
   await saveDreamingState(agentDir, state)
 }

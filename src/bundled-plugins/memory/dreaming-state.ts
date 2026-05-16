@@ -4,23 +4,25 @@ import { dirname, join } from 'node:path'
 
 export const DREAMING_STATE_FILE = 'memory/.dreaming-state.json'
 
-const VERSION = 1
+const VERSION = 2
 
-// Per-day watermark: the number of lines of `memory/yyyy-MM-dd.md` that have
-// been consolidated into MEMORY.md. The next dreaming run reads only the tail
-// past this point. The next system-prompt injection (loadMemory) shows only
-// the tail too, so already-consolidated content does not appear twice.
+// Per-day "dreamed" set: the set of stream-event ids dreaming has already
+// reasoned over for a given day. Anything in this set is either cited from
+// MEMORY.md (must survive compaction) or was consciously discarded by a
+// dreaming run (safe to GC). The undreamed-tail computation is set
+// difference: events whose id is NOT in this set are the new things to look
+// at on the next run.
 //
-// We deliberately track lines (not bytes) because line-based slicing is
-// human-inspectable and the `fragments:` citations in MEMORY.md already use
-// `memory/yyyy-MM-dd:<line>-<line>` notation.
+// Tracking ids (not line numbers) is the load-bearing invariant for fragment
+// compaction — line numbers shift when any earlier event is removed, ids
+// don't.
 export type DreamingState = {
   version: number
   dreamedThrough: Record<string, DreamedDay>
 }
 
 export type DreamedDay = {
-  lines: number
+  dreamedIds: string[]
   ts: string
 }
 
@@ -28,10 +30,6 @@ export function emptyState(): DreamingState {
   return { version: VERSION, dreamedThrough: {} }
 }
 
-// Missing or unreadable file → empty state. Malformed JSON or wrong shape is
-// also treated as empty: the cost is one redundant re-consolidation, which is
-// strictly safer than crashing the dreaming pipeline because of a bad state
-// file.
 export async function loadDreamingState(agentDir: string): Promise<DreamingState> {
   const path = join(agentDir, DREAMING_STATE_FILE)
   if (!existsSync(path)) return emptyState()
@@ -60,16 +58,29 @@ export async function saveDreamingState(agentDir: string, state: DreamingState):
   await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
 }
 
-export function getDreamedLines(state: DreamingState, date: string): number {
-  return state.dreamedThrough[date]?.lines ?? 0
+export function getDreamedIds(state: DreamingState, date: string): ReadonlySet<string> {
+  const ids = state.dreamedThrough[date]?.dreamedIds
+  return ids === undefined ? EMPTY_SET : new Set(ids)
 }
 
-export function setDreamedLines(state: DreamingState, date: string, lines: number, ts: string): DreamingState {
+export function addDreamedIds(state: DreamingState, date: string, ids: Iterable<string>, ts: string): DreamingState {
+  const existing = state.dreamedThrough[date]?.dreamedIds ?? []
+  const merged = new Set<string>(existing)
+  for (const id of ids) merged.add(id)
   return {
     version: state.version,
-    dreamedThrough: { ...state.dreamedThrough, [date]: { lines, ts } },
+    dreamedThrough: { ...state.dreamedThrough, [date]: { dreamedIds: [...merged].sort(), ts } },
   }
 }
+
+export function clearDreamedIds(state: DreamingState, date: string, ts: string): DreamingState {
+  return {
+    version: state.version,
+    dreamedThrough: { ...state.dreamedThrough, [date]: { dreamedIds: [], ts } },
+  }
+}
+
+const EMPTY_SET: ReadonlySet<string> = new Set()
 
 function isDreamingState(value: unknown): value is DreamingState {
   if (typeof value !== 'object' || value === null) return false
@@ -79,7 +90,8 @@ function isDreamingState(value: unknown): value is DreamingState {
   for (const [, entry] of Object.entries(v.dreamedThrough as Record<string, unknown>)) {
     if (typeof entry !== 'object' || entry === null) return false
     const e = entry as Record<string, unknown>
-    if (typeof e.lines !== 'number' || e.lines < 0) return false
+    if (!Array.isArray(e.dreamedIds)) return false
+    if (!e.dreamedIds.every((id) => typeof id === 'string' && id.length > 0)) return false
     if (typeof e.ts !== 'string') return false
   }
   return true

@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { loadDreamingState, saveDreamingState, setDreamedLines } from './dreaming-state'
+import { addDreamedIds, loadDreamingState, saveDreamingState } from './dreaming-state'
 import { runMigration, type MigrationLogger } from './migration'
 import { readEvents } from './stream-io'
 
@@ -132,29 +132,28 @@ describe('runMigration', () => {
     expect(messages.info.some((message) => message.includes('not in a git repo'))).toBe(true)
   })
 
-  test('resets dreaming-state line counts for migrated dates', async () => {
-    let state = setDreamedLines(await loadDreamingState(agentDir), '2026-05-16', 99, 'old')
+  test('clears the dreamed-id set for migrated dates so dreaming re-reads the newly-written JSONL', async () => {
+    let state = addDreamedIds(await loadDreamingState(agentDir), '2026-05-16', ['stale-id-1', 'stale-id-2'], 'old')
     await saveDreamingState(agentDir, state)
     await writeDailyMd('2026-05-16', '<!-- watermark source=ses_a entry=entry_1 -->')
 
     await runMigration({ agentDir, logger })
 
     state = await loadDreamingState(agentDir)
-
-    expect(state.dreamedThrough['2026-05-16']?.lines).toBe(0)
+    expect(state.dreamedThrough['2026-05-16']?.dreamedIds).toEqual([])
   })
 
-  test('leaves dreaming-state line counts unchanged for unmigrated dates', async () => {
-    let state = setDreamedLines(await loadDreamingState(agentDir), '2026-05-15', 42, 'old')
-    state = setDreamedLines(state, '2026-05-16', 99, 'old')
+  test('leaves dreamed-id sets unchanged for unmigrated dates', async () => {
+    let state = addDreamedIds(await loadDreamingState(agentDir), '2026-05-15', ['kept-id'], 'old')
+    state = addDreamedIds(state, '2026-05-16', ['will-be-cleared'], 'old')
     await saveDreamingState(agentDir, state)
     await writeDailyMd('2026-05-16', '<!-- watermark source=ses_a entry=entry_1 -->')
 
     await runMigration({ agentDir, logger })
     state = await loadDreamingState(agentDir)
 
-    expect(state.dreamedThrough['2026-05-15']).toEqual({ lines: 42, ts: 'old' })
-    expect(state.dreamedThrough['2026-05-16']?.lines).toBe(0)
+    expect(state.dreamedThrough['2026-05-15']?.dreamedIds).toEqual(['kept-id'])
+    expect(state.dreamedThrough['2026-05-16']?.dreamedIds).toEqual([])
   })
 
   test('migrates an empty markdown stream to an empty JSONL file', async () => {

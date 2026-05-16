@@ -252,4 +252,32 @@ describe('advanceWatermarkTool', () => {
     expect(events).toHaveLength(1)
     expect(events[0]!).toMatchObject({ type: 'watermark', source: 'ses_a', entry: 'latest_entry' })
   })
+
+  test('writes UUIDv7-shaped ids whose ts field matches the id timestamp', async () => {
+    const root = tmpRoot()
+
+    await advanceWatermarkTool.execute({ source: 'ses_a', latestEntryId: 'latest_entry' }, ctx(root))
+
+    const events = await readEvents(streamPath(root))
+    const watermark = events[0]!
+    const id = String(watermark.id)
+    const ts = String(watermark.ts)
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    const tsMs = new Date(ts).getTime()
+    const idHex = id.replace(/-/g, '').slice(0, 12)
+    expect(tsMs).toBe(Number.parseInt(idHex, 16))
+  })
+
+  test('appendTool fragment and watermark ids are both UUIDv7 and time-ordered', async () => {
+    const root = tmpRoot()
+
+    await call(root)
+
+    const events = await readEvents(streamPath(root))
+    const fragmentId = String(events[0]!.id)
+    const watermarkId = String(events[1]!.id)
+    expect(fragmentId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/)
+    expect(watermarkId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-/)
+    expect(fragmentId <= watermarkId).toBe(true)
+  })
 })

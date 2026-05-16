@@ -1,5 +1,35 @@
 import { z } from 'zod'
 
+// Event ids are UUIDv7. The 48-bit Unix-ms timestamp prefix gives two
+// load-bearing properties:
+//   1. Lexicographic order = chronological order. Sort ids as strings and
+//      they come out in creation order — across files, within a file, and
+//      after any future compaction that may reorder events on disk.
+//   2. The timestamp in the `ts` field is structurally derivable from the
+//      id, so `ts` is now a denormalized convenience for grep-ability rather
+//      than independent state. Append paths derive `ts` from the id at write
+//      time so the two never drift.
+//
+// Bun.randomUUIDv7() is the single id source for this subsystem. Node's
+// `crypto.randomUUID()` (v4) is not used here.
+export function newEventId(): string {
+  return Bun.randomUUIDv7()
+}
+
+// Recover the wall-clock instant a UUIDv7 was minted at. The first 48 bits
+// of the 128-bit id are big-endian milliseconds since the Unix epoch. We
+// only need the first 12 hex chars (= 48 bits) — the 4-bit version nibble
+// at position 12 and the 12-bit random tail that follow are not part of the
+// timestamp. Returns ISO 8601 in UTC. Throws on shapes that lack a parseable
+// timestamp prefix; callers should only pass ids produced by `newEventId`.
+export function timestampFromId(id: string): string {
+  const hex = id.replace(/-/g, '').slice(0, 12)
+  if (hex.length !== 12) throw new Error(`timestampFromId: not a UUIDv7-shaped id: ${id}`)
+  const ms = Number.parseInt(hex, 16)
+  if (!Number.isFinite(ms)) throw new Error(`timestampFromId: unparseable timestamp prefix in: ${id}`)
+  return new Date(ms).toISOString()
+}
+
 export const fragmentEventSchema = z
   .object({
     type: z.literal('fragment'),
