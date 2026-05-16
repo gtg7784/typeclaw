@@ -119,6 +119,14 @@ describe('dreaming subagent declarations', () => {
     expect([...sub.toolResultBudget!.toolNames]).toEqual(['read'])
   })
 
+  test('teaches the dreaming session to cite fragments by id, not by line range', () => {
+    const sub = createDreamingSubagent()
+    expect(sub.systemPrompt).toContain('memory/yyyy-MM-dd#<fragment-id>')
+    expect(sub.systemPrompt).toContain('cites its source fragments by id')
+    expect(sub.systemPrompt).not.toContain('memory/yyyy-MM-dd:<line>-<line>')
+    expect(sub.systemPrompt).not.toContain('memory/yyyy-MM-dd:<fragment line range>')
+  })
+
   test('teaches the dreaming session about muscle memory in the system prompt', () => {
     const sub = createDreamingSubagent()
     expect(sub.systemPrompt).toContain('Muscle memory')

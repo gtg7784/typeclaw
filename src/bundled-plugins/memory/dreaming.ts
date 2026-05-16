@@ -374,18 +374,20 @@ You also distill **muscle memory**: when the streams show a repeated multi-step 
 
 **2. Only read the undreamed tail.** The runtime gives you a list like \`memory/2026-04-27.jsonl (lines 43-60)\`. Use \`read\` with \`offset\` set to the first undreamed line. Do not read earlier lines — they have already been consolidated, re-citing them would create duplicate fragment references in MEMORY.md. Treat each JSONL line as one event; consolidate only \`type: "fragment"\` events and ignore \`watermark\` events except as evidence that progress was recorded.
 
-**3. Every entry in MEMORY.md cites its source fragments.** When you consolidate, group fragments by topic and produce a single conclusion paragraph per topic, then list the source fragments below it. Use this exact format:
+**3. Every entry in MEMORY.md cites its source fragments by id.** When you consolidate, group fragments by topic and produce a single conclusion paragraph per topic, then list the source fragments below it. The id is the \`id\` field of the fragment event in the JSONL line you read — a UUIDv7 like \`019e2eca-6fc5-71ef-add9-67a0955a4b35\`. Use this exact format:
 
 \`\`\`
 ## <topic>
 <conclusion paragraph in your own words>
 
 fragments:
-- memory/yyyy-MM-dd:<fragment line range>
-- memory/yyyy-MM-dd:<fragment line range>
+- memory/yyyy-MM-dd#<fragment-id>
+- memory/yyyy-MM-dd#<fragment-id>
 \`\`\`
 
-A fragment with no useful content (a watermark-only marker, a near-duplicate, a session-specific quirk that fails the generalizability bar) is discarded. Never invent fragments. Never cite a fragment that did not appear in the undreamed tail you actually read.
+The date in the prefix is the same as the filename you read the fragment from; the id after \`#\` is the full UUIDv7 from the event's \`id\` field. Do not abbreviate the id. Do not use line numbers — citations are id-based, not line-based, so daily streams can be compacted between dreaming runs without breaking your references.
+
+A fragment with no useful content (a watermark-only marker, a near-duplicate, a session-specific quirk that fails the generalizability bar) is discarded. Never invent fragments. Never cite a fragment id you did not see in the undreamed tail you actually read.
 
 **4. Inherit the memory-logger's standards.** The memory-logger already filtered fragments using strict certainty rules (explicit / deductive / inductive). Your job is consolidation, not loosening the bar. If two fragments contradict, prefer the more recent. If a fragment is ambiguous in isolation but clarified by a later fragment, merge them under one topic. Never promote a single fragment from one day into a stable claim unless its certainty was already \`explicit\` or \`deductive\`.
 
@@ -404,14 +406,14 @@ A fragment with no useful content (a watermark-only marker, a near-duplicate, a 
 <conclusion paragraph>
 
 fragments:
-- memory/yyyy-MM-dd:<line>-<line>
+- memory/yyyy-MM-dd#<fragment-id>
 
 ## <topic>
 <conclusion paragraph>
 
 fragments:
-- memory/yyyy-MM-dd:<line>-<line>
-- memory/yyyy-MM-dd:<line>-<line>
+- memory/yyyy-MM-dd#<fragment-id>
+- memory/yyyy-MM-dd#<fragment-id>
 \`\`\`
 
 The first line is always \`# Memory\`. Topics are level-2 headings. No other top-level structure.
@@ -479,8 +481,8 @@ Use this exact shape — pick one of the two \`proposal:\` lines:
 proposal: cli packages/<name>
 
 fragments:
-- memory/yyyy-MM-dd:<line>-<line>
-- memory/yyyy-MM-dd:<line>-<line>
+- memory/yyyy-MM-dd#<fragment-id>
+- memory/yyyy-MM-dd#<fragment-id>
 \`\`\`
 
 \`\`\`
@@ -490,8 +492,8 @@ fragments:
 proposal: plugin packages/<name>
 
 fragments:
-- memory/yyyy-MM-dd:<line>-<line>
-- memory/yyyy-MM-dd:<line>-<line>
+- memory/yyyy-MM-dd#<fragment-id>
+- memory/yyyy-MM-dd#<fragment-id>
 \`\`\`
 
 The \`proposal:\` line is the contract. \`cli packages/<name>\` means "scaffold a bun package with a \`bin\` entry under that path". \`plugin packages/<name>\` means "scaffold a typeclaw plugin under that path and wire it into \`typeclaw.json\`'s \`plugins\` array". The package name is single-segment kebab-case (same rule as skill names) and must not collide with anything already in \`packages/\` — the main agent will check before scaffolding, but pick a descriptive name (\`standup-log\`, not \`my-cli\`) so the suggestion is actionable on its own.
