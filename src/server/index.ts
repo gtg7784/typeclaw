@@ -38,6 +38,7 @@ export type ServerOptions = {
   agentDir?: string
   pluginRuntime?: PluginRuntime
   containerName?: string
+  runtimeVersion?: string
   tuiToken?: string
   // Optional in-process portbroker handler. When provided, requests to the
   // /portbroker WS path are routed to it instead of being treated as TUI
@@ -108,6 +109,7 @@ export function createServer({
   agentDir,
   pluginRuntime,
   containerName,
+  runtimeVersion,
   tuiToken,
   containerBroker,
   logger = consoleLogger,
@@ -167,6 +169,7 @@ export function createServer({
               ...(channelRouter ? { channelRouter } : {}),
               ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
               ...(containerName !== undefined ? { containerName } : {}),
+              ...(runtimeVersion !== undefined ? { runtimeVersion } : {}),
             })
             const session = 'session' in result ? result.session : result
             const dispose = 'session' in result && result.dispose ? result.dispose : async () => {}

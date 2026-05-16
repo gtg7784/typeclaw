@@ -33,6 +33,7 @@ export type BuildChannelSessionFactoryDeps = {
   // their inbound messages came from.
   getChannelRouter: () => ChannelRouter
   containerName?: string
+  runtimeVersion?: string
   // When set, rehydrating a session JSONL caps oversized tool results in the
   // file before pi-coding-agent reads it. `null` disables the load-time pass
   // (tool-result-cap.enabled=false in config, or no plugin block at all).
@@ -105,6 +106,7 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
           }
         : {}),
       ...(deps.containerName !== undefined ? { containerName: deps.containerName } : {}),
+      ...(deps.runtimeVersion !== undefined ? { runtimeVersion: deps.runtimeVersion } : {}),
       ...(deps.permissions !== undefined ? { permissions: deps.permissions } : {}),
     })
 

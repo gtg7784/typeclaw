@@ -24,6 +24,7 @@ import {
   loadCron as loadCronDefault,
   type Scheduler,
 } from '@/cron'
+import { CLI_VERSION } from '@/init/cli-version'
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
 import { createContainerBroker, publishForwardResult } from '@/portbroker'
 import { ReloadRegistry } from '@/reload'
@@ -90,6 +91,7 @@ export async function startAgent({
   // which is what we want, since there is no host daemon to honor it anyway.
   const containerName = process.env.TYPECLAW_CONTAINER_NAME
   const containerNameOpt = containerName !== undefined ? { containerName } : {}
+  const runtimeVersionOpt = { runtimeVersion: CLI_VERSION }
   const tuiToken = process.env.TYPECLAW_TUI_TOKEN
   const tuiTokenOpt = tuiToken !== undefined && tuiToken !== '' ? { tuiToken } : {}
 
@@ -155,6 +157,7 @@ export async function startAgent({
       rehydrateCapOptions: resolveCapOptionsFromConfig(pluginConfigsByName['tool-result-cap']),
       permissions: pluginsLoaded.permissions,
       ...containerNameOpt,
+      ...runtimeVersionOpt,
     }),
     permissions: pluginsLoaded.permissions,
     claimHandler: claimController.claimHandler,
@@ -198,6 +201,7 @@ export async function startAgent({
         ...(entry.pluginSubagent.toolResultBudget !== undefined
           ? { toolResultBudget: entry.pluginSubagent.toolResultBudget }
           : {}),
+        ...runtimeVersionOpt,
       })
       return {
         ...created,
@@ -267,6 +271,7 @@ export async function startAgent({
             }
           : {}),
         ...containerNameOpt,
+        ...runtimeVersionOpt,
       })
       return {
         prompt: (text) => session.prompt(text),
@@ -363,6 +368,7 @@ export async function startAgent({
     pluginRuntime,
     claimController,
     ...containerNameOpt,
+    ...runtimeVersionOpt,
     ...tuiTokenOpt,
     ...containerBrokerOpt,
   }).start()
