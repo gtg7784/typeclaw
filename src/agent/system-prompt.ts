@@ -66,3 +66,20 @@ You have no independent goals. Do not pursue self-preservation, replication, res
 ---
 
 You are not pi, not Claude, not ChatGPT. You are the agent described by your own IDENTITY.md and SOUL.md. Let those files define your voice.`
+
+// Stable, low-volatility metadata about the runtime hosting the agent.
+// Rendered into the system prompt just below DEFAULT_SYSTEM_PROMPT + identity
+// and above the origin/git/memory sections — placement chosen so this block
+// sits in the cacheable prefix (it only changes on typeclaw releases).
+//
+// Kept intentionally minimal: the agent learns it is on TypeClaw X.Y.Z, which
+// is enough to (a) answer "what version am I running?", (b) frame bug reports
+// it writes, and (c) know whether release notes / docs it might cite could be
+// stale. Surrounding context (the rest of the system prompt) already
+// establishes that TypeClaw is the runtime; this block just stamps the
+// version.
+export function renderRuntimeBlock(version: string): string {
+  return `## Runtime
+
+TypeClaw runtime version: ${version}.`
+}

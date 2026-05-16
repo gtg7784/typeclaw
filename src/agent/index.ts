@@ -30,7 +30,7 @@ import { resolveBuiltinToolRefs, wrapPluginTool, wrapSystemAgentTool, wrapSystem
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
-import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
+import { DEFAULT_SYSTEM_PROMPT, renderRuntimeBlock } from './system-prompt'
 import {
   createBudgetState,
   type ToolResultBudget,
@@ -104,6 +104,13 @@ export type CreateSessionOptions = {
   // Enables the `restart` tool. Set when the agent is running inside a
   // typeclaw-managed container. Read from TYPECLAW_CONTAINER_NAME at the call site.
   containerName?: string
+  // The typeclaw runtime version (`package.json#version` of the executing
+  // CLI) to surface in the system prompt under `## Runtime`. Threaded from
+  // `startAgent` via `CLI_VERSION` so every session — TUI, channel, cron,
+  // plugin subagent — sees the same value. Omitted in stand-alone test
+  // callers, in which case the runtime block is skipped (no token cost, no
+  // misleading "unknown" value).
+  runtimeVersion?: string
   // The permission service the runtime resolved at boot. When provided, the
   // resolved role and permission list for `options.origin` are rendered into
   // the system prompt under `## Your role in this session`. The block is
@@ -171,11 +178,17 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
 
   const resourceLoader =
     options.systemPromptOverride !== undefined
-      ? await createOverrideResourceLoader(options.systemPromptOverride, options.origin, options.permissions)
+      ? await createOverrideResourceLoader(
+          options.systemPromptOverride,
+          options.origin,
+          options.permissions,
+          options.runtimeVersion,
+        )
       : await createResourceLoader({
           ...(options.plugins ? { plugins: options.plugins, materializedSkills } : {}),
           ...(options.origin ? { origin: options.origin } : {}),
           ...(options.permissions ? { permissions: options.permissions } : {}),
+          ...(options.runtimeVersion !== undefined ? { runtimeVersion: options.runtimeVersion } : {}),
         })
 
   const getOrigin: () => SessionOrigin | undefined =
@@ -475,8 +488,11 @@ export async function createOverrideResourceLoader(
   systemPrompt: string,
   origin?: SessionOrigin,
   permissions?: PermissionService,
+  runtimeVersion?: string,
 ): Promise<DefaultResourceLoader> {
-  const finalPrompt = withOrigin(systemPrompt, origin, permissions)
+  const withRuntime =
+    runtimeVersion !== undefined ? `${systemPrompt}\n\n${renderRuntimeBlock(runtimeVersion)}` : systemPrompt
+  const finalPrompt = withOrigin(withRuntime, origin, permissions)
   const loader = new DefaultResourceLoader({
     systemPromptOverride: () => finalPrompt,
     appendSystemPromptOverride: () => [],
@@ -491,6 +507,7 @@ export type CreateResourceLoaderOptions = {
   materializedSkills?: MaterializedSkills | null
   origin?: SessionOrigin
   permissions?: PermissionService
+  runtimeVersion?: string
 }
 
 export async function createResourceLoader(options: CreateResourceLoaderOptions = {}): Promise<DefaultResourceLoader> {
@@ -509,6 +526,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   // section changes (the provider's prompt cache hits up to the first byte
   // that differs).
   //
+  // 0. runtime block — most stable: only changes on typeclaw releases (rare).
   // 1. origin block — stable across all sessions of the same kind.
   // 2. gitNudge — rare changes; agent folders force-commit sessions/ and
   //    memory/ after every turn, so the dirty-files list is empty most of
@@ -517,6 +535,9 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   //    and memory/yyyy-MM-dd.md grows after every channel turn that triggers
   //    memory-logger. Pinning it to the end keeps everything above it
   //    cacheable across session resurrections.
+  if (options.runtimeVersion !== undefined) {
+    systemPrompt = `${systemPrompt}\n\n${renderRuntimeBlock(options.runtimeVersion)}`
+  }
   systemPrompt = withOrigin(systemPrompt, options.origin, options.permissions)
 
   const gitNudge = await renderGitNudge(agentDir)

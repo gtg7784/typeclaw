@@ -152,6 +152,47 @@ describe('createResourceLoader', () => {
     expect(nudgeIdx).toBeLessThan(memoryIdx)
   })
 
+  test('omits the runtime block when runtimeVersion is not provided', async () => {
+    // given: no runtimeVersion option
+
+    // when
+    const loader = await createResourceLoader({ agentDir })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('## Runtime')
+    expect(prompt).not.toContain('TypeClaw runtime version')
+  })
+
+  test('renders the runtime block under "## Runtime" when runtimeVersion is provided', async () => {
+    // when
+    const loader = await createResourceLoader({ agentDir, runtimeVersion: '9.9.9' })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('## Runtime')
+    expect(prompt).toContain('TypeClaw runtime version: 9.9.9.')
+  })
+
+  test('runtime block sits BEFORE the origin block so version stays in the cache prefix relative to per-session origin churn', async () => {
+    // given: an origin (which renders the origin block via withOrigin) AND a
+    // runtimeVersion. The cache-suffix invariant requires the runtime block to
+    // precede the origin block — version changes are rarer than origin changes,
+    // and the cache hits up to the first byte that differs.
+    const origin: SessionOrigin = { kind: 'tui', sessionId: 'sess-runtime-order' }
+
+    // when
+    const loader = await createResourceLoader({ agentDir, origin, runtimeVersion: '9.9.9' })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    const runtimeIdx = prompt.indexOf('TypeClaw runtime version: 9.9.9.')
+    const originIdx = prompt.indexOf('## Session origin')
+    expect(runtimeIdx).toBeGreaterThan(-1)
+    expect(originIdx).toBeGreaterThan(-1)
+    expect(runtimeIdx).toBeLessThan(originIdx)
+  })
+
   test('full cache-suffix ordering: role block < gitNudge < memory section, when all three render', async () => {
     // given: dirty git repo (gitNudge renders), populated MEMORY.md (memory
     // section renders), and a channel origin with a permission service that
