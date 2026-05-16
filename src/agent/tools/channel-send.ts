@@ -33,9 +33,8 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
       'Post a message to an external messenger channel. Specify adapter, workspace, chat, and text. ' +
       'For Discord guild channels, workspace is the guild id; for Slack team channels, workspace is ' +
       'the team id (e.g. "T0ACME"). For DMs on either platform, workspace is the literal "@dm". ' +
-      'The runtime checks the channel allow rules before delivering — if the target chat is not in ' +
-      'the configured allow list, the call fails with { ok: false, error }. There is no auto-reply: ' +
-      'the only way for an agent to post is via this tool.',
+      'On failure (no adapter registered, or the adapter-level send failed), the call returns ' +
+      '{ ok: false, error }. There is no auto-reply: the only way for an agent to post is via this tool.',
     parameters: Type.Object({
       adapter: Type.Union(
         ADAPTER_IDS.map((a) => Type.Literal(a)),
