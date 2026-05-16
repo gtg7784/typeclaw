@@ -8,13 +8,14 @@ import { lsTool, readTool, type Subagent, writeTool } from '@/plugin'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
 
 import {
+  addDreamedIds,
   DREAMING_STATE_FILE,
   type DreamingState,
-  getDreamedLines,
+  getDreamedIds,
   loadDreamingState,
   saveDreamingState,
-  setDreamedLines,
 } from './dreaming-state'
+import type { StreamEvent } from './stream-events'
 import { readEvents } from './stream-io'
 
 const STREAM_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
@@ -46,18 +47,16 @@ const consoleLogger: DreamingLogger = {
 type StreamSnapshot = {
   date: string
   filename: string
-  totalLines: number
-  dreamedLines: number
+  undreamedIds: string[]
 }
 
 type StreamSnapshots = {
-  all: StreamSnapshot[]
   undreamed: StreamSnapshot[]
 }
 
 async function collectStreamSnapshots(agentDir: string, state: DreamingState): Promise<StreamSnapshots> {
   const memoryDir = join(agentDir, 'memory')
-  if (!existsSync(memoryDir)) return { all: [], undreamed: [] }
+  if (!existsSync(memoryDir)) return { undreamed: [] }
 
   const names = await readdir(memoryDir)
   const dated = names
@@ -66,38 +65,33 @@ async function collectStreamSnapshots(agentDir: string, state: DreamingState): P
     .map(({ name, match }) => ({ name, date: match[1]! }))
     .sort((a, b) => a.date.localeCompare(b.date))
 
-  const all = await Promise.all(
+  const snapshots = await Promise.all(
     dated.map(async ({ name, date }): Promise<StreamSnapshot> => {
-      const totalLines = await countLines(join(memoryDir, name))
-      const dreamedLines = getDreamedLines(state, date)
-      return { date, filename: name, totalLines, dreamedLines }
+      const events = await readEvents(join(memoryDir, name))
+      const dreamedIds = getDreamedIds(state, date)
+      const undreamedIds = collectUndreamedFragmentIds(events, dreamedIds)
+      return { date, filename: name, undreamedIds }
     }),
   )
 
-  // A hand-edited stream that shrank below its watermark is "fully dreamed":
-  // the locked-in design says trust the user's edit and keep the watermark.
-  // The locked-out lines are presumed already consolidated into MEMORY.md.
-  const undreamed = all.filter((s) => s.totalLines > s.dreamedLines)
-  return { all, undreamed }
+  return { undreamed: snapshots.filter((s) => s.undreamedIds.length > 0) }
 }
 
-async function countLines(path: string): Promise<number> {
-  try {
-    const raw = await readFile(path, 'utf8')
-    if (raw.length === 0) return 0
-    // A trailing newline is a separator, not a line. So `"a\nb\n"` is 2 lines,
-    // matching `wc -l` semantics and how an editor displays line numbers.
-    return raw.endsWith('\n') ? raw.split('\n').length - 1 : raw.split('\n').length
-  } catch {
-    return 0
+function collectUndreamedFragmentIds(events: readonly StreamEvent[], dreamedIds: ReadonlySet<string>): string[] {
+  const ids: string[] = []
+  for (const event of events) {
+    if (event.type !== 'fragment') continue
+    if (dreamedIds.has(event.id)) continue
+    ids.push(event.id)
   }
+  return ids
 }
 
-function advanceWatermarks(state: DreamingState, snapshots: StreamSnapshot[]): DreamingState {
+function advanceDreamedIds(state: DreamingState, snapshots: StreamSnapshot[]): DreamingState {
   const ts = formatLocalDateTime()
   let next = state
   for (const snap of snapshots) {
-    next = setDreamedLines(next, snap.date, snap.totalLines, ts)
+    next = addDreamedIds(next, snap.date, snap.undreamedIds, ts)
   }
   return next
 }
@@ -529,17 +523,15 @@ function buildInitialPrompt(payload: DreamingPayload, snapshots: StreamSnapshot[
     `Today's local date: ${today}`,
     `Dreaming state: ${join(payload.agentDir, DREAMING_STATE_FILE)}`,
     '',
-    'Undreamed tails to consolidate (read each with `offset` set to the first undreamed line — earlier lines are already in MEMORY.md):',
+    'Undreamed fragments to consolidate. Each entry lists the daily JSONL file and the ids of fragments in that file you have not yet consolidated into MEMORY.md. Read the file, locate each id, and decide what (if anything) belongs in MEMORY.md. Cite by id (memory/yyyy-MM-dd#<id>), not by line number.',
   ]
   for (const snap of snapshots) {
-    const firstLine = snap.dreamedLines + 1
-    lines.push(
-      `- memory/${snap.filename}: read offset=${firstLine}, total file lines=${snap.totalLines} (undreamed: ${firstLine}-${snap.totalLines})`,
-    )
+    lines.push('', `- memory/${snap.filename}:`)
+    for (const id of snap.undreamedIds) lines.push(`    - ${id}`)
   }
   lines.push(
     '',
-    'Dream now. Read MEMORY.md and each undreamed tail listed above. Consolidate the new fragments into long-term memory and write the full new MEMORY.md if anything changed. If nothing meets the bar, stop without writing — the runtime will advance the watermark either way.',
+    'Dream now. Read MEMORY.md and the listed fragments. Consolidate them into long-term memory and write the full new MEMORY.md if anything changed. If nothing meets the bar, stop without writing — the runtime advances the dreamed-id set either way so you will not see these fragments again on the next run.',
   )
   return lines.join('\n')
 }
@@ -570,10 +562,10 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         return
       }
 
-      const undreamedLines = snapshots.undreamed.reduce((sum, s) => sum + (s.totalLines - s.dreamedLines), 0)
+      const undreamedFragments = snapshots.undreamed.reduce((sum, s) => sum + s.undreamedIds.length, 0)
       const start = Date.now()
       logger.info(
-        `[dreaming] start days=${snapshots.undreamed.length} undreamed_lines=${undreamedLines} agent_dir=${ctx.payload.agentDir}`,
+        `[dreaming] start days=${snapshots.undreamed.length} undreamed_fragments=${undreamedFragments} agent_dir=${ctx.payload.agentDir}`,
       )
 
       try {
@@ -584,9 +576,9 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         throw err
       }
 
-      const advanced = advanceWatermarks(state, snapshots.undreamed)
+      const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)
-      logger.info(`[dreaming] watermarks advanced days=${snapshots.undreamed.length}`)
+      logger.info(`[dreaming] dreamed-ids advanced days=${snapshots.undreamed.length}`)
 
       try {
         await commit(ctx.payload.agentDir)

@@ -2,7 +2,7 @@ import { existsSync } from 'node:fs'
 import { readdir, readFile, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
-import { loadDreamingState, saveDreamingState, setDreamedLines } from './dreaming-state'
+import { clearDreamedIds, loadDreamingState, saveDreamingState } from './dreaming-state'
 import { newEventId, type StreamEvent, streamEventSchema, timestampFromId } from './stream-events'
 import { writeEventsAtomic as defaultWriteEventsAtomic } from './stream-io'
 
@@ -212,7 +212,7 @@ async function resetDreamingWatermarks(agentDir: string, dates: readonly string[
   let state = await loadDreamingState(agentDir)
   const ts = new Date().toISOString()
   for (const date of dates) {
-    state = setDreamedLines(state, date, 0, ts)
+    state = clearDreamedIds(state, date, ts)
   }
   await saveDreamingState(agentDir, state)
 }

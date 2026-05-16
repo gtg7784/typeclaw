@@ -27,10 +27,10 @@ function legacy(text: string): StreamEvent {
 
 async function writeDreamingState(
   dir: string,
-  dreamedThrough: Record<string, { lines: number; ts: string }>,
+  dreamedThrough: Record<string, { dreamedIds: string[]; ts: string }>,
 ): Promise<void> {
   await mkdir(join(dir, 'memory'), { recursive: true })
-  await writeFile(join(dir, DREAMING_STATE_FILE), JSON.stringify({ version: 1, dreamedThrough }))
+  await writeFile(join(dir, DREAMING_STATE_FILE), JSON.stringify({ version: 2, dreamedThrough }))
 }
 
 let agentDir: string
@@ -180,20 +180,20 @@ describe('loadMemory', () => {
 })
 
 describe('loadMemory undreamed-tail filtering', () => {
-  test('omits a stream entirely when its line count equals the watermark (fully dreamed)', async () => {
+  test('omits a stream entirely when every event id is in the dreamed-id set (fully dreamed)', async () => {
     await mkdir(join(agentDir, 'memory'))
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([fragment('e1', 'ses_a', 'consolidated', 'consolidated')]),
     )
-    await writeDreamingState(agentDir, { '2026-04-27': { lines: 1, ts: 'past' } })
+    await writeDreamingState(agentDir, { '2026-04-27': { dreamedIds: ['e1'], ts: 'past' } })
 
     const section = await loadMemory(agentDir)
 
     expect(section).not.toContain('## memory/2026-04-27.jsonl')
   })
 
-  test('injects only the tail past the watermark when partially dreamed', async () => {
+  test('injects only the events whose ids are NOT in the dreamed-id set', async () => {
     await mkdir(join(agentDir, 'memory'))
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
@@ -205,7 +205,7 @@ describe('loadMemory undreamed-tail filtering', () => {
         fragment('e5', 'ses_a', 'new line 5', 'new line 5'),
       ]),
     )
-    await writeDreamingState(agentDir, { '2026-04-27': { lines: 2, ts: 'past' } })
+    await writeDreamingState(agentDir, { '2026-04-27': { dreamedIds: ['e1', 'e2'], ts: 'past' } })
 
     const section = await loadMemory(agentDir)
 
@@ -228,13 +228,13 @@ describe('loadMemory undreamed-tail filtering', () => {
     expect(section).toContain('fragment')
   })
 
-  test('treats a hand-edited stream that shrank below its watermark as fully dreamed', async () => {
+  test('treats a hand-edited stream whose only fragment was already dreamed as fully dreamed', async () => {
     await mkdir(join(agentDir, 'memory'))
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([fragment('e1', 'ses_a', 'just one line', 'just one line')]),
     )
-    await writeDreamingState(agentDir, { '2026-04-27': { lines: 99, ts: 'past' } })
+    await writeDreamingState(agentDir, { '2026-04-27': { dreamedIds: ['e1'], ts: 'past' } })
 
     const section = await loadMemory(agentDir)
 

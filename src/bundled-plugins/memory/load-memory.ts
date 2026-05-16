@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 import type { SessionOrigin } from '@/agent/session-origin'
 
-import { getDreamedLines, loadDreamingState } from './dreaming-state'
+import { getDreamedIds, loadDreamingState } from './dreaming-state'
 import type { StreamEvent } from './stream-events'
 import { readEvents } from './stream-io'
 
@@ -80,10 +80,10 @@ async function readStreamEntries(agentDir: string, currentSessionId: string | un
   const entries = await Promise.all(
     dated.map(async (name) => {
       const date = STREAM_DATE_FROM_FILENAME.exec(name)?.[1] ?? ''
-      const dreamedLines = getDreamedLines(state, date)
+      const dreamedIds = getDreamedIds(state, date)
       const entry = await readStreamEntry(memoryDir, name)
       const filtered = dropSelfSessionFragments({ ...entry, name: `memory/${name}` }, currentSessionId)
-      const tail = sliceUndreamedTail(filtered, dreamedLines)
+      const tail = sliceUndreamedTail(filtered, dreamedIds)
       return renderStreamEntry(tail)
     }),
   )
@@ -96,12 +96,18 @@ async function readStreamEntry(memoryDir: string, name: string): Promise<StreamE
   return { name, path: filePath, events }
 }
 
-// Slice off the events already consolidated into MEMORY.md so the agent never
-// sees a fragment twice (once in MEMORY.md and once in the daily stream).
-function sliceUndreamedTail(entry: StreamEntry, dreamedLines: number): StreamEntry {
-  if (dreamedLines <= 0) return entry
-  if (dreamedLines >= entry.events.length) return { ...entry, fullyDreamed: true }
-  const tail = entry.events.slice(dreamedLines)
+// Slice off the events whose ids already appear in the dreamed-id set so the
+// agent never sees a fragment twice (once in MEMORY.md and once in the daily
+// stream). Events without an id (legacy_prose) are always kept — they
+// pre-date the dreamed-id contract and cannot be addressed by id.
+function sliceUndreamedTail(entry: StreamEntry, dreamedIds: ReadonlySet<string>): StreamEntry {
+  if (dreamedIds.size === 0) return entry
+  const tail = entry.events.filter((event) => {
+    if (event.type === 'legacy_prose') return true
+    return !dreamedIds.has(event.id)
+  })
+  if (tail.length === 0) return { ...entry, fullyDreamed: true }
+  if (tail.length === entry.events.length) return entry
   return { ...entry, name: `${entry.name} (undreamed tail)`, events: tail }
 }
 

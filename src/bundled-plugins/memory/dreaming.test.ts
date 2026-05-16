@@ -174,45 +174,69 @@ describe('dreaming subagent (orchestration)', () => {
     expect(committed).toBe(false)
   })
 
-  test('skips dreaming when every stream is already at the watermark', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'line 1\nline 2\nline 3\n')
+  test('skips dreaming when every fragment id is already in the dreamed-id set', async () => {
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.jsonl'),
+      [fragmentLine('frag1'), fragmentLine('frag2'), fragmentLine('frag3')].join(''),
+    )
     await writeFile(
       join(agentDir, DREAMING_STATE_FILE),
-      JSON.stringify({ version: 1, dreamedThrough: { '2026-04-27': { lines: 3, ts: 'past' } } }),
+      JSON.stringify({
+        version: 2,
+        dreamedThrough: { '2026-04-27': { dreamedIds: ['f-frag1', 'f-frag2', 'f-frag3'], ts: 'past' } },
+      }),
     )
 
     const { prompts } = await invokeDreaming(agentDir)
     expect(prompts).toHaveLength(0)
   })
 
-  test('prompts subagent only with undreamed tails (read offsets reflect watermark)', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'l1\nl2\nl3\nl4\nl5\n')
+  test('prompts subagent only with fragment ids not yet in the dreamed-id set', async () => {
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.jsonl'),
+      [fragmentLine('a'), fragmentLine('b'), fragmentLine('c'), fragmentLine('d'), fragmentLine('e')].join(''),
+    )
     await writeFile(
       join(agentDir, DREAMING_STATE_FILE),
-      JSON.stringify({ version: 1, dreamedThrough: { '2026-04-27': { lines: 2, ts: 'past' } } }),
+      JSON.stringify({ version: 2, dreamedThrough: { '2026-04-27': { dreamedIds: ['f-a', 'f-b'], ts: 'past' } } }),
     )
 
     const { prompts } = await invokeDreaming(agentDir)
 
     expect(prompts).toHaveLength(1)
     expect(prompts[0]).toContain('memory/2026-04-27.jsonl')
-    expect(prompts[0]).toContain('offset=3')
-    expect(prompts[0]).toContain('total file lines=5')
-    expect(prompts[0]).toContain('undreamed: 3-5')
+    expect(prompts[0]).toContain('f-c')
+    expect(prompts[0]).toContain('f-d')
+    expect(prompts[0]).toContain('f-e')
+    expect(prompts[0]).not.toContain('f-a')
+    expect(prompts[0]).not.toContain('f-b')
   })
 
-  test('advances watermarks to current line counts after a successful run', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'a\nb\nc\nd\n')
+  test('teaches the subagent to cite by id in the per-run prompt, not by line number', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('one'))
+
+    const { prompts } = await invokeDreaming(agentDir)
+
+    expect(prompts[0]).toContain('memory/yyyy-MM-dd#<id>')
+    expect(prompts[0]).not.toMatch(/offset=\d+/)
+    expect(prompts[0]).not.toMatch(/total file lines/)
+  })
+
+  test('adds every undreamed fragment id to the dreamed-id set after a successful run', async () => {
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.jsonl'),
+      [fragmentLine('a'), fragmentLine('b'), fragmentLine('c'), fragmentLine('d')].join(''),
+    )
 
     await invokeDreaming(agentDir)
 
     const state = await loadDreamingState(agentDir)
-    expect(state.dreamedThrough['2026-04-27']?.lines).toBe(4)
+    expect(state.dreamedThrough['2026-04-27']?.dreamedIds).toEqual(['f-a', 'f-b', 'f-c', 'f-d'])
   })
 
   test('passes multiple undreamed days oldest-first to the subagent', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-25.jsonl'), 'older\n')
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'newer\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-25.jsonl'), fragmentLine('older'))
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('newer'))
 
     const { prompts } = await invokeDreaming(agentDir)
 
@@ -222,7 +246,7 @@ describe('dreaming subagent (orchestration)', () => {
   })
 
   test('calls commitMemory after the subagent finishes', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'fragment\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('only'))
     const commits: string[] = []
 
     await invokeDreaming(agentDir, {
@@ -234,40 +258,33 @@ describe('dreaming subagent (orchestration)', () => {
     expect(commits).toEqual([agentDir])
   })
 
-  test('does NOT advance watermarks when prompt() throws', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'oops\n')
+  test('does NOT advance the dreamed-id set when prompt() throws', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('oops'))
 
     await expect(invokeDreaming(agentDir, { throwOnRunSession: true })).rejects.toThrow(/LLM blew up/)
     const state = await loadDreamingState(agentDir)
     expect(state.dreamedThrough['2026-04-27']).toBeUndefined()
   })
 
-  test('treats a hand-edited stream that shrank below its watermark as fully dreamed (no re-run)', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'just one line\n')
-    await writeFile(
-      join(agentDir, DREAMING_STATE_FILE),
-      JSON.stringify({ version: 1, dreamedThrough: { '2026-04-27': { lines: 99, ts: 'past' } } }),
-    )
+  test('skips when no fragment events are undreamed (a stream containing only watermarks does not trigger a run)', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), watermarkLine('w1'))
 
     const { prompts } = await invokeDreaming(agentDir)
-
     expect(prompts).toHaveLength(0)
-    const state = await loadDreamingState(agentDir)
-    expect(state.dreamedThrough['2026-04-27']?.lines).toBe(99)
   })
 
   test('writes the dreaming state file under memory/.dreaming-state.json', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'fragment\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('only'))
 
     await invokeDreaming(agentDir)
 
     const raw = await readFile(join(agentDir, DREAMING_STATE_FILE), 'utf8')
     expect(raw).toContain('2026-04-27')
-    expect(raw).toContain('"lines": 1')
+    expect(raw).toContain('f-only')
   })
 
   test('creates MEMORY.md if missing on first dreaming run (replaces init scaffold)', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'fragment\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('one'))
     await expect(readFile(join(agentDir, 'MEMORY.md'), 'utf8')).rejects.toThrow()
 
     await invokeDreaming(agentDir)
@@ -276,22 +293,27 @@ describe('dreaming subagent (orchestration)', () => {
     expect(memory).toBe('')
   })
 
-  test('emits [dreaming] start, watermark-advanced, and done log lines on a successful run', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'one\ntwo\nthree\n')
+  test('emits [dreaming] start, dreamed-ids-advanced, and done log lines on a successful run', async () => {
+    await writeFile(
+      join(agentDir, 'memory', '2026-04-27.jsonl'),
+      [fragmentLine('a'), fragmentLine('b'), fragmentLine('c')].join(''),
+    )
     const infos: string[] = []
     const logger: DreamingLogger = { info: (m) => infos.push(m), warn: () => {}, error: () => {} }
 
     await invokeDreaming(agentDir, { commitMemory: async () => {}, logger })
 
     expect(
-      infos.some((m) => m.startsWith('[dreaming] start') && m.includes('days=1') && m.includes('undreamed_lines=3')),
+      infos.some(
+        (m) => m.startsWith('[dreaming] start') && m.includes('days=1') && m.includes('undreamed_fragments=3'),
+      ),
     ).toBe(true)
-    expect(infos.some((m) => m.startsWith('[dreaming] watermarks advanced'))).toBe(true)
+    expect(infos.some((m) => m.startsWith('[dreaming] dreamed-ids advanced'))).toBe(true)
     expect(infos.some((m) => m.startsWith('[dreaming] done'))).toBe(true)
   })
 
   test('emits a [dreaming] commit-failed warning when commitMemory throws but does not rethrow', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'frag\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('frag'))
     const warnings: string[] = []
     const logger: DreamingLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
 
@@ -306,9 +328,9 @@ describe('dreaming subagent (orchestration)', () => {
   })
 
   test('emits a [dreaming] run-threw warning and rethrows when runSession fails', async () => {
-    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), 'frag\n')
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('frag'))
     const warnings: string[] = []
-    const logger: DreamingLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
+    const logger: DreamingLogger = { info: (m) => void m, warn: (m) => warnings.push(m), error: () => {} }
 
     await expect(invokeDreaming(agentDir, { throwOnRunSession: true, logger })).rejects.toThrow(/LLM blew up/)
     expect(warnings.some((m) => m.startsWith('[dreaming] run threw') && m.includes('LLM blew up'))).toBe(true)
