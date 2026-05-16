@@ -260,6 +260,50 @@ describe('runAddChannel', () => {
   })
 })
 
+describe('auto-commit on success', () => {
+  async function runGit(cwd: string, args: string[]): Promise<string> {
+    const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+    await proc.exited
+    return (await new Response(proc.stdout).text()).trim()
+  }
+
+  async function initGit(cwd: string): Promise<void> {
+    for (const cmd of [
+      ['init', '-b', 'main'],
+      ['config', 'user.name', 'Test User'],
+      ['config', 'user.email', 'test@example.com'],
+      ['add', '.'],
+      ['commit', '-m', 'initial'],
+    ]) {
+      const proc = Bun.spawn({ cmd: ['git', ...cmd], cwd, stdout: 'pipe', stderr: 'pipe' })
+      await proc.exited
+    }
+  }
+
+  test('commits typeclaw.json with a "channel: add <kind>" subject', async () => {
+    await initGit(root)
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-x' })
+
+    expect(await runGit(root, ['log', '-1', '--format=%s'])).toBe('channel: add discord-bot')
+    expect(await runGit(root, ['show', '--name-only', '--format=', 'HEAD'])).toBe('typeclaw.json')
+  })
+
+  test('failed channel add (kakaotalk auth rejects) does NOT produce a commit', async () => {
+    await initGit(root)
+    const head = await runGit(root, ['rev-parse', 'HEAD'])
+
+    await expect(
+      runAddChannel({
+        cwd: root,
+        channel: 'kakaotalk',
+        runKakaotalkAuth: async () => ({ ok: false, reason: 'nope' }),
+      }),
+    ).rejects.toThrow(/nope/)
+
+    expect(await runGit(root, ['rev-parse', 'HEAD'])).toBe(head)
+  })
+})
+
 describe('readConfiguredChannels', () => {
   test('returns empty set when no channels are configured', async () => {
     const present = await readConfiguredChannels(root)
