@@ -10,9 +10,9 @@
 // so legacy citations from before the cutover are dropped — they no longer
 // pin fragments alive against compaction.
 
-const CITATION_LINE = /^[\s-]*memory\/(\d{4}-\d{2}-\d{2})#([0-9a-f-]+)\s*$/im
+const CITATION_LINE = /^[\s-]*memory\/(\d{4}-\d{2}-\d{2})#([\w-]+)\s*$/im
 
-const CITATION_LINE_GLOBAL = /memory\/(\d{4}-\d{2}-\d{2})#([0-9a-f-]+)/gim
+const CITATION_LINE_GLOBAL = /memory\/(\d{4}-\d{2}-\d{2})#([\w-]+)/g
 
 export type Citation = { date: string; fragmentId: string }
 

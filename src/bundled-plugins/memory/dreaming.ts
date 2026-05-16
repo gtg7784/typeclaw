@@ -7,6 +7,7 @@ import { z } from 'zod'
 import { lsTool, readTool, type Subagent, writeTool } from '@/plugin'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
 
+import { parseCitations } from './citations'
 import {
   addDreamedIds,
   DREAMING_STATE_FILE,
@@ -16,7 +17,7 @@ import {
   saveDreamingState,
 } from './dreaming-state'
 import type { StreamEvent } from './stream-events'
-import { readEvents } from './stream-io'
+import { readEvents, writeEventsAtomic } from './stream-io'
 
 const STREAM_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
 
@@ -94,6 +95,101 @@ function advanceDreamedIds(state: DreamingState, snapshots: StreamSnapshot[]): D
     next = addDreamedIds(next, snap.date, snap.undreamedIds, ts)
   }
   return next
+}
+
+export type CompactionStats = {
+  filesCompacted: number
+  watermarksDropped: number
+  fragmentsDropped: number
+}
+
+// Compact the daily stream files touched on this dreaming pass.
+//
+// GC rule 1 (watermarks): keep only the latest watermark per source per file.
+// Nothing cites watermarks, so the only live one for any source is the most
+// recent — that's what readLatestWatermark resolves to anyway.
+//
+// GC rule 2 (fragments): drop fragment events whose id is in dreamedIds but
+// is NOT in citedIds. dreamedIds means the dreaming subagent already saw
+// this fragment; citedIds means MEMORY.md still references it. A fragment
+// in dreamedIds-but-not-citedIds has either been folded into a topic's
+// conclusion paragraph in the subagent's own words or was consciously
+// discarded as not worth promoting; either way, it carries no future
+// information and the bytes are pure overhead in the force-committed git
+// history.
+//
+// Atomicity: each file rewrite is tmpfile + rename. Recovery from a crash
+// mid-loop: the per-file rewrite is atomic, dreamedIds is already on disk
+// (caller must invoke saveDreamingState before compactDailyStreams), so a
+// later dreaming pass sees the same dreamedIds and the same citedIds and
+// computes the same kept set for any files that weren't yet rewritten.
+export async function compactDailyStreams(
+  agentDir: string,
+  state: DreamingState,
+  citedIdsByDate: ReadonlyMap<string, ReadonlySet<string>>,
+  touchedDates: readonly string[],
+): Promise<CompactionStats> {
+  const stats: CompactionStats = { filesCompacted: 0, watermarksDropped: 0, fragmentsDropped: 0 }
+  const memoryDir = join(agentDir, 'memory')
+
+  for (const date of touchedDates) {
+    const path = join(memoryDir, `${date}.jsonl`)
+    if (!existsSync(path)) continue
+
+    const events = await readEvents(path)
+    if (events.length === 0) continue
+
+    const dreamedIds = getDreamedIds(state, date)
+    const citedIds = citedIdsByDate.get(date) ?? EMPTY_ID_SET
+
+    const latestWatermarkBySource = new Map<string, string>()
+    for (const event of events) {
+      if (event.type === 'watermark') latestWatermarkBySource.set(event.source, event.id)
+    }
+
+    let watermarksDropped = 0
+    let fragmentsDropped = 0
+    const kept: StreamEvent[] = []
+    for (const event of events) {
+      if (event.type === 'watermark') {
+        if (latestWatermarkBySource.get(event.source) === event.id) {
+          kept.push(event)
+        } else {
+          watermarksDropped++
+        }
+        continue
+      }
+      if (event.type === 'fragment') {
+        if (dreamedIds.has(event.id) && !citedIds.has(event.id)) {
+          fragmentsDropped++
+          continue
+        }
+        kept.push(event)
+        continue
+      }
+      kept.push(event)
+    }
+
+    if (watermarksDropped === 0 && fragmentsDropped === 0) continue
+
+    await writeEventsAtomic(path, kept)
+    stats.filesCompacted++
+    stats.watermarksDropped += watermarksDropped
+    stats.fragmentsDropped += fragmentsDropped
+  }
+
+  return stats
+}
+
+const EMPTY_ID_SET: ReadonlySet<string> = new Set()
+
+async function loadCitedIds(agentDir: string): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
+  try {
+    const raw = await readFile(join(agentDir, 'MEMORY.md'), 'utf8')
+    return parseCitations(raw)
+  } catch {
+    return new Map()
+  }
 }
 
 const SNAPSHOT_PATHS = ['MEMORY.md', 'memory/'] as const
@@ -579,6 +675,15 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)
       logger.info(`[dreaming] dreamed-ids advanced days=${snapshots.undreamed.length}`)
+
+      const citedIdsByDate = await loadCitedIds(ctx.payload.agentDir)
+      const touchedDates = snapshots.undreamed.map((s) => s.date)
+      const compaction = await compactDailyStreams(ctx.payload.agentDir, advanced, citedIdsByDate, touchedDates)
+      if (compaction.filesCompacted > 0) {
+        logger.info(
+          `[dreaming] compaction files=${compaction.filesCompacted} watermarks_dropped=${compaction.watermarksDropped} fragments_dropped=${compaction.fragmentsDropped}`,
+        )
+      }
 
       try {
         await commit(ctx.payload.agentDir)
