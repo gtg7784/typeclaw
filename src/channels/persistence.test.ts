@@ -15,7 +15,7 @@ async function tempDir(): Promise<string> {
   return await mkdtemp(join(tmpdir(), 'channels-persistence-'))
 }
 
-const silentLogger = { warn: () => {}, error: () => {} }
+const silentLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
 describe('loadChannelSessions', () => {
   test('returns empty list when file is missing', async () => {
@@ -24,7 +24,7 @@ describe('loadChannelSessions', () => {
     expect(out).toEqual([])
   })
 
-  test('returns parsed sessions for a v3 file', async () => {
+  test('migrates a v3 file to v4 with unknown lastInboundAt sentinel', async () => {
     const dir = await tempDir()
     const path = channelsSessionsPath(dir)
     await mkdir(join(dir, 'channels'), { recursive: true })
@@ -44,6 +44,31 @@ describe('loadChannelSessions', () => {
     expect(out).toHaveLength(1)
     expect(out[0]?.sessionId).toBe('ses_abc')
     expect(out[0]?.sessionFile).toBe('2026-05-02T16-56-52-380Z_ses_abc.jsonl')
+    expect(out[0]?.lastInboundAt).toBe(0)
+  })
+
+  test('loads a v4 file without clobbering lastInboundAt', async () => {
+    const dir = await tempDir()
+    const path = channelsSessionsPath(dir)
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    const records: ChannelSessionRecord[] = [
+      {
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        thread: null,
+        sessionId: 'ses_abc',
+        sessionFile: '2026-05-02T16-56-52-380Z_ses_abc.jsonl',
+        lastInboundAt: 1234,
+        participants: [],
+      },
+    ]
+    await writeFile(path, JSON.stringify({ version: 4, sessions: records }))
+
+    const out = await loadChannelSessions(dir, silentLogger)
+
+    expect(out).toHaveLength(1)
+    expect(out[0]?.lastInboundAt).toBe(1234)
   })
 
   test('migrates a v2 file by globbing the sessions directory for *_<sessionId>.jsonl', async () => {
@@ -65,13 +90,14 @@ describe('loadChannelSessions', () => {
     ]
     await writeFile(path, JSON.stringify({ version: 2, sessions: records }))
 
-    // when: load runs the v2→v3 migration in-place
+    // when: load runs the v2→v3→v4 migration chain
     const out = await loadChannelSessions(dir, silentLogger)
 
-    // then: the actual basename is attached
+    // then: the actual basename is attached and the unknown-inbound sentinel is set
     expect(out).toHaveLength(1)
     expect(out[0]?.sessionId).toBe('ses_abc')
     expect(out[0]?.sessionFile).toBe('2026-05-02T16-56-52-380Z_ses_abc.jsonl')
+    expect(out[0]?.lastInboundAt).toBe(0)
   })
 
   test('v2 migration leaves sessionFile unset and warns when the on-disk file is missing', async () => {
@@ -92,10 +118,11 @@ describe('loadChannelSessions', () => {
     await writeFile(path, JSON.stringify({ version: 2, sessions: records }))
 
     const warns: string[] = []
-    const out = await loadChannelSessions(dir, { warn: (m) => warns.push(m), error: () => {} })
+    const out = await loadChannelSessions(dir, { info: () => {}, warn: (m) => warns.push(m), error: () => {} })
 
     expect(out).toHaveLength(1)
     expect(out[0]?.sessionFile).toBeUndefined()
+    expect(out[0]?.lastInboundAt).toBe(0)
     expect(warns.some((w) => w.includes('ses_lost') && w.includes('no session file'))).toBe(true)
   })
 
@@ -120,6 +147,7 @@ describe('loadChannelSessions', () => {
 
     expect(out).toHaveLength(1)
     expect(out[0]?.sessionFile).toBeUndefined()
+    expect(out[0]?.lastInboundAt).toBe(0)
   })
 
   test('returns empty list and logs when file is corrupted JSON', async () => {
@@ -128,7 +156,7 @@ describe('loadChannelSessions', () => {
     await mkdir(join(dir, 'channels'), { recursive: true })
     await writeFile(path, '{not valid')
     const errors: string[] = []
-    const out = await loadChannelSessions(dir, { warn: () => {}, error: (m) => errors.push(m) })
+    const out = await loadChannelSessions(dir, { info: () => {}, warn: () => {}, error: (m) => errors.push(m) })
     expect(out).toEqual([])
     expect(errors[0]).toContain('corrupted')
   })
@@ -137,16 +165,16 @@ describe('loadChannelSessions', () => {
     const dir = await tempDir()
     const path = channelsSessionsPath(dir)
     await mkdir(join(dir, 'channels'), { recursive: true })
-    await writeFile(path, JSON.stringify({ version: 1, sessions: [] }))
+    await writeFile(path, JSON.stringify({ version: 5, sessions: [] }))
     const warns: string[] = []
-    const out = await loadChannelSessions(dir, { warn: (m) => warns.push(m), error: () => {} })
+    const out = await loadChannelSessions(dir, { info: () => {}, warn: (m) => warns.push(m), error: () => {} })
     expect(out).toEqual([])
-    expect(warns[0]).toContain('version 1 not supported')
+    expect(warns[0]).toContain('version 5 not supported')
   })
 })
 
 describe('saveChannelSessions', () => {
-  test('persists records as a v3 file with stable structure', async () => {
+  test('persists records as a v4 file with stable structure', async () => {
     const dir = await tempDir()
     const records: ChannelSessionRecord[] = [
       {
@@ -162,7 +190,7 @@ describe('saveChannelSessions', () => {
     await saveChannelSessions(dir, records, silentLogger)
     const raw = await readFile(channelsSessionsPath(dir), 'utf8')
     const parsed = JSON.parse(raw)
-    expect(parsed.version).toBe(3)
+    expect(parsed.version).toBe(4)
     expect(parsed.sessions).toHaveLength(1)
     expect(parsed.sessions[0].sessionId).toBe('ses_abc')
     expect(parsed.sessions[0].sessionFile).toBe('2026-05-02T16-56-52-380Z_ses_abc.jsonl')

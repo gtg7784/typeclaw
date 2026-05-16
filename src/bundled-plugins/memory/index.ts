@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { access, constants as fsConstants, mkdir, stat, writeFile } from 'node:fs/promises'
+import { access, constants as fsConstants, mkdir, readdir, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import { CronExpressionParser } from 'cron-parser'
@@ -10,6 +10,7 @@ import { definePlugin } from '@/plugin'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
+import { runMigration } from './migration'
 
 const DEFAULT_IDLE_MS = 10_000
 const DEFAULT_BUFFER_BYTES = 100_000
@@ -90,6 +91,14 @@ export default definePlugin({
     const bufferBytes = ctx.config.bufferBytes
     const spawnTimeoutMs = ctx.config.spawnTimeoutMs
     const dreamingSchedule = ctx.config.dreaming?.schedule ?? DEFAULT_DREAMING_SCHEDULE
+
+    const migrationResult = await runMigration({
+      agentDir: ctx.agentDir,
+      logger: ctx.logger,
+    })
+    if (migrationResult.migrated.length > 0) {
+      ctx.logger.info(`[memory] migrated ${migrationResult.migrated.length} daily stream(s) to JSONL`)
+    }
 
     const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
@@ -250,7 +259,7 @@ export default definePlugin({
           description: "today's daily stream file exists",
           run: async (dctx) => {
             const today = new Date().toISOString().slice(0, 10)
-            const rel = `memory/${today}.md`
+            const rel = `memory/${today}.jsonl`
             const abs = join(dctx.agentDir, rel)
             if (existsSync(abs)) return { status: 'ok', message: `${rel} present` }
             return {
@@ -265,6 +274,65 @@ export default definePlugin({
                 },
               },
             }
+          },
+        },
+        'legacy-md-cleanup': {
+          description: 'Check for legacy .md daily stream files that should have been migrated to .jsonl',
+          run: async (dctx) => {
+            const memoryDir = join(dctx.agentDir, 'memory')
+            let files: string[]
+            try {
+              files = await readdir(memoryDir)
+            } catch {
+              return { status: 'ok', message: 'memory/ does not exist yet' }
+            }
+
+            const mdFiles = files.filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+            if (mdFiles.length === 0) return { status: 'ok', message: 'no legacy .md daily streams found' }
+
+            const caseA: string[] = []
+            const caseB: string[] = []
+
+            for (const mdFile of mdFiles) {
+              const date = mdFile.replace('.md', '')
+              const jsonlFile = `${date}.jsonl`
+              if (files.includes(jsonlFile)) {
+                caseB.push(date)
+              } else {
+                caseA.push(date)
+              }
+            }
+
+            if (caseA.length > 0 && caseB.length === 0) {
+              return {
+                status: 'warning',
+                message: `${caseA.length} legacy .md daily stream(s) still present; boot-time migration likely failed`,
+                fix: {
+                  description: 'Re-run migration to convert .md files to .jsonl',
+                  apply: async (fixCtx) => {
+                    const result = await runMigration({ agentDir: fixCtx.agentDir, logger: fixCtx.logger })
+                    return {
+                      summary: `migrated ${result.migrated.length} legacy .md daily stream(s) to .jsonl`,
+                      changedPaths: result.migrated.map((d) => `memory/${d}.jsonl`),
+                    }
+                  },
+                },
+              }
+            }
+
+            if (caseB.length > 0) {
+              const allDates = [...caseA, ...caseB]
+              return {
+                status: 'warning',
+                message: `Conflicting .md+.jsonl pair for dates: ${allDates.join(', ')}. Inspect manually: the .jsonl is the authoritative new format; if its contents match or supersede the .md, delete the .md by hand.`,
+                fix: {
+                  description: 'Manual inspection required. Delete the .md file if the .jsonl is correct.',
+                  // No apply — this is an operator decision
+                },
+              }
+            }
+
+            return { status: 'ok', message: 'no legacy .md daily streams found' }
           },
         },
       },

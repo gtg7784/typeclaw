@@ -6,7 +6,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { type Subagent, readTool } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
-import { appendTool } from './append-tool'
+import { appendTool, advanceWatermarkTool } from './append-tool'
 import { findEntryTool } from './find-entry-tool'
 import { readLatestWatermark } from './watermark'
 
@@ -18,12 +18,12 @@ export const memoryLoggerPayloadSchema = z.object({
 })
 
 // Recovery message for the read-budget short-circuit. The watermark contract
-// in MEMORY_LOGGER_SYSTEM_PROMPT requires a trailing watermark marker on every
-// run, but once read is short-circuited the subagent cannot keep scanning to
-// pick a "latest evaluated entry id". `find_entry` and `append` are not
+// in MEMORY_LOGGER_SYSTEM_PROMPT requires advancing to the latest evaluated
+// entry on every run, but once read is short-circuited the subagent cannot keep
+// scanning to pick a "latest evaluated entry id". `find_entry` and `append` are not
 // budgeted, so the recovery is: call find_entry on the transcript to learn
-// `totalLines` without re-reading content, then append a watermark pointing
-// at any entry id the subagent already saw earlier in the run. When zero
+// `totalLines` without re-reading content, then advance the watermark to any
+// entry id the subagent already saw earlier in the run. When zero
 // transcript content has been read (budget consumed entirely on MEMORY.md or
 // the stream file), no advancement is possible and the run should exit
 // silently — that is the explicit second branch below. Both branches are
@@ -40,8 +40,8 @@ export function memoryLoggerExhaustedMessage(used: number, max: number): string 
     '',
     'Recovery (in order):',
     '1. If you already saw at least one transcript entry id in earlier read output,',
-    '   call `append` to write `<!-- watermark source=<sessionId> entry=<that id> -->`',
-    '   as the last line of the daily stream, then exit.',
+    '   either call `append` with `latestEntryId=<that id>` for a real fragment, or',
+    '   call the watermark-advance tool with `{ source, latestEntryId: <that id> }`, then exit.',
     '2. If you saw NO transcript entries (the budget was consumed on MEMORY.md and',
     '   the daily stream file before you reached the transcript), exit immediately',
     '   WITHOUT writing a watermark. The next run will retry from the same point.',
@@ -62,7 +62,7 @@ Your job is to read a session transcript and capture, as fragments, everything m
 
 A separate \`dreaming\` subagent runs later. It consolidates your fragments into long-term memory, dedupes, drops near-duplicates, resolves contradictions, and decides what generalizes. **You are the additive layer; dreaming is the filter.** This division of labor is the whole point: capture broadly here, and let dreaming throw away what doesn't last.
 
-You have exactly three tools: \`read\`, \`find_entry\`, and \`append\`. You cannot run shell commands, overwrite files, or edit existing content.
+You have exactly four tools: \`read\`, \`find_entry\`, \`append\`, and the watermark-advance tool. You cannot run shell commands, overwrite files, or edit existing content.
 
 # Reading the transcript past the watermark
 
@@ -74,7 +74,7 @@ Typical flow with a watermark:
 
 1. \`find_entry(path=<transcript>, entryId=<watermark>)\` → returns \`line=N, totalLines=T, offset=N+1\`.
 2. \`read(path=<transcript>, offset=N+1)\` → returns the chunk starting AT the first unread entry. Repeat with the next offset until the read tool's continuation notice stops appearing.
-3. As you read, track the most recent \`id\` you see. That is your new watermark value — write it into the trailing watermark marker at the end of your appended output.
+3. As you read, track the most recent \`id\` you see. That is your new watermark value — pass it as \`latestEntryId\` on the final \`append\` call, or to the watermark-advance tool when there are zero fragments.
 
 Never write the same watermark id you were given as input. If the transcript has no new entries past the watermark, evaluate the entries you can see, then advance the watermark to the latest \`id\` in the transcript (which is on line \`totalLines\` from \`find_entry\`'s reply). The whole point of the watermark is to move forward each run.
 
@@ -129,7 +129,7 @@ The \`append\` tool will refuse content that contains a recognizable credential 
 
 # Read existing memory first
 
-Before reading the transcript, read \`MEMORY.md\` and the current \`memory/yyyy-MM-dd.md\` stream file. You need that context for three reasons:
+Before reading the transcript, read \`MEMORY.md\` and the current \`memory/yyyy-MM-dd.jsonl\` stream file. You need that context for three reasons:
 
 - **Notice contradictions.** If the transcript supersedes existing memory, write a fragment that names the prior memory and supersedes it.
 - **Notice violations.** If existing memory contains a commitment the agent just broke, that's a high-value fragment.
@@ -141,17 +141,10 @@ The \`append\` tool refuses byte-equivalent fragments within the same daily stre
 
 # Fragment format
 
-Each fragment is an HTML comment marker followed by a topic heading and a body:
+Call \`append\` with \`{topic, body, source, entry, latestEntryId}\`. The runtime serializes your call into a JSON line in the daily stream — you never write raw JSON. \`source\` is the parent session id from the user message. \`entry\` is the specific transcript-entry-id this fragment anchors to. \`latestEntryId\` is the latest transcript-entry-id you evaluated in this run; it advances the watermark and may equal \`entry\` or be later.
 
-\`\`\`
-<!-- fragment source=<sessionId> entry=<entryId> -->
-## <topic>
-<body — see below>
-\`\`\`
-
-- \`source\` is the parent session id from the user message.
 - \`entry\` is the stable id of the **specific** transcript entry that anchors this fragment's evidence. Each fragment carries its own entry id — do not stamp every fragment with the same "latest evaluated" id. The provenance is per-fragment.
-- \`<topic>\` is a short noun phrase naming what the fragment is about.
+- \`topic\` is a short noun phrase naming what the fragment is about.
 
 The body is the substance of the fragment. The form is flexible, but every body must satisfy two requirements:
 
@@ -179,21 +172,17 @@ A fragment doesn't need to articulate how a future agent will use it. If the imp
 
 **One topic per fragment.** If you have two unrelated things to say, write two fragments. Don't pile multiple stable facts into a single body.
 
-Separate fragments with a blank line.
-
 # Watermark contract
 
-The watermark is a separate concern from per-fragment provenance. After all fragments (or zero of them), append exactly one trailing watermark marker that records the latest transcript entry id you considered. This marker is what prevents you from re-reading the same transcript prefix on the next run.
+Every \`append\` call advances the watermark via the \`latestEntryId\` field. You no longer emit a separate watermark marker. Ensure the FINAL \`append\` call's \`latestEntryId\` is the latest transcript-entry-id you read this run. The watermark is what prevents you from re-reading the same transcript prefix on the next run.
 
-\`\`\`
-<!-- watermark source=<sessionId> entry=<latestEntryId> -->
-\`\`\`
+- \`latestEntryId\` is the latest transcript entry you evaluated, **regardless of which entries actually anchored fragments**. You may have evaluated 50 entries and written 2 fragments anchored to entries 5 and 23; the final \`latestEntryId\` is still the latest of the 50.
+- When you write multiple fragments, every \`append\` call may carry the same latest value if you already know it, but the final call must carry the farthest evaluated id.
+- Never reuse the watermark trick of stamping a fragment's \`entry\` with the latest evaluated entry — fragments carry per-evidence provenance, and \`latestEntryId\` carries progress.
 
-- The watermark's \`entry=\` is the latest transcript entry you evaluated, **regardless of which entries actually anchored fragments**. You may have evaluated 50 entries and written 2 fragments anchored to entries 5 and 23; the watermark is still the latest of the 50.
-- The watermark must always be the **last** marker in your appended output, after any fragments.
-- Write exactly one watermark per run, never more.
+# Zero-fragments path
 
-Never exit without a new watermark marker. Never reuse the watermark trick of stamping a fragment's \`entry=\` with the latest evaluated entry — fragments carry per-evidence provenance, and the watermark is its own marker.
+When you evaluated the transcript but found nothing worth a fragment, call the watermark-advance tool with \`{source, latestEntryId}\` so the next run does not re-read the same prefix. Do not call \`append\` with fake content just to move the watermark.
 
 # Stopping
 
@@ -219,9 +208,9 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
     '',
     "Per-fragment provenance: each fragment's `entry=` is the specific transcript entry that anchors that fragment's evidence — not the latest entry you evaluated. Two fragments anchored to two different entries get two different `entry=` values. Do not stamp every fragment with the same id.",
     '',
-    'Watermark: regardless of how many fragments you wrote (zero or more), append exactly one trailing watermark marker `<!-- watermark source=' +
+    'Watermark: every `append` call must include the `latestEntryId` argument. Ensure the final `append` call uses the latest transcript entry you evaluated, regardless of whether it anchored a fragment. If you evaluated transcript entries but found zero fragments, call the watermark-advance tool with `{ source: "' +
       payload.parentSessionId +
-      ' entry=<latestEntryId> -->` as the last line of your appended output. `<latestEntryId>` is the latest transcript entry you evaluated, regardless of whether it anchored a fragment. Never exit without writing this marker.',
+      '", latestEntryId: "<latestEntryId>" }` instead of writing a fake fragment.',
   )
   return lines.join('\n')
 }
@@ -277,7 +266,7 @@ export function createMemoryLoggerSubagent(
   return {
     systemPrompt: MEMORY_LOGGER_SYSTEM_PROMPT,
     tools: [readTool],
-    customTools: [findEntryTool, appendTool],
+    customTools: [findEntryTool, appendTool, advanceWatermarkTool],
     payloadSchema: memoryLoggerPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,
     toolResultBudget: {
@@ -288,11 +277,11 @@ export function createMemoryLoggerSubagent(
     handler: async (ctx, runSession) => {
       const today = formatLocalDate()
       const memoryDir = join(ctx.payload.agentDir, 'memory')
-      const streamFile = join(memoryDir, `${today}.md`)
-      const watermark = readLatestWatermark(memoryDir, ctx.payload.parentSessionId)
+      const streamFile = join(memoryDir, `${today}.jsonl`)
+      const watermark = await readLatestWatermark(memoryDir, ctx.payload.parentSessionId)
       const start = Date.now()
       logger.info(
-        `[memory-logger] ${ctx.payload.parentSessionId} start stream=${today}.md watermark=${watermark ?? 'none'}`,
+        `[memory-logger] ${ctx.payload.parentSessionId} start stream=${today}.jsonl watermark=${watermark ?? 'none'}`,
       )
       try {
         await runSession({ userPrompt: buildInitialPrompt(ctx.payload, streamFile, watermark) })

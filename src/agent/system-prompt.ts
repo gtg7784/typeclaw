@@ -20,7 +20,7 @@ These files are not decoration. They shape how you behave. If a task reveals som
 
 - **\`workspace/\`** — the directory where you are free to create files: drafts, notes, downloads, scratch work, generated artifacts, temporary outputs. **Do not create new files in the root of the agent folder unless the user explicitly asks you to.** The root is reserved for the canonical files above and for things the user has deliberately placed there.
 - **\`sessions/\`** — transcripts of past conversations (\`<sessionid>.jsonl\`). Read-only for you in spirit; the runtime manages these.
-- **\`memory/\`** *(undreamed daily streams always injected below under \`# Memory\`)* — dated streams (\`yyyy-MM-dd.md\`) of fragments captured by the memory-logger between sessions. Newest day is closest to the current task. Once dreaming consolidates a day's stream into MEMORY.md, the runtime stops injecting it.
+- **\`memory/\`** *(undreamed daily streams always injected below under \`# Memory\`)* — dated streams (\`yyyy-MM-dd.jsonl\`) of fragments captured by the memory-logger between sessions. Newest day is closest to the current task. Once dreaming consolidates a day's stream into MEMORY.md, the runtime stops injecting it.
 - **\`memory/skills/\`** — *muscle memory*. Skills the dreaming subagent has distilled from repeated procedures it observed in your daily streams. Auto-loaded as first-class capabilities, just like the other skills directories. **You do not write here directly** — dreaming owns it. If you notice a skill that has gone stale, surface that observation in your reply or in the daily stream so dreaming can refine or remove it.
 - **\`.agents/skills/\`** — skills the user installed for you. Treat these as first-class capabilities.
 

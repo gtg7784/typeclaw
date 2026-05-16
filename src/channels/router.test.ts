@@ -16,6 +16,7 @@ import {
   createChannelRouter,
   MAX_TYPING_HEARTBEAT_MS,
   SESSION_GC_INTERVAL_MS,
+  SESSION_FRESHNESS_TTL_MS,
   SESSION_IDLE_MS,
   sliceHeadTail,
   type ChannelRouter,
@@ -125,6 +126,7 @@ function makeRouter(
     ensureLiveTimeoutMs?: number
     permissions?: PermissionService
     claimHandler?: ClaimHandler
+    hooks?: HookBus
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -161,6 +163,7 @@ function makeRouter(
         ...(options.transcriptPathFor !== undefined
           ? { getTranscriptPath: () => options.transcriptPathFor!(sessionId) }
           : {}),
+        ...(options.hooks !== undefined ? { hooks: options.hooks } : {}),
       }
     },
   })
@@ -197,6 +200,16 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 1))
   }
   throw new Error('condition not met')
+}
+
+async function waitForPersistedLastInboundAt(agentDir: string, expected: number): Promise<void> {
+  for (let i = 0; i < 20; i++) {
+    const loaded = await loadChannelSessions(agentDir)
+    if (loaded[0]?.lastInboundAt === expected) return
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+  const loaded = await loadChannelSessions(agentDir)
+  throw new Error(`lastInboundAt persisted as ${String(loaded[0]?.lastInboundAt)}, expected ${expected}`)
 }
 
 const KEY: ChannelKey = { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null }
@@ -415,6 +428,145 @@ describe('ChannelRouter session lifecycle', () => {
     const { router, sessions } = makeRouter(dir)
     await Promise.all([router.route(inbound()), router.route(inbound({ externalMessageId: 'm2' }))])
     expect(sessions).toHaveLength(1)
+  })
+
+  test('after SESSION_FRESHNESS_TTL_MS + 1ms idle, next inbound creates new sessionId', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS + 1
+    await router.route(inbound({ externalMessageId: 'm2', text: 'still there?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions).toHaveLength(2)
+    const loaded = await loadChannelSessions(dir)
+    expect(loaded).toHaveLength(1)
+    expect(loaded[0]?.sessionId).toBe('ses_fake_2')
+    expect(loaded[0]?.lastInboundAt).toBe(1000 + SESSION_FRESHNESS_TTL_MS + 1)
+  })
+
+  test('at exactly SESSION_FRESHNESS_TTL_MS, next inbound reuses session', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS
+    await router.route(inbound({ externalMessageId: 'm2', text: 'boundary check' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions).toHaveLength(1)
+    await waitForPersistedLastInboundAt(dir, 1000 + SESSION_FRESHNESS_TTL_MS)
+    const loaded = await loadChannelSessions(dir)
+    expect(loaded[0]?.sessionId).toBe('ses_fake_1')
+    expect(loaded[0]?.lastInboundAt).toBe(1000 + SESSION_FRESHNESS_TTL_MS)
+  })
+
+  test('stale rollover fires session.end on old session', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const events: string[] = []
+    const hooks: HookBus = {
+      registerAll: () => {},
+      unregisterAll: () => {},
+      runSessionStart: async () => {},
+      runSessionEnd: async (e) => {
+        events.push(`end:${e.sessionId}`)
+      },
+      runSessionIdle: async () => {},
+      runSessionPrompt: async () => {},
+      runSessionTurnStart: async () => {},
+      runSessionTurnEnd: async () => {},
+      runToolBefore: async () => undefined,
+      runToolAfter: async () => {},
+      count: () => 0,
+    }
+    const { router, sessions } = makeRouter(dir, { nowRef, hooks })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS + 1
+    await router.route(inbound({ externalMessageId: 'm2', text: 'roll over' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(events).toContain('end:ses_fake_1')
+    expect(sessions[0]!.disposed).toBe(1)
+    expect(sessions).toHaveLength(2)
+  })
+
+  test('lastInboundAt persisted to sessions.json after every engaged inbound', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router } = makeRouter(dir, { nowRef })
+
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+    await waitForPersistedLastInboundAt(dir, 1000)
+
+    nowRef.value = 2000
+    await router.route(inbound({ externalMessageId: 'm2', text: 'second' }))
+    await router.__testing!.flushDebounce(KEY)
+    await waitForPersistedLastInboundAt(dir, 2000)
+  })
+
+  test('v3-loaded record with lastInboundAt=0 forces rollover on first inbound', async () => {
+    const dir = await tempDir()
+    await mkdir(join(dir, 'channels'), { recursive: true })
+    await writeFileFs(
+      channelsSessionsPath(dir),
+      JSON.stringify({
+        version: 3,
+        sessions: [
+          {
+            adapter: 'discord-bot',
+            workspace: 'g1',
+            chat: 'c1',
+            thread: null,
+            sessionId: 'ses_legacy',
+            sessionFile: 'legacy.jsonl',
+            participants: [],
+          },
+        ],
+      }),
+    )
+    const factoryCalls: SessionFactoryArgs[] = []
+    const nowRef = { value: SESSION_FRESHNESS_TTL_MS + 1 }
+    const { router, sessions } = makeRouter(dir, { nowRef, factoryCalls })
+
+    await router.route(inbound({ externalMessageId: 'm-upgrade', text: 'post-upgrade' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(factoryCalls).toHaveLength(1)
+    expect(factoryCalls[0]?.existingSessionId).toBeUndefined()
+    expect(factoryCalls[0]?.existingSessionFile).toBeUndefined()
+    expect(sessions).toHaveLength(1)
+    const loaded = await loadChannelSessions(dir)
+    expect(loaded[0]?.sessionId).toBe('ses_fake_1')
+    expect(loaded[0]?.lastInboundAt).toBe(SESSION_FRESHNESS_TTL_MS + 1)
+  })
+
+  test('command path does NOT trigger rollover', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { nowRef, logs })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS + 1
+    await router.route(inbound({ externalMessageId: 'm-stop', text: '/stop' }))
+
+    expect(sessions).toHaveLength(1)
+    expect(logs.some((l) => l.includes('stale-rollover'))).toBe(false)
+
+    await router.route(inbound({ externalMessageId: 'm2', text: 'now answer' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions).toHaveLength(2)
+    expect(logs.some((l) => l.includes('stale-rollover'))).toBe(true)
   })
 })
 

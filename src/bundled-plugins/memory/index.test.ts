@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { appendFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -66,6 +67,30 @@ afterEach(async () => {
 })
 
 describe('memory plugin shape', () => {
+  test('awaits migration before returning hooks', async () => {
+    const memoryDir = join(agentDir, 'memory')
+    await mkdir(memoryDir, { recursive: true })
+    await writeFile(
+      join(memoryDir, '2026-05-15.md'),
+      '<!-- fragment source=sess-1 entry=ent-1 -->\n## Test Topic\nTest body\n',
+      'utf8',
+    )
+
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+
+    expect(existsSync(join(memoryDir, '2026-05-15.jsonl'))).toBe(true)
+    expect(existsSync(join(memoryDir, '2026-05-15.md'))).toBe(false)
+    expect(exports.hooks).toBeDefined()
+    expect(exports.subagents).toBeDefined()
+  })
+
+  test('rejects plugin boot when migration fails', async () => {
+    const memoryDir = join(agentDir, 'memory')
+    await mkdir(join(memoryDir, '2026-05-15.md'), { recursive: true })
+
+    await expect(bootMemoryPlugin(agentDir, {})).rejects.toThrow()
+  })
+
   test('exposes both subagents', async () => {
     const { exports } = await bootMemoryPlugin(agentDir, {})
     expect(Object.keys(exports.subagents ?? {})).toEqual(expect.arrayContaining(['memory-logger', 'dreaming']))
@@ -655,5 +680,79 @@ describe('lifecycle logging', () => {
     expect(logs.info.some((m) => m.includes('memory-logger spawn ses_a') && m.includes('reason=buffer-trip'))).toBe(
       true,
     )
+  })
+})
+
+describe('doctor checks', () => {
+  test('legacy-md-cleanup: Case A — only .md present → warning with fix.apply', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    const memoryDir = join(agentDir, 'memory')
+    await mkdir(memoryDir, { recursive: true })
+    await writeFile(
+      join(memoryDir, '2026-05-15.md'),
+      '<!-- fragment source=sess-1 entry=ent-1 -->\n## Test Topic\nTest body\n',
+      'utf8',
+    )
+
+    const check = exports.doctorChecks?.['legacy-md-cleanup']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('warning')
+    expect(result.message).toContain('legacy .md daily stream(s) still present')
+    expect(result.fix).toBeDefined()
+    expect(result.fix!.description).toContain('Re-run migration')
+    expect(result.fix!.apply).toBeDefined()
+
+    const fixResult = await result.fix!.apply!({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(fixResult.summary).toContain('migrated')
+    expect(fixResult.changedPaths).toContain('memory/2026-05-15.jsonl')
+    expect(existsSync(join(memoryDir, '2026-05-15.md'))).toBe(false)
+    expect(existsSync(join(memoryDir, '2026-05-15.jsonl'))).toBe(true)
+  })
+
+  test('legacy-md-cleanup: Case B — both .md and .jsonl present → warning, no fix.apply', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    const memoryDir = join(agentDir, 'memory')
+    await mkdir(memoryDir, { recursive: true })
+    await writeFile(join(memoryDir, '2026-05-15.md'), 'legacy', 'utf8')
+    await writeFile(join(memoryDir, '2026-05-15.jsonl'), '{}\n', 'utf8')
+
+    const check = exports.doctorChecks?.['legacy-md-cleanup']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('warning')
+    expect(result.message).toContain('Conflicting .md+.jsonl pair')
+    expect(result.fix).toBeDefined()
+    expect(result.fix!.description).toContain('Manual inspection required')
+    expect(result.fix!.apply).toBeUndefined()
+  })
+
+  test('legacy-md-cleanup: clean state — only .jsonl files → ok', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    const memoryDir = join(agentDir, 'memory')
+    await mkdir(memoryDir, { recursive: true })
+    await writeFile(join(memoryDir, '2026-05-15.jsonl'), '{}\n', 'utf8')
+
+    const check = exports.doctorChecks?.['legacy-md-cleanup']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('ok')
+  })
+
+  test('legacy-md-cleanup: no memory dir → ok', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+
+    const check = exports.doctorChecks?.['legacy-md-cleanup']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('ok')
   })
 })

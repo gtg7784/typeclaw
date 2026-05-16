@@ -1,131 +1,121 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { ToolContext } from '@/plugin'
+import { formatLocalDate } from '@/shared'
 
-import { appendTool } from './append-tool'
+import { advanceWatermarkTool, appendTool } from './append-tool'
+import { readEvents } from './stream-io'
 
-async function callExpectingThrow(path: string, content: string): Promise<unknown> {
-  try {
-    await appendTool.execute({ path, content }, ctx)
-    throw new Error(`expected appendTool.execute to throw, but it returned`)
-  } catch (err) {
-    return err
-  }
+type AppendInput = Parameters<typeof appendTool.execute>[0]
+
+const baseInput: AppendInput = {
+  topic: 'Decision',
+  body: 'Use option A.',
+  source: 'ses_a',
+  entry: 'entry_a',
+  latestEntryId: 'entry_a',
 }
 
 function tmpRoot(): string {
   return mkdtempSync(join(tmpdir(), 'memory-append-'))
 }
 
-const ctx: ToolContext = {
-  signal: undefined,
-  sessionId: 'test',
-  agentDir: '/tmp',
-  logger: { info: () => {}, warn: () => {}, error: () => {} },
+function streamPath(root: string): string {
+  return join(root, 'memory', `${formatLocalDate()}.jsonl`)
 }
 
-async function call(path: string, content: string): Promise<void> {
-  await appendTool.execute({ path, content }, ctx)
+function ctx(root: string): ToolContext {
+  return {
+    signal: undefined,
+    sessionId: 'test',
+    agentDir: root,
+    logger: { info: () => {}, warn: () => {}, error: () => {} },
+  }
+}
+
+async function call(root: string, input: Partial<AppendInput> = {}): Promise<void> {
+  await appendTool.execute({ ...baseInput, ...input }, ctx(root))
+}
+
+async function callExpectingThrow(root: string, input: Partial<AppendInput>): Promise<unknown> {
+  try {
+    await call(root, input)
+    throw new Error(`expected appendTool.execute to throw, but it returned`)
+  } catch (err) {
+    return err
+  }
 }
 
 describe('appendTool', () => {
-  test('creates the file when it does not exist', async () => {
-    const root = tmpRoot()
-    const path = join(root, 'memory', '2026-04-27.md')
+  test('uses the JSONL input schema contract', () => {
+    const valid = appendTool.parameters.safeParse(baseInput)
+    const oldShape = appendTool.parameters.safeParse({ path: 'memory/day.jsonl', content: 'text' })
 
-    await call(path, 'first line\n')
-
-    expect(existsSync(path)).toBe(true)
-    expect(readFileSync(path, 'utf8')).toBe('first line\n')
+    expect(valid.success).toBe(true)
+    expect(oldShape.success).toBe(false)
   })
 
-  test('creates parent directories as needed', async () => {
+  test('creates the daily JSONL stream when it does not exist', async () => {
     const root = tmpRoot()
-    const path = join(root, 'a', 'b', 'c', 'file.md')
 
-    await call(path, 'hello\n')
+    await call(root)
 
-    expect(readFileSync(path, 'utf8')).toBe('hello\n')
+    const events = await readEvents(streamPath(root))
+    expect(existsSync(streamPath(root))).toBe(true)
+    expect(events).toHaveLength(2)
+    expect(events[0]!).toMatchObject({ type: 'fragment', topic: 'Decision', body: 'Use option A.' })
+    expect(events[1]!).toMatchObject({ type: 'watermark', source: 'ses_a', entry: 'entry_a' })
   })
 
-  test('appends to an existing file without truncating prior content', async () => {
+  test('creates parent memory directory as needed', async () => {
     const root = tmpRoot()
-    const path = join(root, 'log.md')
-    writeFileSync(path, 'previous content\n')
 
-    await call(path, 'new content\n')
+    await call(root, { topic: 'Created', body: 'The memory directory was missing.' })
 
-    expect(readFileSync(path, 'utf8')).toBe('previous content\nnew content\n')
+    expect(existsSync(streamPath(root))).toBe(true)
   })
 
-  test('does not add a leading newline when the file is empty', async () => {
+  test('appends events to an existing stream without truncating prior events', async () => {
     const root = tmpRoot()
-    const path = join(root, 'empty.md')
-    writeFileSync(path, '')
 
-    await call(path, 'first\n')
+    await call(root, { topic: 'First', body: 'first body', entry: 'entry_1', latestEntryId: 'entry_1' })
+    await call(root, { topic: 'Second', body: 'second body', entry: 'entry_2', latestEntryId: 'entry_2' })
 
-    expect(readFileSync(path, 'utf8')).toBe('first\n')
+    const events = await readEvents(streamPath(root))
+    expect(events).toHaveLength(4)
+    expect(events[0]!).toMatchObject({ type: 'fragment', topic: 'First' })
+    expect(events[2]!).toMatchObject({ type: 'fragment', topic: 'Second' })
   })
 
-  test('does not add a leading newline when the existing file already ends in newline', async () => {
+  test('preserves multi-line bodies and special characters inside JSONL events', async () => {
     const root = tmpRoot()
-    const path = join(root, 'log.md')
-    writeFileSync(path, 'a\n')
+    const body = ['line one', 'line two with `code`', 'emoji 🧠 and quotes "hello"', 'pipe | table char'].join('\n')
 
-    await call(path, 'b\n')
+    await call(root, { topic: 'Special chars / multiline', body })
 
-    expect(readFileSync(path, 'utf8')).toBe('a\nb\n')
+    const events = await readEvents(streamPath(root))
+    expect(events[0]!).toMatchObject({ type: 'fragment', topic: 'Special chars / multiline', body })
   })
 
-  test('inserts a leading newline when the existing file does NOT end in a newline', async () => {
+  test('latestEntryId can differ from the fragment entry', async () => {
     const root = tmpRoot()
-    const path = join(root, 'log.md')
-    writeFileSync(path, 'no trailing newline')
 
-    await call(path, 'second\n')
+    await call(root, { entry: 'fragment_entry', latestEntryId: 'latest_seen_entry' })
 
-    expect(readFileSync(path, 'utf8')).toBe('no trailing newline\nsecond\n')
+    const events = await readEvents(streamPath(root))
+    expect(events[0]!).toMatchObject({ type: 'fragment', entry: 'fragment_entry' })
+    expect(events[1]!).toMatchObject({ type: 'watermark', entry: 'latest_seen_entry' })
   })
 
-  test('preserves all content across two sequential appends (data-loss guard)', async () => {
+  test('refuses to write content containing a GitHub fine-grained PAT', async () => {
     const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-
-    await call(path, '<!-- fragment source=ses_a entry=11111111 -->\n## first\nbody\n')
-    await call(path, '<!-- fragment source=ses_a entry=22222222 -->\n## second\nbody\n')
-
-    const content = readFileSync(path, 'utf8')
-    expect(content).toContain('11111111')
-    expect(content).toContain('22222222')
-    expect(content).toContain('## first')
-    expect(content).toContain('## second')
-  })
-
-  test('appends content byte-for-byte (does not auto-add trailing newlines)', async () => {
-    const root = tmpRoot()
-    const path = join(root, 'exact.md')
-
-    await call(path, 'no trailing newline here')
-
-    expect(readFileSync(path, 'utf8')).toBe('no trailing newline here')
-  })
-
-  test('refuses to write content containing a GitHub fine-grained PAT (the leak pattern this PR fixes)', async () => {
-    const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-    // Token literal is split across concatenations so upstream secret scanners do not flag this file.
     const fakePat = 'github_' + 'pat_' + 'X'.repeat(80)
-    const content = [
-      '<!-- fragment source=ses_a entry=11111111 -->',
-      '## GitHub Token Environment Variable',
-      `GH_TOKEN=${fakePat}`,
-    ].join('\n')
 
-    const err = await callExpectingThrow(path, content)
+    const err = await callExpectingThrow(root, { body: `GH_TOKEN=${fakePat}` })
+
     expect(err).toBeInstanceOf(Error)
     expect((err as Error).message).toMatch(/credential|secret/i)
     expect((err as Error).message).toContain('github-pat')
@@ -133,134 +123,133 @@ describe('appendTool', () => {
 
   test('does not create the file when content is rejected for containing a secret', async () => {
     const root = tmpRoot()
-    const path = join(root, 'fragments.md')
 
-    await callExpectingThrow(path, `token=${'sk-' + 'ant-' + 'X'.repeat(30)}`)
+    await callExpectingThrow(root, { body: `token=${'sk-' + 'ant-' + 'X'.repeat(30)}` })
 
-    expect(existsSync(path)).toBe(false)
+    expect(existsSync(streamPath(root))).toBe(false)
   })
 
-  test('does not append when an existing file would be polluted by secret content', async () => {
+  test('does not append when an existing stream would be polluted by secret content', async () => {
     const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-    const before = '<!-- fragment source=ses_a entry=existing -->\n## prior\nbody\n'
-    writeFileSync(path, before)
+    await call(root, { topic: 'Prior', body: 'safe body' })
 
-    await callExpectingThrow(path, `GH_TOKEN=${'ghp' + '_' + 'X'.repeat(36)}`)
+    await callExpectingThrow(root, { topic: 'Secret', body: `GH_TOKEN=${'ghp' + '_' + 'X'.repeat(36)}` })
 
-    expect(readFileSync(path, 'utf8')).toBe(before)
+    const events = await readEvents(streamPath(root))
+    expect(events).toHaveLength(2)
+    expect(events[0]!).toMatchObject({ type: 'fragment', topic: 'Prior' })
   })
 
   test('error message names every distinct secret rule that fired', async () => {
     const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-    const content = [`${'ghp' + '_' + 'X'.repeat(36)}`, `${'AK' + 'IA' + 'XXXXXXXXXXXXXXXX'}`].join('\n')
+    const body = [`${'ghp' + '_' + 'X'.repeat(36)}`, `${'AK' + 'IA' + 'XXXXXXXXXXXXXXXX'}`].join('\n')
 
-    const err = await callExpectingThrow(path, content)
+    const err = await callExpectingThrow(root, { body })
     const message = (err as Error).message
     expect(message).toContain('github-classic-pat')
     expect(message).toContain('aws-access-key')
   })
 
-  test('still allows ordinary memory fragments through (no false positives on prose)', async () => {
+  test('still allows ordinary memory fragments through without false positives on prose', async () => {
     const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-    const content = [
-      '<!-- fragment source=ses_a entry=normal01 -->',
-      '## GitHub Token Environment Variable: GH_TOKEN',
+    const body = [
       '**Claim**: The environment variable `GH_TOKEN` (not `GITHUB_TOKEN`) holds the GitHub PAT.',
       '**Evidence**: Discovered via `env | grep -i token`. Successfully used to fetch private repo data.',
       '**Implication**: For GitHub API operations, use `GH_TOKEN`, not `GITHUB_TOKEN`.',
     ].join('\n')
 
-    await call(path, content)
-    expect(readFileSync(path, 'utf8')).toBe(content)
+    await call(root, { topic: 'GitHub Token Environment Variable: GH_TOKEN', body })
+
+    const events = await readEvents(streamPath(root))
+    expect(events[0]!).toMatchObject({ type: 'fragment', topic: 'GitHub Token Environment Variable: GH_TOKEN', body })
   })
 
-  test('refuses to append a fragment whose topic+body already exists in the file (the winky duplication case)', async () => {
+  test('refuses to append a fragment whose topic+body already exists in the stream', async () => {
     const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-    const fragment = (sessionId: string, entryId: string): string =>
-      [
-        `<!-- fragment source=${sessionId} entry=${entryId} -->`,
-        '## Review System Final Design Decisions',
-        'Three Key Decisions raised by Jamie and confirmed:',
-        '1. Eligibility (Conservative) - DELIVERED + no cancellation + no return',
-        '2. Delete Strategy (Hybrid) - hard for user, soft for admin hide',
-        '3. Review Count per Order Item - 1 per (user, order_item) with UNIQUE constraint',
-        '',
-      ].join('\n')
+    const body = [
+      'Three Key Decisions raised by Jamie and confirmed:',
+      '1. Eligibility (Conservative) - DELIVERED + no cancellation + no return',
+      '2. Delete Strategy (Hybrid) - hard for user, soft for admin hide',
+      '3. Review Count per Order Item - 1 per (user, order_item) with UNIQUE constraint',
+    ].join('\n')
 
-    await call(path, fragment('ses_first', '92ad3a70'))
-    const err = await callExpectingThrow(path, fragment('ses_second', '1db7920a'))
+    await call(root, { source: 'ses_first', entry: '92ad3a70', topic: 'Review System Final Design Decisions', body })
+    const err = await callExpectingThrow(root, {
+      source: 'ses_second',
+      entry: '1db7920a',
+      topic: 'Review System Final Design Decisions',
+      body,
+    })
 
     expect(err).toBeInstanceOf(Error)
     expect((err as Error).message).toMatch(/already exist|duplicate|byte-equivalent/i)
     expect((err as Error).message).toContain('Review System Final Design Decisions')
   })
 
-  test('does not modify the file when an append is rejected for duplication', async () => {
+  test('does not modify the stream when an append is rejected for duplication', async () => {
     const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-    const original = '<!-- fragment source=ses_a entry=11 -->\n## Existing\noriginal body\n'
-    writeFileSync(path, original)
+    await call(root, { topic: 'Existing', body: 'original body' })
 
-    const dup = '<!-- fragment source=ses_b entry=22 -->\n## Existing\noriginal body\n'
-    await callExpectingThrow(path, dup)
+    await callExpectingThrow(root, { source: 'ses_b', entry: 'entry_b', topic: 'Existing', body: 'original body' })
 
-    expect(readFileSync(path, 'utf8')).toBe(original)
+    const events = await readEvents(streamPath(root))
+    expect(events).toHaveLength(2)
+    expect(events[0]!).toMatchObject({ type: 'fragment', source: 'ses_a', topic: 'Existing' })
   })
 
-  test('allows fragments whose topic matches but body differs (legitimately distinct)', async () => {
+  test('allows fragments whose topic matches but body differs', async () => {
     const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-    await call(path, '<!-- fragment source=ses_a entry=11 -->\n## Decision\nuse option A\n')
-    await call(path, '<!-- fragment source=ses_b entry=22 -->\n## Decision\nactually use option B (decision changed)\n')
 
-    const content = readFileSync(path, 'utf8')
-    expect(content).toContain('use option A')
-    expect(content).toContain('actually use option B')
+    await call(root, { topic: 'Decision', body: 'use option A', entry: 'entry_1' })
+    await call(root, { topic: 'Decision', body: 'actually use option B (decision changed)', entry: 'entry_2' })
+
+    const events = await readEvents(streamPath(root))
+    expect(events).toHaveLength(4)
+    expect(events[0]!).toMatchObject({ type: 'fragment', body: 'use option A' })
+    expect(events[2]!).toMatchObject({ type: 'fragment', body: 'actually use option B (decision changed)' })
   })
 
-  test('allows watermark-only appends regardless of existing fragments (no fragments to dedup)', async () => {
+  test('treats whitespace-only differences as duplicates', async () => {
     const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-    writeFileSync(path, '<!-- fragment source=ses_a entry=11 -->\n## Existing\nbody\n')
 
-    await call(path, '<!-- watermark source=ses_b entry=22 -->\n')
+    await call(root, { topic: 'Topic', body: 'body line' })
+    const err = await callExpectingThrow(root, { topic: 'Topic   ', body: 'body line   \n' })
 
-    expect(readFileSync(path, 'utf8')).toContain('<!-- watermark source=ses_b')
-  })
-
-  test('refuses an append that contains a duplicate even if other fragments in the same append are new', async () => {
-    const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-    await call(path, '<!-- fragment source=ses_a entry=11 -->\n## ExistingTopic\nshared body\n')
-
-    const mixedAppend = [
-      '<!-- fragment source=ses_b entry=22 -->',
-      '## NewTopic',
-      'genuinely new body',
-      '',
-      '<!-- fragment source=ses_b entry=23 -->',
-      '## ExistingTopic',
-      'shared body',
-      '',
-    ].join('\n')
-
-    const err = await callExpectingThrow(path, mixedAppend)
-    expect(err).toBeInstanceOf(Error)
-    expect((err as Error).message).toContain('ExistingTopic')
-    expect(readFileSync(path, 'utf8')).not.toContain('NewTopic')
-  })
-
-  test('treats whitespace-only differences as duplicates (semantic equivalence)', async () => {
-    const root = tmpRoot()
-    const path = join(root, 'fragments.md')
-    await call(path, '<!-- fragment source=ses_a entry=11 -->\n## Topic\nbody line\n')
-
-    const trailingSpaces = '<!-- fragment source=ses_b entry=22 -->\n## Topic\nbody line   \n'
-    const err = await callExpectingThrow(path, trailingSpaces)
     expect((err as Error).message).toContain('Topic')
+  })
+
+  test('dedups against pre-existing JSONL fragment events', async () => {
+    const root = tmpRoot()
+    const path = streamPath(root)
+    mkdirSync(join(root, 'memory'), { recursive: true })
+    await Bun.write(
+      path,
+      `${JSON.stringify({
+        type: 'fragment',
+        id: 'fixture-fragment',
+        ts: new Date().toISOString(),
+        source: 'ses_fixture',
+        entry: 'entry_fixture',
+        topic: 'Fixture',
+        body: 'existing body',
+      })}\n`,
+    )
+
+    const err = await callExpectingThrow(root, { topic: 'Fixture', body: 'existing body' })
+
+    expect((err as Error).message).toContain('Fixture')
+    expect(await readEvents(path)).toHaveLength(1)
+  })
+})
+
+describe('advanceWatermarkTool', () => {
+  test('writes only a watermark event', async () => {
+    const root = tmpRoot()
+
+    await advanceWatermarkTool.execute({ source: 'ses_a', latestEntryId: 'latest_entry' }, ctx(root))
+
+    const events = await readEvents(streamPath(root))
+    expect(events).toHaveLength(1)
+    expect(events[0]!).toMatchObject({ type: 'watermark', source: 'ses_a', entry: 'latest_entry' })
   })
 })

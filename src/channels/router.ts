@@ -77,6 +77,18 @@ export const MAX_TYPING_HEARTBEAT_MS = 2 * 60 * 1000
 export const SESSION_IDLE_MS = 30 * 60 * 1000
 export const SESSION_GC_INTERVAL_MS = 60 * 1000
 
+/**
+ * Maximum age of the last engaged inbound before the next inbound triggers a fresh session.
+ * Set to the LLM provider's KV-cache TTL (5 min) so the new session's system prompt is
+ * guaranteed to be a cache hit on the provider side.
+ *
+ * Unlike SESSION_IDLE_MS (which evicts the in-memory entry without rollover), this constant
+ * triggers a full tearDownLive + recreate on the next engaged inbound. The old session's
+ * transcript is preserved on disk; only the in-memory live entry and sessions.json pointer
+ * are replaced.
+ */
+export const SESSION_FRESHNESS_TTL_MS = 5 * 60 * 1000
+
 // Watchdog ceiling for ensureLive's full async chain (resolve names →
 // fetch membership → open session manager → persist mapping → prefetch
 // history). A legitimate cold-start completes in well under a second;
@@ -406,6 +418,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   let mappings: ChannelSessionRecord[] | null = null
   let loadOnce: Promise<void> | null = null
+  let persistChain: Promise<void> = Promise.resolve()
 
   const ensureLoaded = async (): Promise<void> => {
     if (mappings !== null) return
@@ -419,7 +432,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
   const persist = async (): Promise<void> => {
     if (mappings === null) return
-    await saveChannelSessions(options.agentDir, mappings, logger)
+    persistChain = persistChain.then(async () => {
+      if (mappings === null) return
+      await saveChannelSessions(options.agentDir, mappings, logger)
+    })
+    await persistChain
   }
 
   const createForChannel: CreateSessionForChannel =
@@ -535,7 +552,37 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   ): Promise<LiveSession> => {
     const keyId = channelKeyId(key)
     const existing = liveSessions.get(keyId)
-    if (existing && !existing.destroyed) return existing
+    if (existing && !existing.destroyed) {
+      const idleMs = now() - existing.lastInboundAt
+      if (idleMs > SESSION_FRESHNESS_TTL_MS) {
+        logger.info(`[channels] ${keyId}: stale-rollover (live: ${idleMs}ms idle)`)
+        await tearDownLive(existing)
+        liveSessions.delete(keyId)
+        if (mappings) {
+          const idx = mappings.findIndex(
+            (s) =>
+              s.adapter === key.adapter &&
+              s.workspace === key.workspace &&
+              s.chat === key.chat &&
+              (s.thread ?? null) === (key.thread ?? null),
+          )
+          if (idx >= 0) {
+            const prev = mappings[idx]!
+            mappings[idx] = {
+              adapter: prev.adapter,
+              workspace: prev.workspace,
+              chat: prev.chat,
+              thread: prev.thread,
+              participants: prev.participants,
+              lastInboundAt: 0,
+            }
+            await persist()
+          }
+        }
+      } else {
+        return existing
+      }
+    }
 
     const inFlight = creating.get(keyId)
     if (inFlight) return inFlight
@@ -543,9 +590,39 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const promise = (async () => {
       await ensureLoaded()
       const record = mappings ? findRecord(mappings, key) : undefined
-      const phase = record?.sessionId === undefined ? 'cold-start' : 'rehydrate'
+      let resolvedRecord = record
+      if (
+        record?.sessionId !== undefined &&
+        existing === undefined &&
+        now() - (record.lastInboundAt ?? 0) > SESSION_FRESHNESS_TTL_MS
+      ) {
+        const idleMs = now() - (record.lastInboundAt ?? 0)
+        logger.info(`[channels] ${keyId}: stale-rollover (persisted: ${idleMs}ms idle)`)
+        resolvedRecord = {
+          adapter: record.adapter,
+          workspace: record.workspace,
+          chat: record.chat,
+          thread: record.thread,
+          participants: record.participants,
+          lastInboundAt: 0,
+        }
+        if (mappings) {
+          const idx = mappings.findIndex(
+            (s) =>
+              s.adapter === key.adapter &&
+              s.workspace === key.workspace &&
+              s.chat === key.chat &&
+              (s.thread ?? null) === (key.thread ?? null),
+          )
+          if (idx >= 0) {
+            mappings[idx] = resolvedRecord
+            await persist()
+          }
+        }
+      }
+      const phase = resolvedRecord?.sessionId === undefined ? 'cold-start' : 'rehydrate'
       logger.info(`[channels] ${keyId}: ensureLive begin (${phase})`)
-      const participants = (record?.participants ?? []) as ChannelParticipant[]
+      const participants = (resolvedRecord?.participants ?? []) as ChannelParticipant[]
       const membershipFetch = warmMembership(key)
       const resolvedNames = await resolveChannelNames(key)
       logger.info(`[channels] ${keyId}: ensureLive resolved-names`)
@@ -571,7 +648,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         ...(membership !== null ? { membership } : {}),
       }
 
-      const isColdStart = record?.sessionId === undefined
+      const isColdStart = resolvedRecord?.sessionId === undefined
 
       // The router writes into this holder before every prompt() so the
       // tool wrappers' getOrigin() sees the current-turn origin.
@@ -579,8 +656,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
       const created = await createForChannel({
         key,
-        ...(record?.sessionId ? { existingSessionId: record.sessionId } : {}),
-        ...(record?.sessionFile ? { existingSessionFile: record.sessionFile } : {}),
+        ...(resolvedRecord?.sessionId ? { existingSessionId: resolvedRecord.sessionId } : {}),
+        ...(resolvedRecord?.sessionFile ? { existingSessionFile: resolvedRecord.sessionFile } : {}),
         participants,
         origin,
         originRef,
@@ -595,6 +672,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         thread: key.thread,
         sessionId: created.sessionId,
         ...(transcriptPath ? { sessionFile: basename(transcriptPath) } : {}),
+        lastInboundAt: now(),
         participants,
       }
       if (mappings) {
@@ -974,6 +1052,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const elapsedSinceFirst = t - live.firstUnprocessedAt
     const wait = Math.max(0, Math.min(baseWait, MAX_DEBOUNCE_MS - elapsedSinceFirst))
     live.lastInboundAt = t
+    if (mappings) {
+      const idx = mappings.findIndex(
+        (s) =>
+          s.adapter === live.key.adapter &&
+          s.workspace === live.key.workspace &&
+          s.chat === live.key.chat &&
+          (s.thread ?? null) === (live.key.thread ?? null),
+      )
+      if (idx >= 0) {
+        mappings[idx] = { ...mappings[idx]!, lastInboundAt: t }
+        void persist()
+      }
+    }
     live.debounceTimer = setTimeout(() => {
       live.debounceTimer = null
       live.firstUnprocessedAt = 0
@@ -1030,6 +1121,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     const parsedCommand = commands.parse(event.text)
     if (parsedCommand !== null) {
+      // Commands are control traffic, not engaged inbounds; if the session is stale,
+      // the next engaged inbound will perform the rollover before prompting.
       const keyId = channelKeyId(key)
       if (!commands.has(parsedCommand.name)) {
         logger.info(`[channels] ${keyId}: ignoring unknown command /${parsedCommand.name}`)
