@@ -11,7 +11,7 @@ import {
   type KnownModelRef,
   type KnownProviderId,
 } from './providers'
-import { isProviderConfigured } from './providers-mutation'
+import { isProviderConfigured, listConfiguredProviders } from './providers-mutation'
 
 const CONFIG_FILE = 'typeclaw.json'
 
@@ -49,6 +49,25 @@ export function listModelProfiles(cwd: string, env: NodeJS.ProcessEnv = process.
 
 export function listAvailableModelRefs(): KnownModelRef[] {
   return listKnownModelRefs()
+}
+
+// Subset of `listAvailableModelRefs()` filtered to providers with a usable
+// credential in this agent folder — either a `secrets.json#providers.<id>`
+// entry (api-key OR oauth) or a credential resolvable from the process env
+// via the provider's canonical env-var name. Used by `typeclaw model set`'s
+// interactive picker so users only see models they can actually run; the
+// CLI surfaces an explicit "add provider" sentinel when the result is empty
+// or when the user wants to wire a new one.
+//
+// Ordering preserves `listKnownModelRefs()` (provider-table declaration
+// order, then per-provider model order) so the picker reads stably across
+// invocations.
+export function listRegisteredModelRefs(cwd: string, env: NodeJS.ProcessEnv = process.env): KnownModelRef[] {
+  const registered = new Set<KnownProviderId>()
+  for (const entry of listConfiguredProviders(cwd, env)) {
+    if (entry.known) registered.add(entry.id as KnownProviderId)
+  }
+  return listKnownModelRefs().filter((ref) => registered.has(providerForModelRef(ref)))
 }
 
 export function isKnownModelRef(value: string): value is KnownModelRef {

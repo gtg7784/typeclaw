@@ -48,37 +48,51 @@ const addSub = defineCommand({
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
-    const providerId = await resolveProviderForAdd(args.provider)
-    const provider = KNOWN_PROVIDERS[providerId]
-
-    intro(`Adding provider: ${provider.name}`)
-
-    const method = await resolveAuthMethod(provider, args)
-    if (method === 'oauth') {
-      const result = await runOAuthLogin(cwd, providerId)
-      if (!result.ok) {
-        console.error(errorLine(`OAuth login failed: ${result.reason}`))
-        process.exit(1)
-      }
-      done({
-        title: c.green(`Logged in to ${provider.name}.`),
-        hints: nextStepHints({ credentialChanged: true }),
-      })
-      return
-    }
-
-    const credential = await resolveApiKeyInputs(provider, args)
-    const result = addProvider(cwd, providerId, credential)
+    const result = await runProviderAddFlow(cwd, args)
     if (!result.ok) {
       console.error(errorLine(result.reason))
       process.exit(1)
     }
-    done({
-      title: c.green(`Added ${provider.name} credentials to secrets.json.`),
-      hints: nextStepHints({ credentialChanged: true }),
-    })
   },
 })
+
+export type ProviderAddFlowArgs = {
+  provider?: string | undefined
+  key?: string | undefined
+  env?: string | undefined
+  oauth?: boolean | undefined
+}
+
+export type ProviderAddFlowResult =
+  | { ok: true; providerId: KnownProviderId; method: 'api-key' | 'oauth' }
+  | { ok: false; reason: string }
+
+export async function runProviderAddFlow(cwd: string, args: ProviderAddFlowArgs): Promise<ProviderAddFlowResult> {
+  const providerId = await resolveProviderForAdd(args.provider)
+  const provider = KNOWN_PROVIDERS[providerId]
+
+  intro(`Adding provider: ${provider.name}`)
+
+  const method = await resolveAuthMethod(provider, args)
+  if (method === 'oauth') {
+    const result = await runOAuthLogin(cwd, providerId)
+    if (!result.ok) return { ok: false, reason: `OAuth login failed: ${result.reason}` }
+    done({
+      title: c.green(`Logged in to ${provider.name}.`),
+      hints: nextStepHints({ credentialChanged: true }),
+    })
+    return { ok: true, providerId, method: 'oauth' }
+  }
+
+  const credential = await resolveApiKeyInputs(provider, args)
+  const result = addProvider(cwd, providerId, credential)
+  if (!result.ok) return { ok: false, reason: result.reason }
+  done({
+    title: c.green(`Added ${provider.name} credentials to secrets.json.`),
+    hints: nextStepHints({ credentialChanged: true }),
+  })
+  return { ok: true, providerId, method: 'api-key' }
+}
 
 const setSub = defineCommand({
   meta: {

@@ -1,7 +1,13 @@
-import { cancel, intro, isCancel, select } from '@clack/prompts'
+import { cancel, intro, isCancel, log, select } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
-import { addProfile, listModelProfiles, removeProfile, setProfile } from '@/config/models-mutation'
+import {
+  addProfile,
+  listModelProfiles,
+  listRegisteredModelRefs,
+  removeProfile,
+  setProfile,
+} from '@/config/models-mutation'
 import {
   KNOWN_PROVIDERS,
   listKnownModelRefs,
@@ -11,7 +17,10 @@ import {
 } from '@/config/providers'
 import { findAgentDir, isInitialized } from '@/init'
 
+import { runProviderAddFlow } from './provider'
 import { c, done, errorLine } from './ui'
+
+const ADD_PROVIDER_SENTINEL = '__add-provider__'
 
 const setSub = defineCommand({
   meta: {
@@ -38,7 +47,7 @@ const setSub = defineCommand({
   async run({ args }) {
     const cwd = ensureAgentDir()
     const profile = args.profile ?? (await pickProfileName())
-    const ref = args.ref ?? (await pickModelRef())
+    const ref = args.ref ?? (await pickModelRef(cwd))
 
     intro(`Setting model profile: ${profile} → ${ref}`)
 
@@ -78,7 +87,7 @@ const addSub = defineCommand({
   },
   async run({ args }) {
     const cwd = ensureAgentDir()
-    const ref = args.ref ?? (await pickModelRef())
+    const ref = args.ref ?? (await pickModelRef(cwd))
 
     intro(`Adding model profile: ${args.profile} → ${ref}`)
 
@@ -198,22 +207,45 @@ async function pickProfileName(): Promise<string> {
   return choice
 }
 
-async function pickModelRef(): Promise<string> {
-  const refs = listKnownModelRefs()
-  const choice = await select<KnownModelRef>({
-    message: 'Pick a model',
-    options: refs.map((ref) => ({
-      value: ref,
-      label: describeRef(ref),
-      hint: ref,
-    })),
-    initialValue: refs[0],
-  })
-  if (isCancel(choice)) {
-    cancel('Aborted.')
-    process.exit(0)
+async function pickModelRef(cwd: string): Promise<string> {
+  while (true) {
+    const refs = listRegisteredModelRefs(cwd)
+    if (refs.length === 0) {
+      log.info("No provider credentials found. Let's add one first.")
+      const added = await runProviderAddFlow(cwd, {})
+      if (!added.ok) {
+        console.error(errorLine(added.reason))
+        process.exit(1)
+      }
+      continue
+    }
+    const choice = await select<KnownModelRef | typeof ADD_PROVIDER_SENTINEL>({
+      message: 'Pick a model',
+      options: [
+        ...refs.map((ref) => ({
+          value: ref,
+          label: describeRef(ref),
+          hint: ref,
+        })),
+        {
+          value: ADD_PROVIDER_SENTINEL,
+          label: c.cyan('+ add provider'),
+          hint: 'configure a new provider',
+        },
+      ],
+      initialValue: refs[0],
+    })
+    if (isCancel(choice)) {
+      cancel('Aborted.')
+      process.exit(0)
+    }
+    if (choice !== ADD_PROVIDER_SENTINEL) return choice
+    const added = await runProviderAddFlow(cwd, {})
+    if (!added.ok) {
+      console.error(errorLine(added.reason))
+      process.exit(1)
+    }
   }
-  return choice
 }
 
 function describeRef(ref: KnownModelRef): string {
