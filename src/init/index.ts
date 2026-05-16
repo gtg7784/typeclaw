@@ -12,6 +12,7 @@ import {
   type KnownProviderId,
 } from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability, type DockerExec, start } from '@/container'
+import { commitSystemFile } from '@/git/system-commit'
 import { createSecretsStoreForAgent, type Channels, type Secret, SecretsBackend } from '@/secrets'
 import { createTui } from '@/tui'
 
@@ -860,6 +861,13 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
     await appendChannelSecrets(options.cwd, options.channel, tokens)
   }
   emit({ step: 'secrets', phase: 'done' })
+
+  // Commit the typeclaw.json change so the agent folder isn't silently
+  // dirty after `typeclaw channel add`. Same `commitSystemFile` contract as
+  // every other host-side rewrite: no-op outside a git repo, when Bun is
+  // unavailable, or when the file is clean. secrets.json is gitignored, so
+  // only typeclaw.json is named here.
+  await commitSystemFile(options.cwd, CONFIG_FILE, `channel: add ${options.channel}`)
 }
 
 function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {

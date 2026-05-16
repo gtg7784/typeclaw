@@ -1,6 +1,8 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { commitSystemFileSync } from '@/git/system-commit'
+
 import { configSchema, loadConfigSync, validateConfig } from './config'
 import {
   KNOWN_PROVIDERS,
@@ -87,7 +89,9 @@ export function setProfile(
     }
   }
 
-  return writeProfile(cwd, trimmed, ref)
+  const existingBefore = readModelsRaw(cwd)
+  const verb = existingBefore !== null && trimmed in existingBefore ? 'set' : 'add'
+  return writeProfile(cwd, trimmed, ref, `model: ${verb} ${trimmed} → ${ref}`)
 }
 
 // `add` is just `set` with a uniqueness guard; users who want "update" should
@@ -130,19 +134,19 @@ export function removeProfile(cwd: string, profile: string): ModelMutationResult
   }
   const next = { ...existing }
   delete next[profile]
-  return writeModels(cwd, next)
+  return writeModels(cwd, next, `model: remove ${profile}`)
 }
 
-function writeProfile(cwd: string, profile: string, ref: KnownModelRef): ModelMutationResult {
+function writeProfile(cwd: string, profile: string, ref: KnownModelRef, message: string): ModelMutationResult {
   const existing = readModelsRaw(cwd)
   const next = existing === null ? { default: ref } : { ...existing, [profile]: ref }
   if (existing === null && profile !== 'default') {
     next.default = ref
   }
-  return writeModels(cwd, next)
+  return writeModels(cwd, next, message)
 }
 
-function writeModels(cwd: string, models: Record<string, string>): ModelMutationResult {
+function writeModels(cwd: string, models: Record<string, string>, commitMessage: string): ModelMutationResult {
   const path = join(cwd, CONFIG_FILE)
   let parsed: Record<string, unknown>
   try {
@@ -176,6 +180,11 @@ function writeModels(cwd: string, models: Record<string, string>): ModelMutation
   if (!validation.ok) {
     return { ok: false, reason: validation.reason }
   }
+  // Auto-commit so the agent folder is never silently dirty after a CLI
+  // config mutation. Same pattern as `persistMigratedConfig` and cron
+  // migrations: `commitSystemFileSync` no-ops on non-git folders, missing
+  // Bun, and clean files, so callers outside a git repo pay zero cost.
+  commitSystemFileSync(cwd, CONFIG_FILE, commitMessage)
   return { ok: true }
 }
 

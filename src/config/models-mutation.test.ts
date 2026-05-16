@@ -177,3 +177,64 @@ describe('listModelProfiles', () => {
     expect(vision?.credentialStatus).toBe('available')
   })
 })
+
+describe('auto-commit on success', () => {
+  async function runGit(cwd: string, args: string[]): Promise<string> {
+    const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+    await proc.exited
+    return (await new Response(proc.stdout).text()).trim()
+  }
+
+  async function initGit(cwd: string): Promise<void> {
+    for (const cmd of [
+      ['init', '-b', 'main'],
+      ['config', 'user.name', 'Test User'],
+      ['config', 'user.email', 'test@example.com'],
+      ['add', '.'],
+      ['commit', '-m', 'initial'],
+    ]) {
+      const proc = Bun.spawn({ cmd: ['git', ...cmd], cwd, stdout: 'pipe', stderr: 'pipe' })
+      await proc.exited
+    }
+  }
+
+  test('setProfile commits typeclaw.json with a "model: set" subject', async () => {
+    await initGit(root)
+    const result = setProfile(root, 'default', 'openai/gpt-5.4-nano', { env: { OPENAI_API_KEY: 'x' } })
+    expect(result.ok).toBe(true)
+    expect(await runGit(root, ['log', '-1', '--format=%s'])).toBe('model: set default → openai/gpt-5.4-nano')
+    expect(await runGit(root, ['show', '--name-only', '--format=', 'HEAD'])).toBe('typeclaw.json')
+  })
+
+  test('addProfile commits typeclaw.json with a "model: add" subject', async () => {
+    await initGit(root)
+    const result = addProfile(root, 'fast', 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')
+    expect(result.ok).toBe(true)
+    expect(await runGit(root, ['log', '-1', '--format=%s'])).toBe(
+      'model: add fast → fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+    )
+  })
+
+  test('removeProfile commits typeclaw.json with a "model: remove" subject', async () => {
+    addProfile(root, 'fast', 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')
+    await initGit(root)
+    const result = removeProfile(root, 'fast')
+    expect(result.ok).toBe(true)
+    expect(await runGit(root, ['log', '-1', '--format=%s'])).toBe('model: remove fast')
+  })
+
+  test('no-ops when the folder is not a git repo (mutation-check anchor for the commit call)', async () => {
+    const before = await readFile(join(root, 'typeclaw.json'), 'utf8')
+    const result = setProfile(root, 'default', 'openai/gpt-5.4-nano', { env: { OPENAI_API_KEY: 'x' } })
+    expect(result.ok).toBe(true)
+    expect(await readFile(join(root, 'typeclaw.json'), 'utf8')).not.toBe(before)
+  })
+
+  test('failed mutation does not produce a commit', async () => {
+    await initGit(root)
+    const head = await runGit(root, ['rev-parse', 'HEAD'])
+    const result = setProfile(root, 'default', 'mystery/model')
+    expect(result.ok).toBe(false)
+    expect(await runGit(root, ['rev-parse', 'HEAD'])).toBe(head)
+  })
+})
