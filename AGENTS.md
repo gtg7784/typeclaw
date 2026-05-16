@@ -16,6 +16,32 @@ bun run format
 
 No exceptions. If any of them fail, fix the cause before committing — do not `--no-verify`, do not stage partial fixes.
 
+## Release
+
+Use the **Release** GitHub Actions workflow (`workflow_dispatch`, see `.github/workflows/release.yml`). It validates the input version, typechecks, lints, format-checks, runs the full test suite, bumps `package.json`, builds and pushes the multi-arch base image to `ghcr.io/typeclaw/typeclaw-base:X.Y.Z`, verifies the image is anonymously pullable on both `linux/amd64` and `linux/arm64`, publishes to npm with provenance, then commits the bump and creates a git tag + GitHub Release. Tags have no `v` prefix.
+
+The workflow is the only supported release path. Do not `npm publish` from a local machine, do not push GHCR tags by hand, do not create release tags manually — the GHCR-first-then-npm ordering and the cross-platform pullability verification are load-bearing for the version-pin invariant documented in `## Stages` (the per-agent Dockerfile pins `typeclaw-base:X.Y.Z` to the installed typeclaw version, and a user who `npm install`s the version-to-be-published before its base image lands cannot `typeclaw start`).
+
+### Version Decision
+
+- If the user specifies an exact version (e.g., `1.5.0`), use it as-is.
+  Otherwise, the agent decides the bump level based on the changes since the last release (never bump major unless the user explicitly asks):
+  - **minor** — New features, new CLI subcommands, new plugin contract surface, breaking changes
+  - **patch** — Bug fixes, refactors, docs, dependency updates, minor improvements
+- Never ask the user which version to bump. Decide and proceed.
+- `package.json` is the single source of truth for the version — there is no `.claude-plugin/plugin.json`, no skill `version:` frontmatter, no `README.md` version badge to sync. The workflow's `npm version` step is the only writer.
+
+### Re-running after a partial failure
+
+Every step in `release.yml` is idempotent against re-runs at the same input version:
+
+- GHCR push overwrites the same `:X.Y.Z` tag with identical layers (no immutability policy as of 2026).
+- `npm publish` is gated by `npm view typeclaw@X.Y.Z version` — already-published versions are skipped, not retried.
+- `git tag -f` + `git push --force origin refs/tags/X.Y.Z` overwrites a local-only tag on a fresh runner without touching branches.
+- `gh release create` is gated by `gh release view` — pre-existing releases are skipped.
+
+If a release halts after `npm publish` succeeds (the cardinal irreversible step), re-running the workflow at the same version cleans up whatever didn't finish. If it halts before `npm publish`, the version is still free; pick the same number and re-run.
+
 ## Vocabulary
 
 When the user says "channel" — or mentions tools/code with a `channel_` prefix (e.g. `channel_send`, `channel_reply`) — they almost always mean **`src/channels/`**, this repo's channels subsystem (router, manager, persistence, adapters for Slack/Discord, etc.), **not** Channel Talk (the customer-support SaaS), Slack channels in the abstract, or the agent-messenger CLI's `agent-channeltalk*` skills. Default to `src/channels/` and only branch out when the user explicitly names a different platform or product.
