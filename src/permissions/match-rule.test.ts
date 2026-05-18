@@ -34,6 +34,16 @@ describe('parseMatchRule — accepted forms', () => {
     { input: 'kakao:dm/*', expected: { kind: 'channel', platform: 'kakao', bucket: 'dm' } },
     { input: 'kakao:group/*', expected: { kind: 'channel', platform: 'kakao', bucket: 'group' } },
     { input: 'kakao:open/*', expected: { kind: 'channel', platform: 'kakao', bucket: 'open' } },
+    { input: 'github:acme/project', expected: { kind: 'channel', platform: 'github', workspace: 'acme/project' } },
+    {
+      input: 'github:acme/project/issue:42',
+      expected: { kind: 'channel', platform: 'github', workspace: 'acme/project', chat: 'issue:42' },
+    },
+    { input: 'github:acme/*', expected: { kind: 'channel', platform: 'github', workspace: 'acme' } },
+    {
+      input: 'github:acme/project author:12345',
+      expected: { kind: 'channel', platform: 'github', workspace: 'acme/project', author: '12345' },
+    },
   ]
   for (const { input, expected } of cases) {
     test(`parses '${input}'`, () => {
@@ -69,6 +79,8 @@ describe('parseMatchRule — rejected forms', () => {
     { input: '* author:U_ME', reason: /requires a specific channel scope/ },
     { input: 'discord:group/*', reason: /'group' is only valid for kakao/ },
     { input: 'discord:open/*', reason: /'open' is only valid for kakao/ },
+    { input: 'github:acme', reason: /owner\/repo/ },
+    { input: 'github:acme/project/issue:42/extra', reason: /single segment/ },
   ]
   for (const { input, reason } of cases) {
     test(`rejects '${input}'`, () => {
