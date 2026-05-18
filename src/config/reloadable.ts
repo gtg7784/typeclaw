@@ -11,24 +11,45 @@ export type CreateConfigReloadableOptions = {
   // hand-edits) take effect without a container restart. `roles.<name>.permissions`
   // changes still require a restart — see FIELD_EFFECTS in config.ts.
   permissions?: PermissionService
+  // Skip the mount-path accessibility check inside validateConfig. Mount paths
+  // in typeclaw.json are HOST paths (validated at `typeclaw start` time before
+  // `docker run`); inside the container they don't resolve, so the check would
+  // always fail on any agent that declares mounts. Reload runs container-side
+  // (via the agent's `reload` tool or the WS message from `typeclaw reload`),
+  // and `mounts` is `restart-required` anyway — there's nothing to validate
+  // against the live config pointer either way. Set this when wiring the
+  // reloadable from a container-stage context. See AGENTS.md § Stages.
+  skipMountValidation?: boolean
 }
 
-export function createConfigReloadable({ cwd, permissions }: CreateConfigReloadableOptions): Reloadable {
+export function createConfigReloadable({
+  cwd,
+  permissions,
+  skipMountValidation = false,
+}: CreateConfigReloadableOptions): Reloadable {
   return {
     scope: 'config',
     description: 'typeclaw.json runtime config',
-    reload: async () => doReload(cwd, permissions),
+    reload: async () => doReload(cwd, permissions, skipMountValidation),
   }
 }
 
-async function doReload(cwd: string, permissions: PermissionService | undefined): Promise<ReloadResult> {
+async function doReload(
+  cwd: string,
+  permissions: PermissionService | undefined,
+  skipMountValidation: boolean,
+): Promise<ReloadResult> {
   // Mount accessibility belongs to the validation surface, not loadConfigSync —
   // validateConfig is the single gate that every host-side caller goes through.
   // Run it before swapping the live config pointer so a mount that vanished
   // between starts surfaces as a reload failure (`mounts` is restart-required
   // anyway, so the user has to restart to pick up changes; better to flag the
   // problem now than to let restart fail later).
-  const validated = validateConfig(cwd)
+  //
+  // Container-side reload skips mount validation: mounts are host paths and
+  // statSync against them inside the container always fails. The host-side
+  // `start` / `restart` / doctor paths still gate on the full validateConfig.
+  const validated = validateConfig(cwd, { skipMounts: skipMountValidation })
   if (!validated.ok) {
     return { scope: 'config', ok: false, reason: validated.reason }
   }

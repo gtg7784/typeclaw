@@ -59,6 +59,66 @@ describe('createConfigReloadable', () => {
     expect(getConfig().port).toBe(9001)
   })
 
+  test('skipMountValidation: container-side reload ignores host-only mount paths', async () => {
+    // given: a config whose mount points at an absolute host path that does
+    // not resolve inside the container's filesystem (simulated by referencing
+    // a path under cwd that we never create).
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, port: 9001, mounts: [] }))
+    const reloadable = createConfigReloadable({ cwd, skipMountValidation: true })
+    await reloadable.reload()
+
+    const missingPath = join(cwd, 'host-only-path')
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        model: VALID_MODEL_A,
+        port: 9001,
+        mounts: [{ name: 'host-only', path: missingPath }],
+      }),
+    )
+
+    // when: a container-side reload runs
+    const result = await reloadable.reload()
+
+    // then: it succeeds and reports `mounts` as restart-required even though
+    // the host path does not exist on the local filesystem.
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const diff = result.details as { restartRequired: { path: string }[] }
+    expect(diff.restartRequired.map((c) => c.path)).toEqual(['mounts'])
+  })
+
+  test('skipMountValidation defaults to false: host-side behavior unchanged', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, port: 9001, mounts: [] }))
+    const reloadable = createConfigReloadable({ cwd })
+    await reloadable.reload()
+
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({
+        model: VALID_MODEL_A,
+        port: 9001,
+        mounts: [{ name: 'gone', path: join(cwd, 'still-missing') }],
+      }),
+    )
+    const result = await reloadable.reload()
+
+    expect(result.ok).toBe(false)
+    if (!result.ok) expect(result.reason).toContain('mount "gone"')
+  })
+
+  test('skipMountValidation: schema errors still fail even when mount checks are skipped', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, port: 9001 }))
+    const reloadable = createConfigReloadable({ cwd, skipMountValidation: true })
+    await reloadable.reload()
+
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'not-a-known-model' } }))
+    const result = await reloadable.reload()
+
+    expect(result.ok).toBe(false)
+    expect(getConfig().port).toBe(9001)
+  })
+
   test('atomicity: schema-invalid config leaves the live config untouched', async () => {
     await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL_A, port: 9001 }))
     const reloadable = createConfigReloadable({ cwd })
