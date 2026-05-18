@@ -1,4 +1,4 @@
-export { type Channels } from './schema'
+export { type Channels, type GithubSecretsBlock } from './schema'
 
 export { createSecretsStoreForAgent, SecretsBackend } from './storage'
 

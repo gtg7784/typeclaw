@@ -16,7 +16,7 @@
 // error messages with typo suggestions; a single big regex would only ever
 // say "didn't match".
 
-export const PLATFORMS = ['slack', 'discord', 'telegram', 'kakao'] as const
+export const PLATFORMS = ['slack', 'discord', 'telegram', 'kakao', 'github'] as const
 export type Platform = (typeof PLATFORMS)[number]
 
 const SUBAGENT_NAME = /^[a-z][a-z0-9-]*$/
@@ -50,7 +50,7 @@ export type ParseMatchRuleResult = { ok: true; value: MatchRule } | { ok: false;
 // this to `author:` only, the JSON schema would reject typos with a generic
 // "did not match pattern" error and the user would lose the actionable hint.
 export const MATCH_RULE_REGEX_SOURCE =
-  '^(tui|cron|subagent(:[a-z][a-z0-9-]*)?|\\*|(slack|discord|telegram|kakao):[^\\s]+)(\\s+[a-zA-Z][a-zA-Z0-9_]*:[^\\s]+)*$'
+  '^(tui|cron|subagent(:[a-z][a-z0-9-]*)?|\\*|(slack|discord|telegram|kakao|github):[^\\s]+)(\\s+[a-zA-Z][a-zA-Z0-9_]*:[^\\s]+)*$'
 
 export function parseMatchRule(input: string): ParseMatchRuleResult {
   if (input !== input.trim() || input.length === 0) {
@@ -138,6 +138,8 @@ function parseChannelScope(platform: Platform, rest: string, author: string | un
     return { ok: true, value: buildChannelRule(platform, { author }) }
   }
 
+  if (platform === 'github') return parseGithubChannelScope(rest, author)
+
   // Bucket scopes: `dm/*`, `dm/<id>`, `group/*`, `open/*`. Slack's `im` is
   // renamed to `dm`; that mapping is enforced by the legacy-prefix table at
   // the top of parseMatchRule for unprefixed forms — here we just refuse the
@@ -201,6 +203,26 @@ function parseChannelScope(platform: Platform, rest: string, author: string | un
     return { ok: false, error: `bucket '${platform}:${rest}' requires a chat id or '*'` }
   }
   return { ok: true, value: buildChannelRule(platform, { workspace: rest, author }) }
+}
+
+function parseGithubChannelScope(rest: string, author: string | undefined): ParseMatchRuleResult {
+  const [owner, repo, ...chatParts] = rest.split('/')
+  if (owner === undefined || owner === '' || repo === undefined || repo === '') {
+    return { ok: false, error: "github scope requires 'owner/repo' format" }
+  }
+  if (repo === '*') {
+    return {
+      ok: false,
+      error: `'github:${owner}/*' is not supported; use 'github:${owner}/repo' for a specific repo or 'github:*' for all github events`,
+    }
+  }
+  const workspace = `${owner}/${repo}`
+  if (chatParts.length === 0) return { ok: true, value: buildChannelRule('github', { workspace, author }) }
+  const chat = chatParts.join('/')
+  if (chat === '' || chat.includes('/')) {
+    return { ok: false, error: "github chat scope must be a single segment like 'issue:42'" }
+  }
+  return { ok: true, value: buildChannelRule('github', { workspace, chat, author }) }
 }
 
 function buildChannelRule(

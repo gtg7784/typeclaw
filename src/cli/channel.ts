@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto'
+
 import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
@@ -23,6 +25,7 @@ const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'discord-bot': 'Discord',
   'telegram-bot': 'Telegram',
   kakaotalk: 'KakaoTalk',
+  github: 'GitHub',
 }
 
 const addSub = defineCommand({
@@ -314,6 +317,14 @@ type CollectedCredentials =
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
   | { channel: 'kakaotalk'; runKakaotalkAuth: (options: { cwd: string }) => Promise<KakaotalkAuthResult> }
+  | {
+      channel: 'github'
+      githubPat: string
+      webhookSecret: string
+      webhookUrl: string
+      webhookPort?: number
+      repos: string[]
+    }
 
 async function collectCredentials(channel: ChannelKind): Promise<CollectedCredentials> {
   switch (channel) {
@@ -338,6 +349,106 @@ async function collectCredentials(channel: ChannelKind): Promise<CollectedCreden
           }),
       }
     }
+    case 'github': {
+      const creds = await promptGithubCredentials()
+      return { channel, ...creds }
+    }
+  }
+}
+
+async function promptGithubCredentials(): Promise<{
+  githubPat: string
+  webhookSecret: string
+  webhookUrl: string
+  webhookPort?: number
+  repos: string[]
+}> {
+  note(
+    [
+      'Create a fine-grained PAT with access to the repositories TypeClaw should answer in.',
+      'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used), Metadata read.',
+      'Create a repository webhook pointing to the public webhook URL you enter below.',
+    ].join('\n'),
+    'Get GitHub credentials',
+  )
+  const webhookUrl = await text({
+    message: 'Public webhook URL (GitHub will POST events here)',
+    validate: (value) => validateUrl(value ?? '', 'Webhook URL is required'),
+  })
+  if (isCancel(webhookUrl)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const port = await text({
+    message: 'Local webhook port inside the agent container',
+    initialValue: '8975',
+    validate: (value) => {
+      const parsed = Number(value)
+      return Number.isInteger(parsed) && parsed > 0 ? undefined : 'Port must be a positive integer'
+    },
+  })
+  if (isCancel(port)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const secret = await password({
+    message: 'Webhook secret (leave blank to auto-generate)',
+  })
+  if (isCancel(secret)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const pat = await password({
+    message: 'GitHub fine-grained PAT',
+    validate: (value) => (value && value.length > 0 ? undefined : 'PAT is required'),
+  })
+  if (isCancel(pat)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const reposRaw = await text({
+    message: 'Repositories to allow (comma-separated owner/repo)',
+    validate: (value) => (parseRepos(value ?? '').length > 0 ? undefined : 'At least one owner/repo is required'),
+  })
+  if (isCancel(reposRaw)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const resolvedSecret = secret.length > 0 ? secret : randomBytes(32).toString('hex')
+  if (secret.length === 0) {
+    note(
+      [
+        `Webhook secret: ${resolvedSecret}`,
+        '',
+        'Paste this into the "Secret" field when creating the GitHub webhook.',
+        'It will not be shown again.',
+      ].join('\n'),
+      'Generated webhook secret',
+    )
+  }
+  return {
+    githubPat: pat,
+    webhookSecret: resolvedSecret,
+    webhookUrl,
+    webhookPort: Number(port),
+    repos: parseRepos(reposRaw),
+  }
+}
+
+function parseRepos(input: string): string[] {
+  return input
+    .split(',')
+    .map((v) => v.trim())
+    .filter((v) => /^[^\s/]+\/[^\s/]+$/.test(v))
+}
+
+function validateUrl(value: string, requiredMessage: string): string | undefined {
+  if (!value || value.length === 0) return requiredMessage
+  try {
+    new URL(value)
+    return undefined
+  } catch {
+    return 'Must be a valid URL'
   }
 }
 
