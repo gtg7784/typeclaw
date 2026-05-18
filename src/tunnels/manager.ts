@@ -33,9 +33,6 @@ export function createTunnelManager(options: TunnelManagerOptions): TunnelManage
   const handles = new Map<string, TunnelProviderHandle>()
 
   for (const config of options.tunnels) {
-    if (handles.has(config.name)) {
-      throw new Error(`tunnel '${config.name}' declared twice in typeclaw.json#tunnels`)
-    }
     const handle = buildProvider(config, (url) => publishUrlChange(options.stream, config, url, logger))
     handles.set(config.name, handle)
   }
@@ -78,9 +75,6 @@ function buildProvider(config: TunnelConfig, onUrlChange: (url: string) => void)
   switch (config.provider) {
     case 'external':
       return createExternalProvider({ config, onUrlChange })
-    case 'cloudflare-quick':
-    case 'cloudflare-named':
-      throw new Error(`tunnel provider '${config.provider}' is not implemented yet (deferred to PR 2/3)`)
   }
 }
 

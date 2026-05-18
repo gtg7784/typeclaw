@@ -1,4 +1,4 @@
-export type TunnelProvider = 'cloudflare-quick' | 'cloudflare-named' | 'external'
+export type TunnelProvider = 'external'
 
 export type TunnelFor = { kind: 'channel'; name: string } | { kind: 'manual' }
 
@@ -7,8 +7,6 @@ export type TunnelConfig = {
   provider: TunnelProvider
   for: TunnelFor
   externalUrl?: string
-  hostname?: string
-  tunnelId?: string
   upstreamPort?: number
 }
 

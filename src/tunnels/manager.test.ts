@@ -99,18 +99,7 @@ describe('createTunnelManager (external provider)', () => {
     expect(received.map((p) => p.tunnelName).sort()).toEqual(['a', 'b'])
   })
 
-  it('rejects duplicate tunnel names at construction', () => {
-    const stream = createStream()
-    expect(() =>
-      createTunnelManager({
-        tunnels: [externalConfig({ name: 'dup' }), externalConfig({ name: 'dup' })],
-        stream,
-        logger: silentLogger,
-      }),
-    ).toThrow(/declared twice/)
-  })
-
-  it('rejects external tunnels missing externalUrl', () => {
+  it('rejects external tunnels missing externalUrl at provider construction', () => {
     const stream = createStream()
     expect(() =>
       createTunnelManager({
@@ -119,17 +108,6 @@ describe('createTunnelManager (external provider)', () => {
         logger: silentLogger,
       }),
     ).toThrow(/externalUrl is required/)
-  })
-
-  it('rejects unimplemented providers with a clear deferred message', () => {
-    const stream = createStream()
-    expect(() =>
-      createTunnelManager({
-        tunnels: [{ ...externalConfig(), provider: 'cloudflare-quick', externalUrl: undefined }],
-        stream,
-        logger: silentLogger,
-      }),
-    ).toThrow(/not implemented yet/)
   })
 
   it('start is idempotent: second start does not republish', async () => {
