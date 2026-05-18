@@ -252,6 +252,16 @@ cronJobs: {
     kind: 'exec',
     command: ['bun', 'run', 'scripts/rotate.ts'],
   },
+  // Canonical pattern when the plugin also declares a `commands` entry (§5.7):
+  // the cron job invokes the plugin's own command. Same Bun.spawn dispatch as
+  // a cron.json `exec` job pointing at the same command — provenance, role
+  // inheritance, and scheduledByRole stamping all work identically.
+  daily: {
+    schedule: '0 22 * * *',
+    timezone: 'Asia/Seoul',
+    kind: 'exec',
+    command: ['typeclaw', 'audit-commits', '--since=24h'],
+  },
 }
 ```
 
@@ -259,6 +269,10 @@ cronJobs: {
 - `cron.json` user job ids cannot start with underscore, so collision is impossible by construction.
 - A `prompt` job's `subagent` and `payload` are **validated against the registry at boot** — bad references fail loudly on disk, not 6 hours later when the job fires.
 - Only two kinds: `prompt` and `exec`. Plugins do not extend the schema.
+
+**When to use plugin `cronJobs` vs `cron.json`.** Both schedulers fire `Bun.spawn(['typeclaw', '<cmd>', ...])` identically; what differs is **who owns the cadence**. Plugin `cronJobs` is the right home when the plugin author has an opinion about when the job runs (installing the plugin = scheduled behavior is live, no user wiring required). `cron.json` is for user-owned cadences — weekends only, custom timezone, off-hours runs. **Default to plugin `cronJobs`** when shipping a command that has a natural cadence; reach for `cron.json` only when the cadence is user-specific. See `typeclaw-cron` for the full rules.
+
+For the `exec → LLM` and conditional-`ctx.prompt`-gating patterns that this scheduling layer enables, see §5.7 below and `typeclaw-cron`.
 
 ### 5.4 `skills` — string-form (per-session tmpdir)
 
@@ -443,8 +457,9 @@ Why this beats writing a `kind: 'prompt'` job:
 - The full `ContainerCommandContext` is available — you can mix LLM calls (`ctx.prompt`) with shell calls (`ctx.exec`) inside one command, which a pure-prompt cron job cannot.
 - The cron job stays trivially auditable: `command: ["typeclaw", "standup-now"]` is exact, not a wall of natural-language prose.
 - **You can gate `ctx.prompt` behind a cheap `ctx.exec` probe** so a high-frequency poll (every 15 min for new mail, every commit for CI failures) only spends LLM tokens when there's actual work. A pure `kind: 'prompt'` cron job pays for an LLM round-trip on every tick, including the 99% of ticks that turn out to be no-ops. See `typeclaw-cron` "Conditional LLM calls" for the full recipe and a list of cheap probes (mail count, `git log --since`, file mtime, `gh pr list`, HTTP HEAD, stamp files).
+- **The schedule colocates with the command in your plugin's own `cronJobs` (§5.3)** — installing the plugin is sufficient, no `cron.json` edit required. The shape is `command: ['typeclaw', '<your-command>', ...]` in a plugin cron `exec` job. Reach for `cron.json` only when the user explicitly owns the cadence (weekends only, custom timezone, etc.). See `typeclaw-cron` for the decision rules.
 
-For the cron-side phrasing of this rule (when to pick `prompt` vs `exec → typeclaw <cmd>`, and how to gate the LLM call conditionally) read `typeclaw-cron`.
+For the cron-side phrasing of this rule (when to pick `prompt` vs `exec → typeclaw <cmd>`, where to put the schedule, and how to gate the LLM call conditionally) read `typeclaw-cron`.
 
 #### `args` — Zod object schema with primitive leaves
 

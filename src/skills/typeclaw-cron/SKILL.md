@@ -75,24 +75,22 @@ There are only two cron kinds — `prompt` and `exec`. There is **no** `kind: "e
 
 1. Write a custom typeclaw plugin under `packages/<plugin-name>/` (see the `typeclaw-plugins` and `typeclaw-monorepo` skills).
 2. In the plugin, declare a `surface: 'container'` command on `definePlugin({ commands: { ... } })`. Inside its `run`, call `ctx.prompt(...)` — that opens a full agent session inside the running container with the entire toolset, and returns the final assistant text.
-3. Wire `typeclaw <command-name>` (plus any `--flag=value` args you declared) into the cron job's `command` array as an `exec` kind.
+3. **Schedule it from the plugin's own `cronJobs`** (the default, see below) — or, when the cadence is user-owned, from `cron.json`'s `exec` array.
 
-Concrete example — a daily commit-message-quality audit that needs LLM judgement:
+### Where to put the schedule: plugin `cronJobs` vs `cron.json`
 
-```json
-// cron.json
-{
-  "jobs": [
-    {
-      "id": "daily-commit-audit",
-      "schedule": "0 22 * * *",
-      "timezone": "Asia/Seoul",
-      "kind": "exec",
-      "command": ["typeclaw", "audit-commits", "--since=24h"]
-    }
-  ]
-}
-```
+The same plugin command can be fired by two different schedulers. They look identical at runtime — both end up running `Bun.spawn(['typeclaw', '<cmd>', ...])` from the agent folder with `TYPECLAW_PARENT_ORIGIN_JSON` injected — but they differ in **who owns the cadence**.
+
+| Scheduler                | Schedule lives in            | Best when                                                                                                                                                      | `id` shape                               |
+| ------------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
+| **Plugin `cronJobs`**    | The plugin module            | The plugin **author** decides the cadence — installing the plugin should be sufficient                                                                         | `__plugin_<plugin-name>_<key>`           |
+| **`cron.json`** (`exec`) | The agent folder's cron.json | The **user** decides the cadence — they want to schedule someone else's command at a custom time, or skip days, or change frequency without forking the plugin | `<user-supplied>` (no underscore prefix) |
+
+**Default to plugin `cronJobs`.** A plugin that ships an `audit-commits` command but no `cronJobs` registration silently demands every user wire it into `cron.json` themselves — that's a documentation tax with no payoff. If the plugin author has an opinion about cadence, they should ship the cron job too. The colocation also means renaming the command and updating its schedule happen in the same commit.
+
+Reach for `cron.json` only when the cadence is genuinely user-specific: "fire `audit-commits` every Sunday at 10pm in Asia/Seoul" is a user decision, not a plugin author's.
+
+### Concrete example: plugin-owned schedule (the default)
 
 ```ts
 // packages/dev-audits/index.ts
@@ -113,11 +111,22 @@ export default definePlugin({
       },
     },
   },
-  plugin: async () => ({}),
+  plugin: async () => ({
+    cronJobs: {
+      // Global cron id becomes __plugin_dev-audits_daily — can't collide
+      // with anything in cron.json (those forbid leading underscore).
+      daily: {
+        schedule: '0 22 * * *',
+        timezone: 'Asia/Seoul',
+        kind: 'exec',
+        command: ['typeclaw', 'audit-commits', '--since=24h'],
+      },
+    },
+  }),
 })
 ```
 
-Then list the plugin in `typeclaw.json`:
+`typeclaw.json`:
 
 ```json
 {
@@ -125,25 +134,56 @@ Then list the plugin in `typeclaw.json`:
 }
 ```
 
-Pick this pattern (over a plain `kind: "prompt"` job) when **any** of:
+That's the whole installation. No `cron.json` edit, no user wiring. `typeclaw restart` and the job is live.
 
-- The same logic should also be invokable manually from a shell or TUI — `typeclaw audit-commits --since=7d` Just Works for ad-hoc runs.
-- The job takes arguments — `args: z.object({...})` parses and validates them via `--flag=value`, with `--help` rendered automatically.
-- You want the cron job's `command` to stay exact and auditable (`["typeclaw", "audit-commits", "--since=24h"]`) rather than a wall of natural-language prose that drifts every time you tweak it.
-- The work mixes shell calls and LLM calls — inside the command you can interleave `ctx.exec\`...\``and`ctx.prompt(...)`. A pure `kind: "prompt"` job has no such structured control flow.
-- Multiple cron jobs should share the same logic with different args (run weekly **and** daily, with different `--since` values).
+### Concrete example: user-owned schedule (the alternative)
 
-Pick plain `kind: "prompt"` (no plugin) instead when:
+When the user is scheduling a plugin command at a cadence the plugin author didn't anticipate — or the plugin deliberately ships no `cronJobs` because the author had no opinion — drop into `cron.json`:
+
+```json
+// cron.json — user wants the audit on a custom schedule
+{
+  "jobs": [
+    {
+      "id": "weekly-commit-audit",
+      "schedule": "0 22 * * 0",
+      "timezone": "Asia/Seoul",
+      "kind": "exec",
+      "command": ["typeclaw", "audit-commits", "--since=7d"]
+    }
+  ]
+}
+```
+
+The runtime semantics are identical to the plugin-cron form: same `Bun.spawn`, same `TYPECLAW_PARENT_ORIGIN_JSON`, same role inheritance. The only practical difference is `id` shape (`weekly-commit-audit` vs `__plugin_dev-audits_daily`) and where the schedule is editable.
+
+Both can coexist — a plugin can ship a daily default in `cronJobs`, and the user can add a different cadence in `cron.json` for the same command. They are independent cron jobs at the scheduler layer.
+
+### When to pick which (decision rules)
+
+Pick **plugin `cronJobs`** when **any** of:
+
+- The plugin author has an opinion about cadence — installing the plugin without an extra step should produce the scheduled behavior.
+- The command + the schedule are one feature — they should land in the same PR, version together, and be discoverable in one place.
+- Multiple cron jobs in the plugin share configuration and should evolve together (e.g. one daily, one weekly, both reading from the same plugin config block).
+
+Pick **`cron.json`** when **any** of:
+
+- The cadence is user-specific (weekends only, off-hours only, different timezone than the plugin's default).
+- The command lives in someone else's plugin and the user wants a different cadence without forking it. (Note: the user's `cron.json` entry runs alongside the plugin's default; if the user wants to **replace** the plugin's default rather than supplement it, the plugin should expose its `schedule` through `configSchema` so users override it in `typeclaw.json` without touching `cron.json`. That's the plugin author's responsibility, not the user's.)
+- One-off scheduled prose where writing a plugin is overkill.
+
+Pick plain `kind: "prompt"` (no plugin command at all) when:
 
 - The instruction is one-off, will never be reused, and parametrization is overkill.
 - You don't have a plugin yet and the work is genuinely a few sentences of prose.
 
-What this pattern is NOT:
+### What this pattern is NOT
 
-- It is **not** a way to bypass permissions. The cron job stamps `scheduledByRole` into the spawned session's origin (via `TYPECLAW_PARENT_ORIGIN_JSON`); the plugin command's `ctx.origin` carries that role, and every tool inside `ctx.prompt`'s session resolves against it. A cron scheduled as `scheduledByRole: 'member'` invokes the command's prompt session as a member — no silent elevation. See `typeclaw-permissions`.
+- It is **not** a way to bypass permissions. Both plugin-cron `exec` and `cron.json` `exec` stamp `scheduledByRole` into the spawned session's origin (via `TYPECLAW_PARENT_ORIGIN_JSON`); the plugin command's `ctx.origin` carries that role, and every tool inside `ctx.prompt`'s session resolves against it. A cron scheduled as `scheduledByRole: 'member'` invokes the command's prompt session as a member — no silent elevation. See `typeclaw-permissions`.
 - It is **not** a wrapper for shell pipelines you already have working. If `bash some-script.sh` does the job, just use that as the `command` array directly. Reach for the bridge only when LLM judgement is genuinely required inside the periodic work.
 
-Read `typeclaw-plugins` §5.7 for the full `commands` surface (host/container/either, `args` schema, `ctx.prompt` / `ctx.subagent` / `ctx.exec`, permission gating). Read `typeclaw-monorepo` for where the plugin package lives in `packages/`.
+Read `typeclaw-plugins` §5.3 for the `cronJobs` registration shape, §5.7 for the full `commands` surface (host/container/either, `args` schema, `ctx.prompt` / `ctx.subagent` / `ctx.exec`, permission gating). Read `typeclaw-monorepo` for where the plugin package lives in `packages/`.
 
 ### Conditional LLM calls: gate `ctx.prompt` behind a cheap check
 
@@ -186,23 +226,21 @@ export default definePlugin({
       },
     },
   },
-  plugin: async () => ({}),
+  plugin: async () => ({
+    cronJobs: {
+      // Colocated with the command: install the plugin = the watch is live.
+      // Most ticks spend ~100ms of shell; LLM cost only on non-empty inboxes.
+      watch: {
+        schedule: '*/15 * * * *',
+        kind: 'exec',
+        command: ['typeclaw', 'inbox-check', '--since=15m'],
+      },
+    },
+  }),
 })
 ```
 
-```json
-// cron.json — fire every 15 minutes; most ticks cost ~100ms of shell
-{
-  "jobs": [
-    {
-      "id": "inbox-watch",
-      "schedule": "*/15 * * * *",
-      "kind": "exec",
-      "command": ["typeclaw", "inbox-check", "--since=15m"]
-    }
-  ]
-}
-```
+(If the user wants a different cadence — only during work hours, only weekdays — they add a `cron.json` entry pointing at `["typeclaw", "inbox-check", "--since=…"]` with their own schedule. The plugin's `watch` job and the user's `cron.json` job are independent at the scheduler.)
 
 The shape that matters:
 
