@@ -130,7 +130,7 @@ const setSub = defineCommand({
         ? await pickSettableAdapter(configured)
         : validateSetAdapterArg(args.adapter, configured)
 
-    intro(`Rotating credentials for: ${CHANNEL_LABELS[adapter]}`)
+    intro(`Rotating channel: ${CHANNEL_LABELS[adapter]}`)
 
     await runSet(cwd, adapter)
   },
@@ -469,12 +469,21 @@ async function runSetTelegram(cwd: string): Promise<void> {
 type SlackSetChoice = 'bot' | 'app' | 'both'
 
 async function runSetSlack(cwd: string): Promise<void> {
+  note(
+    [
+      'Rotate at https://api.slack.com/apps → your app:',
+      '  Bot token  (xoxb-...) — OAuth & Permissions → Reset Token.',
+      '  App-level token (xapp-...) — Basic Information → App-Level Tokens → Revoke and regenerate.',
+      'Slack only shows the app-level token once on screen — copy it before closing.',
+    ].join('\n'),
+    'Rotate the Slack tokens',
+  )
   const choice = await select<SlackSetChoice>({
     message: 'Which Slack token do you want to rotate?',
     options: [
-      { value: 'bot', label: 'Bot user token (xoxb-...)' },
-      { value: 'app', label: 'App-level token (xapp-...)' },
-      { value: 'both', label: 'Both' },
+      { value: 'bot', label: 'Bot user token (xoxb-...) — used to post messages as the bot (recommended)' },
+      { value: 'app', label: 'App-level token (xapp-...) — required for Socket Mode' },
+      { value: 'both', label: 'Both tokens — rotate the bot token and the app-level token' },
     ],
     initialValue: 'bot',
   })
@@ -507,15 +516,16 @@ async function runSetGithub(cwd: string): Promise<void> {
     )
     process.exit(1)
   }
+  const authLabel =
+    authType === 'pat'
+      ? 'Personal access token (PAT) — the authentication credential (recommended)'
+      : 'GitHub App private key — the authentication credential (recommended)'
   const choice = await select<GithubSetChoice>({
     message: 'Which GitHub secret do you want to rotate?',
     options: [
-      {
-        value: 'auth',
-        label: authType === 'pat' ? 'Personal access token (PAT)' : 'GitHub App private key',
-      },
-      { value: 'webhook', label: 'Webhook secret' },
-      { value: 'both', label: 'Both' },
+      { value: 'auth', label: authLabel },
+      { value: 'webhook', label: 'Webhook secret — shared secret for verifying GitHub payloads' },
+      { value: 'both', label: 'Both secrets — rotate the auth credential and the webhook secret' },
     ],
     initialValue: 'auth',
   })
@@ -528,9 +538,25 @@ async function runSetGithub(cwd: string): Promise<void> {
 
   if (choice === 'auth' || choice === 'both') {
     if (authType === 'pat') {
+      note(
+        [
+          'Rotate at https://github.com/settings/personal-access-tokens.',
+          'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
+          'Metadata read, and Webhooks read/write.',
+        ].join('\n'),
+        'Rotate the GitHub PAT',
+      )
       const { pat } = await promptGithubPatAuth()
       patch.auth = { type: 'pat', pat }
     } else {
+      note(
+        [
+          'Rotate at https://github.com/settings/apps/<your-app> → Private keys → Generate a private key.',
+          'GitHub immediately downloads the new .pem. The previous key keeps working until you delete it,',
+          'so it is safe to rotate without downtime.',
+        ].join('\n'),
+        'Rotate the GitHub App private key',
+      )
       const privateKeyInput = await text({
         message: 'New GitHub App private key PEM, escaped PEM, or path to .pem file',
         validate: (value) => (value && value.length > 0 ? undefined : 'Private key is required'),

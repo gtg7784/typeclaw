@@ -1252,18 +1252,47 @@ async function appendChannelSecrets(cwd: string, channel: ChannelKind, tokens: C
 
 export type SetChannelTokensResult = { ok: true } | { ok: false; reason: string }
 
+type BotTokenAdapter = 'discord-bot' | 'slack-bot' | 'telegram-bot'
+
+// Required credential fields per adapter. Used post-merge to refuse a
+// rotation that would leave the adapter half-configured — e.g. rotating
+// only `botToken` when the on-disk slot was `{}` would silently leave
+// `appToken` missing and the Slack adapter would fail to start. Listing
+// the contract explicitly here keeps it close to the writer.
+const REQUIRED_CHANNEL_FIELDS: Record<BotTokenAdapter, readonly string[]> = {
+  'discord-bot': ['token'],
+  'slack-bot': ['botToken', 'appToken'],
+  'telegram-bot': ['token'],
+}
+
+// Preserve a user-authored `{ env: 'CUSTOM_NAME' }` rebinding when rotating
+// the value behind it. Mirrors `buildSecret` in providers-mutation.ts for
+// the case where the prior credential had an explicit env-name binding —
+// the rotated value is written as `{ value, env }` so env-wins still works
+// at runtime. Without this, every `channel set` would silently strip the
+// rebinding and `process.env[<custom>]` would no longer override.
+function rotatedSecret(previous: unknown, value: string): Secret {
+  if (isObjectRecord(previous)) {
+    const env = (previous as { env?: unknown }).env
+    if (typeof env === 'string' && env.length > 0) {
+      return { value, env }
+    }
+  }
+  return { value }
+}
+
 // Rotate one or more credential fields on an already-configured bot-token
 // adapter (discord-bot, slack-bot, telegram-bot). Refuses when the adapter
 // has no existing entry in secrets.json — callers must use `runAddChannel`
 // for first-time setup, so a typo in the adapter name can't silently create
-// a half-configured channel.
+// a half-configured channel. Also refuses when the rotation would leave any
+// required field for the adapter unset (e.g. rotating only Slack's
+// `botToken` when `appToken` is missing from disk).
 export async function setChannelSecrets(
   cwd: string,
-  channel: 'discord-bot' | 'slack-bot' | 'telegram-bot',
+  channel: BotTokenAdapter,
   tokens: ChannelSecrets,
 ): Promise<SetChannelTokensResult> {
-  if (Object.keys(tokens).length === 0) return { ok: true }
-
   if (!existsSync(join(cwd, CONFIG_FILE))) {
     return {
       ok: false,
@@ -1271,8 +1300,9 @@ export async function setChannelSecrets(
     }
   }
 
-  const backend = new SecretsBackend(join(cwd, 'secrets.json'))
-  return await backend.updateChannelsAsync<SetChannelTokensResult>(async (current) => {
+  if (Object.keys(tokens).length === 0) return { ok: true }
+
+  return await runChannelMutation(cwd, async (current) => {
     const existingSlot = current[channel]
     if (!isObjectRecord(existingSlot)) {
       return {
@@ -1284,7 +1314,16 @@ export async function setChannelSecrets(
     }
     const slot: Record<string, unknown> = { ...existingSlot }
     for (const [k, v] of Object.entries(tokens)) {
-      slot[k] = { value: v } satisfies Secret
+      slot[k] = rotatedSecret(existingSlot[k], v)
+    }
+    const missing = REQUIRED_CHANNEL_FIELDS[channel].filter((field) => !isSecretFieldSet(slot[field]))
+    if (missing.length > 0) {
+      return {
+        result: {
+          ok: false,
+          reason: `${channel} would be left half-configured after this rotation: missing required field(s) ${missing.join(', ')} in secrets.json. Run \`typeclaw channel add ${channel}\` to re-add the channel, or fix secrets.json by hand.`,
+        },
+      }
     }
     const next: Record<string, unknown> = { ...current, [channel]: slot }
     return { result: { ok: true }, next }
@@ -1307,8 +1346,6 @@ export type GithubCredentialPatch = {
 // existing github entry. Additionally refuses when the requested auth.type
 // doesn't match the on-disk type — see `GithubCredentialPatch` above.
 export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch): Promise<SetChannelTokensResult> {
-  if (patch.webhookSecret === undefined && patch.auth === undefined) return { ok: true }
-
   if (!existsSync(join(cwd, CONFIG_FILE))) {
     return {
       ok: false,
@@ -1316,8 +1353,9 @@ export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch
     }
   }
 
-  const backend = new SecretsBackend(join(cwd, 'secrets.json'))
-  return await backend.updateChannelsAsync<SetChannelTokensResult>(async (current) => {
+  if (patch.webhookSecret === undefined && patch.auth === undefined) return { ok: true }
+
+  return await runChannelMutation(cwd, async (current) => {
     const existing = current.github
     if (!isObjectRecord(existing)) {
       return {
@@ -1331,11 +1369,7 @@ export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch
 
     if (patch.auth !== undefined) {
       const existingAuth = block.auth
-      const existingAuthType = isObjectRecord(existingAuth)
-        ? typeof (existingAuth as { type?: unknown }).type === 'string'
-          ? ((existingAuth as { type: string }).type as 'pat' | 'app' | string)
-          : undefined
-        : undefined
+      const existingAuthType = readGithubAuthTypeFromObject(existingAuth)
       if (existingAuthType !== patch.auth.type) {
         return {
           result: {
@@ -1345,7 +1379,8 @@ export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch
         }
       }
       if (patch.auth.type === 'pat') {
-        block.auth = { type: 'pat', token: { value: patch.auth.pat } satisfies Secret }
+        const previousToken = isObjectRecord(existingAuth) ? (existingAuth as { token?: unknown }).token : undefined
+        block.auth = { type: 'pat', token: rotatedSecret(previousToken, patch.auth.pat) }
       } else {
         const existingApp = isObjectRecord(existingAuth) ? (existingAuth as Record<string, unknown>) : {}
         const appId = patch.auth.appId ?? (existingApp.appId as number | undefined)
@@ -1362,14 +1397,14 @@ export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch
         block.auth = {
           type: 'app',
           appId,
-          privateKey: { value: patch.auth.privateKey } satisfies Secret,
+          privateKey: rotatedSecret(existingApp.privateKey, patch.auth.privateKey),
           ...(installationId !== undefined ? { installationId } : {}),
         }
       }
     }
 
     if (patch.webhookSecret !== undefined) {
-      block.webhookSecret = { value: patch.webhookSecret } satisfies Secret
+      block.webhookSecret = rotatedSecret(block.webhookSecret, patch.webhookSecret)
     }
 
     const next: Record<string, unknown> = { ...current, github: block }
@@ -1377,19 +1412,61 @@ export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch
   })
 }
 
+// Wrapper that converts a thrown schema-validation error (from a hand-edited
+// malformed secrets.json) into a structured `{ ok: false }` result, so CLI
+// callers can render a clean message instead of a stack trace. The
+// `updateChannelsAsync` path itself is atomic; this wrapper only catches the
+// READ stage (envelope parse) failures.
+async function runChannelMutation(
+  cwd: string,
+  fn: (current: Record<string, unknown>) => Promise<{ result: SetChannelTokensResult; next?: Record<string, unknown> }>,
+): Promise<SetChannelTokensResult> {
+  const backend = new SecretsBackend(join(cwd, 'secrets.json'))
+  try {
+    return await backend.updateChannelsAsync<SetChannelTokensResult>(fn)
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `secrets.json is malformed: ${err instanceof Error ? err.message : String(err)}. Fix it by hand, then retry.`,
+    }
+  }
+}
+
+function isSecretFieldSet(slot: unknown): boolean {
+  if (typeof slot === 'string') return slot.length > 0
+  if (isObjectRecord(slot)) {
+    const value = (slot as { value?: unknown }).value
+    if (typeof value === 'string' && value.length > 0) return true
+    const env = (slot as { env?: unknown }).env
+    if (typeof env === 'string' && env.length > 0) return true
+  }
+  return false
+}
+
+function readGithubAuthTypeFromObject(auth: unknown): 'pat' | 'app' | undefined {
+  if (!isObjectRecord(auth)) return undefined
+  const type = (auth as { type?: unknown }).type
+  if (type === 'pat' || type === 'app') return type
+  return undefined
+}
+
 // Lightweight read-only probe used by the `channel set` CLI to drive its
 // "which secret do you want to rotate?" menu for GitHub. Returns the
 // current auth type ('pat' | 'app') so the prompt knows whether to ask for
 // a PAT or an App private key, without forcing the user to re-select auth
-// type when they're rotating a credential of the same kind.
+// type when they're rotating a credential of the same kind. Returns `null`
+// when secrets.json is missing, malformed, or has no github entry — the
+// CLI surfaces that as a single user-facing "fix the file by hand" error.
 export function readGithubAuthType(cwd: string): 'pat' | 'app' | null {
-  const channels = new SecretsBackend(join(cwd, 'secrets.json')).tryReadChannelsSync()
+  let channels: Channels | null
+  try {
+    channels = new SecretsBackend(join(cwd, 'secrets.json')).tryReadChannelsSync()
+  } catch {
+    return null
+  }
   if (channels === null) return null
   const github = channels.github
   if (!isObjectRecord(github)) return null
   const auth = (github as { auth?: unknown }).auth
-  if (!isObjectRecord(auth)) return null
-  const type = (auth as { type?: unknown }).type
-  if (type === 'pat' || type === 'app') return type
-  return null
+  return readGithubAuthTypeFromObject(auth) ?? null
 }

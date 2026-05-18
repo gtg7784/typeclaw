@@ -138,7 +138,7 @@ describe('setChannelSecrets', () => {
     })
   })
 
-  test('replaces a field even when it was previously env-bound (no auto-preserve of env)', async () => {
+  test('preserves an env-binding on the rotated field itself (env-wins still works after rotation)', async () => {
     await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'value-x' })
     const raw = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
       channels: Record<string, Record<string, unknown>>
@@ -150,7 +150,72 @@ describe('setChannelSecrets', () => {
 
     expect(result).toEqual({ ok: true })
     const secrets = await readSecrets()
-    expect(secrets.channels?.['discord-bot']).toEqual({ token: { value: 'rotated-value' } })
+    expect(secrets.channels?.['discord-bot']).toEqual({
+      token: { value: 'rotated-value', env: 'CUSTOM_DISCORD_TOKEN' },
+    })
+  })
+
+  test('preserves an env-binding when the rotated field had both value and env on disk', async () => {
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'value-x' })
+    const raw = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels: Record<string, Record<string, unknown>>
+    }
+    raw.channels['discord-bot'] = { token: { value: 'old-value', env: 'CUSTOM_DISCORD_TOKEN' } }
+    await writeFile(join(root, 'secrets.json'), JSON.stringify(raw, null, 2))
+
+    const result = await setChannelSecrets(root, 'discord-bot', { token: 'rotated-value' })
+
+    expect(result).toEqual({ ok: true })
+    const secrets = await readSecrets()
+    expect(secrets.channels?.['discord-bot']).toEqual({
+      token: { value: 'rotated-value', env: 'CUSTOM_DISCORD_TOKEN' },
+    })
+  })
+
+  test('refuses to rotate slack-bot if the resulting slot would be missing a required field', async () => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'slack-bot',
+      slackBotToken: 'xoxb-orig',
+      slackAppToken: 'xapp-orig',
+    })
+    const raw = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels: Record<string, Record<string, unknown>>
+    }
+    raw.channels['slack-bot'] = { botToken: { value: 'xoxb-orig' } }
+    await writeFile(join(root, 'secrets.json'), JSON.stringify(raw, null, 2))
+
+    const result = await setChannelSecrets(root, 'slack-bot', { botToken: 'xoxb-rotated' })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/half-configured/i)
+    expect(result.reason).toMatch(/appToken/)
+    const secrets = await readSecrets()
+    expect(secrets.channels?.['slack-bot']).toEqual({ botToken: { value: 'xoxb-orig' } })
+  })
+
+  test('allows rotating both slack tokens at once when disk was empty (full repair)', async () => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'slack-bot',
+      slackBotToken: 'xoxb-orig',
+      slackAppToken: 'xapp-orig',
+    })
+    const raw = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels: Record<string, Record<string, unknown>>
+    }
+    raw.channels['slack-bot'] = {}
+    await writeFile(join(root, 'secrets.json'), JSON.stringify(raw, null, 2))
+
+    const result = await setChannelSecrets(root, 'slack-bot', { botToken: 'xoxb-new', appToken: 'xapp-new' })
+
+    expect(result).toEqual({ ok: true })
+    const secrets = await readSecrets()
+    expect(secrets.channels?.['slack-bot']).toEqual({
+      botToken: { value: 'xoxb-new' },
+      appToken: { value: 'xapp-new' },
+    })
   })
 
   test('no-op when called with an empty tokens map', async () => {
@@ -163,16 +228,31 @@ describe('setChannelSecrets', () => {
     expect(await readFile(join(root, 'secrets.json'), 'utf8')).toBe(before)
   })
 
-  test('returns a structured error when run from a non-initialized directory', async () => {
+  test('returns the same structured error for non-agent directory regardless of patch shape', async () => {
     const empty = await mkdtemp(join(tmpdir(), 'typeclaw-set-empty-'))
     try {
-      const result = await setChannelSecrets(empty, 'discord-bot', { token: 'x' })
-      expect(result.ok).toBe(false)
-      if (result.ok) throw new Error('unreachable')
-      expect(result.reason).toMatch(/typeclaw\.json not found/)
+      const withPatch = await setChannelSecrets(empty, 'discord-bot', { token: 'x' })
+      const withoutPatch = await setChannelSecrets(empty, 'discord-bot', {})
+
+      expect(withPatch.ok).toBe(false)
+      expect(withoutPatch.ok).toBe(false)
+      if (withPatch.ok || withoutPatch.ok) throw new Error('unreachable')
+      expect(withPatch.reason).toMatch(/typeclaw\.json not found/)
+      expect(withoutPatch.reason).toMatch(/typeclaw\.json not found/)
     } finally {
       await rm(empty, { recursive: true, force: true })
     }
+  })
+
+  test('returns a structured error when secrets.json is malformed (does not throw)', async () => {
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'orig' })
+    await writeFile(join(root, 'secrets.json'), '{ this is not valid JSON')
+
+    const result = await setChannelSecrets(root, 'discord-bot', { token: 'rotated' })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/secrets\.json is malformed/i)
   })
 })
 
@@ -320,6 +400,105 @@ describe('setGithubSecrets', () => {
     expect(secrets.providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_existing' } })
     expect(secrets.channels?.['discord-bot']).toEqual({ token: { value: 'discord-keep' } })
   })
+
+  test('preserves env-binding on rotated PAT', async () => {
+    await seedPatGithub()
+    const raw = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels: Record<string, Record<string, unknown>>
+    }
+    raw.channels.github = {
+      auth: { type: 'pat', token: { value: 'ghp_old', env: 'CUSTOM_GH_PAT' } },
+      webhookSecret: { value: 'wh-old' },
+    }
+    await writeFile(join(root, 'secrets.json'), JSON.stringify(raw, null, 2))
+
+    const result = await setGithubSecrets(root, { auth: { type: 'pat', pat: 'ghp_rotated' } })
+
+    expect(result).toEqual({ ok: true })
+    const secrets = await readSecrets()
+    const gh = secrets.channels?.github as Record<string, unknown>
+    expect(gh.auth).toEqual({ type: 'pat', token: { value: 'ghp_rotated', env: 'CUSTOM_GH_PAT' } })
+  })
+
+  test('preserves env-binding on rotated App private key', async () => {
+    await seedAppGithub()
+    const raw = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels: Record<string, Record<string, unknown>>
+    }
+    raw.channels.github = {
+      auth: {
+        type: 'app',
+        appId: 1234,
+        privateKey: { value: '-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----', env: 'CUSTOM_GH_APP_KEY' },
+        installationId: 9999,
+      },
+      webhookSecret: { value: 'wh-old' },
+    }
+    await writeFile(join(root, 'secrets.json'), JSON.stringify(raw, null, 2))
+
+    const result = await setGithubSecrets(root, {
+      auth: { type: 'app', privateKey: '-----BEGIN PRIVATE KEY-----\nrotated\n-----END PRIVATE KEY-----' },
+    })
+
+    expect(result).toEqual({ ok: true })
+    const secrets = await readSecrets()
+    const gh = secrets.channels?.github as Record<string, unknown>
+    expect(gh.auth).toEqual({
+      type: 'app',
+      appId: 1234,
+      privateKey: {
+        value: '-----BEGIN PRIVATE KEY-----\nrotated\n-----END PRIVATE KEY-----',
+        env: 'CUSTOM_GH_APP_KEY',
+      },
+      installationId: 9999,
+    })
+  })
+
+  test('preserves env-binding on rotated webhook secret', async () => {
+    await seedPatGithub()
+    const raw = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels: Record<string, Record<string, unknown>>
+    }
+    raw.channels.github = {
+      auth: { type: 'pat', token: { value: 'ghp_old' } },
+      webhookSecret: { env: 'CUSTOM_GH_WEBHOOK' },
+    }
+    await writeFile(join(root, 'secrets.json'), JSON.stringify(raw, null, 2))
+
+    const result = await setGithubSecrets(root, { webhookSecret: 'wh-rotated' })
+
+    expect(result).toEqual({ ok: true })
+    const secrets = await readSecrets()
+    const gh = secrets.channels?.github as Record<string, unknown>
+    expect(gh.webhookSecret).toEqual({ value: 'wh-rotated', env: 'CUSTOM_GH_WEBHOOK' })
+  })
+
+  test('returns a structured error when secrets.json is malformed (does not throw)', async () => {
+    await seedPatGithub()
+    await writeFile(join(root, 'secrets.json'), '{ malformed')
+
+    const result = await setGithubSecrets(root, { webhookSecret: 'wh-new' })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/secrets\.json is malformed/i)
+  })
+
+  test('returns the same error for non-agent directory regardless of patch shape', async () => {
+    const empty = await mkdtemp(join(tmpdir(), 'typeclaw-set-empty-gh-'))
+    try {
+      const withPatch = await setGithubSecrets(empty, { webhookSecret: 'wh' })
+      const emptyPatch = await setGithubSecrets(empty, {})
+
+      expect(withPatch.ok).toBe(false)
+      expect(emptyPatch.ok).toBe(false)
+      if (withPatch.ok || emptyPatch.ok) throw new Error('unreachable')
+      expect(withPatch.reason).toMatch(/typeclaw\.json not found/)
+      expect(emptyPatch.reason).toMatch(/typeclaw\.json not found/)
+    } finally {
+      await rm(empty, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('readGithubAuthType', () => {
@@ -356,6 +535,11 @@ describe('readGithubAuthType', () => {
   })
 
   test('returns null when github is not configured', () => {
+    expect(readGithubAuthType(root)).toBeNull()
+  })
+
+  test('returns null when secrets.json is malformed (no throw)', async () => {
+    await writeFile(join(root, 'secrets.json'), '{ malformed')
     expect(readGithubAuthType(root)).toBeNull()
   })
 })
