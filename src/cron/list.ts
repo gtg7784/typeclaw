@@ -1,0 +1,94 @@
+import type { RegisteredCronJob } from '@/plugin'
+
+import { computeNextFire } from './scheduler'
+import type { CronJob } from './schema'
+
+// `plugin` carries `localId` (the original key on `definePlugin({ cronJobs })`)
+// so callers can render "memory.dreaming" rather than the synthetic
+// `__plugin_memory_dreaming` global id the scheduler uses internally.
+export type CronListSource = { kind: 'user' } | { kind: 'plugin'; pluginName: string; localId: string }
+
+// Display-oriented snapshot of a CronJob, separated from CronJob itself
+// so the WS wire shape stays stable as CronJob accretes runtime-only
+// fields (scheduledByOrigin, future description, etc.).
+export type CronListEntry = {
+  id: string
+  source: CronListSource
+  kind: 'prompt' | 'exec'
+  schedule: string
+  timezone: string | undefined
+  enabled: boolean
+  scheduledByRole: string | undefined
+  // null when cron-parser rejects `schedule` — keeps such rows visible
+  // in the list with the original error preserved in `scheduleError`,
+  // rather than dropping them silently as the scheduler would.
+  nextFireMs: number | null
+  scheduleError: string | undefined
+  prompt: string | undefined
+  subagent: string | undefined
+  command: readonly string[] | undefined
+}
+
+export type AggregateCronListOptions = {
+  userJobs: readonly CronJob[]
+  // Registered entries (not flat CronJob[]) so each row can be attributed
+  // to its plugin + localId without re-parsing the global id.
+  pluginJobs: readonly RegisteredCronJob[]
+  now: number
+}
+
+export function aggregateCronList(opts: AggregateCronListOptions): CronListEntry[] {
+  const entries: CronListEntry[] = []
+  for (const job of opts.userJobs) {
+    entries.push(toEntry(job, { kind: 'user' }, opts.now))
+  }
+  for (const reg of opts.pluginJobs) {
+    entries.push(toEntry(reg.job, { kind: 'plugin', pluginName: reg.pluginName, localId: reg.localId }, opts.now))
+  }
+  // Sort by next-fire time ascending so the soonest-firing job is at the
+  // top. Jobs with a null nextFireMs (parse errors) sort to the bottom
+  // so the human-readable list keeps the actionable rows first. Disabled
+  // jobs still get a nextFireMs computed — they appear in the list with
+  // an "(disabled)" badge but their position reflects when they WOULD
+  // have fired had they been enabled.
+  entries.sort(compareByNextFire)
+  return entries
+}
+
+function toEntry(job: CronJob, source: CronListSource, now: number): CronListEntry {
+  const fire = computeNextFire(job, now)
+  const base = {
+    id: job.id,
+    source,
+    schedule: job.schedule,
+    timezone: job.timezone,
+    enabled: job.enabled,
+    scheduledByRole: job.scheduledByRole,
+    nextFireMs: fire.ok ? fire.nextFire : null,
+    scheduleError: fire.ok ? undefined : fire.reason,
+  } as const
+  if (job.kind === 'prompt') {
+    return {
+      ...base,
+      kind: 'prompt',
+      prompt: job.prompt,
+      subagent: job.subagent,
+      command: undefined,
+    }
+  }
+  return {
+    ...base,
+    kind: 'exec',
+    prompt: undefined,
+    subagent: undefined,
+    command: job.command,
+  }
+}
+
+function compareByNextFire(a: CronListEntry, b: CronListEntry): number {
+  if (a.nextFireMs === null && b.nextFireMs === null) return a.id.localeCompare(b.id)
+  if (a.nextFireMs === null) return 1
+  if (b.nextFireMs === null) return -1
+  if (a.nextFireMs !== b.nextFireMs) return a.nextFireMs - b.nextFireMs
+  return a.id.localeCompare(b.id)
+}

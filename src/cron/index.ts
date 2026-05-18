@@ -29,6 +29,7 @@ export {
   type Scheduler,
   type SchedulerLogger,
 } from './scheduler'
+export { aggregateCronList, type CronListEntry, type CronListSource } from './list'
 export {
   buildCronMigrationCommitMessage,
   cronFileSchema,
