@@ -442,8 +442,9 @@ Why this beats writing a `kind: 'prompt'` job:
 - Args (`--date`, `--dry-run`, etc.) are declared once via `args: z.object({...})` and parsed/validated by the runtime.
 - The full `ContainerCommandContext` is available — you can mix LLM calls (`ctx.prompt`) with shell calls (`ctx.exec`) inside one command, which a pure-prompt cron job cannot.
 - The cron job stays trivially auditable: `command: ["typeclaw", "standup-now"]` is exact, not a wall of natural-language prose.
+- **You can gate `ctx.prompt` behind a cheap `ctx.exec` probe** so a high-frequency poll (every 15 min for new mail, every commit for CI failures) only spends LLM tokens when there's actual work. A pure `kind: 'prompt'` cron job pays for an LLM round-trip on every tick, including the 99% of ticks that turn out to be no-ops. See `typeclaw-cron` "Conditional LLM calls" for the full recipe and a list of cheap probes (mail count, `git log --since`, file mtime, `gh pr list`, HTTP HEAD, stamp files).
 
-For the cron-side phrasing of this rule (when to pick `prompt` vs `exec → typeclaw <cmd>`) read `typeclaw-cron`.
+For the cron-side phrasing of this rule (when to pick `prompt` vs `exec → typeclaw <cmd>`, and how to gate the LLM call conditionally) read `typeclaw-cron`.
 
 #### `args` — Zod object schema with primitive leaves
 

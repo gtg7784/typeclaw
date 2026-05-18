@@ -1,6 +1,6 @@
 ---
 name: typeclaw-cron
-description: Use this skill whenever the user asks you to schedule recurring work, run something on a cron, do something every day/hour/week, set up a periodic task, or read or edit your cron schedule. Triggers include "every morning", "every Monday", "schedule a", "remind me every", "set up a cron", "run X periodically", "what's on my cron", "when does X run", or any mention of `cron.json`. Also use when the user wants a scheduled shell-style job that nonetheless needs LLM judgement (the `exec → LLM` pattern) — the canonical answer is a plugin container command invoked from cron's `exec` array, not a third cron kind. Read it before touching `cron.json` — the file has a strict schema, restart semantics, and a best-effort execution model that you must not misrepresent to the user.
+description: Use this skill whenever the user asks you to schedule recurring work, run something on a cron, do something every day/hour/week, set up a periodic task, or read or edit your cron schedule. Triggers include "every morning", "every Monday", "schedule a", "remind me every", "set up a cron", "run X periodically", "watch for new X", "when there's a new Y trigger Z", "poll for", "what's on my cron", "when does X run", or any mention of `cron.json`. Also use when the user wants a scheduled shell-style job that nonetheless needs LLM judgement (the `exec → LLM` pattern) — the canonical answer is a plugin container command invoked from cron's `exec` array, not a third cron kind. Also use for conditional/gated LLM calls — polling-style jobs ("if there are new emails…", "if anyone pushed…", "when a file changes…") where a cheap `ctx.exec` probe should run on every tick but `ctx.prompt` should only fire when there's actual work. Read it before touching `cron.json` — the file has a strict schema, restart semantics, and a best-effort execution model that you must not misrepresent to the user.
 ---
 
 # typeclaw-cron
@@ -144,6 +144,97 @@ What this pattern is NOT:
 - It is **not** a wrapper for shell pipelines you already have working. If `bash some-script.sh` does the job, just use that as the `command` array directly. Reach for the bridge only when LLM judgement is genuinely required inside the periodic work.
 
 Read `typeclaw-plugins` §5.7 for the full `commands` surface (host/container/either, `args` schema, `ctx.prompt` / `ctx.subagent` / `ctx.exec`, permission gating). Read `typeclaw-monorepo` for where the plugin package lives in `packages/`.
+
+### Conditional LLM calls: gate `ctx.prompt` behind a cheap check
+
+Most polling-style cron jobs are skewed: they fire often (every 5 minutes, every hour) and **most ticks find no work**. A plain `kind: "prompt"` job spends a full LLM round-trip every tick just to discover there's nothing to do. That gets expensive fast — a 5-minute "check for new emails" prompt is ~290 LLM calls a day, even on days where nothing arrived.
+
+The bridge pattern fixes this naturally because `ctx.exec` runs **before** `ctx.prompt`. Do the cheap check first; only spend tokens when there's actual work:
+
+```ts
+// packages/inbox-watch/index.ts
+import { z } from 'zod'
+import { definePlugin } from 'typeclaw/plugin'
+
+export default definePlugin({
+  commands: {
+    'inbox-check': {
+      surface: 'container',
+      description: 'Triage new mail since last run; no-op if nothing new.',
+      args: z.object({ since: z.string().default('1h') }),
+      async run(ctx, args) {
+        // Cheap shell check: 0 LLM cost, ~100ms.
+        const { stdout, exitCode } = await ctx.exec`gmail unread --since=${args.since} --count`
+        if (exitCode !== 0) {
+          // Don't drag the LLM into shell failures — log and bail.
+          const err = new TextEncoder().encode(`inbox-check: gmail probe failed (exit ${exitCode})\n`)
+          const w = ctx.stderr.getWriter()
+          await w.write(err)
+          w.releaseLock()
+          return exitCode
+        }
+        const count = Number.parseInt(stdout.trim(), 10)
+        if (!Number.isFinite(count) || count === 0) {
+          // Nothing to do. Return 0 silently so cron logs don't get noisy.
+          return 0
+        }
+        // Expensive LLM path: only reached when there's actual work.
+        await ctx.prompt(
+          `There are ${count} unread emails since ${args.since}. Use the gmail skill to read them, summarize anything that needs a human reply, and append to memory/inbox/$(date +%F).md.`,
+        )
+        return 0
+      },
+    },
+  },
+  plugin: async () => ({}),
+})
+```
+
+```json
+// cron.json — fire every 15 minutes; most ticks cost ~100ms of shell
+{
+  "jobs": [
+    {
+      "id": "inbox-watch",
+      "schedule": "*/15 * * * *",
+      "kind": "exec",
+      "command": ["typeclaw", "inbox-check", "--since=15m"]
+    }
+  ]
+}
+```
+
+The shape that matters:
+
+1. **Probe with `ctx.exec` (or an `await` on a Node API) first.** Anything that returns a yes/no signal cheaply: a CLI tool exit code, a count, a file mtime, an HTTP HEAD, a `git log -1 --since=...` output.
+2. **Return early when the probe says "no work".** `return 0` exits the command cleanly, cron logs nothing scary, and zero LLM tokens were spent. Critically: do NOT call `ctx.prompt` to "decide whether to act" — that defeats the entire optimization.
+3. **Reach for `ctx.prompt` only on the work path.** Pass the probe's output into the prompt so the agent doesn't have to re-discover what triggered the run (e.g. `${count} unread emails`, the list of changed files, the new commit hash). This also shortens the LLM's first turn — it gets to act, not investigate.
+
+Concrete signals you can probe cheaply (in rough order of common use):
+
+| Question                            | Cheap probe                                                           |
+| ----------------------------------- | --------------------------------------------------------------------- |
+| Are there new emails?               | `gmail unread --since=15m --count` (or your skill's CLI)              |
+| Did anyone commit since last check? | `git log --since=15m --pretty=oneline` (empty = no)                   |
+| Did a file change?                  | `find <path> -newer .inbox-watch.stamp -type f`                       |
+| Is there a new PR/issue?            | `gh pr list --search 'created:>15m' --json number` (empty array = no) |
+| Did a service go down?              | `curl -fsS https://... > /dev/null` (non-zero = down)                 |
+| Is there a new line in a log?       | `wc -l <log>` vs a stamp file                                         |
+| Did `last-run.txt` rot to stale?    | `find last-run.txt -mmin +60` (empty = fresh)                         |
+
+For "since last run" semantics, write a stamp file at the end of every successful run: `await ctx.exec\`touch .inbox-watch.stamp\``. The next tick's probe compares against it via `-newer`or`mtime`. Stamp files belong in `workspace/`or under`memory/state/` — never at the agent root.
+
+When NOT to gate:
+
+- **The work is small enough that the LLM probe is the action.** A daily "summarize today" job that always has something to summarize doesn't need a gate; the prompt does the work.
+- **The probe is as expensive as the prompt.** If your "is there work?" check requires reading 200 files anyway, just let the LLM do it once with the full toolset.
+- **You genuinely want the LLM to decide intent on every tick.** Rare, but valid — e.g. a "morning standup" job that always produces output regardless of how busy yesterday was.
+
+Pitfalls to avoid:
+
+- **Don't promise the user "the agent checks every 5 minutes" if you've written `*/5 * * * *` without a gate.** That's 12 LLM calls an hour for empty inboxes. Either gate it, or slow the schedule to match what the work actually warrants.
+- **Don't gate inside `ctx.prompt` itself** ("if there are new emails, do X; else do nothing"). The LLM still ran. The gate has to be in shell code outside `ctx.prompt`.
+- **Don't leak probe failures into the LLM session.** If `ctx.exec` exits non-zero, decide explicitly: bail with the same exit code (`return exitCode`), or recover with a fallback path. Don't fall through into `ctx.prompt` with no input — the agent will improvise, and the improvisation is usually worse than a clean `cron failed: ...` log line.
 
 ## Schedule syntax
 
