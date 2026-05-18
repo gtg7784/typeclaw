@@ -1356,3 +1356,84 @@ describe('plugin config layout', () => {
     }
   })
 })
+
+describe('configSchema tunnels field', () => {
+  const baseInput = { models: { default: VALID_MODEL } }
+  const externalChannel = {
+    name: 'github-webhook',
+    provider: 'external',
+    for: { kind: 'channel', name: 'github' },
+    externalUrl: 'https://hook.example.com/',
+  }
+  const externalManual = {
+    name: 'demo',
+    provider: 'external',
+    for: { kind: 'manual' },
+    upstreamPort: 5173,
+    externalUrl: 'https://demo.example.com',
+  }
+
+  test('defaults to [] when omitted', () => {
+    expect(configSchema.parse(baseInput).tunnels).toEqual([])
+  })
+
+  test('accepts a channel-linked external tunnel', () => {
+    const parsed = configSchema.parse({ ...baseInput, tunnels: [externalChannel] })
+    expect(parsed.tunnels).toHaveLength(1)
+    expect(parsed.tunnels[0]?.for).toEqual({ kind: 'channel', name: 'github' })
+  })
+
+  test('accepts a manual external tunnel with upstreamPort', () => {
+    const parsed = configSchema.parse({ ...baseInput, tunnels: [externalManual] })
+    expect(parsed.tunnels[0]?.upstreamPort).toBe(5173)
+  })
+
+  test('rejects external tunnel without externalUrl', () => {
+    expect(() =>
+      configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, externalUrl: undefined }] }),
+    ).toThrow(/externalUrl is required/)
+  })
+
+  test('rejects external tunnel with non-https externalUrl', () => {
+    expect(() =>
+      configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, externalUrl: 'http://hook.example.com' }] }),
+    ).toThrow(/https:\/\//)
+  })
+
+  test('rejects manual tunnel without upstreamPort', () => {
+    expect(() =>
+      configSchema.parse({ ...baseInput, tunnels: [{ ...externalManual, upstreamPort: undefined }] }),
+    ).toThrow(/upstreamPort is required/)
+  })
+
+  test('rejects duplicate tunnel names', () => {
+    expect(() =>
+      configSchema.parse({
+        ...baseInput,
+        tunnels: [externalChannel, { ...externalChannel, externalUrl: 'https://other.example.com' }],
+      }),
+    ).toThrow(/duplicates tunnels/)
+  })
+
+  test('rejects names that do not match the kebab-case regex', () => {
+    expect(() => configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, name: 'Has Caps' }] })).toThrow()
+    expect(() =>
+      configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, name: '-leading-dash' }] }),
+    ).toThrow()
+  })
+
+  test('rejects unsupported provider strings (cloudflare-quick / cloudflare-named deferred to PR 2/3)', () => {
+    expect(() =>
+      configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'cloudflare-quick' }] }),
+    ).toThrow()
+    expect(() =>
+      configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'cloudflare-named' }] }),
+    ).toThrow()
+  })
+
+  test('rejects a channel for-discriminator with an empty name', () => {
+    expect(() =>
+      configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, for: { kind: 'channel', name: '   ' } }] }),
+    ).toThrow()
+  })
+})
