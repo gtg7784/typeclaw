@@ -72,9 +72,7 @@ export const cronCommand = defineCommand({
   },
 })
 
-export function describeFailure(
-  result: Extract<CronListBridgeResult, { kind: Exclude<CronListBridgeResult['kind'], 'ok'> }>,
-): string {
+export function describeFailure(result: Exclude<CronListBridgeResult, { kind: 'ok' }>): string {
   switch (result.kind) {
     case 'unreachable':
       return `cannot reach the agent: ${result.reason}`

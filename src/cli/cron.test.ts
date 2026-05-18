@@ -1,11 +1,20 @@
-import { beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import type { CronListEntryPayload } from '@/shared'
 
 import { describeFailure, formatDuration, formatList } from './cron'
 
+let prevNoColor: string | undefined
 beforeEach(() => {
+  prevNoColor = process.env.NO_COLOR
   process.env.NO_COLOR = '1'
+})
+afterEach(() => {
+  if (prevNoColor === undefined) {
+    delete process.env.NO_COLOR
+  } else {
+    process.env.NO_COLOR = prevNoColor
+  }
 })
 
 const NOW = Date.parse('2026-05-18T00:00:00Z')
