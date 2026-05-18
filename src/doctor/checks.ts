@@ -35,7 +35,6 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): Docto
     agentFolderNodeModules(),
     agentFolderGitRepo(),
     configValid(),
-    configBundledProfiles(),
     hostdHomeWritable(),
     hostdReachable(),
     hostdRegistration(),
@@ -210,55 +209,6 @@ function configValid(): DoctorCheck {
         status: 'error',
         message: result.reason,
         fix: { description: 'Edit typeclaw.json to resolve the validation error above.' },
-      }
-    },
-  }
-}
-
-// Warns (not errors) when a model profile that a bundled subagent prefers is
-// absent from `models`. Bundled subagents fall back to `default` silently
-// today, but the operator likely declared a `fast`/`deep`/`vision` model in
-// the design discussion's tier scheme expecting the bundled subagents to
-// pick them up. This check surfaces the gap once at `typeclaw doctor` time
-// instead of leaving it buried in container logs (where the rate-limited
-// fallback warning lives).
-//
-// We deliberately limit this to known bundled profiles (memory-logger=fast,
-// dreaming=deep, multimodal-looker=vision). Plugin-contributed subagents
-// would require loading the plugin registry — a heavyweight async path
-// that doesn't belong in doctor's static check surface.
-const BUNDLED_PROFILES: ReadonlyArray<{ profile: string; subagent: string }> = [
-  { profile: 'fast', subagent: 'memory-logger' },
-  { profile: 'deep', subagent: 'dreaming' },
-  { profile: 'vision', subagent: 'multimodal-looker (via look_at tool)' },
-]
-
-function configBundledProfiles(): DoctorCheck {
-  return {
-    name: 'config.bundled-profiles',
-    category: 'config',
-    description: 'bundled subagent profiles (`fast`, `deep`, `vision`) declared in models',
-    applies: (ctx) => ctx.hasAgentFolder,
-    async run(ctx) {
-      const validation = validateConfig(ctx.cwd)
-      if (!validation.ok) {
-        return { status: 'ok', message: 'skipped (config.valid will report the underlying error)' }
-      }
-      const config = loadConfigSync(ctx.cwd)
-      const declared = new Set(Object.keys(config.models))
-      const missing = BUNDLED_PROFILES.filter((p) => !declared.has(p.profile))
-      if (missing.length === 0) {
-        return { status: 'ok', message: 'all bundled subagent profiles declared' }
-      }
-      return {
-        status: 'warning',
-        message: `${missing.length} bundled profile(s) missing; will fall back to \`default\``,
-        details: missing.map(
-          (m) => `${m.profile}: used by ${m.subagent}; declare \`models.${m.profile}\` in typeclaw.json to override`,
-        ),
-        fix: {
-          description: 'Add the missing profile(s) under `models` in typeclaw.json. See the typeclaw-config skill.',
-        },
       }
     },
   }
