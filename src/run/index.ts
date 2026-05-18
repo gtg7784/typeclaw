@@ -181,6 +181,7 @@ export async function startAgent({
     channelsConfigRef: () => getConfig().channels,
     aliasesRef: () => getConfig().alias,
     tunnelUrlForChannel: (name) => resolveTunnelUrlForChannel(name, tunnelManager),
+    tunnelConfiguredForChannel: (name) => isTunnelConfiguredForChannel(name),
     createSessionForChannel: buildChannelSessionFactory({
       cwd,
       sessionFactory,
@@ -536,6 +537,10 @@ function buildLocalTuiUrl(port: number, token: string | null): string {
 function resolveTunnelUrlForChannel(channelName: string, tunnelManager: TunnelManager): string | null {
   const tunnel = getConfig().tunnels.find((entry) => entry.for.kind === 'channel' && entry.for.name === channelName)
   return tunnel ? tunnelManager.urlFor(tunnel.name) : null
+}
+
+function isTunnelConfiguredForChannel(channelName: string): boolean {
+  return getConfig().tunnels.some((entry) => entry.for.kind === 'channel' && entry.for.name === channelName)
 }
 
 async function disposeMaterializedSkills(pluginRuntime: PluginRuntime): Promise<void> {

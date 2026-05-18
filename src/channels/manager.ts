@@ -72,6 +72,12 @@ export type ChannelManagerOptions = {
   // src/run/index.ts). Tests typically omit it.
   claimHandler?: ClaimHandler
   tunnelUrlForChannel?: (channelName: string) => string | null
+  // Whether the user declared a `tunnels[]` entry bound to this channel.
+  // Lets channel-bound adapters distinguish "operator opted out of public
+  // webhook delivery" from "operator opted in but the tunnel never produced
+  // a URL" so error logs can be precise. Same shape as
+  // `tunnelUrlForChannel` for consistency. Optional for tests.
+  tunnelConfiguredForChannel?: (channelName: string) => boolean
 }
 
 export type ChannelManager = {
@@ -185,6 +191,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         agentDir: options.agentDir,
         logger,
         tunnelUrl: () => options.tunnelUrlForChannel?.('github') ?? null,
+        tunnelConfiguredForChannel: () => options.tunnelConfiguredForChannel?.('github') ?? false,
       })
     }
     if (name === 'telegram-bot') {
@@ -374,12 +381,9 @@ function isGithubSecretsBlock(value: unknown): value is GithubSecretsBlock {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
   const record = value as Record<string, unknown>
   const auth = record.auth
-  return (
-    typeof auth === 'object' &&
-    auth !== null &&
-    !Array.isArray(auth) &&
-    (auth as Record<string, unknown>).type === 'pat'
-  )
+  if (typeof auth !== 'object' || auth === null || Array.isArray(auth)) return false
+  const authType = (auth as Record<string, unknown>).type
+  return authType === 'pat' || authType === 'app'
 }
 
 function isKakaoCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {
