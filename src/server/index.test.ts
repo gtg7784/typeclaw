@@ -105,6 +105,7 @@ async function startWithSession(
     logger?: ServerLogger
     commandRunnerFactory?: (outbound: CommandOutbound) => CommandRunner
     tunnelManager?: TunnelManager
+    runtimeVersion?: string
   } = {},
 ): Promise<{ url: string }> {
   const pluginRuntime =
@@ -121,6 +122,7 @@ async function startWithSession(
     ...(extra.logger ? { logger: extra.logger } : {}),
     ...(extra.commandRunnerFactory ? { commandRunnerFactory: extra.commandRunnerFactory } : {}),
     ...(extra.tunnelManager ? { tunnelManager: extra.tunnelManager } : {}),
+    ...(extra.runtimeVersion !== undefined ? { runtimeVersion: extra.runtimeVersion } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
@@ -516,6 +518,38 @@ describe('createServer session persistence wiring', () => {
     if (connected.type !== 'connected') throw new Error('unreachable')
     expect(connected.sessionId).toBeDefined()
     expect(connected.sessionId.length).toBeGreaterThan(0)
+
+    ws.close()
+  })
+
+  test('connected message carries the configured runtimeVersion as serverVersion', async () => {
+    // given
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, { runtimeVersion: '9.9.9-test' })
+
+    // when
+    const { ws, waitFor } = await connect(url)
+    const connected = await waitFor((m) => m.type === 'connected')
+
+    // then
+    if (connected.type !== 'connected') throw new Error('unreachable')
+    expect(connected.serverVersion).toBe('9.9.9-test')
+
+    ws.close()
+  })
+
+  test('connected message omits serverVersion when runtimeVersion is not configured', async () => {
+    // given
+    const session = createFakeSession()
+    const { url } = await startWithSession(session)
+
+    // when
+    const { ws, waitFor } = await connect(url)
+    const connected = await waitFor((m) => m.type === 'connected')
+
+    // then
+    if (connected.type !== 'connected') throw new Error('unreachable')
+    expect(connected.serverVersion).toBeUndefined()
 
     ws.close()
   })
