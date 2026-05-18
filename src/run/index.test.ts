@@ -392,6 +392,73 @@ describe('startAgent bundled memory plugin (dreaming cron)', () => {
   })
 })
 
+describe('startAgent config reload wiring', () => {
+  test('config reload succeeds against missing host mount paths when running inside a container', async () => {
+    // given: an agent dir whose typeclaw.json declares a mount pointing at a
+    // path that does not exist on the local filesystem (simulates a host path
+    // that is not visible from inside the container's namespace).
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-mount-reload-'))
+    const originalContainerName = process.env.TYPECLAW_CONTAINER_NAME
+    process.env.TYPECLAW_CONTAINER_NAME = 'typeclaw-test'
+    try {
+      await Bun.write(
+        join(agentDir, 'typeclaw.json'),
+        JSON.stringify({
+          models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
+          mounts: [{ name: 'data', path: join(agentDir, 'this-path-never-exists') }],
+        }),
+      )
+
+      // when: startAgent wires the config reloadable and a reload runs
+      running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
+      const { results } = await running.reloadRegistry.reloadAll()
+
+      // then: the config reload succeeds (mount validation is skipped because
+      // TYPECLAW_CONTAINER_NAME is set) — guards against regressions in the
+      // src/run/index.ts wiring of skipMountValidation.
+      const configResult = results.find((r) => r.scope === 'config')
+      expect(configResult).toBeDefined()
+      expect(configResult?.ok).toBe(true)
+    } finally {
+      if (originalContainerName === undefined) delete process.env.TYPECLAW_CONTAINER_NAME
+      else process.env.TYPECLAW_CONTAINER_NAME = originalContainerName
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('config reload fails on missing host mount paths when TYPECLAW_CONTAINER_NAME is unset (host-stage default)', async () => {
+    // given: same shape, but no container marker — simulates running outside
+    // the typeclaw container (e.g. ad-hoc `bun run typeclaw run` on the host).
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-mount-reload-host-'))
+    const originalContainerName = process.env.TYPECLAW_CONTAINER_NAME
+    delete process.env.TYPECLAW_CONTAINER_NAME
+    try {
+      await Bun.write(
+        join(agentDir, 'typeclaw.json'),
+        JSON.stringify({
+          models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
+          mounts: [{ name: 'data', path: join(agentDir, 'this-path-never-exists') }],
+        }),
+      )
+
+      // when
+      running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
+      const { results } = await running.reloadRegistry.reloadAll()
+
+      // then: the host-stage default keeps the full mount accessibility gate.
+      const configResult = results.find((r) => r.scope === 'config')
+      expect(configResult).toBeDefined()
+      expect(configResult?.ok).toBe(false)
+      if (configResult && !configResult.ok) {
+        expect(configResult.reason).toContain('mount "data"')
+      }
+    } finally {
+      if (originalContainerName !== undefined) process.env.TYPECLAW_CONTAINER_NAME = originalContainerName
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+})
+
 describe('startAgent session persistence wiring', () => {
   let agentDir: string
 

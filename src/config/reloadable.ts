@@ -12,13 +12,10 @@ export type CreateConfigReloadableOptions = {
   // changes still require a restart — see FIELD_EFFECTS in config.ts.
   permissions?: PermissionService
   // Skip the mount-path accessibility check inside validateConfig. Mount paths
-  // in typeclaw.json are HOST paths (validated at `typeclaw start` time before
-  // `docker run`); inside the container they don't resolve, so the check would
-  // always fail on any agent that declares mounts. Reload runs container-side
-  // (via the agent's `reload` tool or the WS message from `typeclaw reload`),
-  // and `mounts` is `restart-required` anyway — there's nothing to validate
-  // against the live config pointer either way. Set this when wiring the
-  // reloadable from a container-stage context. See AGENTS.md § Stages.
+  // in typeclaw.json are host paths — they don't resolve inside the container,
+  // so the check would always fail on any agent that declares mounts. `mounts`
+  // is `restart-required` anyway, so reload never applies mount changes. Set
+  // this when wiring the reloadable from a container-stage context.
   skipMountValidation?: boolean
 }
 
