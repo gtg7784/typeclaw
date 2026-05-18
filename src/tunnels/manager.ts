@@ -75,6 +75,8 @@ function buildProvider(config: TunnelConfig, onUrlChange: (url: string) => void)
   switch (config.provider) {
     case 'external':
       return createExternalProvider({ config, onUrlChange })
+    case 'cloudflare-quick':
+      throw new Error(`tunnel '${config.name}' (cloudflare-quick): upstream port resolver is not configured`)
   }
 }
 

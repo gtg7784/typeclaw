@@ -1,4 +1,4 @@
-export type TunnelProvider = 'external'
+export type TunnelProvider = 'external' | 'cloudflare-quick'
 
 export type TunnelFor = { kind: 'channel'; name: string } | { kind: 'manual' }
 
