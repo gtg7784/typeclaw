@@ -378,7 +378,13 @@ function resolveSessionIdForOrigin(origin: SessionOrigin): string {
   return crypto.randomUUID()
 }
 
-async function runExecForCommand(
+// Grace period before escalating SIGTERM to SIGKILL on aborted ctx.exec.
+// Long enough for an interactive child to flush stdout and exit cleanly;
+// short enough that a wedged shell wrapper doesn't keep command_exit
+// hanging visibly past user expectations.
+const EXEC_ABORT_GRACE_MS = 5_000
+
+export async function runExecForCommand(
   strings: TemplateStringsArray,
   values: readonly unknown[],
   opts: { cwd: string; signal: AbortSignal },
@@ -392,17 +398,61 @@ async function runExecForCommand(
     cmd += String(values[i])
     cmd += strings[i + 1] ?? ''
   }
+
+  // Spawn detached so the child is the leader of its own process group.
+  // We kill via -pid (the process group) on abort, which targets sh AND
+  // every grandchild it spawned. Without detached:true, Bun's signal hook
+  // sends SIGTERM only to sh; orphaned grandchildren (e.g. a long-running
+  // server started by sh -c "node server.js") would keep stdout pipes open
+  // for minutes, masking the abort. See src/agent/tools/ddg.ts for the
+  // same pattern applied to curl-impersonate wrappers.
   const proc = Bun.spawn({
     cmd: ['sh', '-c', cmd],
     cwd: opts.cwd,
     stdout: 'pipe',
     stderr: 'pipe',
-    signal: opts.signal,
+    detached: true,
   })
-  const [exitCode, stdoutText, stderrText] = await Promise.all([
-    proc.exited,
-    new Response(proc.stdout as unknown as ReadableStream<Uint8Array>).text(),
-    new Response(proc.stderr as unknown as ReadableStream<Uint8Array>).text(),
-  ])
-  return { stdout: stdoutText, stderr: stderrText, exitCode }
+
+  let escalationTimer: ReturnType<typeof setTimeout> | null = null
+  const onAbort = (): void => {
+    killProcessGroup(proc.pid, 'SIGTERM')
+    escalationTimer = setTimeout(() => {
+      killProcessGroup(proc.pid, 'SIGKILL')
+    }, EXEC_ABORT_GRACE_MS)
+  }
+  if (opts.signal.aborted) {
+    onAbort()
+  } else {
+    opts.signal.addEventListener('abort', onAbort, { once: true })
+  }
+
+  try {
+    const [exitCode, stdoutText, stderrText] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout as unknown as ReadableStream<Uint8Array>).text(),
+      new Response(proc.stderr as unknown as ReadableStream<Uint8Array>).text(),
+    ])
+    return { stdout: stdoutText, stderr: stderrText, exitCode }
+  } finally {
+    opts.signal.removeEventListener('abort', onAbort)
+    if (escalationTimer !== null) clearTimeout(escalationTimer)
+  }
+}
+
+// Kills the leader-pgid'd process and every member of its group. Falls
+// back to the single-pid kill if the pgid kill fails (e.g. the process
+// already exited and the negative pid is invalid). Errors during cleanup
+// are swallowed; the only consumer is the abort path where the process is
+// almost certainly gone by the time we observe the error.
+function killProcessGroup(pid: number, sig: 'SIGTERM' | 'SIGKILL'): void {
+  try {
+    process.kill(-pid, sig)
+  } catch {
+    try {
+      process.kill(pid, sig)
+    } catch {
+      // Already exited; nothing to clean up.
+    }
+  }
 }

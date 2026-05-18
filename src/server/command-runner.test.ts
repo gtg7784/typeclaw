@@ -12,6 +12,7 @@ import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 import {
   bindSignalToSession,
   createCommandRunner,
+  runExecForCommand,
   type CommandOutbound,
   type CommandSpawnSubagent,
 } from './command-runner'
@@ -446,5 +447,54 @@ describe('bindSignalToSession', () => {
     detach()
     controller.abort('too late')
     expect(aborts.length).toBe(0)
+  })
+})
+
+describe('runExecForCommand', () => {
+  test('runs a fast command to completion and captures stdio + exit code', async () => {
+    const controller = new AbortController()
+    const result = await runExecForCommand(
+      ['echo hello && echo bye >&2 && exit 3'] as unknown as TemplateStringsArray,
+      [],
+      {
+        cwd: '/tmp',
+        signal: controller.signal,
+      },
+    )
+    expect(result.stdout).toBe('hello\n')
+    expect(result.stderr).toBe('bye\n')
+    expect(result.exitCode).toBe(3)
+  })
+
+  test('aborts a long-running shell promptly via process-group SIGTERM', async () => {
+    // Spawn a shell that sleeps for 30s with a background grandchild also
+    // sleeping. Abort after 50ms and assert the process exits well before
+    // the natural completion — this only happens if the process-group kill
+    // (negative-pid) reaches the grandchild; a single-pid SIGTERM on sh
+    // alone would leave the orphaned sleep keeping the stdout pipe open.
+    const controller = new AbortController()
+    const started = Date.now()
+    const promise = runExecForCommand(['sleep 30 & wait'] as unknown as TemplateStringsArray, [], {
+      cwd: '/tmp',
+      signal: controller.signal,
+    })
+    setTimeout(() => controller.abort('user'), 50)
+    const result = await promise
+    const elapsed = Date.now() - started
+    expect(elapsed).toBeLessThan(2_000)
+    // Exit code is non-zero on signalled termination; the exact value
+    // depends on whether SIGTERM or SIGKILL won the escalation race, so
+    // we just assert the process did NOT exit cleanly.
+    expect(result.exitCode).not.toBe(0)
+  })
+
+  test('runs to completion when signal never fires (clean path leaves no timer leak)', async () => {
+    const controller = new AbortController()
+    const result = await runExecForCommand(['echo done'] as unknown as TemplateStringsArray, [], {
+      cwd: '/tmp',
+      signal: controller.signal,
+    })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe('done\n')
   })
 })
