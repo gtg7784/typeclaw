@@ -61,7 +61,7 @@ describe('PermissionService — defaults', () => {
 })
 
 describe('PermissionService — user-declared roles', () => {
-  test('trusted role with channel match grants channel.respond + the trusted bypass', () => {
+  test('trusted role with channel match grants channel.respond + the trusted bypasses', () => {
     const roles = parseRoles({
       trusted: { match: ['slack:T0123 author:U_ME'] },
     })
@@ -69,7 +69,8 @@ describe('PermissionService — user-declared roles', () => {
     expect(svc.resolveRole(slackOwnerChat)).toBe('trusted')
     expect(svc.has(slackOwnerChat, 'channel.respond')).toBe(true)
     expect(svc.has(slackOwnerChat, 'security.bypass.secretExfilBash')).toBe(true)
-    expect(svc.has(slackOwnerChat, 'security.bypass.gitExfil')).toBe(false)
+    expect(svc.has(slackOwnerChat, 'security.bypass.gitExfil')).toBe(true)
+    expect(svc.has(slackOwnerChat, 'security.bypass.gitRemoteTainted')).toBe(false)
   })
 
   test('stranger in same chat does not match author rule → guest', () => {

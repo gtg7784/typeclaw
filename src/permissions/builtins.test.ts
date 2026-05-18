@@ -20,8 +20,13 @@ describe('built-in role contract', () => {
     expect([...BUILTIN_ROLES.trusted.permissions].sort()).toEqual([
       'channel.respond',
       'cron.schedule',
+      'security.bypass.gitExfil',
       'security.bypass.secretExfilBash',
     ])
+  })
+
+  test('trusted does NOT carry security.bypass.gitRemoteTainted (two-step defense stays for trusted)', () => {
+    expect([...BUILTIN_ROLES.trusted.permissions]).not.toContain('security.bypass.gitRemoteTainted')
   })
 
   test('member has empty default match and only channel.respond', () => {

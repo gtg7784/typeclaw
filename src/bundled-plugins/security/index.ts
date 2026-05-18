@@ -25,8 +25,9 @@ export { SECURITY_PERMISSIONS, type SecurityPermission } from './permissions'
 // it's the only carrier.
 const BYPASS_ROLE_HINT = {
   [SECURITY_PERMISSIONS.bypassSecretExfilBash]: 'owner and trusted have it by default',
-  [SECURITY_PERMISSIONS.bypassGitExfil]: 'only owner has it by default',
-  [SECURITY_PERMISSIONS.bypassGitRemoteTainted]: 'only owner has it by default',
+  [SECURITY_PERMISSIONS.bypassGitExfil]: 'owner and trusted have it by default',
+  [SECURITY_PERMISSIONS.bypassGitRemoteTainted]:
+    'only owner has it by default (trusted intentionally does not, so the two-step taint defense still fires)',
   [SECURITY_PERMISSIONS.bypassSecretExfilRead]: 'only owner has it by default',
   [SECURITY_PERMISSIONS.bypassSsrf]: 'only owner has it by default',
   [SECURITY_PERMISSIONS.bypassSessionSearchSecrets]: 'only owner has it by default',
