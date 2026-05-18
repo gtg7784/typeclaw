@@ -2,15 +2,23 @@ import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 
 import type { PermissionService } from '@/permissions'
+import type { GithubSecretsBlock } from '@/secrets'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 import { SecretsBackend } from '@/secrets/storage'
 
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
+import { createGithubAdapter, type GithubAdapter } from './adapters/github'
 import { createKakaotalkAdapter, type KakaotalkAdapter } from './adapters/kakaotalk'
 import { createSlackBotAdapter, type SlackBotAdapter } from './adapters/slack-bot'
 import { createTelegramBotAdapter, type TelegramBotAdapter } from './adapters/telegram-bot'
 import { createChannelRouter, type ChannelRouter, type ClaimHandler, type CreateSessionForChannel } from './router'
-import { ADAPTER_IDS, type AdapterId, type ChannelAdapterConfig, type ChannelsConfig } from './schema'
+import {
+  ADAPTER_IDS,
+  type AdapterId,
+  type ChannelAdapterConfig,
+  type ChannelsConfig,
+  type GithubAdapterConfig,
+} from './schema'
 
 export type ChannelManagerLogger = {
   info: (msg: string) => void
@@ -48,6 +56,7 @@ export type ChannelManagerOptions = {
   createSessionForChannel?: CreateSessionForChannel
   // Test seams: let fake adapters replace the real adapter wiring per id.
   createDiscordAdapter?: typeof createDiscordBotAdapter
+  createGithubAdapter?: typeof createGithubAdapter
   createKakaotalkAdapter?: typeof createKakaotalkAdapter
   createSlackAdapter?: typeof createSlackBotAdapter
   createTelegramAdapter?: typeof createTelegramBotAdapter
@@ -71,7 +80,7 @@ export type ChannelManager = {
   reload: () => Promise<{ started: string[]; stopped: string[]; restartRequired: string[] }>
 }
 
-type AnyAdapter = DiscordBotAdapter | KakaotalkAdapter | SlackBotAdapter | TelegramBotAdapter
+type AnyAdapter = DiscordBotAdapter | GithubAdapter | KakaotalkAdapter | SlackBotAdapter | TelegramBotAdapter
 
 // Credential signature is the comparison key for credential-rotation
 // detection on reload. Discord and Telegram each use a single bot token;
@@ -98,6 +107,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     ...(options.claimHandler ? { claimHandler: options.claimHandler } : {}),
   })
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
+  const createGithub = options.createGithubAdapter ?? createGithubAdapter
   const createKakaotalk = options.createKakaotalkAdapter ?? createKakaotalkAdapter
   const createSlackAdapter = options.createSlackAdapter ?? createSlackBotAdapter
   const createTelegramAdapter = options.createTelegramAdapter ?? createTelegramBotAdapter
@@ -106,6 +116,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
 
   const buildCredentialSignature = (name: AdapterId): { signature: string; missing: string[] } => {
     if (name === 'kakaotalk') return buildKakaotalkSignature(options.agentDir)
+    if (name === 'github') return buildGithubSignature(options.agentDir)
     const requiredEnvs = TOKEN_ENV[name]
     const parts: string[] = []
     const missing: string[] = []
@@ -149,6 +160,17 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         logger,
         selfAliasesRef: () => router.getSelfAliases(),
         credentialsStore: createContainerKakaoCredentialStore(options.agentDir, env),
+      })
+    }
+    if (name === 'github') {
+      const secrets = readGithubSecrets(options.agentDir)
+      if (secrets === null) return null
+      return createGithub({
+        router,
+        configRef: () => (options.channelsConfigRef()[name] ?? cfg) as ChannelAdapterConfig & GithubAdapterConfig,
+        secrets,
+        agentDir: options.agentDir,
+        logger,
       })
     }
     if (name === 'telegram-bot') {
@@ -263,7 +285,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
 // Token-based adapters only. KakaoTalk's credentials live in
 // secrets.json#channels.kakaotalk, not in env, so it goes through
 // buildKakaotalkSignature instead.
-const TOKEN_ENV: Record<Exclude<AdapterId, 'kakaotalk'>, readonly string[]> = {
+const TOKEN_ENV: Record<Exclude<AdapterId, 'kakaotalk' | 'github'>, readonly string[]> = {
   'discord-bot': ['DISCORD_BOT_TOKEN'],
   'slack-bot': ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN'],
   'telegram-bot': ['TELEGRAM_BOT_TOKEN'],
@@ -299,6 +321,35 @@ function buildKakaotalkSignature(agentDir: string): { signature: string; missing
   } catch (err) {
     return { signature: '', missing: [`secrets.json#channels.kakaotalk (${describe(err)})`] }
   }
+}
+
+function buildGithubSignature(agentDir: string): { signature: string; missing: string[] } {
+  const block = readGithubSecrets(agentDir)
+  if (block === null) return { signature: '', missing: ['secrets.json#channels.github'] }
+  const digest = createHash('sha256').update(JSON.stringify(block)).digest('hex')
+  return { signature: `secrets.json#channels.github@sha256:${digest}`, missing: [] }
+}
+
+function readGithubSecrets(agentDir: string): GithubSecretsBlock | null {
+  const path = join(agentDir, 'secrets.json')
+  try {
+    const block = new SecretsBackend(path).tryReadChannelsSync()?.github
+    return isGithubSecretsBlock(block) ? block : null
+  } catch {
+    return null
+  }
+}
+
+function isGithubSecretsBlock(value: unknown): value is GithubSecretsBlock {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  const auth = record.auth
+  return (
+    typeof auth === 'object' &&
+    auth !== null &&
+    !Array.isArray(auth) &&
+    (auth as Record<string, unknown>).type === 'pat'
+  )
 }
 
 function isKakaoCredentialBlock(value: unknown): value is { accounts: Record<string, unknown> } {

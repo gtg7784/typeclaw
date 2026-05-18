@@ -78,6 +78,7 @@ type PlatformInfo = {
 const PLATFORM_INFO: Record<AdapterId, PlatformInfo> = {
   'slack-bot': { displayName: 'Slack', mentionMode: 'angle-id' },
   'discord-bot': { displayName: 'Discord', mentionMode: 'angle-id' },
+  github: { displayName: 'GitHub', mentionMode: 'at-username' },
   'telegram-bot': { displayName: 'Telegram', mentionMode: 'at-username' },
   kakaotalk: { displayName: 'KakaoTalk', mentionMode: 'alias' },
 }
