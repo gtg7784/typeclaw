@@ -4,7 +4,7 @@ import { KNOWN_PROVIDERS, type KnownProviderId } from '@/config/providers'
 import type { LLMAuth } from '@/init'
 import type { ModelOption } from '@/init/models-dev'
 
-import { collectWizardInputs, decideExistingApiKeyReuse, type WizardPrompts } from './init'
+import { collectWizardInputs, decideExistingApiKeyReuse, WizardAbortedError, type WizardPrompts } from './init'
 
 describe('decideExistingApiKeyReuse', () => {
   test('reuses an existing API key when the user confirms', async () => {
@@ -175,20 +175,54 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(result.channelSecrets).toEqual({})
   })
 
-  test('back from pick-provider is a no-op that re-asks the same prompt', async () => {
+  test('back from pick-provider re-asks the same prompt; cancelling twice aborts', async () => {
     let providerCalls = 0
     const prompts = makePrompts({
       pickProvider: async () => {
         providerCalls += 1
-        if (providerCalls < 3) return { kind: 'back' }
+        return { kind: 'back' }
+      },
+    })
+
+    await expect(collectWizardInputs('/agent', prompts)).rejects.toThrow(WizardAbortedError)
+    expect(providerCalls).toBe(2)
+  })
+
+  test('back from pick-provider then pick succeeds (single cancel is still a no-op)', async () => {
+    let providerCalls = 0
+    const prompts = makePrompts({
+      pickProvider: async () => {
+        providerCalls += 1
+        if (providerCalls === 1) return { kind: 'back' }
         return { kind: 'value', value: 'fireworks' as KnownProviderId }
       },
     })
 
     const result = await collectWizardInputs('/agent', prompts)
 
-    expect(providerCalls).toBe(3)
+    expect(providerCalls).toBe(2)
     expect(result.model).toBe(fireworksModel)
+  })
+
+  test('aborts when back from enter-api-key auto-advances back to enter-api-key (single-method provider)', async () => {
+    // given: Fireworks is api-key-only, so pickAuthMethod returns autoValue
+    //   without prompting. The real CLI uses this code path; here we
+    //   simulate it directly with kind: 'value', auto: true.
+    let apiKeyCalls = 0
+    const prompts = makePrompts({
+      pickAuthMethod: async () => ({ kind: 'value', value: 'api-key', auto: true }),
+      askApiKey: async () => {
+        apiKeyCalls += 1
+        return { kind: 'back' }
+      },
+    })
+
+    // when + then
+    await expect(collectWizardInputs('/agent', prompts)).rejects.toThrow(WizardAbortedError)
+    // The user only ever interacts with the api-key prompt. Two cancels
+    // are enough to escape: the second cancel revisits enter-api-key with
+    // pendingBackOrigin already set to enter-api-key, so it aborts.
+    expect(apiKeyCalls).toBe(2)
   })
 
   test('back from pick-model returns to pick-provider, then advances', async () => {
