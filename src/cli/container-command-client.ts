@@ -12,6 +12,10 @@ export type ContainerProxyOptions = {
   stdout?: WritableStream<Uint8Array>
   stderr?: WritableStream<Uint8Array>
   abortSignal?: AbortSignal
+  // Explicit parent-origin override. When unset the proxy reads
+  // process.env.TYPECLAW_PARENT_ORIGIN_JSON. Tests pass this directly to
+  // avoid mutating process.env.
+  parentOriginJson?: string
   // Override hooks for tests. When unset, the live host port + token resolvers
   // are used. The websocketFactory is also pluggable so tests can drive a
   // fake server without binding to a real port.
@@ -148,12 +152,19 @@ export async function proxyContainerCommand(opts: ContainerProxyOptions): Promis
       else opts.abortSignal.addEventListener('abort', onAbort, { once: true })
     }
 
+    // Forward TYPECLAW_PARENT_ORIGIN_JSON verbatim when the surrounding
+    // process set it (e.g. a cron exec runner that injected the cron job's
+    // origin into the subprocess env). The server uses this as the
+    // command's spawnedByOrigin so permission resolution chases through
+    // to the parent role instead of defaulting to synthetic-owner.
+    const parentOriginJson = opts.parentOriginJson ?? process.env.TYPECLAW_PARENT_ORIGIN_JSON
     const exec: ClientMessage = {
       type: 'exec_command',
       callId,
       name: opts.commandName,
       args: opts.args,
       ...(opts.isolated !== undefined ? { isolated: opts.isolated } : {}),
+      ...(parentOriginJson !== undefined && parentOriginJson !== '' ? { parentOriginJson } : {}),
     }
     ws.send(JSON.stringify(exec))
 

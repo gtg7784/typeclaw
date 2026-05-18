@@ -42,7 +42,16 @@ type CommandHandle = {
 export type WsOwnerKey = object | null
 
 export type CommandRunner = {
-  start: (msg: { callId: string; name: string; args: unknown; isolated?: boolean }, ownerKey: WsOwnerKey) => void
+  start: (
+    msg: {
+      callId: string
+      name: string
+      args: unknown
+      isolated?: boolean
+      parentOrigin?: SessionOrigin
+    },
+    ownerKey: WsOwnerKey,
+  ) => void
   feedStdin: (callId: string, chunkBase64: string) => void
   endStdin: (callId: string) => void
   abort: (callId: string, reason: string) => void
@@ -58,7 +67,10 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
     return snapshot.registry.commands.find((c) => c.commandName === name)
   }
 
-  function start(msg: { callId: string; name: string; args: unknown; isolated?: boolean }, ownerKey: WsOwnerKey): void {
+  function start(
+    msg: { callId: string; name: string; args: unknown; isolated?: boolean; parentOrigin?: SessionOrigin },
+    ownerKey: WsOwnerKey,
+  ): void {
     const { callId, name, args } = msg
     if (inFlight.has(callId)) {
       opts.outbound.error(callId, `callId "${callId}" is already in flight`)
@@ -91,15 +103,21 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
 
     // Subagent-shaped (NOT TUI) so the prompt session this command may spawn
     // via ctx.prompt resolves to the `slim` system prompt mode, saving ~2000
-    // tokens per LLM call. The caller's audit trail is preserved via
-    // spawnedByOrigin; permission resolution chases through it to the
-    // synthetic TUI origin (which matches the built-in owner role).
-    const parentTuiOrigin: SessionOrigin = { kind: 'tui', sessionId: `command:${name}:${callId}` }
+    // tokens per LLM call.
+    //
+    // spawnedByOrigin carries the caller's provenance. By default we stamp a
+    // synthetic TUI origin (host CLI operator → owner role). When the caller
+    // forwarded a parentOrigin (e.g. a cron exec job reading
+    // TYPECLAW_PARENT_ORIGIN_JSON), we use that verbatim so permission
+    // resolution chases through to the cron's scheduledByRole instead of
+    // silently elevating to owner.
+    const syntheticTuiOrigin: SessionOrigin = { kind: 'tui', sessionId: `command:${name}:${callId}` }
+    const spawnedByOrigin: SessionOrigin = msg.parentOrigin ?? syntheticTuiOrigin
     const origin: SessionOrigin = {
       kind: 'subagent',
       subagent: `plugin-command:${name}`,
-      parentSessionId: parentTuiOrigin.sessionId,
-      spawnedByOrigin: parentTuiOrigin,
+      parentSessionId: syntheticTuiOrigin.sessionId,
+      spawnedByOrigin,
     }
 
     const stdoutSink = makeWritable((chunk) => opts.outbound.stdout(callId, chunk))
@@ -152,7 +170,7 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
           subagent: (subName, payload) =>
             opts.spawnSubagent(subName, payload, {
               spawnedByOrigin: origin,
-              parentSessionId: parentTuiOrigin.sessionId,
+              parentSessionId: syntheticTuiOrigin.sessionId,
             }),
           exec: (strings, ...values) =>
             runExecForCommand(strings, values, { cwd: opts.agentDir, signal: abortController.signal }),

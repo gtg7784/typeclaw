@@ -596,4 +596,36 @@ describe('CommandRunner — review follow-ups', () => {
     if (e1.kind === 'exit') expect(e1.code).toBe(0)
     if (e2.kind === 'exit') expect(e2.code).toBe(0)
   })
+
+  test('parentOrigin (when provided) becomes ctx.origin.spawnedByOrigin', async () => {
+    const cmd = defineCommand({
+      surface: 'container',
+      description: 'inspect provenance',
+      run: async (ctx) => {
+        const writer = ctx.stdout.getWriter()
+        await writer.write(new TextEncoder().encode(JSON.stringify(ctx.origin)))
+        writer.releaseLock()
+        return 0
+      },
+    })
+    const { runner, frames, decodeStdout } = makeRunner([registerCommand('provenance', cmd)])
+
+    const parentOrigin = {
+      kind: 'cron' as const,
+      jobId: 'nightly-checks',
+      jobKind: 'exec' as const,
+      scheduledByRole: 'member',
+    }
+    runner.start({ callId: 'p-1', name: 'provenance', args: undefined, parentOrigin }, null)
+    await waitForExit(frames, 'p-1')
+
+    const parsed = JSON.parse(decodeStdout()) as {
+      kind: string
+      spawnedByOrigin?: { kind?: string; jobId?: string; scheduledByRole?: string }
+    }
+    expect(parsed.kind).toBe('subagent')
+    expect(parsed.spawnedByOrigin?.kind).toBe('cron')
+    expect(parsed.spawnedByOrigin?.jobId).toBe('nightly-checks')
+    expect(parsed.spawnedByOrigin?.scheduledByRole).toBe('member')
+  })
 })

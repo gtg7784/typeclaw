@@ -1319,6 +1319,80 @@ describe('createServer plugin-command dispatch', () => {
     ws.close()
   })
 
+  test('exec_command parentOriginJson is parsed and forwarded to the runner', async () => {
+    const seenStarts: { callId: string; parentOrigin?: unknown }[] = []
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      createSession: async () => session,
+      commandRunnerFactory: () => ({
+        start(msg) {
+          seenStarts.push({ callId: msg.callId, parentOrigin: msg.parentOrigin })
+        },
+        feedStdin() {},
+        endStdin() {},
+        abort() {},
+        abortForOwner() {},
+        inFlightCount: () => 0,
+      }),
+    }).start()
+    server = built
+
+    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
+
+    const parentOrigin = { kind: 'cron', jobId: 'nightly', jobKind: 'exec', scheduledByRole: 'member' }
+    ws.send(
+      JSON.stringify({
+        type: 'exec_command',
+        callId: 'p-1',
+        name: 'cmd',
+        args: {},
+        parentOriginJson: JSON.stringify(parentOrigin),
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 80))
+
+    expect(seenStarts.length).toBe(1)
+    expect(seenStarts[0]?.parentOrigin).toEqual(parentOrigin)
+    ws.close()
+  })
+
+  test('exec_command with malformed parentOriginJson falls back to undefined parentOrigin', async () => {
+    const seenStarts: { callId: string; parentOrigin?: unknown }[] = []
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      createSession: async () => session,
+      commandRunnerFactory: () => ({
+        start(msg) {
+          seenStarts.push({ callId: msg.callId, parentOrigin: msg.parentOrigin })
+        },
+        feedStdin() {},
+        endStdin() {},
+        abort() {},
+        abortForOwner() {},
+        inFlightCount: () => 0,
+      }),
+    }).start()
+    server = built
+
+    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
+    ws.send(
+      JSON.stringify({
+        type: 'exec_command',
+        callId: 'p-2',
+        name: 'cmd',
+        args: {},
+        parentOriginJson: 'not-valid-json',
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 80))
+
+    expect(seenStarts.length).toBe(1)
+    expect(seenStarts[0]?.parentOrigin).toBeUndefined()
+    ws.close()
+  })
+
   test('ws-close aborts every in-flight command tied to the closed connection', async () => {
     let abortedCount = 0
     const session = createFakeSession()

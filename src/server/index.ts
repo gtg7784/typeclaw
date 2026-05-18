@@ -205,6 +205,19 @@ export function createServer({
         safeWsSend(ws, { type: 'command_exit', callId: msg.callId, code: 1 })
         return
       }
+      // Parse the optional parent-origin JSON: invalid JSON falls back to
+      // the synthetic owner origin rather than rejecting the command, so a
+      // malformed env var on the caller's side doesn't break the whole
+      // dispatch. The runner uses the parsed value as spawnedByOrigin
+      // verbatim — the trust boundary is the WS auth token, not JSON shape.
+      let parentOrigin: SessionOrigin | undefined
+      if (msg.parentOriginJson !== undefined) {
+        try {
+          parentOrigin = JSON.parse(msg.parentOriginJson) as SessionOrigin
+        } catch {
+          parentOrigin = undefined
+        }
+      }
       callIdToWs.set(msg.callId, ws)
       commandRunner.start(
         {
@@ -212,6 +225,7 @@ export function createServer({
           name: msg.name,
           args: msg.args,
           ...(msg.isolated !== undefined ? { isolated: msg.isolated } : {}),
+          ...(parentOrigin !== undefined ? { parentOrigin } : {}),
         },
         ws,
       )
