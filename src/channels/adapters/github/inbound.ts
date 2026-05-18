@@ -11,8 +11,9 @@ export type GithubWebhookHandlerOptions = {
   webhookSecret: string
   dedup: DeliveryDedup
   allowlist: () => readonly string[]
+  selfId: () => string | null
   selfLogin: () => string | null
-  route: (message: InboundMessage) => Promise<void>
+  route: (message: InboundMessage) => void
   logger: GithubInboundLogger
 }
 
@@ -38,17 +39,15 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
     const action = readString(payload, 'action')
     if (!isGithubEventAllowed(options.allowlist(), event, action)) return ok()
 
-    const selfLogin = options.selfLogin()
+    const selfId = options.selfId()
     const author = readAuthor(payload)
-    if (selfLogin !== null && author?.login === selfLogin) return ok()
+    if (selfId !== null && author !== null && String(author.id) === selfId) return ok()
 
-    const classified = classifyGithubInbound(event, payload, selfLogin)
+    const classified = classifyGithubInbound(event, payload, options.selfLogin())
     if (classified === null) return ok()
 
     if (delivery !== '') options.dedup.add(delivery)
-    void options.route(classified).catch((err) => {
-      options.logger.error(`[github] route failed delivery=${delivery || '?'}: ${describe(err)}`)
-    })
+    options.route(classified)
     return ok()
   }
 }

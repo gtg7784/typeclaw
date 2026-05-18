@@ -43,11 +43,12 @@ describe('createGithubWebhookHandler', () => {
       webhookSecret: 'secret',
       dedup: createDeliveryDedup(),
       allowlist: () => ['issue_comment.created'],
+      selfId: () => '99',
       selfLogin: () => 'typeclaw-bot',
       logger,
-      route: async (msg) => {
+      route: (msg) => {
         routed.push(msg)
-        await routeWait.promise
+        void routeWait.promise
       },
     })
 
@@ -65,9 +66,10 @@ describe('createGithubWebhookHandler', () => {
       webhookSecret: 'secret',
       dedup: createDeliveryDedup(),
       allowlist: () => ['issue_comment.created'],
+      selfId: () => '99',
       selfLogin: () => 'typeclaw-bot',
       logger,
-      route: async () => {
+      route: () => {
         count++
       },
     })
