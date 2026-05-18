@@ -802,13 +802,19 @@ function ignoreExists(error: NodeJS.ErrnoException): void {
 // scaffold-test cases above demonstrates how easy it is to lose a single
 // behavior under a mode flag.
 
-export type ChannelKind = 'discord-bot' | 'slack-bot' | 'telegram-bot' | 'kakaotalk'
+export type ChannelKind = 'discord-bot' | 'slack-bot' | 'telegram-bot' | 'kakaotalk' | 'github'
 
 // Public adapter names match the typeclaw.json `channels.*` keys exactly.
 // The CLI takes these as the optional positional arg, the picker shows
 // these labels, and they're the keys we use to detect "already configured"
 // when reading typeclaw.json.
-export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = ['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk']
+export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
+  'slack-bot',
+  'discord-bot',
+  'telegram-bot',
+  'kakaotalk',
+  'github',
+]
 
 export type AddChannelStep = 'kakaotalk-auth' | 'config' | 'secrets'
 
@@ -831,6 +837,14 @@ export type AddChannelOptions = {
   | { channel: 'slack-bot'; slackBotToken: string; slackAppToken: string }
   | { channel: 'telegram-bot'; telegramBotToken: string }
   | { channel: 'kakaotalk'; runKakaotalkAuth: KakaotalkAuthRunner }
+  | {
+      channel: 'github'
+      githubPat: string
+      webhookSecret: string
+      webhookUrl: string
+      webhookPort?: number
+      repos: string[]
+    }
 )
 
 export async function runAddChannel(options: AddChannelOptions): Promise<void> {
@@ -852,7 +866,7 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   }
 
   emit({ step: 'config', phase: 'start' })
-  await mergeChannelIntoConfig(options.cwd, options.channel)
+  await mergeChannelIntoConfig(options.cwd, options)
   emit({ step: 'config', phase: 'done' })
 
   emit({ step: 'secrets', phase: 'start' })
@@ -860,7 +874,14 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   if (Object.keys(tokens).length > 0) {
     await appendChannelSecrets(options.cwd, options.channel, tokens)
   }
+  if (options.channel === 'github') {
+    await appendGithubSecrets(options.cwd, options)
+  }
   emit({ step: 'secrets', phase: 'done' })
+
+  if (options.channel === 'github') {
+    await appendGithubMatchRules(options.cwd, options.repos)
+  }
 
   // Commit the typeclaw.json change so the agent folder isn't silently
   // dirty after `typeclaw channel add`. Same `commitSystemFile` contract as
@@ -881,6 +902,9 @@ function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
     case 'kakaotalk':
       // KakaoTalk auth writes its structured multi-account block directly to
       // secrets.json#channels.kakaotalk before config mutation.
+      return {}
+    case 'github':
+      // GitHub stores a structured PAT + webhook secret block directly.
       return {}
   }
 }
@@ -908,7 +932,7 @@ export async function readConfiguredChannels(cwd: string): Promise<Set<ChannelKi
   return present
 }
 
-async function mergeChannelIntoConfig(cwd: string, channel: ChannelKind): Promise<void> {
+async function mergeChannelIntoConfig(cwd: string, options: AddChannelOptions): Promise<void> {
   const path = join(cwd, CONFIG_FILE)
   let parsed: Record<string, unknown>
   try {
@@ -928,19 +952,73 @@ async function mergeChannelIntoConfig(cwd: string, channel: ChannelKind): Promis
       ? (parsed.channels as Record<string, unknown>)
       : {}
 
-  if (channel in existingChannels) {
+  if (options.channel in existingChannels) {
     // Defense in depth — the CLI already filters configured channels out of
     // the picker and rejects them as the positional arg. Hitting this branch
     // means a programmatic caller passed a duplicate; better to fail loudly
     // than silently overwrite the user's existing config.
-    throw new Error(`Channel "${channel}" is already configured in ${CONFIG_FILE}.`)
+    throw new Error(`Channel "${options.channel}" is already configured in ${CONFIG_FILE}.`)
   }
+
+  const nextChannelConfig =
+    options.channel === 'github'
+      ? {
+          webhookUrl: options.webhookUrl,
+          webhookPort: options.webhookPort ?? 8975,
+          eventAllowlist: [
+            'issue_comment.created',
+            'pull_request_review_comment.created',
+            'discussion_comment.created',
+            'issues.opened',
+            'pull_request.opened',
+            'discussion.created',
+            'pull_request_review.submitted',
+          ],
+        }
+      : {}
 
   parsed.channels = {
     ...existingChannels,
-    [channel]: {},
+    [options.channel]: nextChannelConfig,
   }
 
+  await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`)
+}
+
+async function appendGithubSecrets(
+  cwd: string,
+  options: Extract<AddChannelOptions, { channel: 'github' }>,
+): Promise<void> {
+  if (!existsSync(join(cwd, CONFIG_FILE))) {
+    throw new Error(
+      `${CONFIG_FILE} not found at ${cwd}. Run \`typeclaw init\` before adding channels, or run this command from inside an agent folder.`,
+    )
+  }
+  const backend = new SecretsBackend(join(cwd, 'secrets.json'))
+  const channels: Record<string, unknown> = backend.readChannelsSync()
+  if (channels.github !== undefined) {
+    throw new Error(
+      'github is already set in secrets.json. Remove it before re-adding the channel, or edit it by hand.',
+    )
+  }
+  channels.github = {
+    auth: { type: 'pat', token: { value: options.githubPat } satisfies Secret },
+    webhookSecret: { value: options.webhookSecret } satisfies Secret,
+  }
+  backend.writeChannelsSync(channels as Channels)
+}
+
+async function appendGithubMatchRules(cwd: string, repos: readonly string[]): Promise<void> {
+  const path = join(cwd, CONFIG_FILE)
+  const parsed = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
+  const roles = isObjectRecord(parsed.roles) ? { ...parsed.roles } : {}
+  const member = isObjectRecord(roles.member) ? { ...roles.member } : {}
+  const existing = Array.isArray(member.match) ? member.match.filter((v): v is string => typeof v === 'string') : []
+  const merged = new Set(existing)
+  for (const repo of repos) merged.add(`github:${repo}`)
+  member.match = Array.from(merged)
+  roles.member = member
+  parsed.roles = roles
   await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`)
 }
 

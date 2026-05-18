@@ -8,6 +8,7 @@ import type { ChannelKind } from './index'
 const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
   'discord-bot': 'Discord',
+  github: 'GitHub',
   'telegram-bot': 'Telegram',
   kakaotalk: 'KakaoTalk',
 }
