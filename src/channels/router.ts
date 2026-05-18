@@ -1454,7 +1454,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const live = liveSessions.get(keyId)
     if (live) {
       live.successfulChannelSends++
-      await stopTypingHeartbeat(live)
+      // Don't stop the heartbeat here: the agent may still be mid-turn and
+      // about to send another reply. drain()'s finally block stops typing
+      // when the turn actually ends. Per-send indicator clearing (e.g.
+      // Slack's setStatus("") on postMessage) belongs in the adapter
+      // outbound callback, not in the router.
       const adapterConfig = options.configForAdapter(msg.adapter)
       if (adapterConfig) {
         const targetIds = Array.from(
