@@ -158,13 +158,32 @@ export async function proxyContainerCommand(opts: ContainerProxyOptions): Promis
     ws.send(JSON.stringify(exec))
 
     if (opts.stdin !== undefined) {
-      void pumpStdin(opts.stdin, (chunk) => {
+      pumpStdin(opts.stdin, (chunk) => {
         const frame: ClientMessage = { type: 'command_stdin', callId, chunk: encodeBase64(chunk) }
         ws.send(JSON.stringify(frame))
-      }).then(() => {
-        const end: ClientMessage = { type: 'command_stdin_end', callId }
-        ws.send(JSON.stringify(end))
       })
+        .then(() => {
+          const end: ClientMessage = { type: 'command_stdin_end', callId }
+          ws.send(JSON.stringify(end))
+        })
+        .catch((err: unknown) => {
+          // Local stdin error: tell the server to abandon the in-flight
+          // command so it doesn't wait forever for command_stdin_end, and
+          // settle the host-side promise with a clear error. Without this
+          // .catch the rejection was silent and the command hung.
+          const reason = err instanceof Error ? err.message : String(err)
+          try {
+            const abortFrame: ClientMessage = {
+              type: 'command_abort',
+              callId,
+              reason: `local stdin error: ${reason}`,
+            }
+            ws.send(JSON.stringify(abortFrame))
+          } catch {
+            // ws may have already closed; the close handler will settle below.
+          }
+          settle({ ok: false, exitCode: 1, message: `local stdin error: ${reason}` })
+        })
     }
   })
 }

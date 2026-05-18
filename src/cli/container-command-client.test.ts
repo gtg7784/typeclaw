@@ -220,4 +220,34 @@ describe('proxyContainerCommand', () => {
     expect(stdinSent.length).toBe(2)
     expect(endSeen).toBe(true)
   })
+
+  test('local stdin error sends command_abort and settles with ok:false', async () => {
+    const aborts: string[] = []
+    const { factory } = makeFakeWs({
+      onMessage(msg) {
+        if (msg.type === 'command_abort') aborts.push(msg.reason)
+      },
+    })
+    const erroringStdin = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('chunk before failure'))
+        queueMicrotask(() => controller.error(new Error('disk read failed')))
+      },
+    })
+    const result = await proxyContainerCommand({
+      agentDir: '/tmp/agent',
+      commandName: 'reader',
+      args: {},
+      stdin: erroringStdin,
+      resolveUrl: fakeResolveUrl,
+      websocketFactory: factory,
+    })
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.exitCode).toBe(1)
+      expect(result.message).toMatch(/disk read failed/)
+    }
+    expect(aborts.length).toBeGreaterThanOrEqual(1)
+    expect(aborts[0]).toMatch(/disk read failed/)
+  })
 })
