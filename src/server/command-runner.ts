@@ -95,9 +95,17 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
     const abortController = new AbortController()
     const stdinQueue = createStdinQueue(abortController.signal)
 
+    // Subagent-shaped (NOT TUI) so the prompt session this command may spawn
+    // via ctx.prompt resolves to the `slim` system prompt mode, saving ~2000
+    // tokens per LLM call. The caller's audit trail is preserved via
+    // spawnedByOrigin; permission resolution chases through it to the
+    // synthetic TUI origin (which matches the built-in owner role).
+    const parentTuiOrigin: SessionOrigin = { kind: 'tui', sessionId: `command:${name}:${callId}` }
     const origin: SessionOrigin = {
-      kind: 'tui',
-      sessionId: `command:${name}:${callId}`,
+      kind: 'subagent',
+      subagent: `plugin-command:${name}`,
+      parentSessionId: parentTuiOrigin.sessionId,
+      spawnedByOrigin: parentTuiOrigin,
     }
 
     const stdoutSink = makeWritable((chunk) => opts.outbound.stdout(callId, chunk))
@@ -138,7 +146,10 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
               signal: abortController.signal,
             }),
           subagent: (subName, payload) =>
-            opts.spawnSubagent(subName, payload, { spawnedByOrigin: origin, parentSessionId: origin.sessionId }),
+            opts.spawnSubagent(subName, payload, {
+              spawnedByOrigin: origin,
+              parentSessionId: parentTuiOrigin.sessionId,
+            }),
           exec: (strings, ...values) =>
             runExecForCommand(strings, values, { cwd: opts.agentDir, signal: abortController.signal }),
         }

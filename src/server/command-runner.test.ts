@@ -326,4 +326,65 @@ describe('CommandRunner', () => {
     await waitForExit(frames, 'iso')
     expect(warnings.some((w) => /isolated=true/.test(w))).toBe(true)
   })
+
+  test('ctx.origin is subagent-shaped with parent TUI origin in spawnedByOrigin', async () => {
+    const cmd = defineCommand({
+      surface: 'container',
+      description: 'inspect origin',
+      run: async (ctx) => {
+        const writer = ctx.stdout.getWriter()
+        await writer.write(new TextEncoder().encode(JSON.stringify(ctx.origin)))
+        writer.releaseLock()
+        return 0
+      },
+    })
+    const { runner, frames, decodeStdout } = makeRunner([registerCommand('inspect', cmd)])
+    runner.start({ callId: 'orig-1', name: 'inspect', args: undefined }, null)
+    await waitForExit(frames, 'orig-1')
+
+    const parsed = JSON.parse(decodeStdout()) as {
+      kind: string
+      subagent: string
+      parentSessionId: string
+      spawnedByOrigin?: { kind: string; sessionId: string }
+    }
+    expect(parsed.kind).toBe('subagent')
+    expect(parsed.subagent).toBe('plugin-command:inspect')
+    expect(parsed.parentSessionId).toBe('command:inspect:orig-1')
+    expect(parsed.spawnedByOrigin?.kind).toBe('tui')
+    expect(parsed.spawnedByOrigin?.sessionId).toBe('command:inspect:orig-1')
+  })
+
+  test('ctx.subagent receives spawnedByOrigin matching the command session origin', async () => {
+    const calls: { name: string; payload: unknown; options: unknown }[] = []
+    const capturingSpawn: CommandSpawnSubagent = async (name, payload, options) => {
+      calls.push({ name, payload, options })
+    }
+    const cmd = defineCommand({
+      surface: 'container',
+      description: 'spawns a subagent',
+      run: async (ctx) => {
+        await ctx.subagent('child', { hello: 'world' })
+        return 0
+      },
+    })
+    const { outbound, frames } = makeOutboundCapture()
+    const runtime = makeRuntime([registerCommand('parent', cmd)])
+    const runner = createCommandRunner({
+      pluginRuntime: runtime,
+      permissions: noopPermissionService,
+      spawnSubagent: capturingSpawn,
+      agentDir: '/tmp/agent',
+      runtimeVersion: '0.0.0-test',
+      containerName: 'test-agent',
+      outbound,
+    })
+    runner.start({ callId: 'sub-1', name: 'parent', args: undefined }, null)
+    await waitForExit(frames, 'sub-1')
+
+    expect(calls.length).toBe(1)
+    const opts = calls[0]?.options as { spawnedByOrigin?: { kind: string }; parentSessionId?: string } | undefined
+    expect(opts?.spawnedByOrigin?.kind).toBe('subagent')
+    expect(opts?.parentSessionId).toBe('command:parent:sub-1')
+  })
 })
