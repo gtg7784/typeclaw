@@ -240,7 +240,7 @@ const tunnelEntrySchema = z
       .regex(/^[a-z0-9][a-z0-9-_]*$/, {
         message: 'tunnel name must match /^[a-z0-9][a-z0-9-_]*$/ (lowercase, digits, dashes, underscores)',
       }),
-    provider: z.enum(['external']),
+    provider: z.enum(['external', 'cloudflare-quick']),
     for: tunnelForSchema,
     externalUrl: z
       .string()

@@ -26,6 +26,7 @@ const main = defineCommand({
     compose: () => import('./compose').then((m) => m.composeCommand),
     channel: () => import('./channel').then((m) => m.channelCommand),
     cron: () => import('./cron').then((m) => m.cronCommand),
+    tunnel: () => import('./tunnel').then((m) => m.tunnelCommand),
     role: () => import('./role').then((m) => m.roleCommand),
     provider: () => import('./provider').then((m) => m.providerCommand),
     model: () => import('./model').then((m) => m.modelCommand),

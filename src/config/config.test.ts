@@ -1454,10 +1454,9 @@ describe('configSchema tunnels field', () => {
     ).toThrow()
   })
 
-  test('rejects unsupported provider strings (cloudflare-quick / cloudflare-named deferred to PR 2/3)', () => {
-    expect(() =>
-      configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'cloudflare-quick' }] }),
-    ).toThrow()
+  test('accepts cloudflare-quick and still rejects unsupported provider strings', () => {
+    const parsed = configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'cloudflare-quick' }] })
+    expect(parsed.tunnels[0]?.provider).toBe('cloudflare-quick')
     expect(() =>
       configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'cloudflare-named' }] }),
     ).toThrow()
