@@ -498,3 +498,102 @@ describe('runExecForCommand', () => {
     expect(result.stdout).toBe('done\n')
   })
 })
+
+describe('CommandRunner — review follow-ups', () => {
+  test('frames are ordered: stdout chunks precede the command_exit for the same callId', async () => {
+    const cmd = defineCommand({
+      surface: 'container',
+      description: 'ordered output',
+      run: async (ctx) => {
+        const writer = ctx.stdout.getWriter()
+        await writer.write(new TextEncoder().encode('one'))
+        await writer.write(new TextEncoder().encode('two'))
+        writer.releaseLock()
+        return 0
+      },
+    })
+    const { runner, frames } = makeRunner([registerCommand('ordered', cmd)])
+    runner.start({ callId: 'ord-1', name: 'ordered', args: undefined }, null)
+    await waitForExit(frames, 'ord-1')
+
+    const forCall = frames.filter((f) => f.callId === 'ord-1').map((f) => f.kind)
+    expect(forCall).toEqual(['stdout', 'stdout', 'exit'])
+  })
+
+  test('a callId is reusable after its first command completes', async () => {
+    const cmd = defineCommand({
+      surface: 'container',
+      description: 'short',
+      run: async () => 0,
+    })
+    const { runner, frames } = makeRunner([registerCommand('short', cmd)])
+
+    runner.start({ callId: 'reuse', name: 'short', args: undefined }, null)
+    await waitForExit(frames, 'reuse')
+    // waitForExit resolves on the outbound exit frame, but the runner's
+    // inFlight.delete fires in the chained .finally — let that microtask
+    // flush so the second start() sees a clean slate.
+    await new Promise((r) => setTimeout(r, 10))
+
+    const firstFrameCount = frames.length
+    runner.start({ callId: 'reuse', name: 'short', args: undefined }, null)
+    // Poll for a NEW exit frame, distinct from the first one. waitForExit
+    // returns the first match it finds, which may still be the first run's
+    // frame; assert that frames grew past the prior baseline.
+    const deadline = Date.now() + 2000
+    while (Date.now() < deadline) {
+      if (
+        frames.length > firstFrameCount &&
+        frames.some((f, idx) => idx >= firstFrameCount && f.kind === 'exit' && f.callId === 'reuse')
+      )
+        break
+      await new Promise((r) => setTimeout(r, 5))
+    }
+
+    const exits = frames.filter((f) => f.kind === 'exit' && f.callId === 'reuse')
+    expect(exits.length).toBe(2)
+    expect(frames.filter((f) => f.kind === 'error').length).toBe(0)
+  })
+
+  test('abort closes ctx.stdin so commands blocked on read complete', async () => {
+    const cmd = defineCommand({
+      surface: 'container',
+      description: 'reads stdin to EOF',
+      run: async (ctx) => {
+        const reader = ctx.stdin.getReader()
+        const next = await reader.read()
+        reader.releaseLock()
+        return next.done ? 0 : 99
+      },
+    })
+    const { runner, frames } = makeRunner([registerCommand('stdin-reader', cmd)])
+    runner.start({ callId: 'sr-1', name: 'stdin-reader', args: undefined }, null)
+    await new Promise((r) => setTimeout(r, 20))
+    runner.abort('sr-1', 'cleanup')
+    const exit = await waitForExit(frames, 'sr-1')
+    if (exit.kind === 'exit') expect(exit.code).toBe(0)
+  })
+
+  test('abortForOwner closes ctx.stdin for every command tied to the owner', async () => {
+    const cmd = defineCommand({
+      surface: 'container',
+      description: 'reads stdin to EOF',
+      run: async (ctx) => {
+        const reader = ctx.stdin.getReader()
+        const next = await reader.read()
+        reader.releaseLock()
+        return next.done ? 0 : 99
+      },
+    })
+    const { runner, frames } = makeRunner([registerCommand('stdin-reader', cmd)])
+    const owner = {}
+    runner.start({ callId: 'o1', name: 'stdin-reader', args: undefined }, owner)
+    runner.start({ callId: 'o2', name: 'stdin-reader', args: undefined }, owner)
+    await new Promise((r) => setTimeout(r, 20))
+    runner.abortForOwner(owner)
+    const e1 = await waitForExit(frames, 'o1')
+    const e2 = await waitForExit(frames, 'o2')
+    if (e1.kind === 'exit') expect(e1.code).toBe(0)
+    if (e2.kind === 'exit') expect(e2.code).toBe(0)
+  })
+})

@@ -250,4 +250,36 @@ describe('proxyContainerCommand', () => {
     expect(aborts.length).toBeGreaterThanOrEqual(1)
     expect(aborts[0]).toMatch(/disk read failed/)
   })
+
+  test('frames with a foreign callId are ignored; only matching frames mutate state', async () => {
+    const captured: string[] = []
+    const { factory } = makeFakeWs({
+      onMessage(msg, send) {
+        if (msg.type === 'exec_command') {
+          // Send a frame for an UNRELATED callId first; the proxy must
+          // ignore it. Then send the matching exit.
+          send({ type: 'command_stdout', callId: 'someone-else', chunk: btoa('LEAK') })
+          send({ type: 'command_error', callId: 'someone-else', message: 'wrong recipient' })
+          send({ type: 'command_stdout', callId: msg.callId, chunk: btoa('mine') })
+          send({ type: 'command_exit', callId: msg.callId, code: 0 })
+        }
+      },
+    })
+    const stdout = new WritableStream<Uint8Array>({
+      write(chunk) {
+        captured.push(new TextDecoder().decode(chunk))
+      },
+    })
+    const result = await proxyContainerCommand({
+      agentDir: '/tmp/agent',
+      commandName: 'isolated',
+      args: {},
+      stdout,
+      resolveUrl: fakeResolveUrl,
+      websocketFactory: factory,
+    })
+    expect(result.ok).toBe(true)
+    expect(captured.join('')).toBe('mine')
+    expect(captured.join('')).not.toContain('LEAK')
+  })
 })
