@@ -402,7 +402,11 @@ export function createServer({
               })
             }
 
-            send(ws, { type: 'connected', sessionId: sessionFileId })
+            send(ws, {
+              type: 'connected',
+              sessionId: sessionFileId,
+              ...(runtimeVersion !== undefined ? { serverVersion: runtimeVersion } : {}),
+            })
             console.log(`session ${sessionFileId}: open`)
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err)
