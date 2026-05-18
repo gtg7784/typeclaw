@@ -6,6 +6,7 @@ import { join } from 'node:path'
 
 import type { DockerExec } from '@/container'
 import type { KakaoChannelBlock } from '@/secrets/schema'
+import { expectStable, waitFor } from '@/test-helpers/wait-for'
 
 import { send, sendHttp } from './client'
 import { startDaemon, type Daemon, type PortbrokerCallbacks, type PortbrokerStartInput } from './daemon'
@@ -156,7 +157,20 @@ describe('startDaemon', () => {
     alive.delete('coder')
     await new Promise((resolve) => setTimeout(resolve, 30))
     alive.add('coder')
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    // ensure container remains registered across enough GC ticks (gcIntervalMs=20)
+    // that the absence counter would have reached gcMissesToDeregister=3 if not
+    // for the absence being broken by re-adding above.
+    await waitFor(async () => {
+      const list = await send({ kind: 'list' })
+      return list.ok && (list.result as ListResult).registrations.length > 0
+    })
+    await expectStable(
+      async () => {
+        const list = await send({ kind: 'list' })
+        return list.ok && (list.result as ListResult).registrations.length === 0
+      },
+      { durationMs: 80, intervalMs: 20, description: 'gc deregistration' },
+    )
 
     const list = await send({ kind: 'list' })
     expect(list.ok).toBe(true)
@@ -176,7 +190,14 @@ describe('startDaemon', () => {
     daemon = await startDaemon({ exec, gcIntervalMs: 20, gcMissesToDeregister: 1 })
     await send({ kind: 'register', containerName: 'coder', cwd: '/x' })
 
-    await new Promise((resolve) => setTimeout(resolve, 200))
+    await waitFor(() => psFails > 0)
+    await expectStable(
+      async () => {
+        const list = await send({ kind: 'list' })
+        return list.ok && (list.result as ListResult).registrations.length === 0
+      },
+      { durationMs: 100, intervalMs: 20, description: 'gc deregistration on ps failure' },
+    )
 
     expect(psFails).toBeGreaterThan(0)
     const list = await send({ kind: 'list' })
@@ -222,7 +243,7 @@ describe('startDaemon', () => {
     const ack = await send({ kind: 'restart', containerName: 'coder' })
     expect(ack.ok).toBe(true)
 
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await waitFor(() => restartCalls.length > 0)
     expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder', build: false }])
   })
 
@@ -241,7 +262,7 @@ describe('startDaemon', () => {
     const ack = await send({ kind: 'restart', containerName: 'coder', build: true })
     expect(ack.ok).toBe(true)
 
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await waitFor(() => restartCalls.length > 0)
     expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder', build: true }])
   })
 
@@ -275,7 +296,7 @@ describe('startDaemon', () => {
     const ack = await send({ kind: 'restart', containerName: 'coder', build: true })
 
     expect(ack).toEqual({ ok: false, reason: 'source drift' })
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await expectStable(() => restartCalls.length > 0, { durationMs: 25, description: 'preflight-blocked restart' })
     expect(restartCalls).toEqual([])
   })
 
@@ -301,7 +322,7 @@ describe('startDaemon', () => {
     )
     expect(ack.ok).toBe(true)
 
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await waitFor(() => restartCalls.length > 0)
     expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder', build: false }])
   })
 
@@ -327,7 +348,7 @@ describe('startDaemon', () => {
     )
     expect(ack.ok).toBe(true)
 
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await waitFor(() => restartCalls.length > 0)
     expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder', build: true }])
   })
 
@@ -602,7 +623,7 @@ describe('startDaemon', () => {
     )
     expect(ack.ok).toBe(true)
 
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    await waitFor(() => restartCalls.length > 0)
     expect(restartCalls).toEqual([{ containerName: 'coder', cwd: '/agent/coder' }])
   })
 
