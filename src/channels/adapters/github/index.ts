@@ -48,6 +48,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   if (webhookSecret === undefined || webhookSecret.trim() === '') throw new Error('GitHub webhookSecret is missing')
 
   let server: { stop: () => Promise<void> } | null = null
+  let selfId: string | null = null
   let selfLogin: string | null = null
   let started = false
   const workspaceByChat = new Map<string, string>()
@@ -65,16 +66,25 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   const membership = createGithubMembershipResolver({ token: auth.token, fetchImpl })
   const channelNameResolver = createGithubChannelNameResolver({ token: auth.token, fetchImpl })
   const fetchAttachment = createGithubFetchAttachmentCallback()
+  // No-op typing callback: GitHub has no typing indicator API.
+  const typing = async (): Promise<void> => {}
   const dedup = createDeliveryDedup()
   const handler = createGithubWebhookHandler({
     webhookSecret,
     dedup,
     allowlist: () => options.configRef().eventAllowlist,
+    selfId: () => selfId,
     selfLogin: () => selfLogin,
     logger,
-    route: async (message) => {
+    route: (message) => {
       rememberWorkspace(message.workspace, message.chat)
-      await options.router.route(message)
+      // Ack-first: wrap in Promise.resolve so a synchronous throw inside
+      // router.route() cannot prevent the 200 response from being returned.
+      void Promise.resolve()
+        .then(() => options.router.route(message))
+        .catch((err: unknown) => {
+          logger.error(`[github] route failed: ${err instanceof Error ? err.message : String(err)}`)
+        })
     },
   })
 
@@ -82,13 +92,31 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     async start(): Promise<void> {
       if (started) return
       const self = await auth.getSelf()
+      selfId = String(self.id)
       selfLogin = self.login
+      // Register all callbacks before binding the HTTP listener so the router
+      // is fully wired before any webhook can arrive.
       options.router.registerOutbound('github', outbound)
+      options.router.registerTyping('github', typing)
       options.router.registerHistory('github', history)
       options.router.registerMembership('github', membership)
       options.router.registerChannelNameResolver('github', channelNameResolver)
       options.router.registerFetchAttachment('github', fetchAttachment)
-      server = (options.httpListenImpl ?? listenWithBun)(options.configRef().webhookPort, handler)
+      try {
+        server = (options.httpListenImpl ?? listenWithBun)(options.configRef().webhookPort, handler)
+      } catch (err) {
+        // Listener failed — roll back all registrations so stop() is a no-op
+        // and the manager can report the failure cleanly.
+        options.router.unregisterOutbound('github', outbound)
+        options.router.unregisterTyping('github', typing)
+        options.router.unregisterHistory('github', history)
+        options.router.unregisterMembership('github', membership)
+        options.router.unregisterChannelNameResolver('github', channelNameResolver)
+        options.router.unregisterFetchAttachment('github', fetchAttachment)
+        selfId = null
+        selfLogin = null
+        throw err
+      }
       started = true
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
     },
@@ -96,12 +124,14 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       if (!started) return
       started = false
       options.router.unregisterOutbound('github', outbound)
+      options.router.unregisterTyping('github', typing)
       options.router.unregisterHistory('github', history)
       options.router.unregisterMembership('github', membership)
       options.router.unregisterChannelNameResolver('github', channelNameResolver)
       options.router.unregisterFetchAttachment('github', fetchAttachment)
       await server?.stop()
       server = null
+      selfId = null
       selfLogin = null
     },
     isConnected(): boolean {
