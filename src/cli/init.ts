@@ -1,3 +1,6 @@
+import { randomBytes } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+
 import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
@@ -16,6 +19,7 @@ import {
   isHatched,
   readExistingProviderApiKey,
   runInit,
+  type GithubInitCredentials,
   type InitStep,
   type InitStepEvent,
   type KakaotalkAuthResult,
@@ -107,8 +111,15 @@ export const init = defineCommand({
       throw error
     }
     const { model, llmAuth, vision, channelChoice, reuseExistingChannel, channelSecrets } = collected
-    const { discordBotToken, slackBotToken, slackAppToken, telegramBotToken, kakaotalkEmail, kakaotalkPassword } =
-      channelSecrets
+    const {
+      discordBotToken,
+      slackBotToken,
+      slackAppToken,
+      telegramBotToken,
+      kakaotalkEmail,
+      kakaotalkPassword,
+      github: githubCredentials,
+    } = channelSecrets
 
     // TODO: add remaining wizard steps from TypeClaw.md once their runtime lands:
     //   - git backup (url + PAT) — Phase 10
@@ -123,7 +134,9 @@ export const init = defineCommand({
     const reuseSlack = reuseExistingChannel && channelChoice === 'slack'
     const reuseTelegram = reuseExistingChannel && channelChoice === 'telegram'
     const reuseKakaotalk = reuseExistingChannel && channelChoice === 'kakaotalk'
+    const reuseGithub = reuseExistingChannel && channelChoice === 'github'
     const wantsKakaotalk = (kakaotalkEmail !== undefined && kakaotalkPassword !== undefined) || reuseKakaotalk
+    const wantsGithub = githubCredentials !== undefined || reuseGithub
     let hatchingOk = false
     let preflightFailure: Extract<DockerAvailability, { ok: false }> | null = null
     try {
@@ -155,6 +168,12 @@ export const init = defineCommand({
                         },
                       }),
                   }),
+            }
+          : {}),
+        ...(wantsGithub
+          ? {
+              withGithub: true,
+              ...(reuseGithub || githubCredentials === undefined ? {} : { githubCredentials }),
             }
           : {}),
         onProgress: reportProgress(
@@ -206,7 +225,7 @@ interface WizardState {
   channelReuseExisting?: boolean
 }
 
-type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'kakaotalk' | 'none'
+type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'kakaotalk' | 'github' | 'none'
 
 interface CollectedInputs {
   model: ModelOption
@@ -228,6 +247,11 @@ interface CollectedInputs {
     telegramBotToken?: string
     kakaotalkEmail?: string
     kakaotalkPassword?: string
+    // Structured (auth union + webhook + repo allowlist) rather than flat
+    // tokens, so it rides as one sub-object instead of sibling fields.
+    // `runInit` delegates to `runAddChannel` for GitHub to keep the github
+    // config-writing in one place.
+    github?: GithubInitCredentials
   }
 }
 
@@ -561,6 +585,8 @@ function channelDisplayName(choice: Exclude<ChannelChoice, 'none'>): string {
       return 'Telegram'
     case 'kakaotalk':
       return 'KakaoTalk'
+    case 'github':
+      return 'GitHub'
   }
 }
 
@@ -742,6 +768,7 @@ async function pickChannel(initial: ChannelChoice | undefined): Promise<StepResu
       { value: 'discord', label: 'Discord' },
       { value: 'telegram', label: 'Telegram' },
       { value: 'kakaotalk', label: 'KakaoTalk' },
+      { value: 'github', label: 'GitHub' },
       { value: 'none', label: 'Skip — no channel right now' },
     ],
     initialValue: initial ?? 'slack',
@@ -762,6 +789,8 @@ async function runChannelFlow(choice: ChannelChoice): Promise<StepResult<Collect
       return runSlackFlow()
     case 'telegram':
       return runTelegramFlow()
+    case 'github':
+      return runGithubFlow()
   }
 }
 
@@ -922,6 +951,140 @@ async function runSlackFlow(): Promise<StepResult<CollectedInputs['channelSecret
     }
     return value({ slackBotToken: botToken!, slackAppToken: input })
   }
+}
+
+async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+  note(
+    [
+      'Choose PAT auth for a quick setup, or GitHub App auth for expiring installation tokens.',
+      'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used), Metadata read.',
+      'Create a repository webhook pointing to the public webhook URL you enter below.',
+    ].join('\n'),
+    'Get GitHub credentials',
+  )
+  const authType = await select<'pat' | 'app'>({
+    message: 'GitHub authentication type',
+    options: [
+      { value: 'pat', label: 'Fine-grained personal access token' },
+      { value: 'app', label: 'GitHub App installation token' },
+    ],
+  })
+  if (isCancel(authType)) return back()
+  const webhookUrl = await text({
+    message: 'Public webhook URL (GitHub will POST events here)',
+    validate: (v) => validateGithubUrl(v ?? '', 'Webhook URL is required'),
+  })
+  if (isCancel(webhookUrl)) return back()
+  const port = await text({
+    message: 'Local webhook port inside the agent container',
+    initialValue: '8975',
+    validate: (v) => {
+      const parsed = Number(v)
+      return Number.isInteger(parsed) && parsed > 0 ? undefined : 'Port must be a positive integer'
+    },
+  })
+  if (isCancel(port)) return back()
+  const secret = await password({
+    message: 'Webhook secret (leave blank to auto-generate)',
+  })
+  if (isCancel(secret)) return back()
+  const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
+  if (auth === null) return back()
+  const reposRaw = await text({
+    message: 'Repositories to allow (comma-separated owner/repo)',
+    validate: (v) => (parseGithubRepos(v ?? '').length > 0 ? undefined : 'At least one owner/repo is required'),
+  })
+  if (isCancel(reposRaw)) return back()
+  const resolvedSecret = secret.length > 0 ? secret : randomBytes(32).toString('hex')
+  if (secret.length === 0) {
+    note(
+      [
+        `Webhook secret: ${resolvedSecret}`,
+        '',
+        'Paste this into the "Secret" field when creating the GitHub webhook.',
+        'It will not be shown again.',
+      ].join('\n'),
+      'Generated webhook secret',
+    )
+  }
+  return value({
+    github: {
+      webhookSecret: resolvedSecret,
+      webhookUrl,
+      webhookPort: Number(port),
+      repos: parseGithubRepos(reposRaw),
+      auth,
+    },
+  })
+}
+
+async function promptGithubPatAuth(): Promise<{ type: 'pat'; pat: string } | null> {
+  const pat = await password({
+    message: 'GitHub fine-grained PAT',
+    validate: (v) => (v && v.length > 0 ? undefined : 'PAT is required'),
+  })
+  if (isCancel(pat)) return null
+  return { type: 'pat', pat }
+}
+
+async function promptGithubAppAuth(): Promise<{
+  type: 'app'
+  appId: number
+  privateKey: string
+  installationId?: number
+} | null> {
+  const appId = await text({
+    message: 'GitHub App ID',
+    validate: (v) => validatePositiveInteger(v ?? '', 'App ID is required'),
+  })
+  if (isCancel(appId)) return null
+  const privateKeyInput = await text({
+    message: 'GitHub App private key PEM, escaped PEM, or path to .pem file',
+    validate: (v) => (v && v.length > 0 ? undefined : 'Private key is required'),
+  })
+  if (isCancel(privateKeyInput)) return null
+  const installationId = await text({
+    message: 'Installation ID (optional; leave blank to auto-discover)',
+    validate: (v) =>
+      v === undefined || v === '' ? undefined : validatePositiveInteger(v, 'Installation ID is required'),
+  })
+  if (isCancel(installationId)) return null
+  const parsedInstallationId = installationId === '' ? undefined : Number(installationId)
+  return {
+    type: 'app',
+    appId: Number(appId),
+    privateKey: await resolveGithubPrivateKey(privateKeyInput),
+    ...(parsedInstallationId !== undefined ? { installationId: parsedInstallationId } : {}),
+  }
+}
+
+async function resolveGithubPrivateKey(input: string): Promise<string> {
+  const normalized = input.replace(/\\n/g, '\n')
+  if (normalized.includes('-----BEGIN') && normalized.includes('PRIVATE KEY-----')) return normalized
+  return await readFile(input, 'utf8')
+}
+
+function parseGithubRepos(input: string): string[] {
+  return input
+    .split(',')
+    .map((v) => v.trim())
+    .filter((v) => /^[^\s/]+\/[^\s/]+$/.test(v))
+}
+
+function validateGithubUrl(v: string, requiredMessage: string): string | undefined {
+  if (!v || v.length === 0) return requiredMessage
+  try {
+    new URL(v)
+    return undefined
+  } catch {
+    return 'Must be a valid URL'
+  }
+}
+
+function validatePositiveInteger(v: string, requiredMessage: string): string | undefined {
+  if (!v || v.length === 0) return requiredMessage
+  const parsed = Number(v)
+  return Number.isInteger(parsed) && parsed > 0 ? undefined : 'Must be a positive integer'
 }
 
 async function runTelegramFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {

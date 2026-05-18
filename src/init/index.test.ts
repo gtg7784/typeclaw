@@ -1574,6 +1574,57 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
       accounts: { 'acc-1': { oauth_token: 'tok' } },
     })
   })
+
+  test('runInit with withGithub=true and githubCredentials writes the channel block and secrets', async () => {
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      withGithub: true,
+      githubCredentials: {
+        webhookSecret: 'whsec_test',
+        webhookUrl: 'https://example.com/hook',
+        webhookPort: 8975,
+        repos: ['acme/repo-a'],
+        auth: { type: 'pat', pat: 'ghp_test' },
+      },
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, Record<string, unknown>>
+      roles?: { member?: { match?: string[] } }
+    }
+    expect(config.channels?.github).toMatchObject({
+      webhookUrl: 'https://example.com/hook',
+      webhookPort: 8975,
+    })
+    expect(Array.isArray(config.channels?.github?.eventAllowlist)).toBe(true)
+    expect(config.roles?.member?.match).toContain('github:acme/repo-a')
+
+    const secrets = await readSecrets(root)
+    expect(secrets.channels?.github).toMatchObject({
+      auth: { type: 'pat', token: { value: 'ghp_test' } },
+      webhookSecret: { value: 'whsec_test' },
+    })
+  })
+
+  test('runInit with withGithub=true but no credentials is a no-op for github', async () => {
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      withGithub: true,
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, unknown>
+    }
+    expect(config.channels?.github).toBeUndefined()
+  })
 })
 
 // Guards the exact bug site of the hatching-hostd fix: that the default

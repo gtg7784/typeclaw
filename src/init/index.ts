@@ -58,6 +58,17 @@ export type InitStep =
 
 export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
 
+// Structured credential block for the GitHub channel adapter. Mirrors the
+// shape `runAddChannel({ channel: 'github', ... })` consumes so the wizard
+// can hand off without re-encoding the auth union or webhook fields.
+export type GithubInitCredentials = {
+  webhookSecret: string
+  webhookUrl: string
+  webhookPort?: number
+  repos: string[]
+  auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
+}
+
 export type InitStepEvent =
   | { step: 'preflight'; phase: 'start' }
   | { step: 'preflight'; phase: 'done'; result: DockerAvailability }
@@ -131,7 +142,12 @@ export type InitOptions = {
   withSlack?: boolean
   withTelegram?: boolean
   withKakaotalk?: boolean
+  withGithub?: boolean
   runKakaotalkAuth?: KakaotalkAuthRunner
+  // Structured GitHub credentials collected by the wizard. When omitted and
+  // `withGithub` is true, the existing secrets.json#channels.github block is
+  // reused as-is (the wizard's "reuse existing credentials" path).
+  githubCredentials?: GithubInitCredentials
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
   runBunInstall?: InstallRunner
@@ -159,7 +175,9 @@ export async function runInit({
   withSlack,
   withTelegram,
   withKakaotalk = false,
+  withGithub = false,
   runKakaotalkAuth,
+  githubCredentials,
   onProgress,
   runHatching = defaultRunHatching,
   runBunInstall: installRunner = runBunInstall,
@@ -263,6 +281,23 @@ export async function runInit({
     }
   }
 
+  // Delegate GitHub setup to runAddChannel so the structured
+  // channels.github block, secrets.json write, and member-role match
+  // rules all stay in one place. commitSystemFile inside runAddChannel
+  // no-ops here because the agent folder isn't a git repo yet — the
+  // later `git` step picks the github changes up in its initial commit.
+  if (withGithub && githubCredentials !== undefined) {
+    await runAddChannel({
+      cwd,
+      channel: 'github',
+      webhookSecret: githubCredentials.webhookSecret,
+      webhookUrl: githubCredentials.webhookUrl,
+      ...(githubCredentials.webhookPort !== undefined ? { webhookPort: githubCredentials.webhookPort } : {}),
+      repos: githubCredentials.repos,
+      auth: githubCredentials.auth,
+    })
+  }
+
   emit({ step: 'install', phase: 'start' })
   const install = await installRunner(cwd)
   emit({ step: 'install', phase: 'done', result: install })
@@ -280,6 +315,7 @@ export async function runInit({
   if (wantsSlack) configuredChannels.push('slack-bot')
   if (wantsTelegram) configuredChannels.push('telegram-bot')
   if (withKakaotalk) configuredChannels.push('kakaotalk')
+  if (withGithub) configuredChannels.push('github')
 
   emit({ step: 'hatching', phase: 'start' })
   const hatching = await runHatching({
@@ -721,7 +757,7 @@ export async function readExistingProviderApiKey(root: string, providerId: Known
 // kakaotalk` anyway — better to re-auth now during init.
 export async function hasExistingChannelSecrets(
   root: string,
-  channel: 'discord' | 'slack' | 'telegram' | 'kakaotalk',
+  channel: 'discord' | 'slack' | 'telegram' | 'kakaotalk' | 'github',
 ): Promise<boolean> {
   const channels = new SecretsBackend(join(root, 'secrets.json')).tryReadChannelsSync()
   if (channels === null) return false
@@ -732,6 +768,15 @@ export async function hasExistingChannelSecrets(
       return hasSecretField(channels['slack-bot'], 'botToken') && hasSecretField(channels['slack-bot'], 'appToken')
     case 'telegram':
       return hasSecretField(channels['telegram-bot'], 'token')
+    case 'github':
+      // GitHub credentials alone are not enough to scaffold a working
+      // channel: typeclaw.json#channels.github also needs webhookUrl and
+      // webhookPort, which only the user can supply. Always force a fresh
+      // prompt in the wizard so those fields end up in typeclaw.json. The
+      // existing `secrets.json#channels.github` (if any) is detected and
+      // surfaced as a hard error inside `runAddChannel` to prevent silent
+      // overwrites.
+      return false
     case 'kakaotalk': {
       const block = channels.kakaotalk
       if (!isObjectRecord(block)) return false
