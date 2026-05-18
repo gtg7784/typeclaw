@@ -410,6 +410,10 @@ async function promptGithubCredentials(): Promise<{
     cancel('Aborted.')
     process.exit(0)
   }
+  // clack's password() returns `undefined` on an empty submission (it has no
+  // validate guard and never coerces to ''), so we normalize before the
+  // length checks below to avoid a TypeError on the "leave blank" path.
+  const enteredSecret = typeof secret === 'string' ? secret : ''
   const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
   const reposRaw = await text({
     message: 'Repositories to allow (comma-separated owner/repo)',
@@ -419,8 +423,8 @@ async function promptGithubCredentials(): Promise<{
     cancel('Aborted.')
     process.exit(0)
   }
-  const resolvedSecret = secret.length > 0 ? secret : randomBytes(32).toString('hex')
-  if (secret.length === 0) {
+  const resolvedSecret = enteredSecret.length > 0 ? enteredSecret : randomBytes(32).toString('hex')
+  if (enteredSecret.length === 0) {
     note(
       [
         `Webhook secret: ${resolvedSecret}`,

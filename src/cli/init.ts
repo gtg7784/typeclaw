@@ -988,6 +988,10 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
     message: 'Webhook secret (leave blank to auto-generate)',
   })
   if (isCancel(secret)) return back()
+  // clack's password() returns `undefined` on an empty submission (it has no
+  // validate guard and never coerces to ''), so we normalize before the
+  // length checks below to avoid a TypeError on the "leave blank" path.
+  const enteredSecret = typeof secret === 'string' ? secret : ''
   const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
   if (auth === null) return back()
   const reposRaw = await text({
@@ -995,8 +999,8 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
     validate: (v) => (parseGithubRepos(v ?? '').length > 0 ? undefined : 'At least one owner/repo is required'),
   })
   if (isCancel(reposRaw)) return back()
-  const resolvedSecret = secret.length > 0 ? secret : randomBytes(32).toString('hex')
-  if (secret.length === 0) {
+  const resolvedSecret = enteredSecret.length > 0 ? enteredSecret : randomBytes(32).toString('hex')
+  if (enteredSecret.length === 0) {
     note(
       [
         `Webhook secret: ${resolvedSecret}`,
