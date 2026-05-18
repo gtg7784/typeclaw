@@ -57,7 +57,11 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     workspaceByChat.set(chat, workspace)
   }
 
-  const tokenFn = () => auth.token()
+  const tokenFn = async () => {
+    const t = await auth.token()
+    process.env.GH_TOKEN = t
+    return t
+  }
   const outbound = createGithubOutboundCallback({ token: tokenFn, logger, fetchImpl })
   const history = createGithubHistoryCallback({
     token: tokenFn,
@@ -115,10 +119,15 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         options.router.unregisterChannelNameResolver('github', channelNameResolver)
         options.router.unregisterFetchAttachment('github', fetchAttachment)
         await auth.dispose()
+        delete process.env.GH_TOKEN
         selfId = null
         selfLogin = null
         throw err
       }
+      // Seed GH_TOKEN so `gh` CLI calls in the container are pre-authenticated.
+      // tokenFn keeps it current on every adapter API call; App tokens refresh
+      // automatically when within 5 minutes of expiry.
+      process.env.GH_TOKEN = await auth.token()
       started = true
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
     },
@@ -133,6 +142,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       options.router.unregisterFetchAttachment('github', fetchAttachment)
       await server?.stop()
       await auth.dispose()
+      delete process.env.GH_TOKEN
       server = null
       selfId = null
       selfLogin = null
