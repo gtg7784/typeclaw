@@ -5,7 +5,7 @@ import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 export type GithubOutboundLogger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void }
 
 export function createGithubOutboundCallback(deps: {
-  token: string
+  token: () => Promise<string>
   logger: GithubOutboundLogger
   fetchImpl?: typeof fetch
 }): OutboundCallback {
@@ -29,12 +29,12 @@ export function createGithubOutboundCallback(deps: {
       target.kind === 'pr' && msg.thread !== null && msg.thread !== undefined && msg.thread !== ''
         ? `${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/pulls/${target.number}/comments/${encodeURIComponent(msg.thread)}/replies`
         : `${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/issues/${target.number}/comments`
-    return await postJson(fetchImpl, deps.token, endpoint, { body })
+    return await postJson(fetchImpl, await deps.token(), endpoint, { body })
   }
 }
 
 async function postDiscussionComment(options: {
-  token: string
+  token: () => Promise<string>
   fetchImpl: typeof fetch
   repo: RepoRef
   discussionNumber: number
@@ -43,14 +43,14 @@ async function postDiscussionComment(options: {
   const discussionId = await fetchDiscussionId(options)
   if (!discussionId.ok) return discussionId
   const mutation = `mutation($discussionId:ID!,$body:String!){addDiscussionComment(input:{discussionId:$discussionId,body:$body}){comment{id}}}`
-  return await postGraphql(options.fetchImpl, options.token, mutation, {
+  return await postGraphql(options.fetchImpl, await options.token(), mutation, {
     discussionId: discussionId.id,
     body: options.body,
   })
 }
 
 async function fetchDiscussionId(options: {
-  token: string
+  token: () => Promise<string>
   fetchImpl: typeof fetch
   repo: RepoRef
   discussionNumber: number
@@ -58,7 +58,7 @@ async function fetchDiscussionId(options: {
   const query = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){discussion(number:$number){id}}}`
   const result = await graphql<{ repository?: { discussion?: { id?: string } | null } }>(
     options.fetchImpl,
-    options.token,
+    await options.token(),
     query,
     {
       owner: options.repo.owner,

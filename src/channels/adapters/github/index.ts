@@ -57,14 +57,15 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     workspaceByChat.set(chat, workspace)
   }
 
-  const outbound = createGithubOutboundCallback({ token: auth.token, logger, fetchImpl })
+  const tokenFn = () => auth.token()
+  const outbound = createGithubOutboundCallback({ token: tokenFn, logger, fetchImpl })
   const history = createGithubHistoryCallback({
-    token: auth.token,
+    token: tokenFn,
     fetchImpl,
     workspaceForChat: (chat) => workspaceByChat.get(chat) ?? null,
   })
-  const membership = createGithubMembershipResolver({ token: auth.token, fetchImpl })
-  const channelNameResolver = createGithubChannelNameResolver({ token: auth.token, fetchImpl })
+  const membership = createGithubMembershipResolver({ token: tokenFn, fetchImpl })
+  const channelNameResolver = createGithubChannelNameResolver({ token: tokenFn, fetchImpl })
   const fetchAttachment = createGithubFetchAttachmentCallback()
   // No-op typing callback: GitHub has no typing indicator API.
   const typing = async (): Promise<void> => {}
@@ -113,6 +114,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         options.router.unregisterMembership('github', membership)
         options.router.unregisterChannelNameResolver('github', channelNameResolver)
         options.router.unregisterFetchAttachment('github', fetchAttachment)
+        await auth.dispose()
         selfId = null
         selfLogin = null
         throw err
@@ -130,6 +132,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       options.router.unregisterChannelNameResolver('github', channelNameResolver)
       options.router.unregisterFetchAttachment('github', fetchAttachment)
       await server?.stop()
+      await auth.dispose()
       server = null
       selfId = null
       selfLogin = null

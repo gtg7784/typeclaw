@@ -5,7 +5,7 @@ import { createGithubMembershipResolver } from './membership'
 describe('createGithubMembershipResolver', () => {
   it('counts collaborator humans and bots', async () => {
     const resolver = createGithubMembershipResolver({
-      token: 'tok',
+      token: async () => 'tok',
       fetchImpl: Object.assign(async () => Response.json([{ type: 'User' }, { type: 'Bot' }]), {
         preconnect: () => {},
       }),

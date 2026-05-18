@@ -5,7 +5,7 @@ import { createGithubHistoryCallback } from './history'
 describe('createGithubHistoryCallback', () => {
   it('fetches issue comments for a remembered workspace', async () => {
     const cb = createGithubHistoryCallback({
-      token: 'tok',
+      token: async () => 'tok',
       workspaceForChat: () => 'acme/project',
       fetchImpl: Object.assign(
         async () =>
