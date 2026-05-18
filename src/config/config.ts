@@ -216,6 +216,42 @@ export const networkSchema = z
 
 export type NetworkConfig = z.infer<typeof networkSchema>
 
+// Reverse-proxy tunnels expose a container-private port to the public internet
+// via a managed subprocess (cloudflared) or a user-supplied external URL.
+// See AGENTS.md `## Tunnels`. PR 1 ships the schema and the `external` provider
+// only; `cloudflare-quick` and `cloudflare-named` parse but fail at boot until
+// PR 2 lands them. `restart-required` because the tunnel manager reads this
+// list once at boot and spawns one subprocess per entry.
+const tunnelForSchema = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('channel'), name: z.string().min(1) }),
+  z.object({ kind: z.literal('manual') }),
+])
+
+const tunnelEntrySchema = z
+  .object({
+    name: z
+      .string()
+      .min(1)
+      .regex(/^[a-z0-9][a-z0-9-_]*$/, {
+        message: 'tunnel name must be kebab-case (matches /^[a-z0-9][a-z0-9-_]*$/)',
+      }),
+    provider: z.enum(['cloudflare-quick', 'cloudflare-named', 'external']),
+    for: tunnelForSchema,
+    externalUrl: z.string().url().optional(),
+    hostname: z.string().min(1).optional(),
+    tunnelId: z.string().min(1).optional(),
+    upstreamPort: z.number().int().min(1).max(65535).optional(),
+  })
+  .refine((v) => v.provider !== 'external' || (v.externalUrl !== undefined && v.externalUrl.trim() !== ''), {
+    message: "tunnels[].externalUrl is required when provider is 'external'",
+  })
+  .refine((v) => v.provider !== 'cloudflare-named' || (v.hostname !== undefined && v.tunnelId !== undefined), {
+    message: "tunnels[].hostname and tunnels[].tunnelId are required when provider is 'cloudflare-named'",
+  })
+  .refine((v) => v.for.kind !== 'manual' || v.upstreamPort !== undefined, {
+    message: "tunnels[].upstreamPort is required when for.kind is 'manual'",
+  })
+
 // `models` is a map from profile name to a single curated model ref. The
 // `default` profile is mandatory; every other profile is optional and falls
 // back to `default` at resolution time (see `resolveProfile`).
@@ -269,6 +305,7 @@ export const configSchema = z
     docker: dockerSchema,
     git: gitSchema,
     roles: rolesConfigSchema.optional(),
+    tunnels: z.array(tunnelEntrySchema).default([]),
   })
   .catchall(z.unknown())
 
@@ -380,6 +417,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   channels: 'applied',
   portForward: 'restart-required',
   network: 'restart-required',
+  tunnels: 'restart-required',
   'docker.file': 'restart-required',
   'git.ignore': 'restart-required',
   // Split: `match` lists are reload-safe (typeclaw role claim, hand-edits
