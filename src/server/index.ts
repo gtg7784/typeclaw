@@ -10,13 +10,22 @@ import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
 import { detectProviderError } from '@/agent/provider-error'
 import type { SessionOrigin } from '@/agent/session-origin'
 import type { ChannelRouter } from '@/channels/router'
+import { aggregateCronList, type CronListEntry, loadCron } from '@/cron'
 import type { HookBus } from '@/plugin'
 import type { BrokerWsData, ContainerBroker } from '@/portbroker'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { ClaimController, ClaimResultEvent } from '@/role-claim'
 import type { PluginRuntime, PluginRuntimeState } from '@/run/plugin-runtime'
 import type { SessionFactory } from '@/sessions'
-import type { ClientMessage, PromptDelivery, QueueStateItem, ReloadResultPayload, ServerMessage } from '@/shared'
+import type {
+  ClientMessage,
+  CronListEntryPayload,
+  CronListSourcePayload,
+  PromptDelivery,
+  QueueStateItem,
+  ReloadResultPayload,
+  ServerMessage,
+} from '@/shared'
 import type { Stream, StreamMessage, StreamMessageId, Unsubscribe } from '@/stream'
 
 export type ReloadAllFn = () => Promise<ReloadAllResult>
@@ -310,6 +319,11 @@ export function createServer({
 
           if (msg.type === 'doctor_fix') {
             await handleDoctorFix(ws, msg.requestId, msg.checkId, pluginRuntime, agentDir)
+            return
+          }
+
+          if (msg.type === 'cron_list') {
+            await handleCronList(ws, msg.requestId, pluginRuntime, agentDir)
             return
           }
 
@@ -614,6 +628,70 @@ async function handleDoctorFix(
       ? { ok: true as const, checkId, summary: outcome.summary, changedPaths: outcome.changedPaths }
       : { ok: false as const, checkId, error: outcome.error }
   send(ws, { type: 'doctor_fix_result', requestId, result })
+}
+
+async function handleCronList(
+  ws: Ws,
+  requestId: string,
+  pluginRuntime: PluginRuntime | undefined,
+  agentDir: string | undefined,
+): Promise<void> {
+  if (agentDir === undefined) {
+    send(ws, { type: 'cron_list_result', requestId, result: { ok: false, reason: 'agentDir not configured' } })
+    return
+  }
+  try {
+    // Snapshot the runtime once so subagent validation and the plugin
+    // cron-job list see the same generation, the way TUI sessions do.
+    // Without one snapshot, a reload landing mid-request can show user
+    // jobs validated against an old subagent registry alongside plugin
+    // jobs from a newer registry.
+    const snapshot = pluginRuntime?.get()
+    const loadResult = await loadCron(agentDir, {
+      // Read-only path: do not rewrite cron.json or commit the
+      // migration just because the user (or the agent) asked to see
+      // the schedule. Boot/reload still own the persistent migration.
+      persistMigrations: false,
+      ...(snapshot !== undefined ? { subagents: snapshot.subagents } : {}),
+    })
+    if (!loadResult.ok) {
+      send(ws, { type: 'cron_list_result', requestId, result: { ok: false, reason: loadResult.reason } })
+      return
+    }
+    const userJobs = loadResult.file?.jobs ?? []
+    const pluginJobs = snapshot?.registry.cronJobs ?? []
+    const nowMs = Date.now()
+    const entries = aggregateCronList({ userJobs, pluginJobs, now: nowMs })
+    send(ws, {
+      type: 'cron_list_result',
+      requestId,
+      result: { ok: true, jobs: entries.map(toPayload), nowMs },
+    })
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    send(ws, { type: 'cron_list_result', requestId, result: { ok: false, reason } })
+  }
+}
+
+function toPayload(entry: CronListEntry): CronListEntryPayload {
+  const source: CronListSourcePayload =
+    entry.source.kind === 'plugin'
+      ? { kind: 'plugin', pluginName: entry.source.pluginName, localId: entry.source.localId }
+      : { kind: 'user' }
+  return {
+    id: entry.id,
+    source,
+    kind: entry.kind,
+    schedule: entry.schedule,
+    enabled: entry.enabled,
+    nextFireMs: entry.nextFireMs,
+    ...(entry.timezone !== undefined ? { timezone: entry.timezone } : {}),
+    ...(entry.scheduledByRole !== undefined ? { scheduledByRole: entry.scheduledByRole } : {}),
+    ...(entry.scheduleError !== undefined ? { scheduleError: entry.scheduleError } : {}),
+    ...(entry.prompt !== undefined ? { prompt: entry.prompt } : {}),
+    ...(entry.subagent !== undefined ? { subagent: entry.subagent } : {}),
+    ...(entry.command !== undefined ? { command: entry.command } : {}),
+  }
 }
 
 async function handleReload(

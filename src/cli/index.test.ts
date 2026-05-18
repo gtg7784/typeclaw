@@ -70,6 +70,7 @@ describe('BUILTIN_COMMAND_NAMES exposure', () => {
     expect(BUILTIN_COMMAND_NAMES).toContain('run')
     expect(BUILTIN_COMMAND_NAMES).toContain('tui')
     expect(BUILTIN_COMMAND_NAMES).toContain('doctor')
+    expect(BUILTIN_COMMAND_NAMES).toContain('cron')
     expect(BUILTIN_COMMAND_NAMES).toContain('_hostd')
   })
 })

@@ -21,7 +21,15 @@ export {
   type CronConsumerLogger,
   type CronSession,
 } from './consumer'
-export { createScheduler, type JobDiff, type Scheduler, type SchedulerLogger } from './scheduler'
+export {
+  type ComputeNextFireResult,
+  computeNextFire,
+  createScheduler,
+  type JobDiff,
+  type Scheduler,
+  type SchedulerLogger,
+} from './scheduler'
+export { aggregateCronList, type CronListEntry, type CronListSource } from './list'
 export {
   buildCronMigrationCommitMessage,
   cronFileSchema,
@@ -41,6 +49,12 @@ export type LoadCronResult = { ok: true; file: CronFile | null } | { ok: false; 
 
 export type LoadCronOptions = {
   subagents?: SubagentRegistry
+  // When true (the default), legacy-shape migrations are written back
+  // to cron.json on disk and committed by the system-commit helper.
+  // Read-only inspection callers must pass `false` so an unaware
+  // `typeclaw cron list` against a legacy file does not produce a
+  // commit on whatever branch the user happens to be on.
+  persistMigrations?: boolean
 }
 
 export async function loadCron(agentDir: string, options: LoadCronOptions = {}): Promise<LoadCronResult> {
@@ -62,7 +76,8 @@ export async function loadCron(agentDir: string, options: LoadCronOptions = {}):
   }
 
   const migrated = migrateLegacyCronShape(parsed)
-  if (migrated.changed) {
+  const persistMigrations = options.persistMigrations ?? true
+  if (migrated.changed && persistMigrations) {
     await persistMigratedCron(path, migrated.json, agentDir, migrated.applied)
   }
 
