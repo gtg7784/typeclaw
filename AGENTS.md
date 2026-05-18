@@ -16,6 +16,41 @@ bun run format
 
 No exceptions. If any of them fail, fix the cause before committing — do not `--no-verify`, do not stage partial fixes.
 
+## Debugging the system prompt
+
+`bun run debug:prompt` dumps the fully-rendered system prompt for one or every session-origin kind (`tui`, `cron`, `channel`, `subagent`), with `<PLACEHOLDER: …>` values substituted for every dynamic field (identity, memory, job-id, channel addressing, participants, role/permissions). Use it whenever you need to see what the agent actually sees without spinning up a container, hatching an agent folder, or digging into provider logs.
+
+```sh
+bun run debug:prompt                       # all 4 origins
+bun run debug:prompt --origin cron         # just one
+bun run debug:prompt --origin channel --no-git-nudge  # omit the dirty-files block
+```
+
+Each dump is prefixed with a per-section breakdown:
+
+```
+══════════════════════════════════════════════════════════════════════════════
+  SYSTEM PROMPT — origin: cron — ~2700 tok / 10798 chars / 10860 bytes (tok est. chars/4)
+══════════════════════════════════════════════════════════════════════════════
+  Section                           Tokens  Chars  Bytes
+  ────────────────────────────────  ──────  ─────  ─────
+  DEFAULT_SYSTEM_PROMPT (base)       ~2155   8618   8668
+  Identity (IDENTITY.md + SOUL.md)     ~88    352    356
+  Runtime block                        ~13     50     50
+  Session origin                       ~85    339    341
+  Role context                        ~110    441    441
+  Git nudge                           ~118    471    475
+  Memory (MEMORY.md + streams)        ~129    515    517
+  ────────────────────────────────  ──────  ─────  ─────
+  TOTAL                              ~2700  10798  10860
+```
+
+Tokens are estimated with a `chars/4` heuristic (industry rule-of-thumb, ~15% off, model-agnostic — explicit because exact tokenization differs across Claude/GPT/Gemini). Bytes are UTF-8 wire bytes and differ from chars on multi-byte content (em-dashes, curly quotes, emoji) — useful when you care about what actually leaves the host.
+
+The script calls the same `composeSystemPrompt` helper (`src/agent/index.ts`) that `createResourceLoader` uses in production, so the section order it prints is the section order an agent actually sees. The cache-suffix contract (least-volatile first → identity → runtime → origin+role → git → memory) is enforced both by the helper and by a section-order assertion in `scripts/dump-system-prompt.test.ts` — reordering one without the other fails CI.
+
+`composeSystemPrompt` is the right entry point if you're adding a new section. Land the renderer (`renderXBlock`) in the appropriate `src/agent/*.ts` module, plumb it through `SystemPromptComposition`, decide its volatility tier (rare-change → earlier, per-turn-change → later), and `dump-system-prompt.ts` will surface it automatically once you add a fixture and a breakdown entry.
+
 ## Release
 
 Use the **Release** GitHub Actions workflow (`workflow_dispatch`, see `.github/workflows/release.yml`). It validates the input version, typechecks, lints, format-checks, runs the full test suite, bumps `package.json`, builds and pushes the multi-arch base image to `ghcr.io/typeclaw/typeclaw-base:X.Y.Z`, verifies the image is anonymously pullable on both `linux/amd64` and `linux/arm64`, publishes to npm with provenance, then commits the bump and creates a git tag + GitHub Release. Tags have no `v` prefix.
