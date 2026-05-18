@@ -1228,3 +1228,168 @@ async function appendChannelSecrets(cwd: string, channel: ChannelKind, tokens: C
   channels[channel] = slot
   backend.writeChannelsSync(channels as Channels)
 }
+
+// ----------------------------------------------------------------------------
+// `typeclaw channel set`
+//
+// Rotate credentials of an already-configured channel. Symmetric with
+// `typeclaw provider set` (see `setProvider` in src/config/providers-mutation.ts):
+// `add` is "add for the first time, refuse if already present", `set` is
+// "rotate the value, refuse if NOT yet present". Two separate verbs keep the
+// "add by mistake" footgun and the "rotate by mistake" footgun on opposite
+// sides of the CLI namespace.
+//
+// Per the env-wins / file-never-auto-mutated rule in AGENTS.md#secrets, these
+// helpers only touch the fields the user explicitly asked to rotate. Any
+// untouched field — including a sibling field bound to a custom env var —
+// keeps its existing Secret envelope verbatim.
+//
+// Kakaotalk has its own auth flow (encryption envelope + device_uuid + phone
+// passcode) and is rotated via `typeclaw channel reauth kakaotalk`, NOT via
+// these helpers. Trying to set('kakaotalk') would bypass the encryption
+// bridge and corrupt the per-account block; the CLI layer rejects it before
+// reaching here.
+
+export type SetChannelTokensResult = { ok: true } | { ok: false; reason: string }
+
+// Rotate one or more credential fields on an already-configured bot-token
+// adapter (discord-bot, slack-bot, telegram-bot). Refuses when the adapter
+// has no existing entry in secrets.json — callers must use `runAddChannel`
+// for first-time setup, so a typo in the adapter name can't silently create
+// a half-configured channel.
+export async function setChannelSecrets(
+  cwd: string,
+  channel: 'discord-bot' | 'slack-bot' | 'telegram-bot',
+  tokens: ChannelSecrets,
+): Promise<SetChannelTokensResult> {
+  if (Object.keys(tokens).length === 0) return { ok: true }
+
+  if (!existsSync(join(cwd, CONFIG_FILE))) {
+    return {
+      ok: false,
+      reason: `${CONFIG_FILE} not found at ${cwd}. Run \`typeclaw init\` before rotating channel credentials, or run this command from inside an agent folder.`,
+    }
+  }
+
+  const backend = new SecretsBackend(join(cwd, 'secrets.json'))
+  return await backend.updateChannelsAsync<SetChannelTokensResult>(async (current) => {
+    const existingSlot = current[channel]
+    if (!isObjectRecord(existingSlot)) {
+      return {
+        result: {
+          ok: false,
+          reason: `${channel} is not configured in secrets.json. Run \`typeclaw channel add ${channel}\` first.`,
+        },
+      }
+    }
+    const slot: Record<string, unknown> = { ...existingSlot }
+    for (const [k, v] of Object.entries(tokens)) {
+      slot[k] = { value: v } satisfies Secret
+    }
+    const next: Record<string, unknown> = { ...current, [channel]: slot }
+    return { result: { ok: true }, next }
+  })
+}
+
+// Discriminated union of what GitHub credentials the user wants to rotate.
+// The three secrets (PAT/private-key, webhook secret) rotate independently,
+// so the CLI lets the user pick which one(s) to touch in a single call.
+// `auth.type` must match the existing on-disk auth type — flipping between
+// PAT and App auth is a structural change, not a credential rotation, and
+// belongs in a future `channel migrate-auth` or hand-edit of secrets.json.
+export type GithubCredentialPatch = {
+  webhookSecret?: string
+  auth?: { type: 'pat'; pat: string } | { type: 'app'; privateKey: string; appId?: number; installationId?: number }
+}
+
+// Rotate one or more credential fields on an already-configured GitHub
+// channel. Like setChannelSecrets, refuses when secrets.json has no
+// existing github entry. Additionally refuses when the requested auth.type
+// doesn't match the on-disk type — see `GithubCredentialPatch` above.
+export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch): Promise<SetChannelTokensResult> {
+  if (patch.webhookSecret === undefined && patch.auth === undefined) return { ok: true }
+
+  if (!existsSync(join(cwd, CONFIG_FILE))) {
+    return {
+      ok: false,
+      reason: `${CONFIG_FILE} not found at ${cwd}. Run \`typeclaw init\` before rotating channel credentials, or run this command from inside an agent folder.`,
+    }
+  }
+
+  const backend = new SecretsBackend(join(cwd, 'secrets.json'))
+  return await backend.updateChannelsAsync<SetChannelTokensResult>(async (current) => {
+    const existing = current.github
+    if (!isObjectRecord(existing)) {
+      return {
+        result: {
+          ok: false,
+          reason: 'github is not configured in secrets.json. Run `typeclaw channel add github` first.',
+        },
+      }
+    }
+    const block: Record<string, unknown> = { ...existing }
+
+    if (patch.auth !== undefined) {
+      const existingAuth = block.auth
+      const existingAuthType = isObjectRecord(existingAuth)
+        ? typeof (existingAuth as { type?: unknown }).type === 'string'
+          ? ((existingAuth as { type: string }).type as 'pat' | 'app' | string)
+          : undefined
+        : undefined
+      if (existingAuthType !== patch.auth.type) {
+        return {
+          result: {
+            ok: false,
+            reason: `github auth type mismatch: secrets.json currently uses "${existingAuthType ?? 'unknown'}" auth, but you tried to rotate a "${patch.auth.type}" credential. Edit secrets.json by hand to migrate between PAT and App auth.`,
+          },
+        }
+      }
+      if (patch.auth.type === 'pat') {
+        block.auth = { type: 'pat', token: { value: patch.auth.pat } satisfies Secret }
+      } else {
+        const existingApp = isObjectRecord(existingAuth) ? (existingAuth as Record<string, unknown>) : {}
+        const appId = patch.auth.appId ?? (existingApp.appId as number | undefined)
+        const installationId = patch.auth.installationId ?? (existingApp.installationId as number | undefined)
+        if (typeof appId !== 'number') {
+          return {
+            result: {
+              ok: false,
+              reason:
+                'github App auth requires appId, but it is missing from secrets.json. Re-run `typeclaw channel add github` to re-establish the App auth block.',
+            },
+          }
+        }
+        block.auth = {
+          type: 'app',
+          appId,
+          privateKey: { value: patch.auth.privateKey } satisfies Secret,
+          ...(installationId !== undefined ? { installationId } : {}),
+        }
+      }
+    }
+
+    if (patch.webhookSecret !== undefined) {
+      block.webhookSecret = { value: patch.webhookSecret } satisfies Secret
+    }
+
+    const next: Record<string, unknown> = { ...current, github: block }
+    return { result: { ok: true }, next }
+  })
+}
+
+// Lightweight read-only probe used by the `channel set` CLI to drive its
+// "which secret do you want to rotate?" menu for GitHub. Returns the
+// current auth type ('pat' | 'app') so the prompt knows whether to ask for
+// a PAT or an App private key, without forcing the user to re-select auth
+// type when they're rotating a credential of the same kind.
+export function readGithubAuthType(cwd: string): 'pat' | 'app' | null {
+  const channels = new SecretsBackend(join(cwd, 'secrets.json')).tryReadChannelsSync()
+  if (channels === null) return null
+  const github = channels.github
+  if (!isObjectRecord(github)) return null
+  const auth = (github as { auth?: unknown }).auth
+  if (!isObjectRecord(auth)) return null
+  const type = (auth as { type?: unknown }).type
+  if (type === 'pat' || type === 'app') return type
+  return null
+}

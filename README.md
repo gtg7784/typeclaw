@@ -69,22 +69,23 @@ That's it. The agent is now alive, listening on a websocket, ready to receive pr
 
 ## CLI
 
-| Command                             | Purpose                                                                            |
-| ----------------------------------- | ---------------------------------------------------------------------------------- |
-| `typeclaw init`                     | Scaffold a new agent folder                                                        |
-| `typeclaw start`                    | Build and run the container                                                        |
-| `typeclaw stop`                     | Stop the container                                                                 |
-| `typeclaw restart`                  | `stop` then `start`                                                                |
-| `typeclaw status`                   | Show container + daemon registration state                                         |
-| `typeclaw logs`                     | Stream container stdout/stderr with local timestamps; `-f` to follow               |
-| `typeclaw tui`                      | Attach a terminal UI over the agent's websocket                                    |
-| `typeclaw shell`                    | Open a shell inside the running container                                          |
-| `typeclaw reload`                   | Push a live config reload to the running agent                                     |
-| `typeclaw compose`                  | Orchestrate multiple agents                                                        |
-| `typeclaw cron list`                | List every cron job registered in the running agent (user `cron.json` + plugins)   |
-| `typeclaw channel add <kind>`       | Wire a new channel adapter (Slack, Discord, Telegram, KakaoTalk)                   |
-| `typeclaw channel reauth kakaotalk` | Re-authenticate KakaoTalk after a stale-token 401 or to rotate the stored password |
-| `typeclaw tunnel ...`               | Add/list/status/remove public tunnels and inspect tunnel logs                      |
+| Command                             | Purpose                                                                             |
+| ----------------------------------- | ----------------------------------------------------------------------------------- |
+| `typeclaw init`                     | Scaffold a new agent folder                                                         |
+| `typeclaw start`                    | Build and run the container                                                         |
+| `typeclaw stop`                     | Stop the container                                                                  |
+| `typeclaw restart`                  | `stop` then `start`                                                                 |
+| `typeclaw status`                   | Show container + daemon registration state                                          |
+| `typeclaw logs`                     | Stream container stdout/stderr with local timestamps; `-f` to follow                |
+| `typeclaw tui`                      | Attach a terminal UI over the agent's websocket                                     |
+| `typeclaw shell`                    | Open a shell inside the running container                                           |
+| `typeclaw reload`                   | Push a live config reload to the running agent                                      |
+| `typeclaw compose`                  | Orchestrate multiple agents                                                         |
+| `typeclaw cron list`                | List every cron job registered in the running agent (user `cron.json` + plugins)    |
+| `typeclaw channel add <kind>`       | Wire a new channel adapter (Slack, Discord, Telegram, KakaoTalk, GitHub)            |
+| `typeclaw channel set <kind>`       | Rotate the credentials of an already-configured channel (bot/app tokens, PAT, etc.) |
+| `typeclaw channel reauth kakaotalk` | Re-authenticate KakaoTalk after a stale-token 401 or to rotate the stored password  |
+| `typeclaw tunnel ...`               | Add/list/status/remove public tunnels and inspect tunnel logs                       |
 
 ## Configuration
 

@@ -12,9 +12,13 @@ import {
   formatEagerGithubWebhookInstallResult,
   isInitialized,
   readConfiguredChannels,
+  readGithubAuthType,
   runAddChannel,
+  setChannelSecrets,
+  setGithubSecrets,
   type AddChannelStepEvent,
   type ChannelKind,
+  type GithubCredentialPatch,
   type GithubTunnelProvider,
   type KakaotalkAuthResult,
 } from '@/init'
@@ -80,11 +84,58 @@ const addSub = defineCommand({
   },
 })
 
-// Only adapters with an interactive credential flow appear here. Bot tokens
-// (Discord/Slack/Telegram) are rotated by editing secrets.json or .env
-// directly — they don't need a guided CLI flow because there's no
-// passcode-on-phone equivalent. KakaoTalk is the only adapter that does, so
-// it's the only adapter that needs `reauth`.
+// Adapters whose credentials are rotated via the generic `channel set` flow:
+// one or more named token fields, no passcode-on-phone, no encryption envelope.
+// KakaoTalk is excluded by design — it has its own `channel reauth` flow that
+// replays the full interactive login (see REAUTHABLE_ADAPTERS below). GitHub
+// is included here but routed through its own prompt path because it has
+// three independent secrets (PAT or App private key + webhook secret) and a
+// structural auth-type flip is forbidden during rotation.
+const SETTABLE_ADAPTERS = ['slack-bot', 'discord-bot', 'telegram-bot', 'github'] as const
+type SettableAdapter = (typeof SETTABLE_ADAPTERS)[number]
+
+const setSub = defineCommand({
+  meta: {
+    name: 'set',
+    description: 'rotate credentials of an already-configured channel adapter (symmetric with `typeclaw provider set`)',
+  },
+  args: {
+    adapter: {
+      type: 'positional',
+      description: `which adapter to rotate (${SETTABLE_ADAPTERS.join(' | ')}); omit to pick interactively`,
+      required: false,
+    },
+  },
+  async run({ args }) {
+    const cwd = findAgentDir(process.cwd()) ?? process.cwd()
+
+    if (!isInitialized(cwd)) {
+      console.error(errorLine('TypeClaw config file not found. Run `typeclaw init` first, or cd into an agent folder.'))
+      process.exit(1)
+    }
+
+    const configured = await readConfiguredChannels(cwd)
+
+    if (args.adapter === 'kakaotalk') {
+      console.error(
+        errorLine(
+          'KakaoTalk uses an interactive auth flow (phone passcode + device_uuid). Use `typeclaw channel reauth kakaotalk` to rotate its credentials.',
+        ),
+      )
+      process.exit(1)
+    }
+
+    const adapter =
+      args.adapter === undefined
+        ? await pickSettableAdapter(configured)
+        : validateSetAdapterArg(args.adapter, configured)
+
+    intro(`Rotating credentials for: ${CHANNEL_LABELS[adapter]}`)
+
+    await runSet(cwd, adapter)
+  },
+})
+
 const REAUTHABLE_ADAPTERS = ['kakaotalk'] as const
 type ReauthableAdapter = (typeof REAUTHABLE_ADAPTERS)[number]
 
@@ -125,6 +176,7 @@ export const channelCommand = defineCommand({
   },
   subCommands: {
     add: addSub,
+    set: setSub,
     reauth: reauthSub,
   },
 })
@@ -231,11 +283,18 @@ async function readExistingKakaotalkEmail(cwd: string): Promise<string | undefin
 // We can't reliably distinguish the last two cases from outside the container
 // without calling reload first, so the next-step hints surface both paths.
 async function maybePromptReauthRefresh(cwd: string, adapter: ReauthableAdapter): Promise<void> {
-  const label = CHANNEL_LABELS[adapter]
+  await maybePromptCredentialRefresh(cwd, CHANNEL_LABELS[adapter], 're-authenticated')
+}
+
+async function maybePromptCredentialRefresh(
+  cwd: string,
+  label: string,
+  verbPast: 're-authenticated' | 'credentials updated',
+): Promise<void> {
   const current = await status({ cwd }).catch(() => null)
   if (current === null || current.kind !== 'running') {
     done({
-      title: c.green(`${label} re-authenticated.`),
+      title: c.green(`${label} ${verbPast}.`),
       hints: [
         { label: 'Start the agent:', command: 'typeclaw start' },
         { label: 'Then check status:', command: 'typeclaw status' },
@@ -251,7 +310,7 @@ async function maybePromptReauthRefresh(cwd: string, adapter: ReauthableAdapter)
   })
   if (isCancel(restartNow) || !restartNow) {
     done({
-      title: c.green(`${label} re-authenticated.`),
+      title: c.green(`${label} ${verbPast}.`),
       hints: [
         { label: 'Try a live reload first:', command: 'typeclaw reload' },
         { label: 'If reload reports restart-required:', command: 'typeclaw restart' },
@@ -271,9 +330,7 @@ async function maybePromptReauthRefresh(cwd: string, adapter: ReauthableAdapter)
     process.exit(1)
   }
   done({
-    title: c.green(
-      `${label} re-authenticated. Restarted ${started.plan.containerName} on host port ${started.hostPort}.`,
-    ),
+    title: c.green(`${label} ${verbPast}. Restarted ${started.plan.containerName} on host port ${started.hostPort}.`),
     hints: [
       { label: 'Attach TUI:', command: 'typeclaw tui' },
       { label: 'Follow logs:', command: 'typeclaw logs -f' },
@@ -318,6 +375,192 @@ async function pickChannel(configured: Set<ChannelKind>): Promise<ChannelKind> {
     process.exit(0)
   }
   return selected
+}
+
+function isSettableAdapter(value: string): value is SettableAdapter {
+  return (SETTABLE_ADAPTERS as ReadonlyArray<string>).includes(value)
+}
+
+function validateSetAdapterArg(adapter: string, configured: Set<ChannelKind>): SettableAdapter {
+  if (!isSettableAdapter(adapter)) {
+    if (isChannelKind(adapter)) {
+      console.error(
+        errorLine(
+          `Adapter "${adapter}" does not support \`channel set\`. Use \`typeclaw channel reauth ${adapter}\` instead.`,
+        ),
+      )
+    } else {
+      console.error(errorLine(`Unknown adapter "${adapter}". Expected one of: ${SETTABLE_ADAPTERS.join(', ')}.`))
+    }
+    process.exit(1)
+  }
+  if (!configured.has(adapter)) {
+    console.error(
+      errorLine(
+        `${CHANNEL_LABELS[adapter]} ("${adapter}") is not configured in typeclaw.json. Run \`typeclaw channel add ${adapter}\` first.`,
+      ),
+    )
+    process.exit(1)
+  }
+  return adapter
+}
+
+async function pickSettableAdapter(configured: Set<ChannelKind>): Promise<SettableAdapter> {
+  const available = SETTABLE_ADAPTERS.filter((kind) => configured.has(kind))
+  if (available.length === 0) {
+    console.error(
+      errorLine(
+        'No rotatable channels are configured. Run `typeclaw channel add <adapter>` first, or use `typeclaw channel reauth kakaotalk` for KakaoTalk.',
+      ),
+    )
+    process.exit(1)
+  }
+  if (available.length === 1) return available[0]!
+
+  const selected = await select<SettableAdapter>({
+    message: 'Pick a channel to rotate credentials for',
+    options: available.map((kind) => ({ value: kind, label: CHANNEL_LABELS[kind] })),
+    initialValue: available[0],
+  })
+  if (isCancel(selected)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return selected
+}
+
+async function runSet(cwd: string, adapter: SettableAdapter): Promise<void> {
+  switch (adapter) {
+    case 'discord-bot':
+      await runSetDiscord(cwd)
+      break
+    case 'telegram-bot':
+      await runSetTelegram(cwd)
+      break
+    case 'slack-bot':
+      await runSetSlack(cwd)
+      break
+    case 'github':
+      await runSetGithub(cwd)
+      break
+  }
+}
+
+async function runSetDiscord(cwd: string): Promise<void> {
+  const token = await promptDiscordToken()
+  const result = await setChannelSecrets(cwd, 'discord-bot', { token })
+  if (!result.ok) {
+    console.error(errorLine(result.reason))
+    process.exit(1)
+  }
+  await maybePromptCredentialRefresh(cwd, CHANNEL_LABELS['discord-bot'], 'credentials updated')
+}
+
+async function runSetTelegram(cwd: string): Promise<void> {
+  const token = await promptTelegramToken()
+  const result = await setChannelSecrets(cwd, 'telegram-bot', { token })
+  if (!result.ok) {
+    console.error(errorLine(result.reason))
+    process.exit(1)
+  }
+  await maybePromptCredentialRefresh(cwd, CHANNEL_LABELS['telegram-bot'], 'credentials updated')
+}
+
+type SlackSetChoice = 'bot' | 'app' | 'both'
+
+async function runSetSlack(cwd: string): Promise<void> {
+  const choice = await select<SlackSetChoice>({
+    message: 'Which Slack token do you want to rotate?',
+    options: [
+      { value: 'bot', label: 'Bot user token (xoxb-...)' },
+      { value: 'app', label: 'App-level token (xapp-...)' },
+      { value: 'both', label: 'Both' },
+    ],
+    initialValue: 'bot',
+  })
+  if (isCancel(choice)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+
+  const tokens: Record<string, string> = {}
+  if (choice === 'bot' || choice === 'both') tokens.botToken = await promptSlackBotToken()
+  if (choice === 'app' || choice === 'both') tokens.appToken = await promptSlackAppToken()
+
+  const result = await setChannelSecrets(cwd, 'slack-bot', tokens)
+  if (!result.ok) {
+    console.error(errorLine(result.reason))
+    process.exit(1)
+  }
+  await maybePromptCredentialRefresh(cwd, CHANNEL_LABELS['slack-bot'], 'credentials updated')
+}
+
+type GithubSetChoice = 'auth' | 'webhook' | 'both'
+
+async function runSetGithub(cwd: string): Promise<void> {
+  const authType = readGithubAuthType(cwd)
+  if (authType === null) {
+    console.error(
+      errorLine(
+        'GitHub auth block is missing or malformed in secrets.json. Run `typeclaw channel add github` first, or fix the file by hand.',
+      ),
+    )
+    process.exit(1)
+  }
+  const choice = await select<GithubSetChoice>({
+    message: 'Which GitHub secret do you want to rotate?',
+    options: [
+      {
+        value: 'auth',
+        label: authType === 'pat' ? 'Personal access token (PAT)' : 'GitHub App private key',
+      },
+      { value: 'webhook', label: 'Webhook secret' },
+      { value: 'both', label: 'Both' },
+    ],
+    initialValue: 'auth',
+  })
+  if (isCancel(choice)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+
+  const patch: GithubCredentialPatch = {}
+
+  if (choice === 'auth' || choice === 'both') {
+    if (authType === 'pat') {
+      const { pat } = await promptGithubPatAuth()
+      patch.auth = { type: 'pat', pat }
+    } else {
+      const privateKeyInput = await text({
+        message: 'New GitHub App private key PEM, escaped PEM, or path to .pem file',
+        validate: (value) => (value && value.length > 0 ? undefined : 'Private key is required'),
+      })
+      if (isCancel(privateKeyInput)) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+      patch.auth = { type: 'app', privateKey: await resolvePrivateKeyInput(privateKeyInput) }
+    }
+  }
+
+  if (choice === 'webhook' || choice === 'both') {
+    const secret = await password({
+      message: 'New webhook secret (leave blank to auto-generate)',
+    })
+    if (isCancel(secret)) {
+      cancel('Aborted.')
+      process.exit(0)
+    }
+    const enteredSecret = typeof secret === 'string' ? secret : ''
+    patch.webhookSecret = enteredSecret.length > 0 ? enteredSecret : randomBytes(32).toString('hex')
+  }
+
+  const result = await setGithubSecrets(cwd, patch)
+  if (!result.ok) {
+    console.error(errorLine(result.reason))
+    process.exit(1)
+  }
+  await maybePromptCredentialRefresh(cwd, CHANNEL_LABELS.github, 'credentials updated')
 }
 
 type CollectedCredentials =
@@ -609,19 +852,7 @@ async function promptSlackTokens(): Promise<{ bot: string; app: string }> {
     ].join('\n'),
     'Get a Slack bot',
   )
-  const botToken = await password({
-    message: 'Slack bot token (xoxb-...)',
-    validate: (value) =>
-      value && value.length > 0
-        ? value.startsWith('xoxb-')
-          ? undefined
-          : 'Bot token must start with "xoxb-"'
-        : 'Token is required',
-  })
-  if (isCancel(botToken)) {
-    cancel('Aborted.')
-    process.exit(0)
-  }
+  const bot = await promptSlackBotToken()
   note(
     [
       'Slack does not accept connections:write inside the manifest, so',
@@ -635,6 +866,28 @@ async function promptSlackTokens(): Promise<{ bot: string; app: string }> {
     ].join('\n'),
     'Generate the Slack app-level token',
   )
+  const app = await promptSlackAppToken()
+  return { bot, app }
+}
+
+async function promptSlackBotToken(): Promise<string> {
+  const botToken = await password({
+    message: 'Slack bot token (xoxb-...)',
+    validate: (value) =>
+      value && value.length > 0
+        ? value.startsWith('xoxb-')
+          ? undefined
+          : 'Bot token must start with "xoxb-"'
+        : 'Token is required',
+  })
+  if (isCancel(botToken)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return botToken
+}
+
+async function promptSlackAppToken(): Promise<string> {
   const appToken = await password({
     message: 'Slack app-level token (xapp-...) — Socket Mode requires this',
     validate: (value) =>
@@ -648,7 +901,7 @@ async function promptSlackTokens(): Promise<{ bot: string; app: string }> {
     cancel('Aborted.')
     process.exit(0)
   }
-  return { bot: botToken, app: appToken }
+  return appToken
 }
 
 async function promptTelegramToken(): Promise<string> {
