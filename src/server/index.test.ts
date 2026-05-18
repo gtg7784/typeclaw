@@ -12,6 +12,7 @@ import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 import type { SessionFactory } from '@/sessions'
 import type { ServerMessage } from '@/shared'
 import { createStream } from '@/stream'
+import { expectStable, waitFor as waitForState } from '@/test-helpers/wait-for'
 
 import { createServer, type ServerLogger } from './index'
 
@@ -342,7 +343,7 @@ describe('createServer abort handling (no stream — fallback path)', () => {
     await waitFor((m) => m.type === 'connected')
 
     ws.send(JSON.stringify({ type: 'prompt', text: 'do thing' }))
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     expect(session.promptCalls).toEqual(['do thing'])
     expect(session.abortCalls).toBe(0)
 
@@ -359,7 +360,7 @@ describe('createServer abort handling (no stream — fallback path)', () => {
     await waitFor((m) => m.type === 'connected')
 
     ws.send(JSON.stringify({ type: 'abort' }))
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => session.abortCalls > 0)
     expect(session.abortCalls).toBe(1)
     ws.close()
   })
@@ -486,7 +487,7 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     // when
     ws.send(JSON.stringify({ type: 'prompt', text: 'hello' }))
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => session.promptCalls.length > 0)
     expect(session.promptCalls).toEqual(['hello'])
 
     session.resolvePrompt()
@@ -531,14 +532,15 @@ describe('createServer with stream — input queueing bugfix', () => {
     // when: fire two prompts back-to-back while the first is still in flight
     ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
     ws.send(JSON.stringify({ type: 'prompt', text: 'second' }))
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => session.promptCalls.length > 0)
+    await expectStable(() => session.promptCalls.length > 1, { durationMs: 15, description: 'second prompt' })
 
     // then: only the first reached session.prompt — the second is queued
     expect(session.promptCalls).toEqual(['first'])
 
     // when: first completes
     session.resolvePrompt()
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => session.promptCalls.length === 2)
 
     // then: second now reaches session.prompt
     expect(session.promptCalls).toEqual(['first', 'second'])
@@ -558,7 +560,13 @@ describe('createServer with stream — input queueing bugfix', () => {
     // when: send two prompts; only the first should be in flight, the second should be visible in queue_state
     ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
     ws.send(JSON.stringify({ type: 'prompt', text: 'second' }))
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => {
+      const states = received.filter(
+        (m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state',
+      )
+      const last = states[states.length - 1]
+      return last && last.pending.length > 0
+    })
 
     const queueStates = received.filter(
       (m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state',
@@ -568,7 +576,7 @@ describe('createServer with stream — input queueing bugfix', () => {
     expect(last.pending.map((p) => p.text)).toEqual(['second'])
 
     session.resolvePrompt()
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => session.promptCalls.length === 2)
     session.resolvePrompt()
     ws.close()
   })
@@ -583,7 +591,12 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
     ws.send(JSON.stringify({ type: 'prompt', text: 'second' }))
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => {
+      const last = received
+        .filter((m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state')
+        .at(-1)
+      return last && last.pending.length > 0
+    })
 
     const queueStateBefore = received
       .filter((m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state')
@@ -593,7 +606,12 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     // when: cancel the queued one
     ws.send(JSON.stringify({ type: 'queue_cancel', messageId: queuedId }))
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => {
+      const last = received
+        .filter((m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state')
+        .at(-1)
+      return last !== undefined && last.pending.length === 0
+    })
 
     // then: queue is empty
     const queueStateAfter = received
@@ -603,7 +621,7 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     // and: when first completes, second is NOT processed
     session.resolvePrompt()
-    await new Promise((r) => setTimeout(r, 30))
+    await expectStable(() => session.promptCalls.length > 1, { durationMs: 20, description: 'second prompt' })
     expect(session.promptCalls).toEqual(['first'])
 
     ws.close()
@@ -641,7 +659,7 @@ describe('createServer with stream — input queueing bugfix', () => {
       target: { kind: 'session', sessionId: 'someone-else' },
       payload: { kind: 'prompt', text: 'not for us' },
     })
-    await new Promise((r) => setTimeout(r, 20))
+    await expectStable(() => session.promptCalls.length > 0, { durationMs: 15, description: 'foreign prompt' })
 
     // then: nothing reaches this session.prompt
     expect(session.promptCalls).toEqual([])
@@ -650,7 +668,6 @@ describe('createServer with stream — input queueing bugfix', () => {
   })
 
   test('an interrupt-delivery prompt aborts the in-flight prompt before sending the new one', async () => {
-    // given
     const session = createFakeSession()
     const stream = createStream()
     const { url } = await startWithSession(session, { stream })
@@ -659,13 +676,13 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     // when: first prompt starts
     ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => session.promptCalls.length > 0)
     expect(session.promptCalls).toEqual(['first'])
     expect(session.abortCalls).toBe(0)
 
     // when: interrupt-delivery prompt arrives
     ws.send(JSON.stringify({ type: 'prompt', text: 'urgent', delivery: 'interrupt' }))
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => session.abortCalls >= 1 && session.promptCalls.includes('urgent'))
 
     // then: abort was called, then second prompt was sent
     expect(session.abortCalls).toBeGreaterThanOrEqual(1)
@@ -676,7 +693,6 @@ describe('createServer with stream — input queueing bugfix', () => {
   })
 
   test('close() unsubscribes from the stream so further publishes do not error', async () => {
-    // given
     const session = createFakeSession()
     const stream = createStream()
     const { url } = await startWithSession(session, { stream })
@@ -684,7 +700,7 @@ describe('createServer with stream — input queueing bugfix', () => {
     await waitFor((m) => m.type === 'connected')
 
     ws.close()
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => ws.readyState === WebSocket.CLOSED)
 
     // when: publish a broadcast after close
     stream.publish({ target: { kind: 'broadcast' }, payload: { kind: 'noise' } })
@@ -739,10 +755,10 @@ describe('createServer fires session.idle hook after every prompt completion', (
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
     })
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     session.resolvePrompt()
     await waitFor((m) => m.type === 'done')
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => idleEvents.length > 0)
 
     expect(idleEvents).toHaveLength(1)
     expect(idleEvents[0]?.sessionId).toBe('ses_fake')
@@ -783,10 +799,10 @@ describe('createServer fires session.idle hook after every prompt completion', (
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
     })
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     session.rejectPrompt(new Error('llm boom'))
     await waitFor((m) => m.type === 'error')
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => idleEvents.length > 0)
 
     expect(idleEvents).toHaveLength(1)
     ws.close()
@@ -807,7 +823,7 @@ describe('createServer fires session.idle hook after every prompt completion', (
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
     })
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     session.resolvePrompt()
     const done = await waitFor((m) => m.type === 'done')
 
@@ -847,7 +863,7 @@ describe('createServer surfaces LLM errors to logger', () => {
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
     })
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     session.rejectPrompt(new Error('llm boom'))
     const errFrame = await waitFor((m) => m.type === 'error')
 
@@ -869,7 +885,7 @@ describe('createServer surfaces LLM errors to logger', () => {
     if (opened.type !== 'connected') throw new Error('unreachable')
 
     ws.send(JSON.stringify({ type: 'prompt', text: 'hello' }))
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     session.rejectPrompt(new Error('fallback boom'))
     const errFrame = await waitFor((m) => m.type === 'error')
 
@@ -916,7 +932,7 @@ describe('createServer surfaces LLM errors to logger', () => {
       message: { role: 'assistant', stopReason: 'aborted' },
     } as unknown as Parameters<typeof session.emit>[0])
 
-    await new Promise((r) => setTimeout(r, 20))
+    await expectStable(() => errors.length > 0, { durationMs: 15, description: 'aborted-error log' })
     expect(errors).toEqual([])
     ws.close()
   })
@@ -984,10 +1000,10 @@ describe('createServer plugin hooks', () => {
     await waitFor((m) => m.type === 'connected')
 
     ws.close()
-    await new Promise((r) => setTimeout(r, 30))
+    await expectStable(() => ended, { durationMs: 20, description: 'session.end resolved early' })
     expect(ended).toBe(false)
     endResolve.fn?.()
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => ended)
     expect(ended).toBe(true)
   })
 })
@@ -1000,7 +1016,7 @@ describe('createServer session lifecycle', () => {
     await waitFor((m) => m.type === 'connected')
 
     ws.close()
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => session.disposeCalls > 0)
 
     expect(session.disposeCalls).toBe(1)
   })
