@@ -3,6 +3,7 @@ import { z } from 'zod'
 
 import type { SubagentRegistry } from '@/agent/subagents'
 import { validateSubagentPayload } from '@/agent/subagents'
+import type { CronHandlerContext } from '@/plugin/types'
 
 const idPattern = /^[a-zA-Z0-9_-]+$/
 
@@ -42,9 +43,16 @@ export const cronFileSchema = z.object({
   jobs: z.array(cronJobSchema).default([]),
 })
 
-export type CronJob = z.infer<typeof cronJobSchema>
-export type PromptJob = Extract<CronJob, { kind: 'prompt' }>
-export type ExecJob = Extract<CronJob, { kind: 'exec' }>
+export type ParsedCronJob = z.infer<typeof cronJobSchema>
+export type PromptJob = Extract<ParsedCronJob, { kind: 'prompt' }>
+export type ExecJob = Extract<ParsedCronJob, { kind: 'exec' }>
+
+export type HandlerJob = z.infer<typeof baseJob> & {
+  kind: 'handler'
+  handler: (ctx: CronHandlerContext) => Promise<void>
+}
+
+export type CronJob = ParsedCronJob | HandlerJob
 export type CronFile = z.infer<typeof cronFileSchema>
 
 export type ParseCronResult = { ok: true; file: CronFile } | { ok: false; reason: string }

@@ -242,12 +242,23 @@ function toCronJob(globalId: string, spec: PluginCronJob): CronJob {
     }
     return job
   }
+  if (spec.kind === 'exec') {
+    return {
+      id: globalId,
+      schedule: spec.schedule,
+      enabled: spec.enabled ?? true,
+      kind: 'exec',
+      command: spec.command,
+      scheduledByRole,
+      ...(spec.timezone !== undefined ? { timezone: spec.timezone } : {}),
+    }
+  }
   return {
     id: globalId,
     schedule: spec.schedule,
     enabled: spec.enabled ?? true,
-    kind: 'exec',
-    command: spec.command,
+    kind: 'handler',
+    handler: spec.handler,
     scheduledByRole,
     ...(spec.timezone !== undefined ? { timezone: spec.timezone } : {}),
   }

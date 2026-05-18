@@ -579,4 +579,140 @@ describe('createCronConsumer', () => {
 
     consumer.stop()
   })
+
+  test('dispatches a handler job through invokeHandler', async () => {
+    // given
+    const stream = createStream()
+    const seen: string[] = []
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: async () => ({ prompt: async () => {} }),
+      invokeHandler: async (job) => {
+        seen.push(job.id)
+      },
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    // when
+    const handlerJob: CronJob = {
+      id: 'inbox-watch',
+      schedule: '* * * * *',
+      enabled: true,
+      kind: 'handler',
+      handler: async () => {},
+      scheduledByRole: 'owner',
+    }
+    publishCron(stream, handlerJob)
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(seen).toEqual(['inbox-watch'])
+
+    consumer.stop()
+  })
+
+  test('handler job errors are caught and logged, not propagated', async () => {
+    // given
+    const stream = createStream()
+    const errors: string[] = []
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: async () => ({ prompt: async () => {} }),
+      invokeHandler: async () => {
+        throw new Error('handler exploded')
+      },
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    consumer.start()
+
+    // when
+    const handlerJob: CronJob = {
+      id: 'broken',
+      schedule: '* * * * *',
+      enabled: true,
+      kind: 'handler',
+      handler: async () => {
+        throw new Error('handler exploded')
+      },
+      scheduledByRole: 'owner',
+    }
+    publishCron(stream, handlerJob)
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(errors).toEqual([expect.stringContaining('broken failed: handler exploded')])
+
+    consumer.stop()
+  })
+
+  test('handler job dispatched without invokeHandler logs a precise error', async () => {
+    // given
+    const stream = createStream()
+    const errors: string[] = []
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: async () => ({ prompt: async () => {} }),
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    consumer.start()
+
+    // when
+    const handlerJob: CronJob = {
+      id: 'orphan',
+      schedule: '* * * * *',
+      enabled: true,
+      kind: 'handler',
+      handler: async () => {},
+      scheduledByRole: 'owner',
+    }
+    publishCron(stream, handlerJob)
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(errors).toEqual([expect.stringContaining('no invokeHandler wired')])
+
+    consumer.stop()
+  })
+
+  test('handler jobs respect in-flight coalescing keyed by jobId', async () => {
+    // given
+    const stream = createStream()
+    const warns: string[] = []
+    const resolvers: (() => void)[] = []
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: async () => ({ prompt: async () => {} }),
+      invokeHandler: async () =>
+        new Promise<void>((resolve) => {
+          resolvers.push(resolve)
+        }),
+      logger: { ...silentLogger, warn: (m) => warns.push(m) },
+    })
+    consumer.start()
+
+    // when - first publish blocks; second arrives before first resolves
+    const handlerJob: CronJob = {
+      id: 'busy',
+      schedule: '* * * * *',
+      enabled: true,
+      kind: 'handler',
+      handler: async () => {},
+      scheduledByRole: 'owner',
+    }
+    publishCron(stream, handlerJob)
+    await new Promise((r) => setImmediate(r))
+    publishCron(stream, handlerJob)
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(warns).toEqual([expect.stringContaining('busy: previous run still in progress, skipping')])
+
+    for (const r of resolvers) r()
+    consumer.stop()
+  })
 })

@@ -177,7 +177,8 @@ function jobFingerprint(job: CronJob): string {
 
 function jobPayload(job: CronJob): unknown {
   if (job.kind === 'prompt') return { prompt: job.prompt, subagent: job.subagent ?? null, payload: job.payload ?? null }
-  return job.command
+  if (job.kind === 'exec') return job.command
+  return { handler: '<function>' }
 }
 
 type ComputeNextFireResult = { ok: true; nextFire: number } | { ok: false; reason: string }

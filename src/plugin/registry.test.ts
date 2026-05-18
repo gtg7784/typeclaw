@@ -106,6 +106,24 @@ describe('registerContributions', () => {
     expect(buildPluginCronGlobalId('standup-log', 'weekly-digest')).toBe('__plugin_standup-log_weekly-digest')
   })
 
+  test('handler cron job is transformed to a HandlerJob carrying the function reference', () => {
+    const handler = async () => {}
+    const opts = makeOptions('inbox-watch', {
+      cronJobs: {
+        watch: { schedule: '*/15 * * * *', kind: 'handler', handler },
+      },
+    })
+    registerContributions(opts)
+
+    const job = opts.registry.cronJobs[0]?.job
+    expect(opts.registry.cronJobs[0]?.globalId).toBe('__plugin_inbox-watch_watch')
+    expect(job?.kind).toBe('handler')
+    if (job?.kind === 'handler') {
+      expect(job.handler).toBe(handler)
+      expect(job.scheduledByRole).toBe('owner')
+    }
+  })
+
   test('records plugin commands declared on DefinedPlugin', () => {
     const cmd = defineCommand({
       surface: 'host',
