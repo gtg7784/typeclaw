@@ -8,7 +8,7 @@ export type SessionMetaPayload = {
 
 export type MinimalSessionOrigin =
   | { kind: 'tui' }
-  | { kind: 'cron'; jobId: string; jobKind: 'prompt' | 'exec' | 'subagent' }
+  | { kind: 'cron'; jobId: string; jobKind: 'prompt' | 'exec' | 'subagent' | 'handler' }
   | { kind: 'channel'; adapter: string; workspace: string; chat: string; thread: string | null }
   | { kind: 'subagent'; subagent: string; parentSessionId: string }
 

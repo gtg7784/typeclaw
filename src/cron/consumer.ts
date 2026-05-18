@@ -4,7 +4,9 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
-import type { CronJob, ExecJob, PromptJob } from './schema'
+import type { CronJob, ExecJob, HandlerJob, PromptJob } from './schema'
+
+export type CronHandlerInvoker = (job: HandlerJob) => Promise<void>
 
 // `hooks`, `sessionId`, `agentDir`, and `getTranscriptPath` are optional so
 // test fakes can stay one-liners. When present, the consumer fires
@@ -40,6 +42,13 @@ export type CreateCronConsumerOptions = {
   stream: Stream
   cwd: string
   createSessionForCron: (job: PromptJob) => Promise<CronSession>
+  // Builds the `CronHandlerContext` for the job and awaits its `handler`.
+  // Wired by `src/run/index.ts` to reuse `runPromptForCommand` /
+  // `runExecForCommand` from the command runner so plugin cron handlers and
+  // container plugin commands share one implementation of `ctx.prompt` /
+  // `ctx.exec`. Optional so unit-test fakes that never schedule handler jobs
+  // stay one-liners.
+  invokeHandler?: CronHandlerInvoker
   logger?: CronConsumerLogger
 }
 
@@ -59,6 +68,7 @@ export function createCronConsumer({
   stream,
   cwd,
   createSessionForCron,
+  invokeHandler,
   logger = consoleLogger,
 }: CreateCronConsumerOptions): CronConsumer {
   const inFlight = new Set<string>()
@@ -81,8 +91,15 @@ export function createCronConsumer({
         try {
           if (job.kind === 'prompt') {
             await runPrompt(job, createSessionForCron, stream, logger)
-          } else {
+          } else if (job.kind === 'exec') {
             await runExec(job, cwd)
+          } else {
+            if (invokeHandler === undefined) {
+              throw new Error(
+                `handler job dispatched but no invokeHandler wired into the consumer (likely a misconfigured test or boot path)`,
+              )
+            }
+            await invokeHandler(job)
           }
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err)
@@ -180,7 +197,29 @@ async function runPrompt(
 async function runExec(job: ExecJob, cwd: string): Promise<void> {
   const [cmd, ...args] = job.command
   if (!cmd) throw new Error(`exec job ${job.id}: empty command`)
-  const proc = Bun.spawn({ cmd: [cmd, ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  // Inject TYPECLAW_PARENT_ORIGIN_JSON so a child that proxies into the
+  // agent (typically a `typeclaw <container-cmd>` invocation through the
+  // host CLI's container-command-client) can stamp its session's
+  // spawnedByOrigin with the cron job's provenance. Without this the
+  // proxy would default to a synthetic owner origin and silently elevate
+  // a guest- or member-scheduled cron job to owner.
+  const parentOrigin = {
+    kind: 'cron',
+    jobId: job.id,
+    jobKind: 'exec',
+    ...(job.scheduledByRole !== undefined ? { scheduledByRole: job.scheduledByRole } : {}),
+    ...(job.scheduledByOrigin !== undefined ? { scheduledByOrigin: job.scheduledByOrigin } : {}),
+  }
+  const proc = Bun.spawn({
+    cmd: [cmd, ...args],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: {
+      ...process.env,
+      TYPECLAW_PARENT_ORIGIN_JSON: JSON.stringify(parentOrigin),
+    },
+  })
   const code = await proc.exited
   if (code !== 0) {
     const stderr = await new Response(proc.stderr).text()
@@ -190,7 +229,8 @@ async function runExec(job: ExecJob, cwd: string): Promise<void> {
 
 function isCronJob(value: unknown): value is CronJob {
   if (typeof value !== 'object' || value === null) return false
-  const v = value as { id?: unknown; kind?: unknown }
+  const v = value as { id?: unknown; kind?: unknown; handler?: unknown }
   if (typeof v.id !== 'string') return false
-  return v.kind === 'prompt' || v.kind === 'exec'
+  if (v.kind === 'prompt' || v.kind === 'exec') return true
+  return v.kind === 'handler' && typeof v.handler === 'function'
 }

@@ -98,6 +98,14 @@ const execJob = (id: string, schedule: string, overrides: ExecOverrides = {}): C
   ...(overrides.timezone !== undefined && { timezone: overrides.timezone }),
 })
 
+const handlerJob = (id: string, schedule: string, handler: () => Promise<void>, enabled = true): CronJob => ({
+  id,
+  schedule,
+  kind: 'handler',
+  handler,
+  enabled,
+})
+
 describe('createScheduler', () => {
   test('fires a prompt job at its scheduled time', async () => {
     const clock = createFakeClock(new Date('2026-01-01T00:00:00Z').getTime())
@@ -641,6 +649,60 @@ describe('schedule failure surfacing', () => {
     scheduler.replaceJobs([promptJob('broken', 'not a real schedule')])
 
     expect(logger.warns.length).toBe(warnsAfterStart)
+
+    scheduler.stop()
+  })
+
+  test('replaceJobs reclassifies a handler job as updated when the function reference changes', () => {
+    // given
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    let calls = 0
+    const initialHandler = async (): Promise<void> => {
+      calls += 1
+    }
+    const scheduler = createScheduler({
+      jobs: [handlerJob('watch', '*/5 * * * *', initialHandler)],
+      onFire: recorder.onFire,
+      clock,
+      logger: silentLogger,
+    })
+    scheduler.start()
+
+    // when a plugin reload replaces the handler with a different function body
+    const replacementHandler = async (): Promise<void> => {
+      calls += 2
+    }
+    const diff = scheduler.replaceJobs([handlerJob('watch', '*/5 * * * *', replacementHandler)])
+
+    // then: classified as updated, not unchanged. Otherwise replaceJobs would
+    // keep the old timer pointing at initialHandler and replacementHandler
+    // would never fire.
+    expect(diff.updated.map((j) => j.id)).toEqual(['watch'])
+    expect(diff.unchanged).toHaveLength(0)
+
+    scheduler.stop()
+  })
+
+  test('replaceJobs classifies a handler job as unchanged when the function reference is the same', () => {
+    // given
+    const clock = createFakeClock()
+    const recorder = createFireRecorder()
+    const handler = async (): Promise<void> => {}
+    const scheduler = createScheduler({
+      jobs: [handlerJob('watch', '*/5 * * * *', handler)],
+      onFire: recorder.onFire,
+      clock,
+      logger: silentLogger,
+    })
+    scheduler.start()
+
+    // when replaceJobs runs with the SAME handler reference
+    const diff = scheduler.replaceJobs([handlerJob('watch', '*/5 * * * *', handler)])
+
+    // then
+    expect(diff.unchanged.map((j) => j.id)).toEqual(['watch'])
+    expect(diff.updated).toHaveLength(0)
 
     scheduler.stop()
   })

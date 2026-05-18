@@ -16,6 +16,7 @@ import type { BrokerWsData, ContainerBroker } from '@/portbroker'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { ClaimController, ClaimResultEvent } from '@/role-claim'
 import type { PluginRuntime, PluginRuntimeState } from '@/run/plugin-runtime'
+import type { CommandOutbound, CommandRunner } from '@/server/command-runner'
 import type { SessionFactory } from '@/sessions'
 import type {
   ClientMessage,
@@ -65,6 +66,14 @@ export type ServerOptions = {
   // `claim_started` / `claim_completed` / `claim_error` back over the
   // same connection. Omitted in tests that don't exercise the flow.
   claimController?: ClaimController
+  // Optional command runner factory. The server invokes this once at start
+  // with an `outbound` callback wired to send `command_stdout` / `command_stderr`
+  // / `command_exit` / `command_error` frames back to the originating WS for
+  // a given callId. The server owns the callId→ws map; the runner is
+  // transport-agnostic. Omitted in tests that don't exercise plugin commands;
+  // without it the four `exec_command`-family messages are answered with
+  // `command_error` so the host CLI sees a clean failure.
+  commandRunnerFactory?: (outbound: CommandOutbound) => CommandRunner
 }
 
 const consoleLogger: ServerLogger = {
@@ -76,8 +85,15 @@ const consoleLogger: ServerLogger = {
 export type Server = ReturnType<typeof createServer>
 
 type TuiWsData = { kind: 'tui'; sessionId: string }
-type WsData = TuiWsData | BrokerWsData
+// Command-class connections skip TUI session bootstrap. Used by the host
+// CLI's container-command-client. Authenticated with the same TUI token
+// because both surfaces are owner-equivalent (a process that holds the
+// TUI token can already do anything the TUI can).
+type CommandWsData = { kind: 'command' }
+type WsData = TuiWsData | CommandWsData | BrokerWsData
 type Ws = ServerWebSocket<TuiWsData>
+type CommandWs = ServerWebSocket<CommandWsData>
+type AnyOwnerWs = Ws | CommandWs
 
 type QueuedPrompt = {
   streamMessageId: StreamMessageId
@@ -104,8 +120,26 @@ type SessionState = {
   dispose: () => Promise<void>
 }
 
-function send(ws: Ws, msg: ServerMessage) {
-  ws.send(JSON.stringify(msg))
+// Swallows the Bun-thrown error when a command's async cleanup emits a
+// final frame after its ws has begun closing. Returns false on failure so
+// callers can debounce subsequent sends for the same callId.
+export function safeWsSend(ws: { send: (data: string) => void }, msg: ServerMessage): boolean {
+  try {
+    ws.send(JSON.stringify(msg))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function send(ws: Ws, msg: ServerMessage): boolean {
+  return safeWsSend(ws, msg)
+}
+
+function encodeBase64(bytes: Uint8Array): string {
+  let s = ''
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i] ?? 0)
+  return btoa(s)
 }
 
 export function createServer({
@@ -124,8 +158,104 @@ export function createServer({
   containerBroker,
   logger = consoleLogger,
   claimController,
+  commandRunnerFactory,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
+  const callIdToWs = new Map<string, AnyOwnerWs>()
+  const commandRunner: CommandRunner | undefined = commandRunnerFactory
+    ? commandRunnerFactory({
+        stdout(callId, chunk) {
+          const ws = callIdToWs.get(callId)
+          if (ws) safeWsSend(ws, { type: 'command_stdout', callId, chunk: encodeBase64(chunk) })
+        },
+        stderr(callId, chunk) {
+          const ws = callIdToWs.get(callId)
+          if (ws) safeWsSend(ws, { type: 'command_stderr', callId, chunk: encodeBase64(chunk) })
+        },
+        exit(callId, code) {
+          const ws = callIdToWs.get(callId)
+          callIdToWs.delete(callId)
+          if (ws) safeWsSend(ws, { type: 'command_exit', callId, code })
+        },
+        error(callId, message) {
+          const ws = callIdToWs.get(callId)
+          if (ws) safeWsSend(ws, { type: 'command_error', callId, message })
+        },
+      })
+    : undefined
+
+  // Shared command-frame dispatcher: both TUI-class and command-class
+  // connections route through here. Non-command ClientMessage types are
+  // silently dropped so command-class connections (which only ever speak
+  // exec_command/command_stdin/command_stdin_end/command_abort) can reuse
+  // the same handler as the TUI without spreading switch logic.
+  function handleCommandFrame(ws: AnyOwnerWs, msg: ClientMessage): void {
+    if (msg.type === 'exec_command') {
+      if (!commandRunner) {
+        safeWsSend(ws, {
+          type: 'command_error',
+          callId: msg.callId,
+          message: 'plugin commands are not enabled on this agent',
+        })
+        safeWsSend(ws, { type: 'command_exit', callId: msg.callId, code: 1 })
+        return
+      }
+      // Guard at the WS layer BEFORE registering the callId→ws mapping:
+      // if another connection (or this one) is already running a command
+      // with this callId, refuse the replay. Without this check, a stale
+      // or malicious client could overwrite the mapping and steal the
+      // original command's output frames.
+      if (callIdToWs.has(msg.callId)) {
+        safeWsSend(ws, {
+          type: 'command_error',
+          callId: msg.callId,
+          message: `callId "${msg.callId}" is already in flight`,
+        })
+        safeWsSend(ws, { type: 'command_exit', callId: msg.callId, code: 1 })
+        return
+      }
+      // Parse the optional parent-origin JSON: invalid JSON falls back to
+      // the synthetic owner origin rather than rejecting the command, so a
+      // malformed env var on the caller's side doesn't break the whole
+      // dispatch. The runner uses the parsed value as spawnedByOrigin
+      // verbatim — the trust boundary is the WS auth token, not JSON shape.
+      let parentOrigin: SessionOrigin | undefined
+      if (msg.parentOriginJson !== undefined) {
+        try {
+          parentOrigin = JSON.parse(msg.parentOriginJson) as SessionOrigin
+        } catch {
+          parentOrigin = undefined
+        }
+      }
+      callIdToWs.set(msg.callId, ws)
+      commandRunner.start(
+        {
+          callId: msg.callId,
+          name: msg.name,
+          args: msg.args,
+          ...(msg.isolated !== undefined ? { isolated: msg.isolated } : {}),
+          ...(parentOrigin !== undefined ? { parentOrigin } : {}),
+        },
+        ws,
+      )
+      return
+    }
+    if (msg.type === 'command_stdin') {
+      if (!commandRunner) return
+      commandRunner.feedStdin(msg.callId, msg.chunk)
+      return
+    }
+    if (msg.type === 'command_stdin_end') {
+      if (!commandRunner) return
+      commandRunner.endStdin(msg.callId)
+      return
+    }
+    if (msg.type === 'command_abort') {
+      if (!commandRunner) return
+      commandRunner.abort(msg.callId, msg.reason)
+      return
+    }
+  }
 
   function start(): BunServer<WsData> {
     const bunServer = Bun.serve<WsData>({
@@ -135,6 +265,22 @@ export function createServer({
         if (url.pathname === '/portbroker') {
           if (!containerBroker) return new Response('portbroker disabled', { status: 404 })
           const data: BrokerWsData = { kind: 'portbroker', authed: false }
+          if (server.upgrade(req, { data })) return
+          return new Response('upgrade failed', { status: 400 })
+        }
+        // `/commands` is the dedicated host-CLI proxy path. It skips TUI
+        // session creation (which costs an AgentSession spawn per command
+        // invocation) but uses the same tuiToken because both surfaces
+        // are owner-equivalent.
+        // `/commands` is the dedicated host-CLI proxy path. It skips TUI
+        // session creation (which costs an AgentSession spawn per command
+        // invocation) but uses the same tuiToken because both surfaces
+        // are owner-equivalent.
+        if (url.pathname === '/commands') {
+          if (isWebSocketUpgrade(req) && tuiToken !== undefined && url.searchParams.get('token') !== tuiToken) {
+            return new Response('unauthorized', { status: 401 })
+          }
+          const data: CommandWsData = { kind: 'command' }
           if (server.upgrade(req, { data })) return
           return new Response('upgrade failed', { status: 400 })
         }
@@ -150,6 +296,14 @@ export function createServer({
         async open(rawWs) {
           if (rawWs.data.kind === 'portbroker') {
             containerBroker?.open(rawWs as ServerWebSocket<BrokerWsData>)
+            return
+          }
+          if (rawWs.data.kind === 'command') {
+            // Command-class connections are pure transport for plugin-command
+            // dispatch. No AgentSession is created, no plugin lifecycle hooks
+            // fire, no `connected` frame is sent. The host CLI proxy sends
+            // exec_command immediately on open and tears the socket down
+            // when command_exit arrives.
             return
           }
           const ws = rawWs as Ws
@@ -234,6 +388,18 @@ export function createServer({
         async message(rawWs, raw) {
           if (rawWs.data.kind === 'portbroker') {
             await containerBroker?.message(rawWs as ServerWebSocket<BrokerWsData>, raw as string | Buffer)
+            return
+          }
+          // Command-class connections accept ONLY the four exec_command-
+          // family frames. Anything else (prompt, reload, claim_*, etc.) is
+          // silently dropped because there's no AgentSession or claim
+          // controller attached to this kind of connection. Routing through
+          // safeWsSend + the callIdToWs map keeps the outbound path
+          // transport-agnostic.
+          if (rawWs.data.kind === 'command') {
+            const cws = rawWs as CommandWs
+            const msg = JSON.parse(String(raw)) as ClientMessage
+            handleCommandFrame(cws, msg)
             return
           }
           const ws = rawWs as Ws
@@ -384,10 +550,24 @@ export function createServer({
             }
             return
           }
+
+          handleCommandFrame(ws, msg)
         },
         async close(rawWs) {
           if (rawWs.data.kind === 'portbroker') {
             containerBroker?.close(rawWs as ServerWebSocket<BrokerWsData>)
+            return
+          }
+          if (rawWs.data.kind === 'command') {
+            // Command-class connections have no AgentSession, no claim
+            // state, and no broadcast subscriptions to tear down. Just
+            // abort in-flight commands tied to this ws and purge the
+            // callId→ws mapping so late frames don't try to route here.
+            const cws = rawWs as CommandWs
+            commandRunner?.abortForOwner(cws)
+            for (const [callId, owner] of callIdToWs) {
+              if (owner === cws) callIdToWs.delete(callId)
+            }
             return
           }
           const ws = rawWs as Ws
@@ -397,6 +577,10 @@ export function createServer({
           state?.unsubClaim?.()
           if (state?.activeClaimCode !== null && state?.activeClaimCode !== undefined && claimController) {
             claimController.cancelClaim(state.activeClaimCode)
+          }
+          commandRunner?.abortForOwner(ws)
+          for (const [callId, owner] of callIdToWs) {
+            if (owner === ws) callIdToWs.delete(callId)
           }
           try {
             if (state && state.runtimeSnapshot !== null) {

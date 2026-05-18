@@ -1,4 +1,5 @@
-import { runHostCommand } from './host-command-runner'
+import { proxyContainerCommand } from './container-command-client'
+import { parseArgs, runHostCommand } from './host-command-runner'
 import { renderCommandHelp } from './plugin-command-help'
 import { discoverCommands } from './plugin-commands'
 
@@ -49,11 +50,23 @@ export async function dispatchPluginCommand(opts: DispatchOptions): Promise<Plug
   }
 
   if (match.command.surface === 'container') {
-    return {
-      kind: 'error',
-      exitCode: 1,
-      message: `command "${opts.name}" requires the agent container (surface: 'container'); the container-side dispatcher is not yet implemented in this build`,
+    const parsed = parseArgs(match.command, opts.rawArgs)
+    if (!parsed.ok) {
+      return { kind: 'error', exitCode: 2, message: parsed.message }
     }
+    const containerResult = await proxyContainerCommand({
+      agentDir: discovery.agentDir,
+      commandName: match.commandName,
+      args: parsed.value,
+      stdin,
+      stdout,
+      stderr,
+      abortSignal: signal,
+    })
+    if (!containerResult.ok) {
+      return { kind: 'error', exitCode: containerResult.exitCode, message: containerResult.message }
+    }
+    return { kind: 'dispatched', exitCode: containerResult.exitCode }
   }
 
   const result = await runHostCommand({

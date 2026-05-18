@@ -65,9 +65,216 @@ What this means for how you write prompts:
 
 The runtime spawns the command directly with `Bun.spawn` from the agent folder (`/agent` inside the container). No agent session is created. No LLM call happens. The command's exit code and stderr are captured to container logs.
 
-Use `exec` only for jobs that are pure mechanics — no judgement required. Examples that fit: git snapshots, log rotation, calling a script that already exists. Examples that **don't** fit: anything where "what do I commit" or "what should I write" depends on context. Use `prompt` for those.
+Use `exec` only for jobs that are pure mechanics — no judgement required. Examples that fit: git snapshots, log rotation, calling a script that already exists. Examples that **don't** fit: anything where "what do I commit" or "what should I write" depends on context. Use `prompt` for those — **or**, when the work needs imperative control flow that mixes shell calls and LLM calls (probe → maybe prompt → write file) and both the cadence and the logic belong to the same plugin, write a `kind: 'handler'` plugin cron job (see below). That's the best practice for the `exec → LLM` pattern; a cron `exec` pointing at `typeclaw <plugin-cmd>` is a narrower fallback for reusable / host-surface cases.
 
 `command` is an array. Index 0 is the executable, the rest are argv. Do **not** put a single shell pipeline in `command[0]` — that won't be parsed by a shell. If you need shell features (`|`, `>`, `&&`), wrap explicitly: `["sh", "-c", "your | pipeline | here"]`.
+
+## `exec → LLM`: write a plugin cron handler (best practice)
+
+If a scheduled job needs imperative control flow that mixes shell calls and LLM calls (probe → maybe prompt → write file), the best practice is a **plugin cron handler**: a TypeScript function the plugin registers under its own `cronJobs` with `kind: 'handler'`. The cron consumer invokes it directly — no shell-out, no WS round-trip, no `Bun.spawn`. Prefer this whenever the cadence and the logic both belong to the same plugin (which is almost always — see "When to reach for the exec bridge instead" below for the two narrow exceptions).
+
+`cron.json` itself supports only `prompt` and `exec` — `kind: 'handler'` is plugin-only because the handler is a TypeScript function reference (not JSON-serializable). User-authored cron files that try to declare `kind: 'handler'` are rejected by `parseCronFile`.
+
+```ts
+// packages/dev-audits/index.ts
+import { definePlugin } from 'typeclaw/plugin'
+
+export default definePlugin({
+  plugin: async () => ({
+    cronJobs: {
+      daily: {
+        schedule: '0 22 * * *',
+        timezone: 'Asia/Seoul',
+        kind: 'handler',
+        handler: async (ctx) => {
+          const { stdout } = await ctx.exec`git log --since='24h' --pretty=format:'%h %s'`
+          if (stdout.trim().length === 0) return
+          await ctx.prompt(
+            `These commits landed in the last 24h:\n${stdout}\nAppend a critique of weak commit messages to memory/audits/$(date +%F)-commits.md. Be specific — quote bad messages and suggest rewrites.`,
+          )
+        },
+      },
+    },
+  }),
+})
+```
+
+`typeclaw.json`:
+
+```json
+{
+  "plugins": ["./packages/dev-audits"]
+}
+```
+
+That's the whole installation. No `cron.json` edit, no CLI command shim. `typeclaw restart` and the job is live.
+
+### The `CronHandlerContext` surface
+
+The handler receives a `ctx` with the LLM-call surface of a container plugin command, minus the CLI-shaped fields:
+
+| Field             | Type                                                          | Notes                                                                                                                                                                                                                                                                                          |
+| ----------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ctx.jobId`       | `string`                                                      | The global cron id (`__plugin_<plugin-name>_<key>`). Useful for log lines.                                                                                                                                                                                                                     |
+| `ctx.name`        | `string`                                                      | The plugin name that registered this cron job. Mirrors `ContainerCommandContext.name`.                                                                                                                                                                                                         |
+| `ctx.agentDir`    | `string`                                                      | `/agent` in the container.                                                                                                                                                                                                                                                                     |
+| `ctx.logger`      | `PluginLogger`                                                | Plugin-prefixed `info` / `warn` / `error` going to container stdout.                                                                                                                                                                                                                           |
+| `ctx.signal`      | `AbortSignal`                                                 | Reserved for future cancellation; currently never aborted by the runtime (matches existing prompt/exec cron behavior — in-flight work runs to completion on container shutdown). Already threaded into `ctx.prompt` and `ctx.exec`, so future aborts propagate without handler-author changes. |
+| `ctx.permissions` | `PermissionService`                                           | Same service the rest of the runtime uses. Most handlers don't need it; the LLM session resolves permissions through `ctx.origin` automatically.                                                                                                                                               |
+| `ctx.origin`      | `SessionOrigin` (cron-shaped)                                 | `{ kind: 'cron', jobId, jobKind: 'handler', scheduledByRole, scheduledByOrigin }`. Plugin-contributed jobs default to `scheduledByRole: 'owner'`.                                                                                                                                              |
+| `ctx.prompt`      | `(text: string) => Promise<string>`                           | Opens a brand-new agent session with the full toolset, sends `text`, returns the final assistant message. Uses **slim system prompt mode** (saves ~2000 tokens per LLM call vs a TUI session).                                                                                                 |
+| `ctx.subagent`    | `(name: string, payload?) => Promise<void>`                   | Invokes a registered subagent. Same dispatch path as `PluginContext.spawnSubagent`.                                                                                                                                                                                                            |
+| `ctx.exec`        | `` ctx.exec`shell pipeline` `` → `Promise<CommandExecResult>` | Tagged template; runs in the agent folder with `ctx.signal` threaded through. Abort kills the entire process group (SIGTERM → 5s grace → SIGKILL).                                                                                                                                             |
+
+What's NOT on the handler ctx (and why):
+
+- **`stdin` / `stdout` / `stderr`** — cron has no caller piping bytes in or reading bytes out. Use `ctx.logger` or write files for output.
+- **`args`** — handlers are scheduled, not invoked with flags. Configurable values come through the plugin's `configSchema`.
+- **Return value** — the function returns `Promise<void>`. Throw to signal failure; the cron consumer catches and logs. (Note: do NOT write `return 0` — handler return is `void`, not a numeric exit code like a container command's `run`.)
+
+### Trust model
+
+Plugin-contributed cron handlers run with `scheduledByRole: 'owner'` because installed plugins already execute arbitrary in-process TypeScript at boot, on every hook, and inside every tool — granting cron handlers a tighter role wouldn't be a security boundary anyway, since the plugin code already has full process privileges. The role is real (every tool call inside `ctx.prompt` resolves against it) and a future API could tighten it for specific contexts, but today plugin authors are trusted runtime contributions, not user input. See `typeclaw-permissions` for the broader model.
+
+### When to reach for the exec bridge instead
+
+The `kind: 'handler'` path is the right answer for plugin-internal scheduled imperative work. The exec bridge — a `kind: 'exec'` cron job invoking `["typeclaw", "<plugin-command>", ...]` — is the right answer ONLY when **reusability is a real requirement**, not just because the work is scheduled. The bridge buys you a callable CLI surface; the handler does not. Use the bridge when one of these holds:
+
+1. **The same logic must also be invocable as a CLI command.** The user wants to run `typeclaw audit-commits --since=7d` manually from the TUI or a shell, or another plugin / `compose` orchestration wants to call it, or the work needs flags that are part of a public command interface. Write the logic once inside a `surface: 'container'` plugin command's `run`, then point cron at it. Same imperative control flow lives in the command body; cron just provides a different trigger.
+
+2. **The user owns the cadence.** Someone else's plugin ships `audit-commits` (as a container command, see `typeclaw-plugins` §5.7) but no cron registration, or its default cadence doesn't match what the user wants. The user adds a `cron.json` exec job pointing at the command — no need to fork the plugin to change the schedule.
+
+3. **The scheduled job needs to invoke a `surface: 'host'` command.** Host commands run outside the container with no agent runtime — neither `ctx.prompt` nor `ctx.subagent` is available there. A cron `exec` job invoking `typeclaw <host-cmd>` is the only way to schedule host-side work from inside the container's cron.
+
+If none of those apply — the plugin owns both the cadence and the logic, and nothing else needs to call the logic — write a `kind: 'handler'` job. "It's scheduled work that needs LLM judgement" alone is NOT a reason to reach for the bridge; the bridge costs a shell-out, a WS round-trip, and an args-parse round-trip that the handler avoids entirely.
+
+In both cases the `command` array is `['typeclaw', '<cmd>', ...]` and the runtime injects `TYPECLAW_PARENT_ORIGIN_JSON` so the spawned subprocess inherits the cron job's role through the same mechanism that protects plugin-contributed handlers from silent elevation.
+
+```json
+// cron.json — user wants someone else's plugin command on a custom schedule
+{
+  "jobs": [
+    {
+      "id": "weekly-commit-audit",
+      "schedule": "0 22 * * 0",
+      "timezone": "Asia/Seoul",
+      "kind": "exec",
+      "command": ["typeclaw", "audit-commits", "--since=7d"],
+      "scheduledByRole": "owner"
+    }
+  ]
+}
+```
+
+A plugin can ship a `kind: 'handler'` default in `cronJobs` AND the user can add a different cadence in `cron.json` for the same command. They are independent cron jobs at the scheduler layer.
+
+### Decision rules — which arm picks what
+
+```
+"I have scheduled work" → start here
+
+  Is the work pure mechanics (git commit, log rotation, calling a known script)?
+    └─ Yes → kind: 'exec' in cron.json. No plugin needed.
+
+  Does it need LLM judgement?
+    │
+    ├─ One-shot natural-language prompt, no probes, no shell pre-work?
+    │   └─ kind: 'prompt' in cron.json.
+    │
+    ├─ Imperative control flow (probe → maybe prompt → write file)?
+    │   │
+    │   ├─ Default: cadence + logic both belong to the same plugin,
+    │   │  nothing outside cron needs to call this logic?
+    │   │   └─ kind: 'handler' in the plugin's cronJobs.  ← BEST PRACTICE
+    │   │
+    │   ├─ The same logic ALSO needs to be a callable CLI command
+    │   │  (TUI / manual shell / compose), or the user owns the
+    │   │  cadence for someone else's command?
+    │   │   └─ kind: 'exec' in cron.json, command: ['typeclaw', '<cmd>']
+    │   │     (write the command as surface: 'container')
+    │   │
+    │   └─ The work needs a `surface: 'host'` plugin command?
+    │       └─ kind: 'exec' in cron.json, command: ['typeclaw', '<host-cmd>']
+```
+
+### What this pattern is NOT
+
+- It is **not** a way to bypass permissions. Plugin `kind: 'handler'` jobs run under the plugin-default role (`'owner'`). Plugin `kind: 'exec'` and `cron.json` `kind: 'exec'` stamp `scheduledByRole` into the spawned subprocess via `TYPECLAW_PARENT_ORIGIN_JSON`; the plugin command's `ctx.origin` carries that role into every tool call inside `ctx.prompt`'s session. A cron scheduled as `scheduledByRole: 'member'` runs as a member — no silent elevation. See `typeclaw-permissions`.
+- It is **not** a wrapper for shell pipelines you already have working. If `bash some-script.sh` does the job, just use that as the `command` array directly. Reach for handlers (or the exec bridge) only when LLM judgement is genuinely required inside the periodic work.
+
+Read `typeclaw-plugins` §5.3 for the `cronJobs` registration shape, §5.7 for the full `commands` surface (host/container/either, `args` schema, `ctx.prompt` / `ctx.subagent` / `ctx.exec`, permission gating). Read `typeclaw-monorepo` for where the plugin package lives in `packages/`.
+
+### Conditional LLM calls: gate `ctx.prompt` behind a cheap check
+
+Most polling-style cron jobs are skewed: they fire often (every 5 minutes, every hour) and **most ticks find no work**. A plain `kind: "prompt"` job spends a full LLM round-trip every tick just to discover there's nothing to do. That gets expensive fast — a 5-minute "check for new emails" prompt is ~290 LLM calls a day, even on days where nothing arrived.
+
+`kind: 'handler'` fixes this naturally because `ctx.exec` runs **before** `ctx.prompt`. Do the cheap check first; only spend tokens when there's actual work:
+
+```ts
+// packages/inbox-watch/index.ts
+import { definePlugin } from 'typeclaw/plugin'
+
+export default definePlugin({
+  plugin: async () => ({
+    cronJobs: {
+      watch: {
+        schedule: '*/15 * * * *',
+        kind: 'handler',
+        handler: async (ctx) => {
+          // Cheap shell check: 0 LLM cost, ~100ms.
+          const { stdout, exitCode } = await ctx.exec`gmail unread --since=15m --count`
+          if (exitCode !== 0) {
+            // Don't drag the LLM into shell failures — log and bail.
+            ctx.logger.error(`gmail probe failed (exit ${exitCode})`)
+            return
+          }
+          const count = Number.parseInt(stdout.trim(), 10)
+          if (!Number.isFinite(count) || count === 0) {
+            // Nothing to do. Return silently so cron logs stay quiet.
+            return
+          }
+          // Expensive LLM path: only reached when there's actual work.
+          await ctx.prompt(
+            `There are ${count} unread emails since 15m ago. Use the gmail skill to read them, summarize anything that needs a human reply, and append to memory/inbox/$(date +%F).md.`,
+          )
+        },
+      },
+    },
+  }),
+})
+```
+
+The shape that matters:
+
+1. **Probe with `ctx.exec` (or an `await` on a Node API) first.** Anything that returns a yes/no signal cheaply: a CLI tool exit code, a count, a file mtime, an HTTP HEAD, a `git log -1 --since=...` output.
+2. **Return early when the probe says "no work".** A bare `return` exits the handler cleanly, cron logs nothing scary, and zero LLM tokens were spent. Critically: do NOT call `ctx.prompt` to "decide whether to act" — that defeats the entire optimization.
+3. **Reach for `ctx.prompt` only on the work path.** Pass the probe's output into the prompt so the agent doesn't have to re-discover what triggered the run (e.g. `${count} unread emails`, the list of changed files, the new commit hash). This also shortens the LLM's first turn — it gets to act, not investigate.
+
+Concrete signals you can probe cheaply (in rough order of common use):
+
+| Question                            | Cheap probe                                                           |
+| ----------------------------------- | --------------------------------------------------------------------- |
+| Are there new emails?               | `gmail unread --since=15m --count` (or your skill's CLI)              |
+| Did anyone commit since last check? | `git log --since=15m --pretty=oneline` (empty = no)                   |
+| Did a file change?                  | `find <path> -newer .inbox-watch.stamp -type f`                       |
+| Is there a new PR/issue?            | `gh pr list --search 'created:>15m' --json number` (empty array = no) |
+| Did a service go down?              | `curl -fsS https://... > /dev/null` (non-zero = down)                 |
+| Is there a new line in a log?       | `wc -l <log>` vs a stamp file                                         |
+| Did `last-run.txt` rot to stale?    | `find last-run.txt -mmin +60` (empty = fresh)                         |
+
+For "since last run" semantics, write a stamp file at the end of every successful run: `await ctx.exec\`touch .inbox-watch.stamp\``. The next tick's probe compares against it via `-newer`or`mtime`. Stamp files belong in `workspace/`or under`memory/state/` — never at the agent root.
+
+When NOT to gate:
+
+- **The work is small enough that the LLM probe is the action.** A daily "summarize today" job that always has something to summarize doesn't need a gate; the prompt does the work.
+- **The probe is as expensive as the prompt.** If your "is there work?" check requires reading 200 files anyway, just let the LLM do it once with the full toolset.
+- **You genuinely want the LLM to decide intent on every tick.** Rare, but valid — e.g. a "morning standup" job that always produces output regardless of how busy yesterday was.
+
+Pitfalls to avoid:
+
+- **Don't promise the user "the agent checks every 5 minutes" if you've written `*/5 * * * *` without a gate.** That's 12 LLM calls an hour for empty inboxes. Either gate it, or slow the schedule to match what the work actually warrants.
+- **Don't gate inside `ctx.prompt` itself** ("if there are new emails, do X; else do nothing"). The LLM still ran. The gate has to be in shell code outside `ctx.prompt`.
+- **Don't leak probe failures into the LLM session.** If `ctx.exec` exits non-zero, decide explicitly: log via `ctx.logger.error` and bail (`return`), `throw` to surface the failure in cron logs, or recover with a fallback path. Don't fall through into `ctx.prompt` with no input — the agent will improvise, and the improvisation is usually worse than a clean `cron failed: ...` log line.
 
 ## Schedule syntax
 
@@ -142,7 +349,11 @@ If you finished an edit and the user only sees an in-flight job from the previou
 
 Pick `kind` first, then schedule, then timezone:
 
-1. **Does the work need judgement?** → `prompt`. Otherwise → `exec`.
+1. **Pick the kind.**
+   - **Pure mechanics, no judgement** (git snapshots, log rotation, calling an existing script) → `kind: 'exec'` in `cron.json`. Done.
+   - **One-shot natural-language instruction, no shell pre-work, no conditional logic** → `kind: 'prompt'` in `cron.json`. Done.
+   - **Imperative control flow mixing shell calls and LLM calls** (probe → maybe prompt → write file, "if there are new emails then triage", etc.) → **write a `kind: 'handler'` plugin cron job** (see "`exec → LLM`: write a plugin cron handler" above). This is the default for scheduled `exec → LLM` work.
+   - **Reuse a CLI command on a custom cadence** — the same logic must ALSO be invocable from the TUI / manual shell / `compose` orchestration, or the schedule is owned by the user (`cron.json`) rather than the plugin author, or the work must run as a `surface: 'host'` command → `kind: 'exec'` in `cron.json` with `command: ["typeclaw", "<plugin-command>", ...]`. Reach for this ONLY when reusability is the actual requirement, not just because the work is scheduled. See "When to reach for the exec bridge instead" above.
 2. **Translate the cadence to cron.** "Every morning at 7" → `0 7 * * *`. "Every weekday at 9:30" → `30 9 * * 1-5`. "Every five minutes" → `*/5 * * * *`. If you are not sure, ask once. Don't guess on tricky cases like "every other Friday".
 3. **Timezone.** If the user mentioned a wall-clock time, set `timezone` to their zone. If unknown, ask once or default to the timezone in `USER.md` if it's recorded there.
 4. **Pick a stable `id`.** Use kebab-case that describes the job, not the schedule. `daily-summary` not `0-23-30`.

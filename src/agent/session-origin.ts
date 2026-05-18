@@ -25,7 +25,7 @@ export type SessionOrigin =
   | {
       kind: 'cron'
       jobId: string
-      jobKind: 'prompt' | 'exec' | 'subagent'
+      jobKind: 'prompt' | 'exec' | 'subagent' | 'handler'
       scheduledByRole?: string
       scheduledByOrigin?: SessionOrigin | { kind: 'config-file' }
     }
@@ -151,7 +151,7 @@ function renderTuiOrigin(): string {
   ].join('\n')
 }
 
-function renderCronOrigin(origin: { jobId: string; jobKind: 'prompt' | 'exec' | 'subagent' }): string {
+function renderCronOrigin(origin: { jobId: string; jobKind: 'prompt' | 'exec' | 'subagent' | 'handler' }): string {
   return [
     '## Session origin',
     '',

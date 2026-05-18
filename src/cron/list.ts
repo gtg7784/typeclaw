@@ -14,7 +14,7 @@ export type CronListSource = { kind: 'user' } | { kind: 'plugin'; pluginName: st
 export type CronListEntry = {
   id: string
   source: CronListSource
-  kind: 'prompt' | 'exec'
+  kind: 'prompt' | 'exec' | 'handler'
   schedule: string
   timezone: string | undefined
   enabled: boolean
@@ -76,12 +76,23 @@ function toEntry(job: CronJob, source: CronListSource, now: number): CronListEnt
       command: undefined,
     }
   }
+  if (job.kind === 'exec') {
+    return {
+      ...base,
+      kind: 'exec',
+      prompt: undefined,
+      subagent: undefined,
+      command: job.command,
+    }
+  }
+  // Handler jobs carry a function reference, not a serializable payload.
+  // Surface the row so the list stays complete; leave action fields undefined.
   return {
     ...base,
-    kind: 'exec',
+    kind: 'handler',
     prompt: undefined,
     subagent: undefined,
-    command: job.command,
+    command: undefined,
   }
 }
 

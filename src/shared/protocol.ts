@@ -34,6 +34,22 @@ export type ClientMessage =
   | { type: 'cron_list'; requestId: CronListRequestId }
   | { type: 'claim_start'; code: string; role: ClaimRoleChoice; channel?: string; ttlMs: number }
   | { type: 'claim_cancel' }
+  | {
+      type: 'exec_command'
+      callId: string
+      name: string
+      args: unknown
+      isolated?: boolean
+      // Parent origin to stamp as spawnedByOrigin on the command's session.
+      // When unset, the runner stamps a synthetic TUI origin (host CLI
+      // operator). When set, the runner trusts the JSON verbatim as a
+      // SessionOrigin (e.g. cron-shaped, carrying scheduledByRole).
+      // Permission resolution chases through to the parent origin's role.
+      parentOriginJson?: string
+    }
+  | { type: 'command_stdin'; callId: string; chunk: string }
+  | { type: 'command_stdin_end'; callId: string }
+  | { type: 'command_abort'; callId: string; reason: string }
 
 export type CronListRequestId = string
 
@@ -42,7 +58,7 @@ export type CronListSourcePayload = { kind: 'user' } | { kind: 'plugin'; pluginN
 export type CronListEntryPayload = {
   id: string
   source: CronListSourcePayload
-  kind: 'prompt' | 'exec'
+  kind: 'prompt' | 'exec' | 'handler'
   schedule: string
   timezone?: string
   enabled: boolean
@@ -97,3 +113,7 @@ export type ServerMessage =
   | { type: 'claim_started'; payload: ClaimStartedPayload }
   | { type: 'claim_completed'; payload: ClaimCompletedPayload }
   | { type: 'claim_error'; payload: ClaimErrorPayload }
+  | { type: 'command_stdout'; callId: string; chunk: string }
+  | { type: 'command_stderr'; callId: string; chunk: string }
+  | { type: 'command_exit'; callId: string; code: number }
+  | { type: 'command_error'; callId: string; message: string }

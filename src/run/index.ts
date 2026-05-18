@@ -26,11 +26,20 @@ import {
 } from '@/cron'
 import { CLI_VERSION } from '@/init/cli-version'
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
+import { createPluginLogger } from '@/plugin/context'
+import type { CronHandlerContext } from '@/plugin/types'
 import { createContainerBroker, publishForwardResult } from '@/portbroker'
 import { ReloadRegistry } from '@/reload'
 import { createClaimController } from '@/role-claim'
 import { hydrateChannelEnvFromSecrets } from '@/secrets'
 import { createServer, type Server } from '@/server'
+import {
+  createCommandRunner,
+  type CommandRunner,
+  type CommandSpawnSubagent,
+  runExecForCommand,
+  runPromptForCommand,
+} from '@/server/command-runner'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
@@ -245,6 +254,47 @@ export async function startAgent({
   const cronConsumer = createCronConsumer({
     stream,
     cwd,
+    invokeHandler: async (job) => {
+      const snap = pluginRuntime.get()
+      const registered = snap.registry.cronJobs.find((j) => j.globalId === job.id)
+      const pluginName = registered?.pluginName ?? '<unknown>'
+      const logger = createPluginLogger(pluginName)
+      const abortController = new AbortController()
+      const origin: SessionOrigin = {
+        kind: 'cron',
+        jobId: job.id,
+        jobKind: 'handler',
+        ...(job.scheduledByRole !== undefined ? { scheduledByRole: job.scheduledByRole } : {}),
+        scheduledByOrigin: (job.scheduledByOrigin as SessionOrigin | undefined) ?? { kind: 'config-file' },
+      }
+      const ctx: CronHandlerContext = {
+        jobId: job.id,
+        name: pluginName,
+        agentDir: cwd,
+        logger,
+        signal: abortController.signal,
+        permissions: pluginsLoaded.permissions,
+        origin,
+        prompt: (text: string) =>
+          runPromptForCommand({
+            text,
+            origin,
+            runtime: pluginRuntime,
+            agentDir: cwd,
+            permissions: pluginsLoaded.permissions,
+            signal: abortController.signal,
+            runtimeVersion: runtimeVersionOpt.runtimeVersion,
+            containerName: containerNameOpt.containerName,
+          }),
+        subagent: (subName: string, payload?: unknown) =>
+          dispatchSpawnSubagent(subName, payload, {
+            spawnedByOrigin: origin,
+          }),
+        exec: (strings: TemplateStringsArray, ...values: unknown[]) =>
+          runExecForCommand(strings, values, { cwd, signal: abortController.signal }),
+      }
+      await job.handler(ctx)
+    },
     createSessionForCron: async (job) => {
       const snap = pluginRuntime.get()
       const sessionManager = SessionManager.create(cwd, sessionFactory.sessionDir())
@@ -314,7 +364,10 @@ export async function startAgent({
   reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
   await channelManager.start()
 
-  pluginsLoaded.setSpawnSubagent(async (name, payload, options) => {
+  // Captured separately from setSpawnSubagent so both the plugin context and
+  // the plugin-command runner can dispatch through the same path. The setter
+  // returns void, so without this local binding we couldn't reuse the fn.
+  const dispatchSpawnSubagent: CommandSpawnSubagent = async (name, payload, options) => {
     // Resolve the spawning session's role from its origin so the subagent
     // inherits it. Callers (hooks like session.idle) pass the parent origin
     // verbatim; we look up the role rather than letting the caller forge it,
@@ -334,7 +387,8 @@ export async function startAgent({
       ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
       ...(options?.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
     })
-  })
+  }
+  pluginsLoaded.setSpawnSubagent(dispatchSpawnSubagent)
   pluginsLoaded.markBooted()
 
   if (pluginsLoaded.loadedPlugins.length > 0) {
@@ -366,6 +420,17 @@ export async function startAgent({
       : undefined
   const containerBrokerOpt = containerBroker ? { containerBroker } : {}
 
+  const commandRunnerFactory = (outbound: import('@/server/command-runner').CommandOutbound): CommandRunner =>
+    createCommandRunner({
+      pluginRuntime,
+      permissions: pluginsLoaded.permissions,
+      spawnSubagent: dispatchSpawnSubagent,
+      agentDir: cwd,
+      runtimeVersion: CLI_VERSION,
+      containerName,
+      outbound,
+    })
+
   const server = createServer({
     port,
     reloadAll: () => reloadRegistry.reloadAll(),
@@ -376,6 +441,7 @@ export async function startAgent({
     agentDir: cwd,
     pluginRuntime,
     claimController,
+    commandRunnerFactory,
     ...containerNameOpt,
     ...runtimeVersionOpt,
     ...tuiTokenOpt,

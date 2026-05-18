@@ -14,7 +14,8 @@ import type { ServerMessage } from '@/shared'
 import { createStream } from '@/stream'
 import { expectStable, waitFor as waitForState } from '@/test-helpers/wait-for'
 
-import { createServer, type ServerLogger } from './index'
+import type { CommandOutbound, CommandRunner } from './command-runner'
+import { createServer, safeWsSend, type ServerLogger } from './index'
 
 function makeRuntime(opts: { registry: PluginRegistry; hooks: HookBus }): PluginRuntime {
   return createPluginRuntime({
@@ -101,6 +102,7 @@ async function startWithSession(
     pluginRegistry?: PluginRegistry
     pluginHooks?: HookBus
     logger?: ServerLogger
+    commandRunnerFactory?: (outbound: CommandOutbound) => CommandRunner
   } = {},
 ): Promise<{ url: string }> {
   const pluginRuntime =
@@ -115,6 +117,7 @@ async function startWithSession(
     ...(extra.agentDir !== undefined ? { agentDir: extra.agentDir } : {}),
     ...(pluginRuntime ? { pluginRuntime } : {}),
     ...(extra.logger ? { logger: extra.logger } : {}),
+    ...(extra.commandRunnerFactory ? { commandRunnerFactory: extra.commandRunnerFactory } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }

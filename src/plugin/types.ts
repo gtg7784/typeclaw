@@ -92,7 +92,58 @@ export type PluginExecCronJob = {
   timezone?: string
 }
 
-export type PluginCronJob = PluginPromptCronJob | PluginExecCronJob
+// In-process handler. Invoked directly by the cron consumer; no shell-out, no
+// WS round-trip, no Bun.spawn. Use this when the cron job needs imperative
+// control flow (probe → maybe prompt → write file) and lives in the same
+// plugin as the logic — there is no need to dress the work up as a CLI
+// command just to schedule it from yourself.
+//
+// `handler` is a TypeScript function reference, so this kind CANNOT appear in
+// cron.json (only plugin-contributed cron registrations can carry it). The
+// schema gate (`parseCronFile` in src/cron/schema.ts) keeps user files limited
+// to `prompt` and `exec`.
+export type PluginHandlerCronJob = {
+  schedule: string
+  kind: 'handler'
+  handler: (ctx: CronHandlerContext) => Promise<void>
+  enabled?: boolean
+  timezone?: string
+}
+
+export type PluginCronJob = PluginPromptCronJob | PluginExecCronJob | PluginHandlerCronJob
+
+// Surface passed into a plugin cron handler. Mirrors the LLM-call capabilities
+// of `ContainerCommandContext` (`prompt`, `subagent`, `exec`) without the
+// CLI-shaped fields (stdin/stdout/stderr, args, exit code) because cron has
+// no caller to pipe to.
+//
+// `signal` is reserved for future cancellation and is currently never aborted
+// by the runtime — the consumer matches the existing prompt/exec cron jobs
+// which also let in-flight work finish on container shutdown. The signal IS
+// already threaded into `ctx.prompt` and `ctx.exec`, so the moment the
+// runtime starts aborting it (e.g. via a future graceful-shutdown path),
+// propagation works without handler-author changes. Handler authors who
+// want to respect future cancellation should still check `ctx.signal.aborted`
+// in long-running loops; nothing fires it today.
+//
+// `origin` is a cron-shaped SessionOrigin so any session the handler spawns
+// via `ctx.prompt` carries the cron job's provenance — same role-inheritance
+// semantics as a `kind: 'exec'` job that shells out to `typeclaw <cmd>`.
+export type CronHandlerContext = {
+  readonly jobId: string
+  // The plugin that registered this cron job (e.g. 'inbox-watch'). Matches
+  // `ContainerCommandContext.name`. Useful for log lines that should be
+  // attributable to the plugin, not just the cron id.
+  readonly name: string
+  readonly agentDir: string
+  readonly logger: PluginLogger
+  readonly signal: AbortSignal
+  readonly permissions: PermissionService
+  readonly origin: SessionOrigin
+  readonly prompt: (text: string) => Promise<string>
+  readonly subagent: (name: string, payload?: unknown) => Promise<void>
+  readonly exec: (cmd: TemplateStringsArray, ...values: unknown[]) => Promise<CommandExecResult>
+}
 
 export type PluginSkill = {
   description: string
