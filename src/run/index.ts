@@ -31,6 +31,7 @@ import { ReloadRegistry } from '@/reload'
 import { createClaimController } from '@/role-claim'
 import { hydrateChannelEnvFromSecrets } from '@/secrets'
 import { createServer, type Server } from '@/server'
+import { createCommandRunner, type CommandRunner, type CommandSpawnSubagent } from '@/server/command-runner'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
@@ -314,7 +315,10 @@ export async function startAgent({
   reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
   await channelManager.start()
 
-  pluginsLoaded.setSpawnSubagent(async (name, payload, options) => {
+  // Captured separately from setSpawnSubagent so both the plugin context and
+  // the plugin-command runner can dispatch through the same path. The setter
+  // returns void, so without this local binding we couldn't reuse the fn.
+  const dispatchSpawnSubagent: CommandSpawnSubagent = async (name, payload, options) => {
     // Resolve the spawning session's role from its origin so the subagent
     // inherits it. Callers (hooks like session.idle) pass the parent origin
     // verbatim; we look up the role rather than letting the caller forge it,
@@ -334,7 +338,8 @@ export async function startAgent({
       ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
       ...(options?.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
     })
-  })
+  }
+  pluginsLoaded.setSpawnSubagent(dispatchSpawnSubagent)
   pluginsLoaded.markBooted()
 
   if (pluginsLoaded.loadedPlugins.length > 0) {
@@ -366,6 +371,17 @@ export async function startAgent({
       : undefined
   const containerBrokerOpt = containerBroker ? { containerBroker } : {}
 
+  const commandRunnerFactory = (outbound: import('@/server/command-runner').CommandOutbound): CommandRunner =>
+    createCommandRunner({
+      pluginRuntime,
+      permissions: pluginsLoaded.permissions,
+      spawnSubagent: dispatchSpawnSubagent,
+      agentDir: cwd,
+      runtimeVersion: CLI_VERSION,
+      containerName,
+      outbound,
+    })
+
   const server = createServer({
     port,
     reloadAll: () => reloadRegistry.reloadAll(),
@@ -376,6 +392,7 @@ export async function startAgent({
     agentDir: cwd,
     pluginRuntime,
     claimController,
+    commandRunnerFactory,
     ...containerNameOpt,
     ...runtimeVersionOpt,
     ...tuiTokenOpt,

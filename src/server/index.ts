@@ -15,6 +15,7 @@ import type { BrokerWsData, ContainerBroker } from '@/portbroker'
 import type { ReloadAllResult, ReloadRegistry } from '@/reload'
 import type { ClaimController, ClaimResultEvent } from '@/role-claim'
 import type { PluginRuntime, PluginRuntimeState } from '@/run/plugin-runtime'
+import type { CommandOutbound, CommandRunner } from '@/server/command-runner'
 import type { SessionFactory } from '@/sessions'
 import type { ClientMessage, PromptDelivery, QueueStateItem, ReloadResultPayload, ServerMessage } from '@/shared'
 import type { Stream, StreamMessage, StreamMessageId, Unsubscribe } from '@/stream'
@@ -56,6 +57,14 @@ export type ServerOptions = {
   // `claim_started` / `claim_completed` / `claim_error` back over the
   // same connection. Omitted in tests that don't exercise the flow.
   claimController?: ClaimController
+  // Optional command runner factory. The server invokes this once at start
+  // with an `outbound` callback wired to send `command_stdout` / `command_stderr`
+  // / `command_exit` / `command_error` frames back to the originating WS for
+  // a given callId. The server owns the callId→ws map; the runner is
+  // transport-agnostic. Omitted in tests that don't exercise plugin commands;
+  // without it the four `exec_command`-family messages are answered with
+  // `command_error` so the host CLI sees a clean failure.
+  commandRunnerFactory?: (outbound: CommandOutbound) => CommandRunner
 }
 
 const consoleLogger: ServerLogger = {
@@ -99,6 +108,12 @@ function send(ws: Ws, msg: ServerMessage) {
   ws.send(JSON.stringify(msg))
 }
 
+function encodeBase64(bytes: Uint8Array): string {
+  let s = ''
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i] ?? 0)
+  return btoa(s)
+}
+
 export function createServer({
   port,
   reloadAll,
@@ -115,8 +130,31 @@ export function createServer({
   containerBroker,
   logger = consoleLogger,
   claimController,
+  commandRunnerFactory,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
+  const callIdToWs = new Map<string, Ws>()
+  const commandRunner: CommandRunner | undefined = commandRunnerFactory
+    ? commandRunnerFactory({
+        stdout(callId, chunk) {
+          const ws = callIdToWs.get(callId)
+          if (ws) send(ws, { type: 'command_stdout', callId, chunk: encodeBase64(chunk) })
+        },
+        stderr(callId, chunk) {
+          const ws = callIdToWs.get(callId)
+          if (ws) send(ws, { type: 'command_stderr', callId, chunk: encodeBase64(chunk) })
+        },
+        exit(callId, code) {
+          const ws = callIdToWs.get(callId)
+          callIdToWs.delete(callId)
+          if (ws) send(ws, { type: 'command_exit', callId, code })
+        },
+        error(callId, message) {
+          const ws = callIdToWs.get(callId)
+          if (ws) send(ws, { type: 'command_error', callId, message })
+        },
+      })
+    : undefined
 
   function start(): BunServer<WsData> {
     const bunServer = Bun.serve<WsData>({
@@ -370,6 +408,44 @@ export function createServer({
             }
             return
           }
+
+          if (msg.type === 'exec_command') {
+            if (!commandRunner) {
+              send(ws, {
+                type: 'command_error',
+                callId: msg.callId,
+                message: 'plugin commands are not enabled on this agent',
+              })
+              send(ws, { type: 'command_exit', callId: msg.callId, code: 1 })
+              return
+            }
+            callIdToWs.set(msg.callId, ws)
+            commandRunner.start(
+              {
+                callId: msg.callId,
+                name: msg.name,
+                args: msg.args,
+                ...(msg.isolated !== undefined ? { isolated: msg.isolated } : {}),
+              },
+              ws,
+            )
+            return
+          }
+          if (msg.type === 'command_stdin') {
+            if (!commandRunner) return
+            commandRunner.feedStdin(msg.callId, msg.chunk)
+            return
+          }
+          if (msg.type === 'command_stdin_end') {
+            if (!commandRunner) return
+            commandRunner.endStdin(msg.callId)
+            return
+          }
+          if (msg.type === 'command_abort') {
+            if (!commandRunner) return
+            commandRunner.abort(msg.callId, msg.reason)
+            return
+          }
         },
         async close(rawWs) {
           if (rawWs.data.kind === 'portbroker') {
@@ -383,6 +459,10 @@ export function createServer({
           state?.unsubClaim?.()
           if (state?.activeClaimCode !== null && state?.activeClaimCode !== undefined && claimController) {
             claimController.cancelClaim(state.activeClaimCode)
+          }
+          commandRunner?.abortForOwner(ws)
+          for (const [callId, owner] of callIdToWs) {
+            if (owner === ws) callIdToWs.delete(callId)
           }
           try {
             if (state && state.runtimeSnapshot !== null) {

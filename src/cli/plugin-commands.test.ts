@@ -255,7 +255,7 @@ describe('dispatchPluginCommand', () => {
     expect(getStdout().trim()).toBe(dir)
   })
 
-  test('refuses container commands until container path lands', async () => {
+  test('container command without a running container errors with start-it hint', async () => {
     const dir = await mkTempAgent(CONTAINER_ONLY_PLUGIN)
     const { stdin, stdout, stderr } = buildStreams()
     const outcome = await dispatchPluginCommand({
@@ -268,7 +268,7 @@ describe('dispatchPluginCommand', () => {
     })
     expect(outcome.kind).toBe('error')
     if (outcome.kind === 'error') {
-      expect(outcome.message).toMatch(/container/)
+      expect(outcome.message).toMatch(/typeclaw start/)
     }
   })
 
