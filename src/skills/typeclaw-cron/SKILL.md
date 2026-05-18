@@ -1,6 +1,6 @@
 ---
 name: typeclaw-cron
-description: Use this skill whenever the user asks you to schedule recurring work, run something on a cron, do something every day/hour/week, set up a periodic task, or read or edit your cron schedule. Triggers include "every morning", "every Monday", "schedule a", "remind me every", "set up a cron", "run X periodically", "watch for new X", "when there's a new Y trigger Z", "poll for", "what's on my cron", "when does X run", or any mention of `cron.json`. Also use when the user wants a scheduled shell-style job that nonetheless needs LLM judgement (the `exec → LLM` pattern) — the canonical answer is a plugin container command invoked from cron's `exec` array, not a third cron kind. Also use for conditional/gated LLM calls — polling-style jobs ("if there are new emails…", "if anyone pushed…", "when a file changes…") where a cheap `ctx.exec` probe should run on every tick but `ctx.prompt` should only fire when there's actual work. Read it before touching `cron.json` — the file has a strict schema, restart semantics, and a best-effort execution model that you must not misrepresent to the user.
+description: "Use this skill whenever the user asks you to schedule recurring work, run something on a cron, do something every day/hour/week, set up a periodic task, or read or edit your cron schedule. Triggers include 'every morning', 'every Monday', 'schedule a', 'remind me every', 'set up a cron', 'run X periodically', 'watch for new X', 'when there's a new Y trigger Z', 'poll for', 'what's on my cron', 'when does X run', or any mention of `cron.json`. Also use when the user wants a scheduled shell-style job that nonetheless needs LLM judgement (the `exec → LLM` pattern) — the best practice is a plugin cron job with `kind: 'handler'` (a TypeScript function the plugin registers under its own `cronJobs`); fall back to a cron `exec` job pointing at `['typeclaw', '<plugin-command>']` only when the same logic also needs to be invocable as a reusable CLI command (TUI / manual shell / `compose`) or when the work must run as a `surface: 'host'` command. Also use for conditional/gated LLM calls — polling-style jobs ('if there are new emails…', 'if anyone pushed…', 'when a file changes…') where a cheap `ctx.exec` probe should run on every tick but `ctx.prompt` should only fire when there's actual work. Read it before touching `cron.json` — the file has a strict schema, restart semantics, and a best-effort execution model that you must not misrepresent to the user."
 ---
 
 # typeclaw-cron
@@ -65,13 +65,15 @@ What this means for how you write prompts:
 
 The runtime spawns the command directly with `Bun.spawn` from the agent folder (`/agent` inside the container). No agent session is created. No LLM call happens. The command's exit code and stderr are captured to container logs.
 
-Use `exec` only for jobs that are pure mechanics — no judgement required. Examples that fit: git snapshots, log rotation, calling a script that already exists. Examples that **don't** fit: anything where "what do I commit" or "what should I write" depends on context. Use `prompt` for those — **or** the `exec → LLM` bridge below when you want the cron-time discipline of `exec` (exact `command`, no prompt drift) but still need LLM judgement at runtime.
+Use `exec` only for jobs that are pure mechanics — no judgement required. Examples that fit: git snapshots, log rotation, calling a script that already exists. Examples that **don't** fit: anything where "what do I commit" or "what should I write" depends on context. Use `prompt` for those — **or**, when the work needs imperative control flow that mixes shell calls and LLM calls (probe → maybe prompt → write file) and both the cadence and the logic belong to the same plugin, write a `kind: 'handler'` plugin cron job (see below). That's the best practice for the `exec → LLM` pattern; a cron `exec` pointing at `typeclaw <plugin-cmd>` is a narrower fallback for reusable / host-surface cases.
 
 `command` is an array. Index 0 is the executable, the rest are argv. Do **not** put a single shell pipeline in `command[0]` — that won't be parsed by a shell. If you need shell features (`|`, `>`, `&&`), wrap explicitly: `["sh", "-c", "your | pipeline | here"]`.
 
-## `exec → LLM`: write a plugin cron handler
+## `exec → LLM`: write a plugin cron handler (best practice)
 
-`cron.json` itself supports only `prompt` and `exec` — no third kind. If a scheduled job needs imperative control flow that mixes shell calls and LLM calls (probe → maybe prompt → write file), the canonical answer is a **plugin cron handler**: a TypeScript function the plugin registers under its own `cronJobs` with `kind: 'handler'`. The cron consumer invokes it directly — no shell-out, no WS round-trip, no `Bun.spawn`.
+If a scheduled job needs imperative control flow that mixes shell calls and LLM calls (probe → maybe prompt → write file), the best practice is a **plugin cron handler**: a TypeScript function the plugin registers under its own `cronJobs` with `kind: 'handler'`. The cron consumer invokes it directly — no shell-out, no WS round-trip, no `Bun.spawn`. Prefer this whenever the cadence and the logic both belong to the same plugin (which is almost always — see "When to reach for the exec bridge instead" below for the two narrow exceptions).
+
+`cron.json` itself supports only `prompt` and `exec` — `kind: 'handler'` is plugin-only because the handler is a TypeScript function reference (not JSON-serializable). User-authored cron files that try to declare `kind: 'handler'` are rejected by `parseCronFile`.
 
 ```ts
 // packages/dev-audits/index.ts
@@ -136,11 +138,15 @@ Plugin-contributed cron handlers run with `scheduledByRole: 'owner'` because ins
 
 ### When to reach for the exec bridge instead
 
-The `kind: 'handler'` path is the right answer for plugin-internal scheduled imperative work. Two distinct cases still want a `kind: 'exec'` job pointing at a `typeclaw <cmd>` invocation:
+The `kind: 'handler'` path is the right answer for plugin-internal scheduled imperative work. The exec bridge — a `kind: 'exec'` cron job invoking `["typeclaw", "<plugin-command>", ...]` — is the right answer ONLY when **reusability is a real requirement**, not just because the work is scheduled. The bridge buys you a callable CLI surface; the handler does not. Use the bridge when one of these holds:
 
-1. **The user wants a custom cadence for someone else's plugin command.** The plugin ships `audit-commits` (as a `surface: 'container'` command, see `typeclaw-plugins` §5.7) but no cron registration, or the plugin's default cadence doesn't match the user. The user writes a `cron.json` `exec` job pointing at the command. Same imperative control flow lives inside the command's `run`; cron just provides a different trigger.
+1. **The same logic must also be invocable as a CLI command.** The user wants to run `typeclaw audit-commits --since=7d` manually from the TUI or a shell, or another plugin / `compose` orchestration wants to call it, or the work needs flags that are part of a public command interface. Write the logic once inside a `surface: 'container'` plugin command's `run`, then point cron at it. Same imperative control flow lives in the command body; cron just provides a different trigger.
 
-2. **The scheduled job needs to invoke a `surface: 'host'` command.** Host commands run outside the container with no agent runtime — neither `ctx.prompt` nor `ctx.subagent` is available. A cron `exec` job invoking `typeclaw <host-cmd>` is the only way to schedule host-side work from inside the container's cron.
+2. **The user owns the cadence.** Someone else's plugin ships `audit-commits` (as a container command, see `typeclaw-plugins` §5.7) but no cron registration, or its default cadence doesn't match what the user wants. The user adds a `cron.json` exec job pointing at the command — no need to fork the plugin to change the schedule.
+
+3. **The scheduled job needs to invoke a `surface: 'host'` command.** Host commands run outside the container with no agent runtime — neither `ctx.prompt` nor `ctx.subagent` is available there. A cron `exec` job invoking `typeclaw <host-cmd>` is the only way to schedule host-side work from inside the container's cron.
+
+If none of those apply — the plugin owns both the cadence and the logic, and nothing else needs to call the logic — write a `kind: 'handler'` job. "It's scheduled work that needs LLM judgement" alone is NOT a reason to reach for the bridge; the bridge costs a shell-out, a WS round-trip, and an args-parse round-trip that the handler avoids entirely.
 
 In both cases the `command` array is `['typeclaw', '<cmd>', ...]` and the runtime injects `TYPECLAW_PARENT_ORIGIN_JSON` so the spawned subprocess inherits the cron job's role through the same mechanism that protects plugin-contributed handlers from silent elevation.
 
@@ -177,12 +183,15 @@ A plugin can ship a `kind: 'handler'` default in `cronJobs` AND the user can add
     │
     ├─ Imperative control flow (probe → maybe prompt → write file)?
     │   │
-    │   ├─ The cadence and the logic belong to the same plugin?
-    │   │   └─ kind: 'handler' in the plugin's cronJobs.  ← CANONICAL
+    │   ├─ Default: cadence + logic both belong to the same plugin,
+    │   │  nothing outside cron needs to call this logic?
+    │   │   └─ kind: 'handler' in the plugin's cronJobs.  ← BEST PRACTICE
     │   │
-    │   ├─ The logic is in a plugin's container command and the USER
-    │   │  wants a custom cadence?
+    │   ├─ The same logic ALSO needs to be a callable CLI command
+    │   │  (TUI / manual shell / compose), or the user owns the
+    │   │  cadence for someone else's command?
     │   │   └─ kind: 'exec' in cron.json, command: ['typeclaw', '<cmd>']
+    │   │     (write the command as surface: 'container')
     │   │
     │   └─ The work needs a `surface: 'host'` plugin command?
     │       └─ kind: 'exec' in cron.json, command: ['typeclaw', '<host-cmd>']
@@ -340,7 +349,11 @@ If you finished an edit and the user only sees an in-flight job from the previou
 
 Pick `kind` first, then schedule, then timezone:
 
-1. **Does the work need judgement?** → `prompt`. Otherwise → `exec`. Edge case: the user wants exact `command` argv AND judgement (e.g. `["typeclaw", "audit-commits", "--since=24h"]`), or the same logic to be reusable from a shell, or the job to take flags. In that case → `exec` with `command: ["typeclaw", "<plugin-command>", ...]`, and write the plugin command. See "`exec → LLM`: bridge via a plugin container command" above.
+1. **Pick the kind.**
+   - **Pure mechanics, no judgement** (git snapshots, log rotation, calling an existing script) → `kind: 'exec'` in `cron.json`. Done.
+   - **One-shot natural-language instruction, no shell pre-work, no conditional logic** → `kind: 'prompt'` in `cron.json`. Done.
+   - **Imperative control flow mixing shell calls and LLM calls** (probe → maybe prompt → write file, "if there are new emails then triage", etc.) → **write a `kind: 'handler'` plugin cron job** (see "`exec → LLM`: write a plugin cron handler" above). This is the default for scheduled `exec → LLM` work.
+   - **Reuse a CLI command on a custom cadence** — the same logic must ALSO be invocable from the TUI / manual shell / `compose` orchestration, or the schedule is owned by the user (`cron.json`) rather than the plugin author, or the work must run as a `surface: 'host'` command → `kind: 'exec'` in `cron.json` with `command: ["typeclaw", "<plugin-command>", ...]`. Reach for this ONLY when reusability is the actual requirement, not just because the work is scheduled. See "When to reach for the exec bridge instead" above.
 2. **Translate the cadence to cron.** "Every morning at 7" → `0 7 * * *`. "Every weekday at 9:30" → `30 9 * * 1-5`. "Every five minutes" → `*/5 * * * *`. If you are not sure, ask once. Don't guess on tricky cases like "every other Friday".
 3. **Timezone.** If the user mentioned a wall-clock time, set `timezone` to their zone. If unknown, ask once or default to the timezone in `USER.md` if it's recorded there.
 4. **Pick a stable `id`.** Use kebab-case that describes the job, not the schedule. `daily-summary` not `0-23-30`.
