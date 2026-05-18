@@ -1,4 +1,5 @@
 import { buildAuthStrategy } from '@/channels/adapters/github/auth'
+import { applyManagedPath, buildManagedPath, resolveAgentId } from '@/channels/adapters/github/managed-path'
 import { registerGithubWebhooks, type WebhookRegistrationResult } from '@/channels/adapters/github/webhook-register'
 import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 
@@ -23,6 +24,13 @@ export type EagerGithubWebhookInstallOptions = {
   repos: readonly string[]
   events?: readonly string[]
   auth: GithubInitCredentials['auth']
+  // Agent folder (or container name). Used to derive a stable webhook URL
+  // path marker so this eager-installed hook is recognizable to the
+  // container-side adapter on every subsequent start, even after the
+  // public URL's hostname rotates. Optional only because legacy direct
+  // callers (host-side init flows on stable user-set webhookUrls) may
+  // omit it; production wiring in src/init/index.ts always passes it.
+  agentDir?: string
   fetchImpl?: typeof fetch
 }
 
@@ -43,13 +51,18 @@ export async function installGithubWebhooksEagerly(
     return { error: describe(err), repos: [] }
   }
 
+  const managedPath =
+    options.agentDir !== undefined ? buildManagedPath(resolveAgentId({ agentDir: options.agentDir })) : undefined
+  const webhookUrl = managedPath !== undefined ? applyManagedPath(options.webhookUrl, managedPath) : options.webhookUrl
+
   try {
     const result = await registerGithubWebhooks({
       token: () => strategy.token(),
-      webhookUrl: options.webhookUrl,
+      webhookUrl,
       webhookSecret: options.webhookSecret,
       repos: options.repos,
       events: options.events ?? DEFAULT_GITHUB_EVENT_ALLOWLIST,
+      ...(managedPath !== undefined ? { managedPath } : {}),
       ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
     })
     return result
