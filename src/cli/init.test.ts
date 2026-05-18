@@ -764,4 +764,52 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(result.channelSecrets).toEqual({ telegramBotToken: 'tg' })
     expect(calls).toEqual(['pick-channel:1', 'reuse-existing-channel', 'pick-channel:2', 'channel-flow:telegram'])
   })
+
+  test('github: wizard collects structured credentials into channelSecrets.github', async () => {
+    const calls: string[] = []
+    // Production hasExistingChannelSecrets returns false for github so the
+    // reuse prompt is suppressed. The test mirrors that contract here.
+    const hasExisting = mock(async (_cwd: string, channel: string) => channel !== 'github')
+    const askReuse = mock(async () => ({ kind: 'value' as const, value: 'reuse' as const }))
+    const prompts = makePrompts({
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'github' }
+      },
+      hasExistingChannelSecrets: hasExisting,
+      askReuseExistingChannel: askReuse,
+      runChannelFlow: async (choice) => {
+        calls.push(`channel-flow:${choice}`)
+        return {
+          kind: 'value',
+          value: {
+            github: {
+              webhookSecret: 'whsec',
+              webhookUrl: 'https://example.com/wh',
+              webhookPort: 8975,
+              repos: ['acme/repo-a', 'acme/repo-b'],
+              auth: { type: 'pat', pat: 'ghp_test' },
+            },
+          },
+        }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(hasExisting).toHaveBeenCalledWith('/agent', 'github')
+    expect(askReuse).not.toHaveBeenCalled()
+    expect(calls).toEqual(['pick-channel', 'channel-flow:github'])
+    expect(result.channelChoice).toBe('github')
+    expect(result.reuseExistingChannel).toBe(false)
+    expect(result.channelSecrets).toEqual({
+      github: {
+        webhookSecret: 'whsec',
+        webhookUrl: 'https://example.com/wh',
+        webhookPort: 8975,
+        repos: ['acme/repo-a', 'acme/repo-b'],
+        auth: { type: 'pat', pat: 'ghp_test' },
+      },
+    })
+  })
 })
