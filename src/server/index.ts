@@ -104,8 +104,20 @@ type SessionState = {
   dispose: () => Promise<void>
 }
 
-function send(ws: Ws, msg: ServerMessage) {
-  ws.send(JSON.stringify(msg))
+// Swallows the Bun-thrown error when a command's async cleanup emits a
+// final frame after its ws has begun closing. Returns false on failure so
+// callers can debounce subsequent sends for the same callId.
+export function safeWsSend(ws: { send: (data: string) => void }, msg: ServerMessage): boolean {
+  try {
+    ws.send(JSON.stringify(msg))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function send(ws: Ws, msg: ServerMessage): boolean {
+  return safeWsSend(ws, msg)
 }
 
 function encodeBase64(bytes: Uint8Array): string {

@@ -10,7 +10,7 @@ import type { ServerMessage } from '@/shared'
 import { createStream } from '@/stream'
 
 import type { CommandOutbound, CommandRunner } from './command-runner'
-import { createServer, type ServerLogger } from './index'
+import { createServer, safeWsSend, type ServerLogger } from './index'
 
 function makeRuntime(opts: { registry: PluginRegistry; hooks: HookBus }): PluginRuntime {
   return createPluginRuntime({
@@ -1194,5 +1194,29 @@ describe('createServer plugin-command dispatch', () => {
     expect(state.starts[0]?.callId).toBe('dup-1')
 
     ws.close()
+  })
+})
+
+describe('safeWsSend', () => {
+  test('returns true when ws.send succeeds and forwards the JSON-serialized message', () => {
+    const sent: string[] = []
+    const fakeWs = {
+      send: (data: string) => {
+        sent.push(data)
+      },
+    }
+    const ok = safeWsSend(fakeWs, { type: 'done' })
+    expect(ok).toBe(true)
+    expect(sent).toEqual(['{"type":"done"}'])
+  })
+
+  test('returns false and swallows the error when ws.send throws (closing-ws race)', () => {
+    const fakeWs = {
+      send: () => {
+        throw new Error('WebSocket is closed')
+      },
+    }
+    const ok = safeWsSend(fakeWs, { type: 'done' })
+    expect(ok).toBe(false)
   })
 })
