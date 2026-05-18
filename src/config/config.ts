@@ -881,7 +881,16 @@ export type ValidateConfigResult = { ok: true } | { ok: false; reason: string }
 // confusing path-sharing error (or, on some Linux setups, silently bind-mount
 // an empty auto-created directory). First-failure reporting matches the
 // schema-error path's shape; users fix one and re-run.
-export function validateConfig(cwd: string): ValidateConfigResult {
+export type ValidateConfigOptions = {
+  // Skip the mount-path accessibility check. Host-side callers leave this
+  // false (the default) so missing mount directories surface as a precise
+  // pre-`docker run` error. Container-side callers (the reload registry)
+  // set it true because mount paths in typeclaw.json are host paths and
+  // don't resolve inside the container's filesystem.
+  skipMounts?: boolean
+}
+
+export function validateConfig(cwd: string, options: ValidateConfigOptions = {}): ValidateConfigResult {
   let raw: string
   try {
     raw = readFileSync(join(cwd, CONFIG_FILE), 'utf8')
@@ -907,9 +916,11 @@ export function validateConfig(cwd: string): ValidateConfigResult {
     return { ok: false, reason: `${CONFIG_FILE} is invalid: ${formatZodError(result.error)}` }
   }
 
-  for (const mount of result.data.mounts) {
-    const check = validateMount(mount, cwd)
-    if (!check.ok) return check
+  if (!options.skipMounts) {
+    for (const mount of result.data.mounts) {
+      const check = validateMount(mount, cwd)
+      if (!check.ok) return check
+    }
   }
 
   return { ok: true }

@@ -11,24 +11,42 @@ export type CreateConfigReloadableOptions = {
   // hand-edits) take effect without a container restart. `roles.<name>.permissions`
   // changes still require a restart — see FIELD_EFFECTS in config.ts.
   permissions?: PermissionService
+  // Skip the mount-path accessibility check inside validateConfig. Mount paths
+  // in typeclaw.json are host paths — they don't resolve inside the container,
+  // so the check would always fail on any agent that declares mounts. `mounts`
+  // is `restart-required` anyway, so reload never applies mount changes. Set
+  // this when wiring the reloadable from a container-stage context.
+  skipMountValidation?: boolean
 }
 
-export function createConfigReloadable({ cwd, permissions }: CreateConfigReloadableOptions): Reloadable {
+export function createConfigReloadable({
+  cwd,
+  permissions,
+  skipMountValidation = false,
+}: CreateConfigReloadableOptions): Reloadable {
   return {
     scope: 'config',
     description: 'typeclaw.json runtime config',
-    reload: async () => doReload(cwd, permissions),
+    reload: async () => doReload(cwd, permissions, skipMountValidation),
   }
 }
 
-async function doReload(cwd: string, permissions: PermissionService | undefined): Promise<ReloadResult> {
+async function doReload(
+  cwd: string,
+  permissions: PermissionService | undefined,
+  skipMountValidation: boolean,
+): Promise<ReloadResult> {
   // Mount accessibility belongs to the validation surface, not loadConfigSync —
   // validateConfig is the single gate that every host-side caller goes through.
   // Run it before swapping the live config pointer so a mount that vanished
   // between starts surfaces as a reload failure (`mounts` is restart-required
   // anyway, so the user has to restart to pick up changes; better to flag the
   // problem now than to let restart fail later).
-  const validated = validateConfig(cwd)
+  //
+  // Container-side reload skips mount validation: mounts are host paths and
+  // statSync against them inside the container always fails. The host-side
+  // `start` / `restart` / doctor paths still gate on the full validateConfig.
+  const validated = validateConfig(cwd, { skipMounts: skipMountValidation })
   if (!validated.ok) {
     return { scope: 'config', ok: false, reason: validated.reason }
   }

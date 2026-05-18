@@ -105,7 +105,13 @@ export async function startAgent({
     ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
 
-  reloadRegistry.register(createConfigReloadable({ cwd, permissions: pluginsLoaded.permissions }))
+  reloadRegistry.register(
+    createConfigReloadable({
+      cwd,
+      permissions: pluginsLoaded.permissions,
+      skipMountValidation: containerName !== undefined,
+    }),
+  )
   const pluginRegistry = pluginsLoaded.registry
   const pluginHooks = pluginsLoaded.hooks
 
