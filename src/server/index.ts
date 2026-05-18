@@ -7,6 +7,7 @@ import {
   type CreateSessionResult,
 } from '@/agent'
 import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
+import { detectProviderError } from '@/agent/provider-error'
 import type { SessionOrigin } from '@/agent/session-origin'
 import type { ChannelRouter } from '@/channels/router'
 import type { HookBus } from '@/plugin'
@@ -458,16 +459,10 @@ function forwardSessionEvents(ws: Ws, session: AgentSession, logger: ServerLogge
 }
 
 function forwardAssistantError(ws: Ws, message: unknown, logger: ServerLogger, sessionFileId: string): void {
-  if (typeof message !== 'object' || message === null) return
-  const m = message as { role?: string; stopReason?: string; errorMessage?: string }
-  if (m.role !== 'assistant') return
-  if (m.stopReason !== 'error' && m.stopReason !== 'aborted') return
-  // 'aborted' is fired when the user hits Escape — don't surface it as an
-  // error message because the TUI already shows abort feedback elsewhere.
-  if (m.stopReason === 'aborted') return
-  const text = typeof m.errorMessage === 'string' && m.errorMessage.length > 0 ? m.errorMessage : 'LLM call failed'
-  logger.error(`[server] ${sessionFileId}: LLM call failed: ${text}`)
-  send(ws, { type: 'error', message: text })
+  const detected = detectProviderError(message)
+  if (detected === null) return
+  logger.error(`[server] ${sessionFileId}: LLM call failed: ${detected.message}`)
+  send(ws, { type: 'error', message: detected.message })
 }
 
 function enqueuePrompt(

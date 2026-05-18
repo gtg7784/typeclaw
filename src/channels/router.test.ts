@@ -36,6 +36,8 @@ class FakeSession {
     getLeafEntry: (): SessionEntry | undefined => this.leafEntry,
   }
 
+  private subscribers = new Set<(event: { type: string; message?: unknown }) => void>()
+
   prompt = async (text: string): Promise<void> => {
     this.prompts.push(text)
     await this.onPrompt?.(text)
@@ -45,6 +47,13 @@ class FakeSession {
   }
   dispose = (): void => {
     this.disposed++
+  }
+  subscribe = (cb: (event: { type: string; message?: unknown }) => void): (() => void) => {
+    this.subscribers.add(cb)
+    return () => this.subscribers.delete(cb)
+  }
+  emit = (event: { type: string; message?: unknown }): void => {
+    for (const cb of this.subscribers) cb(event)
   }
 
   setAssistantText(text: string): void {
@@ -1840,6 +1849,83 @@ describe('ChannelRouter plugin lifecycle hooks', () => {
 
     // then
     expect(events).toEqual(['idle:ses_fake_throws'])
+  })
+
+  test('logs LLM soft errors (stopReason=error encoded in message_end) so `typeclaw logs` surfaces them', async () => {
+    // given: a live session whose prompt() resolves normally but emits a
+    // message_end with stopReason=error mid-turn — pi-coding-agent's
+    // documented way of reporting billing/rate-limit failures without
+    // throwing. Without the router subscribing, this would be invisible
+    // (no reply to the channel, no entry in `typeclaw logs`).
+    const dir = await tempDir()
+    const errors: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      logger: { info: () => {}, warn: () => {}, error: (m) => errors.push(m) },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        fake.prompt = async (_text) => {
+          fake.emit({
+            type: 'message_end',
+            message: {
+              role: 'assistant',
+              stopReason: 'error',
+              errorMessage: 'billing not active',
+            },
+          })
+        }
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_soft_err',
+          dispose: async () => {},
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+
+    // when
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(errors.some((m) => /LLM call failed: billing not active/.test(m))).toBe(true)
+  })
+
+  test('upgrades hard prompt-throws to logger.error (not warn) so `typeclaw logs` operators see them at the right level', async () => {
+    // given
+    const dir = await tempDir()
+    const warns: string[] = []
+    const errors: string[] = []
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      logger: {
+        info: () => {},
+        warn: (m) => warns.push(m),
+        error: (m) => errors.push(m),
+      },
+      createSessionForChannel: async () => {
+        const fake = new FakeSession()
+        fake.prompt = async () => {
+          throw new Error('network unreachable')
+        }
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: 'ses_hard_err',
+          dispose: async () => {},
+          getTranscriptPath: () => undefined,
+        }
+      },
+    })
+
+    // when
+    await router.route(inbound({ text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then
+    expect(errors.some((m) => /prompt threw.*network unreachable/.test(m))).toBe(true)
+    expect(warns.some((m) => /prompt threw/.test(m))).toBe(false)
   })
 
   test('fires session.end on stop() before disposing each live session', async () => {

@@ -491,4 +491,49 @@ describe('createSubagentConsumer', () => {
 
     consumer.stop()
   })
+
+  test('logs LLM soft errors emitted via message_end during prompt() so `typeclaw logs` surfaces them', async () => {
+    // given: a subagent whose underlying session emits a message_end with
+    // stopReason=error during prompt(), mirroring how pi-coding-agent
+    // reports billing/rate-limit failures (resolves normally, doesn't throw).
+    const stream = createStream()
+    const errors: string[] = []
+    type Listener = (event: { type: string; message?: unknown }) => void
+    const sessionWithSubscribe = (): AgentSession => {
+      const listeners = new Set<Listener>()
+      return {
+        prompt: async () => {
+          for (const cb of listeners) {
+            cb({
+              type: 'message_end',
+              message: { role: 'assistant', stopReason: 'error', errorMessage: 'billing failed' },
+            })
+          }
+        },
+        dispose: () => {},
+        subscribe: (cb: Listener) => {
+          listeners.add(cb)
+          return () => listeners.delete(cb)
+        },
+      } as unknown as AgentSession
+    }
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+    const consumer = createSubagentConsumer({
+      stream,
+      getRegistry: () => registry,
+      agentDir: '/agent',
+      createSessionForSubagent: async () => sessionWithSubscribe(),
+      logger: { ...silent, error: (m) => errors.push(m) },
+    })
+    consumer.start()
+
+    // when
+    stream.publish({ target: { kind: 'new-session', subagent: 'greeter' }, payload: undefined })
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(errors.some((e) => /\[subagent\] greeter: LLM call failed: billing failed/.test(e))).toBe(true)
+
+    consumer.stop()
+  })
 })

@@ -5,6 +5,7 @@ import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
 import { type AgentSession, createSession } from './index'
+import { subscribeProviderErrors } from './provider-error'
 import type { SessionOrigin } from './session-origin'
 import type { ToolResultBudget } from './tool-result-budget'
 
@@ -134,6 +135,7 @@ export type InvokeSubagentOptions = {
   parentSessionId?: string
   spawnedByRole?: string
   spawnedByOrigin?: SessionOrigin
+  onProviderError?: (errorMessage: string) => void
 }
 
 export async function invokeSubagent(name: string, options: InvokeSubagentOptions): Promise<void> {
@@ -153,6 +155,10 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
     const { session, dispose, hooks, sessionId, agentDir, origin, getTranscriptPath } = normalizeSubagentSession(
       await createSessionForSubagent(subagent, sessionOptions),
     )
+    const unsubProviderErrors =
+      options.onProviderError !== undefined
+        ? subscribeProviderErrors(session, (err) => options.onProviderError!(err.message))
+        : null
     const turnEvent =
       hooks && sessionId !== undefined && agentDir !== undefined
         ? { sessionId, agentDir, ...(origin !== undefined ? { origin } : {}) }
@@ -177,6 +183,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
         })
       }
     } finally {
+      unsubProviderErrors?.()
       if (hooks && sessionId !== undefined) {
         await hooks.runSessionEnd({ sessionId, ...(origin !== undefined ? { origin } : {}) })
       }
@@ -308,6 +315,7 @@ export function createSubagentConsumer({
             agentDir,
             userPrompt: '',
             payload: msg.payload,
+            onProviderError: (message) => logger.error(`[subagent] ${key}: LLM call failed: ${message}`),
             ...(target.parentSessionId !== undefined ? { parentSessionId: target.parentSessionId } : {}),
             ...(target.spawnedByRole !== undefined ? { spawnedByRole: target.spawnedByRole } : {}),
             ...(spawnedByOrigin !== undefined ? { spawnedByOrigin } : {}),

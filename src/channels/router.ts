@@ -4,6 +4,7 @@ import type { AssistantMessage } from '@mariozechner/pi-ai'
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, type AgentSession } from '@/agent'
+import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { createCommandRegistry } from '@/commands'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
@@ -255,6 +256,7 @@ type LiveSession = {
   loopGuardActive: boolean
   membershipFetch: Promise<MembershipCount | null> | null
   destroyed: boolean
+  unsubProviderErrors: (() => void) | null
 }
 
 type ChannelCommandContext = {
@@ -722,7 +724,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         loopGuardActive: false,
         membershipFetch,
         destroyed: false,
+        unsubProviderErrors: null,
       }
+      live.unsubProviderErrors = subscribeProviderErrors(created.session, (err) => {
+        logger.error(`[channels] ${live.keyId}: LLM call failed: ${err.message}`)
+      })
       liveSessions.set(keyId, live)
 
       if (isColdStart) {
@@ -1027,7 +1033,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.consecutiveAborts = 0
           logger.info(`[channels] ${live.keyId} prompted elapsed_ms=${now() - promptStart}`)
         } catch (err) {
-          logger.warn(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
+          logger.error(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
           live.consecutiveSends.clear()
         } finally {
           await fireSessionTurnEnd(live)
@@ -1512,6 +1518,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.destroyed = true
     if (live.debounceTimer) clearTimeout(live.debounceTimer)
     live.debounceTimer = null
+    live.unsubProviderErrors?.()
+    live.unsubProviderErrors = null
     await stopTypingHeartbeat(live)
     try {
       await live.session.abort()

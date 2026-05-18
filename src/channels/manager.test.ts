@@ -177,6 +177,7 @@ describe('channel manager — reload detects missing tokens and stops adapter', 
       },
       abort: async () => {},
       sessionManager: { getLeafEntry: () => undefined },
+      subscribe: () => () => {},
     } as unknown as AgentSession
     const mgr = createChannelManager({
       agentDir,
