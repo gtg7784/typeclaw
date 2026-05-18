@@ -9,6 +9,7 @@ import { createDeliveryDedup } from './dedup'
 import { createGithubFetchAttachmentCallback } from './fetch-attachment'
 import { createGithubHistoryCallback } from './history'
 import { createGithubWebhookHandler } from './inbound'
+import { applyManagedPath, buildManagedPath, resolveAgentId } from './managed-path'
 import { createGithubMembershipResolver } from './membership'
 import { createGithubOutboundCallback } from './outbound'
 import { deregisterGithubWebhooks, registerGithubWebhooks, type WebhookRegistrationResult } from './webhook-register'
@@ -149,19 +150,26 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       if (cfg.webhookUrl !== undefined && tunnelUrl !== null) {
         logger.warn('[github] webhookUrl configured; ignoring tunnel URL for webhook registration')
       }
-      const effectiveUrl = cfg.webhookUrl ?? tunnelUrl
+      const rawUrl = cfg.webhookUrl ?? tunnelUrl
+      const managedPath = buildManagedPath(
+        resolveAgentId({ containerName: process.env.TYPECLAW_CONTAINER_NAME, agentDir: options.agentDir }),
+      )
+      const effectiveUrl = rawUrl === null ? null : applyManagedPath(rawUrl, managedPath)
       if (effectiveUrl === null) {
         logSkippedRegistration(logger, {
           tunnelConfigured: options.tunnelConfiguredForChannel?.() ?? false,
           reposCount: repos.length,
         })
       } else if (repos.length > 0) {
+        const legacyProviderHostSuffix = detectLegacyProviderHostSuffix(effectiveUrl)
         const registration = await registerGithubWebhooks({
           token: tokenFn,
           webhookUrl: effectiveUrl,
           webhookSecret,
           repos,
           events: cfg.eventAllowlist,
+          managedPath,
+          ...(legacyProviderHostSuffix !== undefined ? { legacyProviderHostSuffix } : {}),
           fetchImpl,
         })
         managedHooks = registration.repos.flatMap((r) =>
@@ -233,11 +241,36 @@ function logSkippedRegistration(
   )
 }
 
+// Known tunnel-provider host suffixes whose hostnames rotate per container.
+// A pre-marker hook on one of these is unambiguously a typeclaw orphan from
+// this agent's prior runs (cloudflare-quick is per-container, the host
+// changes every restart, so a stale unmarked *.trycloudflare.com hook
+// pointing at a now-dead host cannot belong to any live service).
+// Extending: add the host suffix here AND verify that hooks on the new
+// provider always look unmarked (no operator-supplied path) before the
+// marker was introduced.
+const LEGACY_TUNNEL_PROVIDER_HOSTS: readonly string[] = ['.trycloudflare.com']
+
+function detectLegacyProviderHostSuffix(url: string): string | undefined {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return undefined
+  }
+  for (const suffix of LEGACY_TUNNEL_PROVIDER_HOSTS) {
+    if (parsed.host.endsWith(suffix)) return suffix
+  }
+  return undefined
+}
+
 function logRegistrationOutcome(logger: GithubAdapterLogger, result: WebhookRegistrationResult): void {
   for (const r of result.repos) {
     if (r.action === 'created') logger.info(`[github] registered webhook ${r.hookId} on ${r.repo}`)
-    else if (r.action === 'updated') logger.info(`[github] updated webhook ${r.hookId} on ${r.repo}`)
-    else logger.warn(`[github] webhook register failed for ${r.repo}: ${r.error}`)
+    else if (r.action === 'updated') {
+      const tail = r.stalePruned > 0 ? ` (pruned ${r.stalePruned} stale)` : ''
+      logger.info(`[github] updated webhook ${r.hookId} on ${r.repo}${tail}`)
+    } else logger.warn(`[github] webhook register failed for ${r.repo}: ${r.error}`)
   }
 }
 

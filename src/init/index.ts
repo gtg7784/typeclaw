@@ -314,6 +314,7 @@ export async function runInit({
         webhookSecret: githubCredentials.webhookSecret,
         repos: githubCredentials.repos,
         auth: githubCredentials.auth,
+        agentDir: cwd,
         ...(githubFetchImpl !== undefined ? { fetchImpl: githubFetchImpl } : {}),
       })
       emit({ step: 'github-webhooks', phase: 'done', result })
@@ -981,6 +982,7 @@ async function maybeInstallGithubWebhooks(
     webhookSecret: options.webhookSecret,
     repos: options.repos,
     auth: options.auth,
+    agentDir: options.cwd,
     ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
   })
   emit({ step: 'github-webhooks', phase: 'done', result })

@@ -67,7 +67,7 @@ describe('installGithubWebhooksEagerly', () => {
 
     expect('error' in result).toBe(false)
     if ('error' in result) throw new Error('unreachable')
-    expect(result.repos).toEqual([{ repo: 'acme/widgets', action: 'updated', hookId: 999 }])
+    expect(result.repos).toEqual([{ repo: 'acme/widgets', action: 'updated', hookId: 999, stalePruned: 0 }])
     expect(calls.some((c) => c.method === 'PATCH' && c.url.endsWith('/hooks/999'))).toBe(true)
   })
 
@@ -133,7 +133,7 @@ describe('formatEagerGithubWebhookInstallResult', () => {
       formatEagerGithubWebhookInstallResult({
         repos: [
           { repo: 'a/b', action: 'created', hookId: 1 },
-          { repo: 'a/c', action: 'updated', hookId: 2 },
+          { repo: 'a/c', action: 'updated', hookId: 2, stalePruned: 0 },
         ],
       }),
     ).toBe('GitHub webhooks: 1 created, 1 updated.')
