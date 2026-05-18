@@ -106,9 +106,14 @@ export function renderStartSuccess(result: StartLikeResult): string {
 
 export type NextStepHint = { label: string; command: string }
 
-export function done(opts: { title: string; hints: NextStepHint[] }): void {
-  const body = opts.hints.map((h) => `${c.dim(h.label)}  ${c.cyan(h.command)}`).join('\n')
-  note(body, opts.title)
+// `details` goes into the body, not the title: clack's `note()` sizes the
+// box to the title's visual width and never wraps titles, so a long title
+// breaks the layout on narrow terminals. Body content is wrapped to fit.
+export function done(opts: { title: string; details?: string; hints: NextStepHint[] }): void {
+  const lines: string[] = []
+  if (opts.details !== undefined && opts.details !== '') lines.push(opts.details)
+  for (const h of opts.hints) lines.push(`${c.dim(h.label)}  ${c.cyan(h.command)}`)
+  note(lines.join('\n'), opts.title)
   outro(c.green('Done.'))
 }
 

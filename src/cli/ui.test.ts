@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
-import { c, errorLine, link, renderStartSuccess, spinner, successLine, type StartLikeResult } from './ui'
+import { c, done, errorLine, link, renderStartSuccess, spinner, successLine, type StartLikeResult } from './ui'
 
 const ENV_KEYS = ['NO_COLOR', 'FORCE_COLOR'] as const
 
@@ -218,6 +218,94 @@ describe('errorLine / successLine', () => {
       expect(errorLine('x')).toBe('✖ x')
       expect(successLine('y')).toBe('● y')
     })
+  })
+})
+
+describe('done', () => {
+  const ANSI = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g')
+
+  function captureStdout<T>(fn: () => T): { result: T; output: string } {
+    const original = process.stdout.write.bind(process.stdout)
+    let buf = ''
+    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+      buf += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
+      return true
+    }) as typeof process.stdout.write
+    try {
+      const result = fn()
+      return { result, output: buf.replace(ANSI, '') }
+    } finally {
+      process.stdout.write = original
+    }
+  }
+
+  test('renders a box whose width fits the terminal even when details is very long', () => {
+    const { output } = captureStdout(() =>
+      withNoColor(() =>
+        done({
+          title: 'Profile "default" set.',
+          details: 'default → fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+          hints: [{ label: 'If the agent is running:', command: 'typeclaw reload' }],
+        }),
+      ),
+    )
+
+    const widths = [...output.matchAll(/^[│├└][^\n]*$/gm)].map((m) => m[0].length)
+    const maxWidth = Math.max(0, ...widths)
+    expect(maxWidth).toBeLessThanOrEqual(80)
+    expect(output).toContain('Profile "default" set.')
+    expect(output).toContain('default → fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')
+    expect(output).toContain('typeclaw reload')
+  })
+
+  test('renders only hints when details is omitted (back-compat)', () => {
+    const { output } = captureStdout(() =>
+      withNoColor(() =>
+        done({
+          title: 'Short title.',
+          hints: [{ label: 'Next:', command: 'typeclaw start' }],
+        }),
+      ),
+    )
+    expect(output).toContain('Short title.')
+    expect(output).toContain('typeclaw start')
+  })
+
+  test('places details ABOVE hints in the rendered body', () => {
+    const { output } = captureStdout(() =>
+      withNoColor(() =>
+        done({
+          title: 'Profile set.',
+          details: 'DETAILS_MARKER',
+          hints: [{ label: 'Hint:', command: 'HINTS_MARKER' }],
+        }),
+      ),
+    )
+    const detailsIdx = output.indexOf('DETAILS_MARKER')
+    const hintsIdx = output.indexOf('HINTS_MARKER')
+    expect(detailsIdx).toBeGreaterThanOrEqual(0)
+    expect(hintsIdx).toBeGreaterThan(detailsIdx)
+  })
+
+  test('treats empty details as omitted (same shape as missing details)', () => {
+    const withEmpty = captureStdout(() =>
+      withNoColor(() =>
+        done({
+          title: 'Profile set.',
+          details: '',
+          hints: [{ label: 'Hint:', command: 'typeclaw reload' }],
+        }),
+      ),
+    ).output
+    const without = captureStdout(() =>
+      withNoColor(() =>
+        done({
+          title: 'Profile set.',
+          hints: [{ label: 'Hint:', command: 'typeclaw reload' }],
+        }),
+      ),
+    ).output
+    expect(withEmpty).toBe(without)
   })
 })
 
