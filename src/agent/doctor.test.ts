@@ -14,7 +14,7 @@ import { runPluginDoctorChecks, runPluginDoctorFix, sanitizeChangedPaths } from 
 const silentLogger: PluginLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
 function emptyRegistry(): PluginRegistry {
-  return { tools: [], subagents: [], cronJobs: [], skills: [], skillsDirs: [], doctorChecks: [] }
+  return { tools: [], subagents: [], cronJobs: [], skills: [], skillsDirs: [], doctorChecks: [], commands: [] }
 }
 
 function registerCheck(

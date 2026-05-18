@@ -1,8 +1,9 @@
 export {
   bashTool,
-  defineTool,
+  defineCommand,
   definePlugin,
   defineSubagent,
+  defineTool,
   editTool,
   findTool,
   grepTool,
@@ -13,13 +14,22 @@ export {
 
 export type {
   BuiltinToolRef,
+  CommandExecResult,
+  CommandStreams,
+  ContainerCommand,
+  ContainerCommandContext,
   ContentPart,
   DefinedPlugin,
+  EitherCommand,
+  EitherCommandContext,
   HookContext,
   HookName,
   Hooks,
+  HostCommand,
+  HostCommandContext,
   PluginCheckResult,
   PluginCheckStatus,
+  PluginCommand,
   PluginContext,
   PluginCronJob,
   PluginDoctorCheck,
@@ -61,12 +71,14 @@ export { loadPluginEntry, derivePluginNameFromPackage } from './loader'
 export { materializeSkills, type MaterializedSkills, type SkillEntry } from './skills'
 export {
   buildPluginCronGlobalId,
+  RESERVED_COMMAND_NAMES,
   type PluginRegistry,
+  type RegisteredCommand,
   type RegisteredCronJob,
   type RegisteredDoctorCheck,
+  type RegisteredSkillDir,
+  type RegisteredSkillEntry,
   type RegisteredSubagent,
   type RegisteredTool,
-  type RegisteredSkillEntry,
-  type RegisteredSkillDir,
 } from './registry'
 export { createHookBus, type HookBus } from './hooks'

@@ -309,6 +309,7 @@ describe('createResourceLoader', () => {
         },
       ],
       doctorChecks: [],
+      commands: [],
     }
 
     const loader = await createResourceLoader({
@@ -432,6 +433,7 @@ describe('createResourceLoader', () => {
       skills: [],
       skillsDirs: [],
       doctorChecks: [],
+      commands: [],
     }
 
     // when
@@ -465,6 +467,7 @@ describe('createResourceLoader', () => {
       skills: [],
       skillsDirs: [],
       doctorChecks: [],
+      commands: [],
     }
     const origin: SessionOrigin = {
       kind: 'channel',

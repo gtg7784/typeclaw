@@ -117,6 +117,7 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
         pluginName: resolved.name,
         logger,
         exports,
+        ...(resolved.defined.commands !== undefined ? { commands: resolved.defined.commands } : {}),
         registry,
         hooks,
         agentDir: opts.agentDir,
@@ -166,6 +167,7 @@ export function summarizeLoaded(loaded: LoadPluginsResult['loadedPlugins'], regi
     `${registry.skills.length} skill(s)`,
     `${registry.skillsDirs.length} skills dir(s)`,
     `${registry.doctorChecks.length} doctor check(s)`,
+    `${registry.commands.length} command(s)`,
   ].join(', ')
   return `${loaded.length} plugin(s): ${head} [${counts}]`
 }
