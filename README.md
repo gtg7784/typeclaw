@@ -35,7 +35,7 @@ TypeClaw is the agent I wanted to use:
 - 🔄 **Hot reload** — change `typeclaw.json`, `typeclaw reload` — no restart for most fields
 - 🔁 **Self-restart** — the agent can bounce its own container when it updates itself
 - 🌐 **Auto port-forward** — dev servers inside the container appear on `localhost`, even loopback-only ones
-- 🌍 **Public tunnels** — bring-your-own external URL today; managed Cloudflare tunnels in upcoming releases
+- 🌍 **Public tunnels** — Cloudflare Quick (zero signup) or bring-your-own external URL; the agent self-registers GitHub webhooks at the resulting public URL
 - 🎼 **Compose** — orchestrate multiple agents across multiple folders
 
 ### 🌱 Self-improving, in detail
@@ -84,6 +84,7 @@ That's it. The agent is now alive, listening on a websocket, ready to receive pr
 | `typeclaw cron list`                | List every cron job registered in the running agent (user `cron.json` + plugins)   |
 | `typeclaw channel add <kind>`       | Wire a new channel adapter (Slack, Discord, Telegram, KakaoTalk)                   |
 | `typeclaw channel reauth kakaotalk` | Re-authenticate KakaoTalk after a stale-token 401 or to rotate the stored password |
+| `typeclaw tunnel ...`               | Add/list/status/remove public tunnels and inspect tunnel logs                      |
 
 ## Configuration
 
@@ -109,7 +110,7 @@ my-agent/
 - `plugins` — list of plugin module specifiers
 - `channels` — `slack-bot` / `discord-bot` config
 - `portForward` — allow/deny list for auto port forwarding (default: `*`)
-- `tunnels` — declare public URLs for inbound webhooks and ad-hoc exposure (today: `external` provider only; managed Cloudflare providers planned)
+- `tunnels` — declare public URLs for inbound webhooks and ad-hoc exposure (`cloudflare-quick` or `external`)
 - `dockerfile` — toggles for `gh`, `python`, `tmux`, `ffmpeg`, `cjkFonts`, plus `append` lines
 - `memory` — idle window and dreaming schedule for the memory plugin
 

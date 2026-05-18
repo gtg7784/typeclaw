@@ -221,9 +221,8 @@ export type NetworkConfig = z.infer<typeof networkSchema>
 
 // Reverse-proxy tunnels expose a container-private port to the public internet
 // via a managed subprocess (cloudflared) or a user-supplied external URL.
-// See AGENTS.md `## Tunnels`. PR 1 ships only the `external` provider — the
-// `cloudflare-quick` and `cloudflare-named` providers will be added to this
-// enum in PR 2/3. Keeping the enum scoped to what's implemented means
+// See AGENTS.md `## Tunnels`. PR 2 ships `cloudflare-quick`; `cloudflare-named`
+// remains deferred to PR 3. Keeping the enum scoped to what's implemented means
 // validateConfig() rejects unsupported providers at `typeclaw start` time,
 // before the container is torn down and rebuilt. `restart-required` because
 // the tunnel manager reads this list once at boot.
