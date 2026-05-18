@@ -87,7 +87,7 @@ export type StartOptions = {
   // Hostd's supervisor restart callback already runs inside the daemon process.
   // Reusing that daemon avoids a self-shutdown when disk source has drifted.
   reuseCurrentHostDaemon?: boolean
-  ensureDeps?: (cwd: string) => Promise<EnsureDepsResult>
+  ensureDeps?: (cwd: string, opts?: { force?: boolean }) => Promise<EnsureDepsResult>
   // Test seam for the typeclaw-version auto-upgrade. Production callers omit
   // this and get the real autoUpgradeTypeclawDep (which reads the CLI's own
   // package.json). Tests inject a stub to simulate `bun -g update typeclaw`
@@ -149,7 +149,7 @@ export async function start({
   allocatePort = findFreePort,
   cliEntry,
   reuseCurrentHostDaemon = false,
-  ensureDeps = (dir) => ensureDepsInstalled({ cwd: dir }),
+  ensureDeps = (dir, opts) => ensureDepsInstalled({ cwd: dir, ...opts }),
   autoUpgrade = (dir) => autoUpgradeTypeclawDep({ cwd: dir }),
   forceBunUpdate = runBunUpdate,
   readInstalledVersion = readInstalledTypeclawVersionFromAgent,
@@ -235,7 +235,14 @@ export async function start({
     // node_modules/ partially populated. The container then crashes with
     // `Cannot find package 'x'` because the agent folder is bind-mounted into
     // /agent and the container has no node_modules of its own.
-    const deps = await ensureDeps(cwd)
+    //
+    // Force-reinstall ONLY when --build is set AND typeclaw is declared via
+    // a local link. Bun's file-dep cache otherwise serves stale source on
+    // subsequent installs (PR #243 dogfooding wasted three rebuilds + a
+    // manual version bump before this gate existed). Registry-spec users
+    // skip the force path because their install is already cache-correct.
+    const forceDepsReinstall = forceBuild && (await hasLocallyLinkedTypeclawDep(cwd))
+    const deps = await ensureDeps(cwd, { force: forceDepsReinstall })
     if (!deps.ok) {
       return { ok: false, reason: `dependency install failed: ${deps.reason}` }
     }
@@ -707,6 +714,26 @@ async function detectDevSource(cwd: string): Promise<string | null> {
     return isAbsolute(target) ? resolve(target) : resolve(cwd, target)
   } catch {
     return null
+  }
+}
+
+// True when the agent's package.json declares typeclaw via `file:` or
+// `link:` — i.e. a developer is iterating on the typeclaw source via a
+// locally-linked checkout. `bun install` keys its file-dep cache on
+// name+version, so it treats a stale cached copy as a cache hit even
+// after the source on disk has changed. `typeclaw start --build` uses
+// this gate to force `bun install --force` only in dev: registry-spec
+// users (`^X.Y.Z`, `~X.Y.Z`, exact pins) pay nothing because their
+// install path is already cache-correct.
+async function hasLocallyLinkedTypeclawDep(cwd: string): Promise<boolean> {
+  try {
+    const raw = await readFile(join(cwd, PACKAGE_FILE), 'utf8')
+    const pkg = JSON.parse(raw) as { dependencies?: Record<string, string> }
+    const spec = pkg.dependencies?.typeclaw
+    if (typeof spec !== 'string') return false
+    return spec.startsWith('file:') || spec.startsWith('link:')
+  } catch {
+    return false
   }
 }
 

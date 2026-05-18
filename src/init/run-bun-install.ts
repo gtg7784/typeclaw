@@ -1,12 +1,21 @@
 export type InstallResult = { ok: true } | { ok: false; reason: string }
 
+export type InstallRunnerOptions = {
+  // Append `--force` to the bun install argv to bypass the cache for
+  // `file:` / `link:` deps. Bun treats name+version of a `file:` dep as a
+  // cache hit even after the source on disk has changed, so changes to a
+  // locally-linked typeclaw never propagate into <agent>/node_modules until
+  // either the typeclaw version is bumped or the install is forced.
+  force?: boolean
+}
+
 // Signature for the function `runInit` uses to materialize the agent folder's
 // dependencies. Exposed as a named type so callers (and tests) can pass their
 // own stub without re-declaring the shape, mirroring `HatchRunner` and
 // `KakaotalkAuthRunner` in `./index.ts`.
-export type InstallRunner = (cwd: string) => Promise<InstallResult>
+export type InstallRunner = (cwd: string, opts?: InstallRunnerOptions) => Promise<InstallResult>
 
-export async function runBunInstall(cwd: string): Promise<InstallResult> {
+export async function runBunInstall(cwd: string, opts?: InstallRunnerOptions): Promise<InstallResult> {
   const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
   if (!bun) return { ok: false, reason: 'bun runtime not available' }
   try {
@@ -21,7 +30,12 @@ export async function runBunInstall(cwd: string): Promise<InstallResult> {
       // the bug are non-trivial. Hoisted is the fallback strategy bun shipped
       // before 1.3 — slightly slower for huge monorepos, indistinguishable
       // for an agent folder, and not affected by the bug.
-      cmd: ['bun', 'install', '--linker=hoisted'],
+      //
+      // `--force` is conditional: it bypasses the package cache so file:/link:
+      // deps re-copy their current on-disk source into node_modules. Bun's
+      // file-dep cache is keyed on name+version, so without --force, edits to
+      // a `file:..` typeclaw never reach the container after the first install.
+      cmd: opts?.force ? ['bun', 'install', '--linker=hoisted', '--force'] : ['bun', 'install', '--linker=hoisted'],
       cwd,
       stdout: 'pipe',
       stderr: 'pipe',
