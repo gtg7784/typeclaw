@@ -1,6 +1,6 @@
 ---
 name: typeclaw-cron
-description: Use this skill whenever the user asks you to schedule recurring work, run something on a cron, do something every day/hour/week, set up a periodic task, or read or edit your cron schedule. Triggers include "every morning", "every Monday", "schedule a", "remind me every", "set up a cron", "run X periodically", "what's on my cron", "when does X run", or any mention of `cron.json`. Read it before touching `cron.json` — the file has a strict schema, restart semantics, and a best-effort execution model that you must not misrepresent to the user.
+description: Use this skill whenever the user asks you to schedule recurring work, run something on a cron, do something every day/hour/week, set up a periodic task, list or inspect scheduled jobs, or read or edit your cron schedule. Triggers include "every morning", "every Monday", "schedule a", "remind me every", "set up a cron", "run X periodically", "list cron jobs", "list scheduled jobs", "show me the cron", "what cron jobs do you have", "what's on my cron", "when does X run", or any mention of `cron.json`. Read it before touching `cron.json` — the file has a strict schema, restart semantics, and a best-effort execution model that you must not misrepresent to the user.
 ---
 
 # typeclaw-cron
@@ -147,6 +147,26 @@ Pick `kind` first, then schedule, then timezone:
 3. **Timezone.** If the user mentioned a wall-clock time, set `timezone` to their zone. If unknown, ask once or default to the timezone in `USER.md` if it's recorded there.
 4. **Pick a stable `id`.** Use kebab-case that describes the job, not the schedule. `daily-summary` not `0-23-30`.
 5. **Write it. Call `reload`. If reload succeeded, commit it.** If reload failed, fix `cron.json` based on the error and retry — do not commit a broken file.
+
+## Listing what is currently scheduled
+
+When the user asks _"what cron jobs do you have?"_, _"list cron jobs"_, _"show me the cron schedule"_, _"when does X next run"_, the answer is **`typeclaw cron list`**, not `read cron.json`.
+
+```sh
+bash$ typeclaw cron list
+```
+
+The command runs on the host stage and asks the running container for its merged registry: every job authored in `cron.json` PLUS every job contributed by plugins (e.g. the bundled memory plugin's `dreaming` cron, which is invisible from `cron.json` alone). Output includes id, source (`user` vs `plugin:<name>.<localId>`), schedule, next-fire timestamp + relative duration, scheduled-by role, and kind-specific tail. Use `--json` if you want to pipe into anything.
+
+Why not just `read cron.json`?
+
+- It misses every plugin-contributed job. The user almost always wants the merged view.
+- It does not show next-fire times. The user is usually asking about _when_, not _what_.
+- It does not validate the file — a `cron list` will surface invalid schedules and unknown subagent references the live scheduler would reject.
+
+Read `cron.json` directly only when you are **editing** it. For any read-only "what is scheduled" question, use `typeclaw cron list`.
+
+`typeclaw cron list` requires the container to be running. If `cron list` reports the agent is unreachable, suggest `typeclaw start` or fall back to reading `cron.json` directly (with a note that plugin jobs are missing from the view).
 
 ## Reading cron history
 
