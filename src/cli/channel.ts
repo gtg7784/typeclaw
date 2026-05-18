@@ -14,6 +14,7 @@ import {
   runAddChannel,
   type AddChannelStepEvent,
   type ChannelKind,
+  type GithubTunnelProvider,
   type KakaotalkAuthResult,
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
@@ -64,6 +65,11 @@ const addSub = defineCommand({
         ...credentials,
         onProgress: reportProgress(events),
       })
+      if (credentials.channel === 'github' && credentials.tunnelProvider === 'none') {
+        log.warn(
+          'Webhook delivery is disabled until you add a `tunnels[]` entry or set `channels.github.webhookUrl` manually.',
+        )
+      }
     } catch (error) {
       console.error(errorLine(error instanceof Error ? error.message : String(error)))
       process.exit(1)
@@ -321,7 +327,8 @@ type CollectedCredentials =
   | {
       channel: 'github'
       webhookSecret: string
-      webhookUrl: string
+      tunnelProvider: GithubTunnelProvider
+      webhookUrl?: string
       webhookPort?: number
       repos: string[]
       auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
@@ -359,7 +366,8 @@ async function collectCredentials(channel: ChannelKind): Promise<CollectedCreden
 
 async function promptGithubCredentials(): Promise<{
   webhookSecret: string
-  webhookUrl: string
+  tunnelProvider: GithubTunnelProvider
+  webhookUrl?: string
   webhookPort?: number
   repos: string[]
   auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
@@ -384,10 +392,30 @@ async function promptGithubCredentials(): Promise<{
     process.exit(0)
   }
   const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
-  const webhookUrl = await text({
-    message: 'Public webhook URL (GitHub will POST events here)',
-    validate: (value) => validateUrl(value ?? '', 'Webhook URL is required'),
+  note('GitHub webhooks need a public URL. TypeClaw can manage a tunnel for you.', 'GitHub webhook tunnel')
+  const tunnelProvider = await select<GithubTunnelProvider>({
+    message: 'Tunnel provider',
+    options: [
+      {
+        value: 'cloudflare-quick',
+        label: 'Cloudflare Quick Tunnel — no signup, URL rotates on restart (recommended)',
+      },
+      { value: 'external', label: 'External URL — I have my own reverse proxy / tunnel' },
+      { value: 'none', label: 'None — configure later by hand-editing typeclaw.json' },
+    ],
+    initialValue: 'cloudflare-quick',
   })
+  if (isCancel(tunnelProvider)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const webhookUrl =
+    tunnelProvider === 'external'
+      ? await text({
+          message: 'Public webhook URL (GitHub will POST events here)',
+          validate: (value) => validateUrl(value ?? '', 'Webhook URL is required'),
+        })
+      : undefined
   if (isCancel(webhookUrl)) {
     cancel('Aborted.')
     process.exit(0)
@@ -426,7 +454,8 @@ async function promptGithubCredentials(): Promise<{
   const resolvedSecret = enteredSecret.length > 0 ? enteredSecret : randomBytes(32).toString('hex')
   return {
     webhookSecret: resolvedSecret,
-    webhookUrl,
+    tunnelProvider,
+    ...(webhookUrl !== undefined ? { webhookUrl } : {}),
     webhookPort: Number(port),
     repos: parseRepos(reposRaw),
     auth,

@@ -785,6 +785,7 @@ describe('collectWizardInputs back-aware flow', () => {
           value: {
             github: {
               webhookSecret: 'whsec',
+              tunnelProvider: 'external',
               webhookUrl: 'https://example.com/wh',
               webhookPort: 8975,
               repos: ['acme/repo-a', 'acme/repo-b'],
@@ -805,6 +806,7 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(result.channelSecrets).toEqual({
       github: {
         webhookSecret: 'whsec',
+        tunnelProvider: 'external',
         webhookUrl: 'https://example.com/wh',
         webhookPort: 8975,
         repos: ['acme/repo-a', 'acme/repo-b'],

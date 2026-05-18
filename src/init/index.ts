@@ -64,11 +64,14 @@ export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
 // can hand off without re-encoding the auth union or webhook fields.
 export type GithubInitCredentials = {
   webhookSecret: string
-  webhookUrl: string
+  tunnelProvider: GithubTunnelProvider
+  webhookUrl?: string
   webhookPort?: number
   repos: string[]
   auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
 }
+
+export type GithubTunnelProvider = 'cloudflare-quick' | 'external' | 'none'
 
 export type InitStepEvent =
   | { step: 'preflight'; phase: 'start' }
@@ -881,7 +884,8 @@ export type AddChannelOptions = {
   | {
       channel: 'github'
       webhookSecret: string
-      webhookUrl: string
+      tunnelProvider: GithubTunnelProvider
+      webhookUrl?: string
       webhookPort?: number
       repos: string[]
       auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
@@ -1001,22 +1005,59 @@ async function mergeChannelIntoConfig(cwd: string, options: AddChannelOptions): 
     throw new Error(`Channel "${options.channel}" is already configured in ${CONFIG_FILE}.`)
   }
 
-  const nextChannelConfig =
-    options.channel === 'github'
-      ? {
-          webhookUrl: options.webhookUrl,
-          webhookPort: options.webhookPort ?? 8975,
-          eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
-          repos: options.repos,
-        }
-      : {}
+  const nextChannelConfig = options.channel === 'github' ? buildGithubChannelConfig(options) : {}
 
   parsed.channels = {
     ...existingChannels,
     [options.channel]: nextChannelConfig,
   }
 
+  if (options.channel === 'github') mergeGithubTunnelConfig(parsed, options)
+
   await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`)
+}
+
+function buildGithubChannelConfig(options: Extract<AddChannelOptions, { channel: 'github' }>): Record<string, unknown> {
+  return {
+    ...(options.webhookUrl !== undefined ? { webhookUrl: options.webhookUrl } : {}),
+    webhookPort: options.webhookPort ?? 8975,
+    eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
+    repos: options.repos,
+  }
+}
+
+function mergeGithubTunnelConfig(
+  parsed: Record<string, unknown>,
+  options: Extract<AddChannelOptions, { channel: 'github' }>,
+): void {
+  if (options.tunnelProvider === 'none') return
+  if (options.tunnelProvider === 'external' && options.webhookUrl === undefined) {
+    throw new Error('GitHub external tunnel requires webhookUrl')
+  }
+
+  const existingTunnels = Array.isArray(parsed.tunnels) ? parsed.tunnels : []
+  const tunnel =
+    options.tunnelProvider === 'external'
+      ? {
+          name: 'github-webhook',
+          provider: 'external',
+          externalUrl: options.webhookUrl,
+          for: { kind: 'channel', name: 'github' },
+        }
+      : {
+          name: 'github-webhook',
+          provider: 'cloudflare-quick',
+          for: { kind: 'channel', name: 'github' },
+        }
+  parsed.tunnels = [...existingTunnels, tunnel]
+
+  if (options.tunnelProvider === 'cloudflare-quick') {
+    const docker = isObjectRecord(parsed.docker) ? { ...parsed.docker } : {}
+    const file = isObjectRecord(docker.file) ? { ...docker.file } : {}
+    file.cloudflared = true
+    docker.file = file
+    parsed.docker = docker
+  }
 }
 
 // Init-side counterpart of runAddChannel's github branch. Same three writes
@@ -1030,12 +1071,13 @@ async function writeGithubChannelForInit(cwd: string, credentials: GithubInitCre
   const parsed = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>
   const existingChannels = isObjectRecord(parsed.channels) ? { ...parsed.channels } : {}
   existingChannels.github = {
-    webhookUrl: credentials.webhookUrl,
+    ...(credentials.webhookUrl !== undefined ? { webhookUrl: credentials.webhookUrl } : {}),
     webhookPort: credentials.webhookPort ?? 8975,
     eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
     repos: credentials.repos,
   }
   parsed.channels = existingChannels
+  mergeGithubTunnelConfig(parsed, { channel: 'github', ...credentials, cwd })
   await writeFile(configPath, `${JSON.stringify(parsed, null, 2)}\n`)
 
   const backend = new SecretsBackend(join(cwd, 'secrets.json'))

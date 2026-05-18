@@ -20,6 +20,7 @@ import {
   readExistingProviderApiKey,
   runInit,
   type GithubInitCredentials,
+  type GithubTunnelProvider,
   type InitStep,
   type InitStepEvent,
   type KakaotalkAuthResult,
@@ -193,6 +194,12 @@ export const init = defineCommand({
     if (preflightFailure !== null) {
       note(preflightFailureGuidance(preflightFailure).join('\n'), 'Docker check failed')
       process.exit(1)
+    }
+
+    if (githubCredentials?.tunnelProvider === 'none') {
+      log.warn(
+        'Webhook delivery is disabled until you add a `tunnels[]` entry or set `channels.github.webhookUrl` manually.',
+      )
     }
 
     if (hatchingOk) {
@@ -972,10 +979,27 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
   if (isCancel(authType)) return back()
   const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
   if (auth === null) return back()
-  const webhookUrl = await text({
-    message: 'Public webhook URL (GitHub will POST events here)',
-    validate: (v) => validateGithubUrl(v ?? '', 'Webhook URL is required'),
+  note('GitHub webhooks need a public URL. TypeClaw can manage a tunnel for you.', 'GitHub webhook tunnel')
+  const tunnelProvider = await select<GithubTunnelProvider>({
+    message: 'Tunnel provider',
+    options: [
+      {
+        value: 'cloudflare-quick',
+        label: 'Cloudflare Quick Tunnel — no signup, URL rotates on restart (recommended)',
+      },
+      { value: 'external', label: 'External URL — I have my own reverse proxy / tunnel' },
+      { value: 'none', label: 'None — configure later by hand-editing typeclaw.json' },
+    ],
+    initialValue: 'cloudflare-quick',
   })
+  if (isCancel(tunnelProvider)) return back()
+  const webhookUrl =
+    tunnelProvider === 'external'
+      ? await text({
+          message: 'Public webhook URL (GitHub will POST events here)',
+          validate: (v) => validateGithubUrl(v ?? '', 'Webhook URL is required'),
+        })
+      : undefined
   if (isCancel(webhookUrl)) return back()
   const port = await text({
     message: 'Local webhook port inside the agent container',
@@ -1003,7 +1027,8 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
   return value({
     github: {
       webhookSecret: resolvedSecret,
-      webhookUrl,
+      tunnelProvider,
+      ...(webhookUrl !== undefined ? { webhookUrl } : {}),
       webhookPort: Number(port),
       repos: parseGithubRepos(reposRaw),
       auth,

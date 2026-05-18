@@ -248,6 +248,7 @@ describe('runAddChannel', () => {
       channel: 'github',
       auth: { type: 'pat', pat: 'ghp_test' },
       webhookSecret: 'wh-secret',
+      tunnelProvider: 'external',
       webhookUrl: 'https://agent.example.com/gh',
       webhookPort: 8975,
       repos: ['acme/widgets'],
@@ -256,10 +257,24 @@ describe('runAddChannel', () => {
 
     const cfg = (await readConfig()) as {
       channels?: { github?: { webhookUrl?: string; repos?: string[]; eventAllowlist?: string[] } }
+      tunnels?: Array<{
+        name?: string
+        provider?: string
+        externalUrl?: string
+        for?: { kind?: string; name?: string }
+      }>
     }
     expect(cfg.channels?.github?.webhookUrl).toBe('https://agent.example.com/gh')
     expect(cfg.channels?.github?.repos).toEqual(['acme/widgets'])
     expect(cfg.channels?.github?.eventAllowlist).toContain('issue_comment.created')
+    expect(cfg.tunnels).toEqual([
+      {
+        name: 'github-webhook',
+        provider: 'external',
+        externalUrl: 'https://agent.example.com/gh',
+        for: { kind: 'channel', name: 'github' },
+      },
+    ])
 
     const secrets = await readSecretsChannels()
     expect((secrets.github as { auth: { type: string } }).auth.type).toBe('pat')
@@ -275,6 +290,52 @@ describe('runAddChannel', () => {
       'secrets:start',
       'secrets:done',
     ])
+  })
+
+  test('adds github channel with a cloudflare-quick tunnel and cloudflared Dockerfile toggle', async () => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret',
+      tunnelProvider: 'cloudflare-quick',
+      webhookPort: 8975,
+      repos: ['acme/widgets'],
+    })
+
+    const cfg = (await readConfig()) as {
+      channels?: { github?: { webhookUrl?: string; repos?: string[] } }
+      docker?: { file?: { cloudflared?: boolean } }
+      tunnels?: Array<{ name?: string; provider?: string; for?: { kind?: string; name?: string } }>
+    }
+
+    expect(cfg.channels?.github?.webhookUrl).toBeUndefined()
+    expect(cfg.channels?.github?.repos).toEqual(['acme/widgets'])
+    expect(cfg.docker?.file?.cloudflared).toBe(true)
+    expect(cfg.tunnels).toEqual([
+      { name: 'github-webhook', provider: 'cloudflare-quick', for: { kind: 'channel', name: 'github' } },
+    ])
+  })
+
+  test('adds github channel with no tunnel and no webhookUrl', async () => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret',
+      tunnelProvider: 'none',
+      webhookPort: 8975,
+      repos: ['acme/widgets'],
+    })
+
+    const cfg = (await readConfig()) as {
+      channels?: { github?: { webhookUrl?: string; repos?: string[] } }
+      tunnels?: unknown[]
+    }
+
+    expect(cfg.channels?.github?.webhookUrl).toBeUndefined()
+    expect(cfg.channels?.github?.repos).toEqual(['acme/widgets'])
+    expect(cfg.tunnels).toBeUndefined()
   })
 
   test('emits kakaotalk-auth before config + secrets when adding kakaotalk', async () => {
