@@ -600,30 +600,21 @@ The `for` discriminator is load-bearing: `{ kind: 'channel', name: 'github' }` l
 
 Three providers, only one shipped in v1:
 
-| Provider           | Subprocess                     | URL source                                | When                                                                               |
-| ------------------ | ------------------------------ | ----------------------------------------- | ---------------------------------------------------------------------------------- |
-| `external`         | none                           | `externalUrl` from config, static         | User has their own reverse proxy (Caddy, ngrok, etc.)                              |
-| `cloudflare-quick` | `cloudflared tunnel --url ...` | parsed from cloudflared stderr at runtime | Default for `channel add github` — zero signup, URL rotates on restart             |
-| `cloudflare-named` | `cloudflared tunnel run <id>`  | known from config (`hostname` field)      | After `typeclaw tunnel upgrade` — stable URL, requires Cloudflare account + domain |
+| Provider                  | Subprocess                     | URL source                                             | When                                                                               |
+| ------------------------- | ------------------------------ | ------------------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `external` (PR 1)         | none                           | `externalUrl` from config, static (must be `https://`) | User has their own reverse proxy (Caddy, ngrok, etc.)                              |
+| `cloudflare-quick` (PR 2) | `cloudflared tunnel --url ...` | parsed from cloudflared stderr at runtime              | Default for `channel add github` — zero signup, URL rotates on restart             |
+| `cloudflare-named` (PR 3) | `cloudflared tunnel run <id>`  | known from config (`hostname` field)                   | After `typeclaw tunnel upgrade` — stable URL, requires Cloudflare account + domain |
 
-PR 1 ships `external` only. The other two enum values parse but `createTunnelManager` throws `not implemented yet (deferred to PR 2/3)` at boot. The intent is to let users declare `provider: external` with a hand-managed ngrok/cloudflared URL today and graduate to managed providers when PR 2/3 land.
+PR 1 ships **only** `external` in the provider enum. The schema rejects `cloudflare-quick` / `cloudflare-named` at config-parse time so `typeclaw start` fails fast before tearing down a working container; the names are not in the enum until PR 2/3 land them. The intent is to let users declare `provider: external` with a hand-managed ngrok/cloudflared URL today and graduate to managed providers when those PRs land.
 
 ### Webhook server (existing, not new)
 
 There is **no `src/webhooks/` module**. The GitHub adapter at `src/channels/adapters/github/index.ts` line 111 already calls `Bun.serve({ port: configRef().webhookPort, fetch: handler })` inside the container, with `webhookPort` defaulting to 8975 (schema at `src/channels/schema.ts`). Tunnels point at the adapter's existing port. Consolidation into a shared multi-route server is deferred until N≥2 webhook adapters exist (today only GitHub).
 
-### `channels.github.webhookUrl` is now optional
+### Integration with `channels.github.webhookUrl` (PR 2)
 
-The field used to be `z.string().url()` (required). PR 1 relaxes it to `.optional()`. Runtime behavior:
-
-| `webhookUrl` | `tunnels[]` entry for github | Adapter behavior                                                                                                          |
-| ------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| set          | none                         | Treat as external/user-managed (today's behavior — backward-compat).                                                      |
-| unset        | exists                       | Wait for first `tunnel-url-changed` event, then PATCH/POST-register webhook with GitHub. (v1 happy path once PR 2 lands.) |
-| both set     | exists                       | `tunnels[]` wins; warning logged once at boot.                                                                            |
-| neither      | none                         | Adapter boots with a warning; channel cannot receive webhooks.                                                            |
-
-Optional-relaxation is **zero-migration** — every existing config still parses. No `migrateLegacyConfigShape` step is needed. The deprecation message guides users to remove `webhookUrl` once they verify their tunnel works, but typeclaw deliberately does NOT auto-delete user-authored config.
+The GitHub adapter reads `channels.github.webhookUrl` at every `start()` and registers a webhook against that URL per `channels.github.repos[]` entry. PR 1 does not change that contract — `webhookUrl` remains required, the adapter keeps registering at start and deregistering at stop. PR 2 will add a tunnel-url-changed consumer that updates `channels.github.webhookUrl` (via the config store) when a managed tunnel resolves a new URL, then triggers an adapter restart to re-register against the new URL. The existing adapter lifecycle does the heavy lifting; the tunnel manager just keeps the field current.
 
 ### Stream wiring
 
@@ -639,7 +630,7 @@ type TunnelUrlChangedPayload = {
 }
 ```
 
-`isTunnelUrlChangedPayload` (in `src/tunnels/events.ts`) is the type guard for consumers. Today only the GitHub adapter consumes it (deferred subscription wiring lands in PR 2 alongside the auto-registration loop). Future consumers — TUI status renderer, plugin-contributed channel adapters — subscribe via the same broadcast filter.
+`isTunnelUrlChangedPayload` (in `src/tunnels/events.ts`) is the type guard consumers will use. **No consumer subscribes today** — the broadcast payload is published whenever a provider resolves a URL, but PR 1 ships only the wire format. PR 2 wires a consumer that updates `channels.github.webhookUrl` so the existing adapter's start-time webhook registration (`src/channels/adapters/github/index.ts`) picks up the new URL on next restart. Future consumers — TUI status renderer, plugin-contributed channel adapters — subscribe via the same broadcast filter.
 
 ### Rules of thumb
 
@@ -647,7 +638,7 @@ type TunnelUrlChangedPayload = {
 - **The `for` discriminator owns lifecycle ownership.** `for: { kind: 'channel', ... }` entries are owned by `typeclaw channel add/remove`; `for: { kind: 'manual' }` entries are owned by `typeclaw tunnel add/remove`. `tunnel remove` refuses to delete a channel-owned tunnel and points the user at `channel remove <name>` instead. The two paths share zero CLI state.
 - **External tunnels are the universal escape hatch.** When in doubt, a user can declare `provider: 'external'` with their own URL — no subprocess, no signup, no extra binary in the image. The other providers are conveniences on top of this baseline.
 - **Channel adapters subscribe to `tunnel-url-changed` broadcasts via the in-process Stream — they do NOT call into the tunnel manager directly.** The decoupling is load-bearing: the adapter doesn't care whether the URL came from cloudflared, an external URL, or (future) tailscale. The broadcast is the contract.
-- **`webhookUrl` optional is a one-way relaxation.** Re-tightening it to required would break every existing config that omits it. Treat the optional state as permanent and design migrations around it, not against it.
+- **The provider enum is intentionally scoped to what's implemented.** Adding `cloudflare-quick` / `cloudflare-named` to the enum _before_ their providers ship would let `typeclaw start` accept a config that the runtime then refuses to honor, tearing down a working container on every restart. Future PRs widen the enum and the provider switch in `src/tunnels/manager.ts` at the same time.
 
 ## Message Stream
 
