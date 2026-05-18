@@ -240,6 +240,43 @@ describe('runAddChannel', () => {
     ])
   })
 
+  test('adds github channel: writes typeclaw.json (incl. repos[] and event allowlist), secrets.json, and match rules — no webhook side effect at add time', async () => {
+    const events: AddChannelStepEvent[] = []
+
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret',
+      webhookUrl: 'https://agent.example.com/gh',
+      webhookPort: 8975,
+      repos: ['acme/widgets'],
+      onProgress: (e) => events.push(e),
+    })
+
+    const cfg = (await readConfig()) as {
+      channels?: { github?: { webhookUrl?: string; repos?: string[]; eventAllowlist?: string[] } }
+    }
+    expect(cfg.channels?.github?.webhookUrl).toBe('https://agent.example.com/gh')
+    expect(cfg.channels?.github?.repos).toEqual(['acme/widgets'])
+    expect(cfg.channels?.github?.eventAllowlist).toContain('issue_comment.created')
+
+    const secrets = await readSecretsChannels()
+    expect((secrets.github as { auth: { type: string } }).auth.type).toBe('pat')
+
+    const after = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      roles?: { member?: { match?: string[] } }
+    }
+    expect(after.roles?.member?.match).toContain('github:acme/widgets')
+
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
+      'config:start',
+      'config:done',
+      'secrets:start',
+      'secrets:done',
+    ])
+  })
+
   test('emits kakaotalk-auth before config + secrets when adding kakaotalk', async () => {
     const events: AddChannelStepEvent[] = []
     await runAddChannel({

@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import { config, configSchema, migrateLegacyConfigShape, type Config } from '@/config'
 import {
   DEFAULT_MODEL_REF,
@@ -1005,15 +1006,8 @@ async function mergeChannelIntoConfig(cwd: string, options: AddChannelOptions): 
       ? {
           webhookUrl: options.webhookUrl,
           webhookPort: options.webhookPort ?? 8975,
-          eventAllowlist: [
-            'issue_comment.created',
-            'pull_request_review_comment.created',
-            'discussion_comment.created',
-            'issues.opened',
-            'pull_request.opened',
-            'discussion.created',
-            'pull_request_review.submitted',
-          ],
+          eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
+          repos: options.repos,
         }
       : {}
 
@@ -1038,15 +1032,8 @@ async function writeGithubChannelForInit(cwd: string, credentials: GithubInitCre
   existingChannels.github = {
     webhookUrl: credentials.webhookUrl,
     webhookPort: credentials.webhookPort ?? 8975,
-    eventAllowlist: [
-      'issue_comment.created',
-      'pull_request_review_comment.created',
-      'discussion_comment.created',
-      'issues.opened',
-      'pull_request.opened',
-      'discussion.created',
-      'pull_request_review.submitted',
-    ],
+    eventAllowlist: [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
+    repos: credentials.repos,
   }
   parsed.channels = existingChannels
   await writeFile(configPath, `${JSON.stringify(parsed, null, 2)}\n`)

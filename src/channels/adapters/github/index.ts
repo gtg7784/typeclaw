@@ -11,6 +11,7 @@ import { createGithubHistoryCallback } from './history'
 import { createGithubWebhookHandler } from './inbound'
 import { createGithubMembershipResolver } from './membership'
 import { createGithubOutboundCallback } from './outbound'
+import { deregisterGithubWebhooks, registerGithubWebhooks, type WebhookRegistrationResult } from './webhook-register'
 
 export type GithubAdapterLogger = {
   info: (m: string) => void
@@ -51,6 +52,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   let selfId: string | null = null
   let selfLogin: string | null = null
   let started = false
+  let managedHooks: ReadonlyArray<{ repo: string; hookId: number }> = []
   const workspaceByChat = new Map<string, string>()
 
   const rememberWorkspace = (workspace: string, chat: string): void => {
@@ -130,6 +132,26 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       process.env.GH_TOKEN = await auth.token()
       started = true
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
+      // Repository webhook registration is best-effort: failures are logged
+      // per-repo, the adapter stays up. A misconfigured PAT or App that
+      // can't manage hooks must not prevent the adapter from accepting
+      // events for repos whose hooks are already registered.
+      const cfg = options.configRef()
+      const repos = cfg.repos ?? []
+      if (repos.length > 0) {
+        const registration = await registerGithubWebhooks({
+          token: tokenFn,
+          webhookUrl: cfg.webhookUrl,
+          webhookSecret,
+          repos,
+          events: cfg.eventAllowlist,
+          fetchImpl,
+        })
+        managedHooks = registration.repos.flatMap((r) =>
+          r.action === 'created' || r.action === 'updated' ? [{ repo: r.repo, hookId: r.hookId }] : [],
+        )
+        logRegistrationOutcome(logger, registration)
+      }
     },
     async stop(): Promise<void> {
       if (!started) return
@@ -141,6 +163,19 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       options.router.unregisterChannelNameResolver('github', channelNameResolver)
       options.router.unregisterFetchAttachment('github', fetchAttachment)
       await server?.stop()
+      // Detach hooks AFTER closing the listener so any in-flight deliveries
+      // from GitHub no longer hit a live receiver while we're tearing down.
+      // The token call uses the still-live `auth` strategy; dispose() runs
+      // last to clear the cached App-installation token.
+      if (managedHooks.length > 0) {
+        const deregistration = await deregisterGithubWebhooks({
+          token: tokenFn,
+          hooks: managedHooks,
+          fetchImpl,
+        })
+        logDeregistrationOutcome(logger, deregistration)
+        managedHooks = []
+      }
       await auth.dispose()
       delete process.env.GH_TOKEN
       server = null
@@ -156,4 +191,23 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
 function listenWithBun(port: number, handler: (req: Request) => Promise<Response>): { stop: () => Promise<void> } {
   const server = Bun.serve({ port, fetch: handler })
   return { stop: async () => server.stop() }
+}
+
+function logRegistrationOutcome(logger: GithubAdapterLogger, result: WebhookRegistrationResult): void {
+  for (const r of result.repos) {
+    if (r.action === 'created') logger.info(`[github] registered webhook ${r.hookId} on ${r.repo}`)
+    else if (r.action === 'updated') logger.info(`[github] updated webhook ${r.hookId} on ${r.repo}`)
+    else logger.warn(`[github] webhook register failed for ${r.repo}: ${r.error}`)
+  }
+}
+
+function logDeregistrationOutcome(
+  logger: GithubAdapterLogger,
+  result: Awaited<ReturnType<typeof deregisterGithubWebhooks>>,
+): void {
+  for (const h of result.hooks) {
+    if (h.action === 'deleted') logger.info(`[github] detached webhook ${h.hookId} from ${h.repo}`)
+    else if (h.action === 'missing') logger.info(`[github] webhook ${h.hookId} on ${h.repo} already gone`)
+    else logger.warn(`[github] webhook detach failed for ${h.repo}#${h.hookId}: ${h.error ?? 'unknown error'}`)
+  }
 }

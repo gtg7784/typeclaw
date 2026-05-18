@@ -113,6 +113,13 @@ const githubChannelSchema = adapterSchema.extend({
   webhookUrl: z.string().url(),
   webhookPort: z.number().int().positive().default(8975),
   eventAllowlist: z.array(z.string()).default([...DEFAULT_GITHUB_EVENT_ALLOWLIST]),
+  // Repositories whose webhooks the adapter manages. Each entry is an
+  // `owner/name` slug. On adapter start(), TypeClaw registers a webhook
+  // pointing at webhookUrl for every repo here (idempotent: existing hooks
+  // at the same URL are updated). On stop(), every hook TypeClaw created
+  // this session is deleted so a restart with a different webhookUrl (e.g.
+  // a tunnel reassigning a URL) doesn't leave orphaned hooks on GitHub.
+  repos: z.array(z.string()).default([]),
 })
 
 // KakaoTalk uses the same shape as every other adapter. There used to be an

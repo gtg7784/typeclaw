@@ -367,8 +367,8 @@ async function promptGithubCredentials(): Promise<{
   note(
     [
       'Choose PAT auth for a quick setup, or GitHub App auth for expiring installation tokens.',
-      'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used), Metadata read.',
-      'Create a repository webhook pointing to the public webhook URL you enter below.',
+      'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
+      'Metadata read, and Webhooks read/write (TypeClaw will create and manage the repository webhooks for you).',
     ].join('\n'),
     'Get GitHub credentials',
   )
@@ -424,17 +424,6 @@ async function promptGithubCredentials(): Promise<{
     process.exit(0)
   }
   const resolvedSecret = enteredSecret.length > 0 ? enteredSecret : randomBytes(32).toString('hex')
-  if (enteredSecret.length === 0) {
-    note(
-      [
-        `Webhook secret: ${resolvedSecret}`,
-        '',
-        'Paste this into the "Secret" field when creating the GitHub webhook.',
-        'It will not be shown again.',
-      ].join('\n'),
-      'Generated webhook secret',
-    )
-  }
   return {
     webhookSecret: resolvedSecret,
     webhookUrl,
