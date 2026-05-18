@@ -149,5 +149,5 @@ export const channelsSchema = z
 export type EngagementConfig = z.infer<typeof engagementSchema>
 export type ChannelAdapterConfig = z.infer<typeof adapterSchema>
 type ParsedGithubAdapterConfig = z.infer<typeof githubChannelSchema>
-export type GithubAdapterConfig = ParsedGithubAdapterConfig & { webhookUrl: string }
+export type GithubAdapterConfig = ParsedGithubAdapterConfig
 export type ChannelsConfig = z.infer<typeof channelsSchema>
