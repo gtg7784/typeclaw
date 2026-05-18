@@ -69,57 +69,28 @@ Use `exec` only for jobs that are pure mechanics — no judgement required. Exam
 
 `command` is an array. Index 0 is the executable, the rest are argv. Do **not** put a single shell pipeline in `command[0]` — that won't be parsed by a shell. If you need shell features (`|`, `>`, `&&`), wrap explicitly: `["sh", "-c", "your | pipeline | here"]`.
 
-## `exec → LLM`: bridge via a plugin container command
+## `exec → LLM`: write a plugin cron handler
 
-There are only two cron kinds — `prompt` and `exec`. There is **no** `kind: "exec-then-llm"` and there never will be. If a scheduled job needs to call into LLM-driven behavior from a shell-style entry point (e.g. parse output of a script and decide what to do, or run a multi-tool agent flow with a sharp `command` argv at the cron layer), the supported pattern is:
-
-1. Write a custom typeclaw plugin under `packages/<plugin-name>/` (see the `typeclaw-plugins` and `typeclaw-monorepo` skills).
-2. In the plugin, declare a `surface: 'container'` command on `definePlugin({ commands: { ... } })`. Inside its `run`, call `ctx.prompt(...)` — that opens a full agent session inside the running container with the entire toolset, and returns the final assistant text.
-3. **Schedule it from the plugin's own `cronJobs`** (the default, see below) — or, when the cadence is user-owned, from `cron.json`'s `exec` array.
-
-### Where to put the schedule: plugin `cronJobs` vs `cron.json`
-
-The same plugin command can be fired by two different schedulers. They look identical at runtime — both end up running `Bun.spawn(['typeclaw', '<cmd>', ...])` from the agent folder with `TYPECLAW_PARENT_ORIGIN_JSON` injected — but they differ in **who owns the cadence**.
-
-| Scheduler                | Schedule lives in            | Best when                                                                                                                                                      | `id` shape                               |
-| ------------------------ | ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
-| **Plugin `cronJobs`**    | The plugin module            | The plugin **author** decides the cadence — installing the plugin should be sufficient                                                                         | `__plugin_<plugin-name>_<key>`           |
-| **`cron.json`** (`exec`) | The agent folder's cron.json | The **user** decides the cadence — they want to schedule someone else's command at a custom time, or skip days, or change frequency without forking the plugin | `<user-supplied>` (no underscore prefix) |
-
-**Default to plugin `cronJobs`.** A plugin that ships an `audit-commits` command but no `cronJobs` registration silently demands every user wire it into `cron.json` themselves — that's a documentation tax with no payoff. If the plugin author has an opinion about cadence, they should ship the cron job too. The colocation also means renaming the command and updating its schedule happen in the same commit.
-
-Reach for `cron.json` only when the cadence is genuinely user-specific: "fire `audit-commits` every Sunday at 10pm in Asia/Seoul" is a user decision, not a plugin author's.
-
-### Concrete example: plugin-owned schedule (the default)
+`cron.json` itself supports only `prompt` and `exec` — no third kind. If a scheduled job needs imperative control flow that mixes shell calls and LLM calls (probe → maybe prompt → write file), the canonical answer is a **plugin cron handler**: a TypeScript function the plugin registers under its own `cronJobs` with `kind: 'handler'`. The cron consumer invokes it directly — no shell-out, no WS round-trip, no `Bun.spawn`.
 
 ```ts
 // packages/dev-audits/index.ts
-import { z } from 'zod'
 import { definePlugin } from 'typeclaw/plugin'
 
 export default definePlugin({
-  commands: {
-    'audit-commits': {
-      surface: 'container',
-      description: 'Review recent commits for message quality; write findings to memory/audits/.',
-      args: z.object({ since: z.string().default('24h') }),
-      async run(ctx, args) {
-        await ctx.prompt(
-          `Run \`git log --since='${args.since}' --pretty=format:'%h %s'\` and append a critique of weak commit messages to memory/audits/$(date +%F)-commits.md. Be specific — quote bad messages and suggest rewrites.`,
-        )
-        return 0
-      },
-    },
-  },
   plugin: async () => ({
     cronJobs: {
-      // Global cron id becomes __plugin_dev-audits_daily — can't collide
-      // with anything in cron.json (those forbid leading underscore).
       daily: {
         schedule: '0 22 * * *',
         timezone: 'Asia/Seoul',
-        kind: 'exec',
-        command: ['typeclaw', 'audit-commits', '--since=24h'],
+        kind: 'handler',
+        handler: async (ctx) => {
+          const { stdout } = await ctx.exec`git log --since='24h' --pretty=format:'%h %s'`
+          if (stdout.trim().length === 0) return
+          await ctx.prompt(
+            `These commits landed in the last 24h:\n${stdout}\nAppend a critique of weak commit messages to memory/audits/$(date +%F)-commits.md. Be specific — quote bad messages and suggest rewrites.`,
+          )
+        },
       },
     },
   }),
@@ -134,14 +105,46 @@ export default definePlugin({
 }
 ```
 
-That's the whole installation. No `cron.json` edit, no user wiring. `typeclaw restart` and the job is live.
+That's the whole installation. No `cron.json` edit, no CLI command shim. `typeclaw restart` and the job is live.
 
-### Concrete example: user-owned schedule (the alternative)
+### The `CronHandlerContext` surface
 
-When the user is scheduling a plugin command at a cadence the plugin author didn't anticipate — or the plugin deliberately ships no `cronJobs` because the author had no opinion — drop into `cron.json`:
+The handler receives a `ctx` with the LLM-call surface of a container plugin command, minus the CLI-shaped fields:
+
+| Field             | Type                                                          | Notes                                                                                                                                                                                          |
+| ----------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ctx.jobId`       | `string`                                                      | The global cron id (`__plugin_<plugin-name>_<key>`). Useful for log lines.                                                                                                                     |
+| `ctx.agentDir`    | `string`                                                      | `/agent` in the container.                                                                                                                                                                     |
+| `ctx.logger`      | `PluginLogger`                                                | Plugin-prefixed `info` / `warn` / `error` going to container stdout.                                                                                                                           |
+| `ctx.signal`      | `AbortSignal`                                                 | Fires on container shutdown (SIGTERM). Respect it; don't fight it.                                                                                                                             |
+| `ctx.permissions` | `PermissionService`                                           | Same service the rest of the runtime uses. Most handlers don't need it; the LLM session resolves permissions through `ctx.origin` automatically.                                               |
+| `ctx.origin`      | `SessionOrigin` (cron-shaped)                                 | `{ kind: 'cron', jobId, jobKind: 'handler', scheduledByRole, scheduledByOrigin }`. Plugin-contributed jobs default to `scheduledByRole: 'owner'`.                                              |
+| `ctx.prompt`      | `(text: string) => Promise<string>`                           | Opens a brand-new agent session with the full toolset, sends `text`, returns the final assistant message. Uses **slim system prompt mode** (saves ~2000 tokens per LLM call vs a TUI session). |
+| `ctx.subagent`    | `(name: string, payload?) => Promise<void>`                   | Invokes a registered subagent. Same dispatch path as `PluginContext.spawnSubagent`.                                                                                                            |
+| `ctx.exec`        | `` ctx.exec`shell pipeline` `` → `Promise<CommandExecResult>` | Tagged template; runs in the agent folder with `ctx.signal` threaded through. Abort kills the entire process group (SIGTERM → 5s grace → SIGKILL).                                             |
+
+What's NOT on the handler ctx (and why):
+
+- **`stdin` / `stdout` / `stderr`** — cron has no caller piping bytes in or reading bytes out. Use `ctx.logger` or write files for output.
+- **`args`** — handlers are scheduled, not invoked with flags. Configurable values come through the plugin's `configSchema`.
+- **Return value** — the function returns `Promise<void>`. Throw to signal failure; the cron consumer catches and logs.
+
+### Permission contract (no silent elevation)
+
+The handler runs under the cron job's `scheduledByRole`. Inside `ctx.prompt`, every tool call resolves permissions against `ctx.origin` — which carries the cron's role. A plugin author cannot forge `scheduledByRole: 'owner'` to bypass guards from a less-privileged context; plugin-contributed cron jobs always inherit `'owner'` because plugins are part of the bundled runtime, but the role is real, not synthetic, and can be tightened by a future API. See `typeclaw-permissions`.
+
+### When to reach for the exec bridge instead
+
+The `kind: 'handler'` path is the right answer for plugin-internal scheduled imperative work. Two distinct cases still want a `kind: 'exec'` job pointing at a `typeclaw <cmd>` invocation:
+
+1. **The user wants a custom cadence for someone else's plugin command.** The plugin ships `audit-commits` (as a `surface: 'container'` command, see `typeclaw-plugins` §5.7) but no cron registration, or the plugin's default cadence doesn't match the user. The user writes a `cron.json` `exec` job pointing at the command. Same imperative control flow lives inside the command's `run`; cron just provides a different trigger.
+
+2. **The scheduled job needs to invoke a `surface: 'host'` command.** Host commands run outside the container with no agent runtime — neither `ctx.prompt` nor `ctx.subagent` is available. A cron `exec` job invoking `typeclaw <host-cmd>` is the only way to schedule host-side work from inside the container's cron.
+
+In both cases the `command` array is `['typeclaw', '<cmd>', ...]` and the runtime injects `TYPECLAW_PARENT_ORIGIN_JSON` so the spawned subprocess inherits the cron job's role through the same mechanism that protects plugin-contributed handlers from silent elevation.
 
 ```json
-// cron.json — user wants the audit on a custom schedule
+// cron.json — user wants someone else's plugin command on a custom schedule
 {
   "jobs": [
     {
@@ -149,39 +152,45 @@ When the user is scheduling a plugin command at a cadence the plugin author didn
       "schedule": "0 22 * * 0",
       "timezone": "Asia/Seoul",
       "kind": "exec",
-      "command": ["typeclaw", "audit-commits", "--since=7d"]
+      "command": ["typeclaw", "audit-commits", "--since=7d"],
+      "scheduledByRole": "owner"
     }
   ]
 }
 ```
 
-The runtime semantics are identical to the plugin-cron form: same `Bun.spawn`, same `TYPECLAW_PARENT_ORIGIN_JSON`, same role inheritance. The only practical difference is `id` shape (`weekly-commit-audit` vs `__plugin_dev-audits_daily`) and where the schedule is editable.
+A plugin can ship a `kind: 'handler'` default in `cronJobs` AND the user can add a different cadence in `cron.json` for the same command. They are independent cron jobs at the scheduler layer.
 
-Both can coexist — a plugin can ship a daily default in `cronJobs`, and the user can add a different cadence in `cron.json` for the same command. They are independent cron jobs at the scheduler layer.
+### Decision rules — which arm picks what
 
-### When to pick which (decision rules)
+```
+"I have scheduled work" → start here
 
-Pick **plugin `cronJobs`** when **any** of:
+  Is the work pure mechanics (git commit, log rotation, calling a known script)?
+    └─ Yes → kind: 'exec' in cron.json. No plugin needed.
 
-- The plugin author has an opinion about cadence — installing the plugin without an extra step should produce the scheduled behavior.
-- The command + the schedule are one feature — they should land in the same PR, version together, and be discoverable in one place.
-- Multiple cron jobs in the plugin share configuration and should evolve together (e.g. one daily, one weekly, both reading from the same plugin config block).
-
-Pick **`cron.json`** when **any** of:
-
-- The cadence is user-specific (weekends only, off-hours only, different timezone than the plugin's default).
-- The command lives in someone else's plugin and the user wants a different cadence without forking it. (Note: the user's `cron.json` entry runs alongside the plugin's default; if the user wants to **replace** the plugin's default rather than supplement it, the plugin should expose its `schedule` through `configSchema` so users override it in `typeclaw.json` without touching `cron.json`. That's the plugin author's responsibility, not the user's.)
-- One-off scheduled prose where writing a plugin is overkill.
-
-Pick plain `kind: "prompt"` (no plugin command at all) when:
-
-- The instruction is one-off, will never be reused, and parametrization is overkill.
-- You don't have a plugin yet and the work is genuinely a few sentences of prose.
+  Does it need LLM judgement?
+    │
+    ├─ One-shot natural-language prompt, no probes, no shell pre-work?
+    │   └─ kind: 'prompt' in cron.json.
+    │
+    ├─ Imperative control flow (probe → maybe prompt → write file)?
+    │   │
+    │   ├─ The cadence and the logic belong to the same plugin?
+    │   │   └─ kind: 'handler' in the plugin's cronJobs.  ← CANONICAL
+    │   │
+    │   ├─ The logic is in a plugin's container command and the USER
+    │   │  wants a custom cadence?
+    │   │   └─ kind: 'exec' in cron.json, command: ['typeclaw', '<cmd>']
+    │   │
+    │   └─ The work needs a `surface: 'host'` plugin command?
+    │       └─ kind: 'exec' in cron.json, command: ['typeclaw', '<host-cmd>']
+```
 
 ### What this pattern is NOT
 
-- It is **not** a way to bypass permissions. Both plugin-cron `exec` and `cron.json` `exec` stamp `scheduledByRole` into the spawned session's origin (via `TYPECLAW_PARENT_ORIGIN_JSON`); the plugin command's `ctx.origin` carries that role, and every tool inside `ctx.prompt`'s session resolves against it. A cron scheduled as `scheduledByRole: 'member'` invokes the command's prompt session as a member — no silent elevation. See `typeclaw-permissions`.
-- It is **not** a wrapper for shell pipelines you already have working. If `bash some-script.sh` does the job, just use that as the `command` array directly. Reach for the bridge only when LLM judgement is genuinely required inside the periodic work.
+- It is **not** a way to bypass permissions. Plugin `kind: 'handler'` jobs run under the plugin-default role (`'owner'`). Plugin `kind: 'exec'` and `cron.json` `kind: 'exec'` stamp `scheduledByRole` into the spawned subprocess via `TYPECLAW_PARENT_ORIGIN_JSON`; the plugin command's `ctx.origin` carries that role into every tool call inside `ctx.prompt`'s session. A cron scheduled as `scheduledByRole: 'member'` runs as a member — no silent elevation. See `typeclaw-permissions`.
+- It is **not** a wrapper for shell pipelines you already have working. If `bash some-script.sh` does the job, just use that as the `command` array directly. Reach for handlers (or the exec bridge) only when LLM judgement is genuinely required inside the periodic work.
 
 Read `typeclaw-plugins` §5.3 for the `cronJobs` registration shape, §5.7 for the full `commands` surface (host/container/either, `args` schema, `ctx.prompt` / `ctx.subagent` / `ctx.exec`, permission gating). Read `typeclaw-monorepo` for where the plugin package lives in `packages/`.
 
@@ -189,58 +198,41 @@ Read `typeclaw-plugins` §5.3 for the `cronJobs` registration shape, §5.7 for t
 
 Most polling-style cron jobs are skewed: they fire often (every 5 minutes, every hour) and **most ticks find no work**. A plain `kind: "prompt"` job spends a full LLM round-trip every tick just to discover there's nothing to do. That gets expensive fast — a 5-minute "check for new emails" prompt is ~290 LLM calls a day, even on days where nothing arrived.
 
-The bridge pattern fixes this naturally because `ctx.exec` runs **before** `ctx.prompt`. Do the cheap check first; only spend tokens when there's actual work:
+`kind: 'handler'` fixes this naturally because `ctx.exec` runs **before** `ctx.prompt`. Do the cheap check first; only spend tokens when there's actual work:
 
 ```ts
 // packages/inbox-watch/index.ts
-import { z } from 'zod'
 import { definePlugin } from 'typeclaw/plugin'
 
 export default definePlugin({
-  commands: {
-    'inbox-check': {
-      surface: 'container',
-      description: 'Triage new mail since last run; no-op if nothing new.',
-      args: z.object({ since: z.string().default('1h') }),
-      async run(ctx, args) {
-        // Cheap shell check: 0 LLM cost, ~100ms.
-        const { stdout, exitCode } = await ctx.exec`gmail unread --since=${args.since} --count`
-        if (exitCode !== 0) {
-          // Don't drag the LLM into shell failures — log and bail.
-          const err = new TextEncoder().encode(`inbox-check: gmail probe failed (exit ${exitCode})\n`)
-          const w = ctx.stderr.getWriter()
-          await w.write(err)
-          w.releaseLock()
-          return exitCode
-        }
-        const count = Number.parseInt(stdout.trim(), 10)
-        if (!Number.isFinite(count) || count === 0) {
-          // Nothing to do. Return 0 silently so cron logs don't get noisy.
-          return 0
-        }
-        // Expensive LLM path: only reached when there's actual work.
-        await ctx.prompt(
-          `There are ${count} unread emails since ${args.since}. Use the gmail skill to read them, summarize anything that needs a human reply, and append to memory/inbox/$(date +%F).md.`,
-        )
-        return 0
-      },
-    },
-  },
   plugin: async () => ({
     cronJobs: {
-      // Colocated with the command: install the plugin = the watch is live.
-      // Most ticks spend ~100ms of shell; LLM cost only on non-empty inboxes.
       watch: {
         schedule: '*/15 * * * *',
-        kind: 'exec',
-        command: ['typeclaw', 'inbox-check', '--since=15m'],
+        kind: 'handler',
+        handler: async (ctx) => {
+          // Cheap shell check: 0 LLM cost, ~100ms.
+          const { stdout, exitCode } = await ctx.exec`gmail unread --since=15m --count`
+          if (exitCode !== 0) {
+            // Don't drag the LLM into shell failures — log and bail.
+            ctx.logger.error(`gmail probe failed (exit ${exitCode})`)
+            return
+          }
+          const count = Number.parseInt(stdout.trim(), 10)
+          if (!Number.isFinite(count) || count === 0) {
+            // Nothing to do. Return silently so cron logs stay quiet.
+            return
+          }
+          // Expensive LLM path: only reached when there's actual work.
+          await ctx.prompt(
+            `There are ${count} unread emails since 15m ago. Use the gmail skill to read them, summarize anything that needs a human reply, and append to memory/inbox/$(date +%F).md.`,
+          )
+        },
       },
     },
   }),
 })
 ```
-
-(If the user wants a different cadence — only during work hours, only weekdays — they add a `cron.json` entry pointing at `["typeclaw", "inbox-check", "--since=…"]` with their own schedule. The plugin's `watch` job and the user's `cron.json` job are independent at the scheduler.)
 
 The shape that matters:
 
