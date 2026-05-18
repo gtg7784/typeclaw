@@ -9,6 +9,7 @@ import { createDeliveryDedup } from './dedup'
 import { createGithubFetchAttachmentCallback } from './fetch-attachment'
 import { createGithubHistoryCallback } from './history'
 import { createGithubWebhookHandler } from './inbound'
+import { applyManagedPath, buildManagedPath, resolveAgentId } from './managed-path'
 import { createGithubMembershipResolver } from './membership'
 import { createGithubOutboundCallback } from './outbound'
 import { deregisterGithubWebhooks, registerGithubWebhooks, type WebhookRegistrationResult } from './webhook-register'
@@ -149,7 +150,11 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       if (cfg.webhookUrl !== undefined && tunnelUrl !== null) {
         logger.warn('[github] webhookUrl configured; ignoring tunnel URL for webhook registration')
       }
-      const effectiveUrl = cfg.webhookUrl ?? tunnelUrl
+      const rawUrl = cfg.webhookUrl ?? tunnelUrl
+      const managedPath = buildManagedPath(
+        resolveAgentId({ containerName: process.env.TYPECLAW_CONTAINER_NAME, agentDir: options.agentDir }),
+      )
+      const effectiveUrl = rawUrl === null ? null : applyManagedPath(rawUrl, managedPath)
       if (effectiveUrl === null) {
         logSkippedRegistration(logger, {
           tunnelConfigured: options.tunnelConfiguredForChannel?.() ?? false,
@@ -162,6 +167,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           webhookSecret,
           repos,
           events: cfg.eventAllowlist,
+          managedPath,
           fetchImpl,
         })
         managedHooks = registration.repos.flatMap((r) =>
@@ -236,8 +242,10 @@ function logSkippedRegistration(
 function logRegistrationOutcome(logger: GithubAdapterLogger, result: WebhookRegistrationResult): void {
   for (const r of result.repos) {
     if (r.action === 'created') logger.info(`[github] registered webhook ${r.hookId} on ${r.repo}`)
-    else if (r.action === 'updated') logger.info(`[github] updated webhook ${r.hookId} on ${r.repo}`)
-    else logger.warn(`[github] webhook register failed for ${r.repo}: ${r.error}`)
+    else if (r.action === 'updated') {
+      const tail = r.stalePruned > 0 ? ` (pruned ${r.stalePruned} stale)` : ''
+      logger.info(`[github] updated webhook ${r.hookId} on ${r.repo}${tail}`)
+    } else logger.warn(`[github] webhook register failed for ${r.repo}: ${r.error}`)
   }
 }
 
