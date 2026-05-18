@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
 
 import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
@@ -319,11 +320,11 @@ type CollectedCredentials =
   | { channel: 'kakaotalk'; runKakaotalkAuth: (options: { cwd: string }) => Promise<KakaotalkAuthResult> }
   | {
       channel: 'github'
-      githubPat: string
       webhookSecret: string
       webhookUrl: string
       webhookPort?: number
       repos: string[]
+      auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
     }
 
 async function collectCredentials(channel: ChannelKind): Promise<CollectedCredentials> {
@@ -357,20 +358,31 @@ async function collectCredentials(channel: ChannelKind): Promise<CollectedCreden
 }
 
 async function promptGithubCredentials(): Promise<{
-  githubPat: string
   webhookSecret: string
   webhookUrl: string
   webhookPort?: number
   repos: string[]
+  auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
 }> {
   note(
     [
-      'Create a fine-grained PAT with access to the repositories TypeClaw should answer in.',
+      'Choose PAT auth for a quick setup, or GitHub App auth for expiring installation tokens.',
       'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used), Metadata read.',
       'Create a repository webhook pointing to the public webhook URL you enter below.',
     ].join('\n'),
     'Get GitHub credentials',
   )
+  const authType = await select({
+    message: 'GitHub authentication type',
+    options: [
+      { value: 'pat', label: 'Fine-grained personal access token' },
+      { value: 'app', label: 'GitHub App installation token' },
+    ],
+  })
+  if (isCancel(authType)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
   const webhookUrl = await text({
     message: 'Public webhook URL (GitHub will POST events here)',
     validate: (value) => validateUrl(value ?? '', 'Webhook URL is required'),
@@ -398,14 +410,7 @@ async function promptGithubCredentials(): Promise<{
     cancel('Aborted.')
     process.exit(0)
   }
-  const pat = await password({
-    message: 'GitHub fine-grained PAT',
-    validate: (value) => (value && value.length > 0 ? undefined : 'PAT is required'),
-  })
-  if (isCancel(pat)) {
-    cancel('Aborted.')
-    process.exit(0)
-  }
+  const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
   const reposRaw = await text({
     message: 'Repositories to allow (comma-separated owner/repo)',
     validate: (value) => (parseRepos(value ?? '').length > 0 ? undefined : 'At least one owner/repo is required'),
@@ -427,12 +432,70 @@ async function promptGithubCredentials(): Promise<{
     )
   }
   return {
-    githubPat: pat,
     webhookSecret: resolvedSecret,
     webhookUrl,
     webhookPort: Number(port),
     repos: parseRepos(reposRaw),
+    auth,
   }
+}
+
+async function promptGithubPatAuth(): Promise<{ type: 'pat'; pat: string }> {
+  const pat = await password({
+    message: 'GitHub fine-grained PAT',
+    validate: (value) => (value && value.length > 0 ? undefined : 'PAT is required'),
+  })
+  if (isCancel(pat)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return { type: 'pat', pat }
+}
+
+async function promptGithubAppAuth(): Promise<{
+  type: 'app'
+  appId: number
+  privateKey: string
+  installationId?: number
+}> {
+  const appId = await text({
+    message: 'GitHub App ID',
+    validate: (value) => validatePositiveInteger(value ?? '', 'App ID is required'),
+  })
+  if (isCancel(appId)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const privateKeyInput = await text({
+    message: 'GitHub App private key PEM, escaped PEM, or path to .pem file',
+    validate: (value) => (value && value.length > 0 ? undefined : 'Private key is required'),
+  })
+  if (isCancel(privateKeyInput)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const installationId = await text({
+    message: 'Installation ID (optional; leave blank to auto-discover)',
+    validate: (value) =>
+      value === undefined || value === '' ? undefined : validatePositiveInteger(value, 'Installation ID is required'),
+  })
+  if (isCancel(installationId)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  const parsedInstallationId = installationId === '' ? undefined : Number(installationId)
+  return {
+    type: 'app',
+    appId: Number(appId),
+    privateKey: await resolvePrivateKeyInput(privateKeyInput),
+    ...(parsedInstallationId !== undefined ? { installationId: parsedInstallationId } : {}),
+  }
+}
+
+async function resolvePrivateKeyInput(input: string): Promise<string> {
+  const normalized = input.replace(/\\n/g, '\n')
+  if (normalized.includes('-----BEGIN') && normalized.includes('PRIVATE KEY-----')) return normalized
+  return await readFile(input, 'utf8')
 }
 
 function parseRepos(input: string): string[] {
@@ -450,6 +513,12 @@ function validateUrl(value: string, requiredMessage: string): string | undefined
   } catch {
     return 'Must be a valid URL'
   }
+}
+
+function validatePositiveInteger(value: string, requiredMessage: string): string | undefined {
+  if (!value || value.length === 0) return requiredMessage
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? undefined : 'Must be a positive integer'
 }
 
 async function promptDiscordToken(): Promise<string> {

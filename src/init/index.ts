@@ -839,11 +839,11 @@ export type AddChannelOptions = {
   | { channel: 'kakaotalk'; runKakaotalkAuth: KakaotalkAuthRunner }
   | {
       channel: 'github'
-      githubPat: string
       webhookSecret: string
       webhookUrl: string
       webhookPort?: number
       repos: string[]
+      auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
     }
 )
 
@@ -1002,7 +1002,15 @@ async function appendGithubSecrets(
     )
   }
   channels.github = {
-    auth: { type: 'pat', token: { value: options.githubPat } satisfies Secret },
+    auth:
+      options.auth.type === 'pat'
+        ? { type: 'pat', token: { value: options.auth.pat } satisfies Secret }
+        : {
+            type: 'app',
+            appId: options.auth.appId,
+            privateKey: { value: options.auth.privateKey } satisfies Secret,
+            ...(options.auth.installationId !== undefined ? { installationId: options.auth.installationId } : {}),
+          },
     webhookSecret: { value: options.webhookSecret } satisfies Secret,
   }
   backend.writeChannelsSync(channels as Channels)
