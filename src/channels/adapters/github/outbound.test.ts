@@ -17,7 +17,7 @@ const fakeFetch = (responses: Record<string, { status: number; body: unknown }>)
 describe('createGithubOutboundCallback', () => {
   it('posts issue and top-level PR comments through the issues comments endpoint', async () => {
     const cb = createGithubOutboundCallback({
-      token: 'tok',
+      token: async () => 'tok',
       logger,
       fetchImpl: fakeFetch({
         'POST https://api.github.com/repos/acme/project/issues/42/comments': { status: 201, body: { id: 1 } },
@@ -37,7 +37,7 @@ describe('createGithubOutboundCallback', () => {
 
   it('posts PR review thread replies through the pull comment replies endpoint', async () => {
     const cb = createGithubOutboundCallback({
-      token: 'tok',
+      token: async () => 'tok',
       logger,
       fetchImpl: fakeFetch({
         'POST https://api.github.com/repos/acme/project/pulls/42/comments/99/replies': { status: 201, body: { id: 2 } },
@@ -56,7 +56,7 @@ describe('createGithubOutboundCallback', () => {
   })
 
   it('rejects attachments', async () => {
-    const cb = createGithubOutboundCallback({ token: 'tok', logger, fetchImpl: fakeFetch({}) })
+    const cb = createGithubOutboundCallback({ token: async () => 'tok', logger, fetchImpl: fakeFetch({}) })
 
     const result = await cb({
       adapter: 'github',

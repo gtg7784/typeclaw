@@ -113,6 +113,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         options.router.unregisterMembership('github', membership)
         options.router.unregisterChannelNameResolver('github', channelNameResolver)
         options.router.unregisterFetchAttachment('github', fetchAttachment)
+        await auth.dispose()
         selfId = null
         selfLogin = null
         throw err
@@ -130,6 +131,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       options.router.unregisterChannelNameResolver('github', channelNameResolver)
       options.router.unregisterFetchAttachment('github', fetchAttachment)
       await server?.stop()
+      await auth.dispose()
       server = null
       selfId = null
       selfLogin = null

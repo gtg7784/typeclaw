@@ -4,7 +4,7 @@ import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 import { parseRepo } from './outbound'
 
 export function createGithubMembershipResolver(options: {
-  token: string
+  token: () => Promise<string>
   fetchImpl?: typeof fetch
 }): MembershipResolver {
   const fetchImpl = options.fetchImpl ?? fetch
@@ -16,7 +16,7 @@ export function createGithubMembershipResolver(options: {
       const response = await fetchImpl(
         `${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/collaborators?per_page=100`,
         {
-          headers: githubJsonHeaders(options.token),
+          headers: githubJsonHeaders(await options.token()),
         },
       )
       if (!response.ok) return response.status >= 500 ? { kind: 'transient' } : { kind: 'permanent' }

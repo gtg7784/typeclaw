@@ -4,7 +4,7 @@ import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 import { parseChat, parseRepo } from './outbound'
 
 export function createGithubChannelNameResolver(options: {
-  token: string
+  token: () => Promise<string>
   fetchImpl?: typeof fetch
 }): ChannelNameResolver {
   const fetchImpl = options.fetchImpl ?? fetch
@@ -18,7 +18,7 @@ export function createGithubChannelNameResolver(options: {
     const path = chat.kind === 'issue' ? `issues/${chat.number}` : `pulls/${chat.number}`
     try {
       const response = await fetchImpl(`${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/${path}`, {
-        headers: githubJsonHeaders(options.token),
+        headers: githubJsonHeaders(await options.token()),
       })
       if (!response.ok) return names
       const raw = (await response.json()) as { title?: string }

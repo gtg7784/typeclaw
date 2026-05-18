@@ -3,9 +3,10 @@ import type { GithubPatAuthBlock } from '@/secrets/schema'
 import { PatAuthStrategy } from './auth-pat'
 
 export type GithubAuthStrategy = {
-  readonly token: string
-  authHeaders: () => HeadersInit
+  token: () => Promise<string>
+  authHeaders: () => Promise<HeadersInit>
   getSelf: () => Promise<GithubSelfUser>
+  dispose: () => Promise<void>
 }
 
 export type GithubSelfUser = {

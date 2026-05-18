@@ -4,7 +4,7 @@ import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 import { parseChat, parseRepo } from './outbound'
 
 export function createGithubHistoryCallback(options: {
-  token: string
+  token: () => Promise<string>
   workspaceForChat: (chat: string) => string | null
   fetchImpl?: typeof fetch
 }): HistoryCallback {
@@ -26,7 +26,7 @@ export function createGithubHistoryCallback(options: {
       const response = await fetchImpl(
         `${endpoint}?per_page=${Math.min(Math.max(args.limit, 1), 100)}&direction=desc${cursor}`,
         {
-          headers: githubJsonHeaders(options.token),
+          headers: githubJsonHeaders(await options.token()),
         },
       )
       if (!response.ok) return { ok: false, error: `GitHub history ${response.status}` }
