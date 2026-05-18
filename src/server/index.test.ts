@@ -9,7 +9,8 @@ import type { SessionFactory } from '@/sessions'
 import type { ServerMessage } from '@/shared'
 import { createStream } from '@/stream'
 
-import { createServer, type ServerLogger } from './index'
+import type { CommandOutbound, CommandRunner } from './command-runner'
+import { createServer, safeWsSend, type ServerLogger } from './index'
 
 function makeRuntime(opts: { registry: PluginRegistry; hooks: HookBus }): PluginRuntime {
   return createPluginRuntime({
@@ -96,6 +97,7 @@ async function startWithSession(
     pluginRegistry?: PluginRegistry
     pluginHooks?: HookBus
     logger?: ServerLogger
+    commandRunnerFactory?: (outbound: CommandOutbound) => CommandRunner
   } = {},
 ): Promise<{ url: string }> {
   const pluginRuntime =
@@ -110,6 +112,7 @@ async function startWithSession(
     ...(extra.agentDir !== undefined ? { agentDir: extra.agentDir } : {}),
     ...(pluginRuntime ? { pluginRuntime } : {}),
     ...(extra.logger ? { logger: extra.logger } : {}),
+    ...(extra.commandRunnerFactory ? { commandRunnerFactory: extra.commandRunnerFactory } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
@@ -1133,5 +1136,312 @@ describe('createServer scoped reload', () => {
     expect(first?.scope).toBe('no-such-scope')
     expect(first?.ok).toBe(false)
     ws.close()
+  })
+})
+
+describe('createServer plugin-command dispatch', () => {
+  function makeFakeRunner(): {
+    runner: CommandRunner
+    starts: { callId: string; name: string }[]
+    outbound: CommandOutbound | null
+  } {
+    const ref: {
+      runner: CommandRunner
+      starts: { callId: string; name: string }[]
+      outbound: CommandOutbound | null
+    } = {
+      runner: null as unknown as CommandRunner,
+      starts: [],
+      outbound: null,
+    }
+    return ref
+  }
+
+  function buildRunnerFactory(state: ReturnType<typeof makeFakeRunner>): (outbound: CommandOutbound) => CommandRunner {
+    return (outbound) => {
+      state.outbound = outbound
+      const runner: CommandRunner = {
+        start(msg) {
+          state.starts.push({ callId: msg.callId, name: msg.name })
+        },
+        feedStdin() {},
+        endStdin() {},
+        abort() {},
+        abortForOwner() {},
+        inFlightCount: () => 0,
+      }
+      state.runner = runner
+      return runner
+    }
+  }
+
+  test('rejects a duplicate callId at the WS layer before the runner is touched', async () => {
+    const session = createFakeSession()
+    const state = makeFakeRunner()
+    const { url } = await startWithSession(session, { commandRunnerFactory: buildRunnerFactory(state) })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'dup-1', name: 'noop', args: {} }))
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'dup-1', name: 'noop', args: {} }))
+
+    const errorFrame = await waitFor(
+      (m) => m.type === 'command_error' && 'callId' in m && m.callId === 'dup-1' && /already in flight/.test(m.message),
+    )
+    expect(errorFrame.type).toBe('command_error')
+
+    expect(state.starts.length).toBe(1)
+    expect(state.starts[0]?.callId).toBe('dup-1')
+
+    ws.close()
+  })
+
+  test('/commands path dispatches exec_command WITHOUT sending a `connected` frame', async () => {
+    // Tracks how many times the session factory was hit. A connection to
+    // the /commands path must not create an AgentSession, so this counter
+    // stays at 0 across the whole interaction.
+    let sessionFactoryHits = 0
+    const session = createFakeSession()
+    const state = makeFakeRunner()
+
+    const built = createServer({
+      port: 0,
+      createSession: async () => {
+        sessionFactoryHits++
+        return session
+      },
+      commandRunnerFactory: buildRunnerFactory(state),
+    }).start()
+    server = built
+
+    const { ws, received } = await connect(`ws://localhost:${built.port}/commands`)
+
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'cmd-1', name: 'noop', args: {} }))
+    // Give the server a tick to dispatch synchronously; no `connected` frame
+    // means waitFor would just hang, so we sleep briefly and then assert.
+    await new Promise((r) => setTimeout(r, 100))
+
+    expect(state.starts.length).toBe(1)
+    expect(state.starts[0]?.callId).toBe('cmd-1')
+    expect(sessionFactoryHits).toBe(0)
+    expect(received.some((m) => m.type === 'connected')).toBe(false)
+
+    ws.close()
+  })
+
+  test('/commands path rejects non-command ClientMessage frames silently (no error frame, no session)', async () => {
+    let sessionFactoryHits = 0
+    const session = createFakeSession()
+    const state = makeFakeRunner()
+
+    const built = createServer({
+      port: 0,
+      createSession: async () => {
+        sessionFactoryHits++
+        return session
+      },
+      commandRunnerFactory: buildRunnerFactory(state),
+    }).start()
+    server = built
+
+    const { ws, received } = await connect(`ws://localhost:${built.port}/commands`)
+
+    ws.send(JSON.stringify({ type: 'prompt', text: 'hi' }))
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(received.length).toBe(0)
+    expect(sessionFactoryHits).toBe(0)
+
+    ws.close()
+  })
+
+  test('command_stdin / command_stdin_end / command_abort route to the runner with the right callId', async () => {
+    const session = createFakeSession()
+    const stdinFeeds: { callId: string; chunk: string }[] = []
+    const stdinEnds: string[] = []
+    const aborts: { callId: string; reason: string }[] = []
+    const built = createServer({
+      port: 0,
+      createSession: async () => session,
+      commandRunnerFactory: (_outbound) => ({
+        start() {},
+        feedStdin(callId, chunk) {
+          stdinFeeds.push({ callId, chunk })
+        },
+        endStdin(callId) {
+          stdinEnds.push(callId)
+        },
+        abort(callId, reason) {
+          aborts.push({ callId, reason })
+        },
+        abortForOwner() {},
+        inFlightCount: () => 0,
+      }),
+    }).start()
+    server = built
+
+    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'k', name: 'foo', args: {} }))
+    ws.send(JSON.stringify({ type: 'command_stdin', callId: 'k', chunk: btoa('payload') }))
+    ws.send(JSON.stringify({ type: 'command_stdin_end', callId: 'k' }))
+    ws.send(JSON.stringify({ type: 'command_abort', callId: 'k', reason: 'manual' }))
+    await new Promise((r) => setTimeout(r, 80))
+
+    expect(stdinFeeds).toEqual([{ callId: 'k', chunk: btoa('payload') }])
+    expect(stdinEnds).toEqual(['k'])
+    expect(aborts).toEqual([{ callId: 'k', reason: 'manual' }])
+
+    ws.close()
+  })
+
+  test('exec_command without commandRunnerFactory replies with command_error + command_exit', async () => {
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      createSession: async () => session,
+    }).start()
+    server = built
+
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}/commands`)
+
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'fb', name: 'whatever', args: {} }))
+
+    const errFrame = await waitFor((m) => m.type === 'command_error' && 'callId' in m && m.callId === 'fb')
+    expect(errFrame.type).toBe('command_error')
+    if (errFrame.type === 'command_error') {
+      expect(errFrame.message).toMatch(/not enabled/)
+    }
+    const exitFrame = await waitFor((m) => m.type === 'command_exit' && 'callId' in m && m.callId === 'fb')
+    if (exitFrame.type === 'command_exit') {
+      expect(exitFrame.code).toBe(1)
+    }
+
+    ws.close()
+  })
+
+  test('exec_command parentOriginJson is parsed and forwarded to the runner', async () => {
+    const seenStarts: { callId: string; parentOrigin?: unknown }[] = []
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      createSession: async () => session,
+      commandRunnerFactory: () => ({
+        start(msg) {
+          seenStarts.push({ callId: msg.callId, parentOrigin: msg.parentOrigin })
+        },
+        feedStdin() {},
+        endStdin() {},
+        abort() {},
+        abortForOwner() {},
+        inFlightCount: () => 0,
+      }),
+    }).start()
+    server = built
+
+    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
+
+    const parentOrigin = { kind: 'cron', jobId: 'nightly', jobKind: 'exec', scheduledByRole: 'member' }
+    ws.send(
+      JSON.stringify({
+        type: 'exec_command',
+        callId: 'p-1',
+        name: 'cmd',
+        args: {},
+        parentOriginJson: JSON.stringify(parentOrigin),
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 80))
+
+    expect(seenStarts.length).toBe(1)
+    expect(seenStarts[0]?.parentOrigin).toEqual(parentOrigin)
+    ws.close()
+  })
+
+  test('exec_command with malformed parentOriginJson falls back to undefined parentOrigin', async () => {
+    const seenStarts: { callId: string; parentOrigin?: unknown }[] = []
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      createSession: async () => session,
+      commandRunnerFactory: () => ({
+        start(msg) {
+          seenStarts.push({ callId: msg.callId, parentOrigin: msg.parentOrigin })
+        },
+        feedStdin() {},
+        endStdin() {},
+        abort() {},
+        abortForOwner() {},
+        inFlightCount: () => 0,
+      }),
+    }).start()
+    server = built
+
+    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
+    ws.send(
+      JSON.stringify({
+        type: 'exec_command',
+        callId: 'p-2',
+        name: 'cmd',
+        args: {},
+        parentOriginJson: 'not-valid-json',
+      }),
+    )
+    await new Promise((r) => setTimeout(r, 80))
+
+    expect(seenStarts.length).toBe(1)
+    expect(seenStarts[0]?.parentOrigin).toBeUndefined()
+    ws.close()
+  })
+
+  test('ws-close aborts every in-flight command tied to the closed connection', async () => {
+    let abortedCount = 0
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      createSession: async () => session,
+      commandRunnerFactory: () => ({
+        start() {},
+        feedStdin() {},
+        endStdin() {},
+        abort() {},
+        abortForOwner() {
+          abortedCount++
+        },
+        inFlightCount: () => 0,
+      }),
+    }).start()
+    server = built
+
+    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'will-die', name: 'noop', args: {} }))
+    await new Promise((r) => setTimeout(r, 50))
+    ws.close()
+    await new Promise((r) => setTimeout(r, 100))
+
+    expect(abortedCount).toBe(1)
+  })
+})
+
+describe('safeWsSend', () => {
+  test('returns true when ws.send succeeds and forwards the JSON-serialized message', () => {
+    const sent: string[] = []
+    const fakeWs = {
+      send: (data: string) => {
+        sent.push(data)
+      },
+    }
+    const ok = safeWsSend(fakeWs, { type: 'done' })
+    expect(ok).toBe(true)
+    expect(sent).toEqual(['{"type":"done"}'])
+  })
+
+  test('returns false and swallows the error when ws.send throws (closing-ws race)', () => {
+    const fakeWs = {
+      send: () => {
+        throw new Error('WebSocket is closed')
+      },
+    }
+    const ok = safeWsSend(fakeWs, { type: 'done' })
+    expect(ok).toBe(false)
   })
 })

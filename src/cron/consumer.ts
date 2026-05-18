@@ -180,7 +180,29 @@ async function runPrompt(
 async function runExec(job: ExecJob, cwd: string): Promise<void> {
   const [cmd, ...args] = job.command
   if (!cmd) throw new Error(`exec job ${job.id}: empty command`)
-  const proc = Bun.spawn({ cmd: [cmd, ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  // Inject TYPECLAW_PARENT_ORIGIN_JSON so a child that proxies into the
+  // agent (typically a `typeclaw <container-cmd>` invocation through the
+  // host CLI's container-command-client) can stamp its session's
+  // spawnedByOrigin with the cron job's provenance. Without this the
+  // proxy would default to a synthetic owner origin and silently elevate
+  // a guest- or member-scheduled cron job to owner.
+  const parentOrigin = {
+    kind: 'cron',
+    jobId: job.id,
+    jobKind: 'exec',
+    ...(job.scheduledByRole !== undefined ? { scheduledByRole: job.scheduledByRole } : {}),
+    ...(job.scheduledByOrigin !== undefined ? { scheduledByOrigin: job.scheduledByOrigin } : {}),
+  }
+  const proc = Bun.spawn({
+    cmd: [cmd, ...args],
+    cwd,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: {
+      ...process.env,
+      TYPECLAW_PARENT_ORIGIN_JSON: JSON.stringify(parentOrigin),
+    },
+  })
   const code = await proc.exited
   if (code !== 0) {
     const stderr = await new Response(proc.stderr).text()

@@ -118,6 +118,37 @@ describe('createCronConsumer', () => {
     consumer.stop()
   })
 
+  test('exec job spawn injects TYPECLAW_PARENT_ORIGIN_JSON describing the cron job', async () => {
+    const stream = createStream()
+    const factory = makeFakeSessionFactory()
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: factory.createSessionForCron,
+      logger: silentLogger,
+    })
+    consumer.start()
+
+    const job: ExecJob = {
+      id: 'nightly-checks',
+      schedule: '* * * * *',
+      enabled: true,
+      kind: 'exec',
+      command: ['sh', '-c', 'printf "%s" "$TYPECLAW_PARENT_ORIGIN_JSON" > origin.json'],
+      scheduledByRole: 'member',
+    }
+    publishCron(stream, job)
+    await new Promise((r) => setTimeout(r, 80))
+
+    const captured = await Bun.file(join(root, 'origin.json')).text()
+    const parsed = JSON.parse(captured) as { kind?: string; jobId?: string; scheduledByRole?: string }
+    expect(parsed.kind).toBe('cron')
+    expect(parsed.jobId).toBe('nightly-checks')
+    expect(parsed.scheduledByRole).toBe('member')
+
+    consumer.stop()
+  })
+
   test('exec job exiting non-zero is logged but does not crash the consumer', async () => {
     const stream = createStream()
     const factory = makeFakeSessionFactory()
