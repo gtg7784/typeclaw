@@ -15,7 +15,7 @@ export type RegisterGithubWebhooksOptions = {
   // string is considered owned by this agent: at register time we PATCH the
   // first such hook to the current URL and delete the rest as stale orphans.
   //
-  // Convention: `/typeclaw/github/<containerName>` — see
+  // Convention: `/typeclaw/v1/github/<containerName>` — see
   // `buildManagedPath` in `./managed-path.ts`. The path is appended onto
   // tunnel-derived URLs by the adapter; user-set `webhookUrl` is kept
   // verbatim (the operator is in control of their own URL — we trust them

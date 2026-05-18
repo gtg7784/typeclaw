@@ -225,8 +225,8 @@ describe('registerGithubWebhooks', () => {
         return {
           status: 200,
           body: [
-            { id: 11, config: { url: 'https://old-A.trycloudflare.com/typeclaw/github/coder' } },
-            { id: 22, config: { url: 'https://old-B.trycloudflare.com/typeclaw/github/coder' } },
+            { id: 11, config: { url: 'https://old-A.trycloudflare.com/typeclaw/v1/github/coder' } },
+            { id: 22, config: { url: 'https://old-B.trycloudflare.com/typeclaw/v1/github/coder' } },
             { id: 33, config: { url: 'https://unrelated.example.com/different-tool' } },
           ],
         }
@@ -246,8 +246,8 @@ describe('registerGithubWebhooks', () => {
     const result = await registerGithubWebhooks(
       baseOpts({
         fetchImpl,
-        webhookUrl: 'https://new-C.trycloudflare.com/typeclaw/github/coder',
-        managedPath: '/typeclaw/github/coder',
+        webhookUrl: 'https://new-C.trycloudflare.com/typeclaw/v1/github/coder',
+        managedPath: '/typeclaw/v1/github/coder',
       }),
     )
 
@@ -268,7 +268,7 @@ describe('registerGithubWebhooks', () => {
       if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
         return {
           status: 200,
-          body: [{ id: 5, config: { url: 'https://stale.trycloudflare.com/typeclaw/github/coder' } }],
+          body: [{ id: 5, config: { url: 'https://stale.trycloudflare.com/typeclaw/v1/github/coder' } }],
         }
       }
       if (url.endsWith('/repos/acme/widgets/hooks/5') && method === 'PATCH') return { status: 200, body: { id: 5 } }
@@ -278,15 +278,15 @@ describe('registerGithubWebhooks', () => {
     await registerGithubWebhooks(
       baseOpts({
         fetchImpl,
-        webhookUrl: 'https://fresh.trycloudflare.com/typeclaw/github/coder',
-        managedPath: '/typeclaw/github/coder',
+        webhookUrl: 'https://fresh.trycloudflare.com/typeclaw/v1/github/coder',
+        managedPath: '/typeclaw/v1/github/coder',
       }),
     )
 
     const patch = calls.find((c) => c.init?.method === 'PATCH')
     expect(patch).toBeDefined()
     const body = JSON.parse(String(patch!.init?.body)) as { config: { url: string } }
-    expect(body.config.url).toBe('https://fresh.trycloudflare.com/typeclaw/github/coder')
+    expect(body.config.url).toBe('https://fresh.trycloudflare.com/typeclaw/v1/github/coder')
   })
 
   test("a foreign agent's hook (different managed-path marker on the same host) is not claimed", async () => {
@@ -296,7 +296,7 @@ describe('registerGithubWebhooks', () => {
       if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
         return {
           status: 200,
-          body: [{ id: 9, config: { url: 'https://anything.trycloudflare.com/typeclaw/github/other-agent' } }],
+          body: [{ id: 9, config: { url: 'https://anything.trycloudflare.com/typeclaw/v1/github/other-agent' } }],
         }
       }
       if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST') {
@@ -309,8 +309,8 @@ describe('registerGithubWebhooks', () => {
     const result = await registerGithubWebhooks(
       baseOpts({
         fetchImpl,
-        webhookUrl: 'https://new.trycloudflare.com/typeclaw/github/coder',
-        managedPath: '/typeclaw/github/coder',
+        webhookUrl: 'https://new.trycloudflare.com/typeclaw/v1/github/coder',
+        managedPath: '/typeclaw/v1/github/coder',
       }),
     )
 
@@ -325,7 +325,7 @@ describe('registerGithubWebhooks', () => {
       if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
         return {
           status: 200,
-          body: [{ id: 11, config: { url: 'https://old.trycloudflare.com/typeclaw/github/coder' } }],
+          body: [{ id: 11, config: { url: 'https://old.trycloudflare.com/typeclaw/v1/github/coder' } }],
         }
       }
       if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST') {
@@ -338,7 +338,7 @@ describe('registerGithubWebhooks', () => {
     const result = await registerGithubWebhooks(
       baseOpts({
         fetchImpl,
-        webhookUrl: 'https://new.trycloudflare.com/typeclaw/github/coder',
+        webhookUrl: 'https://new.trycloudflare.com/typeclaw/v1/github/coder',
       }),
     )
 

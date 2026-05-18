@@ -1,6 +1,12 @@
 import { basename, resolve } from 'node:path'
 
-const MARKER_PREFIX = '/typeclaw/github/'
+// `v1` is a schema version for the marker layout. Bumping it lets a future
+// change (e.g. embedding a per-repo nonce, switching to a different ownership
+// scheme) coexist with hooks created under earlier versions instead of
+// stranding them. `findManagedHooks` only treats the current version as ours;
+// a v2 rollout would need a one-shot pass that adopts v1 hooks before
+// retiring them.
+const MARKER_PREFIX = '/typeclaw/v1/github/'
 
 export function buildManagedPath(agentId: string): string {
   const safe = sanitizeAgentId(agentId)

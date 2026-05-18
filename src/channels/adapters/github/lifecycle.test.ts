@@ -403,7 +403,7 @@ describe('createGithubAdapter lifecycle', () => {
     expect(repoHooks.length).toBe(1)
     const firstHookId = repoHooks[0]!.id
 
-    repoHooks[0] = { id: firstHookId, config: { url: 'https://first.trycloudflare.com/typeclaw/github/coder' } }
+    repoHooks[0] = { id: firstHookId, config: { url: 'https://first.trycloudflare.com/typeclaw/v1/github/coder' } }
     currentTunnelUrl = 'https://second.trycloudflare.com'
 
     const router2 = freshRouter()
