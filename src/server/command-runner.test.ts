@@ -308,8 +308,8 @@ describe('CommandRunner', () => {
     await waitForExit(frames, 'dup')
   })
 
-  test('isolated:true is accepted but degrades to in-process (warning logged)', async () => {
-    const warnings: string[] = []
+  test('isolated:true warning lands on the per-command stderr (visible to caller)', async () => {
+    const pluginWarnings: string[] = []
     const cmd = defineCommand({
       surface: 'container',
       description: 'noop',
@@ -319,12 +319,21 @@ describe('CommandRunner', () => {
       pluginName: 'test',
       commandName: 'noop',
       command: cmd,
-      logger: { info: () => {}, warn: (m) => warnings.push(m), error: () => {} },
+      logger: { info: () => {}, warn: (m) => pluginWarnings.push(m), error: () => {} },
     }
     const { runner, frames } = makeRunner([registered])
     runner.start({ callId: 'iso', name: 'noop', args: undefined, isolated: true }, null)
     await waitForExit(frames, 'iso')
-    expect(warnings.some((w) => /isolated=true/.test(w))).toBe(true)
+
+    // Per-command stderr frames are emitted by the runner outbound; assert
+    // the isolated warning shows up there, NOT on the plugin's boot-time
+    // logger (which writes to container logs the caller never reads).
+    const stderrText = frames
+      .filter((f) => f.kind === 'stderr')
+      .map((f) => (f as { chunk: string }).chunk)
+      .join('')
+    expect(stderrText).toMatch(/isolated=true/)
+    expect(pluginWarnings.length).toBe(0)
   })
 
   test('ctx.origin is subagent-shaped with parent TUI origin in spawnedByOrigin', async () => {

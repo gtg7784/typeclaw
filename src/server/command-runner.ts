@@ -86,12 +86,6 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
       return
     }
 
-    if (msg.isolated === true) {
-      registered.logger.warn(
-        `command "${name}" requested isolated=true; this build does not yet implement subprocess isolation, falling back to in-process`,
-      )
-    }
-
     const abortController = new AbortController()
     const stdinQueue = createStdinQueue(abortController.signal)
 
@@ -115,6 +109,16 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
       info: (m) => writeLine(stderrSink, `[command:${registered.pluginName}] info: ${m}`),
       warn: (m) => writeLine(stderrSink, `[command:${registered.pluginName}] warn: ${m}`),
       error: (m) => writeLine(stderrSink, `[command:${registered.pluginName}] error: ${m}`),
+    }
+
+    // Emit the isolated-fallback warning through the per-command stderr
+    // stream so the invoking CLI sees it. The plugin's boot-time logger
+    // (registered.logger) writes to container logs which the caller never
+    // reads.
+    if (msg.isolated === true) {
+      logger.warn(
+        `command "${name}" requested isolated=true; this build does not yet implement subprocess isolation, falling back to in-process`,
+      )
     }
 
     const sharedCtx = {
