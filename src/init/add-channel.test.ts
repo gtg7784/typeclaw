@@ -45,6 +45,40 @@ async function readSecretsChannels(): Promise<Record<string, Record<string, unkn
   return (await readSecrets()).channels ?? {}
 }
 
+type RecordedCall = { url: string; method: string; body?: string }
+
+type RecordingGithubFetchOptions = {
+  onHookList?: (url: string) => Response
+  onHookCreate?: (url: string, body: string | undefined, index: number) => Response
+}
+
+function recordingGithubFetch(options: RecordingGithubFetchOptions = {}): {
+  fn: typeof fetch
+  calls: RecordedCall[]
+} {
+  const calls: RecordedCall[] = []
+  let createIndex = 0
+  const handler = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+    const method = init?.method ?? 'GET'
+    const body = typeof init?.body === 'string' ? init.body : undefined
+    calls.push(body !== undefined ? { url, method, body } : { url, method })
+
+    if (url === 'https://api.github.com/user' && method === 'GET') {
+      return Response.json({ login: 'test-bot', id: 1 })
+    }
+    if (/\/repos\/[^/]+\/[^/]+\/hooks(\?|$)/.test(url) && method === 'GET') {
+      return options.onHookList ? options.onHookList(url) : Response.json([])
+    }
+    if (/\/repos\/[^/]+\/[^/]+\/hooks$/.test(url) && method === 'POST') {
+      if (options.onHookCreate) return options.onHookCreate(url, body, createIndex++)
+      return Response.json({ id: 100 + createIndex++ }, { status: 201 })
+    }
+    return new Response('unexpected', { status: 500 })
+  }
+  return { fn: Object.assign(handler, { preconnect: () => {} }) as typeof fetch, calls }
+}
+
 describe('runAddChannel', () => {
   test('adds discord-bot to typeclaw.json as an empty block (no allow field)', async () => {
     await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-token-x' })
@@ -240,8 +274,9 @@ describe('runAddChannel', () => {
     ])
   })
 
-  test('adds github channel: writes typeclaw.json (incl. repos[] and event allowlist), secrets.json, and match rules — no webhook side effect at add time', async () => {
+  test('adds github channel: writes typeclaw.json (incl. repos[] and event allowlist), secrets.json, and match rules', async () => {
     const events: AddChannelStepEvent[] = []
+    const fetchImpl = recordingGithubFetch()
 
     await runAddChannel({
       cwd: root,
@@ -252,6 +287,7 @@ describe('runAddChannel', () => {
       webhookUrl: 'https://agent.example.com/gh',
       webhookPort: 8975,
       repos: ['acme/widgets'],
+      fetchImpl: fetchImpl.fn,
       onProgress: (e) => events.push(e),
     })
 
@@ -289,7 +325,131 @@ describe('runAddChannel', () => {
       'config:done',
       'secrets:start',
       'secrets:done',
+      'github-webhooks:start',
+      'github-webhooks:done',
     ])
+  })
+
+  test('adds github channel (external): eagerly registers webhook with the github API using the provided URL and secret', async () => {
+    const events: AddChannelStepEvent[] = []
+    const fetchImpl = recordingGithubFetch()
+
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret-xyz',
+      tunnelProvider: 'external',
+      webhookUrl: 'https://agent.example.com/gh',
+      webhookPort: 8975,
+      repos: ['acme/widgets', 'acme/gadgets'],
+      fetchImpl: fetchImpl.fn,
+      onProgress: (e) => events.push(e),
+    })
+
+    const posts = fetchImpl.calls.filter((c) => c.method === 'POST' && c.url.endsWith('/hooks'))
+    expect(posts.map((p) => p.url)).toEqual([
+      'https://api.github.com/repos/acme/widgets/hooks',
+      'https://api.github.com/repos/acme/gadgets/hooks',
+    ])
+    for (const post of posts) {
+      const body = JSON.parse(post.body ?? '{}') as {
+        config?: { url?: string; secret?: string; content_type?: string }
+        events?: string[]
+        active?: boolean
+      }
+      expect(body.config?.url).toBe('https://agent.example.com/gh')
+      expect(body.config?.secret).toBe('wh-secret-xyz')
+      expect(body.config?.content_type).toBe('json')
+      expect(body.active).toBe(true)
+      expect(body.events).toContain('issue_comment')
+    }
+
+    const doneEvent = events.find(
+      (e): e is Extract<AddChannelStepEvent, { step: 'github-webhooks'; phase: 'done' }> =>
+        e.step === 'github-webhooks' && e.phase === 'done',
+    )
+    expect(doneEvent).toBeDefined()
+    expect(doneEvent!.result).toEqual({
+      repos: [
+        { repo: 'acme/widgets', action: 'created', hookId: 100 },
+        { repo: 'acme/gadgets', action: 'created', hookId: 101 },
+      ],
+    })
+  })
+
+  test('adds github channel (cloudflare-quick): does NOT eagerly register webhooks (URL is unknown until cloudflared boots)', async () => {
+    const events: AddChannelStepEvent[] = []
+    const fetchImpl = recordingGithubFetch()
+
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret',
+      tunnelProvider: 'cloudflare-quick',
+      webhookPort: 8975,
+      repos: ['acme/widgets'],
+      fetchImpl: fetchImpl.fn,
+      onProgress: (e) => events.push(e),
+    })
+
+    expect(fetchImpl.calls).toEqual([])
+    expect(events.some((e) => e.step === 'github-webhooks')).toBe(false)
+  })
+
+  test('adds github channel (none): does NOT eagerly register webhooks (no URL configured)', async () => {
+    const events: AddChannelStepEvent[] = []
+    const fetchImpl = recordingGithubFetch()
+
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret',
+      tunnelProvider: 'none',
+      webhookPort: 8975,
+      repos: ['acme/widgets'],
+      fetchImpl: fetchImpl.fn,
+      onProgress: (e) => events.push(e),
+    })
+
+    expect(fetchImpl.calls).toEqual([])
+    expect(events.some((e) => e.step === 'github-webhooks')).toBe(false)
+  })
+
+  test('github eager webhook install failure surfaces as a structured event but does NOT roll back the config/secrets writes', async () => {
+    const events: AddChannelStepEvent[] = []
+    const fetchImpl = recordingGithubFetch({
+      onHookList: () => new Response('forbidden', { status: 403 }),
+    })
+
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret',
+      tunnelProvider: 'external',
+      webhookUrl: 'https://agent.example.com/gh',
+      webhookPort: 8975,
+      repos: ['acme/widgets'],
+      fetchImpl: fetchImpl.fn,
+      onProgress: (e) => events.push(e),
+    })
+
+    const cfg = (await readConfig()) as { channels?: { github?: { repos?: string[] } } }
+    expect(cfg.channels?.github?.repos).toEqual(['acme/widgets'])
+    const secrets = await readSecretsChannels()
+    expect((secrets.github as { auth: { type: string } }).auth.type).toBe('pat')
+
+    const doneEvent = events.find(
+      (e): e is Extract<AddChannelStepEvent, { step: 'github-webhooks'; phase: 'done' }> =>
+        e.step === 'github-webhooks' && e.phase === 'done',
+    )
+    expect(doneEvent).toBeDefined()
+    expect('error' in doneEvent!.result).toBe(false)
+    if ('error' in doneEvent!.result) throw new Error('unreachable')
+    expect(doneEvent!.result.repos).toEqual([expect.objectContaining({ repo: 'acme/widgets', action: 'failed' })])
   })
 
   test('adds github channel with a cloudflare-quick tunnel and cloudflared Dockerfile toggle', async () => {

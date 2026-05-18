@@ -57,6 +57,22 @@ const okDocker: DockerExec = async () => ({ exitCode: 0, stdout: '29.4.0\n', std
 // own InstallRunner.
 const okInstall: InstallRunner = async () => ({ ok: true })
 
+// Hermetic stub for the eager github webhook install path. Returns empty
+// hook lists and successful POSTs so runInit's github branch never reaches
+// the real api.github.com. Tests that assert webhook side effects use a
+// recording variant instead.
+const okGithubFetch: typeof fetch = (() => {
+  let nextId = 100
+  const handler = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+    const method = init?.method ?? 'GET'
+    if (/\/hooks(\?|$)/.test(url) && method === 'GET') return Response.json([])
+    if (url.endsWith('/hooks') && method === 'POST') return Response.json({ id: nextId++ }, { status: 201 })
+    return new Response('unexpected', { status: 500 })
+  }
+  return Object.assign(handler, { preconnect: () => {} }) as typeof fetch
+})()
+
 function captureHatch(): { runner: HatchRunner; calls: Array<{ cwd: string; port: number; cliEntry?: string }> } {
   const calls: Array<{ cwd: string; port: number; cliEntry?: string }> = []
   const runner: HatchRunner = async (options) => {
@@ -1588,6 +1604,7 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
         repos: ['acme/repo-a'],
         auth: { type: 'pat', pat: 'ghp_test' },
       },
+      githubFetchImpl: okGithubFetch,
       runHatching: okHatch,
       runBunInstall: okInstall,
       dockerExec: okDocker,
@@ -1669,6 +1686,7 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
         repos: ['acme/repo-b'],
         auth: { type: 'pat', pat: 'new_pat' },
       },
+      githubFetchImpl: okGithubFetch,
       runHatching: okHatch,
       runBunInstall: okInstall,
       dockerExec: okDocker,
@@ -1693,6 +1711,7 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
   })
 
   test('runInit with github cloudflare-quick credentials writes tunnel config without webhookUrl', async () => {
+    const events: InitStepEvent[] = []
     await runInit({
       cwd: root,
       apiKey: 'fw_test_key',
@@ -1704,6 +1723,7 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
         repos: ['acme/repo-a'],
         auth: { type: 'pat', pat: 'ghp_test' },
       },
+      onProgress: (e) => events.push(e),
       runHatching: okHatch,
       runBunInstall: okInstall,
       dockerExec: okDocker,
@@ -1719,6 +1739,57 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
     expect(config.tunnels).toEqual([
       { name: 'github-webhook', provider: 'cloudflare-quick', for: { kind: 'channel', name: 'github' } },
     ])
+    expect(events.some((e) => e.step === 'github-webhooks')).toBe(false)
+  })
+
+  test('runInit eagerly installs github webhooks when the credentials carry a known webhookUrl', async () => {
+    const events: InitStepEvent[] = []
+    const calls: Array<{ url: string; method: string; body?: string }> = []
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const method = init?.method ?? 'GET'
+      const body = typeof init?.body === 'string' ? init.body : undefined
+      calls.push(body !== undefined ? { url, method, body } : { url, method })
+      if (/\/hooks(\?|$)/.test(url) && method === 'GET') return Response.json([])
+      if (url.endsWith('/hooks') && method === 'POST') return Response.json({ id: 777 }, { status: 201 })
+      return new Response('unexpected', { status: 500 })
+    }) as unknown as typeof fetch as typeof fetch
+
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      withGithub: true,
+      githubCredentials: {
+        webhookSecret: 'whsec_init',
+        tunnelProvider: 'external',
+        webhookUrl: 'https://init.example.com/hook',
+        webhookPort: 8975,
+        repos: ['acme/repo-a'],
+        auth: { type: 'pat', pat: 'ghp_test' },
+      },
+      githubFetchImpl: fetchImpl,
+      onProgress: (e) => events.push(e),
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    const post = calls.find((c) => c.method === 'POST' && c.url.endsWith('/hooks'))
+    expect(post?.url).toBe('https://api.github.com/repos/acme/repo-a/hooks')
+    const body = JSON.parse(post?.body ?? '{}') as { config?: { url?: string; secret?: string } }
+    expect(body.config?.url).toBe('https://init.example.com/hook')
+    expect(body.config?.secret).toBe('whsec_init')
+
+    const doneEvent = events.find(
+      (e): e is Extract<InitStepEvent, { step: 'github-webhooks'; phase: 'done' }> =>
+        e.step === 'github-webhooks' && e.phase === 'done',
+    )
+    expect(doneEvent).toBeDefined()
+    if (doneEvent && !('error' in doneEvent.result)) {
+      expect(doneEvent.result.repos).toEqual([{ repo: 'acme/repo-a', action: 'created', hookId: 777 }])
+    } else {
+      throw new Error('expected structured success result, got error or no event')
+    }
   })
 })
 

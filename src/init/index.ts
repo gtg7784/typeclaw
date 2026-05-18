@@ -19,6 +19,7 @@ import { createTui } from '@/tui'
 
 import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
+import { installGithubWebhooksEagerly, type EagerGithubWebhookInstallResult } from './github-webhook-install'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { HATCHING_PROMPT } from './hatching'
 import type { OAuthLoginRunner, OAuthLoginResult } from './oauth-login'
@@ -26,6 +27,9 @@ import { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 import { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
 
 export { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
+
+export type { EagerGithubWebhookInstallResult } from './github-webhook-install'
+export { formatEagerGithubWebhookInstallResult, installGithubWebhooksEagerly } from './github-webhook-install'
 
 export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 
@@ -52,6 +56,7 @@ export type InitStep =
   | 'oauth-login'
   | 'scaffold'
   | 'kakaotalk-auth'
+  | 'github-webhooks'
   | 'install'
   | 'dockerfile'
   | 'git'
@@ -82,6 +87,8 @@ export type InitStepEvent =
   | { step: 'scaffold'; phase: 'done' }
   | { step: 'kakaotalk-auth'; phase: 'start' }
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
+  | { step: 'github-webhooks'; phase: 'start' }
+  | { step: 'github-webhooks'; phase: 'done'; result: EagerGithubWebhookInstallResult }
   | { step: 'install'; phase: 'start' }
   | { step: 'install'; phase: 'done'; result: InstallResult }
   | { step: 'dockerfile'; phase: 'start' }
@@ -152,6 +159,10 @@ export type InitOptions = {
   // `withGithub` is true, the existing secrets.json#channels.github block is
   // reused as-is (the wizard's "reuse existing credentials" path).
   githubCredentials?: GithubInitCredentials
+  // Test seam for the eager-webhook-install path that fires after the github
+  // channel block is written. Production callers leave this undefined so the
+  // global `fetch` is used.
+  githubFetchImpl?: typeof fetch
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
   runBunInstall?: InstallRunner
@@ -182,6 +193,7 @@ export async function runInit({
   withGithub = false,
   runKakaotalkAuth,
   githubCredentials,
+  githubFetchImpl,
   onProgress,
   runHatching = defaultRunHatching,
   runBunInstall: installRunner = runBunInstall,
@@ -295,6 +307,17 @@ export async function runInit({
   // bot-token adapters all support.
   if (withGithub && githubCredentials !== undefined) {
     await writeGithubChannelForInit(cwd, githubCredentials)
+    if (githubCredentials.webhookUrl !== undefined && githubCredentials.repos.length > 0) {
+      emit({ step: 'github-webhooks', phase: 'start' })
+      const result = await installGithubWebhooksEagerly({
+        webhookUrl: githubCredentials.webhookUrl,
+        webhookSecret: githubCredentials.webhookSecret,
+        repos: githubCredentials.repos,
+        auth: githubCredentials.auth,
+        ...(githubFetchImpl !== undefined ? { fetchImpl: githubFetchImpl } : {}),
+      })
+      emit({ step: 'github-webhooks', phase: 'done', result })
+    }
   }
 
   emit({ step: 'install', phase: 'start' })
@@ -860,7 +883,7 @@ export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'github',
 ]
 
-export type AddChannelStep = 'kakaotalk-auth' | 'config' | 'secrets'
+export type AddChannelStep = 'kakaotalk-auth' | 'config' | 'secrets' | 'github-webhooks'
 
 export type AddChannelStepEvent =
   | { step: 'config'; phase: 'start' }
@@ -869,6 +892,8 @@ export type AddChannelStepEvent =
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
   | { step: 'secrets'; phase: 'start' }
   | { step: 'secrets'; phase: 'done' }
+  | { step: 'github-webhooks'; phase: 'start' }
+  | { step: 'github-webhooks'; phase: 'done'; result: EagerGithubWebhookInstallResult }
 
 // Discriminated union per channel so the type system enforces "you must pass
 // the right credentials for the channel you're adding". The CLI builds these
@@ -889,6 +914,7 @@ export type AddChannelOptions = {
       webhookPort?: number
       repos: string[]
       auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
+      fetchImpl?: typeof fetch
     }
 )
 
@@ -926,6 +952,7 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
 
   if (options.channel === 'github') {
     await appendGithubMatchRules(options.cwd, options.repos)
+    await maybeInstallGithubWebhooks(options, emit)
   }
 
   // Commit the typeclaw.json change so the agent folder isn't silently
@@ -934,6 +961,29 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   // unavailable, or when the file is clean. secrets.json is gitignored, so
   // only typeclaw.json is named here.
   await commitSystemFile(options.cwd, CONFIG_FILE, `channel: add ${options.channel}`)
+}
+
+// Eager webhook registration is best-effort: a failure here MUST NOT roll
+// back the typeclaw.json / secrets.json writes. The container-side adapter
+// re-runs registration on every start, so a missing PAT scope or a transient
+// 5xx today gets retried automatically on the next `typeclaw start`. We
+// surface the per-repo outcome as a structured event so the CLI can render
+// it, but we never throw.
+async function maybeInstallGithubWebhooks(
+  options: Extract<AddChannelOptions, { channel: 'github' }>,
+  emit: (event: AddChannelStepEvent) => void,
+): Promise<void> {
+  if (options.webhookUrl === undefined) return
+  if (options.repos.length === 0) return
+  emit({ step: 'github-webhooks', phase: 'start' })
+  const result = await installGithubWebhooksEagerly({
+    webhookUrl: options.webhookUrl,
+    webhookSecret: options.webhookSecret,
+    repos: options.repos,
+    auth: options.auth,
+    ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
+  })
+  emit({ step: 'github-webhooks', phase: 'done', result })
 }
 
 function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
