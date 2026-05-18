@@ -26,33 +26,54 @@ bun run debug:prompt --origin cron         # just one
 bun run debug:prompt --origin channel --no-git-nudge  # omit the dirty-files block
 ```
 
-Each dump is prefixed with a per-section breakdown. Cron and subagent sessions render the **slim** base prompt instead of the full operator-facing manual:
+Each dump is prefixed with a per-section breakdown. Cron sessions render the **slim** base prompt instead of the full operator-facing manual; the subagent dump models the production override path (subagents always declare their own `systemPrompt`):
 
 ```
 ══════════════════════════════════════════════════════════════════════════════
-  SYSTEM PROMPT — origin: cron — ~568 tok / 2270 chars / 2280 bytes (tok est. chars/4)
+  SYSTEM PROMPT — origin: cron — ~670 tok / 2679 chars / 2693 bytes (tok est. chars/4)
 ══════════════════════════════════════════════════════════════════════════════
   Section                           Tokens  Chars  Bytes
   ────────────────────────────────  ──────  ─────  ─────
-  SLIM_SYSTEM_PROMPT (base)           ~141    563    565
+  SLIM_SYSTEM_PROMPT (base)           ~245    972    980
   Identity (IDENTITY.md + SOUL.md)     ~88    352    356
   Runtime block                        ~13     50     50
   Session origin                       ~85    339    341
   Role context                        ~110    441    441
   Memory (MEMORY.md + streams)        ~129    515    517
   ────────────────────────────────  ──────  ─────  ─────
-  TOTAL                               ~568   2270   2280
+  TOTAL                               ~670   2679   2693
 ```
 
-TUI and channel sessions still get the full prompt (~2674 / ~3425 tokens) because a human is reading the output and the agent is expected to maintain its agent folder. Cron and default subagents — unattended, narrow-scope sessions — get the slim prompt, saving ~2100 tokens per fire. The git-nudge block is also skipped in slim mode because the operator-facing commit guidance it points back to is itself excluded from the slim base.
+The slim base carries the load-bearing guidance that survives without a human watching: `.env` + `secrets.json` redaction, error/result honesty (never suppress, never fabricate), output discipline (don't narrate routine tool calls), and filesystem hygiene (the `workspace/` boundary, MEMORY.md ownership, runtime-managed paths). It deliberately does NOT carry "no human is watching" / "plain prose is invisible" — those are origin-block concerns. The "plain prose is invisible" claim in particular is actively wrong for subagents, whose plain text IS the deliverable to the parent session, so it must not leak into the shared slim base.
+
+TUI and channel sessions get a slim-but-still-operator-facing `DEFAULT_SYSTEM_PROMPT` (~1300 tokens, down from ~2155 after the PR #219 rewrite). Trimming preserved every load-bearing phrase — `workspace/` boundary, MEMORY.md ownership, `.env`/`secrets.json` redaction, commit-before-done, SOUL voice, error honesty, and the "not pi/Claude/ChatGPT" closer — but cut decorative prose (the "your home, your memory, your record of who you are" framing) and redundant restatement (workspace boundary mentioned in three places, etc.). Test: see `src/agent/index.test.ts` "trimmed full prompt still carries every load-bearing phrase" — adding new load-bearing prose without updating that assertion will fail CI. Totals: TUI ~1590 tok, channel ~2341 tok. The git-nudge block is also skipped in slim mode because the operator-facing commit guidance it points back to is itself excluded from the slim base.
+
+**Production subagent paths (memory-logger, dreaming, and every plugin-declared subagent) bypass the slim base entirely.** They are created with `systemPromptOverride: subagent.systemPrompt`, which routes through `createOverrideResourceLoader` and emits only `<override prompt> + runtime block + origin/role` — no DEFAULT/SLIM base, no IDENTITY/SOUL, no git-nudge, no memory. The debug dumper's `subagent` fixture mirrors this shape so the reported breakdown matches what the agent actually receives:
+
+```
+══════════════════════════════════════════════════════════════════════════════
+  SYSTEM PROMPT — origin: subagent — ~276 tok / 1102 chars / 1104 bytes (tok est. chars/4)
+══════════════════════════════════════════════════════════════════════════════
+  Section                   Tokens  Chars  Bytes
+  ────────────────────────  ──────  ─────  ─────
+  Subagent override prompt     ~94    377    379
+  Runtime block                ~13     50     50
+  Session origin + role       ~168    671    671
+  ────────────────────────  ──────  ─────  ─────
+  TOTAL                       ~276   1102   1104
+```
+
+The slim mode is therefore a **defensive default** for any future subagent declared without a `systemPrompt`. Today's bundled subagents all declare one, so the slim path only fires for cron in production.
 
 Tokens are estimated with a `chars/4` heuristic (industry rule-of-thumb, ~15% off, model-agnostic — explicit because exact tokenization differs across Claude/GPT/Gemini). Bytes are UTF-8 wire bytes and differ from chars on multi-byte content (em-dashes, curly quotes, emoji) — useful when you care about what actually leaves the host.
 
-The script calls the same `composeSystemPrompt` helper (`src/agent/index.ts`) that `createResourceLoader` uses in production, and uses `deriveSystemPromptMode` to pick full vs slim from the origin kind — exactly the same derivation production uses — so the section order, base prompt, and presence/absence of git-nudge it prints all match what the agent actually sees at runtime. The cache-suffix contract (least-volatile first → identity → runtime → origin+role → git → memory) is enforced both by the helper and by a section-order assertion in `scripts/dump-system-prompt.test.ts` — reordering one without the other fails CI.
+The script calls the same `composeSystemPrompt` helper (`src/agent/index.ts`) that `createResourceLoader` uses in production, and uses `deriveSystemPromptMode` to pick full vs slim from the origin kind — exactly the same derivation production uses — so the section order, base prompt, and presence/absence of git-nudge it prints all match what the agent actually sees at runtime. The cache-suffix contract (least-volatile first → identity → runtime → origin+role → git → memory) is enforced both by the helper and by a section-order assertion in `scripts/dump-system-prompt.test.ts` — reordering one without the other fails CI. The dumper has a separate `subagent` branch that renders the override path; without it the dump would lie about subagent costs.
 
 `composeSystemPrompt` is the right entry point if you're adding a new section. Land the renderer (`renderXBlock`) in the appropriate `src/agent/*.ts` module, plumb it through `SystemPromptComposition`, decide its volatility tier (rare-change → earlier, per-turn-change → later) and whether it should render in slim mode (most don't), and `dump-system-prompt.ts` will surface it automatically once you add a fixture and a breakdown entry.
 
-**Adding a new origin kind?** Update `deriveSystemPromptMode` (`src/agent/index.ts`) to decide whether it's a full-mode (human-facing) or slim-mode (unattended) origin. The two existing slim origins are `cron` and `subagent`; the two existing full origins are `tui` and `channel`. The asymmetry is load-bearing: the slim base drops ~2000 tokens of operator-facing guidance (workspace boundary, version-control rules, register-matching prose) that is irrelevant when there's no human reading the output, and the origin block already names the unattended context. Restoring the full prompt for a new unattended kind would re-introduce the bloat the slim mode exists to remove.
+**Adding a new origin kind?** `deriveSystemPromptMode` (`src/agent/index.ts`) is an exhaustive `switch` on `origin.kind`, so a TypeScript compile error forces you to make an explicit full-or-slim decision. The two existing slim origins are `cron` and `subagent`; the two existing full origins are `tui` and `channel`. The asymmetry is load-bearing: the slim base drops ~1500 tokens of operator-facing guidance (agent-folder layout, version-control rules, register-matching prose) that is irrelevant when there's no human reading the output, and the origin block already names the unattended context. Restoring the full prompt for a new unattended kind would re-introduce the bloat the slim mode exists to remove.
+
+**Open follow-up (PR #219 review)**: The slim prompt's MEMORY.md prohibition is currently prose-only. The guard plugin at `src/bundled-plugins/guard/policies/non-workspace-write.ts` explicitly permits writes to `MEMORY.md` (it's in `AGENT_ROOT_WRITE_ALLOWLIST`). A future hardening PR should add a `tool.before` guard policy that blocks non-dreaming `write`/`edit` to `MEMORY.md` with an exemption for the dreaming subagent (resolved via `event.origin.subagent === 'dreaming'`). Until that lands, the slim prompt's prose plus the lazy-loaded `typeclaw-memory` skill are the only protection against a cron job clobbering MEMORY.md.
 
 ## Release
 
