@@ -394,6 +394,109 @@ describe('registerGithubWebhooks', () => {
     expect(calls.some((c) => c.init?.method === 'DELETE')).toBe(false)
   })
 
+  test('legacyProviderHostSuffix: unmarked hooks on the same provider domain are claimed and pruned (covers pre-fix orphans)', async () => {
+    const deleted: number[] = []
+    let patched: number | null = null as number | null
+    const { fetch: fetchImpl } = makeFetch(({ url, init }) => {
+      const method = init?.method ?? 'GET'
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
+        return {
+          status: 200,
+          body: [
+            { id: 100, config: { url: 'https://stale-a.trycloudflare.com' } },
+            { id: 101, config: { url: 'https://stale-b.trycloudflare.com/' } },
+            { id: 102, config: { url: 'https://unrelated.example.com/' } },
+            { id: 103, config: { url: 'https://still-someone-else.trycloudflare.com/their/path' } },
+          ],
+        }
+      }
+      const idMatch = url.match(/\/repos\/acme\/widgets\/hooks\/(\d+)$/)
+      if (idMatch && method === 'PATCH') {
+        patched = Number(idMatch[1])
+        return { status: 200, body: { id: Number(idMatch[1]) } }
+      }
+      if (idMatch && method === 'DELETE') {
+        deleted.push(Number(idMatch[1]))
+        return { status: 204 }
+      }
+      return { status: 500 }
+    })
+
+    const result = await registerGithubWebhooks(
+      baseOpts({
+        fetchImpl,
+        webhookUrl: 'https://fresh.trycloudflare.com/typeclaw/v1/github/coder',
+        managedPath: '/typeclaw/v1/github/coder',
+        legacyProviderHostSuffix: '.trycloudflare.com',
+      }),
+    )
+
+    expect(patched).toBe(100)
+    const repo = result.repos[0]!
+    expect(repo.action).toBe('updated')
+    if (repo.action !== 'updated') throw new Error('unreachable')
+    expect(repo.hookId).toBe(100)
+    expect(repo.stalePruned).toBe(1)
+    expect(deleted).toEqual([101])
+  })
+
+  test("legacyProviderHostSuffix does NOT claim hooks on the same provider with a non-trivial path (could be a foreign service's webhook)", async () => {
+    let createdId: number | null = null as number | null
+    const { fetch: fetchImpl } = makeFetch(({ url, init }) => {
+      const method = init?.method ?? 'GET'
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
+        return {
+          status: 200,
+          body: [{ id: 200, config: { url: 'https://other-service.trycloudflare.com/their/webhook' } }],
+        }
+      }
+      if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST') {
+        createdId = 999
+        return { status: 201, body: { id: 999 } }
+      }
+      return { status: 500 }
+    })
+
+    await registerGithubWebhooks(
+      baseOpts({
+        fetchImpl,
+        webhookUrl: 'https://fresh.trycloudflare.com/typeclaw/v1/github/coder',
+        managedPath: '/typeclaw/v1/github/coder',
+        legacyProviderHostSuffix: '.trycloudflare.com',
+      }),
+    )
+
+    expect(createdId).toBe(999)
+  })
+
+  test('legacyProviderHostSuffix is opt-in: without it, unmarked same-provider hooks are NOT claimed', async () => {
+    let createdId: number | null = null as number | null
+    const { fetch: fetchImpl } = makeFetch(({ url, init }) => {
+      const method = init?.method ?? 'GET'
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
+        return {
+          status: 200,
+          body: [{ id: 100, config: { url: 'https://stale.trycloudflare.com' } }],
+        }
+      }
+      if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST') {
+        createdId = 999
+        return { status: 201, body: { id: 999 } }
+      }
+      return { status: 500 }
+    })
+
+    await registerGithubWebhooks(
+      baseOpts({
+        fetchImpl,
+        webhookUrl: 'https://fresh.trycloudflare.com/typeclaw/v1/github/coder',
+        managedPath: '/typeclaw/v1/github/coder',
+      }),
+    )
+
+    expect(createdId).toBe(999)
+  })
+
   test('without managedPath, prior-run hooks at a rotated URL are NOT recognized (regression baseline — proves the marker is the load-bearing fix)', async () => {
     let createdId: number | null = null as number | null
     const { fetch: fetchImpl } = makeFetch(({ url, init }) => {

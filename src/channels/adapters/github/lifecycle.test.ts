@@ -439,6 +439,64 @@ describe('createGithubAdapter lifecycle', () => {
     expect(repoHooks.length).toBe(0)
   })
 
+  test('legacy unmarked *.trycloudflare.com orphans (the reported bug) are cleaned up on the next adapter start', async () => {
+    type Hook = { id: number; config: { url: string } }
+    let nextHookId = 1000
+    const repoHooks: Hook[] = [
+      { id: 1, config: { url: 'https://examining-may-clerk-blue.trycloudflare.com' } },
+      { id: 2, config: { url: 'https://effect-comprehensive-co.trycloudflare.com' } },
+      { id: 3, config: { url: 'https://inclusion-convergence-co.trycloudflare.com' } },
+    ]
+
+    const fetchImpl: typeof fetch = Object.assign(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+        const method = init?.method ?? 'GET'
+        if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+        if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') return Response.json(repoHooks)
+        if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST') {
+          const parsed = JSON.parse(String(init?.body)) as { config: { url: string } }
+          const hook: Hook = { id: nextHookId++, config: { url: parsed.config.url } }
+          repoHooks.push(hook)
+          return Response.json({ id: hook.id }, { status: 201 })
+        }
+        const idMatch = url.match(/\/repos\/acme\/widgets\/hooks\/(\d+)$/)
+        if (idMatch && method === 'PATCH') {
+          const parsed = JSON.parse(String(init?.body)) as { config: { url: string } }
+          const target = repoHooks.find((h) => h.id === Number(idMatch[1]))
+          if (target !== undefined) target.config.url = parsed.config.url
+          return Response.json({ id: Number(idMatch[1]) })
+        }
+        if (idMatch && method === 'DELETE') {
+          const id = Number(idMatch[1])
+          const idx = repoHooks.findIndex((h) => h.id === id)
+          if (idx >= 0) repoHooks.splice(idx, 1)
+          return new Response('', { status: 204 })
+        }
+        return new Response('unexpected', { status: 500 })
+      },
+      { preconnect: () => {} },
+    ) as typeof fetch
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets'], null),
+      secrets: patSecrets(),
+      agentDir: '/tmp/coder',
+      logger: silentLogger(),
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      tunnelUrl: () => 'https://fresh.trycloudflare.com',
+    })
+    await adapter.start()
+
+    expect(repoHooks.length).toBe(1)
+    expect(repoHooks[0]?.config.url).toBe('https://fresh.trycloudflare.com/typeclaw/v1/github/coder')
+
+    await adapter.stop()
+    expect(repoHooks.length).toBe(0)
+  })
+
   test('stop() does not attempt detach when no hooks were registered (e.g. registration failed)', async () => {
     const deleted: string[] = []
     const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {

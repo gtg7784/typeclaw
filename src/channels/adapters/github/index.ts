@@ -161,6 +161,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           reposCount: repos.length,
         })
       } else if (repos.length > 0) {
+        const legacyProviderHostSuffix = detectLegacyProviderHostSuffix(effectiveUrl)
         const registration = await registerGithubWebhooks({
           token: tokenFn,
           webhookUrl: effectiveUrl,
@@ -168,6 +169,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           repos,
           events: cfg.eventAllowlist,
           managedPath,
+          ...(legacyProviderHostSuffix !== undefined ? { legacyProviderHostSuffix } : {}),
           fetchImpl,
         })
         managedHooks = registration.repos.flatMap((r) =>
@@ -237,6 +239,29 @@ function logSkippedRegistration(
       'binds a public URL to this channel. Add an entry to `tunnels[]` (e.g. `provider: "cloudflare-quick"`) ' +
       'or set `channels.github.webhookUrl` to a public URL to enable webhook delivery.',
   )
+}
+
+// Known tunnel-provider host suffixes whose hostnames rotate per container.
+// A pre-marker hook on one of these is unambiguously a typeclaw orphan from
+// this agent's prior runs (cloudflare-quick is per-container, the host
+// changes every restart, so a stale unmarked *.trycloudflare.com hook
+// pointing at a now-dead host cannot belong to any live service).
+// Extending: add the host suffix here AND verify that hooks on the new
+// provider always look unmarked (no operator-supplied path) before the
+// marker was introduced.
+const LEGACY_TUNNEL_PROVIDER_HOSTS: readonly string[] = ['.trycloudflare.com']
+
+function detectLegacyProviderHostSuffix(url: string): string | undefined {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    return undefined
+  }
+  for (const suffix of LEGACY_TUNNEL_PROVIDER_HOSTS) {
+    if (parsed.host.endsWith(suffix)) return suffix
+  }
+  return undefined
 }
 
 function logRegistrationOutcome(logger: GithubAdapterLogger, result: WebhookRegistrationResult): void {

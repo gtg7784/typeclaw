@@ -25,6 +25,16 @@ export type RegisterGithubWebhooksOptions = {
   // The adapter always passes it in production; the option stays optional so
   // direct unit-test calls can opt out of the cleanup logic.
   managedPath?: string
+  // Opt-in legacy-orphan cleanup for hooks created before the marker existed.
+  // When set (e.g. `.trycloudflare.com`), the lister ALSO claims any hook
+  // whose URL host endsWith this suffix AND whose pathname is empty or `/`
+  // (unmarked = necessarily pre-fix). The adapter passes this only when the
+  // CURRENT effective URL itself lives on the same provider domain, so an
+  // agent on an external/self-hosted tunnel can never claim a colleague's
+  // cloudflare-quick hook. Hooks with a non-trivial path are still skipped
+  // unconditionally so a foreign service that happens to also use
+  // *.trycloudflare.com with its own path stays safe.
+  legacyProviderHostSuffix?: string
   fetchImpl?: typeof fetch
 }
 
@@ -94,7 +104,14 @@ async function registerOne(
     return { repo, action: 'failed', error: `invalid repo slug: "${repo}" (expected owner/name)` }
   }
   try {
-    const owned = await findManagedHooks(fetchImpl, token, parsed, options.webhookUrl, options.managedPath)
+    const owned = await findManagedHooks(
+      fetchImpl,
+      token,
+      parsed,
+      options.webhookUrl,
+      options.managedPath,
+      options.legacyProviderHostSuffix,
+    )
     if (owned.length === 0) {
       const hookId = await createHook(fetchImpl, token, parsed, options)
       return { repo, action: 'created', hookId }
@@ -177,7 +194,7 @@ function parseRepoSlug(slug: string): RepoSlug | null {
 const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/
 
 // Returns the hookIds of every hook owned by this agent on `repo`, in the
-// order GitHub returned them. Ownership is the union of two rules:
+// order GitHub returned them. Ownership is the union of three rules:
 //
 //   1. `config.url === webhookUrl` — the live URL match. Covers the
 //      common case (user-set webhookUrl, or a tunnel URL that hasn't
@@ -188,6 +205,11 @@ const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/
 //      created in a previous run whose tunnel host has since rotated.
 //      Skipped when `managedPath` is omitted (legacy callers).
 //
+//   3. (Opt-in via `legacyProviderHostSuffix`) `URL(config.url).host` ends
+//      with the supplied suffix AND pathname is empty or `/`. Covers the
+//      pre-marker orphans the user reported in the bug. Tightly bounded:
+//      same provider domain only, unmarked hooks only.
+//
 // Hooks whose `config.url` isn't a parseable URL are ignored. Hooks
 // without an `id` are ignored.
 async function findManagedHooks(
@@ -196,6 +218,7 @@ async function findManagedHooks(
   repo: RepoSlug,
   webhookUrl: string,
   managedPath: string | undefined,
+  legacyProviderHostSuffix: string | undefined,
 ): Promise<number[]> {
   const response = await fetchImpl(`${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/hooks?per_page=100`, {
     method: 'GET',
@@ -217,6 +240,10 @@ async function findManagedHooks(
     }
     if (managedPath !== undefined && hookPathMatchesMarker(url, managedPath)) {
       owned.push(hook.id)
+      continue
+    }
+    if (legacyProviderHostSuffix !== undefined && hookIsUnmarkedOnProvider(url, legacyProviderHostSuffix)) {
+      owned.push(hook.id)
     }
   }
   return owned
@@ -234,6 +261,22 @@ function hookPathMatchesMarker(rawUrl: string, marker: string): boolean {
   // Suffix (not equality) so a future reverse-proxy that prepends a path
   // prefix doesn't break recognition.
   return parsed.pathname === marker || parsed.pathname.endsWith(marker)
+}
+
+function hookIsUnmarkedOnProvider(rawUrl: string, hostSuffix: string): boolean {
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    return false
+  }
+  // Empty pathname (rare, depends on URL parser) or root only. Anything
+  // with a real path is treated as user-controlled and left alone.
+  const unmarked = parsed.pathname === '' || parsed.pathname === '/'
+  // hostSuffix must start with a dot OR be the full host — guards against
+  // `foo.com` accidentally matching `evilfoo.com`.
+  const onProvider = parsed.host === hostSuffix || (hostSuffix.startsWith('.') && parsed.host.endsWith(hostSuffix))
+  return unmarked && onProvider
 }
 
 async function createHook(
