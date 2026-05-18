@@ -119,7 +119,11 @@ export type ClaimErrorPayload = {
 }
 
 export type ServerMessage =
-  | { type: 'connected'; sessionId: string }
+  // serverVersion is optional so an old CLI talking to a new server still
+  // parses cleanly. The server impl always emits it; consumers that care
+  // about host/agent skew (the TUI command in particular) read it to warn
+  // the user when their CLI is on a different version than the container.
+  | { type: 'connected'; sessionId: string; serverVersion?: string }
   | { type: 'text_delta'; delta: string }
   | { type: 'tool_start'; toolCallId: string; name: string; args: unknown }
   | { type: 'tool_end'; toolCallId: string; name: string; error: boolean; result: unknown; durationMs: number }
