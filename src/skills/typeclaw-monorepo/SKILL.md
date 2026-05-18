@@ -170,6 +170,6 @@ If you see `Cannot find module 'my-utility'` after creating a new workspace pack
 
 ## Cross-references
 
-- **`typeclaw-plugins`** — read this before authoring any custom plugin. Covers the plugin SDK, hooks, tools, subagents, cron, naming derivation, and failure modes.
+- **`typeclaw-plugins`** — read this before authoring any custom plugin. Covers the plugin SDK, hooks, tools, subagents, cron, plugin commands (`typeclaw <name>`), naming derivation, and failure modes.
 - **`typeclaw-git`** — commit policy. Every new package and every meaningful edit to `package.json` (root or workspace) gets a commit immediately with decision context.
-- **`typeclaw-cron`** — if your package is invoked from a cron job, the `prompt` vs `exec` choice and the schedule semantics live there.
+- **`typeclaw-cron`** — if your package is invoked from a cron job, the `prompt` vs `exec` choice and the schedule semantics live there. Also covers the `exec → LLM` bridge (plugin container command invoked from cron's `exec`) when a scheduled job needs LLM judgement at a shell-style entry point.

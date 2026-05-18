@@ -1,6 +1,6 @@
 ---
 name: typeclaw-cron
-description: Use this skill whenever the user asks you to schedule recurring work, run something on a cron, do something every day/hour/week, set up a periodic task, or read or edit your cron schedule. Triggers include "every morning", "every Monday", "schedule a", "remind me every", "set up a cron", "run X periodically", "what's on my cron", "when does X run", or any mention of `cron.json`. Read it before touching `cron.json` — the file has a strict schema, restart semantics, and a best-effort execution model that you must not misrepresent to the user.
+description: Use this skill whenever the user asks you to schedule recurring work, run something on a cron, do something every day/hour/week, set up a periodic task, or read or edit your cron schedule. Triggers include "every morning", "every Monday", "schedule a", "remind me every", "set up a cron", "run X periodically", "what's on my cron", "when does X run", or any mention of `cron.json`. Also use when the user wants a scheduled shell-style job that nonetheless needs LLM judgement (the `exec → LLM` pattern) — the canonical answer is a plugin container command invoked from cron's `exec` array, not a third cron kind. Read it before touching `cron.json` — the file has a strict schema, restart semantics, and a best-effort execution model that you must not misrepresent to the user.
 ---
 
 # typeclaw-cron
@@ -65,9 +65,85 @@ What this means for how you write prompts:
 
 The runtime spawns the command directly with `Bun.spawn` from the agent folder (`/agent` inside the container). No agent session is created. No LLM call happens. The command's exit code and stderr are captured to container logs.
 
-Use `exec` only for jobs that are pure mechanics — no judgement required. Examples that fit: git snapshots, log rotation, calling a script that already exists. Examples that **don't** fit: anything where "what do I commit" or "what should I write" depends on context. Use `prompt` for those.
+Use `exec` only for jobs that are pure mechanics — no judgement required. Examples that fit: git snapshots, log rotation, calling a script that already exists. Examples that **don't** fit: anything where "what do I commit" or "what should I write" depends on context. Use `prompt` for those — **or** the `exec → LLM` bridge below when you want the cron-time discipline of `exec` (exact `command`, no prompt drift) but still need LLM judgement at runtime.
 
 `command` is an array. Index 0 is the executable, the rest are argv. Do **not** put a single shell pipeline in `command[0]` — that won't be parsed by a shell. If you need shell features (`|`, `>`, `&&`), wrap explicitly: `["sh", "-c", "your | pipeline | here"]`.
+
+## `exec → LLM`: bridge via a plugin container command
+
+There are only two cron kinds — `prompt` and `exec`. There is **no** `kind: "exec-then-llm"` and there never will be. If a scheduled job needs to call into LLM-driven behavior from a shell-style entry point (e.g. parse output of a script and decide what to do, or run a multi-tool agent flow with a sharp `command` argv at the cron layer), the supported pattern is:
+
+1. Write a custom typeclaw plugin under `packages/<plugin-name>/` (see the `typeclaw-plugins` and `typeclaw-monorepo` skills).
+2. In the plugin, declare a `surface: 'container'` command on `definePlugin({ commands: { ... } })`. Inside its `run`, call `ctx.prompt(...)` — that opens a full agent session inside the running container with the entire toolset, and returns the final assistant text.
+3. Wire `typeclaw <command-name>` (plus any `--flag=value` args you declared) into the cron job's `command` array as an `exec` kind.
+
+Concrete example — a daily commit-message-quality audit that needs LLM judgement:
+
+```json
+// cron.json
+{
+  "jobs": [
+    {
+      "id": "daily-commit-audit",
+      "schedule": "0 22 * * *",
+      "timezone": "Asia/Seoul",
+      "kind": "exec",
+      "command": ["typeclaw", "audit-commits", "--since=24h"]
+    }
+  ]
+}
+```
+
+```ts
+// packages/dev-audits/index.ts
+import { z } from 'zod'
+import { definePlugin } from 'typeclaw/plugin'
+
+export default definePlugin({
+  commands: {
+    'audit-commits': {
+      surface: 'container',
+      description: 'Review recent commits for message quality; write findings to memory/audits/.',
+      args: z.object({ since: z.string().default('24h') }),
+      async run(ctx, args) {
+        await ctx.prompt(
+          `Run \`git log --since='${args.since}' --pretty=format:'%h %s'\` and append a critique of weak commit messages to memory/audits/$(date +%F)-commits.md. Be specific — quote bad messages and suggest rewrites.`,
+        )
+        return 0
+      },
+    },
+  },
+  plugin: async () => ({}),
+})
+```
+
+Then list the plugin in `typeclaw.json`:
+
+```json
+{
+  "plugins": ["./packages/dev-audits"]
+}
+```
+
+Pick this pattern (over a plain `kind: "prompt"` job) when **any** of:
+
+- The same logic should also be invokable manually from a shell or TUI — `typeclaw audit-commits --since=7d` Just Works for ad-hoc runs.
+- The job takes arguments — `args: z.object({...})` parses and validates them via `--flag=value`, with `--help` rendered automatically.
+- You want the cron job's `command` to stay exact and auditable (`["typeclaw", "audit-commits", "--since=24h"]`) rather than a wall of natural-language prose that drifts every time you tweak it.
+- The work mixes shell calls and LLM calls — inside the command you can interleave `ctx.exec\`...\``and`ctx.prompt(...)`. A pure `kind: "prompt"` job has no such structured control flow.
+- Multiple cron jobs should share the same logic with different args (run weekly **and** daily, with different `--since` values).
+
+Pick plain `kind: "prompt"` (no plugin) instead when:
+
+- The instruction is one-off, will never be reused, and parametrization is overkill.
+- You don't have a plugin yet and the work is genuinely a few sentences of prose.
+
+What this pattern is NOT:
+
+- It is **not** a way to bypass permissions. The cron job stamps `scheduledByRole` into the spawned session's origin (via `TYPECLAW_PARENT_ORIGIN_JSON`); the plugin command's `ctx.origin` carries that role, and every tool inside `ctx.prompt`'s session resolves against it. A cron scheduled as `scheduledByRole: 'member'` invokes the command's prompt session as a member — no silent elevation. See `typeclaw-permissions`.
+- It is **not** a wrapper for shell pipelines you already have working. If `bash some-script.sh` does the job, just use that as the `command` array directly. Reach for the bridge only when LLM judgement is genuinely required inside the periodic work.
+
+Read `typeclaw-plugins` §5.7 for the full `commands` surface (host/container/either, `args` schema, `ctx.prompt` / `ctx.subagent` / `ctx.exec`, permission gating). Read `typeclaw-monorepo` for where the plugin package lives in `packages/`.
 
 ## Schedule syntax
 
@@ -142,7 +218,7 @@ If you finished an edit and the user only sees an in-flight job from the previou
 
 Pick `kind` first, then schedule, then timezone:
 
-1. **Does the work need judgement?** → `prompt`. Otherwise → `exec`.
+1. **Does the work need judgement?** → `prompt`. Otherwise → `exec`. Edge case: the user wants exact `command` argv AND judgement (e.g. `["typeclaw", "audit-commits", "--since=24h"]`), or the same logic to be reusable from a shell, or the job to take flags. In that case → `exec` with `command: ["typeclaw", "<plugin-command>", ...]`, and write the plugin command. See "`exec → LLM`: bridge via a plugin container command" above.
 2. **Translate the cadence to cron.** "Every morning at 7" → `0 7 * * *`. "Every weekday at 9:30" → `30 9 * * 1-5`. "Every five minutes" → `*/5 * * * *`. If you are not sure, ask once. Don't guess on tricky cases like "every other Friday".
 3. **Timezone.** If the user mentioned a wall-clock time, set `timezone` to their zone. If unknown, ask once or default to the timezone in `USER.md` if it's recorded there.
 4. **Pick a stable `id`.** Use kebab-case that describes the job, not the schedule. `daily-summary` not `0-23-30`.

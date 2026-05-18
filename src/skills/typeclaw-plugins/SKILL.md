@@ -1,6 +1,6 @@
 ---
 name: typeclaw-plugins
-description: TypeClaw plugin authoring and operation guide. Use when writing, editing, configuring, debugging, or installing a TypeClaw plugin — including any work with definePlugin, defineTool, defineSubagent, plugin hooks (session.start/end/idle/prompt, tool.before/after), plugin cron jobs, plugin skills, the typeclaw/plugin import path, or per-plugin config blocks in typeclaw.json. Triggers on mentions of 'TypeClaw plugin', 'definePlugin', 'plugin hook', 'plugin cron', 'plugins[]', 'typeclaw-plugin-', or any file under src/plugin/ or plugins/.
+description: TypeClaw plugin authoring and operation guide. Use when writing, editing, configuring, debugging, or installing a TypeClaw plugin — including any work with definePlugin, defineTool, defineSubagent, plugin hooks (session.start/end/idle/prompt, tool.before/after), plugin cron jobs, plugin commands (host/container/either CLI subcommands callable as `typeclaw <name>`), plugin skills, the typeclaw/plugin import path, or per-plugin config blocks in typeclaw.json. Also use when you need to bridge a cron `exec` job to LLM-driven work — the canonical pattern is a `surface: 'container'` plugin command whose `run` calls `ctx.prompt(...)`, invoked as `typeclaw <command>` from cron's `command` array. Triggers on mentions of 'TypeClaw plugin', 'definePlugin', 'plugin hook', 'plugin cron', 'plugin command', 'PluginCommand', 'ContainerCommand', 'HostCommand', 'EitherCommand', 'ctx.prompt', 'ctx.subagent', 'ctx.exec', 'plugins[]', 'typeclaw-plugin-', or any file under src/plugin/ or plugins/.
 ---
 
 # TypeClaw Plugins
@@ -326,6 +326,181 @@ Provider prompt caching makes the **prefix** of the system prompt 5–10× cheap
 
 If your content varies per session, **append**. If it's stable across sessions, prepending is fine but understand the cost.
 
+### 5.7 `commands` — typeclaw CLI subcommands
+
+A plugin can register top-level CLI commands invocable as `typeclaw <name>` from any shell sitting in the agent folder. **Unlike every other contribution in §5, `commands` is declared by-value on `definePlugin(...)`, NOT inside the factory return.** This is so the host-stage CLI can dispatch commands without booting the plugin runtime (no `bun install`, no factory, no engine spin-up just to print `--help`).
+
+```ts
+import { z } from 'zod'
+import { definePlugin } from 'typeclaw/plugin'
+
+export default definePlugin({
+  commands: {
+    'standup-now': {
+      surface: 'container',
+      description: 'Generate a standup write-up for today from sessions/.',
+      args: z.object({
+        date: z.string().optional().describe('YYYY-MM-DD; defaults to today'),
+      }),
+      async run(ctx, args) {
+        const text = await ctx.prompt(
+          `Read sessions/ for ${args.date ?? 'today'} and write a 3-bullet standup to standup/${args.date ?? 'today'}.md.`,
+        )
+        const writer = ctx.stdout.getWriter()
+        await writer.write(new TextEncoder().encode(text + '\n'))
+        writer.releaseLock()
+        return 0
+      },
+    },
+  },
+  plugin: async (ctx) => ({
+    /* tools, hooks, cron, ... */
+  }),
+})
+```
+
+Once installed, the user (or a cron `exec` job) runs `typeclaw standup-now --date=2026-05-18`. `typeclaw --help` lists all discovered plugin commands automatically — no separate registration.
+
+#### The three surfaces
+
+| `surface`     | Runs where                                                          | `ctx` has                                                                 | Use when                                                                                                                                                               |
+| ------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'container'` | Inside the running agent container, proxied over WS by the host CLI | `prompt`, `subagent`, `exec`, `permissions`, `origin`, `signal` + streams | The command needs the agent runtime — LLM calls (`ctx.prompt`), subagent invocation, permission checks. **This is the bridge for `exec → LLM` from cron (see below).** |
+| `'host'`      | On the user's machine, no container required                        | `streams`, `signal`, `logger`, `agentDir` (host path)                     | The command only touches host-side state (files, host binaries, prompts the user). Container does NOT need to be running.                                              |
+| `'either'`    | Whichever stage invoked it — same author code runs in both          | The intersection (`streams`, `signal`, `logger`, `agentDir`)              | The command's logic is stage-agnostic. `agentDir` resolves to `/agent` in the container and the host path on the host, automatically.                                  |
+
+The `surface: 'container'` command requires the container to be running. The host CLI opens a WebSocket to `/commands` on the agent's port, sends `exec_command`, and streams stdout/stderr back. Ctrl-C on the host propagates as `AbortSignal` to `ctx.signal` inside the container.
+
+#### `ContainerCommandContext` — what you get inside `run`
+
+```ts
+type ContainerCommandContext = {
+  readonly name: string // plugin name (e.g. 'standup-log'), NOT command name
+  readonly version: string | undefined
+  readonly agentDir: string // /agent inside the container
+  readonly logger: PluginLogger
+  readonly permissions: PermissionService
+  readonly origin: SessionOrigin // caller's origin — cron job, TUI op, etc.
+  readonly signal: AbortSignal // aborts on ws close or host Ctrl-C
+  readonly stdin: ReadableStream<Uint8Array>
+  readonly stdout: WritableStream<Uint8Array>
+  readonly stderr: WritableStream<Uint8Array>
+  readonly prompt: (text: string) => Promise<string> // full LLM session, full toolset, returns last assistant text
+  readonly subagent: (name: string, payload?: unknown) => Promise<void>
+  readonly exec: (cmd: TemplateStringsArray, ...values: unknown[]) => Promise<CommandExecResult>
+}
+```
+
+Key facts about each capability:
+
+- **`ctx.prompt(text)`** opens a brand-new `AgentSession` with the full agent toolset (read/bash/edit/write/grep/find/ls + plugin tools), sends `text` as if a user typed it, and returns the last assistant message. The session is created and disposed inside the call. The session uses **slim system prompt mode** (subagent-shaped origin) so you save ~2000 tokens per LLM call versus a normal TUI session.
+- **`ctx.subagent(name, payload)`** invokes a registered subagent (yours or another plugin's). Returns when the subagent's `runSession` resolves.
+- **`ctx.exec` is a tagged template** — `await ctx.exec\`git log --oneline -10\``runs the command in the agent folder with`ctx.signal` threaded through. Aborts kill the entire process group (SIGTERM → 5s grace → SIGKILL) so daemonized grandchildren don't outlive the abort.
+- **`ctx.origin`** carries the caller's `SessionOrigin`. For host-invoked (TUI op) calls it's `{ kind: 'tui', ... }`; for cron-invoked calls it's the cron job's origin including `scheduledByRole`. **No silent role elevation** — a cron job running as `scheduledByRole: 'member'` invokes the command with that same role, and permission checks inside the command resolve accordingly.
+
+#### The cron-exec → LLM bridge (the headline use case)
+
+Cron `kind: 'prompt'` already gives you LLM-driven scheduled work. Cron `kind: 'exec'` gives you shell-only work. **There is no `exec → LLM` cron kind** by design — that would be a third schema field nobody else needs. The supported pattern instead is: write a `surface: 'container'` plugin command whose `run` calls `ctx.prompt(...)`, then point a cron `exec` job at it.
+
+```json
+// cron.json
+{
+  "jobs": [
+    {
+      "id": "daily-standup",
+      "schedule": "30 9 * * 1-5",
+      "timezone": "Asia/Seoul",
+      "kind": "exec",
+      "command": ["typeclaw", "standup-now"]
+    }
+  ]
+}
+```
+
+```ts
+// packages/standup-log/index.ts
+export default definePlugin({
+  commands: {
+    'standup-now': {
+      surface: 'container',
+      description: 'Generate today’s standup.',
+      async run(ctx) {
+        await ctx.prompt(
+          `Read sessions/$(date +%F)*.jsonl and append a 3-bullet standup to memory/standups/$(date +%F).md.`,
+        )
+        return 0
+      },
+    },
+  },
+  plugin: async () => ({}),
+})
+```
+
+Why this beats writing a `kind: 'prompt'` job:
+
+- The command is reusable from the TUI, from another cron job, from a `compose` orchestration, or from a manual `typeclaw standup-now` invocation.
+- Args (`--date`, `--dry-run`, etc.) are declared once via `args: z.object({...})` and parsed/validated by the runtime.
+- The full `ContainerCommandContext` is available — you can mix LLM calls (`ctx.prompt`) with shell calls (`ctx.exec`) inside one command, which a pure-prompt cron job cannot.
+- The cron job stays trivially auditable: `command: ["typeclaw", "standup-now"]` is exact, not a wall of natural-language prose.
+
+For the cron-side phrasing of this rule (when to pick `prompt` vs `exec → typeclaw <cmd>`) read `typeclaw-cron`.
+
+#### `args` — Zod object schema with primitive leaves
+
+```ts
+args: z.object({
+  date: z.string().optional().describe('YYYY-MM-DD; defaults to today'),
+  dryRun: z.boolean().default(false),
+  count: z.number().int().min(1).max(100).default(10),
+})
+```
+
+- The top level **MUST** be `z.object({...})`. Leaves should be primitives (`string`, `number`, `boolean`, `literal`, `enum`) so `--help` can render `--<name>=<type>`.
+- Args are validated locally by the host CLI **before** any WS round-trip, so bad args fail fast with a clean error and exit code 2. The container re-validates as defense-in-depth.
+- `.describe(...)` populates `--help` output. Use it.
+- Omit `args` entirely if the command takes no flags.
+
+#### `permissions: [...]` on the command
+
+```ts
+{
+  surface: 'container',
+  permissions: ['standup-log.write.standup'],
+  async run(ctx, args) {
+    ctx.permissions.assert(ctx.origin, 'standup-log.write.standup')
+    // ...
+  },
+}
+```
+
+Declared permissions are surfaced in `--help` and (for container commands) checked against the caller's origin. Same `<plugin>.<verb>.<noun>` shape as the rest of the permission system; see `typeclaw-permissions`.
+
+#### `isolated: true` (container surface only)
+
+```ts
+{
+  surface: 'container',
+  isolated: true,  // currently degrades to in-process with a warning on stderr
+  async run(ctx, args) { /* ... */ },
+}
+```
+
+Reserved for a future subprocess sandbox. Today the runtime accepts the flag and emits a warning on the per-command stderr (visible to the invoking CLI) but executes in-process anyway. Set it now if you genuinely want the isolation when it lands; otherwise omit.
+
+#### Discovery and naming
+
+- Command names are **global across all plugins**. Two plugins registering `standup-now` is a discovery error — the second one is dropped and logged on `--help`.
+- Command names are NOT auto-prefixed with the plugin name. Pick discriminating names (`standup-now`, not `run`).
+- `typeclaw --help` (in any agent folder) lists every discovered plugin command with description, surface, and which plugin owns it.
+- `typeclaw <name> --help` renders args, surface, plugin name + version. Free.
+
+#### What's NOT supported
+
+- **No host-stage CLI commands that mutate the live container without going through `restart` / `reload`.** A host command can `Bun.spawn('typeclaw', ['reload'])` if it needs to push a config change, but there's no privileged backdoor.
+- **No tool-style `content: ContentPart[]` return.** Commands write to `ctx.stdout` and return an exit code. They are CLI processes, not LLM tool calls.
+- **No streaming token output from `ctx.prompt`** yet — the full LLM response arrives as one stdout burst. Chunked streaming is on the roadmap.
+- **No nested command dispatch.** A command cannot invoke `typeclaw <other-cmd>` and expect to share state; spawn a subprocess or share a subagent instead.
+
 ---
 
 ## 6. PluginContext
@@ -530,9 +705,8 @@ If you find yourself wanting any of these, the design has gone wrong somewhere �
 - **Stream subscriptions**. Plugins observe through the typed `hooks` surface; they cannot subscribe to the in-process pub/sub directly.
 - **Server-side TUI push notifications** from plugin code. Tool calls reach the TUI via existing `tool_start`/`tool_end` events.
 - **Dockerfile fragments** contributed by plugins. The Dockerfile is core-managed.
-- **New cron job kinds** beyond `prompt` and `exec`. (Subagent invocation is a `prompt` variant, not a separate kind.)
+- **New cron job kinds** beyond `prompt` and `exec`. (Subagent invocation is a `prompt` variant, not a separate kind. For `exec → LLM`, write a container plugin command and call it from cron `exec` — see §5.7.)
 - **Reload-registry scopes** for plugin-owned state.
-- **Host-stage CLI commands** registered by plugins. Plugins are container-stage only.
 - **`extendConfig`** for arbitrary top-level fields outside the plugin's own config block.
 - **Per-LLM-call hooks** (`llm.params` / `llm.headers`). Wait until a real plugin needs them.
 
@@ -575,6 +749,10 @@ export default definePlugin({
   configSchema: z.object({
     /* ... */
   }), // optional
+  commands: {
+    /* name: { surface, run, args?, ... } */
+  }, // optional, declared BY-VALUE (not inside factory)
+  permissions: ['my-plugin.write.x'], // optional
   plugin: async (ctx) => ({
     // required
     tools,
@@ -582,7 +760,8 @@ export default definePlugin({
     cronJobs,
     skills,
     skillsDirs,
-    hooks, // all optional
+    hooks,
+    doctorChecks, // all optional
   }),
 })
 ```
@@ -590,5 +769,9 @@ export default definePlugin({
 **Cron global id**: `__plugin_<plugin-name>_<key>`
 
 **Plugin name = derived**: scope-stripped, `typeclaw-plugin-` prefix stripped (npm), or basename minus extension (local).
+
+**Command name = global**: NOT prefixed with plugin name. Two plugins registering the same command name is a discovery error (second is dropped, logged on `--help`).
+
+**`exec → LLM` from cron**: write `surface: 'container'` command calling `ctx.prompt(...)`, point cron `exec` job at `["typeclaw", "<command-name>"]`. There is no native `exec → LLM` cron kind by design.
 
 **Boundary**: `src/plugin/**` MUST NOT import `@mariozechner/*`.
