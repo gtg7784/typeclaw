@@ -9,7 +9,12 @@ import { defineCommand } from '@/plugin/define'
 import { emptyRegistry, type RegisteredCommand } from '@/plugin/registry'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 
-import { createCommandRunner, type CommandOutbound, type CommandSpawnSubagent } from './command-runner'
+import {
+  bindSignalToSession,
+  createCommandRunner,
+  type CommandOutbound,
+  type CommandSpawnSubagent,
+} from './command-runner'
 
 type CapturedFrame =
   | { kind: 'stdout'; callId: string; chunk: string }
@@ -395,5 +400,51 @@ describe('CommandRunner', () => {
     const opts = calls[0]?.options as { spawnedByOrigin?: { kind: string }; parentSessionId?: string } | undefined
     expect(opts?.spawnedByOrigin?.kind).toBe('subagent')
     expect(opts?.parentSessionId).toBe('command:parent:sub-1')
+  })
+})
+
+describe('bindSignalToSession', () => {
+  test('calls session.abort when the signal fires before detach', () => {
+    const aborts: number[] = []
+    const session = {
+      abort: async () => {
+        aborts.push(1)
+      },
+    }
+    const controller = new AbortController()
+    const detach = bindSignalToSession(controller.signal, session)
+    expect(aborts.length).toBe(0)
+
+    controller.abort('user requested')
+    expect(aborts.length).toBe(1)
+
+    detach()
+  })
+
+  test('aborts the session immediately when the signal is already aborted', () => {
+    const aborts: number[] = []
+    const session = {
+      abort: async () => {
+        aborts.push(1)
+      },
+    }
+    const controller = new AbortController()
+    controller.abort('pre-aborted')
+    bindSignalToSession(controller.signal, session)
+    expect(aborts.length).toBe(1)
+  })
+
+  test('does not abort the session when the signal never fires (clean prompt completion)', () => {
+    const aborts: number[] = []
+    const session = {
+      abort: async () => {
+        aborts.push(1)
+      },
+    }
+    const controller = new AbortController()
+    const detach = bindSignalToSession(controller.signal, session)
+    detach()
+    controller.abort('too late')
+    expect(aborts.length).toBe(0)
   })
 })

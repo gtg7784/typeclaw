@@ -330,7 +330,7 @@ async function runPromptForCommand(args: {
   // the agent folder's IDENTITY/SOUL/MEMORY files via the default resource
   // loader (no `systemPromptOverride`).
   const snapshot = args.runtime.get()
-  const sessionId = args.origin.kind === 'tui' ? args.origin.sessionId : crypto.randomUUID()
+  const sessionId = resolveSessionIdForOrigin(args.origin)
   const { session, dispose } = await createSessionWithDispose({
     origin: args.origin,
     permissions: args.permissions,
@@ -343,16 +343,39 @@ async function runPromptForCommand(args: {
     ...(args.runtimeVersion !== undefined ? { runtimeVersion: args.runtimeVersion } : {}),
     ...(args.containerName !== undefined ? { containerName: args.containerName } : {}),
   })
+  const detachAbort = bindSignalToSession(args.signal, session)
   try {
-    if (args.signal.aborted) {
-      throw new Error('command aborted before prompt could be sent')
-    }
     await session.prompt(args.text)
     return session.getLastAssistantText() ?? ''
   } finally {
+    detachAbort()
     session.dispose()
     await dispose()
   }
+}
+
+// Propagate abort into the live session: without this, abort flips the
+// signal but session.prompt() keeps waiting on the provider until the LLM
+// call completes naturally — which for a long generation means the whole
+// command, its dispose() chain, and command_exit hang for minutes.
+// Returns a detach function the caller must invoke (in finally) so the
+// listener doesn't leak after a clean prompt completion.
+export function bindSignalToSession(signal: AbortSignal, session: { abort: () => Promise<void> }): () => void {
+  const onAbort = (): void => {
+    void session.abort()
+  }
+  if (signal.aborted) {
+    onAbort()
+    return () => {}
+  }
+  signal.addEventListener('abort', onAbort, { once: true })
+  return () => signal.removeEventListener('abort', onAbort)
+}
+
+function resolveSessionIdForOrigin(origin: SessionOrigin): string {
+  if (origin.kind === 'tui') return origin.sessionId
+  if (origin.kind === 'subagent') return origin.parentSessionId
+  return crypto.randomUUID()
 }
 
 async function runExecForCommand(
