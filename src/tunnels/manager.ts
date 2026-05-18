@@ -20,6 +20,8 @@ export type TunnelManager = {
   stop: () => Promise<void>
   snapshot: () => TunnelState[]
   urlFor: (tunnelName: string) => string | null
+  tail: (tunnelName: string) => string[]
+  subscribeToLogs: (tunnelName: string, cb: (line: string) => void) => () => void
 }
 
 const consoleLogger: TunnelManagerLogger = {
@@ -67,6 +69,12 @@ export function createTunnelManager(options: TunnelManagerOptions): TunnelManage
     },
     urlFor(tunnelName: string): string | null {
       return handles.get(tunnelName)?.snapshot().url ?? null
+    },
+    tail(tunnelName: string): string[] {
+      return handles.get(tunnelName)?.tail() ?? []
+    },
+    subscribeToLogs(tunnelName: string, cb: (line: string) => void): () => void {
+      return handles.get(tunnelName)?.subscribeToLogs(cb) ?? (() => {})
     },
   }
 }

@@ -123,4 +123,20 @@ describe('createTunnelManager (external provider)', () => {
 
     expect(received).toHaveLength(1)
   })
+
+  it('tail returns an empty log snapshot for external tunnels and unknown names', () => {
+    const stream = createStream()
+    const manager = createTunnelManager({ tunnels: [externalConfig()], stream, logger: silentLogger })
+
+    expect(manager.tail('demo')).toEqual([])
+    expect(manager.tail('unknown')).toEqual([])
+  })
+
+  it('subscribeToLogs returns an unsubscribe function for external tunnels and unknown names', () => {
+    const stream = createStream()
+    const manager = createTunnelManager({ tunnels: [externalConfig()], stream, logger: silentLogger })
+
+    expect(typeof manager.subscribeToLogs('demo', () => {})).toBe('function')
+    expect(typeof manager.subscribeToLogs('unknown', () => {})).toBe('function')
+  })
 })
