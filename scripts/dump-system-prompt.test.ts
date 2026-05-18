@@ -9,17 +9,32 @@ import {
 } from './dump-system-prompt'
 
 describe('dumpSystemPrompt', () => {
-  const kinds: Array<'tui' | 'cron' | 'channel' | 'subagent'> = ['tui', 'cron', 'channel', 'subagent']
+  const defaultLoaderKinds: Array<'tui' | 'cron' | 'channel'> = ['tui', 'cron', 'channel']
 
-  test.each(kinds)('%s origin renders the common required sections', (kind) => {
-    const out = dumpSystemPrompt(kind)
+  test.each(defaultLoaderKinds)(
+    '%s origin (default-loader path) renders identity, runtime, origin, role, and memory',
+    (kind) => {
+      const out = dumpSystemPrompt(kind)
 
-    expect(out).toContain('# Identity')
+      expect(out).toContain('# Identity')
+      expect(out).toContain('## Runtime')
+      expect(out).toContain('TypeClaw runtime version: 1.2.3-debug.')
+      expect(out).toContain('## Session origin')
+      expect(out).toContain('## Your role in this session')
+      expect(out).toContain('# Memory')
+    },
+  )
+
+  test('subagent origin (override path) renders only override + runtime + origin/role, NOT identity or memory', () => {
+    const out = dumpSystemPrompt('subagent')
+
     expect(out).toContain('## Runtime')
-    expect(out).toContain('TypeClaw runtime version: 1.2.3-debug.')
     expect(out).toContain('## Session origin')
     expect(out).toContain('## Your role in this session')
-    expect(out).toContain('# Memory')
+    expect(out).not.toContain('# Identity')
+    expect(out).not.toContain('# Memory')
+    expect(out).not.toContain('You are a general-purpose AI agent running inside TypeClaw.')
+    expect(out).not.toContain('You are an AI agent running inside TypeClaw.')
   })
 
   const fullKinds: Array<'tui' | 'channel'> = ['tui', 'channel']
@@ -30,13 +45,26 @@ describe('dumpSystemPrompt', () => {
     expect(out).toContain('## Uncommitted changes at session start')
   })
 
-  const slimKinds: Array<'cron' | 'subagent'> = ['cron', 'subagent']
-  test.each(slimKinds)('%s origin uses the slim base prompt and omits git nudge', (kind) => {
-    const out = dumpSystemPrompt(kind)
+  test('cron origin uses the slim base prompt and omits git nudge', () => {
+    const out = dumpSystemPrompt('cron')
 
-    expect(out).toContain('You are an AI agent running inside TypeClaw')
+    expect(out).toContain('You are an AI agent running inside TypeClaw.')
     expect(out).not.toContain('You are a general-purpose AI agent running inside TypeClaw.')
     expect(out).not.toContain('## Uncommitted changes at session start')
+  })
+
+  test('cron slim prompt carries the load-bearing guidance the audit identified', () => {
+    const out = dumpSystemPrompt('cron')
+
+    expect(out).toContain('Never echo secrets from `.env`')
+    expect(out).toContain('never fabricate results')
+    expect(out).toContain('Do not narrate routine')
+    expect(out).toContain('workspace/')
+    expect(out).toContain('Do not edit `MEMORY.md` directly')
+  })
+
+  test('slim prompt does NOT contain the subagent-breaking "plain prose is invisible" claim', () => {
+    expect(dumpSystemPrompt('cron')).not.toContain('Plain prose with no tool call is invisible')
   })
 
   test('cron origin includes cron-specific text', () => {
@@ -102,7 +130,8 @@ describe('dumpSystemPrompt', () => {
     (kind) => {
       const result = dumpSystemPromptWithBreakdown(kind)
 
-      expect(result.sections.length).toBeGreaterThanOrEqual(6)
+      const minSections = kind === 'subagent' ? 3 : 6
+      expect(result.sections.length).toBeGreaterThanOrEqual(minSections)
       for (const s of result.sections) {
         expect(s.bytes).toBeGreaterThan(0)
         expect(s.chars).toBeGreaterThan(0)
@@ -146,16 +175,28 @@ describe('dumpSystemPrompt', () => {
     ])
   })
 
-  test('subagent breakdown uses the slim base and omits Git nudge', () => {
+  test('subagent breakdown reflects production override path: only override + runtime + origin/role', () => {
     const names = dumpSystemPromptWithBreakdown('subagent').sections.map((s) => s.name)
-    expect(names).toContain('SLIM_SYSTEM_PROMPT (base)')
+    expect(names).toEqual(['Subagent override prompt', 'Runtime block', 'Session origin + role'])
+    expect(names).not.toContain('SLIM_SYSTEM_PROMPT (base)')
+    expect(names).not.toContain('DEFAULT_SYSTEM_PROMPT (base)')
+    expect(names).not.toContain('Identity (IDENTITY.md + SOUL.md)')
+    expect(names).not.toContain('Memory (MEMORY.md + streams)')
     expect(names).not.toContain('Git nudge')
   })
 
-  test('slim cron prompt is at least 1500 tokens lighter than the full tui prompt', () => {
+  test('slim cron prompt is meaningfully lighter than the full tui prompt', () => {
     const cronTok = dumpSystemPromptWithBreakdown('cron').totalTokens
     const tuiTok = dumpSystemPromptWithBreakdown('tui').totalTokens
-    expect(tuiTok - cronTok).toBeGreaterThan(1500)
+    expect(tuiTok - cronTok).toBeGreaterThan(800)
+  })
+
+  test('slim cron prompt stays under the 1000-token budget (regression guard)', () => {
+    expect(dumpSystemPromptWithBreakdown('cron').totalTokens).toBeLessThan(1000)
+  })
+
+  test('subagent override-path dump stays under the 500-token budget', () => {
+    expect(dumpSystemPromptWithBreakdown('subagent').totalTokens).toBeLessThan(500)
   })
 
   test('--no-git-nudge breakdown omits the Git nudge row on a full-mode origin', () => {
