@@ -322,6 +322,7 @@ export async function startAgent({
       agentDir: cwd,
       userPrompt: '',
       payload,
+      onProviderError: (message) => console.error(`[subagent] ${name}: LLM call failed: ${message}`),
       ...(options?.parentSessionId !== undefined ? { parentSessionId: options.parentSessionId } : {}),
       ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
       ...(options?.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
