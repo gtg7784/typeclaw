@@ -71,6 +71,7 @@ export type ChannelManagerOptions = {
   // code. Production wiring sets this from the role-claim subsystem (see
   // src/run/index.ts). Tests typically omit it.
   claimHandler?: ClaimHandler
+  tunnelUrlForChannel?: (channelName: string) => string | null
 }
 
 export type ChannelManager = {
@@ -183,6 +184,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         secrets,
         agentDir: options.agentDir,
         logger,
+        tunnelUrl: () => options.tunnelUrlForChannel?.('github') ?? null,
       })
     }
     if (name === 'telegram-bot') {

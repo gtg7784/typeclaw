@@ -266,6 +266,26 @@ describe('channel manager — restartAdapter serialization', () => {
     await slackRestart
     await mgr.stop()
   })
+
+  test('passes tunnelUrlForChannel through to the github adapter', async () => {
+    cfg.github = enabledGithubCfg()
+    await writeGithubSecrets(agentDir)
+    let captured: { tunnelUrl?: () => string | null } | undefined
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      tunnelUrlForChannel: (name) => (name === 'github' ? 'https://x.trycloudflare.com' : null),
+      createGithubAdapter: (opts) => {
+        captured = opts
+        return makeFakeAdapter()
+      },
+    })
+
+    await mgr.start()
+
+    expect(captured?.tunnelUrl?.()).toBe('https://x.trycloudflare.com')
+    await mgr.stop()
+  })
 })
 
 describe('channel manager — slack adapter lifecycle', () => {
