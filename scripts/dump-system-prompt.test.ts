@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
-import { dumpSystemPrompt } from './dump-system-prompt'
+import {
+  byteLength,
+  dumpSystemPrompt,
+  dumpSystemPromptWithBreakdown,
+  estimateTokens,
+  TOKENS_PER_CHAR,
+} from './dump-system-prompt'
 
 describe('dumpSystemPrompt', () => {
   const kinds: Array<'tui' | 'cron' | 'channel' | 'subagent'> = ['tui', 'cron', 'channel', 'subagent']
@@ -53,6 +59,69 @@ describe('dumpSystemPrompt', () => {
 
     expect(out).not.toContain('## Uncommitted changes at session start')
     expect(out).toContain('# Memory')
+  })
+
+  test('TOKENS_PER_CHAR is the documented 1/4 heuristic', () => {
+    expect(TOKENS_PER_CHAR).toBe(0.25)
+  })
+
+  test('estimateTokens rounds chars*0.25', () => {
+    expect(estimateTokens('')).toBe(0)
+    expect(estimateTokens('abcd')).toBe(1)
+    expect(estimateTokens('a'.repeat(100))).toBe(25)
+  })
+
+  test('byteLength returns UTF-8 byte count, not String.length', () => {
+    expect(byteLength('abc')).toBe(3)
+    expect(byteLength('—')).toBe(3)
+    expect(byteLength("don't")).toBeGreaterThanOrEqual(5)
+  })
+
+  test('byteLength differs from String.length on multi-byte content', () => {
+    const text = 'em — dash and curly — quote'
+    expect(byteLength(text)).toBeGreaterThan(text.length)
+  })
+
+  test.each(['tui', 'cron', 'channel', 'subagent'] as const)(
+    '%s breakdown has bytes / chars / tokens for every section, plus totals',
+    (kind) => {
+      const result = dumpSystemPromptWithBreakdown(kind)
+
+      expect(result.sections.length).toBeGreaterThanOrEqual(6)
+      for (const s of result.sections) {
+        expect(s.bytes).toBeGreaterThan(0)
+        expect(s.chars).toBeGreaterThan(0)
+        expect(s.tokens).toBeGreaterThanOrEqual(0)
+        expect(s.bytes).toBeGreaterThanOrEqual(s.chars)
+      }
+      expect(result.totalBytes).toBe(byteLength(result.prompt))
+      expect(result.totalChars).toBe(result.prompt.length)
+      expect(result.totalTokens).toBe(estimateTokens(result.prompt))
+      expect(result.totalBytes).toBeGreaterThanOrEqual(result.totalChars)
+    },
+  )
+
+  test('breakdown total tokens matches estimateTokens on the rendered prompt', () => {
+    const result = dumpSystemPromptWithBreakdown('cron')
+    expect(estimateTokens(result.prompt)).toBe(result.totalTokens)
+  })
+
+  test('cron breakdown lists each expected section in order', () => {
+    const names = dumpSystemPromptWithBreakdown('cron').sections.map((s) => s.name)
+    expect(names).toEqual([
+      'DEFAULT_SYSTEM_PROMPT (base)',
+      'Identity (IDENTITY.md + SOUL.md)',
+      'Runtime block',
+      'Session origin',
+      'Role context',
+      'Git nudge',
+      'Memory (MEMORY.md + streams)',
+    ])
+  })
+
+  test('--no-git-nudge breakdown omits the Git nudge row', () => {
+    const names = dumpSystemPromptWithBreakdown('cron', { gitNudge: false }).sections.map((s) => s.name)
+    expect(names).not.toContain('Git nudge')
   })
 
   test('section order is least-volatile to most-volatile (cache-suffix contract)', () => {

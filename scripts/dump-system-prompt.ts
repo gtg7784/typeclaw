@@ -166,21 +166,140 @@ function buildFixture(kind: OriginKind): Fixture {
   }
 }
 
-export function dumpSystemPrompt(kind: OriginKind, options: { gitNudge: boolean } = { gitNudge: true }): string {
+export type SectionBreakdown = {
+  name: string
+  bytes: number
+  chars: number
+  tokens: number
+}
+
+export type DumpResult = {
+  prompt: string
+  sections: SectionBreakdown[]
+  totalBytes: number
+  totalChars: number
+  totalTokens: number
+}
+
+// Heuristic: ~4 chars per token. Industry rule-of-thumb (e.g. OpenAI tokenizer
+// docs); accurate to ~15% for English prose / markdown, model-agnostic across
+// Claude / GPT / Gemini families. Exposed so tests can assert the methodology.
+export const TOKENS_PER_CHAR = 0.25
+
+export function estimateTokens(text: string): number {
+  return Math.round(text.length * TOKENS_PER_CHAR)
+}
+
+// UTF-8 byte length, not String.length. The system prompt contains em-dashes,
+// curly quotes, and other multi-byte codepoints (em-dash is 3 bytes; some
+// emoji used in skills are 4 bytes), so chars and bytes differ on this
+// content. Bytes are what gets transmitted on the wire; chars are what the
+// tokenizer heuristic operates on. Using TextEncoder (Bun's native impl) is
+// O(n) once and avoids the Buffer.byteLength edge cases.
+const encoder = new TextEncoder()
+export function byteLength(text: string): number {
+  return encoder.encode(text).length
+}
+
+export function dumpSystemPromptWithBreakdown(
+  kind: OriginKind,
+  options: { gitNudge: boolean } = { gitNudge: true },
+): DumpResult {
   const fixture = buildFixture(kind)
-  return composeSystemPrompt({
+  const parts = {
     self: PLACEHOLDER_SELF,
     runtimeVersion: PLACEHOLDER_RUNTIME_VERSION,
     origin: fixture.origin,
     roleContext: fixture.roleContext,
     gitNudge: options.gitNudge ? PLACEHOLDER_GIT_NUDGE : '',
     memorySection: fixture.memory,
+  } as const
+
+  const prompt = composeSystemPrompt(parts)
+
+  // Section breakdown mirrors the concat order in composeSystemPrompt.
+  // Counts are over each section's contribution string, not the running
+  // total — easier to read and matches what a prompt-engineer wants to
+  // see ("the memory section alone is ~1200 tokens"). Inter-section
+  // separators ("\n\n") are tiny and intentionally not attributed.
+  const mkSection = (name: string, body: string): SectionBreakdown => ({
+    name,
+    bytes: byteLength(body),
+    chars: body.length,
+    tokens: estimateTokens(body),
   })
+
+  const baseEnd = prompt.indexOf(`\n\n${parts.self}`)
+  const base = baseEnd > 0 ? prompt.slice(0, baseEnd) : ''
+  const sections: SectionBreakdown[] = [
+    mkSection('DEFAULT_SYSTEM_PROMPT (base)', base),
+    mkSection('Identity (IDENTITY.md + SOUL.md)', parts.self),
+    mkSection('Runtime block', `## Runtime\n\nTypeClaw runtime version: ${parts.runtimeVersion}.`),
+    mkSection('Session origin', extractSection(prompt, '## Session origin', '## Your role in this session')),
+    mkSection(
+      'Role context',
+      extractSection(
+        prompt,
+        '## Your role in this session',
+        parts.gitNudge !== '' ? '## Uncommitted changes at session start' : '# Memory',
+      ),
+    ),
+  ]
+  if (parts.gitNudge !== '') {
+    sections.push(mkSection('Git nudge', parts.gitNudge))
+  }
+  sections.push(mkSection('Memory (MEMORY.md + streams)', parts.memorySection))
+
+  return {
+    prompt,
+    sections,
+    totalBytes: byteLength(prompt),
+    totalChars: prompt.length,
+    totalTokens: estimateTokens(prompt),
+  }
 }
 
-function header(kind: OriginKind): string {
+export function dumpSystemPrompt(kind: OriginKind, options: { gitNudge: boolean } = { gitNudge: true }): string {
+  return dumpSystemPromptWithBreakdown(kind, options).prompt
+}
+
+// Slice between two unique headers in the rendered prompt. Both anchors are
+// guaranteed unique by `composeSystemPrompt`'s contract (each section's
+// header appears exactly once). Used by the breakdown so we attribute each
+// section's chars precisely instead of guessing from input fixtures.
+function extractSection(prompt: string, startHeader: string, endHeader: string): string {
+  const start = prompt.lastIndexOf(`\n\n${startHeader}`)
+  if (start < 0) return ''
+  const afterStart = start + 2
+  const end = prompt.indexOf(`\n\n${endHeader}`, afterStart)
+  return end < 0 ? prompt.slice(afterStart) : prompt.slice(afterStart, end)
+}
+
+function header(kind: OriginKind, result: DumpResult): string {
   const bar = '═'.repeat(78)
-  return `\n${bar}\n  SYSTEM PROMPT — origin: ${kind}\n${bar}\n`
+  const summary = `~${result.totalTokens} tok / ${result.totalChars} chars / ${result.totalBytes} bytes (tok est. chars/4)`
+  return `\n${bar}\n  SYSTEM PROMPT — origin: ${kind} — ${summary}\n${bar}\n`
+}
+
+function renderBreakdownTable(result: DumpResult): string {
+  const nameW = Math.max(...result.sections.map((s) => s.name.length), 'Section'.length)
+  const tokW = Math.max(...result.sections.map((s) => `~${s.tokens}`.length), 'Tokens'.length)
+  const charW = Math.max(...result.sections.map((s) => String(s.chars).length), 'Chars'.length)
+  const byteW = Math.max(...result.sections.map((s) => String(s.bytes).length), 'Bytes'.length)
+
+  const pad = (s: string, w: number, right = false) => (right ? s.padStart(w) : s.padEnd(w))
+  const row = (n: string, t: string, c: string, b: string) =>
+    `  ${pad(n, nameW)}  ${pad(t, tokW, true)}  ${pad(c, charW, true)}  ${pad(b, byteW, true)}`
+  const sep = `  ${'─'.repeat(nameW)}  ${'─'.repeat(tokW)}  ${'─'.repeat(charW)}  ${'─'.repeat(byteW)}`
+
+  const lines = [
+    row('Section', 'Tokens', 'Chars', 'Bytes'),
+    sep,
+    ...result.sections.map((s) => row(s.name, `~${s.tokens}`, String(s.chars), String(s.bytes))),
+    sep,
+    row('TOTAL', `~${result.totalTokens}`, String(result.totalChars), String(result.totalBytes)),
+  ]
+  return lines.join('\n')
 }
 
 function main(): void {
@@ -200,7 +319,9 @@ function main(): void {
         'Usage: bun run debug:prompt [--origin <kind>] [--no-git-nudge]',
         '',
         'Dump the rendered system prompt for one or all session-origin kinds,',
-        'using placeholder values for every dynamic field.',
+        'using placeholder values for every dynamic field. Each dump is prefixed',
+        'with a per-section breakdown showing approximate tokens (chars/4),',
+        'character count, and UTF-8 byte length.',
         '',
         'Options:',
         '  -o, --origin <kind>   tui | cron | channel | subagent | all (default: all)',
@@ -226,8 +347,11 @@ function main(): void {
           })()
 
   for (const kind of kinds) {
-    process.stdout.write(header(kind))
-    process.stdout.write(dumpSystemPrompt(kind, { gitNudge: !values['no-git-nudge'] }))
+    const result = dumpSystemPromptWithBreakdown(kind, { gitNudge: !values['no-git-nudge'] })
+    process.stdout.write(header(kind, result))
+    process.stdout.write(renderBreakdownTable(result))
+    process.stdout.write('\n\n')
+    process.stdout.write(result.prompt)
     process.stdout.write('\n')
   }
 }
