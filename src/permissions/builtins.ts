@@ -37,7 +37,12 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
   },
   trusted: {
     match: [],
-    permissions: [CORE_PERMISSIONS.channelRespond, CORE_PERMISSIONS.cronSchedule, 'security.bypass.secretExfilBash'],
+    permissions: [
+      CORE_PERMISSIONS.channelRespond,
+      CORE_PERMISSIONS.cronSchedule,
+      'security.bypass.secretExfilBash',
+      'security.bypass.gitExfil',
+    ],
   },
   member: {
     match: [],

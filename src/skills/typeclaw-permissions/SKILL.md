@@ -24,7 +24,7 @@ You always have these four, even if `typeclaw.json` declares zero `roles`. User-
 | Role      | Built-in `match[]`                                                | Default `permissions[]`                                                                                                   |
 | --------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
 | `owner`   | `["tui"]` (always prepended)                                      | `channel.respond`, `cron.schedule`, `cron.modify`, **all `security.bypass.*` contributed by plugins** (wildcard sentinel) |
-| `trusted` | none                                                              | `channel.respond`, `cron.schedule`, `security.bypass.secretExfilBash`                                                     |
+| `trusted` | none                                                              | `channel.respond`, `cron.schedule`, `security.bypass.secretExfilBash`, `security.bypass.gitExfil`                         |
 | `member`  | none                                                              | `channel.respond`                                                                                                         |
 | `guest`   | none (fallback when nothing else matches, or stamped role is bad) | none                                                                                                                      |
 
@@ -82,7 +82,7 @@ Three sources contribute permission strings:
 2. **Bundled security plugin** (always loaded): `security.bypass.secretExfilBash`, `security.bypass.gitExfil`, `security.bypass.gitRemoteTainted`, `security.bypass.secretExfilRead`, `security.bypass.ssrf`, `security.bypass.sessionSearchSecrets`, `security.bypass.systemPromptLeak`, `security.bypass.outboundSecret`.
 3. **User-declared plugins** (variable): each plugin can contribute its own strings via `definePlugin({ permissions: [...] })`.
 
-`owner` carries every `security.bypass.*` from sources 2 and 3 by default (via a wildcard sentinel expanded at boot). `trusted` carries only `security.bypass.secretExfilBash` by default. `member` and `guest` carry no `security.bypass.*` strings.
+`owner` carries every `security.bypass.*` from sources 2 and 3 by default (via a wildcard sentinel expanded at boot). `trusted` carries `security.bypass.secretExfilBash` and `security.bypass.gitExfil` by default (so a trusted actor can run dangerous bash and `git push` without per-call acks) but **deliberately not** `security.bypass.gitRemoteTainted` — the two-step social-attack defense (re-point remote, then push to it) still fires for trusted, so a prompt-injection mid-session that swaps the remote URL still blocks the eventual push. `member` and `guest` carry no `security.bypass.*` strings.
 
 User-declared `permissions[]` strings that don't appear in any of the three sources are **logged as warnings at boot** (`[permissions] role "X" declares unknown permission "Y" — did you mean 'Z'?`) but the role still resolves with the unknown string in its list. This is intentional — the runtime is forward-compatible with strings from plugins that aren't loaded yet — but it also means typos silently fail to bypass guards. If you wrote `security.bypass.secretExfilBach` instead of `Bash`, no guard will be skipped and you will only notice when you read the boot logs.
 
@@ -94,7 +94,8 @@ The security plugin's `tool.before` hook produces block messages of the form:
 Guard `<guardName>` blocked <what>. If this is genuinely intentional and the user
 explicitly asked for it, retry with `acknowledgeGuards.<guardName>: true` in the
 <tool> arguments. Or run as a role carrying `<permission>` (owner has all
-security.bypass.*; trusted has security.bypass.secretExfilBash).
+security.bypass.*; trusted has security.bypass.secretExfilBash and
+security.bypass.gitExfil — but not gitRemoteTainted).
 ```
 
 Three escape hatches, ordered from least to most invasive:
@@ -120,7 +121,7 @@ To distinguish cause 1/2 from cause 3: if `typeclaw logs <container> -f` (host s
 This is a `roles` edit. The full procedure:
 
 1. **Resolve the coordinates.** Get the platform name (`slack | discord | telegram | kakao`), the workspace ID, the chat ID. If the user gave you names, ask them or look them up in the participants list of a previous inbound from that channel.
-2. **Pick a role.** Default to `member` for "give them normal channel access". Use `trusted` if they should also be able to schedule cron and bypass the bash secret guard. Only use `owner` if they should have full bypass on every security guard — typically the agent's primary operator.
+2. **Pick a role.** Default to `member` for "give them normal channel access". Use `trusted` if they should also be able to schedule cron, bypass the bash secret guard, and run `git push` / `git remote add` / `git add -f` without per-call acks (the two-step taint defense still fires for trusted so a mid-session remote re-point still blocks the eventual push). Only use `owner` if they should have full bypass on every security guard, including the taint defense — typically the agent's primary operator.
 3. **Edit `typeclaw.json` `roles.<role>.match[]`.** Append the canonical DSL string. Example: `roles.member.match` adds `"slack:T0123/C0ABCDE"`. If the user wants only a specific person in that channel, append `slack:T0123/C0ABCDE author:U_ME` instead.
 4. **Restart.** `roles` is **restart-required** — `typeclaw reload` does not re-evaluate role config. Tell the user: "edited `roles.<role>.match` — restart-required. Run `typeclaw restart` (host stage)."
 5. **Commit the change.** See the `typeclaw-git` skill. The decision context in the commit message should name the role, the channel, and the author/scope ("let @X talk to me as `member` in #foo in workspace bar").
