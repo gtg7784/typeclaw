@@ -107,7 +107,7 @@ my-agent/
 - `plugins` — list of plugin module specifiers
 - `channels` — `slack-bot` / `discord-bot` config
 - `portForward` — allow/deny list for auto port forwarding (default: `*`)
-- `dockerfile` — toggles for `gh`, `python`, `tmux`, `ffmpeg`, plus `append` lines
+- `dockerfile` — toggles for `gh`, `python`, `tmux`, `ffmpeg`, `cjkFonts`, plus `append` lines
 - `memory` — idle window and dreaming schedule for the memory plugin
 
 `Dockerfile` and `.gitignore` are owned by TypeClaw and rewritten on every `start` — edit `src/init/dockerfile.ts` and re-run `start --build` to ship template changes.

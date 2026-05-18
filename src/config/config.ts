@@ -86,6 +86,17 @@ const dockerfileObjectSchema = z.object({
   gh: dockerfileFeatureSchema.default(true),
   python: z.boolean().default(true),
   tmux: dockerfileFeatureSchema.default(true),
+  // `fonts-noto-cjk` is a ~56MB metapackage that makes Chromium render
+  // Korean/Japanese/Chinese glyphs correctly in screenshots, `page.pdf()`,
+  // and any other raster output the agent-browser plugin produces. Default
+  // `true` because the alternative — silent tofu boxes (□□□) in CJK
+  // screenshots — is a confusing failure mode that an agent cannot self-
+  // diagnose from a screenshot it took itself. Opt-out with `cjkFonts:
+  // false` to save the ~56MB on agents that never touch CJK content.
+  // Boolean-only (no version pin) because the package is a metapackage
+  // tracking the upstream Noto release and version pinning offers no
+  // practical value.
+  cjkFonts: z.boolean().default(true),
   append: z.array(dockerfileLineSchema).default([]),
 })
 
