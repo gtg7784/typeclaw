@@ -201,16 +201,59 @@ export function byteLength(text: string): number {
   return encoder.encode(text).length
 }
 
+const PLACEHOLDER_SUBAGENT_OVERRIDE = [
+  'You are typeclaw <PLACEHOLDER: subagent name>, a narrow worker subagent.',
+  '',
+  '<PLACEHOLDER: contents of the subagent-specific system prompt — owned by the plugin/bundled subagent that declared this worker. Real examples: memory-logger (~1000 tok), dreaming (~2200 tok). The prompt is opaque to the runtime; it teaches the subagent its job, its tools, and its termination contract.>',
+].join('\n')
+
+const mkSection = (name: string, body: string): SectionBreakdown => ({
+  name,
+  bytes: byteLength(body),
+  chars: body.length,
+  tokens: estimateTokens(body),
+})
+
 export function dumpSystemPromptWithBreakdown(
   kind: OriginKind,
   options: { gitNudge: boolean } = { gitNudge: true },
 ): DumpResult {
+  if (kind === 'subagent') return dumpSubagentOverridePrompt()
+  return dumpDefaultLoaderPrompt(kind, options)
+}
+
+// Subagent sessions in production go through `defaultCreateSessionForSubagent`
+// (and the plugin-subagent path in run/index.ts), both of which set
+// `systemPromptOverride: subagent.systemPrompt`. That routes through
+// `createOverrideResourceLoader`, which emits only:
+//   <override string> + runtime block + origin (with role)
+// No DEFAULT/SLIM base, no IDENTITY/SOUL, no git-nudge, no memory.
+//
+// Without this branch, the dumper would report a misleadingly large slim
+// breakdown for the subagent case and contradict AGENTS.md's "the section
+// order it prints is the section order an agent actually sees" contract.
+function dumpSubagentOverridePrompt(): DumpResult {
+  const fixture = buildFixture('subagent')
+  const runtimeBlock = `## Runtime\n\nTypeClaw runtime version: ${PLACEHOLDER_RUNTIME_VERSION}.`
+  const originBlock = `## Session origin\n\nYou are a \`${(fixture.origin as { subagent: string }).subagent}\` subagent spawned by parent session\n\`${(fixture.origin as { parentSessionId: string }).parentSessionId}\`. Stay narrowly within the task you were given.\nReturn cleanly when done; do not sprawl into unrelated work.\n\n## Your role in this session\n\nRole: \`${fixture.roleContext.role}\`. Permissions: ${fixture.roleContext.permissions.map((p) => `\`${p}\``).join(', ')}.\n\nThis is the role the runtime resolved at session creation. Tool calls\nand channel admission are gated by these permissions; a \`blocked:\` or\n"denied by permissions" message means the current actor lacks the\npermission the guard was looking for. See the \`typeclaw-permissions\`\nskill for what each role can do and how to grant access.`
+
+  const prompt = `${PLACEHOLDER_SUBAGENT_OVERRIDE}\n\n${runtimeBlock}\n\n${originBlock}`
+  const sections: SectionBreakdown[] = [
+    mkSection('Subagent override prompt', PLACEHOLDER_SUBAGENT_OVERRIDE),
+    mkSection('Runtime block', runtimeBlock),
+    mkSection('Session origin + role', originBlock),
+  ]
+  return {
+    prompt,
+    sections,
+    totalBytes: byteLength(prompt),
+    totalChars: prompt.length,
+    totalTokens: estimateTokens(prompt),
+  }
+}
+
+function dumpDefaultLoaderPrompt(kind: Exclude<OriginKind, 'subagent'>, options: { gitNudge: boolean }): DumpResult {
   const fixture = buildFixture(kind)
-  // Mirror production: createResourceLoader derives mode from origin kind
-  // (cron/subagent → slim, tui/channel → full). Slim mode also drops the
-  // git-nudge section. Without this alignment the debug dumper would report
-  // numbers that don't match what the agent actually receives at runtime —
-  // which is the whole point of `bun run debug:prompt`.
   const mode: SystemPromptMode = deriveSystemPromptMode(fixture.origin)
   const wantGitNudge = options.gitNudge && mode === 'full'
   const parts = {
@@ -224,18 +267,6 @@ export function dumpSystemPromptWithBreakdown(
   } as const
 
   const prompt = composeSystemPrompt(parts)
-
-  // Section breakdown mirrors the concat order in composeSystemPrompt.
-  // Counts are over each section's contribution string, not the running
-  // total — easier to read and matches what a prompt-engineer wants to
-  // see ("the memory section alone is ~1200 tokens"). Inter-section
-  // separators ("\n\n") are tiny and intentionally not attributed.
-  const mkSection = (name: string, body: string): SectionBreakdown => ({
-    name,
-    bytes: byteLength(body),
-    chars: body.length,
-    tokens: estimateTokens(body),
-  })
 
   const baseEnd = prompt.indexOf(`\n\n${parts.self}`)
   const base = baseEnd > 0 ? prompt.slice(0, baseEnd) : ''

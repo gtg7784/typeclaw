@@ -681,6 +681,48 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('# Memory')
     expect(prompt).toContain('standup-summary-marker')
   })
+
+  test('slim cron prompt carries the load-bearing guidance review surfaced (errors, narration, workspace, MEMORY.md, runtime-managed paths)', async () => {
+    const origin: SessionOrigin = { kind: 'cron', jobId: 'job-1', jobKind: 'prompt' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('Never echo secrets from `.env`')
+    expect(prompt).toContain('never fabricate results')
+    expect(prompt).toContain('Do not narrate routine')
+    expect(prompt).toContain('workspace/')
+    expect(prompt).toContain('Do not edit `MEMORY.md` directly')
+    expect(prompt).toContain('Never stage or commit')
+  })
+
+  test('slim prompt does NOT contain the subagent-breaking "plain prose is invisible" claim', async () => {
+    const origin: SessionOrigin = { kind: 'subagent', subagent: 'tester', parentSessionId: 'ses_p' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('Plain prose with no tool call is invisible')
+    expect(prompt).not.toContain('plain-text output is invisible')
+  })
+
+  test('trimmed full prompt still carries every load-bearing phrase (workspace, MEMORY.md, secrets, git hygiene, persona, error honesty)', async () => {
+    const origin: SessionOrigin = { kind: 'tui', sessionId: 'ses_t' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('`workspace/`')
+    expect(prompt).toContain('never edit MEMORY.md directly')
+    expect(prompt).toContain('`.env`')
+    expect(prompt).toContain('`secrets.json`')
+    expect(prompt).toContain('Never echo, log, or commit')
+    expect(prompt).toContain('One logical change = one commit')
+    expect(prompt).toContain('SOUL.md specifies a voice')
+    expect(prompt).toContain('never fabricate results')
+    expect(prompt).toContain('re-read whenever process is unclear')
+    expect(prompt).toContain('You are not pi, not Claude, not ChatGPT')
+  })
 })
 
 describe('deriveSystemPromptMode', () => {
@@ -706,6 +748,25 @@ describe('deriveSystemPromptMode', () => {
   })
   test('returns full when origin is undefined (back-compat default)', () => {
     expect(deriveSystemPromptMode(undefined)).toBe('full')
+  })
+
+  test('covers every declared origin kind without falling through', () => {
+    const allKinds: SessionOrigin[] = [
+      { kind: 'tui', sessionId: 's' },
+      {
+        kind: 'channel',
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        thread: null,
+      },
+      { kind: 'cron', jobId: 'j', jobKind: 'prompt' },
+      { kind: 'subagent', subagent: 's', parentSessionId: 'p' },
+    ]
+    for (const origin of allKinds) {
+      const mode = deriveSystemPromptMode(origin)
+      expect(['full', 'slim']).toContain(mode)
+    }
   })
 })
 
