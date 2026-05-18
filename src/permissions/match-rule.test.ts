@@ -39,7 +39,6 @@ describe('parseMatchRule — accepted forms', () => {
       input: 'github:acme/project/issue:42',
       expected: { kind: 'channel', platform: 'github', workspace: 'acme/project', chat: 'issue:42' },
     },
-    { input: 'github:acme/*', expected: { kind: 'channel', platform: 'github', workspace: 'acme' } },
     {
       input: 'github:acme/project author:12345',
       expected: { kind: 'channel', platform: 'github', workspace: 'acme/project', author: '12345' },
@@ -80,6 +79,7 @@ describe('parseMatchRule — rejected forms', () => {
     { input: 'discord:group/*', reason: /'group' is only valid for kakao/ },
     { input: 'discord:open/*', reason: /'open' is only valid for kakao/ },
     { input: 'github:acme', reason: /owner\/repo/ },
+    { input: 'github:acme/*', reason: /not supported/ },
     { input: 'github:acme/project/issue:42/extra', reason: /single segment/ },
   ]
   for (const { input, reason } of cases) {

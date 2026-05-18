@@ -211,10 +211,10 @@ function parseGithubChannelScope(rest: string, author: string | undefined): Pars
     return { ok: false, error: "github scope requires 'owner/repo' format" }
   }
   if (repo === '*') {
-    if (chatParts.length > 0) {
-      return { ok: false, error: "github owner wildcard cannot be combined with a chat; use 'github:owner/*'" }
+    return {
+      ok: false,
+      error: `'github:${owner}/*' is not supported; use 'github:${owner}/repo' for a specific repo or 'github:*' for all github events`,
     }
-    return { ok: true, value: buildChannelRule('github', { workspace: owner, author }) }
   }
   const workspace = `${owner}/${repo}`
   if (chatParts.length === 0) return { ok: true, value: buildChannelRule('github', { workspace, author }) }
