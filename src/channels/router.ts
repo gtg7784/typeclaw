@@ -299,6 +299,7 @@ export type ChannelRouter = {
     fireTypingHeartbeat: (key: ChannelKey, phase?: 'tick' | 'stop') => Promise<void>
     fireTypingInterval: (key: ChannelKey) => Promise<void>
     isTypingActive: (key: ChannelKey) => boolean
+    stopTyping: (key: ChannelKey) => Promise<void>
     runIdleGc: () => Promise<void>
   }
 }
@@ -1455,10 +1456,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (live) {
       live.successfulChannelSends++
       // Don't stop the heartbeat here: the agent may still be mid-turn and
-      // about to send another reply. drain()'s finally block stops typing
-      // when the turn actually ends. Per-send indicator clearing (e.g.
-      // Slack's setStatus("") on postMessage) belongs in the adapter
-      // outbound callback, not in the router.
+      // about to send another reply. drain()'s finally block owns turn-end
+      // stop. But Slack's adapter outbound callback explicitly clears
+      // platform-side typing after every successful postMessage (to defeat
+      // the heartbeat-vs-postMessage race fixed in PR #52), so a fresh
+      // 'tick' must land in the FIFO right after that clear — otherwise
+      // the indicator stays cleared until the next 8s interval, leaving a
+      // visible idle gap between mid-turn sends on Slack. The await on
+      // cb(msg) above already drained the outbound callback's clearAfterSend
+      // through the per-(chat,thread) FIFO, so this tick is guaranteed to
+      // land after it. Discord and Telegram treat the extra tick as a
+      // no-op refresh of their already-armed (auto-expiring) indicators.
+      if (live.typingTimer) void fireTyping(live, 'tick')
       const adapterConfig = options.configForAdapter(msg.adapter)
       if (adapterConfig) {
         const targetIds = Array.from(
@@ -1627,6 +1636,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       isTypingActive: (key: ChannelKey) => {
         const live = liveSessions.get(channelKeyId(key))
         return live?.typingTimer !== null && live?.typingTimer !== undefined
+      },
+      stopTyping: async (key: ChannelKey) => {
+        const live = liveSessions.get(channelKeyId(key))
+        if (!live) return
+        await stopTypingHeartbeat(live)
       },
       runIdleGc,
     },
