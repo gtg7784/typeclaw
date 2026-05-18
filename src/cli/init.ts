@@ -14,6 +14,7 @@ import {
 import type { DockerAvailability } from '@/container'
 import {
   findAgentDir,
+  formatEagerGithubWebhookInstallResult,
   hasExistingChannelSecrets,
   isDirectoryNonEmpty,
   isHatched,
@@ -1174,6 +1175,9 @@ function reportProgress(
       case 'kakaotalk-auth':
         s.stop(reportKakaotalkAuth(event.result))
         break
+      case 'github-webhooks':
+        s.stop(formatEagerGithubWebhookInstallResult(event.result))
+        break
       case 'oauth-login':
         s.stop(event.result.ok ? 'Logged in.' : `OAuth login failed: ${event.result.reason}`)
         break
@@ -1320,6 +1324,7 @@ const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
   'oauth-login': 'Waiting for browser login...',
   scaffold: 'Laying the egg...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
+  'github-webhooks': 'Installing GitHub repository webhooks...',
   install: 'Installing dependencies with bun...',
   dockerfile: 'Writing Dockerfile...',
   git: 'Initializing git repository...',

@@ -9,6 +9,7 @@ import { start, status, stop } from '@/container'
 import {
   CHANNEL_KINDS,
   findAgentDir,
+  formatEagerGithubWebhookInstallResult,
   isInitialized,
   readConfiguredChannels,
   runAddChannel,
@@ -736,6 +737,9 @@ function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEv
       case 'secrets':
         s.stop('Saved credentials to secrets.json.')
         break
+      case 'github-webhooks':
+        s.stop(formatEagerGithubWebhookInstallResult(event.result))
+        break
     }
   }
 }
@@ -744,6 +748,7 @@ const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   config: 'Updating typeclaw.json...',
   secrets: 'Saving credentials to secrets.json...',
+  'github-webhooks': 'Installing GitHub repository webhooks...',
 }
 
 function reportKakaotalkAuth(result: KakaotalkAuthResult): string {

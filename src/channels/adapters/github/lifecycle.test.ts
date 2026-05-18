@@ -204,7 +204,7 @@ describe('createGithubAdapter lifecycle', () => {
     )
   })
 
-  test('start() skips webhook registration when no effective URL is available', async () => {
+  test('start() skips webhook registration (no tunnel configured) with an actionable WARN, not a quiet INFO', async () => {
     const logger = recordingLogger()
     const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
       if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
@@ -219,15 +219,73 @@ describe('createGithubAdapter lifecycle', () => {
       logger,
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      tunnelConfiguredForChannel: () => false,
     })
 
     await adapter.start()
     await adapter.stop()
 
     expect(calls.some((c) => c.url.includes('/hooks'))).toBe(false)
-    expect(logger.messages).toContain(
-      'info:[github] no webhookUrl configured and no tunnel URL available; channel is up but webhook registration is skipped',
-    )
+    const skipMsg = logger.messages.find((m) => m.includes('webhook registration SKIPPED'))
+    expect(skipMsg).toBeDefined()
+    expect(skipMsg).toContain('warn:')
+    expect(skipMsg).toContain('no `channels.github.webhookUrl` set and no `tunnels[]` entry')
+    expect(skipMsg).toContain('cloudflare-quick')
+  })
+
+  test('start() skips webhook registration (tunnel configured but URL not ready) names the tunnel as the failure surface', async () => {
+    const logger = recordingLogger()
+    const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets'], null),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      tunnelUrl: () => null,
+      tunnelConfiguredForChannel: () => true,
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    expect(calls.some((c) => c.url.includes('/hooks'))).toBe(false)
+    const skipMsg = logger.messages.find((m) => m.includes('webhook registration SKIPPED'))
+    expect(skipMsg).toBeDefined()
+    expect(skipMsg).toContain('warn:')
+    expect(skipMsg).toContain('tunnel is configured for this channel but produced no URL yet')
+    expect(skipMsg).toContain('typeclaw tunnel status')
+  })
+
+  test('start() emits a quiet INFO (not WARN) when no repos are configured — there is nothing to register', async () => {
+    const logger = recordingLogger()
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig([], null),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      tunnelConfiguredForChannel: () => true,
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    expect(logger.messages).toContain('info:[github] no repos[] configured; webhook registration skipped')
+    expect(logger.messages.some((m) => m.includes('warn:[github] webhook registration SKIPPED'))).toBe(false)
   })
 
   test('stop() deletes every hook registered by start() (detach on close)', async () => {

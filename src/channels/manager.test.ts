@@ -286,6 +286,61 @@ describe('channel manager — restartAdapter serialization', () => {
     expect(captured?.tunnelUrl?.()).toBe('https://x.trycloudflare.com')
     await mgr.stop()
   })
+
+  test('passes tunnelConfiguredForChannel through to the github adapter', async () => {
+    cfg.github = enabledGithubCfg()
+    await writeGithubSecrets(agentDir)
+    let captured: { tunnelConfiguredForChannel?: () => boolean } | undefined
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      tunnelConfiguredForChannel: (name) => name === 'github',
+      createGithubAdapter: (opts) => {
+        captured = opts
+        return makeFakeAdapter()
+      },
+    })
+
+    await mgr.start()
+
+    expect(captured?.tunnelConfiguredForChannel?.()).toBe(true)
+    await mgr.stop()
+  })
+
+  test("accepts GitHub App auth in secrets.json (regression: runtime guard previously rejected type: 'app')", async () => {
+    cfg.github = enabledGithubCfg()
+    await writeFile(
+      join(agentDir, 'secrets.json'),
+      JSON.stringify({
+        version: 2,
+        providers: {},
+        channels: {
+          github: {
+            auth: {
+              type: 'app',
+              appId: 12345,
+              privateKey: { value: '-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----' },
+            },
+            webhookSecret: { value: 'wh-secret' },
+          },
+        },
+      }),
+    )
+    let constructed = false
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      createGithubAdapter: () => {
+        constructed = true
+        return makeFakeAdapter()
+      },
+    })
+
+    await mgr.start()
+
+    expect(constructed).toBe(true)
+    await mgr.stop()
+  })
 })
 
 describe('channel manager — slack adapter lifecycle', () => {

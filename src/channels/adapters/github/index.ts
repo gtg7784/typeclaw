@@ -28,6 +28,12 @@ export type GithubAdapterOptions = {
   fetchImpl?: typeof fetch
   httpListenImpl?: (port: number, handler: (req: Request) => Promise<Response>) => { stop: () => Promise<void> }
   tunnelUrl?: () => string | null
+  // Whether a channel-bound tunnel exists in typeclaw.json#tunnels[] for the
+  // github channel. Used to distinguish "no tunnel configured (operator opted
+  // out)" from "tunnel configured but not producing a URL (something is
+  // wrong)" so the skip-registration log can be precise and actionable.
+  // Optional so tests that don't exercise the tunnel-status path can omit it.
+  tunnelConfiguredForChannel?: () => boolean
 }
 
 export type GithubAdapter = {
@@ -145,9 +151,10 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       }
       const effectiveUrl = cfg.webhookUrl ?? tunnelUrl
       if (effectiveUrl === null) {
-        logger.info(
-          '[github] no webhookUrl configured and no tunnel URL available; channel is up but webhook registration is skipped',
-        )
+        logSkippedRegistration(logger, {
+          tunnelConfigured: options.tunnelConfiguredForChannel?.() ?? false,
+          reposCount: repos.length,
+        })
       } else if (repos.length > 0) {
         const registration = await registerGithubWebhooks({
           token: tokenFn,
@@ -201,6 +208,29 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
 function listenWithBun(port: number, handler: (req: Request) => Promise<Response>): { stop: () => Promise<void> } {
   const server = Bun.serve({ port, fetch: handler })
   return { stop: async () => server.stop() }
+}
+
+function logSkippedRegistration(
+  logger: GithubAdapterLogger,
+  context: { tunnelConfigured: boolean; reposCount: number },
+): void {
+  if (context.reposCount === 0) {
+    logger.info('[github] no repos[] configured; webhook registration skipped')
+    return
+  }
+  if (context.tunnelConfigured) {
+    logger.warn(
+      '[github] webhook registration SKIPPED: a tunnel is configured for this channel but produced no URL yet. ' +
+        "Check `typeclaw tunnel status` for the tunnel's health (cloudflared binary missing, " +
+        'auth failure, network issue). Webhook delivery will not work until the tunnel produces a public URL.',
+    )
+    return
+  }
+  logger.warn(
+    '[github] webhook registration SKIPPED: no `channels.github.webhookUrl` set and no `tunnels[]` entry ' +
+      'binds a public URL to this channel. Add an entry to `tunnels[]` (e.g. `provider: "cloudflare-quick"`) ' +
+      'or set `channels.github.webhookUrl` to a public URL to enable webhook delivery.',
+  )
 }
 
 function logRegistrationOutcome(logger: GithubAdapterLogger, result: WebhookRegistrationResult): void {
