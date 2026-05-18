@@ -541,9 +541,27 @@ export type CreateResourceLoaderOptions = {
 // conversational register matters. For everything else (cron fires, default
 // subagents), the slim prompt is the right default — the origin block already
 // names the unattended context and tells the agent what's expected of it.
+//
+// Exhaustive switch (not a boolean expression) so a future origin kind forces
+// the author to make an explicit full-or-slim decision at compile time. The
+// previous form silently defaulted new origins to slim, which would have
+// stripped the operator-facing prompt from a new interactive surface by
+// accident.
 export function deriveSystemPromptMode(origin: SessionOrigin | undefined): SystemPromptMode {
   if (origin === undefined) return 'full'
-  return origin.kind === 'tui' || origin.kind === 'channel' ? 'full' : 'slim'
+  switch (origin.kind) {
+    case 'tui':
+    case 'channel':
+      return 'full'
+    case 'cron':
+    case 'subagent':
+      return 'slim'
+    default: {
+      const _exhaustive: never = origin
+      void _exhaustive
+      return 'full'
+    }
+  }
 }
 
 // Pure inputs for `composeSystemPrompt`. Each field maps 1:1 to a rendered
