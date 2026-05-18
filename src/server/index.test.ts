@@ -1127,16 +1127,9 @@ describe('createServer scoped reload', () => {
 })
 
 describe('createServer cron_list handler', () => {
-  function emptyPluginRegistry(): PluginRegistry {
-    return {
-      tools: [],
-      subagents: [],
-      cronJobs: [],
-      skills: [],
-      skillsDirs: [],
-      doctorChecks: [],
-      commands: [],
-    }
+  async function makeEmptyRegistry(): Promise<PluginRegistry> {
+    const { emptyRegistry } = await import('@/plugin/registry')
+    return emptyRegistry()
   }
 
   function promptJob(id: string, schedule = '*/5 * * * *'): CronJob {
@@ -1176,7 +1169,7 @@ describe('createServer cron_list handler', () => {
       }),
     )
 
-    const registry = emptyPluginRegistry()
+    const registry = await makeEmptyRegistry()
     registry.cronJobs.push({
       pluginName: 'memory',
       localId: 'dreaming',
@@ -1216,7 +1209,7 @@ describe('createServer cron_list handler', () => {
     const session = createFakeSession()
     const { url } = await startWithSession(session, {
       agentDir,
-      pluginRegistry: emptyPluginRegistry(),
+      pluginRegistry: await makeEmptyRegistry(),
       pluginHooks: createHookBus(),
     })
     const { ws, waitFor } = await connect(url)
@@ -1237,7 +1230,7 @@ describe('createServer cron_list handler', () => {
     const session = createFakeSession()
     const { url } = await startWithSession(session, {
       agentDir,
-      pluginRegistry: emptyPluginRegistry(),
+      pluginRegistry: await makeEmptyRegistry(),
       pluginHooks: createHookBus(),
     })
     const { ws, waitFor } = await connect(url)
@@ -1250,6 +1243,72 @@ describe('createServer cron_list handler', () => {
     expect(reply.result.ok).toBe(false)
     if (reply.result.ok) throw new Error('unreachable')
     expect(reply.result.reason).toContain('cron.json')
+    ws.close()
+  })
+
+  test('does not rewrite legacy cron.json when listing (read-only path)', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-legacy-'))
+    const cronPath = join(agentDir, 'cron.json')
+    const legacy = JSON.stringify({
+      jobs: [{ id: 'legacy-job', schedule: '0 * * * *', kind: 'prompt', prompt: 'hi' }],
+    })
+    await writeFile(cronPath, legacy)
+
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, {
+      agentDir,
+      pluginRegistry: await makeEmptyRegistry(),
+      pluginHooks: createHookBus(),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-legacy' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result' || !reply.result.ok) throw new Error('unreachable')
+    expect(reply.result.jobs).toHaveLength(1)
+    expect(reply.result.jobs[0]!.scheduledByRole).toBe('owner')
+    const onDisk = await readFile(cronPath, 'utf8')
+    expect(onDisk).toBe(legacy)
+    ws.close()
+  })
+
+  test('reports invalid subagent reference when plugin runtime is available', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-bad-subagent-'))
+    await writeFile(
+      join(agentDir, 'cron.json'),
+      JSON.stringify({
+        jobs: [
+          {
+            id: 'refs-missing',
+            schedule: '*/5 * * * *',
+            kind: 'prompt',
+            prompt: 'hi',
+            scheduledByRole: 'owner',
+            subagent: 'no-such-subagent',
+          },
+        ],
+      }),
+    )
+
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, {
+      agentDir,
+      pluginRegistry: await makeEmptyRegistry(),
+      pluginHooks: createHookBus(),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-bad-sub' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result') throw new Error('unreachable')
+    expect(reply.result.ok).toBe(false)
+    if (reply.result.ok) throw new Error('unreachable')
+    expect(reply.result.reason).toContain('no-such-subagent')
     ws.close()
   })
 })

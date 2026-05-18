@@ -641,18 +641,31 @@ async function handleCronList(
     return
   }
   try {
-    const loadResult = await loadCron(agentDir)
+    // Snapshot the runtime once so subagent validation and the plugin
+    // cron-job list see the same generation, the way TUI sessions do.
+    // Without one snapshot, a reload landing mid-request can show user
+    // jobs validated against an old subagent registry alongside plugin
+    // jobs from a newer registry.
+    const snapshot = pluginRuntime?.get()
+    const loadResult = await loadCron(agentDir, {
+      // Read-only path: do not rewrite cron.json or commit the
+      // migration just because the user (or the agent) asked to see
+      // the schedule. Boot/reload still own the persistent migration.
+      persistMigrations: false,
+      ...(snapshot !== undefined ? { subagents: snapshot.subagents } : {}),
+    })
     if (!loadResult.ok) {
       send(ws, { type: 'cron_list_result', requestId, result: { ok: false, reason: loadResult.reason } })
       return
     }
     const userJobs = loadResult.file?.jobs ?? []
-    const pluginJobs = pluginRuntime?.get()?.registry.cronJobs ?? []
-    const entries = aggregateCronList({ userJobs, pluginJobs, now: Date.now() })
+    const pluginJobs = snapshot?.registry.cronJobs ?? []
+    const nowMs = Date.now()
+    const entries = aggregateCronList({ userJobs, pluginJobs, now: nowMs })
     send(ws, {
       type: 'cron_list_result',
       requestId,
-      result: { ok: true, jobs: entries.map(toPayload), nowMs: Date.now() },
+      result: { ok: true, jobs: entries.map(toPayload), nowMs },
     })
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
