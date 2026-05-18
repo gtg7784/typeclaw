@@ -414,9 +414,21 @@ async function promptGithubCredentials(): Promise<{
     cancel('Aborted.')
     process.exit(0)
   }
+  const resolvedSecret = secret.length > 0 ? secret : randomBytes(32).toString('hex')
+  if (secret.length === 0) {
+    note(
+      [
+        `Webhook secret: ${resolvedSecret}`,
+        '',
+        'Paste this into the "Secret" field when creating the GitHub webhook.',
+        'It will not be shown again.',
+      ].join('\n'),
+      'Generated webhook secret',
+    )
+  }
   return {
     githubPat: pat,
-    webhookSecret: secret.length > 0 ? secret : randomBytes(32).toString('hex'),
+    webhookSecret: resolvedSecret,
     webhookUrl,
     webhookPort: Number(port),
     repos: parseRepos(reposRaw),
