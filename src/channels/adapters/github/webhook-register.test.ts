@@ -110,7 +110,7 @@ describe('registerGithubWebhooks', () => {
 
     const result = await registerGithubWebhooks(baseOpts({ fetchImpl }))
 
-    expect(result.repos).toEqual([{ repo: 'acme/widgets', action: 'updated', hookId: 99 }])
+    expect(result.repos).toEqual([{ repo: 'acme/widgets', action: 'updated', hookId: 99, stalePruned: 0 }])
     const patch = calls.find((c) => c.init?.method === 'PATCH')
     expect(patch).toBeDefined()
     const body = JSON.parse(String(patch!.init?.body)) as {
@@ -214,6 +214,136 @@ describe('registerGithubWebhooks', () => {
       expect(r.action).toBe('failed')
       if (r.action === 'failed') expect(r.error).toContain('GitHub App has no installations')
     }
+  })
+
+  test('recognizes hooks from a prior run by managed-path marker even after the URL hostname rotated, then prunes stale orphans', async () => {
+    const deleted: number[] = []
+    let patched: number | null = null as number | null
+    const { fetch: fetchImpl, calls } = makeFetch(({ url, init }) => {
+      const method = init?.method ?? 'GET'
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
+        return {
+          status: 200,
+          body: [
+            { id: 11, config: { url: 'https://old-A.trycloudflare.com/typeclaw/github/coder' } },
+            { id: 22, config: { url: 'https://old-B.trycloudflare.com/typeclaw/github/coder' } },
+            { id: 33, config: { url: 'https://unrelated.example.com/different-tool' } },
+          ],
+        }
+      }
+      const patchMatch = url.match(/\/repos\/acme\/widgets\/hooks\/(\d+)$/)
+      if (patchMatch && method === 'PATCH') {
+        patched = Number(patchMatch[1])
+        return { status: 200, body: { id: Number(patchMatch[1]) } }
+      }
+      if (patchMatch && method === 'DELETE') {
+        deleted.push(Number(patchMatch[1]))
+        return { status: 204 }
+      }
+      return { status: 500 }
+    })
+
+    const result = await registerGithubWebhooks(
+      baseOpts({
+        fetchImpl,
+        webhookUrl: 'https://new-C.trycloudflare.com/typeclaw/github/coder',
+        managedPath: '/typeclaw/github/coder',
+      }),
+    )
+
+    expect(result.repos.length).toBe(1)
+    const repo = result.repos[0]!
+    expect(repo.action).toBe('updated')
+    if (repo.action !== 'updated') throw new Error('unreachable')
+    expect(repo.hookId).toBe(11)
+    expect(repo.stalePruned).toBe(1)
+    expect(patched).toBe(11)
+    expect(deleted).toEqual([22])
+    expect(calls.every((c) => !c.url.endsWith('/hooks/33'))).toBe(true)
+  })
+
+  test('PATCH targets the current webhookUrl so a rotated tunnel hostname is repaired in place', async () => {
+    const { fetch: fetchImpl, calls } = makeFetch(({ url, init }) => {
+      const method = init?.method ?? 'GET'
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
+        return {
+          status: 200,
+          body: [{ id: 5, config: { url: 'https://stale.trycloudflare.com/typeclaw/github/coder' } }],
+        }
+      }
+      if (url.endsWith('/repos/acme/widgets/hooks/5') && method === 'PATCH') return { status: 200, body: { id: 5 } }
+      return { status: 500 }
+    })
+
+    await registerGithubWebhooks(
+      baseOpts({
+        fetchImpl,
+        webhookUrl: 'https://fresh.trycloudflare.com/typeclaw/github/coder',
+        managedPath: '/typeclaw/github/coder',
+      }),
+    )
+
+    const patch = calls.find((c) => c.init?.method === 'PATCH')
+    expect(patch).toBeDefined()
+    const body = JSON.parse(String(patch!.init?.body)) as { config: { url: string } }
+    expect(body.config.url).toBe('https://fresh.trycloudflare.com/typeclaw/github/coder')
+  })
+
+  test("a foreign agent's hook (different managed-path marker on the same host) is not claimed", async () => {
+    let createdId: number | null = null as number | null
+    const { fetch: fetchImpl } = makeFetch(({ url, init }) => {
+      const method = init?.method ?? 'GET'
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
+        return {
+          status: 200,
+          body: [{ id: 9, config: { url: 'https://anything.trycloudflare.com/typeclaw/github/other-agent' } }],
+        }
+      }
+      if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST') {
+        createdId = 42
+        return { status: 201, body: { id: 42 } }
+      }
+      return { status: 500 }
+    })
+
+    const result = await registerGithubWebhooks(
+      baseOpts({
+        fetchImpl,
+        webhookUrl: 'https://new.trycloudflare.com/typeclaw/github/coder',
+        managedPath: '/typeclaw/github/coder',
+      }),
+    )
+
+    expect(result.repos[0]?.action).toBe('created')
+    expect(createdId).toBe(42)
+  })
+
+  test('without managedPath, prior-run hooks at a rotated URL are NOT recognized (regression baseline — proves the marker is the load-bearing fix)', async () => {
+    let createdId: number | null = null as number | null
+    const { fetch: fetchImpl } = makeFetch(({ url, init }) => {
+      const method = init?.method ?? 'GET'
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
+        return {
+          status: 200,
+          body: [{ id: 11, config: { url: 'https://old.trycloudflare.com/typeclaw/github/coder' } }],
+        }
+      }
+      if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST') {
+        createdId = 50
+        return { status: 201, body: { id: 50 } }
+      }
+      return { status: 500 }
+    })
+
+    const result = await registerGithubWebhooks(
+      baseOpts({
+        fetchImpl,
+        webhookUrl: 'https://new.trycloudflare.com/typeclaw/github/coder',
+      }),
+    )
+
+    expect(result.repos[0]?.action).toBe('created')
+    expect(createdId).toBe(50)
   })
 })
 
