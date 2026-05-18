@@ -9,6 +9,7 @@ import type { SessionFactory } from '@/sessions'
 import type { ServerMessage } from '@/shared'
 import { createStream } from '@/stream'
 
+import type { CommandOutbound, CommandRunner } from './command-runner'
 import { createServer, type ServerLogger } from './index'
 
 function makeRuntime(opts: { registry: PluginRegistry; hooks: HookBus }): PluginRuntime {
@@ -96,6 +97,7 @@ async function startWithSession(
     pluginRegistry?: PluginRegistry
     pluginHooks?: HookBus
     logger?: ServerLogger
+    commandRunnerFactory?: (outbound: CommandOutbound) => CommandRunner
   } = {},
 ): Promise<{ url: string }> {
   const pluginRuntime =
@@ -110,6 +112,7 @@ async function startWithSession(
     ...(extra.agentDir !== undefined ? { agentDir: extra.agentDir } : {}),
     ...(pluginRuntime ? { pluginRuntime } : {}),
     ...(extra.logger ? { logger: extra.logger } : {}),
+    ...(extra.commandRunnerFactory ? { commandRunnerFactory: extra.commandRunnerFactory } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
@@ -1132,6 +1135,64 @@ describe('createServer scoped reload', () => {
     const first = result.results[0]
     expect(first?.scope).toBe('no-such-scope')
     expect(first?.ok).toBe(false)
+    ws.close()
+  })
+})
+
+describe('createServer plugin-command dispatch', () => {
+  function makeFakeRunner(): {
+    runner: CommandRunner
+    starts: { callId: string; name: string }[]
+    outbound: CommandOutbound | null
+  } {
+    const ref: {
+      runner: CommandRunner
+      starts: { callId: string; name: string }[]
+      outbound: CommandOutbound | null
+    } = {
+      runner: null as unknown as CommandRunner,
+      starts: [],
+      outbound: null,
+    }
+    return ref
+  }
+
+  function buildRunnerFactory(state: ReturnType<typeof makeFakeRunner>): (outbound: CommandOutbound) => CommandRunner {
+    return (outbound) => {
+      state.outbound = outbound
+      const runner: CommandRunner = {
+        start(msg) {
+          state.starts.push({ callId: msg.callId, name: msg.name })
+        },
+        feedStdin() {},
+        endStdin() {},
+        abort() {},
+        abortForOwner() {},
+        inFlightCount: () => 0,
+      }
+      state.runner = runner
+      return runner
+    }
+  }
+
+  test('rejects a duplicate callId at the WS layer before the runner is touched', async () => {
+    const session = createFakeSession()
+    const state = makeFakeRunner()
+    const { url } = await startWithSession(session, { commandRunnerFactory: buildRunnerFactory(state) })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'dup-1', name: 'noop', args: {} }))
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'dup-1', name: 'noop', args: {} }))
+
+    const errorFrame = await waitFor(
+      (m) => m.type === 'command_error' && 'callId' in m && m.callId === 'dup-1' && /already in flight/.test(m.message),
+    )
+    expect(errorFrame.type).toBe('command_error')
+
+    expect(state.starts.length).toBe(1)
+    expect(state.starts[0]?.callId).toBe('dup-1')
+
     ws.close()
   })
 })

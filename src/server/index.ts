@@ -419,6 +419,20 @@ export function createServer({
               send(ws, { type: 'command_exit', callId: msg.callId, code: 1 })
               return
             }
+            // Guard at the WS layer BEFORE registering the callId→ws mapping:
+            // if another connection (or this one) is already running a command
+            // with this callId, refuse the replay. Without this check, a stale
+            // or malicious client could overwrite the mapping and steal the
+            // original command's output frames.
+            if (callIdToWs.has(msg.callId)) {
+              send(ws, {
+                type: 'command_error',
+                callId: msg.callId,
+                message: `callId "${msg.callId}" is already in flight`,
+              })
+              send(ws, { type: 'command_exit', callId: msg.callId, code: 1 })
+              return
+            }
             callIdToWs.set(msg.callId, ws)
             commandRunner.start(
               {
