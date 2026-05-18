@@ -15,6 +15,7 @@ import {
   type AddChannelStepEvent,
   type ChannelKind,
   type KakaotalkAuthResult,
+  type WebhookRegistrationResult,
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
@@ -718,6 +719,9 @@ function reportProgress(events: AddChannelStepEvent[]): (event: AddChannelStepEv
       case 'secrets':
         s.stop('Saved credentials to secrets.json.')
         break
+      case 'github-webhooks':
+        s.stop(reportGithubWebhooks(event.result))
+        break
     }
   }
 }
@@ -726,6 +730,21 @@ const START_MESSAGES: Record<AddChannelStepEvent['step'], string> = {
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
   config: 'Updating typeclaw.json...',
   secrets: 'Saving credentials to secrets.json...',
+  'github-webhooks': 'Registering GitHub repository webhooks...',
+}
+
+function reportGithubWebhooks(result: WebhookRegistrationResult): string {
+  const created = result.repos.filter((r) => r.action === 'created').length
+  const updated = result.repos.filter((r) => r.action === 'updated').length
+  const failed = result.repos.filter((r) => r.action === 'failed')
+  const parts: string[] = []
+  if (created > 0) parts.push(`${created} created`)
+  if (updated > 0) parts.push(`${updated} updated`)
+  if (failed.length === 0) {
+    return parts.length > 0 ? `Registered repository webhooks (${parts.join(', ')}).` : 'No repositories to register.'
+  }
+  const detail = failed.map((r) => `${r.repo}: ${r.error}`).join('; ')
+  return `Registered ${parts.join(', ') || 'no'} webhook(s); ${failed.length} failed — ${detail}`
 }
 
 function reportKakaotalkAuth(result: KakaotalkAuthResult): string {

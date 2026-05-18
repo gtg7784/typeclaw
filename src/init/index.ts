@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { DEFAULT_GITHUB_EVENT_ALLOWLIST } from '@/channels/schema'
 import { config, configSchema, migrateLegacyConfigShape, type Config } from '@/config'
 import {
   DEFAULT_MODEL_REF,
@@ -18,6 +19,7 @@ import { createTui } from '@/tui'
 
 import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
+import { registerGithubWebhooks, type WebhookRegistrationResult } from './github-webhook-register'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { HATCHING_PROMPT } from './hatching'
 import type { OAuthLoginRunner, OAuthLoginResult } from './oauth-login'
@@ -27,6 +29,12 @@ import { type InstallResult, type InstallRunner, runBunInstall } from './run-bun
 export { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
 
 export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
+
+export {
+  registerGithubWebhooks,
+  type WebhookRegistrationResult,
+  type WebhookRepoResult,
+} from './github-webhook-register'
 
 const CONFIG_FILE = 'typeclaw.json'
 const CRON_FILE = 'cron.json'
@@ -51,6 +59,7 @@ export type InitStep =
   | 'oauth-login'
   | 'scaffold'
   | 'kakaotalk-auth'
+  | 'github-webhooks'
   | 'install'
   | 'dockerfile'
   | 'git'
@@ -78,6 +87,8 @@ export type InitStepEvent =
   | { step: 'scaffold'; phase: 'done' }
   | { step: 'kakaotalk-auth'; phase: 'start' }
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
+  | { step: 'github-webhooks'; phase: 'start' }
+  | { step: 'github-webhooks'; phase: 'done'; result: WebhookRegistrationResult }
   | { step: 'install'; phase: 'start' }
   | { step: 'install'; phase: 'done'; result: InstallResult }
   | { step: 'dockerfile'; phase: 'start' }
@@ -148,6 +159,9 @@ export type InitOptions = {
   // `withGithub` is true, the existing secrets.json#channels.github block is
   // reused as-is (the wizard's "reuse existing credentials" path).
   githubCredentials?: GithubInitCredentials
+  // Test seam for the GitHub API client used by the webhook registration
+  // step. Production callers omit it so the real `fetch` is used.
+  webhookFetchImpl?: typeof fetch
   onProgress?: (event: InitStepEvent) => void
   runHatching?: HatchRunner
   runBunInstall?: InstallRunner
@@ -178,6 +192,7 @@ export async function runInit({
   withGithub = false,
   runKakaotalkAuth,
   githubCredentials,
+  webhookFetchImpl,
   onProgress,
   runHatching = defaultRunHatching,
   runBunInstall: installRunner = runBunInstall,
@@ -291,6 +306,16 @@ export async function runInit({
   // bot-token adapters all support.
   if (withGithub && githubCredentials !== undefined) {
     await writeGithubChannelForInit(cwd, githubCredentials)
+    emit({ step: 'github-webhooks', phase: 'start' })
+    const webhookResult = await registerGithubWebhooks({
+      auth: githubCredentials.auth,
+      webhookUrl: githubCredentials.webhookUrl,
+      webhookSecret: githubCredentials.webhookSecret,
+      repos: githubCredentials.repos,
+      events: [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
+      ...(webhookFetchImpl !== undefined ? { fetchImpl: webhookFetchImpl } : {}),
+    })
+    emit({ step: 'github-webhooks', phase: 'done', result: webhookResult })
   }
 
   emit({ step: 'install', phase: 'start' })
@@ -856,7 +881,7 @@ export const CHANNEL_KINDS: ReadonlyArray<ChannelKind> = [
   'github',
 ]
 
-export type AddChannelStep = 'kakaotalk-auth' | 'config' | 'secrets'
+export type AddChannelStep = 'kakaotalk-auth' | 'config' | 'secrets' | 'github-webhooks'
 
 export type AddChannelStepEvent =
   | { step: 'config'; phase: 'start' }
@@ -865,6 +890,8 @@ export type AddChannelStepEvent =
   | { step: 'kakaotalk-auth'; phase: 'done'; result: KakaotalkAuthResult }
   | { step: 'secrets'; phase: 'start' }
   | { step: 'secrets'; phase: 'done' }
+  | { step: 'github-webhooks'; phase: 'start' }
+  | { step: 'github-webhooks'; phase: 'done'; result: WebhookRegistrationResult }
 
 // Discriminated union per channel so the type system enforces "you must pass
 // the right credentials for the channel you're adding". The CLI builds these
@@ -884,6 +911,9 @@ export type AddChannelOptions = {
       webhookPort?: number
       repos: string[]
       auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
+      // Test seam for the GitHub API client used by the webhook registration
+      // step. Production callers omit it so the real `fetch` is used.
+      webhookFetchImpl?: typeof fetch
     }
 )
 
@@ -929,6 +959,24 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   // unavailable, or when the file is clean. secrets.json is gitignored, so
   // only typeclaw.json is named here.
   await commitSystemFile(options.cwd, CONFIG_FILE, `channel: add ${options.channel}`)
+
+  // Webhook registration is a best-effort external side effect AFTER every
+  // local write has succeeded and been committed. A GitHub API outage or a
+  // single bad repo slug must not roll back the channel config — the user
+  // can rerun `typeclaw channel add` (idempotent: existing hooks are
+  // updated, missing ones created) or register manually.
+  if (options.channel === 'github') {
+    emit({ step: 'github-webhooks', phase: 'start' })
+    const result = await registerGithubWebhooks({
+      auth: options.auth,
+      webhookUrl: options.webhookUrl,
+      webhookSecret: options.webhookSecret,
+      repos: options.repos,
+      events: [...DEFAULT_GITHUB_EVENT_ALLOWLIST],
+      ...(options.webhookFetchImpl !== undefined ? { fetchImpl: options.webhookFetchImpl } : {}),
+    })
+    emit({ step: 'github-webhooks', phase: 'done', result })
+  }
 }
 
 function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {

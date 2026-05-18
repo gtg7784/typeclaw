@@ -24,6 +24,7 @@ import {
   type InitStepEvent,
   type KakaotalkAuthResult,
   type LLMAuth,
+  type WebhookRegistrationResult,
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
@@ -1160,6 +1161,9 @@ function reportProgress(
       case 'kakaotalk-auth':
         s.stop(reportKakaotalkAuth(event.result))
         break
+      case 'github-webhooks':
+        s.stop(reportGithubWebhooks(event.result))
+        break
       case 'oauth-login':
         s.stop(event.result.ok ? 'Logged in.' : `OAuth login failed: ${event.result.reason}`)
         break
@@ -1306,7 +1310,22 @@ const START_MESSAGES: Record<Exclude<InitStep, 'hatching'>, string> = {
   'oauth-login': 'Waiting for browser login...',
   scaffold: 'Laying the egg...',
   'kakaotalk-auth': 'Logging in to KakaoTalk...',
+  'github-webhooks': 'Registering GitHub repository webhooks...',
   install: 'Installing dependencies with bun...',
   dockerfile: 'Writing Dockerfile...',
   git: 'Initializing git repository...',
+}
+
+function reportGithubWebhooks(result: WebhookRegistrationResult): string {
+  const created = result.repos.filter((r) => r.action === 'created').length
+  const updated = result.repos.filter((r) => r.action === 'updated').length
+  const failed = result.repos.filter((r) => r.action === 'failed')
+  const parts: string[] = []
+  if (created > 0) parts.push(`${created} created`)
+  if (updated > 0) parts.push(`${updated} updated`)
+  if (failed.length === 0) {
+    return parts.length > 0 ? `Registered repository webhooks (${parts.join(', ')}).` : 'No repositories to register.'
+  }
+  const detail = failed.map((r) => `${r.repo}: ${r.error}`).join('; ')
+  return `Registered ${parts.join(', ') || 'no'} webhook(s); ${failed.length} failed — ${detail}`
 }

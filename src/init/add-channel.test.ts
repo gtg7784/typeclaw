@@ -240,6 +240,92 @@ describe('runAddChannel', () => {
     ])
   })
 
+  test('adds github channel with PAT auth, writes config/secrets/match rules, and registers webhooks', async () => {
+    const events: AddChannelStepEvent[] = []
+    const fetchCalls: Array<{ url: string; method: string }> = []
+    const fakeFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const method = init?.method ?? 'GET'
+      fetchCalls.push({ url, method })
+      if (url.endsWith('/repos/acme/widgets/hooks') && method === 'GET') {
+        return new Response(JSON.stringify([]), { status: 200 })
+      }
+      if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST') {
+        return new Response(JSON.stringify({ id: 42 }), { status: 201 })
+      }
+      return new Response('', { status: 500 })
+    }) as unknown as typeof fetch
+
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret',
+      webhookUrl: 'https://agent.example.com/gh',
+      webhookPort: 8975,
+      repos: ['acme/widgets'],
+      webhookFetchImpl: fakeFetch,
+      onProgress: (e) => events.push(e),
+    })
+
+    const cfg = await readConfig()
+    expect(cfg.channels?.github).toBeDefined()
+    expect(cfg.channels?.github?.webhookUrl).toBe('https://agent.example.com/gh')
+
+    const secrets = await readSecretsChannels()
+    expect((secrets.github as { auth: { type: string } }).auth.type).toBe('pat')
+
+    const after = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      roles?: { member?: { match?: string[] } }
+    }
+    expect(after.roles?.member?.match).toContain('github:acme/widgets')
+
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toEqual([
+      'config:start',
+      'config:done',
+      'secrets:start',
+      'secrets:done',
+      'github-webhooks:start',
+      'github-webhooks:done',
+    ])
+
+    const lastEvent = events[events.length - 1]
+    expect(lastEvent?.step).toBe('github-webhooks')
+    expect(lastEvent?.phase).toBe('done')
+    if (lastEvent?.step === 'github-webhooks' && lastEvent.phase === 'done') {
+      expect(lastEvent.result.repos).toEqual([{ repo: 'acme/widgets', action: 'created', hookId: 42 }])
+    }
+
+    expect(fetchCalls.some((c) => c.method === 'POST' && c.url.endsWith('/repos/acme/widgets/hooks'))).toBe(true)
+  })
+
+  test('github webhook step still emits done with per-repo failure when GitHub API errors (no rollback)', async () => {
+    const events: AddChannelStepEvent[] = []
+    const fakeFetch = (async () => new Response('forbidden', { status: 403 })) as unknown as typeof fetch
+
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret',
+      webhookUrl: 'https://agent.example.com/gh',
+      repos: ['acme/widgets'],
+      webhookFetchImpl: fakeFetch,
+      onProgress: (e) => events.push(e),
+    })
+
+    const cfg = await readConfig()
+    expect(cfg.channels?.github).toBeDefined()
+    expect((await readSecretsChannels()).github).toBeDefined()
+
+    const lastEvent = events[events.length - 1]
+    if (lastEvent?.step === 'github-webhooks' && lastEvent.phase === 'done') {
+      expect(lastEvent.result.repos[0]?.action).toBe('failed')
+    } else {
+      throw new Error('expected last event to be github-webhooks:done')
+    }
+  })
+
   test('emits kakaotalk-auth before config + secrets when adding kakaotalk', async () => {
     const events: AddChannelStepEvent[] = []
     await runAddChannel({
