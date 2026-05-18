@@ -383,6 +383,7 @@ async function promptGithubCredentials(): Promise<{
     cancel('Aborted.')
     process.exit(0)
   }
+  const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
   const webhookUrl = await text({
     message: 'Public webhook URL (GitHub will POST events here)',
     validate: (value) => validateUrl(value ?? '', 'Webhook URL is required'),
@@ -414,7 +415,6 @@ async function promptGithubCredentials(): Promise<{
   // validate guard and never coerces to ''), so we normalize before the
   // length checks below to avoid a TypeError on the "leave blank" path.
   const enteredSecret = typeof secret === 'string' ? secret : ''
-  const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
   const reposRaw = await text({
     message: 'Repositories to allow (comma-separated owner/repo)',
     validate: (value) => (parseRepos(value ?? '').length > 0 ? undefined : 'At least one owner/repo is required'),

@@ -970,6 +970,8 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
     ],
   })
   if (isCancel(authType)) return back()
+  const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
+  if (auth === null) return back()
   const webhookUrl = await text({
     message: 'Public webhook URL (GitHub will POST events here)',
     validate: (v) => validateGithubUrl(v ?? '', 'Webhook URL is required'),
@@ -992,8 +994,6 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
   // validate guard and never coerces to ''), so we normalize before the
   // length checks below to avoid a TypeError on the "leave blank" path.
   const enteredSecret = typeof secret === 'string' ? secret : ''
-  const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
-  if (auth === null) return back()
   const reposRaw = await text({
     message: 'Repositories to allow (comma-separated owner/repo)',
     validate: (v) => (parseGithubRepos(v ?? '').length > 0 ? undefined : 'At least one owner/repo is required'),
