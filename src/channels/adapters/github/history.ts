@@ -23,9 +23,12 @@ export function createGithubHistoryCallback(options: {
         : `${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/issues/${chat.number}/comments`
     try {
       const cursor = args.cursor !== undefined && args.cursor !== '' ? `&page=${encodeURIComponent(args.cursor)}` : ''
-      const response = await fetchImpl(`${endpoint}?per_page=${Math.min(Math.max(args.limit, 1), 100)}${cursor}`, {
-        headers: githubJsonHeaders(options.token),
-      })
+      const response = await fetchImpl(
+        `${endpoint}?per_page=${Math.min(Math.max(args.limit, 1), 100)}&direction=desc${cursor}`,
+        {
+          headers: githubJsonHeaders(options.token),
+        },
+      )
       if (!response.ok) return { ok: false, error: `GitHub history ${response.status}` }
       const raw = (await response.json()) as GithubComment[]
       const link = response.headers.get('link') ?? ''
