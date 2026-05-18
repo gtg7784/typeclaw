@@ -111,27 +111,28 @@ That's the whole installation. No `cron.json` edit, no CLI command shim. `typecl
 
 The handler receives a `ctx` with the LLM-call surface of a container plugin command, minus the CLI-shaped fields:
 
-| Field             | Type                                                          | Notes                                                                                                                                                                                          |
-| ----------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ctx.jobId`       | `string`                                                      | The global cron id (`__plugin_<plugin-name>_<key>`). Useful for log lines.                                                                                                                     |
-| `ctx.agentDir`    | `string`                                                      | `/agent` in the container.                                                                                                                                                                     |
-| `ctx.logger`      | `PluginLogger`                                                | Plugin-prefixed `info` / `warn` / `error` going to container stdout.                                                                                                                           |
-| `ctx.signal`      | `AbortSignal`                                                 | Fires on container shutdown (SIGTERM). Respect it; don't fight it.                                                                                                                             |
-| `ctx.permissions` | `PermissionService`                                           | Same service the rest of the runtime uses. Most handlers don't need it; the LLM session resolves permissions through `ctx.origin` automatically.                                               |
-| `ctx.origin`      | `SessionOrigin` (cron-shaped)                                 | `{ kind: 'cron', jobId, jobKind: 'handler', scheduledByRole, scheduledByOrigin }`. Plugin-contributed jobs default to `scheduledByRole: 'owner'`.                                              |
-| `ctx.prompt`      | `(text: string) => Promise<string>`                           | Opens a brand-new agent session with the full toolset, sends `text`, returns the final assistant message. Uses **slim system prompt mode** (saves ~2000 tokens per LLM call vs a TUI session). |
-| `ctx.subagent`    | `(name: string, payload?) => Promise<void>`                   | Invokes a registered subagent. Same dispatch path as `PluginContext.spawnSubagent`.                                                                                                            |
-| `ctx.exec`        | `` ctx.exec`shell pipeline` `` → `Promise<CommandExecResult>` | Tagged template; runs in the agent folder with `ctx.signal` threaded through. Abort kills the entire process group (SIGTERM → 5s grace → SIGKILL).                                             |
+| Field             | Type                                                          | Notes                                                                                                                                                                                                                                                                                          |
+| ----------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ctx.jobId`       | `string`                                                      | The global cron id (`__plugin_<plugin-name>_<key>`). Useful for log lines.                                                                                                                                                                                                                     |
+| `ctx.name`        | `string`                                                      | The plugin name that registered this cron job. Mirrors `ContainerCommandContext.name`.                                                                                                                                                                                                         |
+| `ctx.agentDir`    | `string`                                                      | `/agent` in the container.                                                                                                                                                                                                                                                                     |
+| `ctx.logger`      | `PluginLogger`                                                | Plugin-prefixed `info` / `warn` / `error` going to container stdout.                                                                                                                                                                                                                           |
+| `ctx.signal`      | `AbortSignal`                                                 | Reserved for future cancellation; currently never aborted by the runtime (matches existing prompt/exec cron behavior — in-flight work runs to completion on container shutdown). Already threaded into `ctx.prompt` and `ctx.exec`, so future aborts propagate without handler-author changes. |
+| `ctx.permissions` | `PermissionService`                                           | Same service the rest of the runtime uses. Most handlers don't need it; the LLM session resolves permissions through `ctx.origin` automatically.                                                                                                                                               |
+| `ctx.origin`      | `SessionOrigin` (cron-shaped)                                 | `{ kind: 'cron', jobId, jobKind: 'handler', scheduledByRole, scheduledByOrigin }`. Plugin-contributed jobs default to `scheduledByRole: 'owner'`.                                                                                                                                              |
+| `ctx.prompt`      | `(text: string) => Promise<string>`                           | Opens a brand-new agent session with the full toolset, sends `text`, returns the final assistant message. Uses **slim system prompt mode** (saves ~2000 tokens per LLM call vs a TUI session).                                                                                                 |
+| `ctx.subagent`    | `(name: string, payload?) => Promise<void>`                   | Invokes a registered subagent. Same dispatch path as `PluginContext.spawnSubagent`.                                                                                                                                                                                                            |
+| `ctx.exec`        | `` ctx.exec`shell pipeline` `` → `Promise<CommandExecResult>` | Tagged template; runs in the agent folder with `ctx.signal` threaded through. Abort kills the entire process group (SIGTERM → 5s grace → SIGKILL).                                                                                                                                             |
 
 What's NOT on the handler ctx (and why):
 
 - **`stdin` / `stdout` / `stderr`** — cron has no caller piping bytes in or reading bytes out. Use `ctx.logger` or write files for output.
 - **`args`** — handlers are scheduled, not invoked with flags. Configurable values come through the plugin's `configSchema`.
-- **Return value** — the function returns `Promise<void>`. Throw to signal failure; the cron consumer catches and logs.
+- **Return value** — the function returns `Promise<void>`. Throw to signal failure; the cron consumer catches and logs. (Note: do NOT write `return 0` — handler return is `void`, not a numeric exit code like a container command's `run`.)
 
-### Permission contract (no silent elevation)
+### Trust model
 
-The handler runs under the cron job's `scheduledByRole`. Inside `ctx.prompt`, every tool call resolves permissions against `ctx.origin` — which carries the cron's role. A plugin author cannot forge `scheduledByRole: 'owner'` to bypass guards from a less-privileged context; plugin-contributed cron jobs always inherit `'owner'` because plugins are part of the bundled runtime, but the role is real, not synthetic, and can be tightened by a future API. See `typeclaw-permissions`.
+Plugin-contributed cron handlers run with `scheduledByRole: 'owner'` because installed plugins already execute arbitrary in-process TypeScript at boot, on every hook, and inside every tool — granting cron handlers a tighter role wouldn't be a security boundary anyway, since the plugin code already has full process privileges. The role is real (every tool call inside `ctx.prompt` resolves against it) and a future API could tighten it for specific contexts, but today plugin authors are trusted runtime contributions, not user input. See `typeclaw-permissions` for the broader model.
 
 ### When to reach for the exec bridge instead
 
@@ -237,7 +238,7 @@ export default definePlugin({
 The shape that matters:
 
 1. **Probe with `ctx.exec` (or an `await` on a Node API) first.** Anything that returns a yes/no signal cheaply: a CLI tool exit code, a count, a file mtime, an HTTP HEAD, a `git log -1 --since=...` output.
-2. **Return early when the probe says "no work".** `return 0` exits the command cleanly, cron logs nothing scary, and zero LLM tokens were spent. Critically: do NOT call `ctx.prompt` to "decide whether to act" — that defeats the entire optimization.
+2. **Return early when the probe says "no work".** A bare `return` exits the handler cleanly, cron logs nothing scary, and zero LLM tokens were spent. Critically: do NOT call `ctx.prompt` to "decide whether to act" — that defeats the entire optimization.
 3. **Reach for `ctx.prompt` only on the work path.** Pass the probe's output into the prompt so the agent doesn't have to re-discover what triggered the run (e.g. `${count} unread emails`, the list of changed files, the new commit hash). This also shortens the LLM's first turn — it gets to act, not investigate.
 
 Concrete signals you can probe cheaply (in rough order of common use):
@@ -264,7 +265,7 @@ Pitfalls to avoid:
 
 - **Don't promise the user "the agent checks every 5 minutes" if you've written `*/5 * * * *` without a gate.** That's 12 LLM calls an hour for empty inboxes. Either gate it, or slow the schedule to match what the work actually warrants.
 - **Don't gate inside `ctx.prompt` itself** ("if there are new emails, do X; else do nothing"). The LLM still ran. The gate has to be in shell code outside `ctx.prompt`.
-- **Don't leak probe failures into the LLM session.** If `ctx.exec` exits non-zero, decide explicitly: bail with the same exit code (`return exitCode`), or recover with a fallback path. Don't fall through into `ctx.prompt` with no input — the agent will improvise, and the improvisation is usually worse than a clean `cron failed: ...` log line.
+- **Don't leak probe failures into the LLM session.** If `ctx.exec` exits non-zero, decide explicitly: log via `ctx.logger.error` and bail (`return`), `throw` to surface the failure in cron logs, or recover with a fallback path. Don't fall through into `ctx.prompt` with no input — the agent will improvise, and the improvisation is usually worse than a clean `cron failed: ...` log line.
 
 ## Schedule syntax
 

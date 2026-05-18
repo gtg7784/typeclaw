@@ -280,9 +280,10 @@ When the cron job needs imperative control flow (probe → maybe prompt → writ
 ```ts
 type CronHandlerContext = {
   readonly jobId: string // __plugin_<name>_<key>
+  readonly name: string // plugin name that registered the job
   readonly agentDir: string // /agent in container
   readonly logger: PluginLogger
-  readonly signal: AbortSignal // fires on container shutdown
+  readonly signal: AbortSignal // reserved for future cancellation; currently inert
   readonly permissions: PermissionService
   readonly origin: SessionOrigin // { kind: 'cron', jobKind: 'handler', ... }
   readonly prompt: (text: string) => Promise<string> // full agent session, slim system prompt mode

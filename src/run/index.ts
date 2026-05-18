@@ -269,6 +269,7 @@ export async function startAgent({
       }
       const ctx: CronHandlerContext = {
         jobId: job.id,
+        name: pluginName,
         agentDir: cwd,
         logger,
         signal: abortController.signal,

@@ -117,13 +117,24 @@ export type PluginCronJob = PluginPromptCronJob | PluginExecCronJob | PluginHand
 // CLI-shaped fields (stdin/stdout/stderr, args, exit code) because cron has
 // no caller to pipe to.
 //
-// `signal` aborts on container shutdown (SIGTERM); handlers should respect it
-// and early-return rather than fight the abort. `origin` is a cron-shaped
-// SessionOrigin so any session the handler spawns via `ctx.prompt` carries the
-// cron job's provenance — same role-inheritance semantics as a `kind: 'exec'`
-// job that shells out to `typeclaw <cmd>`.
+// `signal` is reserved for future cancellation and is currently never aborted
+// by the runtime — the consumer matches the existing prompt/exec cron jobs
+// which also let in-flight work finish on container shutdown. The signal IS
+// already threaded into `ctx.prompt` and `ctx.exec`, so the moment the
+// runtime starts aborting it (e.g. via a future graceful-shutdown path),
+// propagation works without handler-author changes. Handler authors who
+// want to respect future cancellation should still check `ctx.signal.aborted`
+// in long-running loops; nothing fires it today.
+//
+// `origin` is a cron-shaped SessionOrigin so any session the handler spawns
+// via `ctx.prompt` carries the cron job's provenance — same role-inheritance
+// semantics as a `kind: 'exec'` job that shells out to `typeclaw <cmd>`.
 export type CronHandlerContext = {
   readonly jobId: string
+  // The plugin that registered this cron job (e.g. 'inbox-watch'). Matches
+  // `ContainerCommandContext.name`. Useful for log lines that should be
+  // attributable to the plugin, not just the cron id.
+  readonly name: string
   readonly agentDir: string
   readonly logger: PluginLogger
   readonly signal: AbortSignal
