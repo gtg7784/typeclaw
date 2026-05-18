@@ -13,15 +13,17 @@ import { createStream } from '@/stream'
 
 import {
   buildChannelTools,
+  composeSystemPrompt,
   createOverrideResourceLoader,
   createResourceLoader,
+  deriveSystemPromptMode,
   formatRestartNotice,
   formatRestartNoticeOriginating,
   getBundledSkillsDir,
   subscribeRestartNotice,
 } from './index'
 import type { SessionOrigin } from './session-origin'
-import { DEFAULT_SYSTEM_PROMPT } from './system-prompt'
+import { DEFAULT_SYSTEM_PROMPT, SLIM_SYSTEM_PROMPT } from './system-prompt'
 
 async function runGit(cwd: string, args: string[]): Promise<void> {
   const proc = Bun.spawn({
@@ -601,6 +603,142 @@ describe('createResourceLoader', () => {
     const prompt = loader.getSystemPrompt() ?? ''
     expect(prompt).toContain('## Your role in this session')
     expect(prompt).toContain('`guest`')
+  })
+
+  test('cron origin defaults to slim mode: uses SLIM_SYSTEM_PROMPT and drops git nudge', async () => {
+    // given: a dirty git repo so gitNudge WOULD render in full mode
+    await initGitRepo(agentDir)
+    await writeFile(join(agentDir, 'tracked.md'), 'initial')
+    await runGit(agentDir, ['add', '.'])
+    await runGit(agentDir, ['commit', '-q', '-m', 'init'])
+    await writeFile(join(agentDir, 'tracked.md'), 'dirty edit')
+    const origin: SessionOrigin = { kind: 'cron', jobId: 'job-1', jobKind: 'prompt' }
+
+    // when
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt.startsWith(SLIM_SYSTEM_PROMPT)).toBe(true)
+    expect(prompt).not.toContain(DEFAULT_SYSTEM_PROMPT)
+    expect(prompt).not.toContain('## Uncommitted changes at session start')
+    expect(prompt).not.toContain('tracked.md')
+  })
+
+  test('subagent origin defaults to slim mode', async () => {
+    const origin: SessionOrigin = { kind: 'subagent', subagent: 'tester', parentSessionId: 'ses_p' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt.startsWith(SLIM_SYSTEM_PROMPT)).toBe(true)
+    expect(prompt).not.toContain(DEFAULT_SYSTEM_PROMPT)
+  })
+
+  test('tui origin stays in full mode', async () => {
+    const origin: SessionOrigin = { kind: 'tui', sessionId: 'ses_t' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt.startsWith(DEFAULT_SYSTEM_PROMPT)).toBe(true)
+  })
+
+  test('channel origin stays in full mode (humans read the chat)', async () => {
+    const origin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt.startsWith(DEFAULT_SYSTEM_PROMPT)).toBe(true)
+  })
+
+  test('explicit mode override beats the origin-derived default', async () => {
+    // given: a cron origin (which would default to slim)
+    const origin: SessionOrigin = { kind: 'cron', jobId: 'job-1', jobKind: 'prompt' }
+
+    // when: forced to full
+    const loader = await createResourceLoader({ agentDir, origin, mode: 'full' })
+
+    // then
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt.startsWith(DEFAULT_SYSTEM_PROMPT)).toBe(true)
+  })
+
+  test('slim mode still injects memory so cron jobs see MEMORY.md context', async () => {
+    await writeFile(join(agentDir, 'MEMORY.md'), 'standup-summary-marker')
+    const origin: SessionOrigin = { kind: 'cron', jobId: 'job-1', jobKind: 'prompt' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('# Memory')
+    expect(prompt).toContain('standup-summary-marker')
+  })
+})
+
+describe('deriveSystemPromptMode', () => {
+  test('returns full for tui', () => {
+    expect(deriveSystemPromptMode({ kind: 'tui', sessionId: 's' })).toBe('full')
+  })
+  test('returns full for channel', () => {
+    expect(
+      deriveSystemPromptMode({
+        kind: 'channel',
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        thread: null,
+      }),
+    ).toBe('full')
+  })
+  test('returns slim for cron', () => {
+    expect(deriveSystemPromptMode({ kind: 'cron', jobId: 'j', jobKind: 'prompt' })).toBe('slim')
+  })
+  test('returns slim for subagent', () => {
+    expect(deriveSystemPromptMode({ kind: 'subagent', subagent: 's', parentSessionId: 'p' })).toBe('slim')
+  })
+  test('returns full when origin is undefined (back-compat default)', () => {
+    expect(deriveSystemPromptMode(undefined)).toBe('full')
+  })
+})
+
+describe('composeSystemPrompt slim mode', () => {
+  test('uses SLIM_SYSTEM_PROMPT as the base when mode is slim', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'slim',
+      self: '# Identity\n\nfoo',
+      gitNudge: '',
+      memorySection: '# Memory\n\nbar',
+    })
+    expect(prompt.startsWith(SLIM_SYSTEM_PROMPT)).toBe(true)
+    expect(prompt).not.toContain(DEFAULT_SYSTEM_PROMPT)
+  })
+
+  test('uses DEFAULT_SYSTEM_PROMPT when mode is unset (back-compat)', () => {
+    const prompt = composeSystemPrompt({
+      self: '# Identity\n\nfoo',
+      gitNudge: '',
+      memorySection: '# Memory\n\nbar',
+    })
+    expect(prompt.startsWith(DEFAULT_SYSTEM_PROMPT)).toBe(true)
+  })
+
+  test('omits memory section when memorySection is the empty string', () => {
+    const prompt = composeSystemPrompt({
+      mode: 'slim',
+      self: '# Identity\n\nfoo',
+      gitNudge: '',
+      memorySection: '',
+    })
+    expect(prompt).not.toContain('# Memory')
+    expect(prompt.endsWith('# Identity\n\nfoo')).toBe(true)
   })
 })
 
