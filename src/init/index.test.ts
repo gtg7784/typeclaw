@@ -1625,6 +1625,61 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
     }
     expect(config.channels?.github).toBeUndefined()
   })
+
+  test('runInit with withGithub=true overwrites a pre-existing secrets.json#channels.github block', async () => {
+    // given: a prior partial init left a github credentials block on disk
+    await writeFile(
+      join(root, 'secrets.json'),
+      `${JSON.stringify(
+        {
+          version: 2,
+          providers: { fireworks: { type: 'api_key', key: { value: 'fw_seed' } } },
+          channels: {
+            github: {
+              auth: { type: 'pat', token: { value: 'old_pat' } },
+              webhookSecret: { value: 'old_whsec' },
+            },
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    )
+
+    // when: the user re-runs init with new credentials
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      withGithub: true,
+      githubCredentials: {
+        webhookSecret: 'new_whsec',
+        webhookUrl: 'https://example.com/new',
+        webhookPort: 9090,
+        repos: ['acme/repo-b'],
+        auth: { type: 'pat', pat: 'new_pat' },
+      },
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    // then: secrets and config reflect the new credentials, not the old ones
+    const secrets = await readSecrets(root)
+    expect(secrets.channels?.github).toMatchObject({
+      auth: { type: 'pat', token: { value: 'new_pat' } },
+      webhookSecret: { value: 'new_whsec' },
+    })
+
+    const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, Record<string, unknown>>
+      roles?: { member?: { match?: string[] } }
+    }
+    expect(config.channels?.github).toMatchObject({
+      webhookUrl: 'https://example.com/new',
+      webhookPort: 9090,
+    })
+    expect(config.roles?.member?.match).toContain('github:acme/repo-b')
+  })
 })
 
 // Guards the exact bug site of the hatching-hostd fix: that the default

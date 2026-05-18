@@ -281,21 +281,16 @@ export async function runInit({
     }
   }
 
-  // Delegate GitHub setup to runAddChannel so the structured
-  // channels.github block, secrets.json write, and member-role match
-  // rules all stay in one place. commitSystemFile inside runAddChannel
-  // no-ops here because the agent folder isn't a git repo yet — the
-  // later `git` step picks the github changes up in its initial commit.
+  // Write the structured github channel block alongside scaffold's bot-token
+  // blocks. We do NOT delegate to runAddChannel because that's the `channel
+  // add` semantics — strict no-overwrite, throws when secrets.json#channels
+  // .github already exists. Init is a different contract: re-running it
+  // regenerates config from the wizard's current inputs (scaffold() already
+  // overwrites typeclaw.json wholesale on every run), so failing on an
+  // existing secret block here would brick the re-init recovery path the
+  // bot-token adapters all support.
   if (withGithub && githubCredentials !== undefined) {
-    await runAddChannel({
-      cwd,
-      channel: 'github',
-      webhookSecret: githubCredentials.webhookSecret,
-      webhookUrl: githubCredentials.webhookUrl,
-      ...(githubCredentials.webhookPort !== undefined ? { webhookPort: githubCredentials.webhookPort } : {}),
-      repos: githubCredentials.repos,
-      auth: githubCredentials.auth,
-    })
+    await writeGithubChannelForInit(cwd, githubCredentials)
   }
 
   emit({ step: 'install', phase: 'start' })
@@ -1028,6 +1023,53 @@ async function mergeChannelIntoConfig(cwd: string, options: AddChannelOptions): 
   }
 
   await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`)
+}
+
+// Init-side counterpart of runAddChannel's github branch. Same three writes
+// (typeclaw.json#channels.github, secrets.json#channels.github, roles.member
+// .match[]) but with overwrite semantics on the secrets/config side so a
+// re-run of `typeclaw init` after a partial failure works the same way it
+// does for the bot-token adapters. The match-rule writer is reused as-is
+// because its set-union is already idempotent.
+async function writeGithubChannelForInit(cwd: string, credentials: GithubInitCredentials): Promise<void> {
+  const configPath = join(cwd, CONFIG_FILE)
+  const parsed = JSON.parse(await readFile(configPath, 'utf8')) as Record<string, unknown>
+  const existingChannels = isObjectRecord(parsed.channels) ? { ...parsed.channels } : {}
+  existingChannels.github = {
+    webhookUrl: credentials.webhookUrl,
+    webhookPort: credentials.webhookPort ?? 8975,
+    eventAllowlist: [
+      'issue_comment.created',
+      'pull_request_review_comment.created',
+      'discussion_comment.created',
+      'issues.opened',
+      'pull_request.opened',
+      'discussion.created',
+      'pull_request_review.submitted',
+    ],
+  }
+  parsed.channels = existingChannels
+  await writeFile(configPath, `${JSON.stringify(parsed, null, 2)}\n`)
+
+  const backend = new SecretsBackend(join(cwd, 'secrets.json'))
+  const channels: Record<string, unknown> = backend.readChannelsSync()
+  channels.github = {
+    auth:
+      credentials.auth.type === 'pat'
+        ? { type: 'pat', token: { value: credentials.auth.pat } satisfies Secret }
+        : {
+            type: 'app',
+            appId: credentials.auth.appId,
+            privateKey: { value: credentials.auth.privateKey } satisfies Secret,
+            ...(credentials.auth.installationId !== undefined
+              ? { installationId: credentials.auth.installationId }
+              : {}),
+          },
+    webhookSecret: { value: credentials.webhookSecret } satisfies Secret,
+  }
+  backend.writeChannelsSync(channels as Channels)
+
+  await appendGithubMatchRules(cwd, credentials.repos)
 }
 
 async function appendGithubSecrets(
