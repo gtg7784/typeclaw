@@ -23,13 +23,14 @@ function report(opts: {
     firstAt: 0,
     lastAt: 0,
     models: [],
+    originKind: 'unknown' as const,
   }))
   return {
     generatedAt: 0,
     agentDir: opts.agentDir,
     range: { since: null, until: null },
     timezone: 'UTC',
-    aggregation: { total, byDay: [], byModel: [], bySession },
+    aggregation: { total, byDay: [], byModel: [], bySession, byOrigin: [] },
     warnings: opts.warnings ?? [],
   }
 }

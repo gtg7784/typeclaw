@@ -6,7 +6,7 @@ import { formatJson, formatReport } from '@/usage/report'
 
 import { parseSince, parseUntil, USAGE_COMMON_ARGS } from './usage-args'
 
-const SUBCOMMANDS = ['daily', 'session', 'models'] as const
+const SUBCOMMANDS = ['daily', 'session', 'models', 'origin'] as const
 type Subcommand = (typeof SUBCOMMANDS)[number]
 type View = 'summary' | Subcommand
 
@@ -18,6 +18,13 @@ const COMMON_ARGS = {
   },
 }
 
+// Captured by the parent's `setup` hook (which citty runs BEFORE the matched
+// subcommand's `run`, with the full parent-level argv parsed). Subcommands
+// read this in their own `run` to recover global options like `--since` that
+// appeared before the subcommand name. Single-instance CLI processes only —
+// no concurrency.
+let parentRunArgs: Record<string, unknown> | undefined
+
 const subcommand = (view: View, description: string) =>
   defineCommand({
     meta: { name: view, description },
@@ -26,7 +33,7 @@ const subcommand = (view: View, description: string) =>
       ...(view === 'session' ? { limit: { type: 'string' as const, description: 'max sessions (default 20)' } } : {}),
     },
     async run({ args }) {
-      await emit(view, args)
+      await emit(view, mergeParentArgs(args))
     },
   })
 
@@ -36,10 +43,14 @@ export const usageCommand = defineCommand({
     description: 'report LLM token usage and cost for this agent folder',
   },
   args: COMMON_ARGS,
+  setup({ args }) {
+    parentRunArgs = args as unknown as Record<string, unknown>
+  },
   subCommands: {
     daily: subcommand('daily', 'one row per calendar day'),
     session: subcommand('session', 'top sessions by cost'),
     models: subcommand('models', 'one row per provider/model'),
+    origin: subcommand('origin', 'one row per session origin (tui/cron/channel/subagent)'),
   },
   async run({ args }) {
     // citty invokes both the matched subcommand's `run` and the parent's
@@ -49,6 +60,23 @@ export const usageCommand = defineCommand({
     await emit('summary', args)
   },
 })
+
+// citty's subcommand `run` only sees args that came AFTER the subcommand
+// name (the child's rawArgs is pre-sliced), so `usage --since=X origin` would
+// silently drop `--since` despite the help text advertising it as a global
+// option. The parent's `setup` runs first with the full parent-level parse
+// (which includes everything: global options + subcommand options merged),
+// so we capture it there and merge it as a fallback under any explicitly-set
+// child arg. Child-wins so `usage --since=A origin --since=B` still honours B.
+function mergeParentArgs(childArgs: Record<string, unknown>): Record<string, unknown> {
+  if (parentRunArgs === undefined) return childArgs
+  const merged: Record<string, unknown> = { ...parentRunArgs }
+  for (const key of Object.keys(childArgs)) {
+    const v = childArgs[key]
+    if (v !== undefined && v !== '' && v !== false) merged[key] = v
+  }
+  return merged
+}
 
 async function emit(view: View, args: Record<string, unknown>): Promise<void> {
   const cwdArg = typeof args.cwd === 'string' && args.cwd.length > 0 ? args.cwd : process.cwd()

@@ -29,6 +29,7 @@ import { lookAtTool } from './multimodal'
 import { resolveBuiltinToolRefs, wrapPluginTool, wrapSystemAgentTool, wrapSystemTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
+import { SESSION_META_CUSTOM_TYPE, sessionMetaPayload } from './session-meta'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
 import { DEFAULT_SYSTEM_PROMPT, renderRuntimeBlock } from './system-prompt'
 import {
@@ -230,6 +231,25 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   // that ID to distinguish the originating session from siblings on the
   // container-restarting broadcast.
   const sessionManager = options.sessionManager ?? SessionManager.inMemory()
+
+  // Stamp a one-shot custom entry naming the session's origin kind so
+  // `typeclaw usage` can bucket tokens by tui/cron/channel/subagent. Pi's
+  // `appendCustomEntry` is the blessed extension point: the entry persists
+  // into the session JSONL alongside messages, does NOT participate in LLM
+  // context, and pi handles file-creation timing — the entry lands after the
+  // session header on first flush, so `SessionManager.open()` keeps reading
+  // a canonical session file. Skipped for reopened sessions (a prior stamp
+  // is already in `getEntries()`) so usage attribution stays stable across
+  // restarts. Also skipped when origin is unknown (inMemory subagents) or
+  // when the manager is not persisted.
+  if (options.origin !== undefined && sessionManager.getSessionFile() !== undefined) {
+    const alreadyStamped = sessionManager
+      .getEntries()
+      .some((e) => e.type === 'custom' && e.customType === SESSION_META_CUSTOM_TYPE)
+    if (!alreadyStamped) {
+      sessionManager.appendCustomEntry(SESSION_META_CUSTOM_TYPE, sessionMetaPayload(options.origin))
+    }
+  }
 
   const customSystemTools =
     options.customTools !== undefined

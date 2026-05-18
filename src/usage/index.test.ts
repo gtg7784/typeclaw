@@ -457,6 +457,267 @@ describe('formatReport cache hit rate column', () => {
   /* eslint-enable no-control-regex */
 })
 
+describe('runUsage origin attribution (typeclaw.session-meta custom entry)', () => {
+  // given: helper that writes a pi-shaped session JSONL whose first non-header
+  // entry is a typeclaw.session-meta custom entry. Mirrors the on-disk format
+  // produced by sessionManager.appendCustomEntry('typeclaw.session-meta', ...).
+  async function writeWithOrigin(sessionId: string, originKind: string, lines: object[]): Promise<void> {
+    const sessionsDir = join(agentDir, 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const ts = new Date('2026-05-10T00:00:00Z').toISOString().replace(/[:.]/g, '-')
+    const file = join(sessionsDir, `${ts}_${sessionId}.jsonl`)
+    const sessionHeader = { type: 'session', version: 3, id: sessionId, timestamp: ts, cwd: agentDir }
+    const meta = {
+      type: 'custom',
+      customType: 'typeclaw.session-meta',
+      data: { origin: { kind: originKind } },
+      id: `meta-${sessionId}`,
+      parentId: null,
+      timestamp: ts,
+    }
+    await writeFile(file, [sessionHeader, meta, ...lines].map((l) => JSON.stringify(l)).join('\n'))
+  }
+
+  test('attributes tokens to the origin kind from the session-meta line', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeWithOrigin('tui00001', 'tui', [
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 100, output: 10, cost: 0.01 }),
+    ])
+    await writeWithOrigin('cron0001', 'cron', [
+      assistantEntry({ id: 'm2', ts, provider: 'p', model: 'x', input: 200, output: 20, cost: 0.02 }),
+    ])
+    await writeWithOrigin('chan0001', 'channel', [
+      assistantEntry({ id: 'm3', ts, provider: 'p', model: 'x', input: 300, output: 30, cost: 0.03 }),
+    ])
+    await writeWithOrigin('suba0001', 'subagent', [
+      assistantEntry({ id: 'm4', ts, provider: 'p', model: 'x', input: 50, output: 5, cost: 0.005 }),
+    ])
+    // legacy file with no session-meta
+    await writeSessionFile('lega0001', [
+      assistantEntry({ id: 'm5', ts, provider: 'p', model: 'x', input: 10, output: 1, cost: 0.001 }),
+    ])
+
+    const report = await runUsage({ agentDir })
+    const byOrigin = Object.fromEntries(report.aggregation.byOrigin.map((o) => [o.originKind, o]))
+    expect(byOrigin.tui?.cost).toBeCloseTo(0.01, 5)
+    expect(byOrigin.cron?.cost).toBeCloseTo(0.02, 5)
+    expect(byOrigin.channel?.cost).toBeCloseTo(0.03, 5)
+    expect(byOrigin.subagent?.cost).toBeCloseTo(0.005, 5)
+    expect(byOrigin.unknown?.cost).toBeCloseTo(0.001, 5)
+  })
+
+  test('session-meta with unknown kind falls back to unknown bucket', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeWithOrigin('weird001', 'mystery-future-kind', [
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 10, output: 1, cost: 0.001 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const buckets = report.aggregation.byOrigin.map((o) => o.originKind)
+    expect(buckets).toEqual(['unknown'])
+  })
+
+  test('first-stamp-wins: a later session-meta in the same file is ignored', async () => {
+    // given: a file with two session-meta entries (rare, but possible if a
+    // session is somehow re-stamped) — first one should win to keep
+    // attribution stable across session resumes
+    const sessionsDir = join(agentDir, 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    const isoTs = new Date('2026-05-10T00:00:00Z').toISOString().replace(/[:.]/g, '-')
+    const file = join(sessionsDir, `${isoTs}_doublest.jsonl`)
+    const header = { type: 'session', version: 3, id: 'doublest', timestamp: isoTs, cwd: agentDir }
+    const meta1 = {
+      type: 'custom',
+      customType: 'typeclaw.session-meta',
+      data: { origin: { kind: 'tui' } },
+      id: 'm1',
+      parentId: null,
+      timestamp: isoTs,
+    }
+    const meta2 = {
+      type: 'custom',
+      customType: 'typeclaw.session-meta',
+      data: { origin: { kind: 'cron' } },
+      id: 'm2',
+      parentId: 'm1',
+      timestamp: isoTs,
+    }
+    const assistant = assistantEntry({ id: 'a1', ts, provider: 'p', model: 'x', input: 100, output: 10, cost: 0.05 })
+    await writeFile(file, [header, meta1, meta2, assistant].map((l) => JSON.stringify(l)).join('\n'))
+
+    const report = await runUsage({ agentDir })
+    expect(report.aggregation.byOrigin).toHaveLength(1)
+    expect(report.aggregation.byOrigin[0]?.originKind).toBe('tui')
+  })
+
+  test('stamps originKind onto bySession rows for downstream rendering', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeWithOrigin('tui99999', 'tui', [
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 1000, output: 100, cost: 0.5 }),
+    ])
+    const report = await runUsage({ agentDir })
+    expect(report.aggregation.bySession[0]?.originKind).toBe('tui')
+  })
+
+  test('honors since/until window for origin aggregation', async () => {
+    const tEarly = new Date('2026-05-01T00:00:00').getTime()
+    const tLate = new Date('2026-05-20T00:00:00').getTime()
+    await writeWithOrigin('range002', 'channel', [
+      assistantEntry({ id: 'm1', ts: tEarly, provider: 'p', model: 'x', input: 100, output: 10, cost: 0.01 }),
+      assistantEntry({ id: 'm2', ts: tLate, provider: 'p', model: 'x', input: 200, output: 20, cost: 0.02 }),
+    ])
+    const inRange = await runUsage({ agentDir, since: tLate })
+    expect(inRange.aggregation.byOrigin).toHaveLength(1)
+    expect(inRange.aggregation.byOrigin[0]?.originKind).toBe('channel')
+    expect(inRange.aggregation.byOrigin[0]?.cost).toBeCloseTo(0.02, 5)
+  })
+
+  test('session counts per origin bucket dedupe by session id', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeWithOrigin('chan_a01', 'channel', [
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 10, output: 1, cost: 0.001 }),
+      assistantEntry({ id: 'm2', ts: ts + 1, provider: 'p', model: 'x', input: 10, output: 1, cost: 0.001 }),
+    ])
+    await writeWithOrigin('chan_b01', 'channel', [
+      assistantEntry({ id: 'm3', ts, provider: 'p', model: 'x', input: 10, output: 1, cost: 0.001 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const channel = report.aggregation.byOrigin.find((o) => o.originKind === 'channel')!
+    expect(channel.messageCount).toBe(3)
+    expect(channel.sessionCount).toBe(2)
+  })
+})
+
+describe('formatReport origin view', () => {
+  async function writeWithOrigin(sessionId: string, originKind: string, lines: object[]): Promise<void> {
+    const sessionsDir = join(agentDir, 'sessions')
+    await mkdir(sessionsDir, { recursive: true })
+    const ts = new Date('2026-05-10T00:00:00Z').toISOString().replace(/[:.]/g, '-')
+    const file = join(sessionsDir, `${ts}_${sessionId}.jsonl`)
+    const sessionHeader = { type: 'session', version: 3, id: sessionId, timestamp: ts, cwd: agentDir }
+    const meta = {
+      type: 'custom',
+      customType: 'typeclaw.session-meta',
+      data: { origin: { kind: originKind } },
+      id: `meta-${sessionId}`,
+      parentId: null,
+      timestamp: ts,
+    }
+    await writeFile(file, [sessionHeader, meta, ...lines].map((l) => JSON.stringify(l)).join('\n'))
+  }
+
+  test('origin view renders a header and origin labels', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeWithOrigin('tui_a', 'tui', [
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 100, output: 10, cost: 0.01 }),
+    ])
+    await writeWithOrigin('cron_a', 'cron', [
+      assistantEntry({ id: 'm2', ts, provider: 'p', model: 'x', input: 200, output: 20, cost: 0.02 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'origin' })
+    expect(out).toMatch(/USAGE BY ORIGIN/)
+    expect(out).toMatch(/tui/)
+    expect(out).toMatch(/cron/)
+  })
+
+  test('origin view renders a Sessions column with per-row counts (no decorative bar)', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeWithOrigin('tui_b', 'tui', [
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 100, output: 10, cost: 0.5 }),
+    ])
+    await writeWithOrigin('cron_b', 'cron', [
+      assistantEntry({ id: 'm2', ts, provider: 'p', model: 'x', input: 200, output: 20, cost: 0.05 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'origin' })
+    expect(out).toMatch(/Sessions/)
+    expect(out).not.toMatch(/Cost share/)
+    expect(out).not.toMatch(/▰|▱/)
+  })
+
+  test('summary view includes a By origin section when origin data is present', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeWithOrigin('chan_c', 'channel', [
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 100, output: 10, cost: 0.01 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'summary' })
+    expect(out).toMatch(/By origin/)
+  })
+
+  test('summary view renders a daily sparkline trend when ≥2 days are present', async () => {
+    const ts1 = new Date('2026-05-10T10:00:00').getTime()
+    const ts2 = new Date('2026-05-11T10:00:00').getTime()
+    await writeWithOrigin('trend_a', 'tui', [
+      assistantEntry({ id: 'm1', ts: ts1, provider: 'p', model: 'x', input: 100, output: 10, cost: 0.01 }),
+      assistantEntry({ id: 'm2', ts: ts2, provider: 'p', model: 'x', input: 500, output: 50, cost: 0.5 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'summary' })
+    expect(out).toMatch(/Trend \(cost\):/)
+    expect(out).toMatch(/[▁▂▃▄▅▆▇█]/)
+  })
+
+  test('summary view omits the sparkline when only a single day of data exists', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeWithOrigin('trend_b', 'tui', [
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 100, output: 10, cost: 0.01 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'summary' })
+    expect(out).not.toMatch(/Trend \(cost\):/)
+  })
+
+  test('session view prepends an origin glyph to each row label', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    // Session id must not contain underscores: sessionIdFromBasename splits on
+    // the last `_`, so `tui_glyph` would collapse into `glyph` and collide.
+    await writeWithOrigin('tuiglyph', 'tui', [
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 100, output: 10, cost: 0.5 }),
+    ])
+    await writeWithOrigin('cronglyph', 'cron', [
+      assistantEntry({ id: 'm2', ts, provider: 'p', model: 'x', input: 200, output: 20, cost: 0.4 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'session' })
+    expect(out).toMatch(/▶/)
+    expect(out).toMatch(/⏱/)
+  })
+
+  test('empty-state origin view renders an explicit message', async () => {
+    const report = await runUsage({ agentDir })
+    const out = formatReport(report, { view: 'origin' })
+    expect(out).toMatch(/USAGE BY ORIGIN/)
+    expect(out).toMatch(/No assistant turns/i)
+  })
+
+  test('origin view fits within narrow terminals (no bar to drop, rows stay compact)', async () => {
+    const ts = new Date('2026-05-10T10:00:00').getTime()
+    await writeWithOrigin('narr_a', 'tui', [
+      assistantEntry({ id: 'm1', ts, provider: 'p', model: 'x', input: 100, output: 10, cost: 0.5 }),
+    ])
+    await writeWithOrigin('narr_b', 'cron', [
+      assistantEntry({ id: 'm2', ts, provider: 'p', model: 'x', input: 200, output: 20, cost: 0.1 }),
+    ])
+    const report = await runUsage({ agentDir })
+    const narrow = formatReport(report, { view: 'origin', terminalWidth: 60 })
+    // Table rows (Item/header/data/Total) — stripped of ANSI — must fit
+    // within terminalWidth. The leading section title line is excluded:
+    // titles include the full agentDir path, which the renderer is not
+    // expected to truncate (a TTY wraps it naturally on display).
+    /* eslint-disable no-control-regex -- ANSI escape sequences are deliberately matched here. */
+    const tableLines = narrow
+      .replace(/\u001b\[[0-9;]*m/g, '')
+      .split('\n')
+      .filter((l) => /^(Item|▶|⏱|#|↳|\?|Total)/.test(l))
+    /* eslint-enable no-control-regex */
+    expect(tableLines.length).toBeGreaterThan(0)
+    const maxLen = Math.max(...tableLines.map((l) => l.length))
+    expect(maxLen).toBeLessThanOrEqual(60)
+  })
+})
+
 describe('formatReport Sent column (provider-billed volume = input + cacheRead)', () => {
   const ts = new Date('2026-05-10T10:00:00').getTime()
 

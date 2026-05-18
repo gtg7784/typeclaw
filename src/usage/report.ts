@@ -1,12 +1,13 @@
 import { styleText } from 'node:util'
 
-import type { ModelUsage, UsageTotals } from './aggregate'
+import type { ModelUsage, OriginUsage, UsageTotals } from './aggregate'
 import { formatCacheHitRate, formatCost, formatTokens, isoDay } from './format'
 import type { UsageReport } from './index'
+import type { OriginKind } from './scan'
 
 export type FormatOptions = {
   useColor?: boolean
-  view?: 'summary' | 'daily' | 'session' | 'models'
+  view?: 'summary' | 'daily' | 'session' | 'models' | 'origin'
   limit?: number
   // Terminal width hint used to size the elastic Item column. Omit to render
   // without truncation (tests, piped output where columns is undefined).
@@ -26,6 +27,8 @@ export function formatReport(report: UsageReport, opts: FormatOptions = {}): str
       return renderSessions(report, ctx, opts.limit ?? 20)
     case 'models':
       return renderModels(report, ctx, opts.limit)
+    case 'origin':
+      return renderOrigin(report, ctx)
   }
 }
 
@@ -58,10 +61,18 @@ function renderSummary(report: UsageReport, ctx: RenderCtx): string {
 
   if (aggregation.byDay.length > 0) {
     sections.push('')
+    const trend = renderDailyTrend(aggregation.byDay, ctx)
+    if (trend !== null) sections.push(trend, '')
     sections.push(header('By day (most recent first)', ctx))
     const recent = aggregation.byDay.slice(-7).reverse()
     const dayRows = recent.map((d) => ({ label: d.date, totals: d as UsageTotals }))
     sections.push(renderTotalsTable(dayRows, ctx, { total: totalOfRows(dayRows) }))
+  }
+
+  if (aggregation.byOrigin.length > 0) {
+    sections.push('')
+    sections.push(header('By origin', ctx))
+    sections.push(renderOriginTable(aggregation.byOrigin, ctx))
   }
 
   if (aggregation.byModel.length > 0) {
@@ -84,6 +95,79 @@ function renderSummary(report: UsageReport, ctx: RenderCtx): string {
   return sections.join('\n')
 }
 
+function renderOrigin(report: UsageReport, ctx: RenderCtx): string {
+  const sections: string[] = [sectionTitle('USAGE BY ORIGIN', report.agentDir, ctx)]
+  if (report.aggregation.byOrigin.length === 0) {
+    sections.push(dim('No assistant turns recorded yet.', ctx))
+    return sections.join('\n')
+  }
+  sections.push(renderOriginTable(report.aggregation.byOrigin, ctx))
+  return sections.join('\n')
+}
+
+// Single source of truth for the origin breakdown table used by both the
+// summary view and the dedicated `usage origin` subcommand. Matches the
+// column shape of renderTotalsTable's other callers (byDay, byModel) plus
+// one extra column for session count — deliberately plain numbers rather
+// than a proportional bar, since the Cost column already lets the eye sort
+// rows by spend and an extra "share of max" bar adds no information that
+// isn't already in the report.
+function renderOriginTable(byOrigin: readonly OriginUsage[], ctx: RenderCtx): string {
+  const rows = byOrigin.map((o) => ({
+    label: renderOriginLabel(o.originKind, ctx),
+    totals: o as UsageTotals,
+    extra: String(o.sessionCount),
+    extraTruncatable: false,
+  }))
+  return renderTotalsTable(rows, ctx, {
+    extraHeader: 'Sessions',
+    total: totalOfRows(rows),
+  })
+}
+
+// Glyph + colored label for each origin kind. The glyphs are chosen to be
+// instantly readable in a dense table: ▶ for TUI (interactive), ⏱ for cron
+// (time-triggered), # for channel (chat-room sigil), ↳ for subagent (child),
+// ? for unknown. ASCII fallbacks are not provided — the codebase already
+// requires unicode for `…` `●` `✓` etc. on other commands.
+function renderOriginLabel(kind: OriginKind, ctx: RenderCtx): string {
+  switch (kind) {
+    case 'tui':
+      return `${color('cyan', '▶', ctx)} ${'tui'}`
+    case 'cron':
+      return `${color('magenta', '⏱', ctx)} ${'cron'}`
+    case 'channel':
+      return `${color('green', '#', ctx)} ${'channel'}`
+    case 'subagent':
+      return `${color('yellow', '↳', ctx)} ${'subagent'}`
+    case 'unknown':
+      return `${dim('?', ctx)} ${dim('unknown', ctx)}`
+  }
+}
+
+// Sparkline trend across the full byDay range, scaled to the row's max cost.
+// Returns null when there are fewer than 2 days (a single point conveys no
+// trend information). The 8-level Unicode block scale `▁▂▃▄▅▆▇█` lets us
+// pack ~80 days into a one-line glance — wider than any table-based view
+// could fit at terminal widths under ~160 columns.
+const SPARK_GLYPHS = '▁▂▃▄▅▆▇█'
+
+function renderDailyTrend(byDay: readonly { date: string; cost: number }[], ctx: RenderCtx): string | null {
+  if (byDay.length < 2) return null
+  const costs = byDay.map((d) => d.cost)
+  const max = costs.reduce((m, c) => Math.max(m, c), 0)
+  if (max <= 0) return null
+  const spark = costs
+    .map((c) => {
+      const idx = Math.min(SPARK_GLYPHS.length - 1, Math.max(0, Math.round((c / max) * (SPARK_GLYPHS.length - 1))))
+      return SPARK_GLYPHS[idx]!
+    })
+    .join('')
+  const first = byDay[0]!.date
+  const last = byDay[byDay.length - 1]!.date
+  return `${dim('Trend (cost):', ctx)} ${color('cyan', spark, ctx)}  ${dim(`${first} → ${last}`, ctx)}`
+}
+
 function renderDaily(report: UsageReport, ctx: RenderCtx, limit: number | undefined): string {
   const days = limit !== undefined ? report.aggregation.byDay.slice(-limit) : report.aggregation.byDay
   if (days.length === 0) return dim('No usage in range.', ctx)
@@ -100,8 +184,9 @@ function renderSessions(report: UsageReport, ctx: RenderCtx, limit: number): str
   const rows = sessions.map((s) => {
     const firstModel = s.models[0]
     const extra = s.models.length > 1 ? `${s.models.length} models` : modelIdFromKey(firstModel)
+    const originGlyph = originGlyphOnly(s.originKind, ctx)
     return {
-      label: `${color('magenta', s.sessionId.slice(0, 12), ctx)}  ${dim(isoDay(s.firstAt), ctx)}`,
+      label: `${originGlyph}  ${color('magenta', s.sessionId.slice(0, 12), ctx)}  ${dim(isoDay(s.firstAt), ctx)}`,
       totals: s as UsageTotals,
       extra,
       extraTruncatable: s.models.length === 1,
@@ -111,6 +196,21 @@ function renderSessions(report: UsageReport, ctx: RenderCtx, limit: number): str
     sectionTitle(`USAGE BY SESSION`, report.agentDir, ctx, `(top ${limit} by cost)`),
     renderTotalsTable(rows, ctx, { extraHeader: 'Model', total: totalOfRows(rows) }),
   ].join('\n')
+}
+
+function originGlyphOnly(kind: OriginKind, ctx: RenderCtx): string {
+  switch (kind) {
+    case 'tui':
+      return color('cyan', '▶', ctx)
+    case 'cron':
+      return color('magenta', '⏱', ctx)
+    case 'channel':
+      return color('green', '#', ctx)
+    case 'subagent':
+      return color('yellow', '↳', ctx)
+    case 'unknown':
+      return dim('?', ctx)
+  }
 }
 
 function renderModels(report: UsageReport, ctx: RenderCtx, limit: number | undefined): string {
