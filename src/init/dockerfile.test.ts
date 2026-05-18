@@ -95,7 +95,9 @@ describe('buildDockerfile feature toggles', () => {
 
   test('all toggles off: only baseline packages remain (incl. the egress-shim deps that ship unconditionally)', () => {
     const pkgs = aptPackages(
-      buildDockerfile(dockerfileSchema.parse({ tmux: false, gh: false, python: false, ffmpeg: false })),
+      buildDockerfile(
+        dockerfileSchema.parse({ tmux: false, gh: false, python: false, ffmpeg: false, cjkFonts: false }),
+      ),
     )
     expect(pkgs).toEqual(['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux'])
   })
@@ -144,7 +146,7 @@ describe('Chrome runtime deps (amd64)', () => {
     for (const p of CHROME_RUNTIME_APT_PACKAGES_AMD64) expect(pkgs).toContain(p)
   })
 
-  test('amd64 branch does not install fonts (the reported failure is linker-level, not glyph rendering; CJK fonts cost ~50MB+ for no launch impact)', () => {
+  test('amd64 else-branch (Chrome runtime libs) does not install fonts — fonts are not a launch-time linker concern, they layer in via the cjkFonts toggle', () => {
     const pkgs = amd64ElseBranchPackages(buildDockerfile())
     expect(pkgs.some((p) => p.startsWith('fonts-'))).toBe(false)
   })
@@ -162,6 +164,42 @@ describe('Chrome runtime deps (amd64)', () => {
     expect(layer2Idx).toBeGreaterThan(-1)
     expect(layer4Idx).toBeGreaterThan(-1)
     expect(layer2Idx).toBeLessThan(layer4Idx)
+  })
+})
+
+describe('cjkFonts toggle', () => {
+  test('default is true: fonts-noto-cjk lands in the main apt-get install line so CJK glyphs render in Chromium screenshots/PDFs out of the box', () => {
+    const pkgs = aptPackages(buildDockerfile())
+    expect(pkgs).toContain('fonts-noto-cjk')
+  })
+
+  test('cjkFonts: false omits fonts-noto-cjk entirely — opt-out actually saves the ~56MB layer', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cjkFonts: false }))
+    expect(out).not.toContain('fonts-noto-cjk')
+  })
+
+  test('cjkFonts default lives on the toggle apt layer, not the Chrome-runtime-libs branch (so opt-out works without re-architecting the launch-deps invariant)', () => {
+    const out = buildDockerfile()
+    expect(aptPackages(out)).toContain('fonts-noto-cjk')
+    expect(amd64ElseBranchPackages(out)).not.toContain('fonts-noto-cjk')
+    expect(arm64IfBranchPackages(out)).not.toContain('fonts-noto-cjk')
+  })
+
+  test('versioned per-agent Dockerfile (base-image-pinning): cjkFonts: true emits fonts-noto-cjk in the per-agent toggle layer (NOT baked into the base image, so opt-out is honored regardless of base-image vintage)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cjkFonts: true }), { baseImageVersion: '0.1.1' })
+    const aptInstallMatch = out.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+)/)
+    expect(aptInstallMatch).not.toBeNull()
+    const pkgs = aptInstallMatch![1]!.split(/\s+/).filter(Boolean)
+    expect(pkgs).toContain('fonts-noto-cjk')
+  })
+
+  test('versioned per-agent Dockerfile (base-image-pinning): cjkFonts: false does not add fonts-noto-cjk on top of the base image', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cjkFonts: false }), { baseImageVersion: '0.1.1' })
+    expect(out).not.toContain('fonts-noto-cjk')
+  })
+
+  test('base Dockerfile does NOT install fonts-noto-cjk — fonts ride the per-agent toggle apt layer, never the shared base image, so cjkFonts: false truly skips the ~56MB even on GHCR-base agents', () => {
+    expect(buildBaseDockerfile()).not.toContain('fonts-noto-cjk')
   })
 })
 
@@ -316,19 +354,25 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
 
   test('with all toggles off: emits no apt install RUN block at all (zero-cost per-agent rebuild)', () => {
     // given: every toggle disabled, so no per-agent apt work is needed
-    const out = buildDockerfile(dockerfileSchema.parse({ tmux: false, gh: false, python: false, ffmpeg: false }), {
-      baseImageVersion: '0.1.1',
-    })
+    const out = buildDockerfile(
+      dockerfileSchema.parse({ tmux: false, gh: false, python: false, ffmpeg: false, cjkFonts: false }),
+      {
+        baseImageVersion: '0.1.1',
+      },
+    )
 
     // then: zero apt-get blocks
     expect(countRunBlocksMatching(out, /apt-get/)).toBe(0)
   })
 
   test('with toggles on: emits exactly one apt install RUN block containing only toggle packages', () => {
-    // given: gh + tmux enabled, python + ffmpeg disabled
-    const out = buildDockerfile(dockerfileSchema.parse({ gh: true, tmux: true, python: false, ffmpeg: false }), {
-      baseImageVersion: '0.1.1',
-    })
+    // given: gh + tmux enabled, python + ffmpeg + cjkFonts disabled
+    const out = buildDockerfile(
+      dockerfileSchema.parse({ gh: true, tmux: true, python: false, ffmpeg: false, cjkFonts: false }),
+      {
+        baseImageVersion: '0.1.1',
+      },
+    )
 
     // then: there's an apt install line with exactly the toggle packages
     const aptInstallMatch = out.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+)/)

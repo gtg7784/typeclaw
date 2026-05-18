@@ -320,7 +320,7 @@ describe('networkSchema', () => {
 })
 
 describe('docker.file schema', () => {
-  const FULL_DEFAULTS = { ffmpeg: false, gh: true, python: true, tmux: true, append: [] }
+  const FULL_DEFAULTS = { ffmpeg: false, gh: true, python: true, tmux: true, cjkFonts: true, append: [] }
 
   test('defaults to a fully-populated object when omitted (omitted == empty object)', () => {
     const omitted = configSchema.parse({ models: { default: VALID_MODEL } })
@@ -357,8 +357,29 @@ describe('docker.file schema', () => {
       gh: '2.40.0',
       python: true,
       tmux: false,
+      cjkFonts: true,
       append: [],
     })
+  })
+
+  test('cjkFonts defaults to true (Chromium renders CJK glyphs correctly out of the box; opt-out saves ~56MB)', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
+    expect(parsed.docker.file.cjkFonts).toBe(true)
+  })
+
+  test('cjkFonts: false is honored and merges with other defaults', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      docker: { file: { cjkFonts: false } },
+    })
+    expect(parsed.docker.file.cjkFonts).toBe(false)
+    expect(parsed.docker.file.python).toBe(true)
+  })
+
+  test('cjkFonts is boolean-only (the package is a metapackage tracking upstream Noto; no meaningful apt pin)', () => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, docker: { file: { cjkFonts: '2.0' } } }),
+    ).toThrow()
   })
 
   test('python is boolean-only (string version is not a meaningful apt pin for the python3 meta-package)', () => {

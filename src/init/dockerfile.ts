@@ -283,9 +283,11 @@ RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
 // names are the trixie-renamed variants from the 64-bit time_t ABI
 // transition; SONAMEs (libglib-2.0.so.0 etc.) are unchanged. Packages
 // without t64 here have no t64 sibling on trixie — verified against
-// packages.debian.org/trixie. Fonts are intentionally omitted: the
-// reported failure is launch-time linker errors, not rendering glyphs;
-// font packages (esp. fonts-noto-cjk) cost ~50MB+ for no launch impact.
+// packages.debian.org/trixie. Fonts are intentionally omitted from this
+// list: the failure these packages address is launch-time linker errors,
+// not rendering glyphs. CJK glyph rendering is a separate concern handled
+// by the `cjkFonts` toggle (see CJK_FONTS_PACKAGE / APT_FEATURES below),
+// which layers `fonts-noto-cjk` on top via the toggle apt install path.
 export const CHROME_RUNTIME_APT_PACKAGES_AMD64 = [
   'libasound2t64',
   'libatk-bridge2.0-0t64',
@@ -310,17 +312,26 @@ export const CHROME_RUNTIME_APT_PACKAGES_AMD64 = [
   'libxrandr2',
 ] as const
 
+// `fonts-noto-cjk` provides CJK glyphs for Chromium-rendered output
+// (screenshots, page.pdf()). Without it CJK text in agent-browser output
+// renders as `.notdef` tofu boxes. Treated as a toggle apt package (like
+// gh/tmux) rather than a base-image staple so users with `cjkFonts: false`
+// genuinely skip the ~56MB layer; baking into the base image would force
+// every GHCR-base user to ship the fonts regardless of their opt-out.
+export const CJK_FONTS_PACKAGE = 'fonts-noto-cjk'
+
 type AptFeature = {
   toAptArgs: (toggle: DockerfileFeatureToggle) => string[]
 }
 
-const APT_FEATURES: Record<'ffmpeg' | 'gh' | 'tmux' | 'python', AptFeature> = {
+const APT_FEATURES: Record<'ffmpeg' | 'gh' | 'tmux' | 'python' | 'cjkFonts', AptFeature> = {
   ffmpeg: { toAptArgs: (v) => singlePackageArgs('ffmpeg', v) },
   gh: { toAptArgs: (v) => singlePackageArgs('gh', v) },
   tmux: { toAptArgs: (v) => singlePackageArgs('tmux', v) },
   python: {
     toAptArgs: (v) => (v === true ? ['python3', 'python3-pip', 'python3-venv', 'python-is-python3'] : []),
   },
+  cjkFonts: { toAptArgs: (v) => (v === true ? [CJK_FONTS_PACKAGE] : []) },
 }
 
 export function buildDockerfile(
@@ -444,7 +455,7 @@ ${renderEntrypointShimLayer()}
 function renderToggleAptInstallLayer(toggleAptArgs: string[]): string {
   return `# Layer 1 (toggle apt install): packages requested via typeclaw.json
 # #docker.file toggles. Baseline + Chrome runtime libs are already in the
-# base image; this layer only adds gh/tmux/python/ffmpeg if enabled.
+# base image; this layer only adds gh/tmux/python/ffmpeg/cjkFonts if enabled.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
     --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \\
     apt-get update \\
@@ -570,12 +581,12 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
     fi`
 
 function defaultConfig(): DockerfileConfig {
-  return { ffmpeg: false, gh: true, python: true, tmux: true, append: [] }
+  return { ffmpeg: false, gh: true, python: true, tmux: true, cjkFonts: true, append: [] }
 }
 
 function collectToggleAptArgs(config: DockerfileConfig): string[] {
   const args: string[] = []
-  for (const key of ['ffmpeg', 'gh', 'python', 'tmux'] as const) {
+  for (const key of ['ffmpeg', 'gh', 'python', 'tmux', 'cjkFonts'] as const) {
     args.push(...APT_FEATURES[key].toAptArgs(config[key]))
   }
   return args
