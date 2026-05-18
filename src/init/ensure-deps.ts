@@ -15,24 +15,35 @@ export type EnsureDepsOptions = {
   cwd: string
   install?: InstallRunner
   detect?: (cwd: string) => Promise<readonly string[]>
+  // Skip the pre-install drift detection and run `bun install --force`
+  // unconditionally. Used by `typeclaw start --build` when the agent declares
+  // typeclaw via `file:` or `link:`: bun's file-dep cache otherwise treats
+  // unchanged name+version as a cache hit even after the source on disk has
+  // changed, so the post-install re-detect at the bottom (the silent-no-op
+  // guard) stays — `--force` does NOT excuse us from verifying the install
+  // actually populated the agent's node_modules/.
+  force?: boolean
 }
 
 export async function ensureDepsInstalled(options: EnsureDepsOptions): Promise<EnsureDepsResult> {
   const { cwd } = options
   const install = options.install ?? runBunInstall
   const detect = options.detect ?? detectMissingDeps
+  const force = options.force ?? false
 
-  const missing = await detect(cwd)
-  if (missing.length === 0) return { ok: true, installed: false }
+  const missing = force ? [] : await detect(cwd)
+  if (!force && missing.length === 0) return { ok: true, installed: false }
 
-  const result = await install(cwd)
+  const result = await install(cwd, { force })
   if (!result.ok) return { ok: false, reason: result.reason, missing }
 
   // Re-probe: `bun install` returns 0 even when a file:-linked dep's own
   // package.json is unreachable (it silently no-ops on the target). Without
   // this check, we'd proceed to `docker run` with a known-broken
   // node_modules/ and the agent would crash with a confusing in-container
-  // `Cannot find package 'x'`.
+  // `Cannot find package 'x'`. This guard remains under `force` too —
+  // --force bypasses the cache but does not guarantee the install actually
+  // landed every declared dep.
   const stillMissing = await detect(cwd)
   if (stillMissing.length > 0) {
     return {

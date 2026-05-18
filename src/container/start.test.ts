@@ -1658,6 +1658,143 @@ describe('start (composition)', () => {
     expect(calls.find((c) => c.args[0] === 'run')).toBeUndefined()
   })
 
+  test('forceBuild + file: typeclaw dep -> ensureDeps called with force=true', async () => {
+    // given: agent declares typeclaw via file: (the dev-mode case PR #243
+    // dogfooding wedged on)
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: 'file:../../workspace/typeclaw' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when: --build is passed
+    const ensureCalls: Array<{ force?: boolean } | undefined> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (_cwd, opts) => {
+        ensureCalls.push(opts)
+        return { ok: true, installed: false }
+      },
+      ...bypassVerify,
+    })
+
+    // then: ensureDeps was forced to bust bun's file-dep cache
+    expect(result.ok).toBe(true)
+    expect(ensureCalls).toEqual([{ force: true }])
+  })
+
+  test('forceBuild + link: typeclaw dep -> ensureDeps called with force=true', async () => {
+    // given: agent declares typeclaw via link: (the other dev-mode shape)
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: 'link:../../workspace/typeclaw' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when
+    const ensureCalls: Array<{ force?: boolean } | undefined> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (_cwd, opts) => {
+        ensureCalls.push(opts)
+        return { ok: true, installed: false }
+      },
+      ...bypassVerify,
+    })
+
+    // then
+    expect(result.ok).toBe(true)
+    expect(ensureCalls).toEqual([{ force: true }])
+  })
+
+  test('forceBuild + registry typeclaw dep -> ensureDeps called with force=false', async () => {
+    // given: agent is on a published registry version (the normal user case);
+    // the force-reinstall would be expensive AND meaningless because bun's
+    // registry-spec install path is already cache-correct
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.3.4' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when: --build is passed
+    const ensureCalls: Array<{ force?: boolean } | undefined> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (_cwd, opts) => {
+        ensureCalls.push(opts)
+        return { ok: true, installed: false }
+      },
+      ...bypassVerify,
+    })
+
+    // then: no force — registry users skip the expensive path
+    expect(result.ok).toBe(true)
+    expect(ensureCalls).toEqual([{ force: false }])
+  })
+
+  test('file: typeclaw dep WITHOUT forceBuild -> ensureDeps called with force=false', async () => {
+    // given: a dev-mode agent BUT --build was not passed (a routine
+    // `typeclaw start` after stop). Force-reinstall would impose a ~30s
+    // tax on every restart for no benefit; only --build implies "rebuild
+    // everything, bust the cache".
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: 'file:../../workspace/typeclaw' })
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when
+    const ensureCalls: Array<{ force?: boolean } | undefined> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: false,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (_cwd, opts) => {
+        ensureCalls.push(opts)
+        return { ok: true, installed: false }
+      },
+      ...bypassVerify,
+    })
+
+    // then
+    expect(result.ok).toBe(true)
+    expect(ensureCalls).toEqual([{ force: false }])
+  })
+
+  test('forceBuild + missing package.json -> ensureDeps called with force=false (no crash)', async () => {
+    // given: a malformed agent folder with no package.json (defensive case).
+    // The gate must degrade to "no force" rather than crash — the underlying
+    // ensureDeps will still surface the missing-deps failure downstream.
+    await writeDockerfile(root)
+    const { exec } = fakeDockerExec({ imageExists: true, container: { exists: false } })
+
+    // when
+    const ensureCalls: Array<{ force?: boolean } | undefined> = []
+    const result = await start({
+      cwd: root,
+      preferredHostPort: 8973,
+      forceBuild: true,
+      exec,
+      allocatePort: deterministicAllocator,
+      ensureDeps: async (_cwd, opts) => {
+        ensureCalls.push(opts)
+        return { ok: true, installed: false }
+      },
+      ...bypassVerify,
+    })
+
+    // then: no crash, no force
+    expect(result.ok).toBe(true)
+    expect(ensureCalls).toEqual([{ force: false }])
+  })
+
   test('auto-commits package.json and bun.lock atomically when both drift', async () => {
     await gitInit(root)
     await writeFile(join(root, '.gitignore'), buildGitignore())

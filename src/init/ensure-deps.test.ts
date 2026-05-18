@@ -230,4 +230,61 @@ describe('ensureDepsInstalled', () => {
     expect(installed).toBe(1)
     expect(result).toMatchObject({ ok: true, installed: true })
   })
+
+  test('force=true skips pre-install detect and calls install with force=true', async () => {
+    // given: drift-detect would report nothing missing (so the default path
+    // would skip install entirely). force=true should bypass that and run
+    // the install anyway.
+    let detectCalls = 0
+    const installOptsSeen: Array<{ force?: boolean } | undefined> = []
+    const result = await ensureDepsInstalled({
+      cwd: root,
+      force: true,
+      detect: async () => {
+        detectCalls++
+        return []
+      },
+      install: async (_cwd, opts) => {
+        installOptsSeen.push(opts)
+        return { ok: true }
+      },
+    })
+
+    expect(detectCalls).toBe(1)
+    expect(installOptsSeen).toEqual([{ force: true }])
+    expect(result).toMatchObject({ ok: true, installed: true })
+  })
+
+  test('force=false (default) does not pass force to the install runner', async () => {
+    const installOptsSeen: Array<{ force?: boolean } | undefined> = []
+    await ensureDepsInstalled({
+      cwd: root,
+      detect: async () => ['zod'],
+      install: async (_cwd, opts) => {
+        installOptsSeen.push(opts)
+        return { ok: true }
+      },
+    })
+
+    expect(installOptsSeen).toEqual([{ force: false }])
+  })
+
+  test('force=true still re-detects post-install (silent no-op guard preserved)', async () => {
+    // given: force install succeeds, but the deps the runner was supposed to
+    // populate did not appear. The re-detect guard must still fire under
+    // force, otherwise --force could hide a broken file:-linked dep that
+    // the runner silently no-op'd against.
+    await writePackageJson(root, { name: 'agent', dependencies: { typeclaw: '^0.1.0' } })
+
+    const result = await ensureDepsInstalled({
+      cwd: root,
+      force: true,
+      install: async () => ({ ok: true }),
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toContain('still missing')
+    expect(result.reason).toContain('typeclaw')
+  })
 })
