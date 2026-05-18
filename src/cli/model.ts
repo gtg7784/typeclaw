@@ -57,7 +57,8 @@ const setSub = defineCommand({
       process.exit(1)
     }
     done({
-      title: c.green(`Profile "${profile}" set to ${ref}.`),
+      title: c.green(`Profile "${profile}" set.`),
+      details: `${profile} → ${ref}`,
       hints: [{ label: 'If the agent is running:', command: 'typeclaw reload' }],
     })
   },
@@ -97,7 +98,8 @@ const addSub = defineCommand({
       process.exit(1)
     }
     done({
-      title: c.green(`Profile "${args.profile}" → ${ref}.`),
+      title: c.green(`Profile "${args.profile}" added.`),
+      details: `${args.profile} → ${ref}`,
       hints: [{ label: 'If the agent is running:', command: 'typeclaw reload' }],
     })
   },
