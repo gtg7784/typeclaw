@@ -368,24 +368,36 @@ describe('createGithubAdapter lifecycle', () => {
     type Hook = { id: number; config: { url: string } }
     let nextHookId = 1000
     const repoHooks: Hook[] = []
-    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
-      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
-      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') return Response.json(repoHooks)
-      if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST') {
-        const hook = { id: nextHookId++, config: { url: 'pending' } }
-        repoHooks.push(hook)
-        return Response.json({ id: hook.id }, { status: 201 })
-      }
-      const idMatch = url.match(/\/repos\/acme\/widgets\/hooks\/(\d+)$/)
-      if (idMatch && method === 'PATCH') return Response.json({ id: Number(idMatch[1]) })
-      if (idMatch && method === 'DELETE') {
-        const id = Number(idMatch[1])
-        const idx = repoHooks.findIndex((h) => h.id === id)
-        if (idx >= 0) repoHooks.splice(idx, 1)
-        return new Response('', { status: 204 })
-      }
-      return new Response('unexpected', { status: 500 })
-    })
+
+    const fetchImpl: typeof fetch = Object.assign(
+      async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+        const method = init?.method ?? 'GET'
+        if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+        if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') return Response.json(repoHooks)
+        if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST') {
+          const parsed = JSON.parse(String(init?.body)) as { config: { url: string } }
+          const hook: Hook = { id: nextHookId++, config: { url: parsed.config.url } }
+          repoHooks.push(hook)
+          return Response.json({ id: hook.id }, { status: 201 })
+        }
+        const idMatch = url.match(/\/repos\/acme\/widgets\/hooks\/(\d+)$/)
+        if (idMatch && method === 'PATCH') {
+          const parsed = JSON.parse(String(init?.body)) as { config: { url: string } }
+          const target = repoHooks.find((h) => h.id === Number(idMatch[1]))
+          if (target !== undefined) target.config.url = parsed.config.url
+          return Response.json({ id: Number(idMatch[1]) })
+        }
+        if (idMatch && method === 'DELETE') {
+          const id = Number(idMatch[1])
+          const idx = repoHooks.findIndex((h) => h.id === id)
+          if (idx >= 0) repoHooks.splice(idx, 1)
+          return new Response('', { status: 204 })
+        }
+        return new Response('unexpected', { status: 500 })
+      },
+      { preconnect: () => {} },
+    ) as typeof fetch
 
     let currentTunnelUrl = 'https://first.trycloudflare.com'
     const router1 = freshRouter()
@@ -402,8 +414,8 @@ describe('createGithubAdapter lifecycle', () => {
     await adapter1.start()
     expect(repoHooks.length).toBe(1)
     const firstHookId = repoHooks[0]!.id
+    expect(repoHooks[0]?.config.url).toBe('https://first.trycloudflare.com/typeclaw/v1/github/coder')
 
-    repoHooks[0] = { id: firstHookId, config: { url: 'https://first.trycloudflare.com/typeclaw/v1/github/coder' } }
     currentTunnelUrl = 'https://second.trycloudflare.com'
 
     const router2 = freshRouter()
@@ -421,6 +433,7 @@ describe('createGithubAdapter lifecycle', () => {
 
     expect(repoHooks.length).toBe(1)
     expect(repoHooks[0]?.id).toBe(firstHookId)
+    expect(repoHooks[0]?.config.url).toBe('https://second.trycloudflare.com/typeclaw/v1/github/coder')
 
     await adapter2.stop()
     expect(repoHooks.length).toBe(0)
