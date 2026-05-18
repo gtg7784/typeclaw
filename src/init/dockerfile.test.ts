@@ -257,7 +257,14 @@ describe('cloudflared layer', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ cloudflared: false }))
 
     expect(out).not.toContain('cloudflared-linux-')
-    expect(out).toBe(buildDockerfile())
+    expect(out).not.toContain('/usr/local/bin/cloudflared --version')
+  })
+
+  test('default config includes the cloudflared layer (default flipped to true so cloudflare-quick tunnels work out of the box)', () => {
+    const out = buildDockerfile()
+
+    expect(out).toContain(`${CLOUDFLARED_RELEASE_URL_BASE}/${CLOUDFLARED_VERSION}/cloudflared-linux-`)
+    expect(out).toContain('/usr/local/bin/cloudflared --version')
   })
 
   test('cloudflared layer appears after curl-impersonate and before the entrypoint shim', () => {
@@ -375,7 +382,10 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
     const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })
 
     // then: no curl-impersonate download, no agent-browser install, no Chrome download
-    expect(countRunBlocksMatching(out, /curl-impersonate|sha256sum/)).toBe(0)
+    // (cloudflared is intentionally NOT part of the prebuilt base image because it is
+    // gated by docker.file.cloudflared; the per-agent versioned Dockerfile still emits
+    // it when the toggle is on, so this regex deliberately excludes its sha256sum line)
+    expect(countRunBlocksMatching(out, /curl-impersonate/)).toBe(0)
     expect(countRunBlocksMatching(out, /bun install -g agent-browser/)).toBe(0)
     expect(countRunBlocksMatching(out, /agent-browser install --with-deps/)).toBe(0)
     expect(countRunBlocksMatching(out, /apt-keep-cache|Keep-Downloaded-Packages/)).toBe(0)

@@ -326,7 +326,7 @@ describe('docker.file schema', () => {
     python: true,
     tmux: true,
     cjkFonts: true,
-    cloudflared: false,
+    cloudflared: true,
     append: [],
   }
 
@@ -366,7 +366,7 @@ describe('docker.file schema', () => {
       python: true,
       tmux: false,
       cjkFonts: true,
-      cloudflared: false,
+      cloudflared: true,
       append: [],
     })
   })
@@ -391,9 +391,9 @@ describe('docker.file schema', () => {
     ).toThrow()
   })
 
-  test('cloudflared defaults to false so non-tunnel users skip the image layer', () => {
+  test('cloudflared defaults to true so cloudflare-quick tunnels work on the next start without a separate Dockerfile edit', () => {
     const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.docker.file.cloudflared).toBe(false)
+    expect(parsed.docker.file.cloudflared).toBe(true)
   })
 
   test('cloudflared: true is honored and merges with other defaults', () => {
