@@ -1,5 +1,6 @@
 import type { Stream } from '@/stream'
 
+import { createCloudflareQuickProvider } from './providers/cloudflare-quick'
 import { createExternalProvider } from './providers/external'
 import type { TunnelConfig, TunnelProviderHandle, TunnelState, TunnelUrlChangedPayload } from './types'
 
@@ -12,6 +13,8 @@ export type TunnelManagerLogger = {
 export type TunnelManagerOptions = {
   tunnels: TunnelConfig[]
   stream: Stream
+  resolveChannelUpstreamPort?: (channelName: string) => number | null
+  cloudflareQuickBinary?: string
   logger?: TunnelManagerLogger
 }
 
@@ -35,7 +38,12 @@ export function createTunnelManager(options: TunnelManagerOptions): TunnelManage
   const handles = new Map<string, TunnelProviderHandle>()
 
   for (const config of options.tunnels) {
-    const handle = buildProvider(config, (url) => publishUrlChange(options.stream, config, url, logger))
+    const handle = buildProvider(
+      config,
+      options.resolveChannelUpstreamPort,
+      (url) => publishUrlChange(options.stream, config, url, logger),
+      options.cloudflareQuickBinary,
+    )
     handles.set(config.name, handle)
   }
 
@@ -79,13 +87,43 @@ export function createTunnelManager(options: TunnelManagerOptions): TunnelManage
   }
 }
 
-function buildProvider(config: TunnelConfig, onUrlChange: (url: string) => void): TunnelProviderHandle {
+function buildProvider(
+  config: TunnelConfig,
+  resolveChannelUpstreamPort: TunnelManagerOptions['resolveChannelUpstreamPort'],
+  onUrlChange: (url: string) => void,
+  cloudflareQuickBinary: string | undefined,
+): TunnelProviderHandle {
   switch (config.provider) {
     case 'external':
       return createExternalProvider({ config, onUrlChange })
     case 'cloudflare-quick':
-      throw new Error(`tunnel '${config.name}' (cloudflare-quick): upstream port resolver is not configured`)
+      return createCloudflareQuickProvider({
+        config,
+        upstreamPort: resolveUpstreamPort(config, resolveChannelUpstreamPort),
+        onUrlChange,
+        binary: cloudflareQuickBinary,
+      })
   }
+}
+
+function resolveUpstreamPort(
+  config: TunnelConfig,
+  resolveChannelUpstreamPort: TunnelManagerOptions['resolveChannelUpstreamPort'],
+): number {
+  if (config.for.kind === 'manual') {
+    if (config.upstreamPort === undefined) {
+      throw new Error(`tunnel '${config.name}' (cloudflare-quick): upstreamPort is required for manual tunnels`)
+    }
+    return config.upstreamPort
+  }
+
+  const upstreamPort = resolveChannelUpstreamPort?.(config.for.name) ?? null
+  if (upstreamPort === null) {
+    throw new Error(
+      `tunnel '${config.name}' (cloudflare-quick): no upstream port resolved for channel '${config.for.name}'`,
+    )
+  }
+  return upstreamPort
 }
 
 function publishUrlChange(stream: Stream, config: TunnelConfig, url: string, logger: TunnelManagerLogger): void {
