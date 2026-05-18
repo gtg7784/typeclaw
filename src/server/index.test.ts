@@ -1254,6 +1254,98 @@ describe('createServer plugin-command dispatch', () => {
 
     ws.close()
   })
+
+  test('command_stdin / command_stdin_end / command_abort route to the runner with the right callId', async () => {
+    const session = createFakeSession()
+    const stdinFeeds: { callId: string; chunk: string }[] = []
+    const stdinEnds: string[] = []
+    const aborts: { callId: string; reason: string }[] = []
+    const built = createServer({
+      port: 0,
+      createSession: async () => session,
+      commandRunnerFactory: (_outbound) => ({
+        start() {},
+        feedStdin(callId, chunk) {
+          stdinFeeds.push({ callId, chunk })
+        },
+        endStdin(callId) {
+          stdinEnds.push(callId)
+        },
+        abort(callId, reason) {
+          aborts.push({ callId, reason })
+        },
+        abortForOwner() {},
+        inFlightCount: () => 0,
+      }),
+    }).start()
+    server = built
+
+    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'k', name: 'foo', args: {} }))
+    ws.send(JSON.stringify({ type: 'command_stdin', callId: 'k', chunk: btoa('payload') }))
+    ws.send(JSON.stringify({ type: 'command_stdin_end', callId: 'k' }))
+    ws.send(JSON.stringify({ type: 'command_abort', callId: 'k', reason: 'manual' }))
+    await new Promise((r) => setTimeout(r, 80))
+
+    expect(stdinFeeds).toEqual([{ callId: 'k', chunk: btoa('payload') }])
+    expect(stdinEnds).toEqual(['k'])
+    expect(aborts).toEqual([{ callId: 'k', reason: 'manual' }])
+
+    ws.close()
+  })
+
+  test('exec_command without commandRunnerFactory replies with command_error + command_exit', async () => {
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      createSession: async () => session,
+    }).start()
+    server = built
+
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}/commands`)
+
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'fb', name: 'whatever', args: {} }))
+
+    const errFrame = await waitFor((m) => m.type === 'command_error' && 'callId' in m && m.callId === 'fb')
+    expect(errFrame.type).toBe('command_error')
+    if (errFrame.type === 'command_error') {
+      expect(errFrame.message).toMatch(/not enabled/)
+    }
+    const exitFrame = await waitFor((m) => m.type === 'command_exit' && 'callId' in m && m.callId === 'fb')
+    if (exitFrame.type === 'command_exit') {
+      expect(exitFrame.code).toBe(1)
+    }
+
+    ws.close()
+  })
+
+  test('ws-close aborts every in-flight command tied to the closed connection', async () => {
+    let abortedCount = 0
+    const session = createFakeSession()
+    const built = createServer({
+      port: 0,
+      createSession: async () => session,
+      commandRunnerFactory: () => ({
+        start() {},
+        feedStdin() {},
+        endStdin() {},
+        abort() {},
+        abortForOwner() {
+          abortedCount++
+        },
+        inFlightCount: () => 0,
+      }),
+    }).start()
+    server = built
+
+    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'will-die', name: 'noop', args: {} }))
+    await new Promise((r) => setTimeout(r, 50))
+    ws.close()
+    await new Promise((r) => setTimeout(r, 100))
+
+    expect(abortedCount).toBe(1)
+  })
 })
 
 describe('safeWsSend', () => {
