@@ -1,6 +1,14 @@
 import { readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
+// Recognised origin kinds. Keep aligned with SessionOrigin's discriminator in
+// src/agent/session-origin.ts. The 'unknown' bucket catches sessions written
+// before origin stamping landed AND sessions whose session-meta line is
+// malformed or missing — surfacing them under one explicit label is more
+// honest than silently dropping them.
+export const ORIGIN_KINDS = ['tui', 'cron', 'channel', 'subagent', 'unknown'] as const
+export type OriginKind = (typeof ORIGIN_KINDS)[number]
+
 // Narrow projection: session files can grow into tens of MB on long-lived
 // agents, so we deliberately drop content/tool blocks before aggregation.
 export type AssistantRow = {
@@ -15,6 +23,7 @@ export type AssistantRow = {
   cacheWrite: number
   totalTokens: number
   cost: number
+  originKind: OriginKind
 }
 
 export type ScanOptions = {
@@ -66,6 +75,13 @@ async function* readSessionFile(file: string, opts: ScanOptions): AsyncGenerator
   }
   const decoder = new TextDecoder()
   let buf = ''
+  // First-stamp-wins per file. Once a `typeclaw.session-meta` custom entry
+  // pins the origin, later entries with the same customType are ignored —
+  // session-resume code paths may legitimately re-stamp on reopen, and the
+  // earliest one is the authoritative one for the session's first turn.
+  // Stays 'unknown' for legacy files (no stamp at all) so usage attribution
+  // surfaces them as a distinct bucket rather than dropping the rows.
+  const ctx: ParseCtx = { originKind: 'unknown', originPinned: false }
   try {
     for await (const chunk of stream) {
       buf += decoder.decode(chunk, { stream: true })
@@ -73,7 +89,7 @@ async function* readSessionFile(file: string, opts: ScanOptions): AsyncGenerator
       while (nl !== -1) {
         const line = buf.slice(0, nl)
         buf = buf.slice(nl + 1)
-        const row = parseLine(line, file, basename, opts)
+        const row = parseLine(line, file, basename, opts, ctx)
         if (row !== null) yield row
         nl = buf.indexOf('\n')
       }
@@ -86,17 +102,20 @@ async function* readSessionFile(file: string, opts: ScanOptions): AsyncGenerator
   // half-written record from a live writer is silently skipped (parseLine
   // returns null and does NOT warn for the tail).
   if (buf.length > 0) {
-    const row = parseLine(buf, file, basename, opts, { isTail: true })
+    const row = parseLine(buf, file, basename, opts, ctx, { isTail: true })
     if (row !== null) yield row
   }
 }
+
+type ParseCtx = { originKind: OriginKind; originPinned: boolean }
 
 function parseLine(
   line: string,
   file: string,
   basename: string,
   opts: ScanOptions,
-  ctx: { isTail?: boolean } = {},
+  ctx: ParseCtx,
+  flags: { isTail?: boolean } = {},
 ): AssistantRow | null {
   const trimmed = line.trim()
   if (trimmed === '') return null
@@ -106,7 +125,18 @@ function parseLine(
     entry = JSON.parse(trimmed)
   } catch {
     // Silently skip the trailing tail: a live writer may be mid-append.
-    if (ctx.isTail !== true) opts.onWarn?.(`skipping malformed JSONL line in ${basename}`)
+    if (flags.isTail !== true) opts.onWarn?.(`skipping malformed JSONL line in ${basename}`)
+    return null
+  }
+
+  if (isSessionMetaCustomEntry(entry)) {
+    if (!ctx.originPinned) {
+      const kind = entry.data.origin.kind
+      if ((ORIGIN_KINDS as readonly string[]).includes(kind)) {
+        ctx.originKind = kind as OriginKind
+        ctx.originPinned = true
+      }
+    }
     return null
   }
 
@@ -134,7 +164,32 @@ function parseLine(
     cacheWrite: numberOrZero(u.cacheWrite),
     totalTokens: numberOrZero(u.totalTokens),
     cost: numberOrZero(u.cost?.total),
+    originKind: ctx.originKind,
   }
+}
+
+// Pi-coding-agent persists `appendCustomEntry(customType, data)` calls as
+// `{type:"custom", customType, data, id, parentId, timestamp}` lines. We
+// stamp our origin block with customType `typeclaw.session-meta` (constant
+// kept in src/agent/session-meta.ts; duplicated as a literal here to keep
+// the usage subsystem free of agent-stack imports — a Grep across the repo
+// is the chosen drift guard).
+type SessionMetaCustomEntry = {
+  type: 'custom'
+  customType: 'typeclaw.session-meta'
+  data: { origin: { kind: string } }
+}
+
+function isSessionMetaCustomEntry(value: unknown): value is SessionMetaCustomEntry {
+  if (typeof value !== 'object' || value === null) return false
+  const v = value as Record<string, unknown>
+  if (v.type !== 'custom') return false
+  if (v.customType !== 'typeclaw.session-meta') return false
+  if (typeof v.data !== 'object' || v.data === null) return false
+  const d = v.data as Record<string, unknown>
+  if (typeof d.origin !== 'object' || d.origin === null) return false
+  const o = d.origin as Record<string, unknown>
+  return typeof o.kind === 'string'
 }
 
 type MessageEntry = { type: 'message'; message: { role: string; [k: string]: unknown } }

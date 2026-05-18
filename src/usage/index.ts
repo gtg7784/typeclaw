@@ -4,8 +4,9 @@ import type { Aggregation } from './aggregate'
 import { aggregate } from './aggregate'
 import { scanAssistantRows } from './scan'
 
-export type { Aggregation, DailyUsage, ModelUsage, SessionUsage, UsageTotals } from './aggregate'
-export type { AssistantRow } from './scan'
+export type { Aggregation, DailyUsage, ModelUsage, OriginUsage, SessionUsage, UsageTotals } from './aggregate'
+export type { AssistantRow, OriginKind } from './scan'
+export { ORIGIN_KINDS } from './scan'
 
 export type UsageReport = {
   generatedAt: number

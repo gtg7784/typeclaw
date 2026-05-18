@@ -1,4 +1,5 @@
-import type { AssistantRow } from './scan'
+import type { AssistantRow, OriginKind } from './scan'
+import { ORIGIN_KINDS } from './scan'
 
 export type UsageTotals = {
   messageCount: number
@@ -18,13 +19,16 @@ export type SessionUsage = UsageTotals & {
   firstAt: number
   lastAt: number
   models: string[]
+  originKind: OriginKind
 }
+export type OriginUsage = UsageTotals & { originKind: OriginKind; sessionCount: number }
 
 export type Aggregation = {
   total: UsageTotals
   byDay: DailyUsage[]
   byModel: ModelUsage[]
   bySession: SessionUsage[]
+  byOrigin: OriginUsage[]
 }
 
 export async function aggregate(rows: AsyncIterable<AssistantRow>): Promise<Aggregation> {
@@ -32,6 +36,7 @@ export async function aggregate(rows: AsyncIterable<AssistantRow>): Promise<Aggr
   const byDay = new Map<string, DailyUsage & { _sessionIds: Set<string> }>()
   const byModel = new Map<string, ModelUsage>()
   const bySession = new Map<string, SessionUsage & { _modelSet: Set<string> }>()
+  const byOrigin = new Map<OriginKind, OriginUsage & { _sessionIds: Set<string> }>()
 
   for await (const row of rows) {
     addInto(total, row)
@@ -66,6 +71,7 @@ export async function aggregate(rows: AsyncIterable<AssistantRow>): Promise<Aggr
       lastAt: row.timestamp,
       models: [],
       _modelSet: new Set<string>(),
+      originKind: row.originKind,
     }
     addInto(sessionBucket, row)
     sessionBucket.firstAt = Math.min(sessionBucket.firstAt, row.timestamp)
@@ -73,6 +79,17 @@ export async function aggregate(rows: AsyncIterable<AssistantRow>): Promise<Aggr
     sessionBucket._modelSet.add(modelKey)
     sessionBucket.models = [...sessionBucket._modelSet]
     bySession.set(sessionKey, sessionBucket)
+
+    const originBucket = byOrigin.get(row.originKind) ?? {
+      ...emptyTotals(),
+      originKind: row.originKind,
+      sessionCount: 0,
+      _sessionIds: new Set<string>(),
+    }
+    addInto(originBucket, row)
+    originBucket._sessionIds.add(sessionKey)
+    originBucket.sessionCount = originBucket._sessionIds.size
+    byOrigin.set(row.originKind, originBucket)
   }
 
   return {
@@ -80,7 +97,19 @@ export async function aggregate(rows: AsyncIterable<AssistantRow>): Promise<Aggr
     byDay: [...byDay.values()].map(({ _sessionIds: _, ...rest }) => rest).sort((a, b) => a.date.localeCompare(b.date)),
     byModel: [...byModel.values()].sort((a, b) => b.cost - a.cost),
     bySession: [...bySession.values()].map(({ _modelSet: _, ...rest }) => rest).sort((a, b) => b.cost - a.cost),
+    byOrigin: [...byOrigin.values()]
+      .map(({ _sessionIds: _, ...rest }) => rest)
+      .sort((a, b) => originSortIndex(a.originKind) - originSortIndex(b.originKind)),
   }
+}
+
+// Stable presentation order for the byOrigin table. Matches ORIGIN_KINDS so
+// the renderer doesn't need to know about ordering. 'unknown' is pinned last
+// because it represents legacy/malformed data the user probably cares about
+// least.
+function originSortIndex(kind: OriginKind): number {
+  const idx = (ORIGIN_KINDS as readonly OriginKind[]).indexOf(kind)
+  return idx === -1 ? Number.MAX_SAFE_INTEGER : idx
 }
 
 function emptyTotals(): UsageTotals {
