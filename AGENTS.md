@@ -26,30 +26,33 @@ bun run debug:prompt --origin cron         # just one
 bun run debug:prompt --origin channel --no-git-nudge  # omit the dirty-files block
 ```
 
-Each dump is prefixed with a per-section breakdown:
+Each dump is prefixed with a per-section breakdown. Cron and subagent sessions render the **slim** base prompt instead of the full operator-facing manual:
 
 ```
 ══════════════════════════════════════════════════════════════════════════════
-  SYSTEM PROMPT — origin: cron — ~2700 tok / 10798 chars / 10860 bytes (tok est. chars/4)
+  SYSTEM PROMPT — origin: cron — ~568 tok / 2270 chars / 2280 bytes (tok est. chars/4)
 ══════════════════════════════════════════════════════════════════════════════
   Section                           Tokens  Chars  Bytes
   ────────────────────────────────  ──────  ─────  ─────
-  DEFAULT_SYSTEM_PROMPT (base)       ~2155   8618   8668
+  SLIM_SYSTEM_PROMPT (base)           ~141    563    565
   Identity (IDENTITY.md + SOUL.md)     ~88    352    356
   Runtime block                        ~13     50     50
   Session origin                       ~85    339    341
   Role context                        ~110    441    441
-  Git nudge                           ~118    471    475
   Memory (MEMORY.md + streams)        ~129    515    517
   ────────────────────────────────  ──────  ─────  ─────
-  TOTAL                              ~2700  10798  10860
+  TOTAL                               ~568   2270   2280
 ```
+
+TUI and channel sessions still get the full prompt (~2674 / ~3425 tokens) because a human is reading the output and the agent is expected to maintain its agent folder. Cron and default subagents — unattended, narrow-scope sessions — get the slim prompt, saving ~2100 tokens per fire. The git-nudge block is also skipped in slim mode because the operator-facing commit guidance it points back to is itself excluded from the slim base.
 
 Tokens are estimated with a `chars/4` heuristic (industry rule-of-thumb, ~15% off, model-agnostic — explicit because exact tokenization differs across Claude/GPT/Gemini). Bytes are UTF-8 wire bytes and differ from chars on multi-byte content (em-dashes, curly quotes, emoji) — useful when you care about what actually leaves the host.
 
-The script calls the same `composeSystemPrompt` helper (`src/agent/index.ts`) that `createResourceLoader` uses in production, so the section order it prints is the section order an agent actually sees. The cache-suffix contract (least-volatile first → identity → runtime → origin+role → git → memory) is enforced both by the helper and by a section-order assertion in `scripts/dump-system-prompt.test.ts` — reordering one without the other fails CI.
+The script calls the same `composeSystemPrompt` helper (`src/agent/index.ts`) that `createResourceLoader` uses in production, and uses `deriveSystemPromptMode` to pick full vs slim from the origin kind — exactly the same derivation production uses — so the section order, base prompt, and presence/absence of git-nudge it prints all match what the agent actually sees at runtime. The cache-suffix contract (least-volatile first → identity → runtime → origin+role → git → memory) is enforced both by the helper and by a section-order assertion in `scripts/dump-system-prompt.test.ts` — reordering one without the other fails CI.
 
-`composeSystemPrompt` is the right entry point if you're adding a new section. Land the renderer (`renderXBlock`) in the appropriate `src/agent/*.ts` module, plumb it through `SystemPromptComposition`, decide its volatility tier (rare-change → earlier, per-turn-change → later), and `dump-system-prompt.ts` will surface it automatically once you add a fixture and a breakdown entry.
+`composeSystemPrompt` is the right entry point if you're adding a new section. Land the renderer (`renderXBlock`) in the appropriate `src/agent/*.ts` module, plumb it through `SystemPromptComposition`, decide its volatility tier (rare-change → earlier, per-turn-change → later) and whether it should render in slim mode (most don't), and `dump-system-prompt.ts` will surface it automatically once you add a fixture and a breakdown entry.
+
+**Adding a new origin kind?** Update `deriveSystemPromptMode` (`src/agent/index.ts`) to decide whether it's a full-mode (human-facing) or slim-mode (unattended) origin. The two existing slim origins are `cron` and `subagent`; the two existing full origins are `tui` and `channel`. The asymmetry is load-bearing: the slim base drops ~2000 tokens of operator-facing guidance (workspace boundary, version-control rules, register-matching prose) that is irrelevant when there's no human reading the output, and the origin block already names the unattended context. Restoring the full prompt for a new unattended kind would re-introduce the bloat the slim mode exists to remove.
 
 ## Release
 

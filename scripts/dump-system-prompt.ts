@@ -2,7 +2,7 @@
 
 import { parseArgs } from 'node:util'
 
-import { composeSystemPrompt } from '@/agent'
+import { composeSystemPrompt, deriveSystemPromptMode, type SystemPromptMode } from '@/agent'
 import type { SessionOrigin, SessionRoleContext } from '@/agent/session-origin'
 
 type OriginKind = 'tui' | 'cron' | 'channel' | 'subagent'
@@ -206,12 +206,20 @@ export function dumpSystemPromptWithBreakdown(
   options: { gitNudge: boolean } = { gitNudge: true },
 ): DumpResult {
   const fixture = buildFixture(kind)
+  // Mirror production: createResourceLoader derives mode from origin kind
+  // (cron/subagent → slim, tui/channel → full). Slim mode also drops the
+  // git-nudge section. Without this alignment the debug dumper would report
+  // numbers that don't match what the agent actually receives at runtime —
+  // which is the whole point of `bun run debug:prompt`.
+  const mode: SystemPromptMode = deriveSystemPromptMode(fixture.origin)
+  const wantGitNudge = options.gitNudge && mode === 'full'
   const parts = {
+    mode,
     self: PLACEHOLDER_SELF,
     runtimeVersion: PLACEHOLDER_RUNTIME_VERSION,
     origin: fixture.origin,
     roleContext: fixture.roleContext,
-    gitNudge: options.gitNudge ? PLACEHOLDER_GIT_NUDGE : '',
+    gitNudge: wantGitNudge ? PLACEHOLDER_GIT_NUDGE : '',
     memorySection: fixture.memory,
   } as const
 
@@ -231,8 +239,9 @@ export function dumpSystemPromptWithBreakdown(
 
   const baseEnd = prompt.indexOf(`\n\n${parts.self}`)
   const base = baseEnd > 0 ? prompt.slice(0, baseEnd) : ''
+  const baseLabel = mode === 'slim' ? 'SLIM_SYSTEM_PROMPT (base)' : 'DEFAULT_SYSTEM_PROMPT (base)'
   const sections: SectionBreakdown[] = [
-    mkSection('DEFAULT_SYSTEM_PROMPT (base)', base),
+    mkSection(baseLabel, base),
     mkSection('Identity (IDENTITY.md + SOUL.md)', parts.self),
     mkSection('Runtime block', `## Runtime\n\nTypeClaw runtime version: ${parts.runtimeVersion}.`),
     mkSection('Session origin', extractSection(prompt, '## Session origin', '## Your role in this session')),

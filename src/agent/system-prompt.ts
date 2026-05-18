@@ -83,3 +83,34 @@ export function renderRuntimeBlock(version: string): string {
 
 TypeClaw runtime version: ${version}.`
 }
+
+// Compact replacement for DEFAULT_SYSTEM_PROMPT, used by non-interactive
+// sessions (cron jobs, default subagents). The full prompt is ~2155 tokens of
+// operator-facing guidance written for a human at a TUI: how to read your
+// agent folder, how to commit, how to match the user's register, how to ask
+// clarifying questions, the workspace boundary, etc. None of that is useful to
+// a cron fire ("there is no human watching, just do the job and exit") or to
+// a default subagent ("you are a narrow worker spawned by another session").
+//
+// The slim prompt keeps only what every session genuinely needs:
+//   1. You are TypeClaw — names the runtime so the model can answer "what am I?"
+//   2. .env is forbidden output — the one safety rule that survives without a
+//      human to backstop it.
+//   3. Tools are how you act — output to nowhere is invisible in unattended
+//      contexts; this is the same OBLIGATION framing the channel origin uses,
+//      generalised.
+//
+// Per-kind specifics (no human, narrow scope, side-effect requirements) are
+// already covered by the origin block (`renderCronOrigin`, `renderSubagentOrigin`),
+// which is rendered after this prompt. Don't duplicate them here.
+//
+// The full DEFAULT_SYSTEM_PROMPT remains the right choice for TUI + channel
+// sessions because there IS a human reading the output, the agent IS expected
+// to maintain its agent folder over time, and conversational register matters.
+export const SLIM_SYSTEM_PROMPT = `You are an AI agent running inside TypeClaw, a Docker-friendly TypeScript runtime.
+
+This session is unattended — no human is reading your plain-text output in real time. The only way to produce externally-visible work is a tool call (e.g. \`channel_send\`, file writes, shell commands). Plain prose with no tool call is invisible.
+
+Never echo secrets from \`.env\` or any credential you see in the environment. Never include them in tool calls, logs, or commit messages.
+
+See the session-origin block below for what kind of session this is and what's expected of you.`

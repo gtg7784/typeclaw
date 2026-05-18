@@ -31,7 +31,7 @@ import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { SESSION_META_CUSTOM_TYPE, sessionMetaPayload } from './session-meta'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
-import { DEFAULT_SYSTEM_PROMPT, renderRuntimeBlock } from './system-prompt'
+import { DEFAULT_SYSTEM_PROMPT, renderRuntimeBlock, SLIM_SYSTEM_PROMPT } from './system-prompt'
 import {
   createBudgetState,
   type ToolResultBudget,
@@ -528,6 +528,22 @@ export type CreateResourceLoaderOptions = {
   origin?: SessionOrigin
   permissions?: PermissionService
   runtimeVersion?: string
+  // Explicit override for the prompt mode. When omitted, the mode is derived
+  // from `origin.kind`: cron + subagent → slim, tui + channel → full. Pass
+  // 'full' to force the heavy prompt even on an unattended origin (rarely
+  // useful; mostly an escape hatch for ad-hoc debugging).
+  mode?: SystemPromptMode
+}
+
+// Origins where the operator-facing DEFAULT_SYSTEM_PROMPT, git-nudge, and the
+// agent-folder commit guidance carry their weight: there is a human reading
+// the output, the agent is expected to maintain its folder over time, and
+// conversational register matters. For everything else (cron fires, default
+// subagents), the slim prompt is the right default — the origin block already
+// names the unattended context and tells the agent what's expected of it.
+export function deriveSystemPromptMode(origin: SessionOrigin | undefined): SystemPromptMode {
+  if (origin === undefined) return 'full'
+  return origin.kind === 'tui' || origin.kind === 'channel' ? 'full' : 'slim'
 }
 
 // Pure inputs for `composeSystemPrompt`. Each field maps 1:1 to a rendered
@@ -536,7 +552,20 @@ export type CreateResourceLoaderOptions = {
 // `scripts/dump-system-prompt.ts` can reuse the exact same composition
 // pipeline `createResourceLoader` uses, with no risk of drift if the
 // section order changes.
+//
+// `mode` selects the base prompt:
+//   - 'full' (default) — DEFAULT_SYSTEM_PROMPT (~2155 tok of operator-facing
+//     guidance: agent folder layout, version-control rules, register matching,
+//     workspace boundary). Right choice for TUI and channel sessions where a
+//     human is reading the output and the agent maintains its folder.
+//   - 'slim' — SLIM_SYSTEM_PROMPT (~80 tok). Right choice for cron jobs and
+//     default subagents — unattended sessions where most of the operator
+//     guidance is irrelevant and the origin block already covers per-kind
+//     specifics (no human, side effects via tools, narrow scope).
+export type SystemPromptMode = 'full' | 'slim'
+
 export type SystemPromptComposition = {
+  mode?: SystemPromptMode
   self: string
   runtimeVersion?: string
   origin?: SessionOrigin
@@ -563,7 +592,8 @@ export type SystemPromptComposition = {
 //    memory-logger. Pinning it to the end keeps everything above it
 //    cacheable across session resurrections.
 export function composeSystemPrompt(parts: SystemPromptComposition): string {
-  let prompt = `${DEFAULT_SYSTEM_PROMPT}\n\n${parts.self}`
+  const base = parts.mode === 'slim' ? SLIM_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT
+  let prompt = `${base}\n\n${parts.self}`
   if (parts.runtimeVersion !== undefined) {
     prompt = `${prompt}\n\n${renderRuntimeBlock(parts.runtimeVersion)}`
   }
@@ -573,41 +603,47 @@ export function composeSystemPrompt(parts: SystemPromptComposition): string {
   if (parts.gitNudge !== '') {
     prompt = `${prompt}\n\n${parts.gitNudge}`
   }
-  prompt = `${prompt}\n\n${parts.memorySection}`
+  if (parts.memorySection !== '') {
+    prompt = `${prompt}\n\n${parts.memorySection}`
+  }
   return prompt
 }
 
 export async function createResourceLoader(options: CreateResourceLoaderOptions = {}): Promise<DefaultResourceLoader> {
   const agentDir = options.agentDir ?? process.cwd()
+  const mode: SystemPromptMode = options.mode ?? deriveSystemPromptMode(options.origin)
+  const basePrompt = mode === 'slim' ? SLIM_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT
   let self = await loadSelf(agentDir)
 
   if (options.plugins) {
-    // The plugin hook receives the partially-assembled prompt
-    // (`DEFAULT_SYSTEM_PROMPT` + identity) so plugins can rewrite either
-    // section before the cache-suffix blocks are appended. The pre-hook
-    // body is rebuilt here verbatim so callers see the same input shape
-    // they did before the `composeSystemPrompt` extraction.
-    const preHook = `${DEFAULT_SYSTEM_PROMPT}\n\n${self}`
+    // The plugin hook receives the partially-assembled prompt (base + identity)
+    // so plugins can rewrite either section before the cache-suffix blocks are
+    // appended. The base reflects the resolved mode, so a slim cron session's
+    // plugin hook sees the slim base — plugins that read the base text get
+    // the same shape the agent will see.
+    const preHook = `${basePrompt}\n\n${self}`
     const event = { prompt: preHook, sessionId: options.plugins.sessionId, agentDir, origin: options.origin }
     await options.plugins.hooks.runSessionPrompt(event)
-    // Plugins mutate the joined string, not the parts. Recover `self` by
-    // stripping the leading `DEFAULT_SYSTEM_PROMPT` so the rest of the
-    // composition stays section-shaped. If a plugin rewrote the base
-    // prompt as well, the recovered `self` carries the full mutated
-    // remainder — matching the previous concat-as-you-go behaviour.
-    self = event.prompt.startsWith(`${DEFAULT_SYSTEM_PROMPT}\n\n`)
-      ? event.prompt.slice(DEFAULT_SYSTEM_PROMPT.length + 2)
-      : event.prompt
+    // Recover `self` by stripping the leading base so the rest of the
+    // composition stays section-shaped. If a plugin rewrote the base prompt as
+    // well, the recovered `self` carries the full mutated remainder.
+    self = event.prompt.startsWith(`${basePrompt}\n\n`) ? event.prompt.slice(basePrompt.length + 2) : event.prompt
   }
 
   const roleContext = options.origin !== undefined ? resolveRoleContext(options.origin, options.permissions) : undefined
-  const gitNudge = await renderGitNudge(agentDir)
+  // Slim mode skips git-nudge entirely: cron + subagent sessions are not the
+  // right actor to drive interactive commit decisions, and the operator-facing
+  // commit guidance the nudge points back to is itself excluded from the slim
+  // base prompt. Memory is still included so cron jobs that depend on MEMORY.md
+  // context (e.g. "send today's standup summary") keep working.
+  const gitNudge = mode === 'slim' ? '' : await renderGitNudge(agentDir)
   const memorySection = await loadMemory(agentDir, {
     ...(options.origin !== undefined ? { origin: options.origin } : {}),
     ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
   })
 
   const systemPrompt = composeSystemPrompt({
+    mode,
     self,
     ...(options.runtimeVersion !== undefined ? { runtimeVersion: options.runtimeVersion } : {}),
     ...(options.origin !== undefined ? { origin: options.origin } : {}),

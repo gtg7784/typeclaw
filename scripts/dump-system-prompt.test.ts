@@ -11,17 +11,32 @@ import {
 describe('dumpSystemPrompt', () => {
   const kinds: Array<'tui' | 'cron' | 'channel' | 'subagent'> = ['tui', 'cron', 'channel', 'subagent']
 
-  test.each(kinds)('%s origin renders all required sections', (kind) => {
+  test.each(kinds)('%s origin renders the common required sections', (kind) => {
     const out = dumpSystemPrompt(kind)
 
-    expect(out).toContain('You are a general-purpose AI agent running inside TypeClaw.')
     expect(out).toContain('# Identity')
     expect(out).toContain('## Runtime')
     expect(out).toContain('TypeClaw runtime version: 1.2.3-debug.')
     expect(out).toContain('## Session origin')
     expect(out).toContain('## Your role in this session')
-    expect(out).toContain('## Uncommitted changes at session start')
     expect(out).toContain('# Memory')
+  })
+
+  const fullKinds: Array<'tui' | 'channel'> = ['tui', 'channel']
+  test.each(fullKinds)('%s origin uses the full base prompt and includes git nudge', (kind) => {
+    const out = dumpSystemPrompt(kind)
+
+    expect(out).toContain('You are a general-purpose AI agent running inside TypeClaw.')
+    expect(out).toContain('## Uncommitted changes at session start')
+  })
+
+  const slimKinds: Array<'cron' | 'subagent'> = ['cron', 'subagent']
+  test.each(slimKinds)('%s origin uses the slim base prompt and omits git nudge', (kind) => {
+    const out = dumpSystemPrompt(kind)
+
+    expect(out).toContain('You are an AI agent running inside TypeClaw')
+    expect(out).not.toContain('You are a general-purpose AI agent running inside TypeClaw.')
+    expect(out).not.toContain('## Uncommitted changes at session start')
   })
 
   test('cron origin includes cron-specific text', () => {
@@ -54,8 +69,8 @@ describe('dumpSystemPrompt', () => {
     expect(out).toContain('ses_<PLACEHOLDER-parent>')
   })
 
-  test('--no-git-nudge equivalent omits the uncommitted changes block', () => {
-    const out = dumpSystemPrompt('cron', { gitNudge: false })
+  test('--no-git-nudge equivalent omits the uncommitted changes block on a full-mode origin', () => {
+    const out = dumpSystemPrompt('tui', { gitNudge: false })
 
     expect(out).not.toContain('## Uncommitted changes at session start')
     expect(out).toContain('# Memory')
@@ -106,8 +121,8 @@ describe('dumpSystemPrompt', () => {
     expect(estimateTokens(result.prompt)).toBe(result.totalTokens)
   })
 
-  test('cron breakdown lists each expected section in order', () => {
-    const names = dumpSystemPromptWithBreakdown('cron').sections.map((s) => s.name)
+  test('tui breakdown lists each expected full-mode section in order', () => {
+    const names = dumpSystemPromptWithBreakdown('tui').sections.map((s) => s.name)
     expect(names).toEqual([
       'DEFAULT_SYSTEM_PROMPT (base)',
       'Identity (IDENTITY.md + SOUL.md)',
@@ -119,13 +134,37 @@ describe('dumpSystemPrompt', () => {
     ])
   })
 
-  test('--no-git-nudge breakdown omits the Git nudge row', () => {
-    const names = dumpSystemPromptWithBreakdown('cron', { gitNudge: false }).sections.map((s) => s.name)
+  test('cron breakdown uses the slim base and omits Git nudge', () => {
+    const names = dumpSystemPromptWithBreakdown('cron').sections.map((s) => s.name)
+    expect(names).toEqual([
+      'SLIM_SYSTEM_PROMPT (base)',
+      'Identity (IDENTITY.md + SOUL.md)',
+      'Runtime block',
+      'Session origin',
+      'Role context',
+      'Memory (MEMORY.md + streams)',
+    ])
+  })
+
+  test('subagent breakdown uses the slim base and omits Git nudge', () => {
+    const names = dumpSystemPromptWithBreakdown('subagent').sections.map((s) => s.name)
+    expect(names).toContain('SLIM_SYSTEM_PROMPT (base)')
     expect(names).not.toContain('Git nudge')
   })
 
-  test('section order is least-volatile to most-volatile (cache-suffix contract)', () => {
-    const out = dumpSystemPrompt('cron')
+  test('slim cron prompt is at least 1500 tokens lighter than the full tui prompt', () => {
+    const cronTok = dumpSystemPromptWithBreakdown('cron').totalTokens
+    const tuiTok = dumpSystemPromptWithBreakdown('tui').totalTokens
+    expect(tuiTok - cronTok).toBeGreaterThan(1500)
+  })
+
+  test('--no-git-nudge breakdown omits the Git nudge row on a full-mode origin', () => {
+    const names = dumpSystemPromptWithBreakdown('tui', { gitNudge: false }).sections.map((s) => s.name)
+    expect(names).not.toContain('Git nudge')
+  })
+
+  test('full-mode section order is least-volatile to most-volatile (cache-suffix contract)', () => {
+    const out = dumpSystemPrompt('tui')
     // Anchor on header strings that appear EXACTLY ONCE in the rendered
     // prompt. `# Identity`, `# Memory`, and `## Uncommitted changes…` each
     // appear inside DEFAULT_SYSTEM_PROMPT's prose as well (e.g. "always
@@ -134,9 +173,19 @@ describe('dumpSystemPrompt', () => {
     const idx = (needle: string) => out.indexOf(needle)
 
     expect(idx('## IDENTITY.md')).toBeLessThan(idx('TypeClaw runtime version:'))
-    expect(idx('TypeClaw runtime version:')).toBeLessThan(idx('You are running an unattended cron job.'))
-    expect(idx('You are running an unattended cron job.')).toBeLessThan(idx('## Your role in this session'))
+    expect(idx('TypeClaw runtime version:')).toBeLessThan(idx('## Session origin'))
+    expect(idx('## Session origin')).toBeLessThan(idx('## Your role in this session'))
     expect(idx('## Your role in this session')).toBeLessThan(idx('git reports 2 uncommitted files'))
     expect(idx('git reports 2 uncommitted files')).toBeLessThan(idx('## MEMORY.md'))
+  })
+
+  test('slim-mode section order is least-volatile to most-volatile (cache-suffix contract)', () => {
+    const out = dumpSystemPrompt('cron')
+    const idx = (needle: string) => out.indexOf(needle)
+
+    expect(idx('## IDENTITY.md')).toBeLessThan(idx('TypeClaw runtime version:'))
+    expect(idx('TypeClaw runtime version:')).toBeLessThan(idx('You are running an unattended cron job.'))
+    expect(idx('You are running an unattended cron job.')).toBeLessThan(idx('## Your role in this session'))
+    expect(idx('## Your role in this session')).toBeLessThan(idx('## MEMORY.md'))
   })
 })
