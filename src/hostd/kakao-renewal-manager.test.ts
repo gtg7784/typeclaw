@@ -7,6 +7,7 @@ import { encrypt } from '@/secrets/encryption'
 import type { AttemptLoginFn } from '@/secrets/kakao-renewal'
 import { createKeyStore } from '@/secrets/keys'
 import type { KakaoChannelBlock } from '@/secrets/schema'
+import { expectStable, waitFor } from '@/test-helpers/wait-for'
 
 import { createKakaoRenewalManager, type KakaoRenewalLogEvent } from './kakao-renewal-manager'
 
@@ -84,12 +85,10 @@ describe('createKakaoRenewalManager', () => {
       })
 
       manager.start({ containerName: setup.containerName, cwd: setup.cwd })
-      await new Promise((r) => setTimeout(r, 30))
+      await manager.drain()
 
       expect(attemptCalls).toBe(1)
       expect(events.some((e) => e.kind === 'kakao-renewal-tick-ok')).toBe(true)
-
-      await manager.drain()
     })
   })
 
@@ -108,11 +107,9 @@ describe('createKakaoRenewalManager', () => {
       })
 
       manager.start({ containerName: setup.containerName, cwd: setup.cwd })
-      await new Promise((r) => setTimeout(r, 30))
+      await manager.drain()
 
       expect(events.some((e) => e.kind === 'kakao-renewal-tick-skipped')).toBe(true)
-
-      await manager.drain()
     })
   })
 
@@ -132,11 +129,9 @@ describe('createKakaoRenewalManager', () => {
       })
 
       manager.start({ containerName: setup.containerName, cwd: setup.cwd })
-      await new Promise((r) => setTimeout(r, 30))
+      await manager.drain()
 
       expect(events.some((e) => e.kind === 'kakao-renewal-tick-reauth-required')).toBe(true)
-
-      await manager.drain()
     })
   })
 
@@ -165,7 +160,6 @@ describe('createKakaoRenewalManager', () => {
       })
 
       manager.start({ containerName: setup.containerName, cwd: setup.cwd })
-      await new Promise((r) => setTimeout(r, 30))
       await manager.stop(setup.containerName)
 
       expect(scheduleStopCalled).toBe(1)
@@ -200,7 +194,7 @@ describe('createKakaoRenewalManager', () => {
 
       manager.start({ containerName: setup.containerName, cwd: setup.cwd })
       manager.start({ containerName: setup.containerName, cwd: setup.cwd })
-      await new Promise((r) => setTimeout(r, 30))
+      await waitFor(() => scheduleStopCalled >= 1)
 
       expect(scheduleStopCalled).toBe(1)
 
@@ -234,7 +228,6 @@ describe('createKakaoRenewalManager', () => {
 
       manager.start({ containerName: 'agent-a', cwd: a.cwd })
       manager.start({ containerName: 'agent-b', cwd: a.cwd })
-      await new Promise((r) => setTimeout(r, 30))
       await manager.drain()
 
       expect(scheduleStopCalled).toBe(2)
@@ -348,7 +341,10 @@ describe('createKakaoRenewalManager', () => {
       })
 
       manager.start({ containerName: setup.containerName, cwd: setup.cwd })
-      await new Promise((r) => setTimeout(r, 30))
+      await expectStable(() => attemptCalls > 0 || scheduleCalls > 0 || events.length > 0, {
+        durationMs: 25,
+        description: 'suppressed cron activity',
+      })
 
       expect(scheduleCalls).toBe(0)
       expect(attemptCalls).toBe(0)
@@ -388,8 +384,7 @@ describe('createKakaoRenewalManager', () => {
       })
 
       manager.start({ containerName: setup.containerName, cwd: setup.cwd })
-      // Wait until the in-flight attemptLogin has parked.
-      while (!attemptStarted) await new Promise((r) => setTimeout(r, 5))
+      await waitFor(() => attemptStarted)
       expect(attemptFinished).toBe(false)
 
       const drainPromise = manager.drain()
@@ -433,7 +428,7 @@ describe('createKakaoRenewalManager', () => {
       })
 
       manager.start({ containerName: setup.containerName, cwd: setup.cwd })
-      while (!attemptStarted) await new Promise((r) => setTimeout(r, 5))
+      await waitFor(() => attemptStarted)
 
       const stopPromise = manager.stop(setup.containerName)
       const racer = Promise.race([stopPromise, new Promise((r) => setTimeout(() => r('timeout'), 50))])
