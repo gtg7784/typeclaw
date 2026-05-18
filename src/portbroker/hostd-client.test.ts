@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import type { PortForward } from '@/config'
+import { expectStable, waitFor } from '@/test-helpers/wait-for'
 
 import { createBroker, type HostListener, type HostSocket, type ListenHostFn, type WsClient } from './hostd-client'
 import {
@@ -139,7 +140,7 @@ describe('createBroker', () => {
   test('start sends broker-hello with token', async () => {
     const { broker, ws } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox[0])
     expect(ws.outbox[0]).toEqual({ type: 'broker-hello', token: 'tok' })
     await broker.stop()
   })
@@ -147,7 +148,7 @@ describe('createBroker', () => {
   test('on hello-ack, sends port-watch-subscribe', async () => {
     const { broker, ws } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     expect(ws.outbox).toContainEqual({ type: 'port-watch-subscribe' })
     await broker.stop()
@@ -156,7 +157,7 @@ describe('createBroker', () => {
   test('snapshot installs forwarders for allowed ports and emits opened events', async () => {
     const { broker, ws, listeners, events } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({
       type: 'port-listen-snapshot',
@@ -165,9 +166,7 @@ describe('createBroker', () => {
         { port: 8080, bindAddr: '0.0.0.0' },
       ],
     })
-    await new Promise((r) => setTimeout(r, 5))
-    expect(listeners.has(5173)).toBe(true)
-    expect(listeners.has(8080)).toBe(true)
+    await waitFor(() => listeners.has(5173) && listeners.has(8080))
     expect(
       events
         .filter((e) => e.kind === 'port-forward-opened')
@@ -180,7 +179,7 @@ describe('createBroker', () => {
   test('deny list excludes ports from snapshot', async () => {
     const { broker, ws, listeners } = setup({ policy: { allow: '*', deny: [9229] } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({
       type: 'port-listen-snapshot',
@@ -189,8 +188,7 @@ describe('createBroker', () => {
         { port: 9229, bindAddr: '127.0.0.1' },
       ],
     })
-    await new Promise((r) => setTimeout(r, 5))
-    expect(listeners.has(5173)).toBe(true)
+    await waitFor(() => listeners.has(5173))
     expect(listeners.has(9229)).toBe(false)
     await broker.stop()
   })
@@ -198,7 +196,7 @@ describe('createBroker', () => {
   test('allowlist excludes everything not listed', async () => {
     const { broker, ws, listeners } = setup({ policy: { allow: [5173] } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({
       type: 'port-listen-snapshot',
@@ -207,8 +205,7 @@ describe('createBroker', () => {
         { port: 8080, bindAddr: '127.0.0.1' },
       ],
     })
-    await new Promise((r) => setTimeout(r, 5))
-    expect(listeners.has(5173)).toBe(true)
+    await waitFor(() => listeners.has(5173))
     expect(listeners.has(8080)).toBe(false)
     await broker.stop()
   })
@@ -216,7 +213,7 @@ describe('createBroker', () => {
   test('off-switch (allow:[]) skips broker entirely', async () => {
     const { broker, ws } = setup({ policy: { allow: [] } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await expectStable(() => ws.outbox.length > 0, { durationMs: 10, description: 'broker outbox' })
     expect(ws.outbox).toEqual([])
     await broker.stop()
   })
@@ -224,12 +221,11 @@ describe('createBroker', () => {
   test('port-listen-opened mid-stream installs new forwarder', async () => {
     const { broker, ws, listeners, events } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-snapshot', ports: [] })
     ws.emit({ type: 'port-listen-opened', port: 5173, bindAddr: '127.0.0.1' })
-    await new Promise((r) => setTimeout(r, 5))
-    expect(listeners.has(5173)).toBe(true)
+    await waitFor(() => listeners.has(5173))
     expect(events.find((e) => e.kind === 'port-forward-opened' && e.port === 5173)).toBeDefined()
     await broker.stop()
   })
@@ -237,10 +233,10 @@ describe('createBroker', () => {
   test('port-listen-closed tears down forwarder and emits closed event', async () => {
     const { broker, ws, listeners, events } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-snapshot', ports: [{ port: 5173, bindAddr: '127.0.0.1' }] })
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => listeners.has(5173))
     ws.emit({ type: 'port-listen-closed', port: 5173 })
     expect(listeners.get(5173)?.stopped).toBe(true)
     expect(events.find((e) => e.kind === 'port-forward-closed' && e.port === 5173)).toMatchObject({
@@ -252,10 +248,10 @@ describe('createBroker', () => {
   test('EADDRINUSE on bind emits port-forward-failed and does not retry', async () => {
     const { broker, ws, events } = setup({ policy: { allow: '*' }, failPorts: new Set([5173]) })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-snapshot', ports: [{ port: 5173, bindAddr: '127.0.0.1' }] })
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => events.find((e) => e.kind === 'port-forward-failed' && e.port === 5173))
     expect(events.find((e) => e.kind === 'port-forward-failed' && e.port === 5173)).toMatchObject({
       reason: 'EADDRINUSE',
     })
@@ -265,10 +261,10 @@ describe('createBroker', () => {
   test('host connection allocates streamId and sends relay-open', async () => {
     const { broker, ws, listeners } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-snapshot', ports: [{ port: 5173, bindAddr: '127.0.0.1' }] })
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => listeners.has(5173))
     const sock = makeFakeHostSocket()
     ;(listeners.get(5173) as unknown as { _accept: (s: HostSocket) => void })._accept(sock)
     const open = ws.outbox.find((m) => m.type === 'relay-open') as Extract<HostdToContainer, { type: 'relay-open' }>
@@ -280,10 +276,10 @@ describe('createBroker', () => {
   test('relay-data flows host→container after open-ack', async () => {
     const { broker, ws, listeners } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-snapshot', ports: [{ port: 5173, bindAddr: '127.0.0.1' }] })
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => listeners.has(5173))
     const sock = makeFakeHostSocket()
     ;(listeners.get(5173) as unknown as { _accept: (s: HostSocket) => void })._accept(sock)
     const open = ws.outbox.find((m) => m.type === 'relay-open') as Extract<HostdToContainer, { type: 'relay-open' }>
@@ -298,10 +294,10 @@ describe('createBroker', () => {
   test('container relay-data writes to host socket', async () => {
     const { broker, ws, listeners } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-snapshot', ports: [{ port: 5173, bindAddr: '127.0.0.1' }] })
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => listeners.has(5173))
     const sock = makeFakeHostSocket()
     ;(listeners.get(5173) as unknown as { _accept: (s: HostSocket) => void })._accept(sock)
     const open = ws.outbox.find((m) => m.type === 'relay-open') as Extract<HostdToContainer, { type: 'relay-open' }>
@@ -315,10 +311,10 @@ describe('createBroker', () => {
   test('relay-open-nack closes the host socket', async () => {
     const { broker, ws, listeners } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-snapshot', ports: [{ port: 5173, bindAddr: '127.0.0.1' }] })
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => listeners.has(5173))
     const sock = makeFakeHostSocket()
     ;(listeners.get(5173) as unknown as { _accept: (s: HostSocket) => void })._accept(sock)
     const open = ws.outbox.find((m) => m.type === 'relay-open') as Extract<HostdToContainer, { type: 'relay-open' }>
@@ -330,10 +326,10 @@ describe('createBroker', () => {
   test('host socket close sends relay-close', async () => {
     const { broker, ws, listeners } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-snapshot', ports: [{ port: 5173, bindAddr: '127.0.0.1' }] })
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => listeners.has(5173))
     const sock = makeFakeHostSocket()
     ;(listeners.get(5173) as unknown as { _accept: (s: HostSocket) => void })._accept(sock)
     const open = ws.outbox.find((m) => m.type === 'relay-open') as Extract<HostdToContainer, { type: 'relay-open' }>
@@ -347,7 +343,7 @@ describe('createBroker', () => {
   test('ws disconnect tears down all forwarders and emits closed events', async () => {
     const { broker, ws, listeners, events } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({
       type: 'port-listen-snapshot',
@@ -356,7 +352,7 @@ describe('createBroker', () => {
         { port: 8080, bindAddr: '0.0.0.0' },
       ],
     })
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => listeners.has(5173) && listeners.has(8080))
     ws.triggerClose()
     expect(listeners.get(5173)?.stopped).toBe(true)
     expect(listeners.get(8080)?.stopped).toBe(true)
@@ -367,10 +363,10 @@ describe('createBroker', () => {
   test('stop() ends all forwarders and emits broker-stopped events', async () => {
     const { broker, ws, listeners, events } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-snapshot', ports: [{ port: 5173, bindAddr: '127.0.0.1' }] })
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => listeners.has(5173))
     await broker.stop()
     expect(listeners.get(5173)?.stopped).toBe(true)
     expect(events.find((e) => e.kind === 'port-forward-closed' && e.reason === 'broker-stopped')).toBeDefined()
@@ -379,7 +375,7 @@ describe('createBroker', () => {
   test('forwardedPorts() reflects currently bound ports', async () => {
     const { broker, ws } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({
       type: 'port-listen-snapshot',
@@ -388,7 +384,7 @@ describe('createBroker', () => {
         { port: 8080, bindAddr: '0.0.0.0' },
       ],
     })
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => broker.forwardedPorts().length === 2)
     expect(broker.forwardedPorts().sort()).toEqual([5173, 8080])
     await broker.stop()
   })
@@ -403,21 +399,18 @@ describe('createBroker', () => {
       },
     })
     broker.start()
-    await new Promise((r) => setTimeout(r, 50))
+    await waitFor(() => ws.outbox.find((m) => m.type === 'broker-hello'))
     expect(calls).toBeGreaterThanOrEqual(3)
-    expect(ws.outbox.find((m) => m.type === 'broker-hello')).toBeDefined()
     await broker.stop()
   })
 
   test('emits port-forward-result back to container after successful forward', async () => {
     const { broker, ws } = setup({ policy: { allow: '*' } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-opened', port: 4848, bindAddr: '127.0.0.1' })
-    await new Promise((r) => setTimeout(r, 5))
-
-    const result = ws.outbox.find((m) => m.type === 'port-forward-result')
+    const result = await waitFor(() => ws.outbox.find((m) => m.type === 'port-forward-result'))
     expect(result).toEqual({ type: 'port-forward-result', port: 4848, ok: true, hostPort: 4848 })
     await broker.stop()
   })
@@ -425,12 +418,10 @@ describe('createBroker', () => {
   test('emits port-forward-result with failure when host bind fails', async () => {
     const { broker, ws } = setup({ policy: { allow: '*' }, failPorts: new Set([4848]) })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-opened', port: 4848, bindAddr: '127.0.0.1' })
-    await new Promise((r) => setTimeout(r, 5))
-
-    const result = ws.outbox.find((m) => m.type === 'port-forward-result')
+    const result = await waitFor(() => ws.outbox.find((m) => m.type === 'port-forward-result'))
     expect(result).toMatchObject({ type: 'port-forward-result', port: 4848, ok: false })
     if (result?.type === 'port-forward-result' && !result.ok) {
       expect(result.reason.length).toBeGreaterThan(0)
@@ -441,12 +432,10 @@ describe('createBroker', () => {
   test('emits port-forward-result with policy-excluded reason for denied ports', async () => {
     const { broker, ws } = setup({ policy: { allow: [5173] } })
     broker.start()
-    await new Promise((r) => setTimeout(r, 5))
+    await waitFor(() => ws.outbox.some((m) => m.type === 'broker-hello'))
     ws.emit({ type: 'broker-hello-ack' })
     ws.emit({ type: 'port-listen-opened', port: 4848, bindAddr: '127.0.0.1' })
-    await new Promise((r) => setTimeout(r, 5))
-
-    const result = ws.outbox.find((m) => m.type === 'port-forward-result')
+    const result = await waitFor(() => ws.outbox.find((m) => m.type === 'port-forward-result'))
     expect(result).toEqual({ type: 'port-forward-result', port: 4848, ok: false, reason: 'policy excluded' })
     await broker.stop()
   })

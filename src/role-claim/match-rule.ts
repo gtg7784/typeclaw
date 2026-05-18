@@ -21,9 +21,10 @@ export type PartialChannelOrigin = {
   authorId: string
 }
 
-const ADAPTER_TO_PLATFORM: Record<ChannelKey['adapter'], 'slack' | 'discord' | 'telegram' | 'kakao'> = {
+const ADAPTER_TO_PLATFORM: Record<ChannelKey['adapter'], 'slack' | 'discord' | 'telegram' | 'kakao' | 'github'> = {
   'slack-bot': 'slack',
   'discord-bot': 'discord',
+  github: 'github',
   'telegram-bot': 'telegram',
   kakaotalk: 'kakao',
 }

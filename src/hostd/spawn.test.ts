@@ -54,7 +54,7 @@ describe('ensureDaemon', () => {
     const result = await ensureDaemon({
       cliEntry: '/nonexistent/cli.ts',
       expectedVersion: 'new',
-      spawnTimeoutMs: 500,
+      spawnTimeoutMs: 100,
     })
 
     // After detecting drift, ensureDaemon sends `shutdown` and waits for the
@@ -74,7 +74,7 @@ describe('ensureDaemon', () => {
 
     const result = await ensureDaemon({
       cliEntry: '/nonexistent/cli.ts',
-      spawnTimeoutMs: 500,
+      spawnTimeoutMs: 100,
     })
 
     // Production path requires a real CLI entry; the test invokes with a

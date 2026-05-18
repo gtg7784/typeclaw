@@ -1,3 +1,6 @@
+import { randomBytes } from 'node:crypto'
+import { readFile } from 'node:fs/promises'
+
 import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
@@ -16,6 +19,7 @@ import {
   isHatched,
   readExistingProviderApiKey,
   runInit,
+  type GithubInitCredentials,
   type InitStep,
   type InitStepEvent,
   type KakaotalkAuthResult,
@@ -31,15 +35,33 @@ import { c, done, errorLine } from './ui'
 // aliases both to the same "cancel" action — there's no way to tell them
 // apart through @clack/prompts). The wizard treats every cancel as "go
 // back to the previous step": each step that runs an interactive prompt
-// either advances with a value or rewinds. There is no "go back" target
-// on the very first step (pick-provider), so a `back` there is a no-op
-// that re-displays the same prompt rather than aborting. Users who want
-// to bail out of the wizard kill the process from outside (close the
-// terminal, send SIGTERM); inside an active clack prompt Ctrl+C is also
-// aliased to cancel, so there is no in-wizard abort hotkey.
-export type StepResult<T> = { kind: 'value'; value: T } | { kind: 'back' }
+// either advances with a value or rewinds.
+//
+// Two cancel patterns must not trap the user:
+//   1. Single-prompt cancel-loop. On the first step (pick-provider) there
+//      is no previous step, so `back` re-displays the same prompt. Two
+//      consecutive cancels on that same prompt = the user wants out.
+//   2. Auto-advance round-trip. `back` from `enter-api-key` routes to
+//      `pick-auth-method`, which for single-method providers (e.g.
+//      Fireworks, api-key only) returns its value without prompting and
+//      sends the wizard straight back to `enter-api-key`. The user only
+//      ever sees the same api-key prompt and has no way to escape.
+//
+// Both patterns are detected in `collectWizardInputs` and surfaced as
+// `WizardAbortedError`, which the `init` command catches and turns into
+// a clean exit. Inside an active clack prompt Ctrl+C is still aliased to
+// cancel, so the abort hotkey is "cancel twice in a row".
+export class WizardAbortedError extends Error {
+  constructor() {
+    super('Wizard aborted by user')
+    this.name = 'WizardAbortedError'
+  }
+}
+
+export type StepResult<T> = { kind: 'value'; value: T; auto?: boolean } | { kind: 'back' }
 const back = <T>(): StepResult<T> => ({ kind: 'back' })
 const value = <T>(v: T): StepResult<T> => ({ kind: 'value', value: v })
+const autoValue = <T>(v: T): StepResult<T> => ({ kind: 'value', value: v, auto: true })
 
 export const init = defineCommand({
   meta: {
@@ -76,12 +98,28 @@ export const init = defineCommand({
     }
 
     intro('Initializing TypeClaw...')
-    log.info('Press ESC at any prompt to go back to the previous step.')
+    log.info('Press ESC at any prompt to go back. Press ESC twice in a row to abort.')
 
-    const collected = await collectWizardInputs(cwd, defaultWizardPrompts)
+    let collected: CollectedInputs
+    try {
+      collected = await collectWizardInputs(cwd, defaultWizardPrompts)
+    } catch (error) {
+      if (error instanceof WizardAbortedError) {
+        cancel('Aborted.')
+        process.exit(0)
+      }
+      throw error
+    }
     const { model, llmAuth, vision, channelChoice, reuseExistingChannel, channelSecrets } = collected
-    const { discordBotToken, slackBotToken, slackAppToken, telegramBotToken, kakaotalkEmail, kakaotalkPassword } =
-      channelSecrets
+    const {
+      discordBotToken,
+      slackBotToken,
+      slackAppToken,
+      telegramBotToken,
+      kakaotalkEmail,
+      kakaotalkPassword,
+      github: githubCredentials,
+    } = channelSecrets
 
     // TODO: add remaining wizard steps from TypeClaw.md once their runtime lands:
     //   - git backup (url + PAT) — Phase 10
@@ -96,7 +134,9 @@ export const init = defineCommand({
     const reuseSlack = reuseExistingChannel && channelChoice === 'slack'
     const reuseTelegram = reuseExistingChannel && channelChoice === 'telegram'
     const reuseKakaotalk = reuseExistingChannel && channelChoice === 'kakaotalk'
+    const reuseGithub = reuseExistingChannel && channelChoice === 'github'
     const wantsKakaotalk = (kakaotalkEmail !== undefined && kakaotalkPassword !== undefined) || reuseKakaotalk
+    const wantsGithub = githubCredentials !== undefined || reuseGithub
     let hatchingOk = false
     let preflightFailure: Extract<DockerAvailability, { ok: false }> | null = null
     try {
@@ -128,6 +168,12 @@ export const init = defineCommand({
                         },
                       }),
                   }),
+            }
+          : {}),
+        ...(wantsGithub
+          ? {
+              withGithub: true,
+              ...(reuseGithub || githubCredentials === undefined ? {} : { githubCredentials }),
             }
           : {}),
         onProgress: reportProgress(
@@ -179,7 +225,7 @@ interface WizardState {
   channelReuseExisting?: boolean
 }
 
-type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'kakaotalk' | 'none'
+type ChannelChoice = 'slack' | 'discord' | 'telegram' | 'kakaotalk' | 'github' | 'none'
 
 interface CollectedInputs {
   model: ModelOption
@@ -201,6 +247,11 @@ interface CollectedInputs {
     telegramBotToken?: string
     kakaotalkEmail?: string
     kakaotalkPassword?: string
+    // Structured (auth union + webhook + repo allowlist) rather than flat
+    // tokens, so it rides as one sub-object instead of sibling fields.
+    // `runInit` delegates to `runAddChannel` for GitHub to keep the github
+    // config-writing in one place.
+    github?: GithubInitCredentials
   }
 }
 
@@ -277,11 +328,22 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
   const catalog = await prompts.loadCatalog()
   const state: WizardState = { catalog }
   let step: StepId = 'pick-provider'
+  let pendingBackOrigin: StepId | null = null
+
+  const onResult = <T>(currentStep: StepId, result: StepResult<T>): StepResult<T> => {
+    if (result.kind === 'back') {
+      if (pendingBackOrigin === currentStep) throw new WizardAbortedError()
+      pendingBackOrigin = currentStep
+    } else if (!result.auto) {
+      pendingBackOrigin = null
+    }
+    return result
+  }
 
   while (true) {
     switch (step) {
       case 'pick-provider': {
-        const result = await prompts.pickProvider(catalog.options, state.providerId)
+        const result = onResult(step, await prompts.pickProvider(catalog.options, state.providerId))
         if (result.kind === 'back') {
           break
         }
@@ -297,7 +359,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
       }
 
       case 'pick-model': {
-        const result = await prompts.pickModel(catalog.options, state.providerId!, state.model?.ref)
+        const result = onResult(step, await prompts.pickModel(catalog.options, state.providerId!, state.model?.ref))
         if (result.kind === 'back') {
           step = 'pick-provider'
           break
@@ -310,7 +372,10 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
       case 'reuse-existing-key': {
         const provider = KNOWN_PROVIDERS[state.providerId!]
         const existingApiKey = await prompts.readExistingApiKey(cwd, state.providerId!)
-        const decision = await prompts.askReuseExistingKey(provider, existingApiKey, state.reuseExisting)
+        const decision = onResult(
+          step,
+          await prompts.askReuseExistingKey(provider, existingApiKey, state.reuseExisting),
+        )
         if (decision.kind === 'back') {
           step = 'pick-model'
           break
@@ -330,7 +395,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
 
       case 'pick-auth-method': {
         const provider = KNOWN_PROVIDERS[state.providerId!]
-        const result = await prompts.pickAuthMethod(provider, state.authMethod)
+        const result = onResult(step, await prompts.pickAuthMethod(provider, state.authMethod))
         if (result.kind === 'back') {
           step = 'reuse-existing-key'
           break
@@ -347,7 +412,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
 
       case 'enter-api-key': {
         const provider = KNOWN_PROVIDERS[state.providerId!]
-        const result = await prompts.askApiKey(provider)
+        const result = onResult(step, await prompts.askApiKey(provider))
         if (result.kind === 'back') {
           step = 'pick-auth-method'
           break
@@ -359,7 +424,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
 
       case 'pick-vision-provider': {
         const visionOptions = catalog.options.filter((o) => o.supportsVision)
-        const result = await prompts.pickVisionProvider(visionOptions, state.visionProviderId)
+        const result = onResult(step, await prompts.pickVisionProvider(visionOptions, state.visionProviderId))
         if (result.kind === 'back') {
           step = stepBeforeVision(state)
           break
@@ -386,7 +451,10 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
 
       case 'pick-vision-model': {
         const visionOptions = catalog.options.filter((o) => o.supportsVision)
-        const result = await prompts.pickVisionModel(visionOptions, state.visionProviderId!, state.visionModel?.ref)
+        const result = onResult(
+          step,
+          await prompts.pickVisionModel(visionOptions, state.visionProviderId!, state.visionModel?.ref),
+        )
         if (result.kind === 'back') {
           step = 'pick-vision-provider'
           break
@@ -415,7 +483,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
 
       case 'pick-vision-auth-method': {
         const provider = KNOWN_PROVIDERS[state.visionProviderId!]
-        const result = await prompts.pickAuthMethod(provider, state.visionAuthMethod)
+        const result = onResult(step, await prompts.pickAuthMethod(provider, state.visionAuthMethod))
         if (result.kind === 'back') {
           step = 'pick-vision-model'
           break
@@ -432,7 +500,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
 
       case 'enter-vision-api-key': {
         const provider = KNOWN_PROVIDERS[state.visionProviderId!]
-        const result = await prompts.askApiKey(provider)
+        const result = onResult(step, await prompts.askApiKey(provider))
         if (result.kind === 'back') {
           step = 'pick-vision-auth-method'
           break
@@ -443,7 +511,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
       }
 
       case 'pick-channel': {
-        const result = await prompts.pickChannel(state.channelChoice)
+        const result: StepResult<ChannelChoice> = onResult(step, await prompts.pickChannel(state.channelChoice))
         if (result.kind === 'back') {
           step = stepBeforePickChannel(state)
           break
@@ -467,7 +535,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
           break
         }
         state.channelReuseOffered = true
-        const decision = await prompts.askReuseExistingChannel(choice)
+        const decision = onResult(step, await prompts.askReuseExistingChannel(choice))
         if (decision.kind === 'back') {
           step = 'pick-channel'
           break
@@ -483,7 +551,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
       }
 
       case 'channel-flow': {
-        const result = await prompts.runChannelFlow(state.channelChoice!)
+        const result = onResult(step, await prompts.runChannelFlow(state.channelChoice!))
         if (result.kind === 'back') {
           step = state.channelReuseOffered === true ? 'reuse-existing-channel' : 'pick-channel'
           break
@@ -517,6 +585,8 @@ function channelDisplayName(choice: Exclude<ChannelChoice, 'none'>): string {
       return 'Telegram'
     case 'kakaotalk':
       return 'KakaoTalk'
+    case 'github':
+      return 'GitHub'
   }
 }
 
@@ -632,8 +702,7 @@ async function pickAuthMethod(
     if (isCancel(choice)) return back()
     return value(choice)
   }
-  // Single-method providers: no prompt to back out of, so always advance.
-  return value(supportsOAuth ? 'oauth' : 'api-key')
+  return autoValue(supportsOAuth ? 'oauth' : 'api-key')
 }
 
 async function pickVisionProvider(
@@ -643,7 +712,7 @@ async function pickVisionProvider(
   const providers = uniqueProviders(options)
   if (providers.length === 0) {
     log.warn('No vision-capable models available; skipping vision profile.')
-    return value('skip')
+    return autoValue('skip')
   }
   const choice = await select<KnownProviderId | 'skip'>({
     message: 'Your model is text-only. Pick a provider for the `vision` profile (used for image input)',
@@ -699,6 +768,7 @@ async function pickChannel(initial: ChannelChoice | undefined): Promise<StepResu
       { value: 'discord', label: 'Discord' },
       { value: 'telegram', label: 'Telegram' },
       { value: 'kakaotalk', label: 'KakaoTalk' },
+      { value: 'github', label: 'GitHub' },
       { value: 'none', label: 'Skip — no channel right now' },
     ],
     initialValue: initial ?? 'slack',
@@ -719,6 +789,8 @@ async function runChannelFlow(choice: ChannelChoice): Promise<StepResult<Collect
       return runSlackFlow()
     case 'telegram':
       return runTelegramFlow()
+    case 'github':
+      return runGithubFlow()
   }
 }
 
@@ -879,6 +951,144 @@ async function runSlackFlow(): Promise<StepResult<CollectedInputs['channelSecret
     }
     return value({ slackBotToken: botToken!, slackAppToken: input })
   }
+}
+
+async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+  note(
+    [
+      'Choose PAT auth for a quick setup, or GitHub App auth for expiring installation tokens.',
+      'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used), Metadata read.',
+      'Create a repository webhook pointing to the public webhook URL you enter below.',
+    ].join('\n'),
+    'Get GitHub credentials',
+  )
+  const authType = await select<'pat' | 'app'>({
+    message: 'GitHub authentication type',
+    options: [
+      { value: 'pat', label: 'Fine-grained personal access token' },
+      { value: 'app', label: 'GitHub App installation token' },
+    ],
+  })
+  if (isCancel(authType)) return back()
+  const auth = authType === 'pat' ? await promptGithubPatAuth() : await promptGithubAppAuth()
+  if (auth === null) return back()
+  const webhookUrl = await text({
+    message: 'Public webhook URL (GitHub will POST events here)',
+    validate: (v) => validateGithubUrl(v ?? '', 'Webhook URL is required'),
+  })
+  if (isCancel(webhookUrl)) return back()
+  const port = await text({
+    message: 'Local webhook port inside the agent container',
+    initialValue: '8975',
+    validate: (v) => {
+      const parsed = Number(v)
+      return Number.isInteger(parsed) && parsed > 0 ? undefined : 'Port must be a positive integer'
+    },
+  })
+  if (isCancel(port)) return back()
+  const secret = await password({
+    message: 'Webhook secret (leave blank to auto-generate)',
+  })
+  if (isCancel(secret)) return back()
+  // clack's password() returns `undefined` on an empty submission (it has no
+  // validate guard and never coerces to ''), so we normalize before the
+  // length checks below to avoid a TypeError on the "leave blank" path.
+  const enteredSecret = typeof secret === 'string' ? secret : ''
+  const reposRaw = await text({
+    message: 'Repositories to allow (comma-separated owner/repo)',
+    validate: (v) => (parseGithubRepos(v ?? '').length > 0 ? undefined : 'At least one owner/repo is required'),
+  })
+  if (isCancel(reposRaw)) return back()
+  const resolvedSecret = enteredSecret.length > 0 ? enteredSecret : randomBytes(32).toString('hex')
+  if (enteredSecret.length === 0) {
+    note(
+      [
+        `Webhook secret: ${resolvedSecret}`,
+        '',
+        'Paste this into the "Secret" field when creating the GitHub webhook.',
+        'It will not be shown again.',
+      ].join('\n'),
+      'Generated webhook secret',
+    )
+  }
+  return value({
+    github: {
+      webhookSecret: resolvedSecret,
+      webhookUrl,
+      webhookPort: Number(port),
+      repos: parseGithubRepos(reposRaw),
+      auth,
+    },
+  })
+}
+
+async function promptGithubPatAuth(): Promise<{ type: 'pat'; pat: string } | null> {
+  const pat = await password({
+    message: 'GitHub fine-grained PAT',
+    validate: (v) => (v && v.length > 0 ? undefined : 'PAT is required'),
+  })
+  if (isCancel(pat)) return null
+  return { type: 'pat', pat }
+}
+
+async function promptGithubAppAuth(): Promise<{
+  type: 'app'
+  appId: number
+  privateKey: string
+  installationId?: number
+} | null> {
+  const appId = await text({
+    message: 'GitHub App ID',
+    validate: (v) => validatePositiveInteger(v ?? '', 'App ID is required'),
+  })
+  if (isCancel(appId)) return null
+  const privateKeyInput = await text({
+    message: 'GitHub App private key PEM, escaped PEM, or path to .pem file',
+    validate: (v) => (v && v.length > 0 ? undefined : 'Private key is required'),
+  })
+  if (isCancel(privateKeyInput)) return null
+  const installationId = await text({
+    message: 'Installation ID (optional; leave blank to auto-discover)',
+    validate: (v) =>
+      v === undefined || v === '' ? undefined : validatePositiveInteger(v, 'Installation ID is required'),
+  })
+  if (isCancel(installationId)) return null
+  const parsedInstallationId = installationId === '' ? undefined : Number(installationId)
+  return {
+    type: 'app',
+    appId: Number(appId),
+    privateKey: await resolveGithubPrivateKey(privateKeyInput),
+    ...(parsedInstallationId !== undefined ? { installationId: parsedInstallationId } : {}),
+  }
+}
+
+async function resolveGithubPrivateKey(input: string): Promise<string> {
+  const normalized = input.replace(/\\n/g, '\n')
+  if (normalized.includes('-----BEGIN') && normalized.includes('PRIVATE KEY-----')) return normalized
+  return await readFile(input, 'utf8')
+}
+
+function parseGithubRepos(input: string): string[] {
+  return input
+    .split(',')
+    .map((v) => v.trim())
+    .filter((v) => /^[^\s/]+\/[^\s/]+$/.test(v))
+}
+
+function validateGithubUrl(v: string, requiredMessage: string): string | undefined {
+  if (!v || v.length === 0) return requiredMessage
+  try {
+    new URL(v)
+    return undefined
+  } catch {
+    return 'Must be a valid URL'
+  }
+}
+
+function validatePositiveInteger(v: string, requiredMessage: string): string | undefined {
+  if (!v || v.length === 0) return requiredMessage
+  const parsed = Number(v)
+  return Number.isInteger(parsed) && parsed > 0 ? undefined : 'Must be a positive integer'
 }
 
 async function runTelegramFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {

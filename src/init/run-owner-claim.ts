@@ -8,6 +8,7 @@ import type { ChannelKind } from './index'
 const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
   'discord-bot': 'Discord',
+  github: 'GitHub',
   'telegram-bot': 'Telegram',
   kakaotalk: 'KakaoTalk',
 }
@@ -25,9 +26,17 @@ export type RunOwnerClaimOptions = {
 // normal hatching path so the TUI still opens — the operator can run
 // `typeclaw role claim` later.
 export async function runOwnerClaim({ url, configuredChannels }: RunOwnerClaimOptions): Promise<void> {
-  if (configuredChannels.length === 0) return
+  // GitHub has no DM affordance, and the github adapter doesn't yet route
+  // claim codes (the `typeclaw role claim` CLI explicitly lists only the
+  // four chat adapters as --channel values). Owner authorization for github
+  // is handled by the `roles.member.match[]` repo allowlist that
+  // runAddChannel writes during init. Filtering here keeps the auto-claim
+  // working for chat channels mixed with github, and skips the flow
+  // entirely when github is the only wired channel.
+  const claimable = configuredChannels.filter((c) => c !== 'github')
+  if (claimable.length === 0) return
 
-  const channelList = configuredChannels.map((c) => CHANNEL_LABELS[c] ?? c).join(', ')
+  const channelList = claimable.map((c) => CHANNEL_LABELS[c] ?? c).join(', ')
 
   const proceed = await confirm({
     message: `Claim owner role on ${channelList} now?`,

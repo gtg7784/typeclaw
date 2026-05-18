@@ -80,6 +80,7 @@ That's it. The agent is now alive, listening on a websocket, ready to receive pr
 | `typeclaw shell`                    | Open a shell inside the running container                                          |
 | `typeclaw reload`                   | Push a live config reload to the running agent                                     |
 | `typeclaw compose`                  | Orchestrate multiple agents                                                        |
+| `typeclaw cron list`                | List every cron job registered in the running agent (user `cron.json` + plugins)   |
 | `typeclaw channel add <kind>`       | Wire a new channel adapter (Slack, Discord, Telegram, KakaoTalk)                   |
 | `typeclaw channel reauth kakaotalk` | Re-authenticate KakaoTalk after a stale-token 401 or to rotate the stored password |
 
@@ -107,7 +108,7 @@ my-agent/
 - `plugins` — list of plugin module specifiers
 - `channels` — `slack-bot` / `discord-bot` config
 - `portForward` — allow/deny list for auto port forwarding (default: `*`)
-- `dockerfile` — toggles for `gh`, `python`, `tmux`, `ffmpeg`, plus `append` lines
+- `dockerfile` — toggles for `gh`, `python`, `tmux`, `ffmpeg`, `cjkFonts`, plus `append` lines
 - `memory` — idle window and dreaming schedule for the memory plugin
 
 `Dockerfile` and `.gitignore` are owned by TypeClaw and rewritten on every `start` — edit `src/init/dockerfile.ts` and re-run `start --build` to ship template changes.

@@ -31,6 +31,7 @@ export type ClientMessage =
   | { type: 'queue_cancel'; messageId: string }
   | { type: 'doctor'; requestId: DoctorRequestId }
   | { type: 'doctor_fix'; requestId: DoctorRequestId; checkId: string }
+  | { type: 'cron_list'; requestId: CronListRequestId }
   | { type: 'claim_start'; code: string; role: ClaimRoleChoice; channel?: string; ttlMs: number }
   | { type: 'claim_cancel' }
   | {
@@ -49,6 +50,29 @@ export type ClientMessage =
   | { type: 'command_stdin'; callId: string; chunk: string }
   | { type: 'command_stdin_end'; callId: string }
   | { type: 'command_abort'; callId: string; reason: string }
+
+export type CronListRequestId = string
+
+export type CronListSourcePayload = { kind: 'user' } | { kind: 'plugin'; pluginName: string; localId: string }
+
+export type CronListEntryPayload = {
+  id: string
+  source: CronListSourcePayload
+  kind: 'prompt' | 'exec' | 'handler'
+  schedule: string
+  timezone?: string
+  enabled: boolean
+  scheduledByRole?: string
+  nextFireMs: number | null
+  scheduleError?: string
+  prompt?: string
+  subagent?: string
+  command?: readonly string[]
+}
+
+export type CronListResultPayload =
+  | { ok: true; jobs: CronListEntryPayload[]; nowMs: number }
+  | { ok: false; reason: string }
 
 export type QueueStateItem = { id: string; text: string; ts: number }
 
@@ -85,6 +109,7 @@ export type ServerMessage =
   | { type: 'prompt_started'; messageId: string; text: string }
   | { type: 'doctor_result'; requestId: DoctorRequestId; checks: DoctorCheckPayload[] }
   | { type: 'doctor_fix_result'; requestId: DoctorRequestId; result: DoctorFixPayload }
+  | { type: 'cron_list_result'; requestId: CronListRequestId; result: CronListResultPayload }
   | { type: 'claim_started'; payload: ClaimStartedPayload }
   | { type: 'claim_completed'; payload: ClaimCompletedPayload }
   | { type: 'claim_error'; payload: ClaimErrorPayload }

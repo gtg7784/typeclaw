@@ -188,6 +188,20 @@ describe('loadCron auto-migrates legacy cron.json (PR #171 backfill)', () => {
     if (!result.ok) throw new Error(`expected migration to absorb legacy shape, got error: ${result.reason}`)
     expect(result.file?.jobs).toHaveLength(1)
   })
+
+  test('persistMigrations: false applies the migration in memory but does not rewrite cron.json', async () => {
+    const legacy = JSON.stringify({
+      jobs: [{ id: 'legacy', schedule: '0 * * * *', kind: 'prompt', prompt: 'x' }],
+    })
+    await writeFile(join(root, 'cron.json'), legacy)
+
+    const result = await loadCron(root, { persistMigrations: false })
+
+    if (!result.ok) throw new Error(`expected ok, got: ${result.reason}`)
+    expect(result.file?.jobs[0]?.scheduledByRole).toBe('owner')
+    const onDisk = await readFile(join(root, 'cron.json'), 'utf8')
+    expect(onDisk).toBe(legacy)
+  })
 })
 
 async function gitInitForCommitTests(cwd: string): Promise<void> {

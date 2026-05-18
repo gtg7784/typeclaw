@@ -189,9 +189,9 @@ function jobPayload(job: CronJob): unknown {
   return { handler: String(job.handler) }
 }
 
-type ComputeNextFireResult = { ok: true; nextFire: number } | { ok: false; reason: string }
+export type ComputeNextFireResult = { ok: true; nextFire: number } | { ok: false; reason: string }
 
-function computeNextFire(job: CronJob, now: number): ComputeNextFireResult {
+export function computeNextFire(job: CronJob, now: number): ComputeNextFireResult {
   try {
     const expr = CronExpressionParser.parse(job.schedule, {
       currentDate: new Date(now),

@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
+import { expectStable, waitFor } from '@/test-helpers/wait-for'
+
 import {
   createContainerBroker,
   type ContainerBroker,
@@ -119,7 +121,7 @@ describe('end-to-end portbroker pipeline', () => {
   test('full handshake → snapshot → forwarder bound → host connection → bytes flow → close', async () => {
     harness = await startHarness({ procSnapshots: [procWith5173Loopback], policy: { allow: '*' } })
     harness.broker.start()
-    await new Promise((r) => setTimeout(r, 100))
+    await waitFor(() => harness!.events.find((e) => e.kind === 'port-forward-opened' && e.port === 5173))
 
     const opened = harness.events.find((e) => e.kind === 'port-forward-opened' && e.port === 5173)
     expect(opened).toBeDefined()
@@ -136,7 +138,10 @@ describe('end-to-end portbroker pipeline', () => {
         error() {},
       },
     })
-    await new Promise((r) => setTimeout(r, 100))
+    await waitFor(() => {
+      const u = harness!.upstreams.get(5173)
+      return u && u.written.length > 0
+    })
     sock.end()
 
     const upstream = harness.upstreams.get(5173)
@@ -151,7 +156,7 @@ describe('end-to-end portbroker pipeline', () => {
       policy: { allow: '*' },
     })
     harness.broker.start()
-    await new Promise((r) => setTimeout(r, 200))
+    await waitFor(() => harness!.events.some((e) => e.kind === 'port-forward-closed' && e.port === 5173))
 
     const closedEvents = harness.events.filter((e) => e.kind === 'port-forward-closed' && e.port === 5173)
     expect(closedEvents.length).toBeGreaterThanOrEqual(1)
@@ -162,7 +167,7 @@ describe('end-to-end portbroker pipeline', () => {
   test('disabled by allow:[] — no events, no broker connect', async () => {
     harness = await startHarness({ procSnapshots: [procWith5173Loopback], policy: { allow: [] } })
     harness.broker.start()
-    await new Promise((r) => setTimeout(r, 100))
+    await expectStable(() => harness!.events.length > 0, { durationMs: 30, description: 'disabled-broker activity' })
     expect(harness.events).toEqual([])
     expect(harness.broker.forwardedPorts()).toEqual([])
   })
@@ -175,7 +180,7 @@ describe('end-to-end portbroker pipeline', () => {
       policy: { allow: '*', deny: [9229] },
     })
     harness.broker.start()
-    await new Promise((r) => setTimeout(r, 100))
+    await waitFor(() => harness!.broker.forwardedPorts().length > 0)
 
     expect(harness.broker.forwardedPorts()).toEqual([5173])
   })
@@ -183,7 +188,7 @@ describe('end-to-end portbroker pipeline', () => {
   test('bytes flow downstream — container-side data reaches host client', async () => {
     harness = await startHarness({ procSnapshots: [procWith5173Loopback], policy: { allow: '*' } })
     harness.broker.start()
-    await new Promise((r) => setTimeout(r, 100))
+    await waitFor(() => harness!.broker.forwardedPorts().includes(5173))
 
     const received: Uint8Array[] = []
     let sockHandle: Awaited<ReturnType<typeof Bun.connect>> | null = null
@@ -201,12 +206,10 @@ describe('end-to-end portbroker pipeline', () => {
         error() {},
       },
     })
-    await new Promise((r) => setTimeout(r, 50))
-
-    const upstream = harness.upstreams.get(5173)
+    const upstream = await waitFor(() => harness!.upstreams.get(5173))
     expect(upstream).toBeDefined()
-    upstream!.handlers.onData(new TextEncoder().encode('HTTP/1.1 200 OK\r\n\r\n'))
-    await new Promise((r) => setTimeout(r, 50))
+    upstream.handlers.onData(new TextEncoder().encode('HTTP/1.1 200 OK\r\n\r\n'))
+    await waitFor(() => received.length > 0)
 
     expect(received.length).toBeGreaterThan(0)
     const text = received.map((b) => new TextDecoder().decode(b)).join('')

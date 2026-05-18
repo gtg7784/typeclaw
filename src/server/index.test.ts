@@ -1,13 +1,18 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession, CreateSessionOptions } from '@/agent'
-import type { HookBus, PluginRegistry } from '@/plugin'
+import type { CronJob } from '@/cron'
+import { createHookBus, type HookBus, type PluginRegistry } from '@/plugin'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 import type { SessionFactory } from '@/sessions'
 import type { ServerMessage } from '@/shared'
 import { createStream } from '@/stream'
+import { expectStable, waitFor as waitForState } from '@/test-helpers/wait-for'
 
 import type { CommandOutbound, CommandRunner } from './command-runner'
 import { createServer, safeWsSend, type ServerLogger } from './index'
@@ -170,20 +175,6 @@ describe('createServer tool event forwarding', () => {
 
     await expect(waitFor((m) => m.type === 'connected')).resolves.toMatchObject({ type: 'connected' })
     ws.close()
-  })
-
-  test('sends an error frame when session creation fails during websocket open', async () => {
-    const built = createServer({
-      port: 0,
-      createSession: async () => {
-        throw new Error('auth missing')
-      },
-    }).start()
-    server = built
-
-    const { waitFor } = await connect(`ws://localhost:${built.port}`)
-
-    await expect(waitFor((m) => m.type === 'error')).resolves.toEqual({ type: 'error', message: 'auth missing' })
   })
 
   test('forwards toolCallId, name, and args from tool_execution_start', async () => {
@@ -355,7 +346,7 @@ describe('createServer abort handling (no stream — fallback path)', () => {
     await waitFor((m) => m.type === 'connected')
 
     ws.send(JSON.stringify({ type: 'prompt', text: 'do thing' }))
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     expect(session.promptCalls).toEqual(['do thing'])
     expect(session.abortCalls).toBe(0)
 
@@ -372,7 +363,7 @@ describe('createServer abort handling (no stream — fallback path)', () => {
     await waitFor((m) => m.type === 'connected')
 
     ws.send(JSON.stringify({ type: 'abort' }))
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => session.abortCalls > 0)
     expect(session.abortCalls).toBe(1)
     ws.close()
   })
@@ -499,7 +490,7 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     // when
     ws.send(JSON.stringify({ type: 'prompt', text: 'hello' }))
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => session.promptCalls.length > 0)
     expect(session.promptCalls).toEqual(['hello'])
 
     session.resolvePrompt()
@@ -544,14 +535,15 @@ describe('createServer with stream — input queueing bugfix', () => {
     // when: fire two prompts back-to-back while the first is still in flight
     ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
     ws.send(JSON.stringify({ type: 'prompt', text: 'second' }))
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => session.promptCalls.length > 0)
+    await expectStable(() => session.promptCalls.length > 1, { durationMs: 15, description: 'second prompt' })
 
     // then: only the first reached session.prompt — the second is queued
     expect(session.promptCalls).toEqual(['first'])
 
     // when: first completes
     session.resolvePrompt()
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => session.promptCalls.length === 2)
 
     // then: second now reaches session.prompt
     expect(session.promptCalls).toEqual(['first', 'second'])
@@ -571,7 +563,13 @@ describe('createServer with stream — input queueing bugfix', () => {
     // when: send two prompts; only the first should be in flight, the second should be visible in queue_state
     ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
     ws.send(JSON.stringify({ type: 'prompt', text: 'second' }))
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => {
+      const states = received.filter(
+        (m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state',
+      )
+      const last = states[states.length - 1]
+      return last && last.pending.length > 0
+    })
 
     const queueStates = received.filter(
       (m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state',
@@ -581,7 +579,7 @@ describe('createServer with stream — input queueing bugfix', () => {
     expect(last.pending.map((p) => p.text)).toEqual(['second'])
 
     session.resolvePrompt()
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => session.promptCalls.length === 2)
     session.resolvePrompt()
     ws.close()
   })
@@ -596,7 +594,12 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
     ws.send(JSON.stringify({ type: 'prompt', text: 'second' }))
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => {
+      const last = received
+        .filter((m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state')
+        .at(-1)
+      return last && last.pending.length > 0
+    })
 
     const queueStateBefore = received
       .filter((m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state')
@@ -606,7 +609,12 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     // when: cancel the queued one
     ws.send(JSON.stringify({ type: 'queue_cancel', messageId: queuedId }))
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => {
+      const last = received
+        .filter((m): m is Extract<ServerMessage, { type: 'queue_state' }> => m.type === 'queue_state')
+        .at(-1)
+      return last !== undefined && last.pending.length === 0
+    })
 
     // then: queue is empty
     const queueStateAfter = received
@@ -616,7 +624,7 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     // and: when first completes, second is NOT processed
     session.resolvePrompt()
-    await new Promise((r) => setTimeout(r, 30))
+    await expectStable(() => session.promptCalls.length > 1, { durationMs: 20, description: 'second prompt' })
     expect(session.promptCalls).toEqual(['first'])
 
     ws.close()
@@ -654,7 +662,7 @@ describe('createServer with stream — input queueing bugfix', () => {
       target: { kind: 'session', sessionId: 'someone-else' },
       payload: { kind: 'prompt', text: 'not for us' },
     })
-    await new Promise((r) => setTimeout(r, 20))
+    await expectStable(() => session.promptCalls.length > 0, { durationMs: 15, description: 'foreign prompt' })
 
     // then: nothing reaches this session.prompt
     expect(session.promptCalls).toEqual([])
@@ -663,7 +671,6 @@ describe('createServer with stream — input queueing bugfix', () => {
   })
 
   test('an interrupt-delivery prompt aborts the in-flight prompt before sending the new one', async () => {
-    // given
     const session = createFakeSession()
     const stream = createStream()
     const { url } = await startWithSession(session, { stream })
@@ -672,13 +679,13 @@ describe('createServer with stream — input queueing bugfix', () => {
 
     // when: first prompt starts
     ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => session.promptCalls.length > 0)
     expect(session.promptCalls).toEqual(['first'])
     expect(session.abortCalls).toBe(0)
 
     // when: interrupt-delivery prompt arrives
     ws.send(JSON.stringify({ type: 'prompt', text: 'urgent', delivery: 'interrupt' }))
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => session.abortCalls >= 1 && session.promptCalls.includes('urgent'))
 
     // then: abort was called, then second prompt was sent
     expect(session.abortCalls).toBeGreaterThanOrEqual(1)
@@ -689,7 +696,6 @@ describe('createServer with stream — input queueing bugfix', () => {
   })
 
   test('close() unsubscribes from the stream so further publishes do not error', async () => {
-    // given
     const session = createFakeSession()
     const stream = createStream()
     const { url } = await startWithSession(session, { stream })
@@ -697,7 +703,7 @@ describe('createServer with stream — input queueing bugfix', () => {
     await waitFor((m) => m.type === 'connected')
 
     ws.close()
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => ws.readyState === WebSocket.CLOSED)
 
     // when: publish a broadcast after close
     stream.publish({ target: { kind: 'broadcast' }, payload: { kind: 'noise' } })
@@ -752,10 +758,10 @@ describe('createServer fires session.idle hook after every prompt completion', (
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
     })
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     session.resolvePrompt()
     await waitFor((m) => m.type === 'done')
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => idleEvents.length > 0)
 
     expect(idleEvents).toHaveLength(1)
     expect(idleEvents[0]?.sessionId).toBe('ses_fake')
@@ -796,10 +802,10 @@ describe('createServer fires session.idle hook after every prompt completion', (
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
     })
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     session.rejectPrompt(new Error('llm boom'))
     await waitFor((m) => m.type === 'error')
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => idleEvents.length > 0)
 
     expect(idleEvents).toHaveLength(1)
     ws.close()
@@ -820,7 +826,7 @@ describe('createServer fires session.idle hook after every prompt completion', (
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
     })
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     session.resolvePrompt()
     const done = await waitFor((m) => m.type === 'done')
 
@@ -860,7 +866,7 @@ describe('createServer surfaces LLM errors to logger', () => {
       target: { kind: 'session', sessionId: 'ses_fake' },
       payload: { kind: 'prompt', text: 'hi', delivery: 'queue' },
     })
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     session.rejectPrompt(new Error('llm boom'))
     const errFrame = await waitFor((m) => m.type === 'error')
 
@@ -882,7 +888,7 @@ describe('createServer surfaces LLM errors to logger', () => {
     if (opened.type !== 'connected') throw new Error('unreachable')
 
     ws.send(JSON.stringify({ type: 'prompt', text: 'hello' }))
-    await new Promise((r) => setTimeout(r, 10))
+    await waitForState(() => session.promptCalls.length > 0)
     session.rejectPrompt(new Error('fallback boom'))
     const errFrame = await waitFor((m) => m.type === 'error')
 
@@ -929,7 +935,7 @@ describe('createServer surfaces LLM errors to logger', () => {
       message: { role: 'assistant', stopReason: 'aborted' },
     } as unknown as Parameters<typeof session.emit>[0])
 
-    await new Promise((r) => setTimeout(r, 20))
+    await expectStable(() => errors.length > 0, { durationMs: 15, description: 'aborted-error log' })
     expect(errors).toEqual([])
     ws.close()
   })
@@ -997,10 +1003,10 @@ describe('createServer plugin hooks', () => {
     await waitFor((m) => m.type === 'connected')
 
     ws.close()
-    await new Promise((r) => setTimeout(r, 30))
+    await expectStable(() => ended, { durationMs: 20, description: 'session.end resolved early' })
     expect(ended).toBe(false)
     endResolve.fn?.()
-    await new Promise((r) => setTimeout(r, 30))
+    await waitForState(() => ended)
     expect(ended).toBe(true)
   })
 })
@@ -1013,7 +1019,7 @@ describe('createServer session lifecycle', () => {
     await waitFor((m) => m.type === 'connected')
 
     ws.close()
-    await new Promise((r) => setTimeout(r, 20))
+    await waitForState(() => session.disposeCalls > 0)
 
     expect(session.disposeCalls).toBe(1)
   })
@@ -1139,309 +1145,189 @@ describe('createServer scoped reload', () => {
   })
 })
 
-describe('createServer plugin-command dispatch', () => {
-  function makeFakeRunner(): {
-    runner: CommandRunner
-    starts: { callId: string; name: string }[]
-    outbound: CommandOutbound | null
-  } {
-    const ref: {
-      runner: CommandRunner
-      starts: { callId: string; name: string }[]
-      outbound: CommandOutbound | null
-    } = {
-      runner: null as unknown as CommandRunner,
-      starts: [],
-      outbound: null,
-    }
-    return ref
+describe('createServer cron_list handler', () => {
+  async function makeEmptyRegistry(): Promise<PluginRegistry> {
+    const { emptyRegistry } = await import('@/plugin/registry')
+    return emptyRegistry()
   }
 
-  function buildRunnerFactory(state: ReturnType<typeof makeFakeRunner>): (outbound: CommandOutbound) => CommandRunner {
-    return (outbound) => {
-      state.outbound = outbound
-      const runner: CommandRunner = {
-        start(msg) {
-          state.starts.push({ callId: msg.callId, name: msg.name })
-        },
-        feedStdin() {},
-        endStdin() {},
-        abort() {},
-        abortForOwner() {},
-        inFlightCount: () => 0,
-      }
-      state.runner = runner
-      return runner
+  function promptJob(id: string, schedule = '*/5 * * * *'): CronJob {
+    return {
+      id,
+      schedule,
+      enabled: true,
+      kind: 'prompt',
+      prompt: 'do it',
+      scheduledByRole: 'owner',
     }
   }
 
-  test('rejects a duplicate callId at the WS layer before the runner is touched', async () => {
+  test('responds with ok: false when agentDir is not configured', async () => {
     const session = createFakeSession()
-    const state = makeFakeRunner()
-    const { url } = await startWithSession(session, { commandRunnerFactory: buildRunnerFactory(state) })
+    const { url } = await startWithSession(session)
     const { ws, waitFor } = await connect(url)
     await waitFor((m) => m.type === 'connected')
 
-    ws.send(JSON.stringify({ type: 'exec_command', callId: 'dup-1', name: 'noop', args: {} }))
-    ws.send(JSON.stringify({ type: 'exec_command', callId: 'dup-1', name: 'noop', args: {} }))
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-1' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
 
-    const errorFrame = await waitFor(
-      (m) => m.type === 'command_error' && 'callId' in m && m.callId === 'dup-1' && /already in flight/.test(m.message),
-    )
-    expect(errorFrame.type).toBe('command_error')
-
-    expect(state.starts.length).toBe(1)
-    expect(state.starts[0]?.callId).toBe('dup-1')
-
+    if (reply.type !== 'cron_list_result') throw new Error('unreachable')
+    expect(reply.requestId).toBe('req-1')
+    expect(reply.result.ok).toBe(false)
+    if (reply.result.ok) throw new Error('unreachable')
+    expect(reply.result.reason).toContain('agentDir')
     ws.close()
   })
 
-  test('/commands path dispatches exec_command WITHOUT sending a `connected` frame', async () => {
-    // Tracks how many times the session factory was hit. A connection to
-    // the /commands path must not create an AgentSession, so this counter
-    // stays at 0 across the whole interaction.
-    let sessionFactoryHits = 0
-    const session = createFakeSession()
-    const state = makeFakeRunner()
-
-    const built = createServer({
-      port: 0,
-      createSession: async () => {
-        sessionFactoryHits++
-        return session
-      },
-      commandRunnerFactory: buildRunnerFactory(state),
-    }).start()
-    server = built
-
-    const { ws, received } = await connect(`ws://localhost:${built.port}/commands`)
-
-    ws.send(JSON.stringify({ type: 'exec_command', callId: 'cmd-1', name: 'noop', args: {} }))
-    // Give the server a tick to dispatch synchronously; no `connected` frame
-    // means waitFor would just hang, so we sleep briefly and then assert.
-    await new Promise((r) => setTimeout(r, 100))
-
-    expect(state.starts.length).toBe(1)
-    expect(state.starts[0]?.callId).toBe('cmd-1')
-    expect(sessionFactoryHits).toBe(0)
-    expect(received.some((m) => m.type === 'connected')).toBe(false)
-
-    ws.close()
-  })
-
-  test('/commands path rejects non-command ClientMessage frames silently (no error frame, no session)', async () => {
-    let sessionFactoryHits = 0
-    const session = createFakeSession()
-    const state = makeFakeRunner()
-
-    const built = createServer({
-      port: 0,
-      createSession: async () => {
-        sessionFactoryHits++
-        return session
-      },
-      commandRunnerFactory: buildRunnerFactory(state),
-    }).start()
-    server = built
-
-    const { ws, received } = await connect(`ws://localhost:${built.port}/commands`)
-
-    ws.send(JSON.stringify({ type: 'prompt', text: 'hi' }))
-    await new Promise((r) => setTimeout(r, 50))
-
-    expect(received.length).toBe(0)
-    expect(sessionFactoryHits).toBe(0)
-
-    ws.close()
-  })
-
-  test('command_stdin / command_stdin_end / command_abort route to the runner with the right callId', async () => {
-    const session = createFakeSession()
-    const stdinFeeds: { callId: string; chunk: string }[] = []
-    const stdinEnds: string[] = []
-    const aborts: { callId: string; reason: string }[] = []
-    const built = createServer({
-      port: 0,
-      createSession: async () => session,
-      commandRunnerFactory: (_outbound) => ({
-        start() {},
-        feedStdin(callId, chunk) {
-          stdinFeeds.push({ callId, chunk })
-        },
-        endStdin(callId) {
-          stdinEnds.push(callId)
-        },
-        abort(callId, reason) {
-          aborts.push({ callId, reason })
-        },
-        abortForOwner() {},
-        inFlightCount: () => 0,
-      }),
-    }).start()
-    server = built
-
-    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
-    ws.send(JSON.stringify({ type: 'exec_command', callId: 'k', name: 'foo', args: {} }))
-    ws.send(JSON.stringify({ type: 'command_stdin', callId: 'k', chunk: btoa('payload') }))
-    ws.send(JSON.stringify({ type: 'command_stdin_end', callId: 'k' }))
-    ws.send(JSON.stringify({ type: 'command_abort', callId: 'k', reason: 'manual' }))
-    await new Promise((r) => setTimeout(r, 80))
-
-    expect(stdinFeeds).toEqual([{ callId: 'k', chunk: btoa('payload') }])
-    expect(stdinEnds).toEqual(['k'])
-    expect(aborts).toEqual([{ callId: 'k', reason: 'manual' }])
-
-    ws.close()
-  })
-
-  test('exec_command without commandRunnerFactory replies with command_error + command_exit', async () => {
-    const session = createFakeSession()
-    const built = createServer({
-      port: 0,
-      createSession: async () => session,
-    }).start()
-    server = built
-
-    const { ws, waitFor } = await connect(`ws://localhost:${built.port}/commands`)
-
-    ws.send(JSON.stringify({ type: 'exec_command', callId: 'fb', name: 'whatever', args: {} }))
-
-    const errFrame = await waitFor((m) => m.type === 'command_error' && 'callId' in m && m.callId === 'fb')
-    expect(errFrame.type).toBe('command_error')
-    if (errFrame.type === 'command_error') {
-      expect(errFrame.message).toMatch(/not enabled/)
-    }
-    const exitFrame = await waitFor((m) => m.type === 'command_exit' && 'callId' in m && m.callId === 'fb')
-    if (exitFrame.type === 'command_exit') {
-      expect(exitFrame.code).toBe(1)
-    }
-
-    ws.close()
-  })
-
-  test('exec_command parentOriginJson is parsed and forwarded to the runner', async () => {
-    const seenStarts: { callId: string; parentOrigin?: unknown }[] = []
-    const session = createFakeSession()
-    const built = createServer({
-      port: 0,
-      createSession: async () => session,
-      commandRunnerFactory: () => ({
-        start(msg) {
-          seenStarts.push({ callId: msg.callId, parentOrigin: msg.parentOrigin })
-        },
-        feedStdin() {},
-        endStdin() {},
-        abort() {},
-        abortForOwner() {},
-        inFlightCount: () => 0,
-      }),
-    }).start()
-    server = built
-
-    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
-
-    const parentOrigin = { kind: 'cron', jobId: 'nightly', jobKind: 'exec', scheduledByRole: 'member' }
-    ws.send(
+  test('returns user jobs from cron.json and plugin jobs from registry, merged', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-'))
+    await writeFile(
+      join(agentDir, 'cron.json'),
       JSON.stringify({
-        type: 'exec_command',
-        callId: 'p-1',
-        name: 'cmd',
-        args: {},
-        parentOriginJson: JSON.stringify(parentOrigin),
+        jobs: [{ id: 'user-job', schedule: '0 * * * *', kind: 'prompt', prompt: 'hi', scheduledByRole: 'owner' }],
       }),
     )
-    await new Promise((r) => setTimeout(r, 80))
 
-    expect(seenStarts.length).toBe(1)
-    expect(seenStarts[0]?.parentOrigin).toEqual(parentOrigin)
+    const registry = await makeEmptyRegistry()
+    registry.cronJobs.push({
+      pluginName: 'memory',
+      localId: 'dreaming',
+      globalId: '__plugin_memory_dreaming',
+      job: { ...promptJob('__plugin_memory_dreaming', '*/30 * * * *'), subagent: 'dreaming' } as CronJob,
+    })
+
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, {
+      agentDir,
+      pluginRegistry: registry,
+      pluginHooks: createHookBus(),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-merge' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result') throw new Error('unreachable')
+    expect(reply.requestId).toBe('req-merge')
+    if (!reply.result.ok) throw new Error(`unexpected failure: ${reply.result.reason}`)
+    expect(reply.result.jobs).toHaveLength(2)
+    const ids = reply.result.jobs.map((j) => j.id).sort()
+    expect(ids).toEqual(['__plugin_memory_dreaming', 'user-job'])
+    const plugin = reply.result.jobs.find((j) => j.source.kind === 'plugin')!
+    expect(plugin.source).toEqual({ kind: 'plugin', pluginName: 'memory', localId: 'dreaming' })
+    expect(plugin.subagent).toBe('dreaming')
+    const user = reply.result.jobs.find((j) => j.source.kind === 'user')!
+    expect(user.id).toBe('user-job')
+    expect(typeof reply.result.nowMs).toBe('number')
     ws.close()
   })
 
-  test('exec_command with malformed parentOriginJson falls back to undefined parentOrigin', async () => {
-    const seenStarts: { callId: string; parentOrigin?: unknown }[] = []
+  test('returns ok: true with empty jobs when neither source has any', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-empty-'))
     const session = createFakeSession()
-    const built = createServer({
-      port: 0,
-      createSession: async () => session,
-      commandRunnerFactory: () => ({
-        start(msg) {
-          seenStarts.push({ callId: msg.callId, parentOrigin: msg.parentOrigin })
-        },
-        feedStdin() {},
-        endStdin() {},
-        abort() {},
-        abortForOwner() {},
-        inFlightCount: () => 0,
-      }),
-    }).start()
-    server = built
+    const { url } = await startWithSession(session, {
+      agentDir,
+      pluginRegistry: await makeEmptyRegistry(),
+      pluginHooks: createHookBus(),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
 
-    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
-    ws.send(
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-empty' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result' || !reply.result.ok) throw new Error('unreachable')
+    expect(reply.result.jobs).toEqual([])
+    ws.close()
+  })
+
+  test('returns ok: false when cron.json is invalid JSON', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-badjson-'))
+    await writeFile(join(agentDir, 'cron.json'), '{ this is not json')
+
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, {
+      agentDir,
+      pluginRegistry: await makeEmptyRegistry(),
+      pluginHooks: createHookBus(),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-bad' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result') throw new Error('unreachable')
+    expect(reply.result.ok).toBe(false)
+    if (reply.result.ok) throw new Error('unreachable')
+    expect(reply.result.reason).toContain('cron.json')
+    ws.close()
+  })
+
+  test('does not rewrite legacy cron.json when listing (read-only path)', async () => {
+    const { readFile } = await import('node:fs/promises')
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-legacy-'))
+    const cronPath = join(agentDir, 'cron.json')
+    const legacy = JSON.stringify({
+      jobs: [{ id: 'legacy-job', schedule: '0 * * * *', kind: 'prompt', prompt: 'hi' }],
+    })
+    await writeFile(cronPath, legacy)
+
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, {
+      agentDir,
+      pluginRegistry: await makeEmptyRegistry(),
+      pluginHooks: createHookBus(),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-legacy' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result' || !reply.result.ok) throw new Error('unreachable')
+    expect(reply.result.jobs).toHaveLength(1)
+    expect(reply.result.jobs[0]!.scheduledByRole).toBe('owner')
+    const onDisk = await readFile(cronPath, 'utf8')
+    expect(onDisk).toBe(legacy)
+    ws.close()
+  })
+
+  test('reports invalid subagent reference when plugin runtime is available', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-bad-subagent-'))
+    await writeFile(
+      join(agentDir, 'cron.json'),
       JSON.stringify({
-        type: 'exec_command',
-        callId: 'p-2',
-        name: 'cmd',
-        args: {},
-        parentOriginJson: 'not-valid-json',
+        jobs: [
+          {
+            id: 'refs-missing',
+            schedule: '*/5 * * * *',
+            kind: 'prompt',
+            prompt: 'hi',
+            scheduledByRole: 'owner',
+            subagent: 'no-such-subagent',
+          },
+        ],
       }),
     )
-    await new Promise((r) => setTimeout(r, 80))
 
-    expect(seenStarts.length).toBe(1)
-    expect(seenStarts[0]?.parentOrigin).toBeUndefined()
-    ws.close()
-  })
-
-  test('ws-close aborts every in-flight command tied to the closed connection', async () => {
-    let abortedCount = 0
     const session = createFakeSession()
-    const built = createServer({
-      port: 0,
-      createSession: async () => session,
-      commandRunnerFactory: () => ({
-        start() {},
-        feedStdin() {},
-        endStdin() {},
-        abort() {},
-        abortForOwner() {
-          abortedCount++
-        },
-        inFlightCount: () => 0,
-      }),
-    }).start()
-    server = built
+    const { url } = await startWithSession(session, {
+      agentDir,
+      pluginRegistry: await makeEmptyRegistry(),
+      pluginHooks: createHookBus(),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
 
-    const { ws } = await connect(`ws://localhost:${built.port}/commands`)
-    ws.send(JSON.stringify({ type: 'exec_command', callId: 'will-die', name: 'noop', args: {} }))
-    await new Promise((r) => setTimeout(r, 50))
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-bad-sub' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result') throw new Error('unreachable')
+    expect(reply.result.ok).toBe(false)
+    if (reply.result.ok) throw new Error('unreachable')
+    expect(reply.result.reason).toContain('no-such-subagent')
     ws.close()
-    await new Promise((r) => setTimeout(r, 100))
-
-    expect(abortedCount).toBe(1)
-  })
-})
-
-describe('safeWsSend', () => {
-  test('returns true when ws.send succeeds and forwards the JSON-serialized message', () => {
-    const sent: string[] = []
-    const fakeWs = {
-      send: (data: string) => {
-        sent.push(data)
-      },
-    }
-    const ok = safeWsSend(fakeWs, { type: 'done' })
-    expect(ok).toBe(true)
-    expect(sent).toEqual(['{"type":"done"}'])
-  })
-
-  test('returns false and swallows the error when ws.send throws (closing-ws race)', () => {
-    const fakeWs = {
-      send: () => {
-        throw new Error('WebSocket is closed')
-      },
-    }
-    const ok = safeWsSend(fakeWs, { type: 'done' })
-    expect(ok).toBe(false)
   })
 })

@@ -15,6 +15,7 @@ export const BUILTIN_COMMAND_NAMES = [
   'shell',
   'compose',
   'channel',
+  'cron',
   'role',
   'provider',
   'model',
