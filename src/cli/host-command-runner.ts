@@ -7,6 +7,7 @@ import {
   type HostCommandContext,
   type PluginCommand,
 } from '@/plugin'
+import { coerceFlag } from '@/plugin/zod-introspect'
 
 export type HostRunOptions = {
   agentDir: string
@@ -126,60 +127,13 @@ function coerceAgainstSchema(
       return { ok: false, message: `unknown flag: --${key}` }
     }
     try {
-      out[key] = coerceLeaf(leaf, raw, key)
+      out[key] = coerceFlag(leaf, raw, key)
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err)
       return { ok: false, message: detail }
     }
   }
   return { ok: true, value: out }
-}
-
-function coerceLeaf(leaf: unknown, raw: string | true, key: string): unknown {
-  const innerName = leafTypeName(leaf)
-  if (innerName === 'boolean') {
-    if (raw === true) return true
-    if (raw === 'true') return true
-    if (raw === 'false') return false
-    throw new Error(`--${key}: expected true/false, got "${raw}"`)
-  }
-  if (innerName === 'number') {
-    if (raw === true) {
-      throw new Error(`--${key} requires a numeric value`)
-    }
-    const n = Number(raw)
-    if (Number.isNaN(n)) {
-      throw new Error(`--${key}: not a number: "${raw}"`)
-    }
-    return n
-  }
-  if (raw === true) {
-    throw new Error(`--${key} requires a value`)
-  }
-  return raw
-}
-
-// Walks through Zod 4 wrappers (optional, default, nullable) until reaching
-// the leaf, then returns its kind. Reads `_def.type` (Zod 4's lowercase
-// discriminator) rather than relying on `instanceof` checks: the wrapper
-// `.innerType` is typed as the base `$ZodType`, not the public `ZodType<...>`
-// class hierarchy, so instanceof always returns false.
-function leafTypeName(leaf: unknown): string {
-  let cur: unknown = leaf
-  while (cur !== null && typeof cur === 'object') {
-    const def = (cur as { _def?: { type?: string; innerType?: unknown } })._def
-    if (def === undefined) break
-    if (def.type === 'optional' || def.type === 'default' || def.type === 'nullable') {
-      cur = def.innerType
-      continue
-    }
-    if (def.type === 'boolean') return 'boolean'
-    if (def.type === 'number' || def.type === 'int') return 'number'
-    if (def.type === 'string') return 'string'
-    if (def.type === 'literal' || def.type === 'enum') return 'string'
-    return 'unknown'
-  }
-  return 'unknown'
 }
 
 function makeCommandLogger(pluginName: string, stderr: WritableStream<Uint8Array>) {

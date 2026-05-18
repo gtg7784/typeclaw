@@ -20,7 +20,20 @@ export type DispatchOptions = {
 export async function dispatchPluginCommand(opts: DispatchOptions): Promise<PluginCommandDispatchOutcome> {
   const discovery = await discoverCommands({ cwd: opts.cwd })
   const match = discovery.commands.find((c) => c.commandName === opts.name)
-  if (match === undefined) return { kind: 'not-found' }
+  if (match === undefined) {
+    // Surface plugin load failures so a user typing `typeclaw <cmd>` sees why
+    // their plugin's command isn't listed, instead of a generic "not found".
+    if (discovery.loadErrors.length > 0) {
+      const stderr = opts.stderr ?? defaultStderr()
+      const writer = stderr.getWriter()
+      const encoder = new TextEncoder()
+      for (const e of discovery.loadErrors) {
+        await writer.write(encoder.encode(`[plugin-commands] ${e.entry}: ${e.error}\n`))
+      }
+      writer.releaseLock()
+    }
+    return { kind: 'not-found' }
+  }
 
   const stdin = opts.stdin ?? defaultStdin()
   const stdout = opts.stdout ?? defaultStdout()

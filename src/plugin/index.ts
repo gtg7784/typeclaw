@@ -72,6 +72,7 @@ export { materializeSkills, type MaterializedSkills, type SkillEntry } from './s
 export {
   buildPluginCronGlobalId,
   RESERVED_COMMAND_NAMES,
+  validateCommandDeclaration,
   type PluginRegistry,
   type RegisteredCommand,
   type RegisteredCronJob,

@@ -7,7 +7,7 @@ import {
   type LoadPluginEntryFn,
   type PluginCommand,
   type ResolvedPlugin,
-  RESERVED_COMMAND_NAMES,
+  validateCommandDeclaration,
 } from '@/plugin'
 
 export type DiscoveredCommand = {
@@ -52,6 +52,12 @@ function normalize(p: string): string {
 //
 // Returns an empty result (no error) when no agent folder is resolvable, so
 // `typeclaw --help` outside any agent prints just built-ins.
+//
+// Side effects: `loadConfigSync(agentDir)` may rewrite `typeclaw.json` and
+// commit the result when the on-disk shape is a legacy schema needing
+// migration. This is by design — running ANY typeclaw subcommand should
+// converge the config on the canonical shape. The migration is idempotent
+// (running twice is a no-op).
 export async function discoverCommands(opts: DiscoverOptions): Promise<DiscoveryResult> {
   const agentDir = resolveAgentDir(opts.cwd)
   if (agentDir === null) {
@@ -85,17 +91,16 @@ export async function discoverCommands(opts: DiscoverOptions): Promise<Discovery
     if (declared === undefined) continue
 
     for (const [commandName, command] of Object.entries(declared)) {
+      try {
+        validateCommandDeclaration(resolved.name, commandName, command)
+      } catch (err) {
+        loadErrors.push({ entry, error: err instanceof Error ? err.message : String(err) })
+        continue
+      }
       if (seenNames.has(commandName)) {
         loadErrors.push({
           entry,
           error: `command "${commandName}" already declared by another plugin; ignoring`,
-        })
-        continue
-      }
-      if (RESERVED_COMMAND_NAMES.has(commandName)) {
-        loadErrors.push({
-          entry,
-          error: `command "${commandName}" shadows a built-in typeclaw subcommand; ignoring`,
         })
         continue
       }

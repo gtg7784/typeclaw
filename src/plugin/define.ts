@@ -18,10 +18,12 @@ type DefinePluginSpec<S extends z.ZodType<unknown> | undefined> =
     ? {
         configSchema: S
         permissions?: readonly string[]
+        commands?: Record<string, PluginCommand>
         plugin: (ctx: PluginContext<T>) => Promise<PluginExports>
       }
     : {
         permissions?: readonly string[]
+        commands?: Record<string, PluginCommand>
         plugin: (ctx: PluginContext<unknown>) => Promise<PluginExports>
       }
 

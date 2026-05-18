@@ -4,7 +4,13 @@ import { z } from 'zod'
 
 import { defineCommand, defineSubagent, defineTool } from './define'
 import { createHookBus } from './hooks'
-import { buildPluginCronGlobalId, discardRegistrationsBy, emptyRegistry, registerContributions } from './registry'
+import {
+  buildPluginCronGlobalId,
+  discardRegistrationsBy,
+  emptyRegistry,
+  RESERVED_COMMAND_NAMES,
+  registerContributions,
+} from './registry'
 import type { PluginCommand, PluginExports } from './types'
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -130,10 +136,12 @@ describe('registerContributions', () => {
 
   test('rejects every kebab-shaped reserved built-in name', () => {
     const cmd: PluginCommand = { surface: 'host', description: '', run: async () => 0 }
-    // Kebab-shaped reserved names get rejected by the shadow check.
-    // Hidden internals like `_hostd` are rejected earlier by the regex
-    // (covered in the kebab-case test below) — either path keeps the name safe.
-    for (const reserved of ['init', 'run', 'tui', 'stop', 'restart', 'doctor', 'compose']) {
+    // Iterate the full RESERVED_COMMAND_NAMES set (filtered to kebab-shaped
+    // entries that get past the regex check). Hidden internals like `_hostd`
+    // hit the regex check first; tested separately in the kebab-case test.
+    const kebabReserved = Array.from(RESERVED_COMMAND_NAMES).filter((n) => /^[a-z][a-z0-9-]*$/.test(n))
+    expect(kebabReserved.length).toBeGreaterThan(10)
+    for (const reserved of kebabReserved) {
       const opts = makeOptions('p1', {}, { [reserved]: cmd })
       expect(() => registerContributions(opts)).toThrow(/shadows a built-in/)
     }
@@ -160,18 +168,29 @@ describe('registerContributions', () => {
     }
   })
 
-  test('rejects args schema that is not z.object', () => {
+  test('rejects args schema that is not z.object with primitive leaves', () => {
     // Bypass the public defineCommand overload (which constrains args to
     // z.ZodObject) to simulate a misbehaving plugin that hand-built the
     // command object with a non-object schema.
-    const cmd = {
+    const nonObject = {
       surface: 'host' as const,
       description: '',
       args: z.string() as unknown as z.ZodObject<z.ZodRawShape>,
       run: async () => 0,
     }
-    const opts = makeOptions('p1', {}, { broken: cmd as PluginCommand })
-    expect(() => registerContributions(opts)).toThrow()
+    expect(() => registerContributions(makeOptions('p1', {}, { broken: nonObject as PluginCommand }))).toThrow(
+      /must be a z\.object\(\{\.\.\.\}\) with primitive/,
+    )
+
+    const nestedObject = defineCommand({
+      surface: 'host',
+      description: '',
+      args: z.object({ inner: z.object({ x: z.string() }) }) as unknown as z.ZodObject<z.ZodRawShape>,
+      run: async () => 0,
+    })
+    expect(() => registerContributions(makeOptions('p1', {}, { 'bad-leaf': nestedObject as PluginCommand }))).toThrow(
+      /must be a z\.object/,
+    )
   })
 
   test("discardRegistrationsBy removes the plugin's commands and leaves others", () => {

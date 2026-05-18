@@ -1,5 +1,7 @@
 import type { z } from 'zod'
 
+import { describeLeaf } from '@/plugin/zod-introspect'
+
 import type { DiscoveredCommand } from './plugin-commands'
 
 export function renderPluginCommandsSection(commands: readonly DiscoveredCommand[]): string | null {
@@ -41,70 +43,7 @@ export function renderFlags(schema: z.ZodObject<z.ZodRawShape>): string[] {
     const required = info.required ? ' (required)' : ''
     const defaultPart = info.defaultValue !== undefined ? ` (default: ${info.defaultValue})` : ''
     const descPart = info.description !== undefined ? `  ${info.description}` : ''
-    out.push(`--${field}=<${info.type}>${descPart}${required}${defaultPart}`)
+    out.push(`--${field}=<${info.kind}>${descPart}${required}${defaultPart}`)
   }
   return out
-}
-
-type LeafInfo = {
-  type: string
-  required: boolean
-  defaultValue: string | undefined
-  description: string | undefined
-}
-
-function describeLeaf(leaf: unknown): LeafInfo {
-  let cur: unknown = leaf
-  let required = true
-  let defaultValue: string | undefined
-  let description: string | undefined
-
-  while (cur !== null && typeof cur === 'object') {
-    const node = cur as {
-      _def?: {
-        type?: string
-        innerType?: unknown
-        defaultValue?: unknown
-      }
-      description?: string
-    }
-    const def = node._def
-    if (def === undefined) break
-    if (typeof node.description === 'string') description = node.description
-    if (def.type === 'optional') {
-      required = false
-      cur = def.innerType
-      continue
-    }
-    if (def.type === 'default') {
-      required = false
-      const raw = typeof def.defaultValue === 'function' ? (def.defaultValue as () => unknown)() : def.defaultValue
-      defaultValue = raw === undefined ? undefined : JSON.stringify(raw)
-      cur = def.innerType
-      continue
-    }
-    if (def.type === 'nullable') {
-      cur = def.innerType
-      continue
-    }
-    return { type: toTypeName(def.type), required, defaultValue, description }
-  }
-  return { type: 'unknown', required, defaultValue, description }
-}
-
-function toTypeName(zodType: string | undefined): string {
-  switch (zodType) {
-    case 'string':
-      return 'string'
-    case 'number':
-    case 'int':
-      return 'number'
-    case 'boolean':
-      return 'boolean'
-    case 'enum':
-    case 'literal':
-      return 'string'
-    default:
-      return 'unknown'
-  }
 }

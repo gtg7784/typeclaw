@@ -8,6 +8,21 @@ import { defineCommand, definePlugin, readTool, writeTool } from './define'
 import type { ContainerCommand, EitherCommand, HostCommand } from './types'
 
 describe('definePlugin', () => {
+  test('accepts a top-level commands field alongside the factory', () => {
+    const spec = definePlugin({
+      commands: {
+        ping: defineCommand({
+          surface: 'host',
+          description: 'ping',
+          run: async () => 0,
+        }),
+      },
+      plugin: async () => ({}),
+    })
+    expect(spec.commands).toBeDefined()
+    expect(Object.keys(spec.commands ?? {})).toEqual(['ping'])
+  })
+
   test('infers config type from configSchema and feeds validated values into the factory ctx', async () => {
     const captured: { value: unknown } = { value: undefined }
     const spec = definePlugin({

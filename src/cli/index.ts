@@ -3,28 +3,8 @@
 import { defineCommand, runMain } from 'citty'
 
 import { CLI_VERSION } from '../init/cli-version'
+import { BUILTIN_COMMAND_NAMES } from './builtins'
 import { dispatchPluginCommand, type PluginCommandDispatchOutcome } from './plugin-commands-dispatch'
-
-const BUILTIN_NAMES = [
-  'init',
-  'run',
-  'tui',
-  'start',
-  'stop',
-  'restart',
-  'status',
-  'reload',
-  'logs',
-  'shell',
-  'compose',
-  'channel',
-  'role',
-  'provider',
-  'model',
-  'doctor',
-  'usage',
-  '_hostd',
-] as const
 
 const main = defineCommand({
   meta: {
@@ -60,17 +40,24 @@ async function runWithPluginDispatch(): Promise<void> {
   const argv = process.argv.slice(2)
   const first = argv[0]
 
-  if (first === '--help' || first === '-h' || first === undefined) {
+  if (first === '--help' || first === '-h') {
+    // citty calls process.exit() after rendering help, so anything we print
+    // AFTER `runMain(main)` is never reached. Print the plugin commands
+    // section first; citty's own help follows and the user reads top-down.
     const { renderPluginCommandsSection } = await import('./plugin-command-help')
     const { discoverCommands } = await import('./plugin-commands')
-    await runMain(main)
     const discovery = await discoverCommands({ cwd: process.cwd() })
     const section = renderPluginCommandsSection(discovery.commands)
-    if (section !== null) process.stdout.write(`\n${section}\n`)
+    if (section !== null) process.stdout.write(`${section}\n\n`)
+    await runMain(main)
     return
   }
 
-  if (!first.startsWith('-') && !BUILTIN_NAMES.includes(first as (typeof BUILTIN_NAMES)[number])) {
+  if (
+    first !== undefined &&
+    !first.startsWith('-') &&
+    !BUILTIN_COMMAND_NAMES.includes(first as (typeof BUILTIN_COMMAND_NAMES)[number])
+  ) {
     const outcome = await dispatchPluginCommand({ name: first, rawArgs: argv.slice(1), cwd: process.cwd() })
     if (outcome.kind === 'dispatched') {
       process.exit(outcome.exitCode)

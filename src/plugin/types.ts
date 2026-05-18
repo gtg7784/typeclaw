@@ -319,6 +319,8 @@ export type CommandExecResult = {
 }
 
 export type ContainerCommandContext = CommandStreams & {
+  // The plugin name (e.g. `'my-utilities'`), NOT the command name. Matches
+  // `PluginContext.name`. Use the command's own static name if you need it.
   readonly name: string
   readonly version: string | undefined
   readonly agentDir: string
@@ -334,15 +336,18 @@ export type ContainerCommandContext = CommandStreams & {
 }
 
 export type HostCommandContext = CommandStreams & {
+  // The plugin name, NOT the command name. See `ContainerCommandContext.name`.
   readonly name: string
   readonly version: string | undefined
-  // Host path of the agent folder (e.g. `/Users/neo/my-agent`), NOT `/agent`.
+  // Host path of the agent folder (e.g. the absolute path to the agent
+  // folder), NOT `/agent`.
   readonly agentDir: string
   readonly logger: PluginLogger
   readonly signal: AbortSignal
 }
 
 export type EitherCommandContext = CommandStreams & {
+  // The plugin name, NOT the command name. See `ContainerCommandContext.name`.
   readonly name: string
   readonly version: string | undefined
   // Resolves to `/agent` in container, host path on host — same author code.
