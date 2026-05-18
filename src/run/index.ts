@@ -123,6 +123,7 @@ export async function startAgent({
     pluginRegistry.cronJobs.length > 0 ||
     pluginRegistry.skills.length > 0 ||
     pluginRegistry.skillsDirs.length > 0 ||
+    pluginRegistry.commands.length > 0 ||
     pluginsLoaded.loadedPlugins.length > 0
 
   const pluginRuntime = createPluginRuntime({

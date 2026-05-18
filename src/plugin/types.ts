@@ -267,5 +267,91 @@ export type PluginFixResult = {
 export type DefinedPlugin<TConfig = never> = {
   readonly configSchema?: z.ZodType<TConfig>
   readonly permissions?: readonly string[]
+  // Declared by-value (not built inside the factory) so the host-stage CLI
+  // can dispatch commands without booting plugin runtime state.
+  readonly commands?: Record<string, PluginCommand>
   readonly plugin: (ctx: PluginContext<TConfig>) => Promise<PluginExports>
+}
+
+// `surface` controls where a plugin command may run: `'container'` requires
+// the agent runtime (prompt/subagent/exec); `'host'` runs on the user's
+// machine with no agent runtime; `'either'` accepts the intersection ctx
+// and runs on whichever stage the user invoked it from.
+export type PluginCommand = ContainerCommand | HostCommand | EitherCommand
+
+export type ContainerCommand<A = unknown> = {
+  readonly surface: 'container'
+  readonly description: string
+  // v1 constraint: `z.object({...})` with primitive (string/number/boolean/
+  // literal/enum) leaves so `--help` can render `--<name>=<type>`.
+  readonly args?: z.ZodObject<z.ZodRawShape>
+  readonly permissions?: readonly string[]
+  // When true, runtime spawns a fresh Bun subprocess instead of dispatching
+  // in-process. Costs ~150ms cold-start; trade for isolation from the agent.
+  readonly isolated?: boolean
+  readonly run: (ctx: ContainerCommandContext, args: A) => Promise<number>
+}
+
+export type HostCommand<A = unknown> = {
+  readonly surface: 'host'
+  readonly description: string
+  readonly args?: z.ZodObject<z.ZodRawShape>
+  readonly run: (ctx: HostCommandContext, args: A) => Promise<number>
+}
+
+export type EitherCommand<A = unknown> = {
+  readonly surface: 'either'
+  readonly description: string
+  readonly args?: z.ZodObject<z.ZodRawShape>
+  readonly run: (ctx: EitherCommandContext, args: A) => Promise<number>
+}
+
+export type CommandStreams = {
+  readonly stdin: ReadableStream<Uint8Array>
+  readonly stdout: WritableStream<Uint8Array>
+  readonly stderr: WritableStream<Uint8Array>
+}
+
+export type CommandExecResult = {
+  readonly stdout: string
+  readonly stderr: string
+  readonly exitCode: number
+}
+
+export type ContainerCommandContext = CommandStreams & {
+  // The plugin name (e.g. `'my-utilities'`), NOT the command name. Matches
+  // `PluginContext.name`. Use the command's own static name if you need it.
+  readonly name: string
+  readonly version: string | undefined
+  readonly agentDir: string
+  readonly logger: PluginLogger
+  readonly permissions: PermissionService
+  // Caller's origin (cron job, TUI op, parent session). Drives permission
+  // resolution inside the command. Dispatcher refuses to run without one.
+  readonly origin: SessionOrigin
+  readonly signal: AbortSignal
+  readonly prompt: (text: string) => Promise<string>
+  readonly subagent: (name: string, payload?: unknown) => Promise<void>
+  readonly exec: (cmd: TemplateStringsArray, ...values: unknown[]) => Promise<CommandExecResult>
+}
+
+export type HostCommandContext = CommandStreams & {
+  // The plugin name, NOT the command name. See `ContainerCommandContext.name`.
+  readonly name: string
+  readonly version: string | undefined
+  // Host path of the agent folder (e.g. the absolute path to the agent
+  // folder), NOT `/agent`.
+  readonly agentDir: string
+  readonly logger: PluginLogger
+  readonly signal: AbortSignal
+}
+
+export type EitherCommandContext = CommandStreams & {
+  // The plugin name, NOT the command name. See `ContainerCommandContext.name`.
+  readonly name: string
+  readonly version: string | undefined
+  // Resolves to `/agent` in container, host path on host — same author code.
+  readonly agentDir: string
+  readonly logger: PluginLogger
+  readonly signal: AbortSignal
 }

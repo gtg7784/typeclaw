@@ -1,9 +1,11 @@
 import { existsSync } from 'node:fs'
 
+import { BUILTIN_COMMAND_NAMES } from '@/cli/builtins'
 import type { CronJob, PromptJob } from '@/cron'
 
 import type { HookBus } from './hooks'
 import type {
+  PluginCommand,
   PluginCronJob,
   PluginDoctorCheck,
   PluginExports,
@@ -12,6 +14,7 @@ import type {
   Subagent,
   Tool,
 } from './types'
+import { isPrimitiveZodObject } from './zod-introspect'
 
 export type RegisteredTool = { pluginName: string; toolName: string; tool: Tool<any>; logger: PluginLogger }
 export type RegisteredSubagent = { pluginName: string; subagentName: string; subagent: Subagent<any> }
@@ -25,6 +28,12 @@ export type RegisteredDoctorCheck = {
   logger: PluginLogger
   check: PluginDoctorCheck
 }
+export type RegisteredCommand = {
+  pluginName: string
+  commandName: string
+  command: PluginCommand
+  logger: PluginLogger
+}
 
 export type PluginRegistry = {
   tools: RegisteredTool[]
@@ -33,17 +42,27 @@ export type PluginRegistry = {
   skills: RegisteredSkillEntry[]
   skillsDirs: RegisteredSkillDir[]
   doctorChecks: RegisteredDoctorCheck[]
+  commands: RegisteredCommand[]
 }
 
 export type RegisterContributionsOptions = {
   pluginName: string
   logger: PluginLogger
   exports: PluginExports
+  // Static commands declared on `DefinedPlugin.commands`. Passed alongside
+  // `exports` because they live outside the factory's return value.
+  commands?: Record<string, PluginCommand>
   registry: PluginRegistry
   hooks: HookBus
   agentDir: string
   pluginConfig: unknown
 }
+
+const COMMAND_NAME_REGEX = /^[a-z][a-z0-9-]*$/
+
+// CLI subcommands plugins MUST NOT shadow. Derived from BUILTIN_COMMAND_NAMES
+// so cli/index.ts and registry.ts cannot drift apart.
+export const RESERVED_COMMAND_NAMES: ReadonlySet<string> = new Set(BUILTIN_COMMAND_NAMES)
 
 export function buildPluginCronGlobalId(pluginName: string, localId: string): string {
   return `__plugin_${pluginName}_${localId}`
@@ -127,6 +146,19 @@ export function registerContributions(opts: RegisterContributionsOptions): void 
       registry.doctorChecks.push({ pluginName, checkName, pluginConfig, logger, check })
     }
   }
+
+  if (opts.commands) {
+    for (const [commandName, command] of Object.entries(opts.commands)) {
+      validateCommandDeclaration(pluginName, commandName, command)
+      const conflict = registry.commands.find((c) => c.commandName === commandName)
+      if (conflict) {
+        throw new Error(
+          `plugin ${pluginName}: command "${commandName}" already registered by plugin ${conflict.pluginName}`,
+        )
+      }
+      registry.commands.push({ pluginName, commandName, command, logger })
+    }
+  }
 }
 
 export function discardRegistrationsBy(pluginName: string, registry: PluginRegistry, hooks: HookBus): void {
@@ -136,17 +168,56 @@ export function discardRegistrationsBy(pluginName: string, registry: PluginRegis
   registry.skills = registry.skills.filter((s) => s.pluginName !== pluginName)
   registry.skillsDirs = registry.skillsDirs.filter((d) => d.pluginName !== pluginName)
   registry.doctorChecks = registry.doctorChecks.filter((d) => d.pluginName !== pluginName)
+  registry.commands = registry.commands.filter((c) => c.pluginName !== pluginName)
   hooks.unregisterAll(pluginName)
 }
 
 export function emptyRegistry(): PluginRegistry {
-  return { tools: [], subagents: [], cronJobs: [], skills: [], skillsDirs: [], doctorChecks: [] }
+  return {
+    tools: [],
+    subagents: [],
+    cronJobs: [],
+    skills: [],
+    skillsDirs: [],
+    doctorChecks: [],
+    commands: [],
+  }
 }
 
 function assertNotEmpty(kind: string, value: string, pluginName: string): void {
   if (value.length === 0) {
     throw new Error(`plugin ${pluginName}: empty ${kind}`)
   }
+}
+
+function assertValidCommandArgsSchema(pluginName: string, commandName: string, command: PluginCommand): void {
+  if (command.args === undefined) return
+  if (!isPrimitiveZodObject(command.args)) {
+    throw new Error(
+      `plugin ${pluginName}: command "${commandName}" args must be a z.object({...}) with primitive (string/number/boolean) leaves`,
+    )
+  }
+}
+
+// Reuses the same checks `registerContributions` runs at boot, so host-stage
+// discovery and runtime registration agree on what is a valid command. Throws
+// a precise error referencing the plugin and command; callers translate the
+// error into a discovery `loadError` rather than failing the whole CLI.
+export function validateCommandDeclaration(pluginName: string, commandName: string, command: PluginCommand): void {
+  if (commandName.length === 0) {
+    throw new Error(`plugin ${pluginName}: empty command name`)
+  }
+  if (!COMMAND_NAME_REGEX.test(commandName)) {
+    throw new Error(
+      `plugin ${pluginName}: command "${commandName}" does not match ${COMMAND_NAME_REGEX.source} (lowercase letters, digits, dashes; must start with a letter)`,
+    )
+  }
+  if (RESERVED_COMMAND_NAMES.has(commandName)) {
+    throw new Error(
+      `plugin ${pluginName}: command "${commandName}" shadows a built-in typeclaw subcommand and cannot be registered`,
+    )
+  }
+  assertValidCommandArgsSchema(pluginName, commandName, command)
 }
 
 function toCronJob(globalId: string, spec: PluginCronJob): CronJob {
