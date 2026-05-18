@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-export const ADAPTER_IDS = ['discord-bot', 'kakaotalk', 'slack-bot', 'telegram-bot'] as const
+export const ADAPTER_IDS = ['discord-bot', 'github', 'kakaotalk', 'slack-bot', 'telegram-bot'] as const
 
 export type AdapterId = (typeof ADAPTER_IDS)[number]
 
@@ -99,6 +99,22 @@ const adapterSchema = z.object({
   enabled: z.boolean().default(true),
 })
 
+export const DEFAULT_GITHUB_EVENT_ALLOWLIST = [
+  'issue_comment.created',
+  'pull_request_review_comment.created',
+  'discussion_comment.created',
+  'issues.opened',
+  'pull_request.opened',
+  'discussion.created',
+  'pull_request_review.submitted',
+] as const
+
+const githubChannelSchema = adapterSchema.extend({
+  webhookUrl: z.string().url(),
+  webhookPort: z.number().int().positive().default(8975),
+  eventAllowlist: z.array(z.string()).default([...DEFAULT_GITHUB_EVENT_ALLOWLIST]),
+})
+
 // KakaoTalk uses the same shape as every other adapter. There used to be an
 // `autoMarkRead` opt-in here; the adapter now fires a LOCO NOTIREAD ack on
 // every inbound MSG event unconditionally (see kakaotalk.ts) so the sender's
@@ -112,6 +128,7 @@ const adapterSchema = z.object({
 export const channelsSchema = z
   .object({
     'discord-bot': adapterSchema.optional(),
+    github: githubChannelSchema.optional(),
     kakaotalk: adapterSchema.optional(),
     'slack-bot': adapterSchema.optional(),
     'telegram-bot': adapterSchema.optional(),
@@ -120,4 +137,5 @@ export const channelsSchema = z
 
 export type EngagementConfig = z.infer<typeof engagementSchema>
 export type ChannelAdapterConfig = z.infer<typeof adapterSchema>
+export type GithubAdapterConfig = z.infer<typeof githubChannelSchema>
 export type ChannelsConfig = z.infer<typeof channelsSchema>
