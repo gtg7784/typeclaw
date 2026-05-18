@@ -21,7 +21,14 @@ export {
   type CronConsumerLogger,
   type CronSession,
 } from './consumer'
-export { createScheduler, type JobDiff, type Scheduler, type SchedulerLogger } from './scheduler'
+export {
+  type ComputeNextFireResult,
+  computeNextFire,
+  createScheduler,
+  type JobDiff,
+  type Scheduler,
+  type SchedulerLogger,
+} from './scheduler'
 export {
   buildCronMigrationCommitMessage,
   cronFileSchema,
