@@ -40,6 +40,16 @@ const telegramBotChannelSchema = z.object({
   token: secretFieldSchema.optional(),
 })
 
+const githubPatAuthSchema = z.object({
+  type: z.literal('pat'),
+  token: secretFieldSchema,
+})
+
+const githubChannelSchema = z.object({
+  auth: githubPatAuthSchema,
+  webhookSecret: secretFieldSchema,
+})
+
 // Encrypted password envelope produced by src/secrets/encryption.ts. Optional
 // in the schema because legacy v2 accounts (pre-renewal feature) don't have
 // one; the renewal cron treats a missing envelope as "reauth required" and
@@ -92,6 +102,7 @@ export const channelsSchema = z
   .object({
     'slack-bot': slackBotChannelSchema.optional(),
     'discord-bot': discordBotChannelSchema.optional(),
+    github: githubChannelSchema.optional(),
     'telegram-bot': telegramBotChannelSchema.optional(),
     kakaotalk: kakaoChannelBlockSchema.optional(),
   })
@@ -113,6 +124,8 @@ export const secretsFileSchema = z.object({
 export type ProviderCredential = z.infer<typeof providerCredentialSchema>
 export type Providers = z.infer<typeof providersSchema>
 export type Channels = z.infer<typeof channelsSchema>
+export type GithubPatAuthBlock = z.infer<typeof githubPatAuthSchema>
+export type GithubSecretsBlock = z.infer<typeof githubChannelSchema>
 export type KakaoAccountRecord = z.infer<typeof kakaoAccountRecordSchema>
 export type PendingLoginRecord = z.infer<typeof kakaoPendingLoginRecordSchema>
 export type KakaoChannelBlock = z.infer<typeof kakaoChannelBlockSchema>
