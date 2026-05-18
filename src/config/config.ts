@@ -97,6 +97,9 @@ const dockerfileObjectSchema = z.object({
   // tracking the upstream Noto release and version pinning offers no
   // practical value.
   cjkFonts: z.boolean().default(true),
+  // Opt into the cloudflared layer for `cloudflare-quick` tunnels. Default
+  // false so non-tunnel users pay zero image-size cost.
+  cloudflared: z.boolean().default(false),
   append: z.array(dockerfileLineSchema).default([]),
 })
 

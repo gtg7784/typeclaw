@@ -581,7 +581,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
     fi`
 
 function defaultConfig(): DockerfileConfig {
-  return { ffmpeg: false, gh: true, python: true, tmux: true, cjkFonts: true, append: [] }
+  return { ffmpeg: false, gh: true, python: true, tmux: true, cjkFonts: true, cloudflared: false, append: [] }
 }
 
 function collectToggleAptArgs(config: DockerfileConfig): string[] {
