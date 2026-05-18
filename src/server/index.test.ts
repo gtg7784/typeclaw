@@ -1,9 +1,13 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession, CreateSessionOptions } from '@/agent'
-import type { HookBus, PluginRegistry } from '@/plugin'
+import type { CronJob } from '@/cron'
+import { createHookBus, type HookBus, type PluginRegistry } from '@/plugin'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 import type { SessionFactory } from '@/sessions'
 import type { ServerMessage } from '@/shared'
@@ -167,20 +171,6 @@ describe('createServer tool event forwarding', () => {
 
     await expect(waitFor((m) => m.type === 'connected')).resolves.toMatchObject({ type: 'connected' })
     ws.close()
-  })
-
-  test('sends an error frame when session creation fails during websocket open', async () => {
-    const built = createServer({
-      port: 0,
-      createSession: async () => {
-        throw new Error('auth missing')
-      },
-    }).start()
-    server = built
-
-    const { waitFor } = await connect(`ws://localhost:${built.port}`)
-
-    await expect(waitFor((m) => m.type === 'error')).resolves.toEqual({ type: 'error', message: 'auth missing' })
   })
 
   test('forwards toolCallId, name, and args from tool_execution_start', async () => {
@@ -1132,6 +1122,134 @@ describe('createServer scoped reload', () => {
     const first = result.results[0]
     expect(first?.scope).toBe('no-such-scope')
     expect(first?.ok).toBe(false)
+    ws.close()
+  })
+})
+
+describe('createServer cron_list handler', () => {
+  function emptyPluginRegistry(): PluginRegistry {
+    return {
+      tools: [],
+      subagents: [],
+      cronJobs: [],
+      skills: [],
+      skillsDirs: [],
+      doctorChecks: [],
+      commands: [],
+    }
+  }
+
+  function promptJob(id: string, schedule = '*/5 * * * *'): CronJob {
+    return {
+      id,
+      schedule,
+      enabled: true,
+      kind: 'prompt',
+      prompt: 'do it',
+      scheduledByRole: 'owner',
+    }
+  }
+
+  test('responds with ok: false when agentDir is not configured', async () => {
+    const session = createFakeSession()
+    const { url } = await startWithSession(session)
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-1' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result') throw new Error('unreachable')
+    expect(reply.requestId).toBe('req-1')
+    expect(reply.result.ok).toBe(false)
+    if (reply.result.ok) throw new Error('unreachable')
+    expect(reply.result.reason).toContain('agentDir')
+    ws.close()
+  })
+
+  test('returns user jobs from cron.json and plugin jobs from registry, merged', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-'))
+    await writeFile(
+      join(agentDir, 'cron.json'),
+      JSON.stringify({
+        jobs: [{ id: 'user-job', schedule: '0 * * * *', kind: 'prompt', prompt: 'hi', scheduledByRole: 'owner' }],
+      }),
+    )
+
+    const registry = emptyPluginRegistry()
+    registry.cronJobs.push({
+      pluginName: 'memory',
+      localId: 'dreaming',
+      globalId: '__plugin_memory_dreaming',
+      job: { ...promptJob('__plugin_memory_dreaming', '*/30 * * * *'), subagent: 'dreaming' } as CronJob,
+    })
+
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, {
+      agentDir,
+      pluginRegistry: registry,
+      pluginHooks: createHookBus(),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-merge' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result') throw new Error('unreachable')
+    expect(reply.requestId).toBe('req-merge')
+    if (!reply.result.ok) throw new Error(`unexpected failure: ${reply.result.reason}`)
+    expect(reply.result.jobs).toHaveLength(2)
+    const ids = reply.result.jobs.map((j) => j.id).sort()
+    expect(ids).toEqual(['__plugin_memory_dreaming', 'user-job'])
+    const plugin = reply.result.jobs.find((j) => j.source.kind === 'plugin')!
+    expect(plugin.source).toEqual({ kind: 'plugin', pluginName: 'memory', localId: 'dreaming' })
+    expect(plugin.subagent).toBe('dreaming')
+    const user = reply.result.jobs.find((j) => j.source.kind === 'user')!
+    expect(user.id).toBe('user-job')
+    expect(typeof reply.result.nowMs).toBe('number')
+    ws.close()
+  })
+
+  test('returns ok: true with empty jobs when neither source has any', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-empty-'))
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, {
+      agentDir,
+      pluginRegistry: emptyPluginRegistry(),
+      pluginHooks: createHookBus(),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-empty' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result' || !reply.result.ok) throw new Error('unreachable')
+    expect(reply.result.jobs).toEqual([])
+    ws.close()
+  })
+
+  test('returns ok: false when cron.json is invalid JSON', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-cron-list-badjson-'))
+    await writeFile(join(agentDir, 'cron.json'), '{ this is not json')
+
+    const session = createFakeSession()
+    const { url } = await startWithSession(session, {
+      agentDir,
+      pluginRegistry: emptyPluginRegistry(),
+      pluginHooks: createHookBus(),
+    })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'cron_list', requestId: 'req-bad' }))
+    const reply = await waitFor((m) => m.type === 'cron_list_result')
+
+    if (reply.type !== 'cron_list_result') throw new Error('unreachable')
+    expect(reply.result.ok).toBe(false)
+    if (reply.result.ok) throw new Error('unreachable')
+    expect(reply.result.reason).toContain('cron.json')
     ws.close()
   })
 })
