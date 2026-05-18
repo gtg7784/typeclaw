@@ -45,8 +45,15 @@ const githubPatAuthSchema = z.object({
   token: secretFieldSchema,
 })
 
+const githubAppAuthSchema = z.object({
+  type: z.literal('app'),
+  appId: z.number().int().positive(),
+  privateKey: secretFieldSchema,
+  installationId: z.number().int().positive().optional(),
+})
+
 const githubChannelSchema = z.object({
-  auth: githubPatAuthSchema,
+  auth: z.discriminatedUnion('type', [githubPatAuthSchema, githubAppAuthSchema]),
   webhookSecret: secretFieldSchema,
 })
 
@@ -125,6 +132,7 @@ export type ProviderCredential = z.infer<typeof providerCredentialSchema>
 export type Providers = z.infer<typeof providersSchema>
 export type Channels = z.infer<typeof channelsSchema>
 export type GithubPatAuthBlock = z.infer<typeof githubPatAuthSchema>
+export type GithubAppAuthBlock = z.infer<typeof githubAppAuthSchema>
 export type GithubSecretsBlock = z.infer<typeof githubChannelSchema>
 export type KakaoAccountRecord = z.infer<typeof kakaoAccountRecordSchema>
 export type PendingLoginRecord = z.infer<typeof kakaoPendingLoginRecordSchema>
