@@ -195,7 +195,10 @@ async function resolveUrlFromDocker(agentDir: string): Promise<{ url: string } |
   }
   const port = await resolveHostPort({ cwd: agentDir })
   const token = await resolveTuiToken({ cwd: agentDir })
-  const url = new URL(`ws://127.0.0.1:${port}`)
+  // The dedicated /commands path skips TUI session bootstrap on the server,
+  // saving an AgentSession creation per command invocation. Same auth as
+  // the root /` TUI path; both are owner-equivalent.
+  const url = new URL(`ws://127.0.0.1:${port}/commands`)
   if (token !== null) url.searchParams.set('token', token)
   return { url: url.toString() }
 }

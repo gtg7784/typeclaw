@@ -1195,6 +1195,65 @@ describe('createServer plugin-command dispatch', () => {
 
     ws.close()
   })
+
+  test('/commands path dispatches exec_command WITHOUT sending a `connected` frame', async () => {
+    // Tracks how many times the session factory was hit. A connection to
+    // the /commands path must not create an AgentSession, so this counter
+    // stays at 0 across the whole interaction.
+    let sessionFactoryHits = 0
+    const session = createFakeSession()
+    const state = makeFakeRunner()
+
+    const built = createServer({
+      port: 0,
+      createSession: async () => {
+        sessionFactoryHits++
+        return session
+      },
+      commandRunnerFactory: buildRunnerFactory(state),
+    }).start()
+    server = built
+
+    const { ws, received } = await connect(`ws://localhost:${built.port}/commands`)
+
+    ws.send(JSON.stringify({ type: 'exec_command', callId: 'cmd-1', name: 'noop', args: {} }))
+    // Give the server a tick to dispatch synchronously; no `connected` frame
+    // means waitFor would just hang, so we sleep briefly and then assert.
+    await new Promise((r) => setTimeout(r, 100))
+
+    expect(state.starts.length).toBe(1)
+    expect(state.starts[0]?.callId).toBe('cmd-1')
+    expect(sessionFactoryHits).toBe(0)
+    expect(received.some((m) => m.type === 'connected')).toBe(false)
+
+    ws.close()
+  })
+
+  test('/commands path rejects non-command ClientMessage frames silently (no error frame, no session)', async () => {
+    let sessionFactoryHits = 0
+    const session = createFakeSession()
+    const state = makeFakeRunner()
+
+    const built = createServer({
+      port: 0,
+      createSession: async () => {
+        sessionFactoryHits++
+        return session
+      },
+      commandRunnerFactory: buildRunnerFactory(state),
+    }).start()
+    server = built
+
+    const { ws, received } = await connect(`ws://localhost:${built.port}/commands`)
+
+    ws.send(JSON.stringify({ type: 'prompt', text: 'hi' }))
+    await new Promise((r) => setTimeout(r, 50))
+
+    expect(received.length).toBe(0)
+    expect(sessionFactoryHits).toBe(0)
+
+    ws.close()
+  })
 })
 
 describe('safeWsSend', () => {
