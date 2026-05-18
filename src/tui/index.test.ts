@@ -5,7 +5,7 @@ import type { Terminal } from '@mariozechner/pi-tui'
 import type { ClientMessage, ServerMessage } from '@/shared'
 
 import { type Client } from './client'
-import { createTui } from './index'
+import { createTui, formatVersionMismatchWarning, type VersionMismatch } from './index'
 
 // oxlint-disable-next-line no-control-regex -- intentionally strips ESC and BEL from rendered ANSI/APC sequences
 const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '').replace(/\x1b_[^\x07]*\x07/g, '')
@@ -642,5 +642,108 @@ describe('createTui queue panel', () => {
 
     client.triggerClose()
     await runPromise
+  })
+
+  test('invokes onVersionMismatch and renders a warning when serverVersion differs from expectedVersion', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-mismatch', serverVersion: '0.3.1' })
+    const seen: VersionMismatch[] = []
+
+    // when
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      expectedVersion: '0.3.2',
+      onVersionMismatch: (info) => seen.push(info),
+    })
+    const runPromise = tui.run()
+    await flush()
+    client.triggerClose()
+    await runPromise
+
+    // then
+    expect(seen).toEqual([{ expected: '0.3.2', actual: '0.3.1' }])
+    expect(terminal.visible()).toContain('host CLI is v0.3.2, agent container is v0.3.1')
+    expect(terminal.visible()).toContain('typeclaw restart --build')
+  })
+
+  test('skips the version warning when expectedVersion matches serverVersion', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-match', serverVersion: '0.3.2' })
+    const seen: VersionMismatch[] = []
+
+    // when
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      expectedVersion: '0.3.2',
+      onVersionMismatch: (info) => seen.push(info),
+    })
+    const runPromise = tui.run()
+    await flush()
+    client.triggerClose()
+    await runPromise
+
+    // then
+    expect(seen).toEqual([])
+    expect(terminal.visible()).not.toContain('host CLI is v')
+  })
+
+  test('skips the version warning when the server omits serverVersion (old server)', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-old' })
+    const seen: VersionMismatch[] = []
+
+    // when
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      expectedVersion: '0.3.2',
+      onVersionMismatch: (info) => seen.push(info),
+    })
+    const runPromise = tui.run()
+    await flush()
+    client.triggerClose()
+    await runPromise
+
+    // then
+    expect(seen).toEqual([])
+    expect(terminal.visible()).not.toContain('host CLI is v')
+  })
+
+  test('skips the version warning when expectedVersion is not configured (container-side local TUI)', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-noexpect', serverVersion: '0.3.1' })
+
+    // when
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+    client.triggerClose()
+    await runPromise
+
+    // then
+    expect(terminal.visible()).not.toContain('host CLI is v')
+  })
+
+  test('formatVersionMismatchWarning renders the expected one-line warning', () => {
+    expect(formatVersionMismatchWarning({ expected: '1.2.3', actual: '1.2.0' })).toBe(
+      'WARN: host CLI is v1.2.3, agent container is v1.2.0. Some commands may hang or fail. Try `typeclaw restart --build`.',
+    )
   })
 })

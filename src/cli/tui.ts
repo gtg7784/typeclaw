@@ -2,7 +2,8 @@ import { defineCommand } from 'citty'
 
 import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir } from '@/init'
-import { createTui } from '@/tui'
+import { CLI_VERSION } from '@/init/cli-version'
+import { createTui, formatVersionMismatchWarning } from '@/tui'
 
 import { errorLine } from './ui'
 
@@ -25,7 +26,14 @@ export const tui = defineCommand({
   },
   async run({ args }) {
     const url = args.url ?? (await defaultUrl())
-    const tui = createTui({ url, initialPrompt: args.prompt })
+    const tui = createTui({
+      url,
+      ...(args.prompt !== undefined ? { initialPrompt: args.prompt } : {}),
+      expectedVersion: CLI_VERSION,
+      onVersionMismatch: (info) => {
+        process.stderr.write(`${formatVersionMismatchWarning(info)}\n`)
+      },
+    })
     await tui.run()
   },
 })

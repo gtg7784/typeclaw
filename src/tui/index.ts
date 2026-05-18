@@ -9,6 +9,8 @@ export type TerminalFactory = () => Terminal
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 30_000
 
+export type VersionMismatch = { expected: string; actual: string }
+
 export type TuiOptions = {
   url: string
   initialPrompt?: string
@@ -16,6 +18,13 @@ export type TuiOptions = {
   createTerminal?: TerminalFactory
   handshakeTimeoutMs?: number
   exit?: (code: number) => void
+  // Locally-known typeclaw version the host CLI is running. When provided
+  // and the connected frame's serverVersion is defined and differs,
+  // onVersionMismatch is invoked AND a yellow warning line is rendered
+  // into the TUI history. The container-side local TUI omits this so no
+  // mismatch check fires when client and server are guaranteed in lockstep.
+  expectedVersion?: string
+  onVersionMismatch?: (info: VersionMismatch) => void
 }
 
 export function createTui({
@@ -25,6 +34,8 @@ export function createTui({
   createTerminal = () => new ProcessTerminal(),
   handshakeTimeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS,
   exit = process.exit.bind(process),
+  expectedVersion,
+  onVersionMismatch,
 }: TuiOptions) {
   async function run(): Promise<void> {
     const terminal = createTerminal()
@@ -44,7 +55,7 @@ export function createTui({
       throw err
     })
 
-    const sessionId = await waitForConnected(client, displayUrl, handshakeTimeoutMs).catch((err) => {
+    const handshake = await waitForConnected(client, displayUrl, handshakeTimeoutMs).catch((err) => {
       status.setText(colors.red(`connection error: ${err instanceof Error ? err.message : String(err)}`))
       tui.requestRender()
       client.close()
@@ -52,6 +63,7 @@ export function createTui({
       exit(1)
       throw err
     })
+    const { sessionId, serverVersion } = handshake
     status.setText(colors.dim(`session: ${sessionId}`))
     tui.requestRender()
 
@@ -217,6 +229,14 @@ export function createTui({
     tui.setFocus(editor)
     tui.requestRender()
 
+    if (expectedVersion !== undefined && serverVersion !== undefined && serverVersion !== expectedVersion) {
+      const mismatch: VersionMismatch = { expected: expectedVersion, actual: serverVersion }
+      const warning = formatVersionMismatchWarning(mismatch)
+      appendHistory(new Text(colors.yellow(warning), 0, 0))
+      tui.requestRender()
+      onVersionMismatch?.(mismatch)
+    }
+
     if (initialPrompt) {
       await send(initialPrompt)
     }
@@ -238,8 +258,12 @@ function redactUrl(url: string): string {
   }
 }
 
-async function waitForConnected(client: Client, url: string, timeoutMs: number): Promise<string> {
-  return await new Promise<string>((resolve, reject) => {
+async function waitForConnected(
+  client: Client,
+  url: string,
+  timeoutMs: number,
+): Promise<{ sessionId: string; serverVersion?: string }> {
+  return await new Promise<{ sessionId: string; serverVersion?: string }>((resolve, reject) => {
     const timer = setTimeout(() => {
       cleanup()
       reject(new Error(`timed out waiting for connected message from ${url} after ${timeoutMs}ms`))
@@ -253,7 +277,10 @@ async function waitForConnected(client: Client, url: string, timeoutMs: number):
       client.onMessage((msg) => {
         if (msg.type === 'connected') {
           cleanup()
-          resolve(msg.sessionId)
+          resolve({
+            sessionId: msg.sessionId,
+            ...(msg.serverVersion !== undefined ? { serverVersion: msg.serverVersion } : {}),
+          })
         }
         if (msg.type === 'error') {
           cleanup()
@@ -274,4 +301,8 @@ async function waitForConnected(client: Client, url: string, timeoutMs: number):
       }),
     )
   })
+}
+
+export function formatVersionMismatchWarning({ expected, actual }: VersionMismatch): string {
+  return `WARN: host CLI is v${expected}, agent container is v${actual}. Some commands may hang or fail. Try \`typeclaw restart --build\`.`
 }
