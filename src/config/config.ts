@@ -98,8 +98,11 @@ const dockerfileObjectSchema = z.object({
   // practical value.
   cjkFonts: z.boolean().default(true),
   // Opt into the cloudflared layer for `cloudflare-quick` tunnels. Default
-  // false so non-tunnel users pay zero image-size cost.
-  cloudflared: z.boolean().default(false),
+  // `true` so `tunnel add` / `channel add github` with the default Cloudflare
+  // Quick provider works on the next `start` without a separate Dockerfile
+  // edit. Opt-out with `cloudflared: false` to skip the ~35MB binary on
+  // agents that don't use tunnels.
+  cloudflared: z.boolean().default(true),
   append: z.array(dockerfileLineSchema).default([]),
 })
 
