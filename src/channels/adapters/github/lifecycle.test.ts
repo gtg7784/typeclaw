@@ -6,14 +6,14 @@ import type { GithubSecretsBlock } from '@/secrets/schema'
 
 import { createGithubAdapter } from './index'
 
-type Call = { url: string; method: string }
+type Call = { url: string; method: string; body?: string }
 
 function fakeFetchRecording(handler: (call: Call) => Response): { fetch: typeof fetch; calls: Call[] } {
   const calls: Call[] = []
   const fn = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
     const method = init?.method ?? 'GET'
-    calls.push({ url, method })
+    calls.push({ url, method, body: typeof init?.body === 'string' ? init.body : undefined })
     return handler({ url, method })
   }
   return { fetch: Object.assign(fn, { preconnect: () => {} }) as typeof fetch, calls }
@@ -21,6 +21,21 @@ function fakeFetchRecording(handler: (call: Call) => Response): { fetch: typeof 
 
 function silentLogger(): { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void } {
   return { info: () => {}, warn: () => {}, error: () => {} }
+}
+
+function recordingLogger(): {
+  info: (m: string) => void
+  warn: (m: string) => void
+  error: (m: string) => void
+  messages: string[]
+} {
+  const messages: string[] = []
+  return {
+    info: (m) => messages.push(`info:${m}`),
+    warn: (m) => messages.push(`warn:${m}`),
+    error: (m) => messages.push(`error:${m}`),
+    messages,
+  }
 }
 
 function patSecrets(): GithubSecretsBlock {
@@ -36,15 +51,19 @@ const ADAPTER_DEFAULTS = {
   history: { prefetch: { thread: { head: 3, tail: 10 }, channel: { tail: 10 } } },
 } as const
 
-function githubConfig(repos: readonly string[]): ChannelAdapterConfig & GithubAdapterConfig {
-  return {
+function githubConfig(
+  repos: readonly string[],
+  webhookUrl: string | null = 'https://agent.example.com/gh',
+): ChannelAdapterConfig & GithubAdapterConfig {
+  const config: ChannelAdapterConfig & GithubAdapterConfig = {
     ...ADAPTER_DEFAULTS,
     engagement: { ...ADAPTER_DEFAULTS.engagement, trigger: [...ADAPTER_DEFAULTS.engagement.trigger] },
-    webhookUrl: 'https://agent.example.com/gh',
     webhookPort: 0,
     eventAllowlist: ['issue_comment.created', 'pull_request.opened'],
     repos: [...repos],
   }
+  if (webhookUrl !== null) config.webhookUrl = webhookUrl
+  return config
 }
 
 function freshRouter(): ChannelRouter {
@@ -95,6 +114,120 @@ describe('createGithubAdapter lifecycle', () => {
       { repo: 'acme/gadgets', hookId: 101 },
     ])
     expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/repos/acme/widgets/hooks'))).toBe(true)
+  })
+
+  test('start() registers with configured webhookUrl when no tunnel URL callback is provided', async () => {
+    const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') return Response.json([])
+      if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST')
+        return Response.json({ id: 42 }, { status: 201 })
+      if (method === 'DELETE') return new Response('', { status: 204 })
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets']),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger: silentLogger(),
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    const registration = calls.find((c) => c.method === 'POST' && c.url.endsWith('/repos/acme/widgets/hooks'))
+    expect(registration?.body).toContain('https://agent.example.com/gh')
+  })
+
+  test('start() registers with tunnel URL when webhookUrl is omitted', async () => {
+    const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') return Response.json([])
+      if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST')
+        return Response.json({ id: 42 }, { status: 201 })
+      if (method === 'DELETE') return new Response('', { status: 204 })
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets'], null),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger: silentLogger(),
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      tunnelUrl: () => 'https://x.trycloudflare.com',
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    const registration = calls.find((c) => c.method === 'POST' && c.url.endsWith('/repos/acme/widgets/hooks'))
+    expect(registration?.body).toContain('https://x.trycloudflare.com')
+  })
+
+  test('start() prefers configured webhookUrl over tunnel URL', async () => {
+    const logger = recordingLogger()
+    const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') return Response.json([])
+      if (url.endsWith('/repos/acme/widgets/hooks') && method === 'POST')
+        return Response.json({ id: 42 }, { status: 201 })
+      if (method === 'DELETE') return new Response('', { status: 204 })
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets'], 'https://configured.example.com/gh'),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      tunnelUrl: () => 'https://x.trycloudflare.com',
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    const registration = calls.find((c) => c.method === 'POST' && c.url.endsWith('/repos/acme/widgets/hooks'))
+    expect(registration?.body).toContain('https://configured.example.com/gh')
+    expect(registration?.body).not.toContain('https://x.trycloudflare.com')
+    expect(logger.messages).toContain(
+      'warn:[github] webhookUrl configured; ignoring tunnel URL for webhook registration',
+    )
+  })
+
+  test('start() skips webhook registration when no effective URL is available', async () => {
+    const logger = recordingLogger()
+    const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets'], null),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    expect(calls.some((c) => c.url.includes('/hooks'))).toBe(false)
+    expect(logger.messages).toContain(
+      'info:[github] no webhookUrl configured and no tunnel URL available; channel is up but webhook registration is skipped',
+    )
   })
 
   test('stop() deletes every hook registered by start() (detach on close)', async () => {

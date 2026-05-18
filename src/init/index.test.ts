@@ -1582,6 +1582,7 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
       withGithub: true,
       githubCredentials: {
         webhookSecret: 'whsec_test',
+        tunnelProvider: 'external',
         webhookUrl: 'https://example.com/hook',
         webhookPort: 8975,
         repos: ['acme/repo-a'],
@@ -1595,11 +1596,20 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
     const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
       channels?: Record<string, Record<string, unknown>>
       roles?: { member?: { match?: string[] } }
+      tunnels?: Array<Record<string, unknown>>
     }
     expect(config.channels?.github).toMatchObject({
       webhookUrl: 'https://example.com/hook',
       webhookPort: 8975,
     })
+    expect(config.tunnels).toEqual([
+      {
+        name: 'github-webhook',
+        provider: 'external',
+        externalUrl: 'https://example.com/hook',
+        for: { kind: 'channel', name: 'github' },
+      },
+    ])
     expect(Array.isArray(config.channels?.github?.eventAllowlist)).toBe(true)
     expect(config.roles?.member?.match).toContain('github:acme/repo-a')
 
@@ -1653,6 +1663,7 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
       withGithub: true,
       githubCredentials: {
         webhookSecret: 'new_whsec',
+        tunnelProvider: 'external',
         webhookUrl: 'https://example.com/new',
         webhookPort: 9090,
         repos: ['acme/repo-b'],
@@ -1679,6 +1690,35 @@ describe('channel secret reuse (init re-run preserves existing tokens)', () => {
       webhookPort: 9090,
     })
     expect(config.roles?.member?.match).toContain('github:acme/repo-b')
+  })
+
+  test('runInit with github cloudflare-quick credentials writes tunnel config without webhookUrl', async () => {
+    await runInit({
+      cwd: root,
+      apiKey: 'fw_test_key',
+      withGithub: true,
+      githubCredentials: {
+        webhookSecret: 'whsec_test',
+        tunnelProvider: 'cloudflare-quick',
+        webhookPort: 8975,
+        repos: ['acme/repo-a'],
+        auth: { type: 'pat', pat: 'ghp_test' },
+      },
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+    })
+
+    const config = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      channels?: Record<string, Record<string, unknown>>
+      docker?: { file?: { cloudflared?: boolean } }
+      tunnels?: Array<Record<string, unknown>>
+    }
+    expect(config.channels?.github?.webhookUrl).toBeUndefined()
+    expect(config.docker?.file?.cloudflared).toBe(true)
+    expect(config.tunnels).toEqual([
+      { name: 'github-webhook', provider: 'cloudflare-quick', for: { kind: 'channel', name: 'github' } },
+    ])
   })
 })
 

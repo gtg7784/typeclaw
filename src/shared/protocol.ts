@@ -24,6 +24,26 @@ export type DoctorFixPayload =
 
 export type ClaimRoleChoice = 'owner' | 'member' | 'trusted' | (string & {})
 
+export type TunnelRequestId = string
+
+export type TunnelSnapshot = {
+  name: string
+  provider: 'external' | 'cloudflare-quick'
+  for: { kind: 'channel'; name: string } | { kind: 'manual' }
+  url: string | null
+  status: 'stopped' | 'starting' | 'healthy' | 'unhealthy' | 'permanently-failed'
+  lastUrlAt: number | null
+  detail: string
+}
+
+export type TunnelLogsClientMessage = { type: 'subscribe'; name: string; follow: boolean }
+
+export type TunnelLogsServerMessage =
+  | { type: 'snapshot'; lines: string[] }
+  | { type: 'line'; line: string }
+  | { type: 'error'; message: string }
+  | { type: 'end' }
+
 export type ClientMessage =
   | { type: 'prompt'; text: string; delivery?: PromptDelivery }
   | { type: 'reload'; scope?: string }
@@ -32,6 +52,8 @@ export type ClientMessage =
   | { type: 'doctor'; requestId: DoctorRequestId }
   | { type: 'doctor_fix'; requestId: DoctorRequestId; checkId: string }
   | { type: 'cron_list'; requestId: CronListRequestId }
+  | { type: 'tunnel_list_request'; requestId: TunnelRequestId }
+  | { type: 'tunnel_status_request'; requestId: TunnelRequestId; name: string }
   | { type: 'claim_start'; code: string; role: ClaimRoleChoice; channel?: string; ttlMs: number }
   | { type: 'claim_cancel' }
   | {
@@ -110,6 +132,14 @@ export type ServerMessage =
   | { type: 'doctor_result'; requestId: DoctorRequestId; checks: DoctorCheckPayload[] }
   | { type: 'doctor_fix_result'; requestId: DoctorRequestId; result: DoctorFixPayload }
   | { type: 'cron_list_result'; requestId: CronListRequestId; result: CronListResultPayload }
+  | ({ type: 'tunnel_list_response'; requestId: TunnelRequestId } & (
+      | { ok: true; tunnels: TunnelSnapshot[] }
+      | { ok: false; error: string }
+    ))
+  | ({ type: 'tunnel_status_response'; requestId: TunnelRequestId } & (
+      | { ok: true; tunnel: TunnelSnapshot }
+      | { ok: false; error: string }
+    ))
   | { type: 'claim_started'; payload: ClaimStartedPayload }
   | { type: 'claim_completed'; payload: ClaimCompletedPayload }
   | { type: 'claim_error'; payload: ClaimErrorPayload }

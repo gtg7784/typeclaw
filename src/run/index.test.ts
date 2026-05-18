@@ -4,9 +4,12 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { createChannelRouter, type ChannelManager, type ChannelManagerOptions } from '@/channels'
+import { __resetConfigForTesting, reloadConfig } from '@/config/config'
 import type { CronFile, CronJob, LoadCronResult, Scheduler } from '@/cron'
 import type { SessionFactory } from '@/sessions'
 import type { TuiOptions } from '@/tui'
+import type { TunnelManager, TunnelManagerOptions } from '@/tunnels'
 
 import { type LoadCronFn, type SchedulerFactory, startAgent, type TuiFactory } from './index'
 
@@ -237,6 +240,133 @@ describe('startAgent', () => {
     running = await startAgent({ port: 0, attachTui: false, loadCron: noCron })
 
     expect(running.cronConsumer).not.toBeNull()
+  })
+
+  test('subscribes tunnel bridge before tunnel manager start', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-tunnel-bridge-run-'))
+    try {
+      await Bun.write(
+        join(agentDir, 'typeclaw.json'),
+        JSON.stringify({
+          models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
+          tunnels: [
+            {
+              name: 'github-webhook',
+              provider: 'external',
+              for: { kind: 'channel', name: 'github' },
+              externalUrl: 'https://agent.example.com',
+            },
+          ],
+        }),
+      )
+      reloadConfig(agentDir)
+      const restarts: string[] = []
+      const createChannelManagerFor = (_opts: ChannelManagerOptions): ChannelManager => ({
+        router: createChannelRouter({ agentDir, configForAdapter: () => undefined }),
+        start: async () => {},
+        stop: async () => {},
+        reload: async () => ({ started: [], stopped: [], restartRequired: [] }),
+        restartAdapter: async (name) => void restarts.push(name),
+      })
+      const createTunnelManagerFor = (opts: TunnelManagerOptions): TunnelManager => ({
+        start: async () => {
+          opts.stream.publish({
+            target: { kind: 'broadcast' },
+            payload: {
+              kind: 'tunnel-url-changed',
+              tunnelName: 'github-webhook',
+              url: 'https://x.trycloudflare.com',
+              for: { kind: 'channel', name: 'github' },
+              rotatedAt: '2026-05-18T00:00:00.000Z',
+            },
+          })
+        },
+        stop: async () => {},
+        snapshot: () => [],
+        urlFor: () => null,
+        tail: () => [],
+        subscribeToLogs: () => () => {},
+      })
+
+      running = await startAgent({
+        port: 0,
+        attachTui: false,
+        cwd: agentDir,
+        loadCron: noCron,
+        createChannelManager: createChannelManagerFor,
+        createTunnelManager: createTunnelManagerFor,
+      })
+
+      expect(restarts).toEqual(['github'])
+    } finally {
+      await running?.stop()
+      running = null
+      __resetConfigForTesting()
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+
+  test('wires tunnel URL and github upstream port resolvers', async () => {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-tunnel-url-run-'))
+    try {
+      await Bun.write(
+        join(agentDir, 'typeclaw.json'),
+        JSON.stringify({
+          models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
+          channels: { github: { webhookPort: 9123, repos: [] } },
+          tunnels: [
+            {
+              name: 'custom-github-tunnel',
+              provider: 'external',
+              for: { kind: 'channel', name: 'github' },
+              externalUrl: 'https://agent.example.com',
+            },
+          ],
+        }),
+      )
+      reloadConfig(agentDir)
+      let channelOptions!: ChannelManagerOptions
+      let tunnelOptions!: TunnelManagerOptions
+      const createChannelManagerFor = (opts: ChannelManagerOptions): ChannelManager => {
+        channelOptions = opts
+        return {
+          router: createChannelRouter({ agentDir, configForAdapter: () => undefined }),
+          start: async () => {},
+          stop: async () => {},
+          reload: async () => ({ started: [], stopped: [], restartRequired: [] }),
+          restartAdapter: async () => {},
+        }
+      }
+      const createTunnelManagerFor = (opts: TunnelManagerOptions): TunnelManager => {
+        tunnelOptions = opts
+        return {
+          start: async () => {},
+          stop: async () => {},
+          snapshot: () => [],
+          urlFor: (name) => (name === 'custom-github-tunnel' ? 'https://x.trycloudflare.com' : null),
+          tail: () => [],
+          subscribeToLogs: () => () => {},
+        }
+      }
+
+      running = await startAgent({
+        port: 0,
+        attachTui: false,
+        cwd: agentDir,
+        loadCron: noCron,
+        createChannelManager: createChannelManagerFor,
+        createTunnelManager: createTunnelManagerFor,
+      })
+
+      expect(tunnelOptions.resolveChannelUpstreamPort?.('github')).toBe(9123)
+      expect(tunnelOptions.resolveChannelUpstreamPort?.('slack')).toBeNull()
+      expect(channelOptions.tunnelUrlForChannel?.('github')).toBe('https://x.trycloudflare.com')
+    } finally {
+      await running?.stop()
+      running = null
+      __resetConfigForTesting()
+      await rm(agentDir, { recursive: true, force: true })
+    }
   })
 })
 

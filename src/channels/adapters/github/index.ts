@@ -27,6 +27,7 @@ export type GithubAdapterOptions = {
   logger?: GithubAdapterLogger
   fetchImpl?: typeof fetch
   httpListenImpl?: (port: number, handler: (req: Request) => Promise<Response>) => { stop: () => Promise<void> }
+  tunnelUrl?: () => string | null
 }
 
 export type GithubAdapter = {
@@ -138,10 +139,19 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       // events for repos whose hooks are already registered.
       const cfg = options.configRef()
       const repos = cfg.repos ?? []
-      if (repos.length > 0) {
+      const tunnelUrl = options.tunnelUrl?.() ?? null
+      if (cfg.webhookUrl !== undefined && tunnelUrl !== null) {
+        logger.warn('[github] webhookUrl configured; ignoring tunnel URL for webhook registration')
+      }
+      const effectiveUrl = cfg.webhookUrl ?? tunnelUrl
+      if (effectiveUrl === null) {
+        logger.info(
+          '[github] no webhookUrl configured and no tunnel URL available; channel is up but webhook registration is skipped',
+        )
+      } else if (repos.length > 0) {
         const registration = await registerGithubWebhooks({
           token: tokenFn,
-          webhookUrl: cfg.webhookUrl,
+          webhookUrl: effectiveUrl,
           webhookSecret,
           repos,
           events: cfg.eventAllowlist,

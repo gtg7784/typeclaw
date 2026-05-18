@@ -97,6 +97,9 @@ const dockerfileObjectSchema = z.object({
   // tracking the upstream Noto release and version pinning offers no
   // practical value.
   cjkFonts: z.boolean().default(true),
+  // Opt into the cloudflared layer for `cloudflare-quick` tunnels. Default
+  // false so non-tunnel users pay zero image-size cost.
+  cloudflared: z.boolean().default(false),
   append: z.array(dockerfileLineSchema).default([]),
 })
 
@@ -218,9 +221,8 @@ export type NetworkConfig = z.infer<typeof networkSchema>
 
 // Reverse-proxy tunnels expose a container-private port to the public internet
 // via a managed subprocess (cloudflared) or a user-supplied external URL.
-// See AGENTS.md `## Tunnels`. PR 1 ships only the `external` provider — the
-// `cloudflare-quick` and `cloudflare-named` providers will be added to this
-// enum in PR 2/3. Keeping the enum scoped to what's implemented means
+// See AGENTS.md `## Tunnels`. PR 2 ships `cloudflare-quick`; `cloudflare-named`
+// remains deferred to PR 3. Keeping the enum scoped to what's implemented means
 // validateConfig() rejects unsupported providers at `typeclaw start` time,
 // before the container is torn down and rebuilt. `restart-required` because
 // the tunnel manager reads this list once at boot.
@@ -237,7 +239,7 @@ const tunnelEntrySchema = z
       .regex(/^[a-z0-9][a-z0-9-_]*$/, {
         message: 'tunnel name must match /^[a-z0-9][a-z0-9-_]*$/ (lowercase, digits, dashes, underscores)',
       }),
-    provider: z.enum(['external']),
+    provider: z.enum(['external', 'cloudflare-quick']),
     for: tunnelForSchema,
     externalUrl: z
       .string()

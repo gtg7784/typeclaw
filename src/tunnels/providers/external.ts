@@ -43,5 +43,11 @@ export function createExternalProvider(options: ExternalProviderOptions): Tunnel
     snapshot(): TunnelState {
       return { ...state }
     },
+    tail(): string[] {
+      return []
+    },
+    subscribeToLogs(): () => void {
+      return () => {}
+    },
   }
 }

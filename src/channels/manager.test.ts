@@ -18,6 +18,22 @@ type FakeAdapter = {
   stopCalls: number
 }
 
+type Deferred<T = void> = {
+  promise: Promise<T>
+  resolve: (value: T | PromiseLike<T>) => void
+  reject: (reason?: unknown) => void
+}
+
+function deferred<T = void>(): Deferred<T> {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  let reject!: (reason?: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 function makeFakeAdapter(): FakeAdapter {
   const adapter = {
     startCalls: 0,
@@ -27,6 +43,33 @@ function makeFakeAdapter(): FakeAdapter {
     },
     async stop() {
       adapter.stopCalls++
+    },
+    isConnected() {
+      return true
+    },
+  }
+  return adapter
+}
+
+function makeRecordingAdapter(
+  events: string[],
+  name: string,
+  gates: { start?: Promise<void>; stop?: Promise<void> } = {},
+): FakeAdapter {
+  const adapter = {
+    startCalls: 0,
+    stopCalls: 0,
+    async start() {
+      adapter.startCalls++
+      events.push(`${name}:start:begin`)
+      await gates.start
+      events.push(`${name}:start:end`)
+    },
+    async stop() {
+      adapter.stopCalls++
+      events.push(`${name}:stop:begin`)
+      await gates.stop
+      events.push(`${name}:stop:end`)
     },
     isConnected() {
       return true
@@ -54,6 +97,195 @@ const enabledAdapterCfg = () => ({
     stickiness: { perReply: { window: 300_000 } },
   },
   history: defaultHistoryConfig(),
+})
+
+const enabledGithubCfg = () => ({
+  ...enabledAdapterCfg(),
+  webhookPort: 0,
+  eventAllowlist: ['issue_comment.created'],
+  repos: [],
+})
+
+const writeGithubSecrets = async (dir: string): Promise<void> => {
+  await writeFile(
+    join(dir, 'secrets.json'),
+    JSON.stringify({
+      version: 2,
+      providers: {},
+      channels: {
+        github: {
+          auth: { type: 'pat', token: { value: 'ghp_test' } },
+          webhookSecret: { value: 'wh-secret' },
+        },
+      },
+    }),
+  )
+}
+
+function recordingLogger(): {
+  info: (msg: string) => void
+  warn: (msg: string) => void
+  error: (msg: string) => void
+  messages: string[]
+} {
+  const messages: string[] = []
+  return {
+    info: (msg) => messages.push(`info:${msg}`),
+    warn: (msg) => messages.push(`warn:${msg}`),
+    error: (msg) => messages.push(`error:${msg}`),
+    messages,
+  }
+}
+
+describe('channel manager — restartAdapter serialization', () => {
+  test('restartAdapter stops a live github adapter before starting it again', async () => {
+    cfg.github = enabledGithubCfg()
+    await writeGithubSecrets(agentDir)
+    const events: string[] = []
+    const stopGate = deferred()
+    const adapters = [
+      makeRecordingAdapter(events, 'github#1', { stop: stopGate.promise }),
+      makeRecordingAdapter(events, 'github#2'),
+    ]
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      createGithubAdapter: () => adapters.shift()!,
+    })
+
+    await mgr.start()
+    const restart = mgr.restartAdapter('github')
+    await Promise.resolve()
+    expect(events).toEqual(['github#1:start:begin', 'github#1:start:end', 'github#1:stop:begin'])
+
+    stopGate.resolve()
+    await restart
+
+    expect(events).toEqual([
+      'github#1:start:begin',
+      'github#1:start:end',
+      'github#1:stop:begin',
+      'github#1:stop:end',
+      'github#2:start:begin',
+      'github#2:start:end',
+    ])
+    await mgr.stop()
+  })
+
+  test('serializes concurrent restartAdapter calls for the same adapter', async () => {
+    cfg.github = enabledGithubCfg()
+    await writeGithubSecrets(agentDir)
+    const events: string[] = []
+    const firstStopGate = deferred()
+    const secondStopGate = deferred()
+    const adapters = [
+      makeRecordingAdapter(events, 'github#1', { stop: firstStopGate.promise }),
+      makeRecordingAdapter(events, 'github#2', { stop: secondStopGate.promise }),
+      makeRecordingAdapter(events, 'github#3'),
+    ]
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      createGithubAdapter: () => adapters.shift()!,
+    })
+
+    await mgr.start()
+    const first = mgr.restartAdapter('github')
+    const second = mgr.restartAdapter('github')
+    await Promise.resolve()
+    expect(events).toEqual(['github#1:start:begin', 'github#1:start:end', 'github#1:stop:begin'])
+
+    firstStopGate.resolve()
+    await first
+    await Promise.resolve()
+    expect(events).toEqual([
+      'github#1:start:begin',
+      'github#1:start:end',
+      'github#1:stop:begin',
+      'github#1:stop:end',
+      'github#2:start:begin',
+      'github#2:start:end',
+      'github#2:stop:begin',
+    ])
+
+    secondStopGate.resolve()
+    await Promise.all([first, second])
+    expect(events).toEqual([
+      'github#1:start:begin',
+      'github#1:start:end',
+      'github#1:stop:begin',
+      'github#1:stop:end',
+      'github#2:start:begin',
+      'github#2:start:end',
+      'github#2:stop:begin',
+      'github#2:stop:end',
+      'github#3:start:begin',
+      'github#3:start:end',
+    ])
+    await mgr.stop()
+  })
+
+  test('restartAdapter is a no-op when the adapter is not live', async () => {
+    const logger = recordingLogger()
+    const mgr = createChannelManager({ agentDir, channelsConfigRef: () => cfg, logger })
+
+    await mgr.restartAdapter('github')
+
+    expect(logger.messages).toContain("info:[channels] restartAdapter('github'): adapter not live, skipping")
+    await mgr.stop()
+  })
+
+  test('restartAdapter serialization is per adapter, not global', async () => {
+    cfg['slack-bot'] = enabledAdapterCfg()
+    cfg['telegram-bot'] = enabledAdapterCfg()
+    const events: string[] = []
+    const slackStopGate = deferred()
+    const slackAdapters = [
+      makeRecordingAdapter(events, 'slack#1', { stop: slackStopGate.promise }),
+      makeRecordingAdapter(events, 'slack#2'),
+    ]
+    const telegramAdapters = [makeRecordingAdapter(events, 'telegram#1'), makeRecordingAdapter(events, 'telegram#2')]
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      env: { SLACK_BOT_TOKEN: 'xoxb-a', SLACK_APP_TOKEN: 'xapp-b', TELEGRAM_BOT_TOKEN: 'tg-a' },
+      createSlackAdapter: () => slackAdapters.shift()!,
+      createTelegramAdapter: () => telegramAdapters.shift()!,
+    })
+
+    await mgr.start()
+    const slackRestart = mgr.restartAdapter('slack-bot')
+    await Promise.resolve()
+    const telegramRestart = mgr.restartAdapter('telegram-bot')
+    await telegramRestart
+
+    expect(events).toContain('telegram#2:start:end')
+    expect(events).not.toContain('slack#2:start:begin')
+
+    slackStopGate.resolve()
+    await slackRestart
+    await mgr.stop()
+  })
+
+  test('passes tunnelUrlForChannel through to the github adapter', async () => {
+    cfg.github = enabledGithubCfg()
+    await writeGithubSecrets(agentDir)
+    let captured: { tunnelUrl?: () => string | null } | undefined
+    const mgr = createChannelManager({
+      agentDir,
+      channelsConfigRef: () => cfg,
+      tunnelUrlForChannel: (name) => (name === 'github' ? 'https://x.trycloudflare.com' : null),
+      createGithubAdapter: (opts) => {
+        captured = opts
+        return makeFakeAdapter()
+      },
+    })
+
+    await mgr.start()
+
+    expect(captured?.tunnelUrl?.()).toBe('https://x.trycloudflare.com')
+    await mgr.stop()
+  })
 })
 
 describe('channel manager — slack adapter lifecycle', () => {

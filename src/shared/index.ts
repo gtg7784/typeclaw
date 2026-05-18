@@ -15,6 +15,10 @@ export {
   type QueueStateItem,
   type ReloadResultPayload,
   type ServerMessage,
+  type TunnelLogsClientMessage,
+  type TunnelLogsServerMessage,
+  type TunnelRequestId,
+  type TunnelSnapshot,
 } from './protocol'
 
 export { formatLocalDate, formatLocalDateTime } from './local-time'

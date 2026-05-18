@@ -71,12 +71,14 @@ export type ChannelManagerOptions = {
   // code. Production wiring sets this from the role-claim subsystem (see
   // src/run/index.ts). Tests typically omit it.
   claimHandler?: ClaimHandler
+  tunnelUrlForChannel?: (channelName: string) => string | null
 }
 
 export type ChannelManager = {
   router: ChannelRouter
   start: () => Promise<void>
   stop: () => Promise<void>
+  restartAdapter: (name: AdapterId) => Promise<void>
   reload: () => Promise<{ started: string[]; stopped: string[]; restartRequired: string[] }>
 }
 
@@ -113,6 +115,17 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   const createTelegramAdapter = options.createTelegramAdapter ?? createTelegramBotAdapter
 
   const live = new Map<AdapterId, AdapterEntry>()
+  const perAdapterSerial = new Map<AdapterId, Promise<unknown>>()
+
+  const runSerially = <T>(name: AdapterId, op: () => Promise<T>): Promise<T> => {
+    const prev = perAdapterSerial.get(name) ?? Promise.resolve()
+    const next = prev.then(op, op)
+    perAdapterSerial.set(
+      name,
+      next.catch(() => {}),
+    )
+    return next
+  }
 
   const buildCredentialSignature = (name: AdapterId): { signature: string; missing: string[] } => {
     if (name === 'kakaotalk') return buildKakaotalkSignature(options.agentDir)
@@ -171,6 +184,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         secrets,
         agentDir: options.agentDir,
         logger,
+        tunnelUrl: () => options.tunnelUrlForChannel?.('github') ?? null,
       })
     }
     if (name === 'telegram-bot') {
@@ -215,9 +229,9 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
   const stopAdapter = async (name: AdapterId): Promise<void> => {
     const entry = live.get(name)
     if (!entry) return
-    live.delete(name)
     try {
       await entry.adapter.stop()
+      live.delete(name)
       logger.info(`[channels] adapter "${name}" stopped`)
     } catch (err) {
       logger.error(`[channels] adapter "${name}" failed to stop: ${describe(err)}`)
@@ -231,13 +245,29 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
       const cfg = options.channelsConfigRef()
       for (const name of ADAPTER_IDS) {
         const adapterCfg = cfg[name]
-        if (adapterCfg !== undefined) await startAdapter(name, adapterCfg)
+        if (adapterCfg !== undefined) await runSerially(name, () => startAdapter(name, adapterCfg))
       }
     },
 
     async stop(): Promise<void> {
-      for (const name of Array.from(live.keys())) await stopAdapter(name)
+      for (const name of Array.from(live.keys())) await runSerially(name, () => stopAdapter(name))
       await router.stop()
+    },
+
+    async restartAdapter(name: AdapterId): Promise<void> {
+      await runSerially(name, async () => {
+        if (!live.has(name)) {
+          logger.info(`[channels] restartAdapter('${name}'): adapter not live, skipping`)
+          return
+        }
+        const currentCfg = options.channelsConfigRef()[name]
+        if (currentCfg === undefined) {
+          logger.info(`[channels] restartAdapter('${name}'): adapter config missing, skipping`)
+          return
+        }
+        await stopAdapter(name)
+        await startAdapter(name, currentCfg)
+      })
     },
 
     async reload(): Promise<{ started: string[]; stopped: string[]; restartRequired: string[] }> {
@@ -251,11 +281,11 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
         const current = live.get(name)
         if (desired === undefined || desired.enabled === false) {
           if (current) {
-            await stopAdapter(name)
+            await runSerially(name, () => stopAdapter(name))
             stopped.push(name)
           }
         } else if (!current) {
-          const ok = await startAdapter(name, desired)
+          const ok = await runSerially(name, () => startAdapter(name, desired))
           if (ok) started.push(name)
         } else {
           const { signature, missing } = buildCredentialSignature(name)
@@ -268,7 +298,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
             logger.warn(
               `[channels] adapter "${name}" missing credentials after reload (${missing.join(', ')}); stopping`,
             )
-            await stopAdapter(name)
+            await runSerially(name, () => stopAdapter(name))
             stopped.push(name)
           } else if (signature !== current.credentialSignature) {
             const reason = name === 'kakaotalk' ? 'credential rotation' : 'token rotation'

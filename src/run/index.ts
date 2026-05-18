@@ -12,6 +12,7 @@ import {
 } from '@/agent/subagents'
 import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
 import { createChannelManager, createChannelsReloadable, type ChannelManager } from '@/channels'
+import { createTunnelBridge, type TunnelBridge } from '@/channels/tunnel-bridge'
 import { createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync } from '@/config'
 import {
   type CronConsumer,
@@ -43,7 +44,7 @@ import {
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
-import { createTunnelManager, type TunnelManager } from '@/tunnels'
+import { createTunnelManager, type TunnelManager, type TunnelManagerOptions } from '@/tunnels'
 
 import { BUNDLED_PLUGINS } from './bundled-plugins'
 import { buildChannelSessionFactory } from './channel-session-factory'
@@ -55,6 +56,8 @@ export type TuiFactory = (options: TuiOptions) => { run: () => Promise<void> }
 
 export type LoadCronFn = (agentDir: string, options?: { subagents?: SubagentRegistry }) => Promise<LoadCronResult>
 export type SchedulerFactory = (options: { cwd: string; file: CronFile; onFire: (job: CronJob) => void }) => Scheduler
+export type ChannelManagerFactory = typeof createChannelManager
+export type TunnelManagerFactory = (options: TunnelManagerOptions) => TunnelManager
 
 export type StartAgentOptions = {
   port: number
@@ -66,6 +69,8 @@ export type StartAgentOptions = {
   createSchedulerFor?: SchedulerFactory
   sessionFactory?: SessionFactory
   stream?: Stream
+  createChannelManager?: ChannelManagerFactory
+  createTunnelManager?: TunnelManagerFactory
 }
 
 export type StartAgentResult = {
@@ -92,6 +97,8 @@ export async function startAgent({
   createSchedulerFor,
   sessionFactory = createSessionFactory({ agentDir: cwd }),
   stream = createStream(),
+  createChannelManager: createChannelManagerFor = createChannelManager,
+  createTunnelManager: createTunnelManagerFor = createTunnelManager,
 }: StartAgentOptions): Promise<StartAgentResult> {
   const reloadRegistry = new ReloadRegistry()
 
@@ -160,10 +167,20 @@ export async function startAgent({
     rolesProvider: () => getConfig().roles,
   })
 
-  const channelManager = createChannelManager({
+  const tunnelManager: TunnelManager = createTunnelManagerFor({
+    tunnels: getConfig().tunnels,
+    stream,
+    resolveChannelUpstreamPort: (name) => {
+      if (name === 'github') return getConfig().channels.github?.webhookPort ?? null
+      return null
+    },
+  })
+
+  const channelManager = createChannelManagerFor({
     agentDir: cwd,
     channelsConfigRef: () => getConfig().channels,
     aliasesRef: () => getConfig().alias,
+    tunnelUrlForChannel: (name) => resolveTunnelUrlForChannel(name, tunnelManager),
     createSessionForChannel: buildChannelSessionFactory({
       cwd,
       sessionFactory,
@@ -362,6 +379,8 @@ export async function startAgent({
     )
   }
 
+  const tunnelBridge: TunnelBridge = createTunnelBridge({ stream, channelManager })
+
   reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
   await channelManager.start()
 
@@ -443,6 +462,7 @@ export async function startAgent({
     pluginRuntime,
     claimController,
     commandRunnerFactory,
+    tunnelManager,
     ...containerNameOpt,
     ...runtimeVersionOpt,
     ...tuiTokenOpt,
@@ -454,10 +474,6 @@ export async function startAgent({
   // or channel adapter availability. External providers resolve URLs
   // synchronously; future managed providers will resolve asynchronously
   // and broadcast URL events when ready.
-  const tunnelManager: TunnelManager = createTunnelManager({
-    tunnels: getConfig().tunnels,
-    stream,
-  })
   await tunnelManager.start()
 
   let stopped = false
@@ -469,6 +485,7 @@ export async function startAgent({
     subagentConsumer.stop()
     server.stop(true)
     void disposeMaterializedSkills(pluginRuntime)
+    tunnelBridge.stop()
     await tunnelManager.stop()
     await channelManager.stop()
   }
@@ -514,6 +531,11 @@ function buildLocalTuiUrl(port: number, token: string | null): string {
   const url = new URL(`ws://localhost:${port}`)
   url.searchParams.set('token', token)
   return url.toString()
+}
+
+function resolveTunnelUrlForChannel(channelName: string, tunnelManager: TunnelManager): string | null {
+  const tunnel = getConfig().tunnels.find((entry) => entry.for.kind === 'channel' && entry.for.name === channelName)
+  return tunnel ? tunnelManager.urlFor(tunnel.name) : null
 }
 
 async function disposeMaterializedSkills(pluginRuntime: PluginRuntime): Promise<void> {

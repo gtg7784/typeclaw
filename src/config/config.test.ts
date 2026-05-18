@@ -320,7 +320,15 @@ describe('networkSchema', () => {
 })
 
 describe('docker.file schema', () => {
-  const FULL_DEFAULTS = { ffmpeg: false, gh: true, python: true, tmux: true, cjkFonts: true, append: [] }
+  const FULL_DEFAULTS = {
+    ffmpeg: false,
+    gh: true,
+    python: true,
+    tmux: true,
+    cjkFonts: true,
+    cloudflared: false,
+    append: [],
+  }
 
   test('defaults to a fully-populated object when omitted (omitted == empty object)', () => {
     const omitted = configSchema.parse({ models: { default: VALID_MODEL } })
@@ -358,6 +366,7 @@ describe('docker.file schema', () => {
       python: true,
       tmux: false,
       cjkFonts: true,
+      cloudflared: false,
       append: [],
     })
   })
@@ -380,6 +389,29 @@ describe('docker.file schema', () => {
     expect(() =>
       configSchema.parse({ models: { default: VALID_MODEL }, docker: { file: { cjkFonts: '2.0' } } }),
     ).toThrow()
+  })
+
+  test('cloudflared defaults to false so non-tunnel users skip the image layer', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
+    expect(parsed.docker.file.cloudflared).toBe(false)
+  })
+
+  test('cloudflared: true is honored and merges with other defaults', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      docker: { file: { cloudflared: true } },
+    })
+    expect(parsed.docker.file.cloudflared).toBe(true)
+    expect(parsed.docker.file.python).toBe(true)
+  })
+
+  test('cloudflared: false is honored and merges with other defaults', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      docker: { file: { cloudflared: false } },
+    })
+    expect(parsed.docker.file.cloudflared).toBe(false)
+    expect(parsed.docker.file.gh).toBe(true)
   })
 
   test('python is boolean-only (string version is not a meaningful apt pin for the python3 meta-package)', () => {
@@ -1422,10 +1454,9 @@ describe('configSchema tunnels field', () => {
     ).toThrow()
   })
 
-  test('rejects unsupported provider strings (cloudflare-quick / cloudflare-named deferred to PR 2/3)', () => {
-    expect(() =>
-      configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'cloudflare-quick' }] }),
-    ).toThrow()
+  test('accepts cloudflare-quick and still rejects unsupported provider strings', () => {
+    const parsed = configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'cloudflare-quick' }] })
+    expect(parsed.tunnels[0]?.provider).toBe('cloudflare-quick')
     expect(() =>
       configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'cloudflare-named' }] }),
     ).toThrow()

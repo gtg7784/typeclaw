@@ -1,11 +1,29 @@
 import { describe, expect, it } from 'bun:test'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { readFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { createStream } from '@/stream'
+import { waitFor } from '@/test-helpers/wait-for'
 
 import { createTunnelManager } from './manager'
 import type { TunnelConfig, TunnelUrlChangedPayload } from './types'
 
 const silentLogger = { info: () => {}, warn: () => {}, error: () => {} }
+
+function createScratchDir(): string {
+  return mkdtempSync(join(tmpdir(), 'tunnel-manager-test-'))
+}
+
+function installFakeCloudflared(scratchDir: string, script: string): string {
+  const binDir = join(scratchDir, 'bin')
+  const path = join(binDir, 'cloudflared')
+  mkdirSync(binDir)
+  writeFileSync(path, `#!/bin/sh\n${script}\n`, 'utf8')
+  chmodSync(path, 0o755)
+  return path
+}
 
 function externalConfig(overrides: Partial<TunnelConfig> = {}): TunnelConfig {
   return {
@@ -13,6 +31,15 @@ function externalConfig(overrides: Partial<TunnelConfig> = {}): TunnelConfig {
     provider: 'external',
     for: { kind: 'manual' },
     externalUrl: 'https://demo.example.com',
+    ...overrides,
+  }
+}
+
+function cloudflareQuickConfig(overrides: Partial<TunnelConfig> = {}): TunnelConfig {
+  return {
+    name: 'github-webhook',
+    provider: 'cloudflare-quick',
+    for: { kind: 'channel', name: 'github' },
     ...overrides,
   }
 }
@@ -122,5 +149,118 @@ describe('createTunnelManager (external provider)', () => {
     await manager.start()
 
     expect(received).toHaveLength(1)
+  })
+
+  it('tail returns an empty log snapshot for external tunnels and unknown names', () => {
+    const stream = createStream()
+    const manager = createTunnelManager({ tunnels: [externalConfig()], stream, logger: silentLogger })
+
+    expect(manager.tail('demo')).toEqual([])
+    expect(manager.tail('unknown')).toEqual([])
+  })
+
+  it('subscribeToLogs returns an unsubscribe function for external tunnels and unknown names', () => {
+    const stream = createStream()
+    const manager = createTunnelManager({ tunnels: [externalConfig()], stream, logger: silentLogger })
+
+    expect(typeof manager.subscribeToLogs('demo', () => {})).toBe('function')
+    expect(typeof manager.subscribeToLogs('unknown', () => {})).toBe('function')
+  })
+
+  it('does not call the channel upstream resolver for external tunnels', async () => {
+    const stream = createStream()
+    let calls = 0
+    const manager = createTunnelManager({
+      tunnels: [externalConfig({ for: { kind: 'channel', name: 'github' } })],
+      stream,
+      logger: silentLogger,
+      resolveChannelUpstreamPort: () => {
+        calls += 1
+        return 8975
+      },
+    })
+
+    await manager.start()
+
+    expect(calls).toBe(0)
+  })
+})
+
+describe('createTunnelManager (cloudflare-quick provider)', () => {
+  it('resolves channel-owned upstream ports before constructing the provider', async () => {
+    const scratchDir = createScratchDir()
+    const argvFile = join(scratchDir, 'argv.txt')
+    const binary = installFakeCloudflared(
+      scratchDir,
+      `
+printf '%s\n' "$@" > "${argvFile}"
+`,
+    )
+    try {
+      const manager = createTunnelManager({
+        tunnels: [cloudflareQuickConfig()],
+        stream: createStream(),
+        logger: silentLogger,
+        cloudflareQuickBinary: binary,
+        resolveChannelUpstreamPort: (channelName) => (channelName === 'github' ? 8975 : null),
+      })
+
+      await manager.start()
+      await waitFor(() => existsSync(argvFile) && readFileSync(argvFile, 'utf8').includes('http://127.0.0.1:8975'), {
+        description: 'cloudflared argv',
+      })
+
+      expect((await readFile(argvFile, 'utf8')).split('\n').filter(Boolean)).toContain('http://127.0.0.1:8975')
+      await manager.stop()
+    } finally {
+      rmSync(scratchDir, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects channel-owned quick tunnels when no upstream port resolves', () => {
+    expect(() =>
+      createTunnelManager({
+        tunnels: [cloudflareQuickConfig()],
+        stream: createStream(),
+        logger: silentLogger,
+        resolveChannelUpstreamPort: () => null,
+      }),
+    ).toThrow("tunnel 'github-webhook' (cloudflare-quick): no upstream port resolved for channel 'github'")
+  })
+
+  it('uses manual upstreamPort without calling the channel resolver', async () => {
+    const scratchDir = createScratchDir()
+    const argvFile = join(scratchDir, 'argv.txt')
+    const binary = installFakeCloudflared(
+      scratchDir,
+      `
+printf '%s\n' "$@" > "${argvFile}"
+`,
+    )
+    let calls = 0
+
+    try {
+      const manager = createTunnelManager({
+        tunnels: [cloudflareQuickConfig({ for: { kind: 'manual' }, upstreamPort: 5173 })],
+        stream: createStream(),
+        logger: silentLogger,
+        cloudflareQuickBinary: binary,
+        resolveChannelUpstreamPort: () => {
+          calls += 1
+          return 8975
+        },
+      })
+
+      await manager.start()
+      await waitFor(() => existsSync(argvFile) && readFileSync(argvFile, 'utf8').includes('http://127.0.0.1:5173'), {
+        description: 'manual cloudflared argv',
+      })
+
+      expect(calls).toBe(0)
+      expect((await readFile(argvFile, 'utf8')).split('\n').filter(Boolean)).toContain('http://127.0.0.1:5173')
+      await manager.stop()
+    } finally {
+      rmSync(scratchDir, { recursive: true, force: true })
+    }
   })
 })

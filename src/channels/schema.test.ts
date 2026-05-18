@@ -54,4 +54,17 @@ describe('channelsSchema', () => {
     const parsed = channelsSchema.parse({ 'discord-bot': { enabled: false } })
     expect(parsed['discord-bot']?.enabled).toBe(false)
   })
+
+  test('accepts github channel config with webhookUrl omitted', () => {
+    const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'] } })
+    expect(parsed.github?.webhookUrl).toBeUndefined()
+    expect(parsed.github?.repos).toEqual(['owner/repo'])
+  })
+
+  test('accepts github channel config with webhookUrl present', () => {
+    const parsed = channelsSchema.parse({
+      github: { webhookUrl: 'https://agent.example.com/github', repos: ['owner/repo'] },
+    })
+    expect(parsed.github?.webhookUrl).toBe('https://agent.example.com/github')
+  })
 })

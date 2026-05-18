@@ -1,4 +1,6 @@
-export type TunnelProvider = 'external'
+import type { Unsubscribe } from '@/stream'
+
+export type TunnelProvider = 'external' | 'cloudflare-quick'
 
 export type TunnelFor = { kind: 'channel'; name: string } | { kind: 'manual' }
 
@@ -26,7 +28,11 @@ export type TunnelProviderHandle = {
   start: () => Promise<void>
   stop: () => Promise<void>
   snapshot: () => TunnelState
+  tail: () => string[]
+  subscribeToLogs: (cb: TunnelLogSubscriber) => Unsubscribe
 }
+
+export type TunnelLogSubscriber = (line: string) => void
 
 export type TunnelUrlChangedPayload = {
   kind: 'tunnel-url-changed'

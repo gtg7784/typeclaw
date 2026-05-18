@@ -110,7 +110,11 @@ export const DEFAULT_GITHUB_EVENT_ALLOWLIST = [
 ] as const
 
 const githubChannelSchema = adapterSchema.extend({
-  webhookUrl: z.string().url(),
+  // Optional now (PR 2): when omitted and a `tunnels[]` entry with
+  // `for: { kind: 'channel', name: 'github' }` exists, the runtime resolves
+  // the URL from the tunnel manager via the adapter's `tunnelUrl` callback.
+  // The github adapter skips webhook registration when no effective URL is available.
+  webhookUrl: z.string().url().optional(),
   webhookPort: z.number().int().positive().default(8975),
   eventAllowlist: z.array(z.string()).default([...DEFAULT_GITHUB_EVENT_ALLOWLIST]),
   // Repositories whose webhooks the adapter manages. Each entry is an
@@ -144,5 +148,6 @@ export const channelsSchema = z
 
 export type EngagementConfig = z.infer<typeof engagementSchema>
 export type ChannelAdapterConfig = z.infer<typeof adapterSchema>
-export type GithubAdapterConfig = z.infer<typeof githubChannelSchema>
+type ParsedGithubAdapterConfig = z.infer<typeof githubChannelSchema>
+export type GithubAdapterConfig = ParsedGithubAdapterConfig
 export type ChannelsConfig = z.infer<typeof channelsSchema>
