@@ -26,8 +26,12 @@ import type {
   QueueStateItem,
   ReloadResultPayload,
   ServerMessage,
+  TunnelLogsClientMessage,
+  TunnelLogsServerMessage,
+  TunnelSnapshot,
 } from '@/shared'
 import type { Stream, StreamMessage, StreamMessageId, Unsubscribe } from '@/stream'
+import type { TunnelManager } from '@/tunnels'
 
 export type ReloadAllFn = () => Promise<ReloadAllResult>
 export type CreateSessionFn = (options?: CreateSessionOptions) => Promise<AgentSession | CreateSessionResult>
@@ -56,6 +60,7 @@ export type ServerOptions = {
   // sessions. Omit to keep TUI-only behavior (used by tests + non-container
   // dev runs).
   containerBroker?: ContainerBroker
+  tunnelManager?: TunnelManager
   // Optional logger for server-side events. Defaults to `consoleLogger`
   // which writes to stdout/stderr so `typeclaw logs` surfaces every event.
   // Tests inject a fake logger to assert on captured output.
@@ -90,9 +95,11 @@ type TuiWsData = { kind: 'tui'; sessionId: string }
 // because both surfaces are owner-equivalent (a process that holds the
 // TUI token can already do anything the TUI can).
 type CommandWsData = { kind: 'command' }
-type WsData = TuiWsData | CommandWsData | BrokerWsData
+type TunnelLogsWsData = { kind: 'tunnel-logs'; unsubscribe: Unsubscribe | null }
+type WsData = TuiWsData | CommandWsData | TunnelLogsWsData | BrokerWsData
 type Ws = ServerWebSocket<TuiWsData>
 type CommandWs = ServerWebSocket<CommandWsData>
+type TunnelLogsWs = ServerWebSocket<TunnelLogsWsData>
 type AnyOwnerWs = Ws | CommandWs
 
 type QueuedPrompt = {
@@ -136,6 +143,15 @@ function send(ws: Ws, msg: ServerMessage): boolean {
   return safeWsSend(ws, msg)
 }
 
+function sendTunnelLog(ws: TunnelLogsWs, msg: TunnelLogsServerMessage): boolean {
+  try {
+    ws.send(JSON.stringify(msg))
+    return true
+  } catch {
+    return false
+  }
+}
+
 function encodeBase64(bytes: Uint8Array): string {
   let s = ''
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i] ?? 0)
@@ -156,6 +172,7 @@ export function createServer({
   runtimeVersion,
   tuiToken,
   containerBroker,
+  tunnelManager,
   logger = consoleLogger,
   claimController,
   commandRunnerFactory,
@@ -268,6 +285,14 @@ export function createServer({
           if (server.upgrade(req, { data })) return
           return new Response('upgrade failed', { status: 400 })
         }
+        if (url.pathname === '/tunnel-logs') {
+          if (isWebSocketUpgrade(req) && tuiToken !== undefined && url.searchParams.get('token') !== tuiToken) {
+            return new Response('unauthorized', { status: 401 })
+          }
+          const data: TunnelLogsWsData = { kind: 'tunnel-logs', unsubscribe: null }
+          if (server.upgrade(req, { data })) return
+          return new Response('upgrade failed', { status: 400 })
+        }
         // `/commands` is the dedicated host-CLI proxy path. It skips TUI
         // session creation (which costs an AgentSession spawn per command
         // invocation) but uses the same tuiToken because both surfaces
@@ -306,6 +331,7 @@ export function createServer({
             // when command_exit arrives.
             return
           }
+          if (rawWs.data.kind === 'tunnel-logs') return
           const ws = rawWs as Ws
           try {
             const sessionManager = sessionFactory?.createPersisted()
@@ -402,6 +428,10 @@ export function createServer({
             handleCommandFrame(cws, msg)
             return
           }
+          if (rawWs.data.kind === 'tunnel-logs') {
+            handleTunnelLogsMessage(rawWs as TunnelLogsWs, raw, tunnelManager)
+            return
+          }
           const ws = rawWs as Ws
           const msg = JSON.parse(String(raw)) as ClientMessage
           const state = sessionStates.get(ws)
@@ -493,6 +523,16 @@ export function createServer({
             return
           }
 
+          if (msg.type === 'tunnel_list_request') {
+            handleTunnelList(ws, msg.requestId, tunnelManager)
+            return
+          }
+
+          if (msg.type === 'tunnel_status_request') {
+            handleTunnelStatus(ws, msg.requestId, msg.name, tunnelManager)
+            return
+          }
+
           if (msg.type === 'abort') {
             if (!state) return
             await state.session.abort()
@@ -568,6 +608,11 @@ export function createServer({
             for (const [callId, owner] of callIdToWs) {
               if (owner === cws) callIdToWs.delete(callId)
             }
+            return
+          }
+          if (rawWs.data.kind === 'tunnel-logs') {
+            rawWs.data.unsubscribe?.()
+            rawWs.data.unsubscribe = null
             return
           }
           const ws = rawWs as Ws
@@ -855,6 +900,78 @@ async function handleCronList(
     const reason = err instanceof Error ? err.message : String(err)
     send(ws, { type: 'cron_list_result', requestId, result: { ok: false, reason } })
   }
+}
+
+function handleTunnelList(ws: Ws, requestId: string, tunnelManager: TunnelManager | undefined): void {
+  if (tunnelManager === undefined) {
+    send(ws, { type: 'tunnel_list_response', requestId, ok: false, error: 'tunnel manager not configured' })
+    return
+  }
+  send(ws, { type: 'tunnel_list_response', requestId, ok: true, tunnels: toTunnelSnapshots(tunnelManager.snapshot()) })
+}
+
+function handleTunnelStatus(ws: Ws, requestId: string, name: string, tunnelManager: TunnelManager | undefined): void {
+  if (tunnelManager === undefined) {
+    send(ws, { type: 'tunnel_status_response', requestId, ok: false, error: 'tunnel manager not configured' })
+    return
+  }
+  const tunnel = toTunnelSnapshots(tunnelManager.snapshot()).find((entry) => entry.name === name)
+  if (tunnel === undefined) {
+    send(ws, { type: 'tunnel_status_response', requestId, ok: false, error: `unknown tunnel: ${name}` })
+    return
+  }
+  send(ws, { type: 'tunnel_status_response', requestId, ok: true, tunnel })
+}
+
+function handleTunnelLogsMessage(
+  ws: TunnelLogsWs,
+  raw: string | Buffer,
+  tunnelManager: TunnelManager | undefined,
+): void {
+  let msg: TunnelLogsClientMessage
+  try {
+    msg = JSON.parse(String(raw)) as TunnelLogsClientMessage
+  } catch {
+    sendTunnelLog(ws, { type: 'error', message: 'invalid JSON' })
+    sendTunnelLog(ws, { type: 'end' })
+    ws.close()
+    return
+  }
+  if (msg.type !== 'subscribe' || typeof msg.name !== 'string' || typeof msg.follow !== 'boolean') {
+    sendTunnelLog(ws, { type: 'error', message: 'invalid tunnel log subscription' })
+    sendTunnelLog(ws, { type: 'end' })
+    ws.close()
+    return
+  }
+  if (tunnelManager === undefined || !tunnelManager.snapshot().some((entry) => entry.name === msg.name)) {
+    sendTunnelLog(ws, { type: 'error', message: `unknown tunnel: ${msg.name}` })
+    sendTunnelLog(ws, { type: 'end' })
+    ws.close()
+    return
+  }
+
+  sendTunnelLog(ws, { type: 'snapshot', lines: tunnelManager.tail(msg.name) })
+  if (!msg.follow) {
+    sendTunnelLog(ws, { type: 'end' })
+    ws.close()
+    return
+  }
+  ws.data.unsubscribe?.()
+  ws.data.unsubscribe = tunnelManager.subscribeToLogs(msg.name, (line) => {
+    sendTunnelLog(ws, { type: 'line', line })
+  })
+}
+
+function toTunnelSnapshots(states: ReturnType<TunnelManager['snapshot']>): TunnelSnapshot[] {
+  return states.map((state) => ({
+    name: state.name,
+    provider: state.provider,
+    for: state.for,
+    url: state.url,
+    status: state.status,
+    lastUrlAt: state.lastUrlAt,
+    detail: state.detail,
+  }))
 }
 
 function toPayload(entry: CronListEntry): CronListEntryPayload {

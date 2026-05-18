@@ -462,6 +462,7 @@ export async function startAgent({
     pluginRuntime,
     claimController,
     commandRunnerFactory,
+    tunnelManager,
     ...containerNameOpt,
     ...runtimeVersionOpt,
     ...tuiTokenOpt,

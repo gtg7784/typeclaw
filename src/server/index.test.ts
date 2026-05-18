@@ -10,12 +10,13 @@ import type { CronJob } from '@/cron'
 import { createHookBus, type HookBus, type PluginRegistry } from '@/plugin'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 import type { SessionFactory } from '@/sessions'
-import type { ServerMessage } from '@/shared'
+import type { ServerMessage, TunnelLogsServerMessage } from '@/shared'
 import { createStream } from '@/stream'
 import { expectStable, waitFor as waitForState } from '@/test-helpers/wait-for'
+import type { TunnelManager, TunnelState } from '@/tunnels'
 
 import type { CommandOutbound, CommandRunner } from './command-runner'
-import { createServer, safeWsSend, type ServerLogger } from './index'
+import { createServer, type ServerLogger } from './index'
 
 function makeRuntime(opts: { registry: PluginRegistry; hooks: HookBus }): PluginRuntime {
   return createPluginRuntime({
@@ -103,6 +104,7 @@ async function startWithSession(
     pluginHooks?: HookBus
     logger?: ServerLogger
     commandRunnerFactory?: (outbound: CommandOutbound) => CommandRunner
+    tunnelManager?: TunnelManager
   } = {},
 ): Promise<{ url: string }> {
   const pluginRuntime =
@@ -118,9 +120,49 @@ async function startWithSession(
     ...(pluginRuntime ? { pluginRuntime } : {}),
     ...(extra.logger ? { logger: extra.logger } : {}),
     ...(extra.commandRunnerFactory ? { commandRunnerFactory: extra.commandRunnerFactory } : {}),
+    ...(extra.tunnelManager ? { tunnelManager: extra.tunnelManager } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
+}
+
+async function connectTunnelLogs(url: string): Promise<{
+  ws: WebSocket
+  received: TunnelLogsServerMessage[]
+  waitFor: (
+    predicate: (msg: TunnelLogsServerMessage) => boolean,
+    timeoutMs?: number,
+  ) => Promise<TunnelLogsServerMessage>
+}> {
+  const ws = new WebSocket(url)
+  const received: TunnelLogsServerMessage[] = []
+  ws.addEventListener('message', (e) => {
+    received.push(JSON.parse(String(e.data)) as TunnelLogsServerMessage)
+  })
+  await new Promise<void>((resolve, reject) => {
+    ws.addEventListener('open', () => resolve(), { once: true })
+    ws.addEventListener('error', (err) => reject(err), { once: true })
+  })
+  const waitFor = async (
+    predicate: (msg: TunnelLogsServerMessage) => boolean,
+    timeoutMs = 1000,
+  ): Promise<TunnelLogsServerMessage> => {
+    const existing = received.find(predicate)
+    if (existing) return existing
+    return await new Promise<TunnelLogsServerMessage>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('timeout waiting for tunnel log message')), timeoutMs)
+      const onMessage = (e: MessageEvent) => {
+        const msg = JSON.parse(String(e.data)) as TunnelLogsServerMessage
+        if (predicate(msg)) {
+          clearTimeout(timer)
+          ws.removeEventListener('message', onMessage)
+          resolve(msg)
+        }
+      }
+      ws.addEventListener('message', onMessage)
+    })
+  }
+  return { ws, received, waitFor }
 }
 
 async function connect(url: string): Promise<{
@@ -1329,5 +1371,160 @@ describe('createServer cron_list handler', () => {
     if (reply.result.ok) throw new Error('unreachable')
     expect(reply.result.reason).toContain('no-such-subagent')
     ws.close()
+  })
+})
+
+describe('createServer tunnel handlers', () => {
+  function makeTunnelManager(): TunnelManager & { appendLog: (name: string, line: string) => void } {
+    const states: TunnelState[] = [
+      {
+        name: 'github-webhook',
+        provider: 'cloudflare-quick',
+        for: { kind: 'channel', name: 'github' },
+        url: 'https://example.trycloudflare.com',
+        status: 'healthy',
+        lastUrlAt: 123,
+        detail: 'connected',
+      },
+      {
+        name: 'demo',
+        provider: 'external',
+        for: { kind: 'manual' },
+        url: 'https://demo.example.com',
+        status: 'healthy',
+        lastUrlAt: 456,
+        detail: 'external URL configured',
+      },
+    ]
+    const logs = new Map<string, string[]>([
+      ['github-webhook', ['first', 'second']],
+      ['demo', ['demo-line']],
+    ])
+    const subscribers = new Map<string, Set<(line: string) => void>>()
+    return {
+      start: async () => {},
+      stop: async () => {},
+      snapshot: () => states,
+      urlFor: (name) => states.find((state) => state.name === name)?.url ?? null,
+      tail: (name) => logs.get(name) ?? [],
+      subscribeToLogs: (name, cb) => {
+        const set = subscribers.get(name) ?? new Set<(line: string) => void>()
+        subscribers.set(name, set)
+        set.add(cb)
+        return () => set.delete(cb)
+      },
+      appendLog: (name, line) => {
+        logs.get(name)?.push(line)
+        for (const cb of subscribers.get(name) ?? []) cb(line)
+      },
+    }
+  }
+
+  test('tunnel_list_request returns the configured tunnels', async () => {
+    const manager = makeTunnelManager()
+    const { url } = await startWithSession(createFakeSession(), { tunnelManager: manager })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'tunnel_list_request', requestId: 'tunnels' }))
+    const reply = await waitFor((m) => m.type === 'tunnel_list_response')
+
+    if (reply.type !== 'tunnel_list_response' || !reply.ok) throw new Error('unreachable')
+    expect(reply.requestId).toBe('tunnels')
+    expect(reply.tunnels.map((entry) => entry.name)).toEqual(['github-webhook', 'demo'])
+    ws.close()
+  })
+
+  test('tunnel_status_request returns one tunnel and errors for unknown names', async () => {
+    const manager = makeTunnelManager()
+    const { url } = await startWithSession(createFakeSession(), { tunnelManager: manager })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    ws.send(JSON.stringify({ type: 'tunnel_status_request', requestId: 'known', name: 'demo' }))
+    const known = await waitFor((m) => m.type === 'tunnel_status_response' && m.requestId === 'known')
+    ws.send(JSON.stringify({ type: 'tunnel_status_request', requestId: 'missing', name: 'missing' }))
+    const missing = await waitFor((m) => m.type === 'tunnel_status_response' && m.requestId === 'missing')
+
+    if (known.type !== 'tunnel_status_response' || !known.ok) throw new Error('unreachable')
+    expect(known.tunnel.name).toBe('demo')
+    if (missing.type !== 'tunnel_status_response' || missing.ok) throw new Error('unreachable')
+    expect(missing.error).toContain('unknown tunnel')
+    ws.close()
+  })
+
+  test('/tunnel-logs follow=false sends snapshot then end', async () => {
+    const manager = makeTunnelManager()
+    const built = createServer({
+      port: 0,
+      createSession: async () => createFakeSession(),
+      tunnelManager: manager,
+    }).start()
+    server = built
+    const { ws, waitFor } = await connectTunnelLogs(`ws://localhost:${built.port}/tunnel-logs`)
+
+    ws.send(JSON.stringify({ type: 'subscribe', name: 'github-webhook', follow: false }))
+    const snapshot = await waitFor((m) => m.type === 'snapshot')
+    const end = await waitFor((m) => m.type === 'end')
+
+    if (snapshot.type !== 'snapshot') throw new Error('unreachable')
+    expect(snapshot.lines).toEqual(['first', 'second'])
+    expect(end.type).toBe('end')
+    ws.close()
+  })
+
+  test('/tunnel-logs follow=true streams appended lines', async () => {
+    const manager = makeTunnelManager()
+    const built = createServer({
+      port: 0,
+      createSession: async () => createFakeSession(),
+      tunnelManager: manager,
+    }).start()
+    server = built
+    const { ws, waitFor } = await connectTunnelLogs(`ws://localhost:${built.port}/tunnel-logs`)
+
+    ws.send(JSON.stringify({ type: 'subscribe', name: 'github-webhook', follow: true }))
+    await waitFor((m) => m.type === 'snapshot')
+    manager.appendLog('github-webhook', 'live')
+    const line = await waitFor((m) => m.type === 'line')
+
+    expect(line).toEqual({ type: 'line', line: 'live' })
+    ws.close()
+  })
+
+  test('/tunnel-logs unknown tunnel sends error then end', async () => {
+    const manager = makeTunnelManager()
+    const built = createServer({
+      port: 0,
+      createSession: async () => createFakeSession(),
+      tunnelManager: manager,
+    }).start()
+    server = built
+    const { ws, waitFor } = await connectTunnelLogs(`ws://localhost:${built.port}/tunnel-logs`)
+
+    ws.send(JSON.stringify({ type: 'subscribe', name: 'missing', follow: false }))
+    const error = await waitFor((m) => m.type === 'error')
+    const end = await waitFor((m) => m.type === 'end')
+
+    if (error.type !== 'error') throw new Error('unreachable')
+    expect(error.message).toContain('unknown tunnel')
+    expect(end.type).toBe('end')
+    ws.close()
+  })
+
+  test('/tunnel-logs rejects websocket upgrades without the expected token', async () => {
+    const manager = makeTunnelManager()
+    const built = createServer({
+      port: 0,
+      createSession: async () => createFakeSession(),
+      tunnelManager: manager,
+      tuiToken: 'secret',
+    }).start()
+    server = built
+
+    const ws = new WebSocket(`ws://localhost:${built.port}/tunnel-logs`)
+
+    await new Promise<void>((resolve) => ws.addEventListener('close', () => resolve(), { once: true }))
+    expect(ws.readyState).toBe(WebSocket.CLOSED)
   })
 })
