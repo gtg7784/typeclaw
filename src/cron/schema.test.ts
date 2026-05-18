@@ -106,6 +106,21 @@ describe('cronFileSchema', () => {
       }),
     ).toThrow()
   })
+
+  test("rejects kind: 'handler' in user-authored cron.json (handlers are plugin-only)", () => {
+    const result = parseCronFile({
+      jobs: [
+        {
+          id: 'j',
+          schedule: '* * * * *',
+          kind: 'handler',
+          scheduledByRole: 'owner',
+        },
+      ],
+    })
+    if (result.ok) throw new Error('expected failure')
+    expect(result.reason).toMatch(/kind/)
+  })
 })
 
 describe('parseCronFile', () => {

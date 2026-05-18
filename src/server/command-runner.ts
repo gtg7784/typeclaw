@@ -331,7 +331,7 @@ function writeLine(stream: WritableStream<Uint8Array>, line: string): void {
   void writer.write(new TextEncoder().encode(`${line}\n`)).then(() => writer.releaseLock())
 }
 
-async function runPromptForCommand(args: {
+export async function runPromptForCommand(args: {
   text: string
   origin: SessionOrigin
   runtime: PluginRuntime

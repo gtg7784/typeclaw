@@ -26,12 +26,20 @@ import {
 } from '@/cron'
 import { CLI_VERSION } from '@/init/cli-version'
 import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistry, summarizeLoaded } from '@/plugin'
+import { createPluginLogger } from '@/plugin/context'
+import type { CronHandlerContext } from '@/plugin/types'
 import { createContainerBroker, publishForwardResult } from '@/portbroker'
 import { ReloadRegistry } from '@/reload'
 import { createClaimController } from '@/role-claim'
 import { hydrateChannelEnvFromSecrets } from '@/secrets'
 import { createServer, type Server } from '@/server'
-import { createCommandRunner, type CommandRunner, type CommandSpawnSubagent } from '@/server/command-runner'
+import {
+  createCommandRunner,
+  type CommandRunner,
+  type CommandSpawnSubagent,
+  runExecForCommand,
+  runPromptForCommand,
+} from '@/server/command-runner'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
@@ -246,6 +254,47 @@ export async function startAgent({
   const cronConsumer = createCronConsumer({
     stream,
     cwd,
+    invokeHandler: async (job) => {
+      const snap = pluginRuntime.get()
+      const registered = snap.registry.cronJobs.find((j) => j.globalId === job.id)
+      const pluginName = registered?.pluginName ?? '<unknown>'
+      const logger = createPluginLogger(pluginName)
+      const abortController = new AbortController()
+      const origin: SessionOrigin = {
+        kind: 'cron',
+        jobId: job.id,
+        jobKind: 'handler',
+        ...(job.scheduledByRole !== undefined ? { scheduledByRole: job.scheduledByRole } : {}),
+        scheduledByOrigin: (job.scheduledByOrigin as SessionOrigin | undefined) ?? { kind: 'config-file' },
+      }
+      const ctx: CronHandlerContext = {
+        jobId: job.id,
+        name: pluginName,
+        agentDir: cwd,
+        logger,
+        signal: abortController.signal,
+        permissions: pluginsLoaded.permissions,
+        origin,
+        prompt: (text: string) =>
+          runPromptForCommand({
+            text,
+            origin,
+            runtime: pluginRuntime,
+            agentDir: cwd,
+            permissions: pluginsLoaded.permissions,
+            signal: abortController.signal,
+            runtimeVersion: runtimeVersionOpt.runtimeVersion,
+            containerName: containerNameOpt.containerName,
+          }),
+        subagent: (subName: string, payload?: unknown) =>
+          dispatchSpawnSubagent(subName, payload, {
+            spawnedByOrigin: origin,
+          }),
+        exec: (strings: TemplateStringsArray, ...values: unknown[]) =>
+          runExecForCommand(strings, values, { cwd, signal: abortController.signal }),
+      }
+      await job.handler(ctx)
+    },
     createSessionForCron: async (job) => {
       const snap = pluginRuntime.get()
       const sessionManager = SessionManager.create(cwd, sessionFactory.sessionDir())

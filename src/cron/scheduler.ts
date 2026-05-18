@@ -177,7 +177,16 @@ function jobFingerprint(job: CronJob): string {
 
 function jobPayload(job: CronJob): unknown {
   if (job.kind === 'prompt') return { prompt: job.prompt, subagent: job.subagent ?? null, payload: job.payload ?? null }
-  return job.command
+  if (job.kind === 'exec') return job.command
+  // Use the handler's source as the discriminator. A constant placeholder
+  // would make every handler fingerprint identically, so a plugin reload
+  // that replaces the handler with a new implementation would be classified
+  // as `unchanged` by `diff()` — the old function reference would keep
+  // firing forever. `Function.prototype.toString()` returns the function's
+  // declared source (deterministic per declaration site, changes when the
+  // plugin module is re-imported with edits), which is the cheapest stable
+  // discriminator without keeping a separate identity Map. JSON-safe.
+  return { handler: String(job.handler) }
 }
 
 type ComputeNextFireResult = { ok: true; nextFire: number } | { ok: false; reason: string }

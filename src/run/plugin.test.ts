@@ -282,6 +282,81 @@ export default {
     expect(written?.agentDir).toBe(agentDir!)
   })
 
+  test('kind: handler cron job fires with a well-formed CronHandlerContext when published to the cron stream', async () => {
+    // given a plugin contributing a kind: 'handler' cron job that records what
+    // it received in ctx
+    agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-e2e-'))
+    await symlink(join(process.cwd(), 'node_modules'), join(agentDir, 'node_modules'), 'dir')
+    const sentinelFile = join(agentDir, 'handler-ran.json')
+    await writeFile(
+      join(agentDir, 'typeclaw.json'),
+      JSON.stringify({
+        models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' },
+        plugins: ['./plugin.ts'],
+      }),
+    )
+    await writePlugin(
+      agentDir,
+      `import { writeFile } from 'node:fs/promises'
+export default {
+  plugin: async () => ({
+    cronJobs: {
+      watch: {
+        schedule: '*/5 * * * *',
+        kind: 'handler',
+        handler: async (ctx) => {
+          await writeFile(
+            ${JSON.stringify(sentinelFile)},
+            JSON.stringify({
+              jobId: ctx.jobId,
+              name: ctx.name,
+              agentDir: ctx.agentDir,
+              originKind: ctx.origin.kind,
+              originJobKind: ctx.origin.kind === 'cron' ? ctx.origin.jobKind : null,
+              scheduledByRole: ctx.origin.kind === 'cron' ? ctx.origin.scheduledByRole ?? null : null,
+              hasPrompt: typeof ctx.prompt,
+              hasSubagent: typeof ctx.subagent,
+              hasExec: typeof ctx.exec,
+              hasSignal: ctx.signal instanceof AbortSignal,
+              hasLogger: typeof ctx.logger?.info,
+              hasPermissions: typeof ctx.permissions?.has,
+            }),
+          )
+        },
+      },
+    },
+  }),
+}`,
+    )
+
+    running = await startAgent({ port: 0, attachTui: false, cwd: agentDir, loadCron: noCron })
+
+    // when we publish the handler job to the cron stream directly (bypassing
+    // the scheduler so the test stays deterministic — the scheduler's clock
+    // would otherwise require waiting for the next */5 boundary)
+    const registered = running.pluginRuntime.get().registry.cronJobs.find((j) => j.localId === 'watch')
+    if (!registered) throw new Error('plugin handler cron job not registered')
+    running.stream.publish({ target: { kind: 'cron', jobId: registered.globalId }, payload: registered.job })
+    for (let i = 0; i < 50 && !(await Bun.file(sentinelFile).exists()); i++) {
+      await new Promise((r) => setTimeout(r, 20))
+    }
+
+    // then the handler observed a well-formed ctx
+    const observed = JSON.parse(await Bun.file(sentinelFile).text())
+    expect(observed.jobId).toBe('__plugin_plugin_watch')
+    expect(observed.name).toBe('plugin')
+    expect(observed.agentDir).toBe(agentDir)
+    expect(observed.originKind).toBe('cron')
+    expect(observed.originJobKind).toBe('handler')
+    expect(observed.scheduledByRole).toBe('owner')
+    expect(observed.hasPrompt).toBe('function')
+    expect(observed.hasSubagent).toBe('function')
+    expect(observed.hasExec).toBe('function')
+    expect(observed.hasSignal).toBe(true)
+    expect(observed.hasLogger).toBe('function')
+    expect(observed.hasPermissions).toBe('function')
+  })
+
   test('plugin config block is validated against configSchema and exposed as ctx.config', async () => {
     agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-plugin-e2e-'))
     await symlink(join(process.cwd(), 'node_modules'), join(agentDir, 'node_modules'), 'dir')

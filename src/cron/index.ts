@@ -31,7 +31,9 @@ export {
   type CronMigrationResult,
   type CronMigrationStep,
   type ExecJob,
+  type HandlerJob,
   migrateLegacyCronShape,
+  type ParsedCronJob,
   type PromptJob,
 } from './schema'
 
