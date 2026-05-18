@@ -43,6 +43,7 @@ import {
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import { createStream, type Stream } from '@/stream'
 import { createTui as createTuiDefault, type TuiOptions } from '@/tui'
+import { createTunnelManager, type TunnelManager } from '@/tunnels'
 
 import { BUNDLED_PLUGINS } from './bundled-plugins'
 import { buildChannelSessionFactory } from './channel-session-factory'
@@ -448,6 +449,17 @@ export async function startAgent({
     ...containerBrokerOpt,
   }).start()
 
+  // Tunnel manager starts AFTER the WS server is up so a slow/hanging
+  // provider (PR 2's cloudflared first-URL wait) cannot block TUI, reload,
+  // or channel adapter availability. External providers resolve URLs
+  // synchronously; future managed providers will resolve asynchronously
+  // and broadcast URL events when ready.
+  const tunnelManager: TunnelManager = createTunnelManager({
+    tunnels: getConfig().tunnels,
+    stream,
+  })
+  await tunnelManager.start()
+
   let stopped = false
   const stop = async () => {
     if (stopped) return
@@ -457,6 +469,7 @@ export async function startAgent({
     subagentConsumer.stop()
     server.stop(true)
     void disposeMaterializedSkills(pluginRuntime)
+    await tunnelManager.stop()
     await channelManager.stop()
   }
 
