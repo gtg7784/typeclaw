@@ -1,19 +1,10 @@
-import { buildAuthStrategy } from '@/channels/adapters/github/auth'
-import { GITHUB_API_BASE, githubJsonHeaders } from '@/channels/adapters/github/auth-pat'
-
-export type GithubAuthInput =
-  | { type: 'pat'; pat: string }
-  | { type: 'app'; appId: number; privateKey: string; installationId?: number }
+import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 
 export type RegisterGithubWebhooksOptions = {
-  auth: GithubAuthInput
+  token: () => Promise<string>
   webhookUrl: string
   webhookSecret: string
   repos: readonly string[]
-  // Accepts either coarse names ('issue_comment') or the dotted event.action
-  // form used by the runtime allowlist ('issue_comment.created'). The dotted
-  // form is reduced to its coarse part because GitHub's hook config API only
-  // subscribes by event name.
   events: readonly string[]
   fetchImpl?: typeof fetch
 }
@@ -31,17 +22,46 @@ export async function registerGithubWebhooks(
   options: RegisterGithubWebhooksOptions,
 ): Promise<WebhookRegistrationResult> {
   const fetchImpl = options.fetchImpl ?? fetch
-  const auth = buildAuthStrategy({ auth: toSecretAuth(options.auth), fetchImpl })
+  let token: string
   try {
-    const token = await auth.token()
-    const repos: WebhookRepoResult[] = []
-    for (const repo of options.repos) {
-      repos.push(await registerOne(fetchImpl, token, repo, options))
-    }
-    return { repos }
-  } finally {
-    await auth.dispose()
+    token = await options.token()
+  } catch (err) {
+    const error = describe(err)
+    return { repos: options.repos.map((repo) => ({ repo, action: 'failed' as const, error })) }
   }
+  const repos: WebhookRepoResult[] = []
+  for (const repo of options.repos) {
+    repos.push(await registerOne(fetchImpl, token, repo, options))
+  }
+  return { repos }
+}
+
+export type DeregisterGithubWebhooksOptions = {
+  token: () => Promise<string>
+  hooks: ReadonlyArray<{ repo: string; hookId: number }>
+  fetchImpl?: typeof fetch
+}
+
+export type WebhookDeregistrationResult = {
+  hooks: Array<{ repo: string; hookId: number; action: 'deleted' | 'missing' | 'failed'; error?: string }>
+}
+
+export async function deregisterGithubWebhooks(
+  options: DeregisterGithubWebhooksOptions,
+): Promise<WebhookDeregistrationResult> {
+  const fetchImpl = options.fetchImpl ?? fetch
+  let token: string
+  try {
+    token = await options.token()
+  } catch (err) {
+    const error = describe(err)
+    return { hooks: options.hooks.map((h) => ({ ...h, action: 'failed', error })) }
+  }
+  const hooks: WebhookDeregistrationResult['hooks'] = []
+  for (const hook of options.hooks) {
+    hooks.push(await deleteOne(fetchImpl, token, hook))
+  }
+  return { hooks }
 }
 
 async function registerOne(
@@ -67,6 +87,35 @@ async function registerOne(
   }
 }
 
+async function deleteOne(
+  fetchImpl: typeof fetch,
+  token: string,
+  hook: { repo: string; hookId: number },
+): Promise<WebhookDeregistrationResult['hooks'][number]> {
+  const parsed = parseRepoSlug(hook.repo)
+  if (parsed === null) {
+    return { ...hook, action: 'failed', error: `invalid repo slug: "${hook.repo}"` }
+  }
+  try {
+    const response = await fetchImpl(`${GITHUB_API_BASE}/repos/${parsed.owner}/${parsed.name}/hooks/${hook.hookId}`, {
+      method: 'DELETE',
+      headers: githubJsonHeaders(token),
+    })
+    if (response.status === 404) return { ...hook, action: 'missing' }
+    if (!response.ok) {
+      const body = await response.text().catch(() => '')
+      return {
+        ...hook,
+        action: 'failed',
+        error: `delete hook failed: ${response.status}${body !== '' ? ` ${body}` : ''}`,
+      }
+    }
+    return { ...hook, action: 'deleted' }
+  } catch (err) {
+    return { ...hook, action: 'failed', error: describe(err) }
+  }
+}
+
 type RepoSlug = { owner: string; name: string }
 
 function parseRepoSlug(slug: string): RepoSlug | null {
@@ -74,8 +123,11 @@ function parseRepoSlug(slug: string): RepoSlug | null {
   if (parts.length !== 2) return null
   const [owner, name] = parts
   if (!owner || !name) return null
+  if (!REPO_SEGMENT.test(owner) || !REPO_SEGMENT.test(name)) return null
   return { owner, name }
 }
+
+const REPO_SEGMENT = /^[A-Za-z0-9._-]+$/
 
 async function findMatchingHook(
   fetchImpl: typeof fetch,
@@ -83,7 +135,7 @@ async function findMatchingHook(
   repo: RepoSlug,
   webhookUrl: string,
 ): Promise<number | null> {
-  const response = await fetchImpl(`${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/hooks`, {
+  const response = await fetchImpl(`${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/hooks?per_page=100`, {
     method: 'GET',
     headers: githubJsonHeaders(token),
   })
@@ -107,17 +159,7 @@ async function createHook(
   const response = await fetchImpl(`${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/hooks`, {
     method: 'POST',
     headers: githubJsonHeaders(token),
-    body: JSON.stringify({
-      name: 'web',
-      active: true,
-      events: toCoarseEvents(options.events),
-      config: {
-        url: options.webhookUrl,
-        content_type: 'json',
-        secret: options.webhookSecret,
-        insecure_ssl: '0',
-      },
-    }),
+    body: JSON.stringify(buildHookPayload(options, { includeName: true })),
   })
   if (!response.ok) {
     const body = await response.text().catch(() => '')
@@ -138,21 +180,30 @@ async function updateHook(
   const response = await fetchImpl(`${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/hooks/${hookId}`, {
     method: 'PATCH',
     headers: githubJsonHeaders(token),
-    body: JSON.stringify({
-      active: true,
-      events: toCoarseEvents(options.events),
-      config: {
-        url: options.webhookUrl,
-        content_type: 'json',
-        secret: options.webhookSecret,
-        insecure_ssl: '0',
-      },
-    }),
+    body: JSON.stringify(buildHookPayload(options, { includeName: false })),
   })
   if (!response.ok) {
     const body = await response.text().catch(() => '')
     throw new Error(`update hook failed: ${response.status}${body !== '' ? ` ${body}` : ''}`)
   }
+}
+
+function buildHookPayload(
+  options: RegisterGithubWebhooksOptions,
+  { includeName }: { includeName: boolean },
+): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    active: true,
+    events: toCoarseEvents(options.events),
+    config: {
+      url: options.webhookUrl,
+      content_type: 'json',
+      secret: options.webhookSecret,
+      insecure_ssl: '0',
+    },
+  }
+  if (includeName) payload.name = 'web'
+  return payload
 }
 
 function toCoarseEvents(events: readonly string[]): string[] {
@@ -162,18 +213,6 @@ function toCoarseEvents(events: readonly string[]): string[] {
     if (coarse && coarse.length > 0) seen.add(coarse)
   }
   return [...seen]
-}
-
-function toSecretAuth(auth: GithubAuthInput): Parameters<typeof buildAuthStrategy>[0]['auth'] {
-  if (auth.type === 'pat') {
-    return { type: 'pat', token: { value: auth.pat } }
-  }
-  return {
-    type: 'app',
-    appId: auth.appId,
-    privateKey: { value: auth.privateKey },
-    ...(auth.installationId !== undefined ? { installationId: auth.installationId } : {}),
-  }
 }
 
 function describe(err: unknown): string {
