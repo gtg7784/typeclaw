@@ -35,6 +35,7 @@ TypeClaw is the agent I wanted to use:
 - 🔄 **Hot reload** — change `typeclaw.json`, `typeclaw reload` — no restart for most fields
 - 🔁 **Self-restart** — the agent can bounce its own container when it updates itself
 - 🌐 **Auto port-forward** — dev servers inside the container appear on `localhost`, even loopback-only ones
+- 🌍 **Public tunnels** — expose container ports to the public internet for webhooks and demos (Cloudflare-managed or bring-your-own URL)
 - 🎼 **Compose** — orchestrate multiple agents across multiple folders
 
 ### 🌱 Self-improving, in detail
@@ -108,6 +109,7 @@ my-agent/
 - `plugins` — list of plugin module specifiers
 - `channels` — `slack-bot` / `discord-bot` config
 - `portForward` — allow/deny list for auto port forwarding (default: `*`)
+- `tunnels` — public reverse-proxy tunnels for webhooks and ad-hoc exposure (PR 1: `external` provider; managed Cloudflare providers in upcoming PRs)
 - `dockerfile` — toggles for `gh`, `python`, `tmux`, `ffmpeg`, `cjkFonts`, plus `append` lines
 - `memory` — idle window and dreaming schedule for the memory plugin
 

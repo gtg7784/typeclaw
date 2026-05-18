@@ -552,6 +552,103 @@ Adding a new request kind is a deliberate addition: extend both `Request` (in `s
 
 - **The daemon stays alive when its registry becomes empty.** Idle cost is ~10 MB RAM and zero CPU. The next `typeclaw start` reuses it. Killing the idle daemon is `pkill -f 'typeclaw _hostd'` (out of scope for the CLI).
 
+## Tunnels
+
+`src/tunnels/` is the in-container subsystem that exposes a container-private TCP port to the public internet. Two distinct use cases share one primitive: inbound webhooks (the GitHub channel needs `api.github.com` to reach it past NAT) and ad-hoc exposure ("yo, let my friend see the dashboard you just built"). Both reduce to "give me a public URL that proxies to `127.0.0.1:<port>` inside the container."
+
+### Why container-side, not host-side
+
+The cloudflared subprocess runs **inside the container**, not on the host. Earlier design sketches put it next to `hostd`; container-side is the right call for typeclaw's architecture because:
+
+- **No host-side binary install.** `cloudflared` lives in the Dockerfile (gated by `docker.file.cloudflared`), same shape as `curl-impersonate`. Users don't `brew install cloudflared`.
+- **Loopback-friendly.** `cloudflared --url http://127.0.0.1:8975` reaches the GitHub adapter's webhook server natively. No bridge IP, no `host.docker.internal` plumbing.
+- **No new RPC kinds.** The tunnel process is already in the container's address space; URL events publish directly to the in-process Stream. No hostd↔container WS round-trip.
+- **Per-agent isolation.** Two agents = two cloudflared subprocesses in two containers. No shared host daemon to coordinate.
+- **Lifecycle = container lifecycle.** `typeclaw stop` kills cloudflared along with everything else.
+
+The one historical argument for host-side — surviving container restarts without URL rotation — only matters for quick tunnels, which by definition rotate. Named tunnels are URL-stable regardless of process location because the URL is bound to Cloudflare-side config.
+
+The egress shim (`buildEntrypointShim()` in `src/init/dockerfile.ts`) does not interfere: cloudflared's outbound to Cloudflare's edge (`198.41.x.x` etc.) is **public-internet**, not RFC1918, so the `network.blockInternal` filter never sees it. The loopback connection to the webhook server is ACCEPT'd by rule 2 of the shim (`-o lo`). cloudflared works under the strictest egress policy typeclaw ships, no carve-out needed.
+
+### Schema and lifecycle
+
+```jsonc
+{
+  "tunnels": [
+    {
+      "name": "github-webhook",
+      "provider": "external",
+      "for": { "kind": "channel", "name": "github" },
+      "externalUrl": "https://my.tunnel.example.com",
+    },
+    {
+      "name": "demo",
+      "provider": "external",
+      "for": { "kind": "manual" },
+      "upstreamPort": 5173,
+      "externalUrl": "https://demo.example.com",
+    },
+  ],
+}
+```
+
+`tunnels[]` is **`restart-required`** in `FIELD_EFFECTS` — the tunnel manager reads the list once at boot and spawns one provider per entry. Adding/removing entries requires `typeclaw restart`. URL changes from running tunnels (cloudflared restart, named-tunnel re-resolve) ARE live — they propagate via `broadcast` Stream messages, not config reload.
+
+The `for` discriminator is load-bearing: `{ kind: 'channel', name: 'github' }` links the tunnel to a channel adapter (the adapter subscribes to URL changes for tunnels with matching `for`), while `{ kind: 'manual' }` requires an explicit `upstreamPort` and is owned solely by `typeclaw tunnel add` / `tunnel remove`. Channels never reference tunnels by name — they query for tunnels declared as `for: { kind: 'channel', name: 'self' }`. This means there are no per-channel port numbers to manage and no string references to keep in sync.
+
+### Providers
+
+Three providers, only one shipped in v1:
+
+| Provider           | Subprocess                     | URL source                                | When                                                                               |
+| ------------------ | ------------------------------ | ----------------------------------------- | ---------------------------------------------------------------------------------- |
+| `external`         | none                           | `externalUrl` from config, static         | User has their own reverse proxy (Caddy, ngrok, etc.)                              |
+| `cloudflare-quick` | `cloudflared tunnel --url ...` | parsed from cloudflared stderr at runtime | Default for `channel add github` — zero signup, URL rotates on restart             |
+| `cloudflare-named` | `cloudflared tunnel run <id>`  | known from config (`hostname` field)      | After `typeclaw tunnel upgrade` — stable URL, requires Cloudflare account + domain |
+
+PR 1 ships `external` only. The other two enum values parse but `createTunnelManager` throws `not implemented yet (deferred to PR 2/3)` at boot. The intent is to let users declare `provider: external` with a hand-managed ngrok/cloudflared URL today and graduate to managed providers when PR 2/3 land.
+
+### Webhook server (existing, not new)
+
+There is **no `src/webhooks/` module**. The GitHub adapter at `src/channels/adapters/github/index.ts` line 111 already calls `Bun.serve({ port: configRef().webhookPort, fetch: handler })` inside the container, with `webhookPort` defaulting to 8975 (schema at `src/channels/schema.ts`). Tunnels point at the adapter's existing port. Consolidation into a shared multi-route server is deferred until N≥2 webhook adapters exist (today only GitHub).
+
+### `channels.github.webhookUrl` is now optional
+
+The field used to be `z.string().url()` (required). PR 1 relaxes it to `.optional()`. Runtime behavior:
+
+| `webhookUrl` | `tunnels[]` entry for github | Adapter behavior                                                                                                          |
+| ------------ | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| set          | none                         | Treat as external/user-managed (today's behavior — backward-compat).                                                      |
+| unset        | exists                       | Wait for first `tunnel-url-changed` event, then PATCH/POST-register webhook with GitHub. (v1 happy path once PR 2 lands.) |
+| both set     | exists                       | `tunnels[]` wins; warning logged once at boot.                                                                            |
+| neither      | none                         | Adapter boots with a warning; channel cannot receive webhooks.                                                            |
+
+Optional-relaxation is **zero-migration** — every existing config still parses. No `migrateLegacyConfigShape` step is needed. The deprecation message guides users to remove `webhookUrl` once they verify their tunnel works, but typeclaw deliberately does NOT auto-delete user-authored config.
+
+### Stream wiring
+
+URL changes use the existing `broadcast` target — no new target kind. Notification payload shape (`src/tunnels/types.ts`):
+
+```ts
+type TunnelUrlChangedPayload = {
+  kind: 'tunnel-url-changed'
+  tunnelName: string
+  url: string
+  for: TunnelFor
+  rotatedAt: string // ISO timestamp
+}
+```
+
+`isTunnelUrlChangedPayload` (in `src/tunnels/events.ts`) is the type guard for consumers. Today only the GitHub adapter consumes it (deferred subscription wiring lands in PR 2 alongside the auto-registration loop). Future consumers — TUI status renderer, plugin-contributed channel adapters — subscribe via the same broadcast filter.
+
+### Rules of thumb
+
+- **`tunnels[]` is `restart-required`, not `applied`.** Process management semantics; the tunnel manager doesn't subscribe to config reload events. Adding/removing entries requires a container restart. URL changes at runtime are live; _config_ changes are not. Don't reclassify either direction without auditing every consumer.
+- **The `for` discriminator owns lifecycle ownership.** `for: { kind: 'channel', ... }` entries are owned by `typeclaw channel add/remove`; `for: { kind: 'manual' }` entries are owned by `typeclaw tunnel add/remove`. `tunnel remove` refuses to delete a channel-owned tunnel and points the user at `channel remove <name>` instead. The two paths share zero CLI state.
+- **External tunnels are the universal escape hatch.** When in doubt, a user can declare `provider: 'external'` with their own URL — no subprocess, no signup, no extra binary in the image. The other providers are conveniences on top of this baseline.
+- **Channel adapters subscribe to `tunnel-url-changed` broadcasts via the in-process Stream — they do NOT call into the tunnel manager directly.** The decoupling is load-bearing: the adapter doesn't care whether the URL came from cloudflared, an external URL, or (future) tailscale. The broadcast is the contract.
+- **`webhookUrl` optional is a one-way relaxation.** Re-tightening it to required would break every existing config that omits it. Treat the optional state as permanent and design migrations around it, not against it.
+
 ## Message Stream
 
 `src/stream/` is the in-process coordination primitive that the WS server, cron, and the agent's own tool use to talk to each other. It's an in-memory pub/sub keyed by typed targets. **Nothing is persisted**; if the Bun process crashes, all in-flight stream state is lost. Persistence is deliberately out of scope — agentic work is not resumable mid-LLM-call, and the container is the failure unit.
