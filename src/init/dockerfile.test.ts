@@ -8,6 +8,8 @@ import {
   buildDockerfile,
   buildEntrypointShim,
   CHROME_RUNTIME_APT_PACKAGES_AMD64,
+  CLOUDFLARED_RELEASE_URL_BASE,
+  CLOUDFLARED_VERSION,
   CURL_IMPERSONATE_PROFILE,
   CURL_IMPERSONATE_SHA256_AMD64,
   CURL_IMPERSONATE_SHA256_ARM64,
@@ -240,6 +242,35 @@ describe('curl-impersonate layer', () => {
     expect(agentBrowserIdx).toBeGreaterThan(-1)
     expect(aptIdx).toBeLessThan(curlImpersonateIdx)
     expect(curlImpersonateIdx).toBeLessThan(agentBrowserIdx)
+  })
+})
+
+describe('cloudflared layer', () => {
+  test('cloudflared: true emits the pinned cloudflared download layer', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cloudflared: true }))
+
+    expect(out).toContain(`${CLOUDFLARED_RELEASE_URL_BASE}/${CLOUDFLARED_VERSION}/cloudflared-linux-`)
+    expect(out).toContain('/usr/local/bin/cloudflared --version')
+  })
+
+  test('cloudflared: false omits the layer entirely', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cloudflared: false }))
+
+    expect(out).not.toContain('cloudflared-linux-')
+    expect(out).toBe(buildDockerfile())
+  })
+
+  test('cloudflared layer appears after curl-impersonate and before the entrypoint shim', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ cloudflared: true }))
+    const curlIdx = out.indexOf('curl-impersonate.tar.gz')
+    const cloudflaredIdx = out.indexOf('cloudflared-linux-')
+    const entrypointIdx = out.indexOf(`base64 -d > ${TYPECLAW_ENTRYPOINT_PATH}`)
+
+    expect(curlIdx).toBeGreaterThan(-1)
+    expect(cloudflaredIdx).toBeGreaterThan(-1)
+    expect(entrypointIdx).toBeGreaterThan(-1)
+    expect(curlIdx).toBeLessThan(cloudflaredIdx)
+    expect(cloudflaredIdx).toBeLessThan(entrypointIdx)
   })
 })
 
