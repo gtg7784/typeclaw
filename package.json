@@ -38,6 +38,7 @@
     "check": "bun run typecheck && bun run lint && bun run format:check",
     "test": "bun test",
     "generate:schema": "bun run scripts/generate-schema.ts",
+    "debug:prompt": "bun run scripts/dump-system-prompt.ts",
     "postinstall": "bun run scripts/generate-schema.ts"
   },
   "dependencies": {

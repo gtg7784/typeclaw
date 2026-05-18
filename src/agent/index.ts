@@ -510,46 +510,91 @@ export type CreateResourceLoaderOptions = {
   runtimeVersion?: string
 }
 
+// Pure inputs for `composeSystemPrompt`. Each field maps 1:1 to a rendered
+// section of the prompt; callers that don't want a section pass `undefined`
+// (or `''` for `gitNudge`). Extracted so the debug dumper in
+// `scripts/dump-system-prompt.ts` can reuse the exact same composition
+// pipeline `createResourceLoader` uses, with no risk of drift if the
+// section order changes.
+export type SystemPromptComposition = {
+  self: string
+  runtimeVersion?: string
+  origin?: SessionOrigin
+  roleContext?: SessionRoleContext
+  gitNudge: string
+  memorySection: string
+}
+
+// Section-order contract for the system prompt. Kept as a pure string→string
+// transform so it can be exercised without disk, plugin runtime, or auth.
+//
+// Cache-suffix ordering: least-volatile sections first, most-volatile last.
+// This minimises the number of cached prompt bytes invalidated when a
+// section changes (the provider's prompt cache hits up to the first byte
+// that differs).
+//
+// 0. runtime block — most stable: only changes on typeclaw releases (rare).
+// 1. origin block — stable across all sessions of the same kind.
+// 2. gitNudge — rare changes; agent folders force-commit sessions/ and
+//    memory/ after every turn, so the dirty-files list is empty most of
+//    the time.
+// 3. memorySection — most volatile: MEMORY.md grows on every dream cycle
+//    and memory/yyyy-MM-dd.md grows after every channel turn that triggers
+//    memory-logger. Pinning it to the end keeps everything above it
+//    cacheable across session resurrections.
+export function composeSystemPrompt(parts: SystemPromptComposition): string {
+  let prompt = `${DEFAULT_SYSTEM_PROMPT}\n\n${parts.self}`
+  if (parts.runtimeVersion !== undefined) {
+    prompt = `${prompt}\n\n${renderRuntimeBlock(parts.runtimeVersion)}`
+  }
+  if (parts.origin !== undefined) {
+    prompt = `${prompt}\n\n${renderSessionOrigin(parts.origin, Date.now(), parts.roleContext)}`
+  }
+  if (parts.gitNudge !== '') {
+    prompt = `${prompt}\n\n${parts.gitNudge}`
+  }
+  prompt = `${prompt}\n\n${parts.memorySection}`
+  return prompt
+}
+
 export async function createResourceLoader(options: CreateResourceLoaderOptions = {}): Promise<DefaultResourceLoader> {
   const agentDir = options.agentDir ?? process.cwd()
-  const self = await loadSelf(agentDir)
-  let systemPrompt = `${DEFAULT_SYSTEM_PROMPT}\n\n${self}`
+  let self = await loadSelf(agentDir)
 
   if (options.plugins) {
-    const event = { prompt: systemPrompt, sessionId: options.plugins.sessionId, agentDir, origin: options.origin }
+    // The plugin hook receives the partially-assembled prompt
+    // (`DEFAULT_SYSTEM_PROMPT` + identity) so plugins can rewrite either
+    // section before the cache-suffix blocks are appended. The pre-hook
+    // body is rebuilt here verbatim so callers see the same input shape
+    // they did before the `composeSystemPrompt` extraction.
+    const preHook = `${DEFAULT_SYSTEM_PROMPT}\n\n${self}`
+    const event = { prompt: preHook, sessionId: options.plugins.sessionId, agentDir, origin: options.origin }
     await options.plugins.hooks.runSessionPrompt(event)
-    systemPrompt = event.prompt
+    // Plugins mutate the joined string, not the parts. Recover `self` by
+    // stripping the leading `DEFAULT_SYSTEM_PROMPT` so the rest of the
+    // composition stays section-shaped. If a plugin rewrote the base
+    // prompt as well, the recovered `self` carries the full mutated
+    // remainder — matching the previous concat-as-you-go behaviour.
+    self = event.prompt.startsWith(`${DEFAULT_SYSTEM_PROMPT}\n\n`)
+      ? event.prompt.slice(DEFAULT_SYSTEM_PROMPT.length + 2)
+      : event.prompt
   }
 
-  // Cache-suffix ordering: least-volatile sections first, most-volatile last.
-  // This minimises the number of cached prompt bytes invalidated when a
-  // section changes (the provider's prompt cache hits up to the first byte
-  // that differs).
-  //
-  // 0. runtime block — most stable: only changes on typeclaw releases (rare).
-  // 1. origin block — stable across all sessions of the same kind.
-  // 2. gitNudge — rare changes; agent folders force-commit sessions/ and
-  //    memory/ after every turn, so the dirty-files list is empty most of
-  //    the time.
-  // 3. memorySection — most volatile: MEMORY.md grows on every dream cycle
-  //    and memory/yyyy-MM-dd.md grows after every channel turn that triggers
-  //    memory-logger. Pinning it to the end keeps everything above it
-  //    cacheable across session resurrections.
-  if (options.runtimeVersion !== undefined) {
-    systemPrompt = `${systemPrompt}\n\n${renderRuntimeBlock(options.runtimeVersion)}`
-  }
-  systemPrompt = withOrigin(systemPrompt, options.origin, options.permissions)
-
+  const roleContext = options.origin !== undefined ? resolveRoleContext(options.origin, options.permissions) : undefined
   const gitNudge = await renderGitNudge(agentDir)
-  if (gitNudge !== '') {
-    systemPrompt = `${systemPrompt}\n\n${gitNudge}`
-  }
-
   const memorySection = await loadMemory(agentDir, {
     ...(options.origin !== undefined ? { origin: options.origin } : {}),
     ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
   })
-  systemPrompt = `${systemPrompt}\n\n${memorySection}`
+
+  const systemPrompt = composeSystemPrompt({
+    self,
+    ...(options.runtimeVersion !== undefined ? { runtimeVersion: options.runtimeVersion } : {}),
+    ...(options.origin !== undefined ? { origin: options.origin } : {}),
+    ...(roleContext !== undefined ? { roleContext } : {}),
+    gitNudge,
+    memorySection,
+  })
 
   const additionalSkillPaths = [getBundledSkillsDir()]
   // pi-coding-agent's DefaultResourceLoader auto-discovers <agentDir>/skills/
