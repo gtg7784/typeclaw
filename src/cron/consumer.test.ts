@@ -477,4 +477,75 @@ describe('createCronConsumer', () => {
 
     consumer.stop()
   })
+
+  test('logs LLM soft errors (stopReason=error encoded in message_end) so `typeclaw logs` surfaces them', async () => {
+    // given: a fake CronSession whose .session emits a message_end with
+    // stopReason=error during prompt(), simulating a billing/rate-limit
+    // failure from pi-coding-agent that resolves normally instead of throwing.
+    const stream = createStream()
+    const errors: string[] = []
+    type Listener = (event: { type: string; message?: unknown }) => void
+    const listeners = new Set<Listener>()
+    const fakeAgentSession = {
+      subscribe: (cb: Listener) => {
+        listeners.add(cb)
+        return () => listeners.delete(cb)
+      },
+    } as unknown as import('@/agent').AgentSession
+
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: async () => ({
+        prompt: async () => {
+          for (const cb of listeners) {
+            cb({
+              type: 'message_end',
+              message: {
+                role: 'assistant',
+                stopReason: 'error',
+                errorMessage: 'rate limit exceeded',
+              },
+            })
+          }
+        },
+        session: fakeAgentSession,
+      }),
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    consumer.start()
+
+    // when
+    publishCron(stream, promptJob('soft-err', 'go'))
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(errors.some((e) => /\[cron\] soft-err: LLM call failed: rate limit exceeded/.test(e))).toBe(true)
+
+    consumer.stop()
+  })
+
+  test('does not log when .session is omitted (test fakes that only need prompt keep working)', async () => {
+    // given
+    const stream = createStream()
+    const errors: string[] = []
+    const consumer = createCronConsumer({
+      stream,
+      cwd: root,
+      createSessionForCron: async () => ({
+        prompt: async () => {},
+      }),
+      logger: { ...silentLogger, error: (m) => errors.push(m) },
+    })
+    consumer.start()
+
+    // when
+    publishCron(stream, promptJob('no-session', 'go'))
+    await new Promise((r) => setImmediate(r))
+
+    // then
+    expect(errors).toEqual([])
+
+    consumer.stop()
+  })
 })

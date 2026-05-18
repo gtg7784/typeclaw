@@ -279,6 +279,7 @@ export async function startAgent({
         sessionId,
         agentDir: cwd,
         origin: cronOrigin,
+        session,
         ...(snap.hasAnyPluginContent ? { hooks: snap.hooks } : {}),
         getTranscriptPath: () => sessionManager.getSessionFile(),
       }

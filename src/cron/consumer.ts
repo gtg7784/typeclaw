@@ -1,3 +1,5 @@
+import type { AgentSession } from '@/agent'
+import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { SessionOrigin } from '@/agent/session-origin'
 import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
@@ -20,6 +22,12 @@ export type CronSession = {
   agentDir?: string
   getTranscriptPath?: () => string | undefined
   origin?: SessionOrigin
+  // Underlying agent session, exposed so the consumer can subscribe to
+  // `message_end` events and surface soft provider errors (billing, rate
+  // limit, network — pi-coding-agent encodes these in the assistant message
+  // instead of throwing, so the outer try/catch never sees them). Optional
+  // so existing test fakes that only need `prompt` keep working.
+  session?: AgentSession
 }
 
 export type CronConsumerLogger = {
@@ -72,7 +80,7 @@ export function createCronConsumer({
         inFlight.add(job.id)
         try {
           if (job.kind === 'prompt') {
-            await runPrompt(job, createSessionForCron, stream)
+            await runPrompt(job, createSessionForCron, stream, logger)
           } else {
             await runExec(job, cwd)
           }
@@ -98,6 +106,7 @@ async function runPrompt(
   job: PromptJob,
   createSessionForCron: (job: PromptJob) => Promise<CronSession>,
   stream: Stream,
+  logger: CronConsumerLogger,
 ): Promise<void> {
   if (job.subagent !== undefined) {
     // Propagate the cron job's role and origin into the spawned subagent.
@@ -123,6 +132,12 @@ async function runPrompt(
     return
   }
   const session = await createSessionForCron(job)
+  const unsubProviderErrors =
+    session.session !== undefined
+      ? subscribeProviderErrors(session.session, (err) => {
+          logger.error(`[cron] ${job.id}: LLM call failed: ${err.message}`)
+        })
+      : null
   const turnEvent =
     session.hooks && session.sessionId !== undefined && session.agentDir !== undefined
       ? {
@@ -151,6 +166,7 @@ async function runPrompt(
       })
     }
   } finally {
+    unsubProviderErrors?.()
     if (session.hooks && session.sessionId !== undefined) {
       await session.hooks.runSessionEnd({
         sessionId: session.sessionId,
