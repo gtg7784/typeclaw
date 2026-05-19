@@ -63,7 +63,7 @@ export function makeOAuthLoginRunner(callbacks: OAuthCallbacks): OAuthLoginRunne
           }
           return value
         },
-        ...(callbacks.onManualCodeInput ? { onManualCodeInput: callbacks.onManualCodeInput } : {}),
+        onManualCodeInput: callbacks.onManualCodeInput,
       })
       return { ok: true }
     } catch (error) {
