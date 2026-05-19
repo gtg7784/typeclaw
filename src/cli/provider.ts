@@ -368,7 +368,12 @@ async function runOAuthLogin(cwd: string, providerId: KnownProviderId): Promise<
 
   const callbacks = {
     onAuth: (url: string, instructions?: string) => {
-      const preamble = [`Open this URL in your browser to authorize ${provider.name}.`]
+      const preamble = [
+        `Open this URL in your browser to sign in to ${provider.name}.`,
+        '',
+        'If your browser shows "this site can\'t be reached" after you sign in,',
+        'copy the full address from the top of the browser and paste it below.',
+      ]
       if (instructions) preamble.push('', instructions)
       note(preamble.join('\n'), 'Browser login')
       console.log(url)
@@ -380,6 +385,15 @@ async function runOAuthLogin(cwd: string, providerId: KnownProviderId): Promise<
     onPrompt: async (message: string, placeholder?: string): Promise<string | null> => {
       const value = await text({ message, ...(placeholder !== undefined ? { placeholder } : {}) })
       if (isCancel(value)) return null
+      return value
+    },
+    onManualCodeInput: async (): Promise<string> => {
+      const value = await text({
+        message:
+          'If your browser shows "this site can\'t be reached" after you sign in, copy the full address from the top of the browser and paste it here:',
+        placeholder: 'http://localhost:1455/auth/callback?code=...&state=...',
+      })
+      if (isCancel(value)) throw new Error('Login cancelled by user')
       return value
     },
   }
