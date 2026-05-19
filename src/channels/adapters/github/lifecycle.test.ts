@@ -364,6 +364,65 @@ describe('createGithubAdapter lifecycle', () => {
     await adapter.stop()
   })
 
+  test('list-hooks 404 emits a permission-setup guide referencing the failing repos and the github.com UI labels', async () => {
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      if (url.includes('/repos/indentcorp/huxley/hooks') || url.includes('/repos/indentcorp/dobby/hooks')) {
+        return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404 })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+    const logger = recordingLogger()
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['indentcorp/huxley', 'indentcorp/dobby']),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    const guidanceLines = logger.messages.filter((m) => m.includes('webhook setup needs more access for'))
+    expect(guidanceLines.length).toBe(1)
+    const guide = guidanceLines[0]!
+    expect(guide).toContain('indentcorp/huxley (404)')
+    expect(guide).toContain('indentcorp/dobby (404)')
+    expect(guide).toContain('"Resource owner"')
+    expect(guide).toContain('"Repository permissions"')
+    expect(guide).toContain('"Webhooks"')
+    expect(guide).toContain('"Read and write"')
+  })
+
+  test('list-hooks 500 (transient server error) does NOT emit permission guidance (would be misleading)', async () => {
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      if (url.includes('/repos/acme/widgets/hooks')) return new Response('boom', { status: 500 })
+      return new Response('unexpected', { status: 500 })
+    })
+    const logger = recordingLogger()
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets']),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    expect(logger.messages.some((m) => m.includes('webhook setup needs more access for'))).toBe(false)
+    expect(logger.messages.some((m) => m.includes('webhook register failed'))).toBe(true)
+  })
+
   test('rotating tunnel URL across two adapter lifecycles: second start adopts and updates the prior hook instead of orphaning it', async () => {
     type Hook = { id: number; config: { url: string } }
     let nextHookId = 1000
