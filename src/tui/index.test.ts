@@ -295,6 +295,191 @@ describe('createTui', () => {
     expect(clientClosed).toBe(true)
   })
 
+  test('/quit exits cleanly without sending the literal text to the agent', async () => {
+    // given: an idle session ready to receive a prompt
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-slash-quit' })
+    let exitCode: number | undefined
+    let clientClosed = false
+    const originalClose = client.close
+    client.close = () => {
+      clientClosed = true
+      originalClose()
+    }
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: (code) => {
+        exitCode = code
+      },
+    })
+    void tui.run().catch(() => {})
+    await flush()
+
+    // when: user types `/quit` and submits
+    for (const ch of '/quit') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+
+    // then: the TUI exits like Ctrl+C, and nothing was shipped to the agent
+    expect(exitCode).toBe(0)
+    expect(terminal.stopped).toBe(true)
+    expect(clientClosed).toBe(true)
+    expect(client.sent).toEqual([])
+  })
+
+  test('/exit is treated as an alias for /quit', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-slash-exit' })
+    let exitCode: number | undefined
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: (code) => {
+        exitCode = code
+      },
+    })
+    void tui.run().catch(() => {})
+    await flush()
+
+    // when
+    for (const ch of '/exit') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+
+    // then
+    expect(exitCode).toBe(0)
+    expect(client.sent).toEqual([])
+  })
+
+  test('text that merely starts with /quit is sent to the agent as a normal prompt', async () => {
+    // given: only a bare /quit or /exit (no args) should trigger the quit path;
+    // anything else (e.g. `/quit me a story`) is just a normal user message
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-slash-prefix' })
+    let exitCode: number | undefined
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: (code) => {
+        exitCode = code
+      },
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    for (const ch of '/quit me a story') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+
+    // then
+    expect(exitCode).toBeUndefined()
+    expect(client.sent).toContainEqual({ type: 'prompt', text: '/quit me a story' })
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('quit command matching is case-insensitive and tolerates surrounding whitespace', async () => {
+    // given: parseCommand normalizes the command name to lowercase and ignores
+    // leading/trailing whitespace, so `  /QUIT  ` should still exit the TUI
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-slash-case' })
+    let exitCode: number | undefined
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: (code) => {
+        exitCode = code
+      },
+    })
+    void tui.run().catch(() => {})
+    await flush()
+
+    // when
+    for (const ch of '  /QUIT  ') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+
+    // then
+    expect(exitCode).toBe(0)
+    expect(client.sent).toEqual([])
+  })
+
+  test('//quit is treated as a literal prompt, not a quit command (escape syntax)', async () => {
+    // given: parseCommand treats a leading `//` as the user-facing escape for
+    // text that legitimately starts with a slash. The TUI must honor that so
+    // users can ask the agent ABOUT `/quit` without exiting.
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-slash-escape' })
+    let exitCode: number | undefined
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: (code) => {
+        exitCode = code
+      },
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    for (const ch of '//quit') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+
+    // then
+    expect(exitCode).toBeUndefined()
+    expect(client.sent).toContainEqual({ type: 'prompt', text: '//quit' })
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('initialPrompt of /quit exits cleanly without sending it to the agent', async () => {
+    // given: `typeclaw tui /quit` (or `typeclaw run /quit`) routes the positional
+    // arg straight into createTui as initialPrompt, bypassing editor.onSubmit.
+    // The guard must catch it there too, otherwise the literal `/quit` would
+    // leak into the agent's chat context — the exact bug we're fixing.
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-initial-quit' })
+    let exitCode: number | undefined
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      initialPrompt: '/quit',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: (code) => {
+        exitCode = code
+      },
+    })
+    void tui.run().catch(() => {})
+    await flush()
+
+    // then: no terminal input needed; the TUI should already be tearing down
+    expect(exitCode).toBe(0)
+    expect(client.sent).toEqual([])
+  })
+
   test('does not send abort when Esc is pressed with no reply in flight', async () => {
     // given: connect, finish initial prompt, then idle
     const terminal = new FakeTerminal()

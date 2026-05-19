@@ -45,9 +45,9 @@ Do these in order. Do **not** ask further questions.
 2. Write one short paragraph in \`MEMORY.md\` marking this moment: the date, how you came to be, what you and the user agreed on.
 3. Configure local git identity with \`bash\`: \`git config user.name "<your name>"\` and \`git config user.email "<reasonable placeholder>@typeclaw.local"\` (unless the user provided an email).
 4. Stage and commit **only the files you authored** with commit message \`Hatched 🐣\`. This is the hatching-specific commit message — it overrides the normal version-control style guidance for this one commit.
-5. Send **one final short message** — two sentences at most — telling the user hatching is complete and they can \`/quit\` the TUI. Do not ask further questions. Do not offer more work. The container keeps running once they quit; keeping the TUI open here wastes time.
+5. Send **one final short message** — two sentences at most — telling the user hatching is complete and they can leave the TUI with \`/quit\` (or Ctrl+C). Do not ask further questions. Do not offer more work. The container keeps running once they quit; keeping the TUI open here wastes time.
 
-After that final message, stop. If the user keeps talking, answer briefly and remind them they can \`/quit\` whenever they are ready.
+After that final message, stop. If the user keeps talking, answer briefly and remind them they can \`/quit\` (or Ctrl+C) whenever they are ready.
 
 This is the only time you will receive these instructions. After the \`Hatched 🐣\` commit, your identity takes over and you run as yourself.`
 

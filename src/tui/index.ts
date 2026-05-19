@@ -1,5 +1,7 @@
 import { Editor, Key, Markdown, matchesKey, ProcessTerminal, type Terminal, Text, TUI } from '@mariozechner/pi-tui'
 
+import { parseCommand } from '@/commands'
+
 import { createClient as createClientDefault, type Client } from './client'
 import { formatQueuePanel, formatToolEnd, formatToolStart, formatUserPromptHistory } from './format'
 import { colors, editorTheme, markdownTheme } from './theme'
@@ -8,6 +10,21 @@ export type ClientFactory = (url: string) => Promise<Client>
 export type TerminalFactory = () => Terminal
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 30_000
+
+// Bare slash-command names (no leading `/`) the TUI intercepts client-side and
+// turns into a clean process exit. The hatching ritual tells the agent to point
+// users at `/quit` (see src/init/hatching.ts); without an intercept the literal
+// text would be shipped to the LLM as a chat message. Grammar (case-insensitive,
+// whitespace-tolerant, `//foo` escapes to a literal prompt) comes from
+// `parseCommand` in src/commands so channel and TUI slash commands stay
+// consistent. Arguments after the name disqualify the match: `/quit me a story`
+// is a real prompt, not a command.
+const QUIT_COMMAND_NAMES: ReadonlySet<string> = new Set(['quit', 'exit'])
+
+function isQuitCommand(text: string): boolean {
+  const parsed = parseCommand(text)
+  return parsed !== null && parsed.args.length === 0 && QUIT_COMMAND_NAMES.has(parsed.name)
+}
 
 export type VersionMismatch = { expected: string; actual: string }
 
@@ -205,14 +222,18 @@ export function createTui({
       return undefined
     })
 
+    const shutdown = (code: number) => {
+      tui.stop()
+      client.close()
+      exit(code)
+    }
+
     // Ctrl+C exits cleanly. In raw mode the kernel does NOT generate SIGINT,
     // so we must intercept the \x03 byte ourselves. The Editor would otherwise
     // swallow it. tui.stop() restores raw-mode/cursor/echo before we exit.
     tui.addInputListener((data) => {
       if (matchesKey(data, Key.ctrl('c'))) {
-        tui.stop()
-        client.close()
-        exit(0)
+        shutdown(0)
         return { consume: true }
       }
       return undefined
@@ -220,6 +241,10 @@ export function createTui({
 
     editor.onSubmit = (text) => {
       if (text.trim().length === 0) return
+      if (isQuitCommand(text)) {
+        shutdown(0)
+        return
+      }
       editor.setText('')
       editor.addToHistory(text)
       tui.requestRender()
@@ -238,6 +263,13 @@ export function createTui({
     }
 
     if (initialPrompt) {
+      // initialPrompt bypasses editor.onSubmit, so the quit intercept above
+      // would never run. Guard the same way so `typeclaw tui /quit` exits
+      // instead of leaking the command into the agent's chat context.
+      if (isQuitCommand(initialPrompt)) {
+        shutdown(0)
+        return
+      }
       await send(initialPrompt)
     }
 
