@@ -14,16 +14,29 @@ export type OAuthLoginResult = { ok: true } | { ok: false; reason: string }
 export type OAuthLoginRunner = (options: { cwd: string; model: KnownModelRef }) => Promise<OAuthLoginResult>
 
 // Wrap pi-ai's OAuth callbacks so the CLI doesn't have to know about the
-// upstream callback shape. The CLI only sees three lifecycle events:
+// upstream callback shape. The CLI sees four lifecycle events:
 // (1) onAuth(url) — print the URL the user must visit
 // (2) onProgress(message) — show waiting/finalizing status
 // (3) onPrompt(prompt) — ask the user for a manual code if the browser flow
-//     can't reach the local callback server. Most users won't see this; it
-//     fires when they paste the post-redirect URL by hand.
+//     can't reach the local callback server. Fires only after the local
+//     server gave up (bind error -> waitForCode resolves null).
+// (4) onManualCodeInput() — concurrent paste input that RACES the local
+//     callback server. Required for cross-device flows: pi-ai's openai-codex
+//     OAuth hardcodes redirect_uri=http://localhost:1455/auth/callback, which
+//     resolves to the *browser's* machine. When the user runs `typeclaw init`
+//     over SSH or on a remote dev box and completes login on a different
+//     laptop, the browser callback never reaches the CLI's local server and
+//     waitForCode() hangs forever — so onPrompt would never fire either.
+//     onManualCodeInput is the upstream-supported escape hatch: it shows a
+//     paste field IMMEDIATELY alongside the URL, and whichever path lands a
+//     code first wins. parseAuthorizationInput on the upstream side accepts
+//     the full redirect URL, the bare `code=...&state=...` query string, or
+//     just the code value.
 export type OAuthCallbacks = {
   onAuth: (url: string, instructions?: string) => void
   onProgress?: (message: string) => void
   onPrompt: (message: string, placeholder?: string) => Promise<string | null>
+  onManualCodeInput?: () => Promise<string>
 }
 
 // Default runner: real OAuth flow against pi-ai. Tests inject a stub to skip
@@ -50,6 +63,7 @@ export function makeOAuthLoginRunner(callbacks: OAuthCallbacks): OAuthLoginRunne
           }
           return value
         },
+        ...(callbacks.onManualCodeInput ? { onManualCodeInput: callbacks.onManualCodeInput } : {}),
       })
       return { ok: true }
     } catch (error) {

@@ -3,6 +3,14 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import {
+  getOAuthProvider,
+  registerOAuthProvider,
+  unregisterOAuthProvider,
+  type OAuthLoginCallbacks,
+  type OAuthProviderInterface,
+} from '@mariozechner/pi-ai/oauth'
+
 import { makeFakeOAuthLoginRunner, makeOAuthLoginRunner, type OAuthCallbacks } from './oauth-login'
 
 let root: string
@@ -57,5 +65,68 @@ describe('makeOAuthLoginRunner', () => {
     if (!result.ok) {
       expect(result.reason).toContain('does not support OAuth')
     }
+  })
+
+  // Swap pi-ai's real openai-codex OAuth provider for a capture-only fake so
+  // we can assert what callback shape typeclaw hands to upstream — specifically
+  // that onManualCodeInput is forwarded when supplied. Real bug this guards:
+  // without this wiring, cross-device login (browser on a different machine
+  // than the CLI) hangs forever because waitForCode never resolves and the
+  // onPrompt fallback never fires either.
+  describe('forwards onManualCodeInput to pi-ai when provided', () => {
+    let original: OAuthProviderInterface | undefined
+    let received: OAuthLoginCallbacks | undefined
+
+    beforeEach(() => {
+      received = undefined
+      original = getOAuthProvider('openai-codex')
+      registerOAuthProvider({
+        id: 'openai-codex',
+        name: 'fake openai-codex for tests',
+        usesCallbackServer: true,
+        login: async (callbacks) => {
+          received = callbacks
+          return { access: 'a', refresh: 'r', expires: Date.now() + 60_000 }
+        },
+        refreshToken: async () => {
+          throw new Error('refresh not used in this test')
+        },
+        getApiKey: (c) => c.access,
+      })
+    })
+
+    afterEach(() => {
+      unregisterOAuthProvider('openai-codex')
+      if (original) registerOAuthProvider(original)
+    })
+
+    test('onManualCodeInput is wired through and returns the value the CLI provides', async () => {
+      const callbacks: OAuthCallbacks = {
+        onAuth: () => {},
+        onPrompt: async () => null,
+        onManualCodeInput: async () => 'pasted-by-user',
+      }
+      const runner = makeOAuthLoginRunner(callbacks)
+
+      const result = await runner({ cwd: root, model: 'openai-codex/gpt-5.5' })
+
+      expect(result).toEqual({ ok: true })
+      expect(received?.onManualCodeInput).toBeDefined()
+      const value = await received?.onManualCodeInput?.()
+      expect(value).toBe('pasted-by-user')
+    })
+
+    test('omitting onManualCodeInput leaves the upstream field unset (backwards compat)', async () => {
+      const callbacks: OAuthCallbacks = {
+        onAuth: () => {},
+        onPrompt: async () => null,
+      }
+      const runner = makeOAuthLoginRunner(callbacks)
+
+      const result = await runner({ cwd: root, model: 'openai-codex/gpt-5.5' })
+
+      expect(result).toEqual({ ok: true })
+      expect(received?.onManualCodeInput).toBeUndefined()
+    })
   })
 })
