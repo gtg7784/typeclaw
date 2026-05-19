@@ -31,6 +31,7 @@ import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
 import { makeOAuthLoginRunner } from '@/init/oauth-login'
 
+import { buildOAuthCallbacks } from './oauth-callbacks'
 import { c, done, errorLine } from './ui'
 
 // ESC and Ctrl+C both produce clack's cancel symbol (the keypress layer
@@ -1259,51 +1260,6 @@ export async function decideExistingApiKeyReuse(
   const reuse = await askReuse(`Reuse existing ${provider.name} API key from secrets.json?`)
   if (isCancel(reuse)) return 'cancel'
   return reuse === true ? 'reuse' : 'prompt'
-}
-
-// Wraps the OAuth lifecycle into the same clack idiom the rest of the wizard
-// uses: a spinner over the "waiting for login" period, with onAuth printing
-// the URL the user needs to open and onPrompt falling back to a `text`
-// prompt for the manual code path. The spinner is started by onAuth and
-// stopped by the caller (runInit) — we don't try to manage it here because
-// the spinner lifecycle has to span emit('start') -> emit('done').
-function buildOAuthCallbacks(providerName: string) {
-  return {
-    onAuth: (url: string, instructions?: string) => {
-      // Don't put the URL inside note(): clack wraps long lines with the box
-      // border `│` on each wrapped segment, which corrupts the URL when the
-      // user copy-pastes it. Keep instructional text in the box, but print
-      // the URL itself as a bare console.log line that any terminal will
-      // hyperlink intact.
-      const preamble = [
-        `Open this URL in your browser to sign in to ${providerName}.`,
-        '',
-        'If your browser shows "this site can\'t be reached" after you sign in,',
-        'copy the full address from the top of the browser and paste it below.',
-      ]
-      if (instructions) preamble.push('', instructions)
-      note(preamble.join('\n'), 'Browser login')
-      console.log(url)
-      console.log('')
-    },
-    onProgress: (message: string) => {
-      log.info(message)
-    },
-    onPrompt: async (message: string, placeholder?: string): Promise<string | null> => {
-      const value = await text({ message, ...(placeholder !== undefined ? { placeholder } : {}) })
-      if (isCancel(value)) return null
-      return value
-    },
-    onManualCodeInput: async (): Promise<string> => {
-      const value = await text({
-        message:
-          'If your browser shows "this site can\'t be reached" after you sign in, copy the full address from the top of the browser and paste it here:',
-        placeholder: 'http://localhost:1455/auth/callback?code=...&state=...',
-      })
-      if (isCancel(value)) throw new Error('Login cancelled by user')
-      return value
-    },
-  }
 }
 
 function uniqueProviders(options: ModelOption[]): KnownProviderId[] {

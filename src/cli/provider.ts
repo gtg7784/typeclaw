@@ -1,4 +1,4 @@
-import { cancel, intro, isCancel, log, note, password, select, text } from '@clack/prompts'
+import { cancel, intro, isCancel, log, password, select } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import {
@@ -17,6 +17,7 @@ import {
 import { findAgentDir, isInitialized } from '@/init'
 import { makeOAuthLoginRunner } from '@/init/oauth-login'
 
+import { buildOAuthCallbacks } from './oauth-callbacks'
 import { c, done, errorLine } from './ui'
 
 const addSub = defineCommand({
@@ -366,39 +367,7 @@ async function runOAuthLogin(cwd: string, providerId: KnownProviderId): Promise<
   }
   const modelRef = `${providerId}/${ref}` as const
 
-  const callbacks = {
-    onAuth: (url: string, instructions?: string) => {
-      const preamble = [
-        `Open this URL in your browser to sign in to ${provider.name}.`,
-        '',
-        'If your browser shows "this site can\'t be reached" after you sign in,',
-        'copy the full address from the top of the browser and paste it below.',
-      ]
-      if (instructions) preamble.push('', instructions)
-      note(preamble.join('\n'), 'Browser login')
-      console.log(url)
-      console.log('')
-    },
-    onProgress: (message: string) => {
-      log.info(message)
-    },
-    onPrompt: async (message: string, placeholder?: string): Promise<string | null> => {
-      const value = await text({ message, ...(placeholder !== undefined ? { placeholder } : {}) })
-      if (isCancel(value)) return null
-      return value
-    },
-    onManualCodeInput: async (): Promise<string> => {
-      const value = await text({
-        message:
-          'If your browser shows "this site can\'t be reached" after you sign in, copy the full address from the top of the browser and paste it here:',
-        placeholder: 'http://localhost:1455/auth/callback?code=...&state=...',
-      })
-      if (isCancel(value)) throw new Error('Login cancelled by user')
-      return value
-    },
-  }
-
-  const runner = makeOAuthLoginRunner(callbacks)
+  const runner = makeOAuthLoginRunner(buildOAuthCallbacks(provider.name))
   const result = await runner({ cwd, model: modelRef as Parameters<typeof runner>[0]['model'] })
   if (!result.ok) return { ok: false, reason: result.reason }
   return { ok: true }
