@@ -32,7 +32,7 @@ import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
 import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
 
 import { buildOAuthCallbacks } from './oauth-callbacks'
-import { c, done, errorLine } from './ui'
+import { c, done, errorLine, printSlackAppManifestSetup } from './ui'
 
 // ESC and Ctrl+C both produce clack's cancel symbol (the keypress layer
 // aliases both to the same "cancel" action — there's no way to tell them
@@ -1005,50 +1005,7 @@ async function runSlackFlow(): Promise<StepResult<CollectedInputs['channelSecret
   let sub: SubStep = 'bot'
   let botToken: string | undefined
 
-  note(
-    [
-      '1. https://api.slack.com/apps → Create New App → From a manifest.',
-      '   Pick your workspace, then paste this JSON manifest:',
-      '',
-      '   {',
-      '     "display_information": { "name": "TypeClaw" },',
-      '     "features": {',
-      '       "bot_user": { "display_name": "TypeClaw", "always_online": true }',
-      '     },',
-      '     "oauth_config": {',
-      '       "scopes": {',
-      '         "bot": [',
-      '           "app_mentions:read", "chat:write", "users:read", "files:read",',
-      '           "channels:history", "channels:read",',
-      '           "groups:history",   "groups:read",',
-      '           "im:history",       "im:read",',
-      '           "mpim:history",     "mpim:read"',
-      '         ]',
-      '       }',
-      '     },',
-      '     "settings": {',
-      '       "event_subscriptions": {',
-      '         "bot_events": [',
-      '           "app_mention",',
-      '           "message.channels", "message.groups",',
-      '           "message.im",       "message.mpim"',
-      '         ]',
-      '       },',
-      '       "socket_mode_enabled": true',
-      '     }',
-      '   }',
-      '',
-      '2. Install to Workspace, then OAuth & Permissions →',
-      '   copy the Bot User OAuth Token (xoxb-...).',
-      '3. Basic Information → App-Level Tokens → Generate Token and',
-      '   Scopes, add the connections:write scope, and copy the',
-      '   token (xapp-...). Socket Mode needs this; the manifest',
-      '   cannot grant it.',
-      '4. Invite the bot to any private channel or DM you want it in:',
-      '   /invite @TypeClaw',
-    ].join('\n'),
-    'Get a Slack bot',
-  )
+  printSlackAppManifestSetup()
 
   while (true) {
     if (sub === 'bot') {
