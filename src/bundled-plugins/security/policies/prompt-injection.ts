@@ -463,10 +463,30 @@ export function detectPromptInjection(prompt: string): InjectionMatch[] {
 
 const DEFENSE_MARKER = '[security/prompt-injection]'
 
+// Subagent prompts are constructed by trusted bundled code, not from raw
+// user input. The backup-diagnose subagent in particular embeds raw git
+// stderr (which legitimately contains literal "git push --help" hint
+// strings on fast-forward rejection or missing-upstream failures) — those
+// hits would otherwise trigger the git_exfil category and inject a "do
+// NOT run git push" rule that contradicts the subagent's own
+// system-prompt instructions to retry with an ack. Under the audience-
+// leak policy the runtime tool.before is the universal backstop for
+// `git push` regardless of role (no role auto-bypasses), so the prompt-
+// side git_exfil category is strictly redundant for subagent origins.
+// Other categories (system_prompt_dump, secret_demand,
+// fake_privileged_skill) still fire for subagents because their threats
+// (e.g. memory-logger ingesting an attacker's transcript) are real.
+function filterForOrigin(matches: InjectionMatch[], origin: SessionPromptEvent['origin']): InjectionMatch[] {
+  if (origin?.kind !== 'subagent') return matches
+  return matches.filter((m) => m.category !== 'git_exfil')
+}
+
 export function applyPromptInjectionDefense(event: SessionPromptEvent): InjectionMatch[] {
-  const matches = detectPromptInjection(event.prompt)
-  if (matches.length === 0) return matches
-  if (event.prompt.includes(DEFENSE_MARKER)) return matches
+  const allMatches = detectPromptInjection(event.prompt)
+  if (allMatches.length === 0) return allMatches
+  if (event.prompt.includes(DEFENSE_MARKER)) return allMatches
+  const matches = filterForOrigin(allMatches, event.origin)
+  if (matches.length === 0) return allMatches
 
   const categories = Array.from(new Set(matches.map((m) => m.category))).join(', ')
   const note = [

@@ -61,15 +61,16 @@ describe('PermissionService — defaults', () => {
 })
 
 describe('PermissionService — user-declared roles', () => {
-  test('trusted role with channel match grants channel.respond + the trusted bypasses', () => {
+  test('trusted role with channel match grants channel.respond + bypass.low; per-guard medium/high bypasses are NOT default', () => {
     const roles = parseRoles({
       trusted: { match: ['slack:T0123 author:U_ME'] },
     })
     const svc = createPermissionService({ roles, pluginPermissions: PLUGIN_PERMS })
     expect(svc.resolveRole(slackOwnerChat)).toBe('trusted')
     expect(svc.has(slackOwnerChat, 'channel.respond')).toBe(true)
-    expect(svc.has(slackOwnerChat, 'security.bypass.secretExfilBash')).toBe(true)
-    expect(svc.has(slackOwnerChat, 'security.bypass.gitExfil')).toBe(true)
+    expect(svc.has(slackOwnerChat, 'security.bypass.low')).toBe(true)
+    expect(svc.has(slackOwnerChat, 'security.bypass.secretExfilBash')).toBe(false)
+    expect(svc.has(slackOwnerChat, 'security.bypass.gitExfil')).toBe(false)
     expect(svc.has(slackOwnerChat, 'security.bypass.gitRemoteTainted')).toBe(false)
   })
 

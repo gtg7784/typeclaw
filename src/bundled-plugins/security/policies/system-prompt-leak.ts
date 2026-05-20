@@ -1,6 +1,13 @@
+import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
 
 export const GUARD_SYSTEM_PROMPT_LEAK = 'systemPromptLeak'
+// Classified `high` (audience-leak axis): bypass posts TypeClaw runtime
+// fingerprints / system-prompt fragments to a chat. Same shape as
+// outboundSecret — third-party audience, no operator intervention before
+// the leak lands. Disclosure also enables recon for later targeted
+// prompt-injection attacks against this agent.
+export const GUARD_SYSTEM_PROMPT_LEAK_SEVERITY: SecuritySeverity = 'high'
 
 const FINGERPRINT_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
   { label: 'TypeClaw runtime preamble', pattern: /You are a general-purpose AI agent running inside TypeClaw\./ },

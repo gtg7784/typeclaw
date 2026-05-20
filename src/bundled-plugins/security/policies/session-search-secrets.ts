@@ -1,6 +1,15 @@
+import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
 
 export const GUARD_SESSION_SEARCH_SECRETS = 'sessionSearchSecrets'
+// Classified `medium` (silent-attack axis): bypass returns secret-shaped
+// session-search hits into the agent's tool-result buffer. The operator
+// doesn't see the raw hits — the agent summarizes them — so the leak is
+// silent from the operator's perspective even though it's a read tool.
+// The hits then live in model context as a precondition for a later
+// channel_send leak; outboundSecret would catch the actual send, but
+// silent-recon-then-summarize is its own attack shape.
+export const GUARD_SESSION_SEARCH_SECRETS_SEVERITY: SecuritySeverity = 'medium'
 
 const SESSION_SEARCH_TOOLS: ReadonlySet<string> = new Set([
   'session_search',

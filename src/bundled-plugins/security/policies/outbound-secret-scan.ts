@@ -1,6 +1,18 @@
+import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
 
 export const GUARD_OUTBOUND_SECRET = 'outboundSecret'
+// Classified `high` (audience-leak axis): bypass posts credential-shaped
+// text to a chat channel whose readership is a third-party audience
+// outside the operator's control loop. Channel readers, push-notification
+// previews, search indexes, and other bots in the channel all see the
+// secret before the operator can intervene. Owner-in-public-channel is
+// the canonical motivating case: even owner asking the agent to "post the
+// deploy status" should not be able to silently include a stack-trace
+// `Bearer ghp_...` line. The whole point of the high tier is that
+// audience-leak guards require per-call ack from every role, including
+// owner — see AGENTS.md `## Permissions` rules of thumb.
+export const GUARD_OUTBOUND_SECRET_SEVERITY: SecuritySeverity = 'high'
 
 const SIGNATURE_PATTERNS: ReadonlyArray<{ kind: string; pattern: RegExp }> = [
   { kind: 'aws_access_key_id', pattern: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ABIA|ACCA)[A-Z0-9]{16}\b/ },

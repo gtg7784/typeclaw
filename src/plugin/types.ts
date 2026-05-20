@@ -318,6 +318,12 @@ export type PluginFixResult = {
 export type DefinedPlugin<TConfig = never> = {
   readonly configSchema?: z.ZodType<TConfig>
   readonly permissions?: readonly string[]
+  // Permission strings the owner wildcard sentinel MUST NOT auto-expand
+  // to. Used by the bundled security plugin to keep audience-leak
+  // (high-tier) bypasses off the owner role unless an operator grants
+  // them explicitly in roles.owner.permissions[]. Generic by design so
+  // any future plugin can carve specific permissions out of the wildcard.
+  readonly ownerWildcardExclusions?: readonly string[]
   // Declared by-value (not built inside the factory) so the host-stage CLI
   // can dispatch commands without booting plugin runtime state.
   readonly commands?: Record<string, PluginCommand>
