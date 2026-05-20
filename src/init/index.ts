@@ -234,8 +234,8 @@ export async function runInit({
   // Same trap as kakaotalk-auth: scaffold-then-fail-auth would leave
   // typeclaw.json without working credentials and the runtime would silently
   // refuse to boot. The login itself doesn't need the agent folder to exist
-  // — pi-ai's OAuth helper just needs a writable path for secrets.json, which
-  // we create on demand inside scaffold().
+  // — pi-ai's OAuth helper just needs a writable path for secrets.json, and
+  // the `mkdir` below creates it on demand before the login runs.
   if (resolvedAuth.kind === 'oauth') {
     emit({ step: 'oauth-login', phase: 'start' })
     await mkdir(cwd, { recursive: true })

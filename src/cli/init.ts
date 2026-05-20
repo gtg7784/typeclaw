@@ -55,9 +55,15 @@ import { c, done, errorLine } from './ui'
 // a clean exit. Inside an active clack prompt Ctrl+C is still aliased to
 // cancel, so the abort hotkey is "cancel twice in a row".
 export class WizardAbortedError extends Error {
-  constructor() {
+  // When the wizard ran a successful eager OAuth login before aborting, the
+  // resulting credentials are already on disk at `<cwd>/secrets.json`. The
+  // CLI surfaces this on abort so the user knows to either re-run init in
+  // the same directory (the credentials will be reused) or delete the file.
+  readonly oauthCredentialsSaved: boolean
+  constructor(options: { oauthCredentialsSaved?: boolean } = {}) {
     super('Wizard aborted by user')
     this.name = 'WizardAbortedError'
+    this.oauthCredentialsSaved = options.oauthCredentialsSaved === true
   }
 }
 
@@ -124,6 +130,16 @@ export const init = defineCommand({
       collected = await collectWizardInputs(cwd, defaultWizardPrompts)
     } catch (error) {
       if (error instanceof WizardAbortedError) {
+        if (error.oauthCredentialsSaved) {
+          note(
+            [
+              'OAuth credentials were saved to `secrets.json` before you aborted.',
+              'Re-run `typeclaw init` here to pick up where you left off (the credentials',
+              'will be reused), or delete `secrets.json` if you want a clean restart.',
+            ].join('\n'),
+            'Saved OAuth credentials',
+          )
+        }
         cancel('Aborted.')
         process.exit(0)
       }
@@ -367,10 +383,15 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
   const state: WizardState = { catalog }
   let step: StepId = 'pick-provider'
   let pendingBackOrigin: StepId | null = null
+  let oauthCredentialsSaved = false
+
+  const abort = (): never => {
+    throw new WizardAbortedError({ oauthCredentialsSaved })
+  }
 
   const onResult = <T>(currentStep: StepId, result: StepResult<T>): StepResult<T> => {
     if (result.kind === 'back') {
-      if (pendingBackOrigin === currentStep) throw new WizardAbortedError()
+      if (pendingBackOrigin === currentStep) abort()
       pendingBackOrigin = currentStep
     } else if (!result.auto) {
       pendingBackOrigin = null
@@ -452,12 +473,19 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
               login.reason,
               providerSupportsApiKey(provider),
             )
-            if (recovery === 'abort') throw new WizardAbortedError()
+            // The recovery prompt is a fresh user decision, so it must clear
+            // any back-token left over from an earlier step. Without this, a
+            // sequence like `enter-api-key → back → autoValue('oauth') →
+            // OAuth fails → recovery=api-key → enter-api-key` would treat the
+            // user's NEXT back press as a double-back and abort the wizard.
+            pendingBackOrigin = null
+            if (recovery === 'abort') abort()
             state.authMethod = recovery === 'api-key' ? 'api-key' : undefined
             state.llmAuth = undefined
             step = recovery === 'api-key' ? 'enter-api-key' : 'pick-auth-method'
             break
           }
+          oauthCredentialsSaved = true
           state.llmAuth = { kind: 'oauth-completed' }
           step = stepAfterDefaultAuth(state)
         } else {
@@ -554,12 +582,16 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
               login.reason,
               providerSupportsApiKey(provider),
             )
-            if (recovery === 'abort') throw new WizardAbortedError()
+            // See the matching pendingBackOrigin reset in the default-provider
+            // branch above — same reasoning applies to vision auth recovery.
+            pendingBackOrigin = null
+            if (recovery === 'abort') abort()
             state.visionAuthMethod = recovery === 'api-key' ? 'api-key' : undefined
             state.visionLlmAuth = undefined
             step = recovery === 'api-key' ? 'enter-vision-api-key' : 'pick-vision-auth-method'
             break
           }
+          oauthCredentialsSaved = true
           state.visionLlmAuth = { kind: 'oauth-completed' }
           step = 'pick-channel'
         } else {

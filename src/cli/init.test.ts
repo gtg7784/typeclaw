@@ -1013,4 +1013,81 @@ describe('collectWizardInputs back-aware flow', () => {
     // never reaches runOAuthLogin.
     expect(calls).toEqual(['pick-auth-method:zai', 'pick-auth-method:openai-codex', 'run-oauth-login', 'pick-channel'])
   })
+
+  test('oauth path: stale pendingBackOrigin from a pre-OAuth back is cleared by recovery prompt', async () => {
+    // Regression for the bug surfaced by self-review: a back press from
+    // enter-api-key (which sets pendingBackOrigin = 'enter-api-key') followed
+    // by an autoValue OAuth attempt + OAuth failure + recovery=api-key would
+    // route back to enter-api-key. The user's first back press there would
+    // see the stale pendingBackOrigin and spuriously abort the wizard.
+    let askApiKeyCalls = 0
+    let askApiKeyBackCount = 0
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: openaiModel }),
+      pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
+      runOAuthLogin: async () => ({ ok: false, reason: 'failed' }),
+      askOAuthFailureRecovery: async () => 'api-key',
+      askApiKey: async () => {
+        askApiKeyCalls += 1
+        if (askApiKeyCalls === 1) {
+          askApiKeyBackCount += 1
+          return { kind: 'back' }
+        }
+        return { kind: 'value', value: 'sk_recovered' }
+      },
+      pickChannel: async () => ({ kind: 'value', value: 'none' }),
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    // The single back press at enter-api-key must NOT abort — pendingBackOrigin
+    // was reset by the recovery prompt, so this is treated as a first-back.
+    expect(askApiKeyBackCount).toBe(1)
+    expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk_recovered' })
+  })
+
+  test('oauth path: WizardAbortedError carries oauthCredentialsSaved=true after a successful OAuth', async () => {
+    // Successful OAuth, then user aborts later (double-back from pick-channel).
+    // The wizard must surface that credentials were already written so the CLI
+    // can warn the user instead of exiting silently.
+    let channelBacks = 0
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: codexModel }),
+      pickAuthMethod: async () => ({ kind: 'value', value: 'oauth', auto: true }),
+      runOAuthLogin: async () => ({ ok: true }),
+      pickChannel: async () => {
+        channelBacks += 1
+        return { kind: 'back' }
+      },
+    })
+
+    try {
+      await collectWizardInputs('/agent', prompts)
+      throw new Error('expected WizardAbortedError')
+    } catch (error) {
+      expect(error).toBeInstanceOf(WizardAbortedError)
+      expect((error as WizardAbortedError).oauthCredentialsSaved).toBe(true)
+    }
+    expect(channelBacks).toBeGreaterThanOrEqual(1)
+  })
+
+  test('oauth path: WizardAbortedError.oauthCredentialsSaved is false when OAuth never succeeded', async () => {
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: codexModel }),
+      pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
+      runOAuthLogin: async () => ({ ok: false, reason: 'nope' }),
+      askOAuthFailureRecovery: async () => 'abort',
+    })
+
+    try {
+      await collectWizardInputs('/agent', prompts)
+      throw new Error('expected WizardAbortedError')
+    } catch (error) {
+      expect(error).toBeInstanceOf(WizardAbortedError)
+      expect((error as WizardAbortedError).oauthCredentialsSaved).toBe(false)
+    }
+  })
 })
