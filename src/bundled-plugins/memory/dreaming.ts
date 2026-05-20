@@ -19,6 +19,7 @@ import {
 } from './dreaming-state'
 import type { StreamEvent } from './stream-events'
 import { readEvents, writeEventsAtomic } from './stream-io'
+import { computeTopicStrengths, renderTopicStrengthsTable, type TopicStrength } from './strength'
 
 const STREAM_FILE_PATTERN = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
 
@@ -632,7 +633,7 @@ Do not suggest CLIs or plugins speculatively. The same recurrence + generalizabi
 
 If the undreamed tails contain only watermarks, or every new fragment is already represented in MEMORY.md and no procedure clears the muscle-memory bar, do not rewrite MEMORY.md and do not write a skill just to touch something. Stop without writing. The point of dreaming is consolidation, not activity. The runtime advances the watermark either way.`
 
-function buildInitialPrompt(payload: DreamingPayload, snapshots: StreamSnapshot[]): string {
+function buildInitialPrompt(payload: DreamingPayload, snapshots: StreamSnapshot[], strengths: TopicStrength[]): string {
   const today = formatLocalDate()
   const memoryFile = join(payload.agentDir, 'MEMORY.md')
   const memoryDir = join(payload.agentDir, 'memory')
@@ -642,9 +643,22 @@ function buildInitialPrompt(payload: DreamingPayload, snapshots: StreamSnapshot[
     `Daily stream directory: ${memoryDir}`,
     `Today's local date: ${today}`,
     `Dreaming state: ${join(payload.agentDir, DREAMING_STATE_FILE)}`,
+  ]
+
+  const strengthTable = renderTopicStrengthsTable(strengths)
+  if (strengthTable.length > 0) {
+    lines.push(
+      '',
+      'Existing MEMORY.md topic strengths (computed from current citations — `cites` is total citation count, `days` is the number of distinct calendar days those citations span, `last reinforced` is the most recent citation date, `age (d)` is whole days since `last reinforced` relative to today). These numbers describe how reinforced each existing topic is; the dreaming system prompt explains how to use them.',
+      '',
+      strengthTable,
+    )
+  }
+
+  lines.push(
     '',
     'Undreamed fragments to consolidate. Each entry lists the daily JSONL file and the ids of fragments in that file you have not yet consolidated into MEMORY.md. Read the file, locate each id, and decide what (if anything) belongs in MEMORY.md. Cite by id (memory/yyyy-MM-dd#<id>), not by line number.',
-  ]
+  )
   for (const snap of snapshots) {
     lines.push('', `- memory/${snap.filename}:`)
     for (const id of snap.undreamedIds) lines.push(`    - ${id}`)
@@ -654,6 +668,15 @@ function buildInitialPrompt(payload: DreamingPayload, snapshots: StreamSnapshot[
     'Dream now. Read MEMORY.md and the listed fragments. Consolidate them into long-term memory and write the full new MEMORY.md if anything changed. If nothing meets the bar, stop without writing — the runtime advances the dreamed-id set either way so you will not see these fragments again on the next run.',
   )
   return lines.join('\n')
+}
+
+async function loadTopicStrengths(agentDir: string): Promise<TopicStrength[]> {
+  try {
+    const raw = await readFile(join(agentDir, 'MEMORY.md'), 'utf8')
+    return computeTopicStrengths(raw, formatLocalDate())
+  } catch {
+    return []
+  }
 }
 
 export type CreateDreamingSubagentOptions = {
@@ -690,9 +713,10 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
 
       const memoryFilePath = join(ctx.payload.agentDir, 'MEMORY.md')
       const memoryHashBefore = await safeContentHash(memoryFilePath)
+      const strengths = await loadTopicStrengths(ctx.payload.agentDir)
 
       try {
-        await runSession({ userPrompt: buildInitialPrompt(ctx.payload, snapshots.undreamed) })
+        await runSession({ userPrompt: buildInitialPrompt(ctx.payload, snapshots.undreamed, strengths) })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         logger.warn(`[dreaming] run threw: ${message} elapsed_ms=${Date.now() - start}`)

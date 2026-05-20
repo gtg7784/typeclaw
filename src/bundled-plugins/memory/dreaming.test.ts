@@ -341,6 +341,46 @@ describe('dreaming subagent (orchestration)', () => {
     expect(prompts[0]).not.toMatch(/total file lines/)
   })
 
+  test('omits the strength-signals block entirely when MEMORY.md is missing or has no topics', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('only'))
+
+    const { prompts } = await invokeDreaming(agentDir)
+
+    expect(prompts[0]).not.toContain('topic strengths')
+    expect(prompts[0]).not.toContain('| topic | cites |')
+  })
+
+  test('injects a per-topic strength table when MEMORY.md already has topics with citations', async () => {
+    await writeFile(
+      join(agentDir, 'MEMORY.md'),
+      [
+        '# Memory',
+        '',
+        '## Strong topic',
+        'Conclusion.',
+        '',
+        'fragments:',
+        '- memory/2026-04-25#f-cite1',
+        '- memory/2026-04-26#f-cite2',
+        '- memory/2026-04-27#f-cite3',
+        '',
+        '## Weak topic',
+        'Conclusion.',
+        '',
+        'fragments:',
+        '- memory/2026-04-20#f-old',
+      ].join('\n'),
+    )
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('new'))
+
+    const { prompts } = await invokeDreaming(agentDir)
+
+    expect(prompts[0]).toContain('| topic | cites | days | last reinforced | age (d) |')
+    expect(prompts[0]).toMatch(/\| Strong topic \| 3 \| 3 \| 2026-04-27 \|/)
+    expect(prompts[0]).toMatch(/\| Weak topic \| 1 \| 1 \| 2026-04-20 \|/)
+    expect(prompts[0]).toContain('Existing MEMORY.md topic strengths')
+  })
+
   test('adds every undreamed fragment id to the dreamed-id set after a successful run', async () => {
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
