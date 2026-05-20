@@ -95,13 +95,31 @@ describe('buildDockerfile feature toggles', () => {
     expect(pkgs).toContain('ffmpeg=7:5.1.4-0+deb12u1')
   })
 
-  test('all toggles off: only baseline packages remain (incl. the egress-shim deps that ship unconditionally)', () => {
+  test('all toggles off: only baseline packages remain (egress-shim deps ship unconditionally; xvfb is a toggle, off here)', () => {
     const pkgs = aptPackages(
       buildDockerfile(
-        dockerfileSchema.parse({ tmux: false, gh: false, python: false, ffmpeg: false, cjkFonts: false }),
+        dockerfileSchema.parse({
+          tmux: false,
+          gh: false,
+          python: false,
+          ffmpeg: false,
+          cjkFonts: false,
+          xvfb: false,
+        }),
       ),
     )
     expect(pkgs).toEqual(['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux'])
+  })
+
+  test('xvfb: true (the default) adds xvfb to the toggle apt package list, after the baseline packages', () => {
+    const pkgs = aptPackages(buildDockerfile(dockerfileSchema.parse({})))
+    expect(pkgs).toContain('xvfb')
+    expect(pkgs.indexOf('xvfb')).toBeGreaterThan(pkgs.indexOf('util-linux'))
+  })
+
+  test('xvfb: false omits xvfb from the apt package list (opt-out)', () => {
+    const pkgs = aptPackages(buildDockerfile(dockerfileSchema.parse({ xvfb: false })))
+    expect(pkgs).not.toContain('xvfb')
   })
 
   test('append lines render after the toggle layers and before ENTRYPOINT', () => {
@@ -330,7 +348,7 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
     expect(base).not.toContain('githubcli-archive-keyring.gpg')
   })
 
-  test('base Dockerfile main apt-get install line installs only the baseline packages (no gh/python/tmux/ffmpeg)', () => {
+  test('base Dockerfile main apt-get install line installs only the baseline packages (no gh/python/tmux/ffmpeg/xvfb — xvfb is a toggle layered onto the base by the per-agent Dockerfile)', () => {
     const base = buildBaseDockerfile()
     const match = base.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+?) \\\n/)
     if (!match || !match[1]) throw new Error('main apt-get install line not found in base Dockerfile')
@@ -396,7 +414,14 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
   test('with all toggles off: emits no apt install RUN block at all (zero-cost per-agent rebuild)', () => {
     // given: every toggle disabled, so no per-agent apt work is needed
     const out = buildDockerfile(
-      dockerfileSchema.parse({ tmux: false, gh: false, python: false, ffmpeg: false, cjkFonts: false }),
+      dockerfileSchema.parse({
+        tmux: false,
+        gh: false,
+        python: false,
+        ffmpeg: false,
+        cjkFonts: false,
+        xvfb: false,
+      }),
       {
         baseImageVersion: '0.1.1',
       },
@@ -407,9 +432,16 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
   })
 
   test('with toggles on: emits exactly one apt install RUN block containing only toggle packages', () => {
-    // given: gh + tmux enabled, python + ffmpeg + cjkFonts disabled
+    // given: gh + tmux enabled, python + ffmpeg + cjkFonts + xvfb disabled
     const out = buildDockerfile(
-      dockerfileSchema.parse({ gh: true, tmux: true, python: false, ffmpeg: false, cjkFonts: false }),
+      dockerfileSchema.parse({
+        gh: true,
+        tmux: true,
+        python: false,
+        ffmpeg: false,
+        cjkFonts: false,
+        xvfb: false,
+      }),
       {
         baseImageVersion: '0.1.1',
       },
@@ -420,6 +452,21 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
     expect(aptInstallMatch).not.toBeNull()
     const pkgs = aptInstallMatch![1]!.split(/\s+/).filter(Boolean)
     expect(pkgs).toEqual(['gh', 'tmux'])
+  })
+
+  test('versioned per-agent Dockerfile: xvfb: true (default) emits xvfb in the per-agent toggle layer so older base images without it still get a working virtual display', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })
+    const aptInstallMatch = out.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+)/)
+    expect(aptInstallMatch).not.toBeNull()
+    expect(aptInstallMatch![1]!.split(/\s+/).filter(Boolean)).toContain('xvfb')
+  })
+
+  test('versioned per-agent Dockerfile: xvfb: false omits xvfb on top of the base image (opt-out honored regardless of base-image vintage)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ xvfb: false }), { baseImageVersion: '0.1.1' })
+    const aptInstallMatch = out.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+)/)
+    if (aptInstallMatch !== null) {
+      expect(aptInstallMatch[1]!.split(/\s+/).filter(Boolean)).not.toContain('xvfb')
+    }
   })
 
   test('keeps gh keyring bootstrap when gh is enabled (per-agent toggle, not base-image content)', () => {
@@ -478,6 +525,25 @@ describe('network egress entrypoint shim', () => {
     const shim = buildEntrypointShim()
     expect(shim).toContain('"${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1"')
     expect(shim).toMatch(/!= "1" \];? then\s+exec bun run typeclaw "\$@"/)
+  })
+
+  test('shim self-heals on Xvfb presence: spawns Xvfb directly (not xvfb-run, which hangs as PID 1) and exports DISPLAY', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('command -v Xvfb')
+    expect(shim).toContain('Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR -nolisten tcp')
+    expect(shim).toContain('export DISPLAY=:99')
+    // Strip the rationale-block comment lines that explain why we avoid
+    // xvfb-run, then assert it is not invoked anywhere in executable code.
+    const executable = shim
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n')
+    expect(executable).not.toContain('xvfb-run')
+  })
+
+  test('shim waits for Xvfb socket to exist before exec-ing the agent (avoids "cannot open display" race)', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('/tmp/.X11-unix/X99')
   })
 
   test('installs a REJECT rule for every IPv4 network in NETWORK_BLOCK_IPV4_NETS', () => {
@@ -550,6 +616,16 @@ describe('network egress entrypoint shim', () => {
     expect(shim).toContain(
       'exec setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin -- bun run typeclaw "$@"',
     )
+  })
+
+  test('DISPLAY export precedes both exec paths so headed Chrome works regardless of network.blockInternal (exported once at the top, inherited via env)', () => {
+    const shim = buildEntrypointShim()
+    const displayIdx = shim.indexOf('export DISPLAY=:99')
+    const offExecIdx = shim.match(/exec bun run typeclaw "\$@"/)?.index ?? -1
+    const onExecIdx = shim.indexOf('exec setpriv')
+    expect(displayIdx).toBeGreaterThan(-1)
+    expect(offExecIdx).toBeGreaterThan(displayIdx)
+    expect(onExecIdx).toBeGreaterThan(displayIdx)
   })
 
   test('runs `set -eu` so an iptables failure brings PID 1 down (fail closed)', () => {
