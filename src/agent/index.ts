@@ -8,7 +8,7 @@ import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent
 import { loadMemory } from '@/bundled-plugins/memory/load-memory'
 import type { ChannelRouter } from '@/channels/router'
 import { getConfig, resolveModel, resolveProfile } from '@/config'
-import { providerForModelRef } from '@/config/providers'
+import { providerForModelRef, type KnownModelRef } from '@/config/providers'
 import type { PermissionService } from '@/permissions'
 import type {
   BuiltinToolRef,
@@ -134,6 +134,12 @@ export type CreateSessionOptions = {
   // overrides) so different sessions on the same agent can run different
   // models without per-session config edits.
   profile?: string
+  // Override the resolved ref directly, bypassing `profile` resolution. Used
+  // by the model-fallback helper (`promptWithFallback`) to recreate a session
+  // pinned to the next ref in the chain after the previous one failed. When
+  // set, `profile` is still recorded for the fallback-warning bookkeeping;
+  // the profile→refs resolution is skipped.
+  refOverride?: KnownModelRef
   // Defensive ceiling on cumulative bytes of tool-result text per session,
   // applied to the named tools only. See `src/agent/tool-result-budget.ts`
   // for the rationale. Intended for subagents that read large files
@@ -164,7 +170,10 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   if (resolved.fellBackToDefault && options.profile !== undefined && options.profile !== 'default') {
     warnProfileFallbackOnce(options.profile, resolved.ref)
   }
-  const { authStorage, modelRegistry } = getAuthFor(providerForModelRef(resolved.ref))
+  // `refOverride` lets the model-fallback helper pin a specific entry from
+  // the chain when it recreates a session after the previous ref failed.
+  const activeRef: KnownModelRef = options.refOverride ?? resolved.ref
+  const { authStorage, modelRegistry } = getAuthFor(providerForModelRef(activeRef))
 
   const materializedSkills =
     options.plugins && options.plugins.registry.skills.length > 0
@@ -279,7 +288,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
       ? customToolsPreBudget.map((t) => wrapToolDefinitionWithBudget(t, sessionBudget, sessionBudgetState))
       : customToolsPreBudget
 
-  const model = resolveModel(resolved.ref)
+  const model = resolveModel(activeRef)
   const { session } = await createAgentSession({
     model,
     sessionManager,

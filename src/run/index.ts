@@ -314,7 +314,7 @@ export async function startAgent({
       }
       await job.handler(ctx)
     },
-    createSessionForCron: async (job) => {
+    createSessionForCron: async (job, refOverride) => {
       const snap = pluginRuntime.get()
       const sessionManager = SessionManager.create(cwd, sessionFactory.sessionDir())
       const sessionId = sessionManager.getSessionId()
@@ -336,6 +336,7 @@ export async function startAgent({
         channelRouter: channelManager.router,
         origin: cronOrigin,
         permissions: pluginsLoaded.permissions,
+        ...(refOverride !== undefined ? { refOverride } : {}),
         ...(snap.hasAnyPluginContent
           ? {
               plugins: {
