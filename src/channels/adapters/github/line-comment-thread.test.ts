@@ -33,6 +33,7 @@ function fakeRouter(handler: (msg: OutboundMessage) => Promise<SendResult>): Cha
     route: async () => {},
     send: handler,
     getConsecutiveSendCount: () => 0,
+    getSendRate: () => ({ count: 0, windowMs: 5_000 }),
     registerOutbound: () => {},
     unregisterOutbound: () => {},
     registerTyping: () => {},

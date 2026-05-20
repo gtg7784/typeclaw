@@ -13,6 +13,7 @@ function fakeRouter(
     route: async () => {},
     send: handler,
     getConsecutiveSendCount: () => options.consecutiveCount ?? 0,
+    getSendRate: () => ({ count: 0, windowMs: 5_000 }),
     registerOutbound: () => {},
     unregisterOutbound: () => {},
     registerTyping: () => {},
@@ -427,6 +428,39 @@ describe('createChannelSendTool', () => {
       expect(calls).toHaveLength(0)
       expect(result.details).toMatchObject({ ok: false })
       expect((result.details as { error: string }).error).toContain('silent-turn signal')
+    })
+  })
+
+  describe('structured router failures surface as denials', () => {
+    test('duplicate code from router renders as channel_send denied with router error text', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: false, error: 'Duplicate not sent. ...', code: 'duplicate' })),
+      })
+      const result = await runTool(tool, {
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        text: 'same body',
+      })
+      expect(result.details).toEqual({ ok: false, error: 'Duplicate not sent. ...' })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toContain('channel_send denied')
+      expect(text).toContain('Duplicate not sent')
+    })
+
+    test('turn-cap code from router renders as channel_send denied', async () => {
+      const tool = createChannelSendTool({
+        router: fakeRouter(async () => ({ ok: false, error: 'Send-cap reached for this turn ...', code: 'turn-cap' })),
+      })
+      const result = await runTool(tool, {
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        text: 'eleventh',
+      })
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toContain('channel_send denied')
+      expect(text).toContain('Send-cap reached')
     })
   })
 })

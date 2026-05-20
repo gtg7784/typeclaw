@@ -14,11 +14,16 @@ import type { HookBus, SessionIdleEvent } from '@/plugin'
 import { channelsSessionsPath, loadChannelSessions, saveChannelSessions } from './persistence'
 import {
   createChannelRouter,
+  DUPLICATE_SEND_ERROR,
+  MAX_CHANNEL_SENDS_PER_TURN,
   MAX_TYPING_HEARTBEAT_MS,
+  SEND_RATE_WARN_THRESHOLD,
+  SEND_RATE_WINDOW_MS,
   SESSION_GC_INTERVAL_MS,
   SESSION_FRESHNESS_TTL_MS,
   SESSION_IDLE_MS,
   sliceHeadTail,
+  TURN_CAP_ERROR,
   type ChannelRouter,
   type ClaimHandler,
 } from './router'
@@ -1294,6 +1299,418 @@ describe('ChannelRouter consecutive-send accounting', () => {
     expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-B' })).toBe(
       1,
     )
+  })
+})
+
+describe('ChannelRouter duplicate-send guard', () => {
+  test('first send delivers; second identical send is blocked with code=duplicate', async () => {
+    const dir = await tempDir()
+    let delivered = 0
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => {
+      delivered++
+      return { ok: true }
+    })
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const first = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'hello' })
+    expect(first).toEqual({ ok: true })
+
+    const second = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'hello' })
+    expect(second).toEqual({ ok: false, error: DUPLICATE_SEND_ERROR, code: 'duplicate' })
+    expect(delivered).toBe(1)
+  })
+
+  test('lets a different body through after a recent dup', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'first' })
+    const second = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'second' })
+    expect(second).toEqual({ ok: true })
+  })
+
+  test('failed delivery does not reserve a dup slot — retry with same text succeeds', async () => {
+    const dir = await tempDir()
+    let attempts = 0
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => {
+      attempts++
+      return attempts === 1 ? { ok: false, error: 'transient' } : { ok: true }
+    })
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const first = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'flaky' })
+    expect(first.ok).toBe(false)
+    const retry = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'flaky' })
+    expect(retry).toEqual({ ok: true })
+  })
+
+  test('resets on the next user batch so across-turn repeats are not blocked', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const a = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'yes I am here' })
+    expect(a).toEqual({ ok: true })
+
+    await router.route(inbound({ externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+    const b = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'yes I am here' })
+    expect(b).toEqual({ ok: true })
+  })
+
+  test('scopes per (chat:thread): same text to a different thread is not flagged', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ thread: 't-A', externalMessageId: 'mA' }))
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' })
+    await router.route(inbound({ thread: 't-B', externalMessageId: 'mB' }))
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-B' })
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A', text: 'shared' })
+    const b = await router.send({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      thread: 't-B',
+      text: 'shared',
+    })
+    expect(b).toEqual({ ok: true })
+  })
+
+  test('attachments-only sends (text undefined) do not poison the dup tracker', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      attachments: [{ path: '/agent/file.png' }],
+    })
+    await router.send({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      attachments: [{ path: '/agent/file2.png' }],
+    })
+    // Both succeed; empty-string normalization means attachments-only never sets lastSentText.
+    expect(router.getConsecutiveSendCount({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toBe(2)
+  })
+
+  test('empty string text is normalized — does not block a follow-up empty-text send', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      text: '',
+      attachments: [{ path: '/agent/a.png' }],
+    })
+    const second = await router.send({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      text: '',
+      attachments: [{ path: '/agent/b.png' }],
+    })
+    expect(second).toEqual({ ok: true })
+  })
+
+  test('parallel router.send for same text — only one delivers, the rest are duplicate-denied', async () => {
+    const dir = await tempDir()
+    let delivered = 0
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => {
+      // simulate a tiny adapter latency so all 10 sends are in flight at the same time
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      delivered++
+      return { ok: true }
+    })
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const N = 10
+    const results = await Promise.all(
+      Array.from({ length: N }, () =>
+        router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'same-text' }),
+      ),
+    )
+    const okCount = results.filter((r) => r.ok).length
+    const dupCount = results.filter((r) => !r.ok && r.code === 'duplicate').length
+    expect(okCount).toBe(1)
+    expect(dupCount).toBe(N - 1)
+    expect(delivered).toBe(1)
+  })
+
+  test('system-source send bypasses the duplicate guard (recovery path)', async () => {
+    const dir = await tempDir()
+    let delivered = 0
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => {
+      delivered++
+      return { ok: true }
+    })
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'hello' })
+    const sys = await router.send(
+      { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'hello' },
+      { source: 'system' },
+    )
+    expect(sys).toEqual({ ok: true })
+    expect(delivered).toBe(2)
+  })
+})
+
+describe('ChannelRouter per-turn send cap', () => {
+  test('blocks the (cap+1)th tool send with code=turn-cap', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    for (let i = 0; i < MAX_CHANNEL_SENDS_PER_TURN; i++) {
+      const r = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: `msg-${i}` })
+      expect(r).toEqual({ ok: true })
+    }
+    const overflow = await router.send({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      text: `msg-${MAX_CHANNEL_SENDS_PER_TURN}`,
+    })
+    expect(overflow).toEqual({ ok: false, error: TURN_CAP_ERROR, code: 'turn-cap' })
+  })
+
+  test('cap resets on the next user batch', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    for (let i = 0; i < MAX_CHANNEL_SENDS_PER_TURN; i++) {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: `pre-${i}` })
+    }
+    await router.route(inbound({ externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const fresh = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'post' })
+    expect(fresh).toEqual({ ok: true })
+  })
+
+  test('system-source bypasses the cap', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    for (let i = 0; i < MAX_CHANNEL_SENDS_PER_TURN; i++) {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: `t-${i}` })
+    }
+    const sys = await router.send(
+      { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'recovery' },
+      { source: 'system' },
+    )
+    expect(sys).toEqual({ ok: true })
+  })
+
+  test('parallel router.send for distinct text — at most cap deliveries; the rest turn-capped', async () => {
+    const dir = await tempDir()
+    let delivered = 0
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      delivered++
+      return { ok: true }
+    })
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const N = MAX_CHANNEL_SENDS_PER_TURN + 5
+    const results = await Promise.all(
+      Array.from({ length: N }, (_v, i) =>
+        router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: `distinct-${i}` }),
+      ),
+    )
+    const okCount = results.filter((r) => r.ok).length
+    const capCount = results.filter((r) => !r.ok && r.code === 'turn-cap').length
+    expect(okCount).toBe(MAX_CHANNEL_SENDS_PER_TURN)
+    expect(capCount).toBe(N - MAX_CHANNEL_SENDS_PER_TURN)
+    expect(delivered).toBe(MAX_CHANNEL_SENDS_PER_TURN)
+  })
+})
+
+describe('ChannelRouter getSendRate', () => {
+  test('reports zero with no active session for the target', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    expect(router.getSendRate({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' })).toEqual({
+      count: 0,
+      windowMs: SEND_RATE_WINDOW_MS,
+    })
+  })
+
+  test('counts every send inside the rolling window', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'a' })
+    nowRef.value += 100
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'b' })
+    nowRef.value += 100
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'c' })
+    expect(router.getSendRate({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' }).count).toBe(3)
+  })
+
+  test('prunes timestamps older than the window on every read', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'a' })
+    nowRef.value += SEND_RATE_WINDOW_MS + 1
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'b' })
+    expect(router.getSendRate({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' }).count).toBe(1)
+  })
+
+  test('survives turn boundaries: rate is wall-clock, not turn-clock', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'a' })
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'b' })
+    expect(router.getSendRate({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' }).count).toBe(2)
+
+    nowRef.value += 500
+    await router.route(inbound({ externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(router.getSendRate({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1' }).count).toBe(2)
+  })
+
+  test('scopes per (chat:thread): different threads count independently', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ thread: 't-A', externalMessageId: 'mA' }))
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' })
+    await router.route(inbound({ thread: 't-B', externalMessageId: 'mB' }))
+    await router.__testing!.flushDebounce({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-B' })
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A', text: 'a1' })
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A', text: 'a2' })
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-B', text: 'b1' })
+
+    expect(router.getSendRate({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-A' }).count).toBe(2)
+    expect(router.getSendRate({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: 't-B' }).count).toBe(1)
+  })
+
+  test('emits a structured per-send log line for every successful send', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'hello' })
+
+    const sendLog = logs.find((m) => m.includes('[channels]') && m.includes(': send source='))
+    expect(sendLog).toBeDefined()
+    expect(sendLog).toContain('source=tool')
+    expect(sendLog).toContain('turn=1')
+    expect(sendLog).toContain('rate=1/')
+    expect(sendLog).toContain('text_len=5')
+  })
+
+  test('flags a burst with send_rate_warning once rate crosses the warn threshold', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const { router } = makeRouter(dir, { nowRef, logs })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    for (let i = 0; i < SEND_RATE_WARN_THRESHOLD - 1; i++) {
+      nowRef.value += 50
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: `pre-${i}` })
+    }
+    expect(logs.some((m) => m.includes('send_rate_warning'))).toBe(false)
+
+    nowRef.value += 50
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'burst' })
+
+    const warn = logs.find((m) => m.startsWith('warn:') && m.includes('send_rate_warning'))
+    expect(warn).toBeDefined()
+    expect(warn).toContain(`rate=${SEND_RATE_WARN_THRESHOLD}/${SEND_RATE_WINDOW_MS}ms`)
+  })
+
+  test('system-source sends are logged with source=system', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'recovery' }, { source: 'system' })
+    const sysLog = logs.find((m) => m.includes(': send source=system'))
+    expect(sysLog).toBeDefined()
+  })
+})
+
+describe('ChannelRouter cross-tool sharing', () => {
+  test('first send via channel_reply blocks a follow-up channel_send with the same text', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let delivered = 0
+    router.registerOutbound('discord-bot', async () => {
+      delivered++
+      return { ok: true }
+    })
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const first = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'shared' })
+    expect(first).toEqual({ ok: true })
+
+    const second = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'shared' })
+    expect(second.ok).toBe(false)
+    if (!second.ok) expect(second.code).toBe('duplicate')
+    expect(delivered).toBe(1)
   })
 })
 
