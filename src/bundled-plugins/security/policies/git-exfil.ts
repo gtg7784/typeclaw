@@ -1,8 +1,28 @@
+import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
 import { getRemoteTaint, recordRemoteTaint } from './remote-taint-state'
 
 export const GUARD_GIT_EXFIL = 'gitExfil'
+// Classified `high` (audience-leak axis): `git push` sends every tracked
+// file to a remote git host. The host (GitHub/GitLab/attacker-controlled
+// box) is a third-party audience outside the operator's control loop.
+// Even a private remote owned by an attacker is now outside the
+// perimeter. No role auto-bypasses high — owner pushing from TUI must ack
+// each push. The historical per-guard string `security.bypass.gitExfil`
+// remains valid as an explicit grant for operators who knowingly want to
+// re-open the auto-bypass (see SKILL.md must-not-do guidance).
+export const GUARD_GIT_EXFIL_SEVERITY: SecuritySeverity = 'high'
 export const GUARD_GIT_REMOTE_TAINTED = 'gitRemoteTainted'
+// Classified `high` (audience-leak axis): same path as gitExfil, second
+// step. A push after a mid-session `git remote set-url` to an
+// attacker-controlled URL is exactly the breach pattern that motivated
+// the entire security plugin per PR #134. The recorder-vs-checker split
+// (see comment on recordGitRemoteTaintIfAny below) is still load-bearing:
+// the recorder fires for anyone who can run the underlying command (ack
+// or the per-guard `bypassGitExfil` grant), so even if an operator
+// explicitly grants `bypassGitExfil` to a role, the second-step taint
+// check still fires on the eventual push.
+export const GUARD_GIT_REMOTE_TAINTED_SEVERITY: SecuritySeverity = 'high'
 
 // Anchors we reuse: a `git` token must be at start-of-line or follow a shell
 // separator. This blocks `git push` while letting `cgit-something` through

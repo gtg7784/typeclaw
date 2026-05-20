@@ -38,6 +38,12 @@ type ResolvedRole = {
 export type CreatePermissionServiceOptions = {
   roles?: RolesConfig
   pluginPermissions?: readonly string[]
+  // Permission strings that the owner wildcard sentinel must NOT
+  // auto-expand to. Today populated from the bundled security plugin's
+  // high-tier list so audience-leak guards do not get auto-granted to
+  // owner. Generic by design — any future plugin could contribute
+  // exclusions through the plugin manager. See expandOwnerWildcard.
+  ownerWildcardExclusions?: readonly string[]
 }
 
 // Returns warnings for user-declared `permissions[]` strings that aren't
@@ -97,7 +103,8 @@ function levenshtein(a: string, b: string): number {
 
 export function createPermissionService(opts: CreatePermissionServiceOptions = {}): PermissionService {
   const pluginPermissions = opts.pluginPermissions ?? []
-  let resolved = buildRoleTable(opts.roles ?? {}, pluginPermissions)
+  const ownerWildcardExclusions = opts.ownerWildcardExclusions ?? []
+  let resolved = buildRoleTable(opts.roles ?? {}, pluginPermissions, ownerWildcardExclusions)
   let byName = new Map(resolved.map((r) => [r.name, r]))
 
   function resolveRole(origin: SessionOrigin | undefined): string {
@@ -139,36 +146,46 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
       return { role: name, permissions: role?.permissions ?? [] }
     },
     replaceRoles(roles) {
-      resolved = buildRoleTable(roles ?? {}, pluginPermissions)
+      resolved = buildRoleTable(roles ?? {}, pluginPermissions, ownerWildcardExclusions)
       byName = new Map(resolved.map((r) => [r.name, r]))
     },
   }
 }
 
-function buildRoleTable(roles: RolesConfig, pluginPermissions: readonly string[]): ResolvedRole[] {
+function buildRoleTable(
+  roles: RolesConfig,
+  pluginPermissions: readonly string[],
+  ownerWildcardExclusions: readonly string[],
+): ResolvedRole[] {
   const out: ResolvedRole[] = []
   const seen = new Set<string>()
 
   for (const name of Object.keys(roles)) {
     if (seen.has(name)) continue
     seen.add(name)
-    out.push(resolveOne(name, roles[name], pluginPermissions))
+    out.push(resolveOne(name, roles[name], pluginPermissions, ownerWildcardExclusions))
   }
 
   for (const name of BUILTIN_ROLE_NAMES) {
     if (seen.has(name)) continue
-    out.push(resolveOne(name, undefined, pluginPermissions))
+    out.push(resolveOne(name, undefined, pluginPermissions, ownerWildcardExclusions))
   }
 
   return out
 }
 
-function resolveOne(name: string, user: RoleConfig | undefined, pluginPermissions: readonly string[]): ResolvedRole {
+function resolveOne(
+  name: string,
+  user: RoleConfig | undefined,
+  pluginPermissions: readonly string[],
+  ownerWildcardExclusions: readonly string[],
+): ResolvedRole {
   if (isBuiltinRoleName(name)) {
     const builtin = BUILTIN_ROLES[name]
     const match = [...builtin.match, ...(user?.match ?? [])]
     const rawPerms = user?.permissions !== undefined ? user.permissions : [...builtin.permissions]
-    const permissions = name === 'owner' ? expandOwnerWildcard(rawPerms, pluginPermissions) : rawPerms
+    const permissions =
+      name === 'owner' ? expandOwnerWildcard(rawPerms, pluginPermissions, ownerWildcardExclusions) : rawPerms
     return { name, match, permissions }
   }
   return {

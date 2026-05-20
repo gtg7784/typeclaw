@@ -1,6 +1,12 @@
+import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
 
 export const GUARD_SSRF = 'ssrf'
+// Classified `medium` (silent-attack axis): bypass lets `curl
+// http://169.254.169.254/...` return cloud-metadata IAM credentials into
+// model context. Silent — no channel side effect at the moment of fetch.
+// Catastrophic on follow-up because the model now has live cloud creds.
+export const GUARD_SSRF_SEVERITY: SecuritySeverity = 'medium'
 
 const ALWAYS_BLOCKED_HOSTS = new Set([
   'localhost',

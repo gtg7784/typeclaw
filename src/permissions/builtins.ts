@@ -25,6 +25,21 @@ export type BuiltinRoleSpec = {
   readonly permissions: readonly string[]
 }
 
+// Owner carries low + medium tier strings explicitly AND the wildcard
+// sentinel. The sentinel expands to plugin-contributed `security.bypass.*`
+// strings minus the security plugin's `ownerWildcardExclusions` (today:
+// `security.bypass.high` plus high-tier per-guard strings). Net effect:
+// owner auto-bypasses every low- and medium-tier guard, and high-tier
+// guards require per-call ack from owner too (the audience-leak rule —
+// owner-in-public-channel must not silently post credentials).
+//
+// Trusted carries only `security.bypass.low`. Trusted does NOT carry the
+// pre-PR per-guard grants (`bypassSecretExfilBash`, `bypassGitExfil`):
+// those guards are medium/high under the audience-leak axis and per-guard
+// grants would re-introduce exactly the bypass holes the tier system
+// exists to prevent. Operators who want the pre-PR ergonomics can add the
+// per-guard strings explicitly to `roles.trusted.permissions[]` in
+// typeclaw.json — that path stays alive forever.
 export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> = {
   owner: {
     match: [{ kind: 'tui' }],
@@ -32,17 +47,14 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.channelRespond,
       CORE_PERMISSIONS.cronSchedule,
       CORE_PERMISSIONS.cronModify,
+      'security.bypass.low',
+      'security.bypass.medium',
       OWNER_SECURITY_WILDCARD,
     ],
   },
   trusted: {
     match: [],
-    permissions: [
-      CORE_PERMISSIONS.channelRespond,
-      CORE_PERMISSIONS.cronSchedule,
-      'security.bypass.secretExfilBash',
-      'security.bypass.gitExfil',
-    ],
+    permissions: [CORE_PERMISSIONS.channelRespond, CORE_PERMISSIONS.cronSchedule, 'security.bypass.low'],
   },
   member: {
     match: [],
@@ -54,11 +66,21 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
   },
 }
 
+// Expands the owner wildcard sentinel against plugin-contributed
+// `security.bypass.*` strings. `wildcardExclusions` is an optional set of
+// permission strings the sentinel must NOT expand to — used by the
+// bundled security plugin to exclude `security.bypass.high` AND the
+// per-guard strings for high-tier guards, so the wildcard does not
+// auto-grant audience-leak bypass to owner. Explicit operator grants of
+// those strings in `roles.owner.permissions[]` still take effect (they
+// flow through the non-sentinel branch).
 export function expandOwnerWildcard(
   ownerPermissions: readonly string[],
   pluginContributed: readonly string[],
+  wildcardExclusions: readonly string[] = [],
 ): readonly string[] {
-  const bypass = pluginContributed.filter((p) => p.startsWith('security.bypass.'))
+  const excludeSet = new Set(wildcardExclusions)
+  const bypass = pluginContributed.filter((p) => p.startsWith('security.bypass.') && !excludeSet.has(p))
   const out: string[] = []
   for (const p of ownerPermissions) {
     if (p === OWNER_SECURITY_WILDCARD) {

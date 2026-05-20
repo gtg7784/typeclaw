@@ -1,6 +1,13 @@
+import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
 
 export const GUARD_SECRET_EXFIL_BASH = 'secretExfilBash'
+// Classified `medium` (silent-attack axis): bypass dumps the whole
+// environment (every API key, every token) into the agent's tool-result
+// buffer. No direct channel side effect — operator only sees on session
+// review — but the secrets are now in model context and one channel_send
+// away from a third-party audience. Silent at the moment of leak.
+export const GUARD_SECRET_EXFIL_BASH_SEVERITY: SecuritySeverity = 'medium'
 
 const DANGEROUS_COMMAND_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string }> = [
   { pattern: /(^|[\s;|&(`$])(env|printenv)([\s;|&)`]|$)/, label: 'env / printenv (full environment dump)' },

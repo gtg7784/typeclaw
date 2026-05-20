@@ -56,9 +56,11 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
   ]
 
   const declaredPermissions = collectDeclaredPermissions(allPlugins)
+  const ownerWildcardExclusions = collectOwnerWildcardExclusions(allPlugins)
   const permissions = createPermissionService({
     ...(opts.roles !== undefined ? { roles: opts.roles } : {}),
     pluginPermissions: declaredPermissions,
+    ownerWildcardExclusions,
   })
 
   // Non-fatal: surface user-declared `permissions[]` strings that aren't in
@@ -152,6 +154,18 @@ function collectDeclaredPermissions(
   const out: string[] = []
   for (const { resolved } of plugins) {
     for (const perm of resolved.defined.permissions ?? []) {
+      if (!out.includes(perm)) out.push(perm)
+    }
+  }
+  return out
+}
+
+function collectOwnerWildcardExclusions(
+  plugins: readonly { entry: string; resolved: ResolvedPlugin }[],
+): readonly string[] {
+  const out: string[] = []
+  for (const { resolved } of plugins) {
+    for (const perm of resolved.defined.ownerWildcardExclusions ?? []) {
       if (!out.includes(perm)) out.push(perm)
     }
   }

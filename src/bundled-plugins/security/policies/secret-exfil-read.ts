@@ -1,8 +1,14 @@
 import path from 'node:path'
 
+import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
 
 export const GUARD_SECRET_EXFIL_READ = 'secretExfilRead'
+// Classified `medium` (silent-attack axis): bypass returns `.env` /
+// credential-file contents into model context. Same shape as
+// secretExfilBash — silent at the moment of read, becomes catastrophic on
+// the next channel-side tool call that quotes it.
+export const GUARD_SECRET_EXFIL_READ_SEVERITY: SecuritySeverity = 'medium'
 
 const SENSITIVE_BASENAMES = new Set([
   '.env',
