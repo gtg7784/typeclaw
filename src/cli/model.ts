@@ -25,7 +25,7 @@ const ADD_PROVIDER_SENTINEL = '__add-provider__'
 const setSub = defineCommand({
   meta: {
     name: 'set',
-    description: 'set or update a model profile (default | fast | vision | <custom>)',
+    description: 'set or update a model profile (default | fast | deep | vision | <custom>)',
   },
   args: {
     profile: {
@@ -206,6 +206,7 @@ async function pickProfileName(): Promise<string> {
     options: [
       { value: 'default', label: 'default', hint: 'active model for new sessions' },
       { value: 'fast', label: 'fast', hint: 'optional alias used by some subagents' },
+      { value: 'deep', label: 'deep', hint: 'optional alias used by some subagents' },
       { value: 'vision', label: 'vision', hint: 'optional alias used by some subagents' },
     ],
     initialValue: 'default',
