@@ -171,6 +171,13 @@ describe('backup plugin', () => {
     await sleep(80)
     expect(spawnCalls.length).toBe(1)
   })
+
+  test('diagnose subagent prompt instructs the model to ack gitExfil on its push retry (regression for PR #255 audience-leak policy)', async () => {
+    const { DIAGNOSE_FAILURE_SYSTEM_PROMPT } = await import('./subagents')
+    expect(DIAGNOSE_FAILURE_SYSTEM_PROMPT).toContain('acknowledgeGuards')
+    expect(DIAGNOSE_FAILURE_SYSTEM_PROMPT).toContain('gitExfil')
+    expect(DIAGNOSE_FAILURE_SYSTEM_PROMPT).toMatch(/only the one push retry|only.*one.*retry/i)
+  })
 })
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
