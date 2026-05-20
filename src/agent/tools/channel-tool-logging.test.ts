@@ -35,6 +35,7 @@ function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
     route: async () => {},
     send: overrides.send ?? (async () => ({ ok: true })),
     getConsecutiveSendCount: () => 0,
+    getSendRate: () => ({ count: 0, windowMs: 5_000 }),
     registerOutbound: () => {},
     unregisterOutbound: () => {},
     registerTyping: () => {},

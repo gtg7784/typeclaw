@@ -78,6 +78,24 @@ export const MAX_TYPING_HEARTBEAT_MS = 2 * 60 * 1000
 export const SESSION_IDLE_MS = 30 * 60 * 1000
 export const SESSION_GC_INTERVAL_MS = 60 * 1000
 
+// Hard cap on tool-initiated outbound sends per (chat:thread) per turn.
+// The original loop-incident emitted ~50 sends in one turn; even
+// legitimate split replies rarely cross 8. 10 leaves headroom for
+// genuine multi-part answers while definitively stopping runaway loops.
+// Enforced inside router.send for `source: 'tool'` callers; system
+// recovery paths (`source: 'system'`) bypass.
+export const MAX_CHANNEL_SENDS_PER_TURN = 10
+// Rolling window for outbound send-rate telemetry. 5s matches Discord's
+// rate-limit shape (5 msg / 5 s / channel) and comfortably covers Slack's
+// 1 msg/s sustained. The window is observational; exceeding the burst
+// threshold below escalates the per-send log to a warning.
+export const SEND_RATE_WINDOW_MS = 5_000
+// Above this in-window count, the per-send log line escalates to a
+// `send_rate_warning` so a burst stands out in the log stream. Every
+// send still emits a structured log line regardless of rate — this
+// constant only controls when the warning marker appears.
+export const SEND_RATE_WARN_THRESHOLD = 3
+
 /**
  * Maximum age of the last engaged inbound before the next inbound triggers a fresh session.
  * Set to the LLM provider's KV-cache TTL (5 min) so the new session's system prompt is
@@ -244,6 +262,26 @@ type LiveSession = {
   // router.send so the hint reflects the position of the about-to-happen send
   // (n-th in a row), nudging the model to yield without forcing it to.
   consecutiveSends: Map<string, number>
+  // Per-(chat:thread) text of the last reserved bot send. Set
+  // SYNCHRONOUSLY inside router.send before the outbound callback awaits,
+  // so two concurrent `router.send` calls for the same target cannot both
+  // pass the duplicate guard. Cleared on every new prompt batch (same
+  // lifecycle as `consecutiveSends`). The scope is "last 1 send within
+  // this turn" so legitimate multi-part replies (different bodies) and
+  // across-turn callbacks ("yes, I'm here" twice) are not blocked. Empty
+  // strings are normalized to undefined before storage so attachments-only
+  // sends never poison the tracker. The fuzzy-match upgrade is intentionally
+  // deferred — exact-match has zero false-positive risk by construction.
+  lastSentText: Map<string, string>
+  // Per-(chat:thread) ring of send timestamps (epoch ms) within the rolling
+  // SEND_RATE_WINDOW_MS window. Append-on-send, prune-on-read. Lifecycle is
+  // wall-clock (NOT cleared on new prompt batches) because rate is a
+  // property of the channel over time, not the agent's turn structure — a
+  // burst that straddles two adjacent turns is still a burst from the chat
+  // platform's POV. Telemetry-only today; the rate is logged when count
+  // crosses SEND_RATE_LOG_THRESHOLD so production data can inform a
+  // future hard cap without picking a threshold out of thin air.
+  sendTimestamps: Map<string, number[]>
   successfulChannelSends: number
   // Loop-guard state. See PEER_BOT_TURNS_WINDOW_MS / MAX_* constants
   // above. Updated in route() on every engaged peer-bot inbound, reset on
@@ -264,15 +302,35 @@ type ChannelCommandContext = {
   event: InboundMessage
 }
 
+export type SendSource = 'tool' | 'system'
+
+export type SendOptions = {
+  source?: SendSource
+}
+
+export const DUPLICATE_SEND_ERROR =
+  'Duplicate not sent. Do not call channel_send/channel_reply again this turn. ' +
+  'End with NO_REPLY unless you have genuinely new, non-redundant information.'
+
+export const TURN_CAP_ERROR =
+  `Send-cap reached for this turn (${MAX_CHANNEL_SENDS_PER_TURN} messages already sent to this conversation). ` +
+  'End your turn now. The user can prompt you again for more output.'
+
 export type ChannelRouter = {
   route: (event: InboundMessage) => Promise<void>
-  send: (msg: OutboundMessage) => Promise<SendResult>
+  send: (msg: OutboundMessage, opts?: SendOptions) => Promise<SendResult>
   getConsecutiveSendCount: (target: {
     adapter: ChannelKey['adapter']
     workspace: string
     chat: string
     thread?: string | null
   }) => number
+  getSendRate: (target: {
+    adapter: ChannelKey['adapter']
+    workspace: string
+    chat: string
+    thread?: string | null
+  }) => { count: number; windowMs: number }
   registerOutbound: (adapter: ChannelKey['adapter'], cb: OutboundCallback) => void
   unregisterOutbound: (adapter: ChannelKey['adapter'], cb: OutboundCallback) => void
   registerTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
@@ -719,6 +777,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         lastTurnAuthorIds: new Set(),
         consecutiveAborts: 0,
         consecutiveSends: new Map(),
+        lastSentText: new Map(),
+        sendTimestamps: new Map(),
         successfulChannelSends: 0,
         recentEngagedPeerBotTurns: [],
         consecutiveEngagedPeerBotTurns: 0,
@@ -1011,7 +1071,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
         live.currentTurnAuthorId = batch.length > 0 ? batch[batch.length - 1]!.authorId : null
         live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
-        if (batch.length > 0) live.consecutiveSends.clear()
+        if (batch.length > 0) {
+          live.consecutiveSends.clear()
+          live.lastSentText.clear()
+        }
 
         // Update the live origin holder so this turn's tool.before events
         // carry the current actor's id. The DefaultResourceLoader still
@@ -1036,6 +1099,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         } catch (err) {
           logger.error(`[channels] ${live.keyId}: prompt threw: ${describe(err)}`)
           live.consecutiveSends.clear()
+          live.lastSentText.clear()
         } finally {
           await fireSessionTurnEnd(live)
         }
@@ -1108,13 +1172,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.info(
           `[channels] ${channelKeyId(key)}: claim ${outcome.kind} author=${event.authorId} id=${event.externalMessageId}`,
         )
-        await send({
-          adapter: event.adapter,
-          workspace: event.workspace,
-          chat: event.chat,
-          thread: event.thread,
-          text: outcome.reply,
-        })
+        await send(
+          {
+            adapter: event.adapter,
+            workspace: event.workspace,
+            chat: event.chat,
+            thread: event.thread,
+            text: outcome.reply,
+          },
+          { source: 'system' },
+        )
         return
       }
     }
@@ -1421,10 +1488,52 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return lastError
   }
 
-  const send = async (msg: OutboundMessage): Promise<SendResult> => {
+  const send = async (msg: OutboundMessage, opts?: SendOptions): Promise<SendResult> => {
+    const source: SendSource = opts?.source ?? 'tool'
     const callbacks = outboundCallbacks.get(msg.adapter)
     if (!callbacks || callbacks.size === 0) {
-      return { ok: false, error: `no adapter registered for "${msg.adapter}"` }
+      return { ok: false, error: `no adapter registered for "${msg.adapter}"`, code: 'no-adapter' }
+    }
+
+    const keyId = channelKeyId({
+      adapter: msg.adapter,
+      workspace: msg.workspace,
+      chat: msg.chat,
+      thread: msg.thread ?? null,
+    })
+    const live = liveSessions.get(keyId)
+    const sendKey = consecutiveSendKey(msg.chat, msg.thread)
+    const text = normalizeSendText(msg.text)
+
+    // Central enforcement. Tool-initiated sends are subject to two policies:
+    // a per-turn count cap (kills runaway loops regardless of content) and
+    // an exact-duplicate guard (kills the byte-identical-spam sub-mode).
+    // Both checks AND the state mutations they consult happen synchronously
+    // before any `await`, so two concurrent `router.send` calls for the same
+    // target (the parallel-tool-execution race) cannot both pass: the
+    // second observer sees the first one's increment / lastSentText write.
+    // System sources (validateChannelTurn recovery, role-claim reply) bypass
+    // — those are one-shot paths the policy doesn't apply to.
+    let priorLastSentText: string | undefined
+    let reserved = false
+    if (live && source === 'tool') {
+      const currentCount = live.consecutiveSends.get(sendKey) ?? 0
+      if (currentCount >= MAX_CHANNEL_SENDS_PER_TURN) {
+        return { ok: false, error: TURN_CAP_ERROR, code: 'turn-cap' }
+      }
+      if (text !== undefined && live.lastSentText.get(sendKey) === text) {
+        return { ok: false, error: DUPLICATE_SEND_ERROR, code: 'duplicate' }
+      }
+      // Reserve the slot before awaiting. If the callback rejects we roll
+      // back below; if it succeeds we keep the increment. The slot reserve
+      // is what makes parallel tool calls safe. We also snapshot the prior
+      // lastSentText so a transient delivery failure can be retried with
+      // the same text — the dup-guard exists to stop runaway loops, not to
+      // strand the model on a flaky adapter.
+      priorLastSentText = live.lastSentText.get(sendKey)
+      live.consecutiveSends.set(sendKey, currentCount + 1)
+      if (text !== undefined) live.lastSentText.set(sendKey, text)
+      reserved = true
     }
 
     // Snapshot the callbacks before iterating so a callback that mutates the
@@ -1443,16 +1552,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
 
     if (!delivered) {
-      return { ok: false, error: lastError ?? 'no callback accepted the outbound' }
+      // Roll back the slot reservation so a failed send doesn't burn cap
+      // budget or poison the dup-guard. Restoring lastSentText to its
+      // prior value (which may be undefined) lets a legitimate retry of
+      // the same text succeed — the dup-guard is for loops, not flake.
+      if (live && reserved) {
+        const after = (live.consecutiveSends.get(sendKey) ?? 1) - 1
+        if (after <= 0) live.consecutiveSends.delete(sendKey)
+        else live.consecutiveSends.set(sendKey, after)
+        if (priorLastSentText === undefined) live.lastSentText.delete(sendKey)
+        else live.lastSentText.set(sendKey, priorLastSentText)
+      }
+      return { ok: false, error: lastError ?? 'no callback accepted the outbound', code: 'callback-rejected' }
     }
 
-    const keyId = channelKeyId({
-      adapter: msg.adapter,
-      workspace: msg.workspace,
-      chat: msg.chat,
-      thread: msg.thread ?? null,
-    })
-    const live = liveSessions.get(keyId)
     if (live) {
       live.successfulChannelSends++
       // Don't stop the heartbeat here: the agent may still be mid-turn and
@@ -1477,8 +1590,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           grantStickyForReplyTargets(stickyLedger, keyId, targetIds, adapterConfig.engagement, now())
         }
       }
-      const sendKey = consecutiveSendKey(msg.chat, msg.thread)
-      live.consecutiveSends.set(sendKey, (live.consecutiveSends.get(sendKey) ?? 0) + 1)
+      const turnCount = live.consecutiveSends.get(sendKey) ?? 0
+      const rateCount = recordSendTimestamp(live, sendKey, now())
+      const level = rateCount >= SEND_RATE_WARN_THRESHOLD ? 'warn' : 'info'
+      const warn = rateCount >= SEND_RATE_WARN_THRESHOLD ? ' send_rate_warning' : ''
+      const textLen = text !== undefined ? text.length : 0
+      const fields = `source=${source} turn=${turnCount} rate=${rateCount}/${SEND_RATE_WINDOW_MS}ms text_len=${textLen}`
+      logger[level](`[channels] ${live.keyId} send ${fields}${warn}`)
     }
 
     return { ok: true }
@@ -1498,13 +1616,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     logger.warn(
       `[channels] ${live.keyId}: recovering assistant_text_without_channel_tool text_len=${assistantText.length}`,
     )
-    const result = await send({
-      adapter: live.key.adapter,
-      workspace: live.key.workspace,
-      chat: live.key.chat,
-      thread: live.key.thread,
-      text: assistantText,
-    })
+    const result = await send(
+      {
+        adapter: live.key.adapter,
+        workspace: live.key.workspace,
+        chat: live.key.chat,
+        thread: live.key.thread,
+        text: assistantText,
+      },
+      { source: 'system' },
+    )
     if (!result.ok) {
       logger.warn(`[channels] ${live.keyId}: recovery send failed: ${result.error}`)
     }
@@ -1525,6 +1646,30 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const live = liveSessions.get(keyId)
     if (!live) return 0
     return live.consecutiveSends.get(consecutiveSendKey(target.chat, target.thread)) ?? 0
+  }
+
+  const getSendRate = (target: {
+    adapter: ChannelKey['adapter']
+    workspace: string
+    chat: string
+    thread?: string | null
+  }): { count: number; windowMs: number } => {
+    const keyId = channelKeyId({
+      adapter: target.adapter,
+      workspace: target.workspace,
+      chat: target.chat,
+      thread: target.thread ?? null,
+    })
+    const live = liveSessions.get(keyId)
+    if (!live) return { count: 0, windowMs: SEND_RATE_WINDOW_MS }
+    const sendKey = consecutiveSendKey(target.chat, target.thread)
+    const buf = live.sendTimestamps.get(sendKey)
+    if (!buf || buf.length === 0) return { count: 0, windowMs: SEND_RATE_WINDOW_MS }
+    const cutoff = now() - SEND_RATE_WINDOW_MS
+    let i = 0
+    while (i < buf.length && buf[i]! <= cutoff) i++
+    if (i > 0) buf.splice(0, i)
+    return { count: buf.length, windowMs: SEND_RATE_WINDOW_MS }
   }
 
   const tearDownLive = async (live: LiveSession): Promise<void> => {
@@ -1585,6 +1730,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     route,
     send,
     getConsecutiveSendCount,
+    getSendRate,
     registerOutbound,
     unregisterOutbound,
     registerTyping,
@@ -1757,6 +1903,26 @@ function tryOpenSessionManager(
 
 function consecutiveSendKey(chat: string, thread: string | null | undefined): string {
   return `${chat}:${thread ?? ''}`
+}
+
+function normalizeSendText(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined
+  if (text === '') return undefined
+  return text
+}
+
+function recordSendTimestamp(live: LiveSession, sendKey: string, ts: number): number {
+  const buf = live.sendTimestamps.get(sendKey)
+  const cutoff = ts - SEND_RATE_WINDOW_MS
+  if (!buf) {
+    live.sendTimestamps.set(sendKey, [ts])
+    return 1
+  }
+  let i = 0
+  while (i < buf.length && buf[i]! <= cutoff) i++
+  if (i > 0) buf.splice(0, i)
+  buf.push(ts)
+  return buf.length
 }
 
 function dmMembership(fetchedAt: number): MembershipCount {
