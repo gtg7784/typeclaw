@@ -24,6 +24,10 @@ export const webfetchTool = defineTool({
   description:
     'Fetch a single HTTP(S) URL and return the body, optionally compacted by a strategy. ' +
     'Use this when the user references a specific URL or when websearch surfaced a result you need to read in full. ' +
+    'Outbound requests impersonate Chrome 136 at the TLS, HTTP/2, and header layers ' +
+    '(via curl-impersonate), which clears most TLS/header fingerprint gates (Cloudflare, Akamai). ' +
+    'Behavioural/JS challenges and IP reputation are still out of scope — a 403 from a site that requires JS execution ' +
+    'or fingerprints the client beyond the TLS layer is expected and unrecoverable from this tool. ' +
     'Strategy guide:\n' +
     '- "readability": extract article content as markdown (blogs, docs, news). Default for HTML.\n' +
     '- "jq": query JSON APIs (npm registry, GitHub API). Pass `query` (e.g. ".items[].name").\n' +

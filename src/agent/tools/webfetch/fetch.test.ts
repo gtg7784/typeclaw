@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import { fetchWithLimits, normalizeUrl, parseMimeType, WebfetchError } from './fetch'
+import { _resetAvailabilityCacheForTest, _setCurlBinaryForTest } from '../curl-impersonate'
+import { _setForceFallbackForTest, fetchWithLimits, normalizeUrl, parseMimeType, WebfetchError } from './fetch'
 
 type FetchInput = Parameters<typeof fetch>[0]
 type FetchArgs = { url: string; init: RequestInit | undefined }
@@ -8,6 +12,8 @@ type FetchArgs = { url: string; init: RequestInit | undefined }
 let fetchCalls: FetchArgs[]
 let fetchResponse: (args: FetchArgs) => Response | Promise<Response>
 const originalFetch = globalThis.fetch
+
+const CURL_META_SENTINEL = '\n--TYPECLAW-CURL-META-9c3f5e4d2a1b4f8e9c7a6b5d4e3f2a1b0--\n'
 
 beforeEach(() => {
   fetchCalls = []
@@ -17,10 +23,18 @@ beforeEach(() => {
     fetchCalls.push(args)
     return fetchResponse(args)
   }) as typeof fetch
+  // Default mode: force the Bun.fetch fallback so existing assertions on
+  // mocked `globalThis.fetch` keep working. The impersonate-path tests
+  // below opt into the curl path explicitly.
+  _setForceFallbackForTest(true)
+  _resetAvailabilityCacheForTest()
 })
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  _setForceFallbackForTest(false)
+  _setCurlBinaryForTest(null)
+  _resetAvailabilityCacheForTest()
 })
 
 describe('normalizeUrl', () => {
@@ -54,7 +68,7 @@ describe('parseMimeType', () => {
   })
 })
 
-describe('fetchWithLimits', () => {
+describe('fetchWithLimits — Bun.fetch fallback path', () => {
   test('returns body, content-type, status, and final URL on success', async () => {
     fetchResponse = () => new Response('hello', { status: 200, headers: { 'content-type': 'text/plain' } })
 
@@ -104,12 +118,79 @@ describe('fetchWithLimits', () => {
     await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/Fetch failed: ECONNREFUSED/)
   })
 
-  test('sends typeclaw User-Agent', async () => {
+  test('sends typeclaw User-Agent on the fallback path', async () => {
     fetchResponse = () => new Response('ok', { status: 200 })
 
     await fetchWithLimits('https://example.com', 30)
 
     const headers = fetchCalls[0]?.init?.headers as Record<string, string> | undefined
     expect(headers?.['User-Agent']).toContain('typeclaw')
+  })
+})
+
+describe('fetchWithLimits — curl-impersonate path', () => {
+  let scratchDir: string
+
+  beforeEach(() => {
+    scratchDir = mkdtempSync(join(tmpdir(), 'webfetch-curl-test-'))
+    // Opt back into the real availability check (one of the tests below
+    // installs a fake binary; another asserts the fallback fires when no
+    // binary exists).
+    _setForceFallbackForTest(false)
+  })
+
+  afterEach(() => {
+    rmSync(scratchDir, { recursive: true, force: true })
+  })
+
+  function installFakeBinary(script: string): void {
+    const path = join(scratchDir, 'fake-curl')
+    writeFileSync(path, `#!/bin/sh\n${script}\n`, 'utf8')
+    chmodSync(path, 0o755)
+    _setCurlBinaryForTest(path)
+    _resetAvailabilityCacheForTest()
+  }
+
+  test('uses curl-impersonate when the binary is available', async () => {
+    // given: fake binary that emits a body + the metadata sentinel
+    installFakeBinary(
+      `printf '<html>ok</html>'; printf '${CURL_META_SENTINEL}200\nhttps://example.com/final\ntext/html; charset=utf-8\n15\n'`,
+    )
+
+    // when
+    const result = await fetchWithLimits('https://example.com', 30)
+
+    // then: the result came from curl, NOT from globalThis.fetch
+    expect(result.body).toBe('<html>ok</html>')
+    expect(result.contentType).toBe('text/html; charset=utf-8')
+    expect(result.httpStatus).toBe(200)
+    expect(result.finalUrl).toBe('https://example.com/final')
+    expect(fetchCalls).toHaveLength(0)
+  })
+
+  test('translates curl non-2xx response into WebfetchError matching the fallback contract', async () => {
+    // given: fake binary that emits a 403-shaped response (Akamai-style block)
+    installFakeBinary(
+      `printf '<html>blocked</html>'; printf '${CURL_META_SENTINEL}403\nhttps://example.com\ntext/html\n20\n'`,
+    )
+
+    // when / then
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(WebfetchError)
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/HTTP 403/)
+  })
+
+  test('falls back to Bun.fetch when curl-impersonate is not installed', async () => {
+    // given: point the curl resolver at a path that doesn't exist, and have
+    // globalThis.fetch ready to serve a known body
+    _setCurlBinaryForTest('/nonexistent/curl_chrome136')
+    _resetAvailabilityCacheForTest()
+    fetchResponse = () => new Response('fallback body', { status: 200, headers: { 'content-type': 'text/plain' } })
+
+    // when
+    const result = await fetchWithLimits('https://example.com', 30)
+
+    // then: globalThis.fetch was the actual transport
+    expect(result.body).toBe('fallback body')
+    expect(fetchCalls).toHaveLength(1)
   })
 })
