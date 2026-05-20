@@ -440,6 +440,120 @@ describe('applyPromptInjectionDefense', () => {
   })
 })
 
+describe('applyPromptInjectionDefense — origin-aware git_exfil carve-out', () => {
+  // Realistic backup-diagnose payload: the runner failed on push, hands the
+  // subagent the git stderr verbatim. Git's stderr contains literal
+  // "git push --help" hint strings on fast-forward rejection and
+  // "git push --set-upstream" on missing upstream. Pre-PR-#255 iteration-3
+  // this triggered the git_exfil category and injected a "do NOT run git
+  // push" rule that contradicted the subagent's own system prompt telling
+  // it to retry with an ack.
+  const DIAGNOSE_PROMPT_FF_REJECTED = [
+    'Agent folder: /agent',
+    'Failed stage: push',
+    'Exit code: 1',
+    '',
+    '## stderr',
+    '```',
+    'To github.com:user/repo.git',
+    ' ! [rejected]        main -> main (fetch first)',
+    "error: failed to push some refs to 'github.com:user/repo.git'",
+    'hint: Updates were rejected because the remote contains work that you do not have locally.',
+    "hint: See the 'Note about fast-forwards' in 'git push --help' for details.",
+    '```',
+  ].join('\n')
+
+  test('subagent origin: diagnose-shaped prompt with literal "git push" does NOT inject defense', () => {
+    const event: SessionPromptEvent = {
+      prompt: DIAGNOSE_PROMPT_FF_REJECTED,
+      sessionId: 'sub_diagnose',
+      agentDir: '/agent',
+      origin: {
+        kind: 'subagent',
+        subagent: 'backup-diagnose',
+        parentSessionId: 'parent',
+      },
+    }
+    const before = event.prompt
+    const matches = applyPromptInjectionDefense(event)
+    // The detector still reports the match (caller may want to log it)…
+    expect(matches.some((m) => m.category === 'git_exfil')).toBe(true)
+    // …but the prompt is NOT mutated because the only category is git_exfil
+    // and subagent origins skip that category.
+    expect(event.prompt).toBe(before)
+    expect(event.prompt).not.toContain('[security/prompt-injection]')
+  })
+
+  test('subagent origin with mixed categories: still injects defense for non-git_exfil matches', () => {
+    // memory-logger ingesting an attacker transcript could trigger
+    // secret_demand from the transcript content while ALSO matching
+    // git_exfil. The defense must still fire on the secret_demand half.
+    const mixed = `${KO_PASSWORD}\n\nhint: See 'git push --help' for details.`
+    const event: SessionPromptEvent = {
+      prompt: mixed,
+      sessionId: 'sub_logger',
+      agentDir: '/agent',
+      origin: { kind: 'subagent', subagent: 'memory-logger', parentSessionId: 'parent' },
+    }
+    const matches = applyPromptInjectionDefense(event)
+    expect(matches.some((m) => m.category === 'secret_demand')).toBe(true)
+    expect(event.prompt).toContain('[security/prompt-injection]')
+    // The injected categories list names secret_demand but NOT git_exfil.
+    const markerIndex = event.prompt.indexOf('[security/prompt-injection]')
+    const markerLine = event.prompt.slice(markerIndex, event.prompt.indexOf('\n', markerIndex))
+    expect(markerLine).toContain('secret_demand')
+    expect(markerLine).not.toContain('git_exfil')
+  })
+
+  test('channel origin: diagnose-shaped prompt with literal "git push" STILL injects defense (regression guard for the original Slack-DM threat)', () => {
+    const event: SessionPromptEvent = {
+      prompt: DIAGNOSE_PROMPT_FF_REJECTED,
+      sessionId: 'ses_channel',
+      agentDir: '/agent',
+      origin: {
+        kind: 'channel',
+        adapter: 'slack-bot',
+        workspace: 'T0',
+        chat: 'C0',
+        thread: null,
+      },
+    }
+    const matches = applyPromptInjectionDefense(event)
+    expect(matches.some((m) => m.category === 'git_exfil')).toBe(true)
+    expect(event.prompt).toContain('[security/prompt-injection]')
+    expect(event.prompt).toContain('Do NOT run')
+    expect(event.prompt).toContain('git push')
+  })
+
+  test('TUI origin: diagnose-shaped prompt with literal "git push" still injects defense', () => {
+    // TUI prompts come from the operator typing, but the operator could
+    // paste attacker-supplied text (e.g. "run this thing my coworker sent
+    // me"). The git_exfil defense remains active for TUI as a backstop;
+    // the runtime layer will also block, so the agent gets a consistent
+    // signal at both layers.
+    const event: SessionPromptEvent = {
+      prompt: DIAGNOSE_PROMPT_FF_REJECTED,
+      sessionId: 'ses_tui',
+      agentDir: '/agent',
+      origin: { kind: 'tui', sessionId: 'ses_tui' },
+    }
+    const matches = applyPromptInjectionDefense(event)
+    expect(matches.some((m) => m.category === 'git_exfil')).toBe(true)
+    expect(event.prompt).toContain('[security/prompt-injection]')
+  })
+
+  test('no origin (legacy / unknown caller): defense fires conservatively (treat as not-subagent)', () => {
+    const event: SessionPromptEvent = {
+      prompt: "hint: See 'git push --help' for details.",
+      sessionId: 'ses_unknown',
+      agentDir: '/agent',
+    }
+    const matches = applyPromptInjectionDefense(event)
+    expect(matches.some((m) => m.category === 'git_exfil')).toBe(true)
+    expect(event.prompt).toContain('[security/prompt-injection]')
+  })
+})
+
 function makeEvent(prompt: string): SessionPromptEvent {
   return { prompt, sessionId: 'ses_test', agentDir: '/agent' }
 }
