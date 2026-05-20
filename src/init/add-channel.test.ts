@@ -217,6 +217,46 @@ describe('runAddChannel', () => {
     expect(after.idleMs).toBe(60_000)
   })
 
+  test('writes roles.member.match: ["*"] when adding a chat adapter to a freshly scaffolded folder', async () => {
+    await runAddChannel({ cwd: root, channel: 'slack-bot', slackBotToken: 'xoxb', slackAppToken: 'xapp' })
+
+    const cfg = (await readConfig()) as { roles?: { member?: { match?: string[] } } }
+    expect(cfg.roles?.member?.match).toEqual(['*'])
+  })
+
+  test('does not duplicate the "*" entry when a second chat adapter is added later', async () => {
+    await runAddChannel({ cwd: root, channel: 'slack-bot', slackBotToken: 'xoxb', slackAppToken: 'xapp' })
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-x' })
+
+    const cfg = (await readConfig()) as { roles?: { member?: { match?: string[] } } }
+    expect(cfg.roles?.member?.match).toEqual(['*'])
+  })
+
+  test('preserves existing roles.member.match entries (set-union semantics, no clobber)', async () => {
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
+    cfg.roles = { member: { match: ['slack:T0123 author:U_EXISTING'] } }
+    await writeFile(join(root, 'typeclaw.json'), `${JSON.stringify(cfg, null, 2)}\n`)
+
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-x' })
+
+    const after = (await readConfig()) as { roles?: { member?: { match?: string[] } } }
+    expect(after.roles?.member?.match).toEqual(['slack:T0123 author:U_EXISTING', '*'])
+  })
+
+  test('preserves existing roles.owner block (does not overwrite when adding a channel)', async () => {
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
+    cfg.roles = { owner: { match: ['slack:@dm author:U_ME'] } }
+    await writeFile(join(root, 'typeclaw.json'), `${JSON.stringify(cfg, null, 2)}\n`)
+
+    await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-x' })
+
+    const after = (await readConfig()) as {
+      roles?: { owner?: { match?: string[] }; member?: { match?: string[] } }
+    }
+    expect(after.roles?.owner?.match).toEqual(['slack:@dm author:U_ME'])
+    expect(after.roles?.member?.match).toEqual(['*'])
+  })
+
   test('rejects re-adding an already-configured channel', async () => {
     await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-first' })
 
