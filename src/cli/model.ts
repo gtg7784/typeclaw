@@ -157,15 +157,23 @@ const listSub = defineCommand({
     }
 
     const profileWidth = Math.max(7, ...entries.map((e) => e.profile.length))
-    const refWidth = Math.max(3, ...entries.map((e) => e.ref.length))
+    const refDisplay = (e: (typeof entries)[number]): string =>
+      e.refs.length > 1 ? `${e.ref} ${c.dim(`(+${e.refs.length - 1} fallback)`)}` : e.ref
+    const refWidth = Math.max(3, ...entries.map((e) => e.ref.length + (e.refs.length > 1 ? 14 : 0)))
 
     const header = `${'PROFILE'.padEnd(profileWidth)}  ${'REF'.padEnd(refWidth)}  PROVIDER  STATUS`
     console.log(c.dim(header))
     for (const e of entries) {
       const star = e.isDefault ? c.cyan('*') : ' '
       const status = e.credentialStatus === 'available' ? c.green('ok') : c.yellow('missing-credentials')
-      const line = `${star}${e.profile.padEnd(profileWidth - 1)}  ${e.ref.padEnd(refWidth)}  ${e.providerId.padEnd(12)}  ${status}`
+      const line = `${star}${e.profile.padEnd(profileWidth - 1)}  ${refDisplay(e).padEnd(refWidth)}  ${e.providerId.padEnd(12)}  ${status}`
       console.log(line)
+      if (e.refs.length > 1) {
+        for (let i = 1; i < e.refs.length; i++) {
+          const fb = e.refs[i]!
+          console.log(`${' '.padEnd(profileWidth + 2)}↳ ${c.dim(fb)}`)
+        }
+      }
     }
   },
 })

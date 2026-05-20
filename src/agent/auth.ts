@@ -83,8 +83,10 @@ export function getAuthFor(providerId: KnownProviderId): Auth {
 
 // Back-compat shim for callers that still want the `default` profile's auth
 // (the main session path). Equivalent to `getAuthFor(provider-of-default)`.
+// Uses the head of the fallback chain; auth for the rest of the chain is
+// resolved lazily when fallback actually fires.
 export function getAuth(): Auth {
-  const defaultRef = getConfig().models.default
+  const defaultRef = getConfig().models.default[0]!
   return getAuthFor(providerForModelRef(defaultRef))
 }
 
@@ -98,7 +100,7 @@ function hasAnyCredentialInEnv(apiKeyEnv: string | null): boolean {
 
 function missingCredentialMessage(providerId: KnownProviderId): string {
   const provider = KNOWN_PROVIDERS[providerId]
-  const defaultRef = getConfig().models.default
+  const defaultRef = getConfig().models.default[0]!
   const defaultProviderId = providerForModelRef(defaultRef)
   // For the `default` profile, name the model in the error message (matches
   // pre-multi-model behavior). For any other profile, the user is mixing

@@ -25,52 +25,79 @@ const VALID_MODEL = 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'
 const VALID_MODEL_2 = 'openai/gpt-5.4-nano'
 
 describe('configSchema models field', () => {
-  test('defaults to { default: <DEFAULT_MODEL_REF> } when omitted', () => {
+  test('defaults to { default: [<DEFAULT_MODEL_REF>] } when omitted', () => {
     const parsed = configSchema.parse({})
-    expect(parsed.models).toEqual({ default: 'openai/gpt-5.4-nano' })
+    expect(parsed.models).toEqual({ default: ['openai/gpt-5.4-nano'] })
   })
 
-  test('accepts a single-key models map (just default)', () => {
+  test('normalises a single-ref string input to a one-element array', () => {
     const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
-    expect(parsed.models).toEqual({ default: VALID_MODEL })
+    expect(parsed.models).toEqual({ default: [VALID_MODEL] })
   })
 
-  test('accepts multiple profiles', () => {
+  test('accepts multiple profiles in either shape and normalises both', () => {
     const parsed = configSchema.parse({
-      models: { default: VALID_MODEL, fast: VALID_MODEL_2, deep: VALID_MODEL, vision: VALID_MODEL_2 },
+      models: { default: VALID_MODEL, fast: [VALID_MODEL_2], deep: VALID_MODEL, vision: VALID_MODEL_2 },
     })
-    expect(parsed.models.default).toBe(VALID_MODEL)
-    expect(parsed.models.fast).toBe(VALID_MODEL_2)
-    expect(parsed.models.deep).toBe(VALID_MODEL)
-    expect(parsed.models.vision).toBe(VALID_MODEL_2)
+    expect(parsed.models.default).toEqual([VALID_MODEL])
+    expect(parsed.models.fast).toEqual([VALID_MODEL_2])
+    expect(parsed.models.deep).toEqual([VALID_MODEL])
+    expect(parsed.models.vision).toEqual([VALID_MODEL_2])
+  })
+
+  test('accepts a fallback chain as an array', () => {
+    const parsed = configSchema.parse({
+      models: { default: [VALID_MODEL, VALID_MODEL_2] },
+    })
+    expect(parsed.models.default).toEqual([VALID_MODEL, VALID_MODEL_2])
   })
 
   test('accepts user-defined profile names alongside well-known ones', () => {
     const parsed = configSchema.parse({
       models: { default: VALID_MODEL, 'cheap-batch': VALID_MODEL_2 },
     })
-    expect(parsed.models['cheap-batch']).toBe(VALID_MODEL_2)
+    expect(parsed.models['cheap-batch']).toEqual([VALID_MODEL_2])
   })
 
   test('rejects models map without default', () => {
     expect(() => configSchema.parse({ models: { fast: VALID_MODEL } })).toThrow()
   })
 
-  test('rejects unknown model refs', () => {
+  test('rejects unknown model refs (string shape)', () => {
     expect(() => configSchema.parse({ models: { default: 'not-a-real-model' } })).toThrow()
+  })
+
+  test('rejects unknown model refs inside a chain', () => {
+    expect(() => configSchema.parse({ models: { default: [VALID_MODEL, 'not-a-real-model'] } })).toThrow()
+  })
+
+  test('rejects empty arrays', () => {
+    expect(() => configSchema.parse({ models: { default: [] } })).toThrow()
   })
 
   test('rejects empty profile names', () => {
     expect(() => configSchema.parse({ models: { '': VALID_MODEL } })).toThrow()
   })
+
+  test('rejects exact duplicate refs in a chain (config typo)', () => {
+    expect(() => configSchema.parse({ models: { default: [VALID_MODEL, VALID_MODEL] } })).toThrow(/duplicate/i)
+  })
+
+  test('accepts different models from the same provider in a chain', () => {
+    const parsed = configSchema.parse({
+      models: { default: ['openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'] },
+    })
+    expect(parsed.models.default).toEqual(['openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'])
+  })
 })
 
 describe('resolveProfile', () => {
-  const models: Models = { default: VALID_MODEL, fast: VALID_MODEL_2 }
+  const models: Models = { default: [VALID_MODEL], fast: [VALID_MODEL_2] }
 
   test('returns the requested profile when present', () => {
     const result = resolveProfile(models, 'fast')
     expect(result.ref).toBe(VALID_MODEL_2)
+    expect(result.refs).toEqual([VALID_MODEL_2])
     expect(result.profile).toBe('fast')
     expect(result.fellBackToDefault).toBe(false)
   })
@@ -78,6 +105,7 @@ describe('resolveProfile', () => {
   test('returns default when name is undefined', () => {
     const result = resolveProfile(models, undefined)
     expect(result.ref).toBe(VALID_MODEL)
+    expect(result.refs).toEqual([VALID_MODEL])
     expect(result.profile).toBe('default')
     expect(result.fellBackToDefault).toBe(false)
   })
@@ -85,6 +113,7 @@ describe('resolveProfile', () => {
   test('returns default when name is "default"', () => {
     const result = resolveProfile(models, 'default')
     expect(result.ref).toBe(VALID_MODEL)
+    expect(result.refs).toEqual([VALID_MODEL])
     expect(result.profile).toBe('default')
     expect(result.fellBackToDefault).toBe(false)
   })
@@ -92,7 +121,22 @@ describe('resolveProfile', () => {
   test('falls back to default when requested profile is missing, flagging the fallback', () => {
     const result = resolveProfile(models, 'deep')
     expect(result.ref).toBe(VALID_MODEL)
+    expect(result.refs).toEqual([VALID_MODEL])
     expect(result.profile).toBe('default')
+    expect(result.fellBackToDefault).toBe(true)
+  })
+
+  test('exposes the full chain when the profile is a multi-ref fallback', () => {
+    const chain: Models = { default: [VALID_MODEL, VALID_MODEL_2] }
+    const result = resolveProfile(chain, 'default')
+    expect(result.ref).toBe(VALID_MODEL)
+    expect(result.refs).toEqual([VALID_MODEL, VALID_MODEL_2])
+  })
+
+  test('inherits the default chain when falling back, preserving every fallback ref', () => {
+    const chain: Models = { default: [VALID_MODEL, VALID_MODEL_2] }
+    const result = resolveProfile(chain, 'deep')
+    expect(result.refs).toEqual([VALID_MODEL, VALID_MODEL_2])
     expect(result.fellBackToDefault).toBe(true)
   })
 })
@@ -595,7 +639,10 @@ describe('migrateLegacyConfigShape', () => {
       await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ model: VALID_MODEL, port: 9001 }))
 
       const cfg = loadConfigSync(cwd)
-      expect(cfg.models).toEqual({ default: VALID_MODEL })
+      // Parsed value is normalised to KnownModelRef[]; on-disk shape remains
+      // the user-friendly single string the migration writes (the schema
+      // accepts both shapes transparently).
+      expect(cfg.models).toEqual({ default: [VALID_MODEL] })
 
       const onDisk = JSON.parse(await Bun.file(join(cwd, 'typeclaw.json')).text())
       expect(onDisk).not.toHaveProperty('model')

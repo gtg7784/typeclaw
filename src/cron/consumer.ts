@@ -1,6 +1,8 @@
 import type { AgentSession } from '@/agent'
-import { subscribeProviderErrors } from '@/agent/provider-error'
+import { promptWithFallback, resolveFallbackChain } from '@/agent/model-fallback'
 import type { SessionOrigin } from '@/agent/session-origin'
+import { getConfig } from '@/config'
+import type { KnownModelRef } from '@/config/providers'
 import type { HookBus } from '@/plugin'
 import type { Stream, Unsubscribe } from '@/stream'
 
@@ -41,7 +43,12 @@ export type CronConsumerLogger = {
 export type CreateCronConsumerOptions = {
   stream: Stream
   cwd: string
-  createSessionForCron: (job: PromptJob) => Promise<CronSession>
+  // The optional `refOverride` argument is consumed by the fallback loop: the
+  // consumer calls this factory once per ref in the profile's chain, pinning
+  // each attempt to the specified model. Factories that don't honor the
+  // override silently lose fallback semantics, so production wiring threads
+  // it through to `createSession({ refOverride })`.
+  createSessionForCron: (job: PromptJob, refOverride?: KnownModelRef) => Promise<CronSession>
   // Builds the `CronHandlerContext` for the job and awaits its `handler`.
   // Wired by `src/run/index.ts` to reuse `runPromptForCommand` /
   // `runExecForCommand` from the command runner so plugin cron handlers and
@@ -121,7 +128,7 @@ export function createCronConsumer({
 
 async function runPrompt(
   job: PromptJob,
-  createSessionForCron: (job: PromptJob) => Promise<CronSession>,
+  createSessionForCron: (job: PromptJob, refOverride?: KnownModelRef) => Promise<CronSession>,
   stream: Stream,
   logger: CronConsumerLogger,
 ): Promise<void> {
@@ -148,50 +155,129 @@ async function runPrompt(
     })
     return
   }
-  const session = await createSessionForCron(job)
-  const unsubProviderErrors =
-    session.session !== undefined
-      ? subscribeProviderErrors(session.session, (err) => {
-          logger.error(`[cron] ${job.id}: LLM call failed: ${err.message}`)
+  // Resolve the model fallback chain for the cron profile (cron jobs run
+  // under the `default` profile today). Single-ref configs produce a length-1
+  // chain; multi-ref configs (e.g. `"default": ["openai/...", "fireworks/..."]`)
+  // drive the retry-on-failure loop inside `runPromptOnce`.
+  const refs = resolveFallbackChain(getConfig().models, undefined)
+  await runPromptOnce(job, refs, createSessionForCron, logger)
+}
+
+async function runPromptOnce(
+  job: PromptJob,
+  refs: KnownModelRef[],
+  createSessionForCron: (job: PromptJob, refOverride?: KnownModelRef) => Promise<CronSession>,
+  logger: CronConsumerLogger,
+): Promise<void> {
+  // Per-attempt lifecycle: every session we create gets full
+  // turn-start → turn-end → session-end → dispose bracketing, regardless of
+  // whether the helper chose it as the final session or disposed it as a
+  // failed earlier attempt. Without per-attempt session.end, plugin state
+  // keyed by sessionId (security plugin's remote-taint map, memory plugin's
+  // debounce timer) would orphan for every failed attempt. We track the
+  // last session separately so we can fire session.idle exactly once on
+  // success (matching pre-fallback cron behavior — see the pre-fallback
+  // try/finally structure: idle inside the prompt try-block, end in the
+  // outer finally).
+  let lastSession: CronSession | null = null
+  const result = await promptWithFallback({
+    refs,
+    text: job.prompt,
+    createSessionForRef: async (ref) => {
+      const created = await createSessionForCron(job, ref)
+      lastSession = created
+      const turnEvent =
+        created.hooks && created.sessionId !== undefined && created.agentDir !== undefined
+          ? {
+              sessionId: created.sessionId,
+              agentDir: created.agentDir,
+              ...(created.origin !== undefined ? { origin: created.origin } : {}),
+            }
+          : undefined
+      if (created.hooks && turnEvent !== undefined) {
+        await created.hooks.runSessionTurnStart(turnEvent)
+      }
+      // Bridge the CronSession wrapper into the AgentSession surface the
+      // fallback helper expects:
+      //   prompt    → CronSession.prompt (wrapper that calls AgentSession.prompt
+      //               in production, or a hand-rolled test fake)
+      //   subscribe → CronSession.session.subscribe when an underlying agent
+      //               session is supplied, else a no-op (soft-error detection
+      //               degrades to "off" in that mode; only hard throws drive
+      //               fallback). Test fakes that omit `.session` lose
+      //               soft-error fallback — production code always provides it.
+      // .bind(created.session) is load-bearing: AgentSession.subscribe is a
+      // regular method that reads `this._eventListeners`. Destructuring drops
+      // the receiver.
+      const sessionForHelper: AgentSession = {
+        prompt: (text: string) => created.prompt(text),
+        subscribe: created.session?.subscribe.bind(created.session) ?? (() => () => {}),
+      } as unknown as AgentSession
+      return {
+        session: sessionForHelper,
+        // Per-attempt teardown. Fires turn.end and session.end for every
+        // session created (success or failure), then disposes the underlying
+        // resources. Hooks that throw are logged but don't prevent disposal.
+        dispose: async () => {
+          if (created.hooks && turnEvent !== undefined) {
+            try {
+              await created.hooks.runSessionTurnEnd(turnEvent)
+            } catch (e) {
+              logger.warn(`[cron] ${job.id}: turn-end hook threw: ${describe(e)}`)
+            }
+          }
+          if (created.hooks && created.sessionId !== undefined) {
+            try {
+              await created.hooks.runSessionEnd({
+                sessionId: created.sessionId,
+                ...(created.origin !== undefined ? { origin: created.origin } : {}),
+              })
+            } catch (e) {
+              logger.warn(`[cron] ${job.id}: session-end hook threw: ${describe(e)}`)
+            }
+          }
+          created.dispose?.()
+        },
+      }
+    },
+    onAttemptFailed: (attempt) => {
+      logger.warn(
+        `[cron] ${job.id}: ${attempt.outcome} failure on ${attempt.ref}: ${attempt.errorMessage ?? 'unknown'}; falling back`,
+      )
+    },
+  })
+
+  if (!result.success) {
+    logger.error(
+      `[cron] ${job.id}: all ${result.attempts.length} model(s) failed; last error: ${result.lastError?.message ?? 'unknown'}`,
+    )
+  }
+
+  // session.idle fires once, only on success, and only against the session
+  // that handled the turn. Then dispose the successful session (the helper
+  // returns the session+dispose so we can run post-prompt hooks against a
+  // live session before tearing it down). Failed-chain disposal is already
+  // handled by the helper's per-attempt dispose calls.
+  if (result.success && lastSession !== null) {
+    const finalSession: CronSession = lastSession
+    if (finalSession.hooks && finalSession.sessionId !== undefined) {
+      try {
+        await finalSession.hooks.runSessionIdle({
+          sessionId: finalSession.sessionId,
+          parentTranscriptPath: finalSession.getTranscriptPath?.(),
+          idleMs: 0,
+          ...(finalSession.origin !== undefined ? { origin: finalSession.origin } : {}),
         })
-      : null
-  const turnEvent =
-    session.hooks && session.sessionId !== undefined && session.agentDir !== undefined
-      ? {
-          sessionId: session.sessionId,
-          agentDir: session.agentDir,
-          ...(session.origin !== undefined ? { origin: session.origin } : {}),
-        }
-      : undefined
-  try {
-    if (session.hooks && turnEvent !== undefined) {
-      await session.hooks.runSessionTurnStart(turnEvent)
-    }
-    try {
-      await session.prompt(job.prompt)
-    } finally {
-      if (session.hooks && turnEvent !== undefined) {
-        await session.hooks.runSessionTurnEnd(turnEvent)
+      } catch (e) {
+        logger.warn(`[cron] ${job.id}: session-idle hook threw: ${describe(e)}`)
       }
     }
-    if (session.hooks && session.sessionId !== undefined) {
-      await session.hooks.runSessionIdle({
-        sessionId: session.sessionId,
-        parentTranscriptPath: session.getTranscriptPath?.(),
-        idleMs: 0,
-        ...(session.origin !== undefined ? { origin: session.origin } : {}),
-      })
-    }
-  } finally {
-    unsubProviderErrors?.()
-    if (session.hooks && session.sessionId !== undefined) {
-      await session.hooks.runSessionEnd({
-        sessionId: session.sessionId,
-        ...(session.origin !== undefined ? { origin: session.origin } : {}),
-      })
-    }
-    session.dispose?.()
+    await result.dispose()
   }
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
 }
 
 async function runExec(job: ExecJob, cwd: string): Promise<void> {

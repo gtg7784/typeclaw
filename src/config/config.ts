@@ -278,32 +278,50 @@ const tunnelsArraySchema = z
     }
   })
 
-// `models` is a map from profile name to a single curated model ref. The
+// `models` maps a profile name to one or more curated model refs. The
 // `default` profile is mandatory; every other profile is optional and falls
 // back to `default` at resolution time (see `resolveProfile`).
 //
+// Each value is either a single `KnownModelRef` or a non-empty array of refs
+// forming a fallback chain: when a turn against the first ref fails (hard
+// throw or a soft provider error), the runtime disposes the failed session
+// and replays the same prompt against the next ref. Schema accepts both
+// shapes for ergonomics; the parsed value is always normalised to a
+// non-empty array so downstream consumers read a uniform `KnownModelRef[]`.
+//
 // Profile names are open strings; the runtime recognizes a handful of
 // well-known names by convention (`default`, `fast`, `deep`, `vision`) but
-// any string is valid. Subagents may declare a static profile preference;
-// callers may override per-spawn. Unknown profile names resolve to `default`
-// with a one-time warning at session construction.
+// any string is valid. Unknown profile names resolve to `default` with a
+// one-time warning at session construction.
 //
 // The pre-multi-model schema had a single `model: KnownModelRef` at the top
 // level. `migrateLegacyConfigShape` rewrites that to `models: { default: ... }`
 // on first load (and writes the result back to disk + commits via
 // `persistMigratedConfig`), so every downstream consumer sees the new shape.
+const modelRefOrChainSchema = z
+  .union([
+    z.enum(knownModelRefs),
+    z
+      .array(z.enum(knownModelRefs))
+      .min(1)
+      // Reject exact duplicates in a chain — retrying the same ref after the
+      // same class of failure is almost certainly a config typo, and silently
+      // deduping would mask user intent. Different models from the same
+      // provider (e.g. `["openai/gpt-5.4-nano", "openai/gpt-5.4-mini"]`) are
+      // still valid because they hit distinct upstream endpoints.
+      .refine((arr) => new Set(arr).size === arr.length, {
+        message: 'models chain must not contain duplicate refs',
+      }),
+  ])
+  .transform((value) => (Array.isArray(value) ? value : [value]))
 export const modelsSchema = z
-  .record(z.string().min(1), z.enum(knownModelRefs))
+  .record(z.string().min(1), modelRefOrChainSchema)
   .refine((m) => 'default' in m, { message: 'models.default is required' })
 
-// Zod's `z.record(..., refine)` doesn't refine the inferred type — the inferred
-// shape is `Record<string, KnownModelRef>` where every access is `T | undefined`.
-// The runtime guarantee (the `refine` above) is that `default` is present, so
-// we narrow the type here. Every consumer (auth.ts, agent/index.ts,
-// resolveProfile) reads `models.default` on the hot path; without this
-// narrowing they all have to assert or `?? throw`, which is noise around an
-// invariant the schema already enforces.
-export type Models = Record<string, KnownModelRef> & { default: KnownModelRef }
+// Zod's `z.record(..., refine)` doesn't refine the inferred type. The
+// `default` key is schema-enforced, so we narrow it here to spare every
+// consumer the `T | undefined` assertion noise.
+export type Models = Record<string, KnownModelRef[]> & { default: KnownModelRef[] }
 
 export const configSchema = z
   .object({
@@ -311,8 +329,10 @@ export const configSchema = z
     port: z.number().int().min(1).max(65535).default(DEFAULT_PORT),
     // `default(() => ...)` ensures every parsed config has at least
     // `models.default`. Direct `.default({ default: ... })` would short-circuit
-    // the refinement, so we lean on the lazy thunk form.
-    models: modelsSchema.default(() => ({ default: DEFAULT_MODEL_REF })) as unknown as z.ZodType<Models>,
+    // the refinement, so we lean on the lazy thunk form. The default value is
+    // shaped to match the post-transform output (always `KnownModelRef[]`),
+    // not the user-facing input shape.
+    models: modelsSchema.default(() => ({ default: [DEFAULT_MODEL_REF] })) as unknown as z.ZodType<Models>,
     // Defaults to `[]` so the field can be omitted from `typeclaw.json` (no
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.
@@ -345,26 +365,28 @@ export function resolveModel(ref: KnownModelRef): Model<'openai-completions'> | 
   return KNOWN_PROVIDERS[providerId].models[modelId as never]
 }
 
-// Resolves a profile name (e.g. `fast`, `deep`, `vision`) to a concrete model
-// ref. Unknown profiles fall back to `default` so callers can pass through
+// Resolves a profile name (e.g. `fast`, `deep`, `vision`) to its fallback
+// chain. Unknown profiles fall back to `default` so callers can pass through
 // arbitrary subagent-declared or user-overridden strings without crashing.
-// Returns the resolved ref plus whether it came from the requested profile or
-// from the `default` fallback, so the caller can warn once per session
-// instead of every prompt.
+// `refs` is non-empty (the schema guarantees `default` exists and every value
+// is at least one ref). `ref` is the head of the chain — the model the
+// session is created with first. Callers that don't implement fallback can
+// keep reading `ref`; fallback-aware callers iterate `refs`.
 export type ResolvedProfile = {
   ref: KnownModelRef
+  refs: KnownModelRef[]
   profile: string
   fellBackToDefault: boolean
 }
 
 export function resolveProfile(models: Models, name: string | undefined): ResolvedProfile {
   const requested = name ?? 'default'
-  const ref = models[requested]
-  if (ref !== undefined) {
-    return { ref, profile: requested, fellBackToDefault: false }
+  const refs = models[requested]
+  if (refs !== undefined) {
+    return { ref: refs[0]!, refs, profile: requested, fellBackToDefault: false }
   }
   const fallback = models.default
-  return { ref: fallback, profile: 'default', fellBackToDefault: true }
+  return { ref: fallback[0]!, refs: fallback, profile: 'default', fellBackToDefault: true }
 }
 
 // Resolves a mount's `path` field to an absolute host path, mirroring shell
