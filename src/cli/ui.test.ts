@@ -417,4 +417,32 @@ describe('printSlackAppManifestSetup', () => {
 
     expect(SLACK_APP_MANIFEST.settings.socket_mode_enabled).toBe(true)
   })
+
+  test('manifest grants write scopes for replies, attachments, pins, and reactions', () => {
+    const scopes = SLACK_APP_MANIFEST.oauth_config.scopes.bot
+    expect(scopes).toContain('channels:join')
+    expect(scopes).toContain('files:write')
+    expect(scopes).toContain('groups:write')
+    expect(scopes).toContain('im:write')
+    expect(scopes).toContain('mpim:write')
+    expect(scopes).toContain('pins:read')
+    expect(scopes).toContain('pins:write')
+    expect(scopes).toContain('reactions:read')
+    expect(scopes).toContain('reactions:write')
+    expect(scopes).toContain('emoji:read')
+  })
+
+  test('manifest scope list is alphabetically sorted so diffs stay stable', () => {
+    const scopes: readonly string[] = SLACK_APP_MANIFEST.oauth_config.scopes.bot
+    const sorted = [...scopes].sort()
+    expect([...scopes]).toEqual(sorted)
+  })
+
+  test('app_home enables the Messages tab and hides the unused Home tab', () => {
+    expect(SLACK_APP_MANIFEST.features.app_home).toEqual({
+      home_tab_enabled: false,
+      messages_tab_enabled: true,
+      messages_tab_read_only_enabled: false,
+    })
+  })
 })
