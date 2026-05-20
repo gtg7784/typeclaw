@@ -17,8 +17,16 @@ const CONFIG_FILE = 'typeclaw.json'
 
 export type ModelProfileEntry = {
   profile: string
+  // Head of the fallback chain. Kept under the legacy `ref` name so callers
+  // that only care about the active model (the common case) don't need to
+  // dereference `refs[0]`. The chain itself is exposed as `refs`.
   ref: KnownModelRef
+  refs: KnownModelRef[]
   providerId: KnownProviderId
+  // Credential status for every provider referenced by the chain. The chain's
+  // overall status is `available` only when every entry resolves; otherwise
+  // it is `missing-credentials`, and `missingProviders` names which.
+  missingProviders: KnownProviderId[]
   isDefault: boolean
   credentialStatus: 'available' | 'missing-credentials'
 }
@@ -31,12 +39,15 @@ export function listModelProfiles(cwd: string, env: NodeJS.ProcessEnv = process.
   for (const [profile, refs] of Object.entries(models)) {
     const headRef = refs[0]!
     const providerId = providerForModelRef(headRef)
+    const missingProviders = uniqueProviders(refs).filter((p) => !hasUsableCredential(cwd, p, env))
     out.push({
       profile,
       ref: headRef,
+      refs,
       providerId,
+      missingProviders,
       isDefault: profile === 'default',
-      credentialStatus: hasUsableCredential(cwd, providerId, env) ? 'available' : 'missing-credentials',
+      credentialStatus: missingProviders.length === 0 ? 'available' : 'missing-credentials',
     })
   }
   // `default` always first; remaining profiles alphabetical so output is stable.
@@ -45,6 +56,19 @@ export function listModelProfiles(cwd: string, env: NodeJS.ProcessEnv = process.
     if (b.isDefault) return 1
     return a.profile.localeCompare(b.profile)
   })
+  return out
+}
+
+function uniqueProviders(refs: ReadonlyArray<KnownModelRef>): KnownProviderId[] {
+  const seen = new Set<KnownProviderId>()
+  const out: KnownProviderId[] = []
+  for (const r of refs) {
+    const p = providerForModelRef(r)
+    if (!seen.has(p)) {
+      seen.add(p)
+      out.push(p)
+    }
+  }
   return out
 }
 
@@ -166,7 +190,11 @@ function writeProfile(cwd: string, profile: string, ref: KnownModelRef, message:
   return writeModels(cwd, next, message)
 }
 
-function writeModels(cwd: string, models: Record<string, string | string[]>, commitMessage: string): ModelMutationResult {
+function writeModels(
+  cwd: string,
+  models: Record<string, string | string[]>,
+  commitMessage: string,
+): ModelMutationResult {
   const path = join(cwd, CONFIG_FILE)
   let parsed: Record<string, unknown>
   try {
@@ -208,6 +236,11 @@ function writeModels(cwd: string, models: Record<string, string | string[]>, com
   return { ok: true }
 }
 
+// Returns the raw `models` block from disk in its on-disk shape: each value
+// is `string | string[]` (the user-facing schema). Writers preserve whichever
+// shape was already present for profiles they don't touch — converting a
+// hand-authored fallback chain back to a single string would silently drop
+// the fallback.
 function readModelsRaw(cwd: string): Record<string, string | string[]> | null {
   try {
     const raw = readFileSync(join(cwd, CONFIG_FILE), 'utf8')

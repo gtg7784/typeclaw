@@ -210,6 +210,45 @@ describe('listModelProfiles', () => {
     const vision = entries.find((e) => e.profile === 'vision')
     expect(vision?.credentialStatus).toBe('available')
   })
+
+  test('exposes fallback chains via refs and reports missing providers across the chain', async () => {
+    const { writeFile } = await import('node:fs/promises')
+    // fireworks is configured via the test setup's secrets.json; openai is
+    // not, so a chain that includes both should be flagged missing-credentials
+    // with `openai` named in `missingProviders`.
+    await writeFile(
+      join(root, 'typeclaw.json'),
+      JSON.stringify({
+        models: {
+          default: ['fireworks/accounts/fireworks/routers/kimi-k2p6-turbo', 'openai/gpt-5.4-nano'],
+        },
+      }),
+    )
+    const env: NodeJS.ProcessEnv = {}
+    const entries = listModelProfiles(root, env)
+    const dflt = entries.find((e) => e.profile === 'default')
+    expect(dflt?.ref).toBe('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')
+    expect(dflt?.refs).toEqual(['fireworks/accounts/fireworks/routers/kimi-k2p6-turbo', 'openai/gpt-5.4-nano'])
+    expect(dflt?.credentialStatus).toBe('missing-credentials')
+    expect(dflt?.missingProviders).toEqual(['openai'])
+  })
+
+  test('reports available when every provider in the chain has credentials', async () => {
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(
+      join(root, 'typeclaw.json'),
+      JSON.stringify({
+        models: {
+          default: ['fireworks/accounts/fireworks/routers/kimi-k2p6-turbo', 'openai/gpt-5.4-nano'],
+        },
+      }),
+    )
+    const env: NodeJS.ProcessEnv = { OPENAI_API_KEY: 'sk-x' }
+    const entries = listModelProfiles(root, env)
+    const dflt = entries.find((e) => e.profile === 'default')
+    expect(dflt?.credentialStatus).toBe('available')
+    expect(dflt?.missingProviders).toEqual([])
+  })
 })
 
 describe('auto-commit on success', () => {
