@@ -1,6 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
-import { c, done, errorLine, link, renderStartSuccess, spinner, successLine, type StartLikeResult } from './ui'
+import {
+  c,
+  done,
+  errorLine,
+  link,
+  printSlackAppManifestSetup,
+  renderStartSuccess,
+  SLACK_APP_MANIFEST,
+  spinner,
+  successLine,
+  type StartLikeResult,
+} from './ui'
 
 const ENV_KEYS = ['NO_COLOR', 'FORCE_COLOR'] as const
 
@@ -335,5 +346,75 @@ describe('spinner', () => {
       s.start('working...')
       s.error('boom')
     }).not.toThrow()
+  })
+})
+
+describe('printSlackAppManifestSetup', () => {
+  const ANSI = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g')
+
+  function captureStdout<T>(fn: () => T): { result: T; output: string } {
+    const original = process.stdout.write.bind(process.stdout)
+    let buf = ''
+    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+      buf += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
+      return true
+    }) as typeof process.stdout.write
+    try {
+      const result = fn()
+      return { result, output: buf.replace(ANSI, '') }
+    } finally {
+      process.stdout.write = original
+    }
+  }
+
+  test('emits the JSON manifest flush-left so it is copy-pasteable', () => {
+    const { output } = captureStdout(() => withNoColor(() => printSlackAppManifestSetup()))
+
+    const jsonStart = output.indexOf('\n{\n')
+    const jsonEnd = output.indexOf('\n}\n', jsonStart)
+    expect(jsonStart).toBeGreaterThanOrEqual(0)
+    expect(jsonEnd).toBeGreaterThan(jsonStart)
+
+    const jsonBlock = output.slice(jsonStart + 1, jsonEnd + 2)
+    for (const line of jsonBlock.split('\n')) {
+      if (line === '') continue
+      expect(line.startsWith('│')).toBe(false)
+      expect(line.startsWith('|')).toBe(false)
+    }
+
+    expect(() => JSON.parse(jsonBlock) as unknown).not.toThrow()
+    expect(JSON.parse(jsonBlock)).toEqual(SLACK_APP_MANIFEST)
+  })
+
+  test('keeps the prose steps inside boxed notes around the JSON block', () => {
+    const { output } = captureStdout(() => withNoColor(() => printSlackAppManifestSetup()))
+
+    expect(output).toContain('Get a Slack bot')
+    expect(output).toContain('Finish Slack setup')
+    expect(output).toContain('https://api.slack.com/apps')
+    expect(output).toContain('/invite @TypeClaw')
+
+    const introIdx = output.indexOf('Get a Slack bot')
+    const jsonIdx = output.indexOf('\n{\n')
+    const followUpIdx = output.indexOf('Finish Slack setup')
+    expect(introIdx).toBeLessThan(jsonIdx)
+    expect(jsonIdx).toBeLessThan(followUpIdx)
+  })
+
+  test('manifest declares the scopes Socket Mode + Events + Web API need', () => {
+    const scopes = SLACK_APP_MANIFEST.oauth_config.scopes.bot
+    expect(scopes).toContain('app_mentions:read')
+    expect(scopes).toContain('chat:write')
+    expect(scopes).toContain('channels:history')
+    expect(scopes).toContain('groups:history')
+    expect(scopes).toContain('im:history')
+    expect(scopes).toContain('mpim:history')
+
+    const events = SLACK_APP_MANIFEST.settings.event_subscriptions.bot_events
+    expect(events).toContain('app_mention')
+    expect(events).toContain('message.channels')
+    expect(events).toContain('message.im')
+
+    expect(SLACK_APP_MANIFEST.settings.socket_mode_enabled).toBe(true)
   })
 })

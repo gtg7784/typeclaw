@@ -124,3 +124,74 @@ export function errorLine(reason: string): string {
 export function successLine(message: string): string {
   return `${c.green('●')} ${message}`
 }
+
+// The exact JSON manifest a user pastes into
+// https://api.slack.com/apps → From a manifest. Kept as a typed object so
+// the file stays a single source of truth and `JSON.stringify` guarantees
+// the rendered text is always valid JSON — no risk of a stray comma or
+// quote slipping in through hand-formatting.
+export const SLACK_APP_MANIFEST = {
+  display_information: { name: 'TypeClaw' },
+  features: {
+    bot_user: { display_name: 'TypeClaw', always_online: true },
+  },
+  oauth_config: {
+    scopes: {
+      bot: [
+        'app_mentions:read',
+        'chat:write',
+        'users:read',
+        'files:read',
+        'channels:history',
+        'channels:read',
+        'groups:history',
+        'groups:read',
+        'im:history',
+        'im:read',
+        'mpim:history',
+        'mpim:read',
+      ],
+    },
+  },
+  settings: {
+    event_subscriptions: {
+      bot_events: ['app_mention', 'message.channels', 'message.groups', 'message.im', 'message.mpim'],
+    },
+    socket_mode_enabled: true,
+  },
+} as const
+
+// Prints the "create a Slack app from a manifest" walkthrough so the JSON
+// payload is **flush-left and copy-pasteable**. Clack's `note()` wraps
+// content inside a box with `│` borders on both sides, and `log.message()`
+// still prefixes every line with a `│  ` guide column — neither survives a
+// click-and-drag copy. This helper splits the walkthrough into three
+// segments: a boxed prose intro, a raw-stdout JSON block, and a boxed
+// follow-up. The JSON block is emitted via `process.stdout.write` so it
+// carries zero terminal decoration.
+export function printSlackAppManifestSetup(output: NodeJS.WritableStream = process.stdout): void {
+  note(
+    [
+      '1. https://api.slack.com/apps → Create New App → From a manifest.',
+      '   Pick your workspace, then paste the JSON manifest printed below',
+      `   (it is rendered flush-left so you can ${c.bold('click-drag and copy')} cleanly).`,
+    ].join('\n'),
+    'Get a Slack bot',
+  )
+  output.write('\n')
+  output.write(`${JSON.stringify(SLACK_APP_MANIFEST, null, 2)}\n`)
+  output.write('\n')
+  note(
+    [
+      '2. Install to Workspace, then OAuth & Permissions →',
+      '   copy the Bot User OAuth Token (xoxb-...).',
+      '3. Basic Information → App-Level Tokens → Generate Token and',
+      '   Scopes, add the connections:write scope, and copy the',
+      '   token (xapp-...). Socket Mode needs this; the manifest',
+      '   cannot grant it.',
+      '4. Invite the bot to any private channel or DM you want it in:',
+      '   /invite @TypeClaw',
+    ].join('\n'),
+    'Finish Slack setup',
+  )
+}
