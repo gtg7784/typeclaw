@@ -116,6 +116,7 @@ describe('collectWizardInputs back-aware flow', () => {
       askReuseExistingChannel: async () => ({ kind: 'value', value: 'prompt' }),
       runChannelFlow: async () => ({ kind: 'value', value: {} }),
       runOAuthLogin: async () => ({ ok: true }),
+      askOAuthFailureRecovery: async () => 'abort',
       ...overrides,
     }
   }
@@ -844,7 +845,7 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(result.llmAuth).toEqual({ kind: 'oauth-completed' })
   })
 
-  test('oauth path: login failure keeps user on pick-auth-method for retry', async () => {
+  test('oauth path: login failure prompts recovery; user picks retry and succeeds', async () => {
     const calls: string[] = []
     let loginAttempt = 0
     let authMethodCalls = 0
@@ -862,6 +863,10 @@ describe('collectWizardInputs back-aware flow', () => {
         if (loginAttempt === 1) return { ok: false, reason: 'browser closed' }
         return { ok: true }
       },
+      askOAuthFailureRecovery: async (provider, reason) => {
+        calls.push(`recovery:${provider.id}:${reason}`)
+        return 'retry'
+      },
       pickChannel: async () => {
         calls.push('pick-channel')
         return { kind: 'value', value: 'none' }
@@ -873,11 +878,103 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(calls).toEqual([
       'pick-auth-method:1',
       'run-oauth-login:1',
+      'recovery:openai-codex:browser closed',
       'pick-auth-method:2',
       'run-oauth-login:2',
       'pick-channel',
     ])
     expect(result.llmAuth).toEqual({ kind: 'oauth-completed' })
+  })
+
+  test('oauth path: login failure → user picks api-key fallback routes to enter-api-key', async () => {
+    const calls: string[] = []
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: openaiModel }),
+      pickAuthMethod: async () => {
+        calls.push('pick-auth-method')
+        return { kind: 'value', value: 'oauth' }
+      },
+      runOAuthLogin: async () => {
+        calls.push('run-oauth-login')
+        return { ok: false, reason: 'token revoked' }
+      },
+      askOAuthFailureRecovery: async (_provider, _reason, apiKeyAvailable) => {
+        calls.push(`recovery:apiKeyAvailable=${apiKeyAvailable}`)
+        return 'api-key'
+      },
+      askApiKey: async () => {
+        calls.push('enter-api-key')
+        return { kind: 'value', value: 'sk_fallback' }
+      },
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'none' }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual([
+      'pick-auth-method',
+      'run-oauth-login',
+      'recovery:apiKeyAvailable=true',
+      'enter-api-key',
+      'pick-channel',
+    ])
+    expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk_fallback' })
+  })
+
+  test('oauth path: login failure → user picks abort throws WizardAbortedError', async () => {
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: codexModel }),
+      pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
+      runOAuthLogin: async () => ({ ok: false, reason: 'cancelled' }),
+      askOAuthFailureRecovery: async () => 'abort',
+    })
+
+    await expect(collectWizardInputs('/agent', prompts)).rejects.toThrow(WizardAbortedError)
+  })
+
+  test('oauth path: oauth-only provider gets apiKeyAvailable=false in recovery prompt', async () => {
+    let apiKeyAvailableSeen: boolean | undefined
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: codexModel }),
+      pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
+      runOAuthLogin: async () => ({ ok: false, reason: 'whatever' }),
+      askOAuthFailureRecovery: async (_provider, _reason, apiKeyAvailable) => {
+        apiKeyAvailableSeen = apiKeyAvailable
+        return 'abort'
+      },
+    })
+
+    await expect(collectWizardInputs('/agent', prompts)).rejects.toThrow(WizardAbortedError)
+    expect(apiKeyAvailableSeen).toBe(false)
+  })
+
+  test('oauth path: runner that throws is coerced to a failure recovery prompt (init never crashes)', async () => {
+    const calls: string[] = []
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: codexModel }),
+      pickAuthMethod: async () => {
+        calls.push('pick-auth-method')
+        return { kind: 'value', value: 'oauth' }
+      },
+      runOAuthLogin: async () => {
+        calls.push('run-oauth-login')
+        throw new Error('unexpected runner crash')
+      },
+      askOAuthFailureRecovery: async (_provider, reason) => {
+        calls.push(`recovery:${reason}`)
+        return 'abort'
+      },
+    })
+
+    await expect(collectWizardInputs('/agent', prompts)).rejects.toThrow(WizardAbortedError)
+    expect(calls).toEqual(['pick-auth-method', 'run-oauth-login', 'recovery:unexpected runner crash'])
   })
 
   test('oauth path: vision profile also runs login inside the wizard when provider differs', async () => {

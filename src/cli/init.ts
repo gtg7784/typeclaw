@@ -331,7 +331,18 @@ export interface WizardPrompts {
     cwd: string,
     model: KnownModelRef,
   ) => Promise<OAuthLoginResult>
+  // Asked after a failed OAuth login. `apiKeyAvailable` is true when the
+  // provider also supports api-key auth (so the wizard can offer a fallback
+  // path); false for OAuth-only providers like openai-codex, where the only
+  // options are retry or abort.
+  askOAuthFailureRecovery: (
+    provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+    reason: string,
+    apiKeyAvailable: boolean,
+  ) => Promise<OAuthFailureRecovery>
 }
+
+export type OAuthFailureRecovery = 'retry' | 'api-key' | 'abort'
 
 export const defaultWizardPrompts: WizardPrompts = {
   loadCatalog,
@@ -348,6 +359,7 @@ export const defaultWizardPrompts: WizardPrompts = {
   askReuseExistingChannel,
   runChannelFlow,
   runOAuthLogin: (provider, cwd, model) => makeOAuthLoginRunner(buildOAuthCallbacks(provider.name))({ cwd, model }),
+  askOAuthFailureRecovery,
 }
 
 export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): Promise<CollectedInputs> {
@@ -430,13 +442,20 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
         if (result.value === 'oauth') {
           // Run the browser login eagerly so the user sees the OAuth URL the
           // moment they pick "OAuth (browser login)" — not at the end of the
-          // wizard. On failure we stay on this step so the user can retry or
-          // fall back to API key without losing the rest of their inputs.
-          const login = await prompts.runOAuthLogin(provider, cwd, state.model!.ref)
+          // wizard. On failure we ask the user how to recover (retry / fall
+          // back to API key / abort) instead of dumping them back into the
+          // auth method picker with no guidance.
+          const login = await runOAuthLoginSafely(prompts, provider, cwd, state.model!.ref)
           if (!login.ok) {
-            log.error(`OAuth login failed: ${login.reason}`)
-            state.authMethod = undefined
+            const recovery = await prompts.askOAuthFailureRecovery(
+              provider,
+              login.reason,
+              providerSupportsApiKey(provider),
+            )
+            if (recovery === 'abort') throw new WizardAbortedError()
+            state.authMethod = recovery === 'api-key' ? 'api-key' : undefined
             state.llmAuth = undefined
+            step = recovery === 'api-key' ? 'enter-api-key' : 'pick-auth-method'
             break
           }
           state.llmAuth = { kind: 'oauth-completed' }
@@ -527,12 +546,18 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
         }
         state.visionAuthMethod = result.value
         if (result.value === 'oauth') {
-          // Same eager-login rationale as the default-provider branch above.
-          const login = await prompts.runOAuthLogin(provider, cwd, state.visionModel!.ref)
+          // Same eager-login + recovery-prompt rationale as the default-provider branch above.
+          const login = await runOAuthLoginSafely(prompts, provider, cwd, state.visionModel!.ref)
           if (!login.ok) {
-            log.error(`OAuth login failed: ${login.reason}`)
-            state.visionAuthMethod = undefined
+            const recovery = await prompts.askOAuthFailureRecovery(
+              provider,
+              login.reason,
+              providerSupportsApiKey(provider),
+            )
+            if (recovery === 'abort') throw new WizardAbortedError()
+            state.visionAuthMethod = recovery === 'api-key' ? 'api-key' : undefined
             state.visionLlmAuth = undefined
+            step = recovery === 'api-key' ? 'enter-vision-api-key' : 'pick-vision-auth-method'
             break
           }
           state.visionLlmAuth = { kind: 'oauth-completed' }
@@ -604,6 +629,25 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
         return finalize(state, result.value)
       }
     }
+  }
+}
+
+// Belt-and-suspenders wrapper: `makeOAuthLoginRunner` already catches the
+// upstream pi-ai login flow and returns `{ ok: false, reason }`, but the
+// wizard cannot afford ANY uncaught throw from a custom runner (test seam,
+// future plugin-contributed runner) — it would bubble out of
+// `collectWizardInputs` and exit the whole init. Coerce unexpected throws to
+// the normal failure path so the recovery prompt always fires.
+async function runOAuthLoginSafely(
+  prompts: WizardPrompts,
+  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+  cwd: string,
+  model: KnownModelRef,
+): Promise<OAuthLoginResult> {
+  try {
+    return await prompts.runOAuthLogin(provider, cwd, model)
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
 }
 
@@ -803,6 +847,28 @@ async function askApiKey(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]): P
   })
   if (isCancel(apiKey)) return back()
   return value(apiKey)
+}
+
+async function askOAuthFailureRecovery(
+  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+  reason: string,
+  apiKeyAvailable: boolean,
+): Promise<OAuthFailureRecovery> {
+  note(reason, `${provider.name} OAuth login failed`)
+  const options: Array<{ value: OAuthFailureRecovery; label: string; hint?: string }> = [
+    { value: 'retry', label: 'Retry OAuth login' },
+  ]
+  if (apiKeyAvailable) {
+    options.push({ value: 'api-key', label: `Use a ${provider.name} API key instead` })
+  }
+  options.push({ value: 'abort', label: 'Abort init', hint: 'you can re-run `typeclaw init` later' })
+  const choice = await select<OAuthFailureRecovery>({
+    message: 'What next?',
+    options,
+    initialValue: 'retry',
+  })
+  if (isCancel(choice)) return 'abort'
+  return choice
 }
 
 async function pickChannel(initial: ChannelChoice | undefined): Promise<StepResult<ChannelChoice>> {
