@@ -176,6 +176,16 @@ describe('claudeCode toggle', () => {
     expect(claudeIdx).toBeLessThan(shimIdx)
   })
 
+  test('install layer symlinks ~/.local/bin/claude into /usr/local/bin (the Anthropic installer emits a "~/.local/bin is not in your PATH" warning on bun:1-slim; without the symlink every `which claude` returns empty)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude')
+  })
+
+  test('install layer smoke-tests the binary with `claude --version` so a broken install fails the build instead of the first delegation', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('claude --version > /dev/null')
+  })
+
   test('install layer is rejected by parse: claudeCode does not accept string version pins (the upstream installer is not a versioned apt package)', () => {
     expect(() => dockerfileSchema.parse({ claudeCode: '1.2.3' })).toThrow()
   })

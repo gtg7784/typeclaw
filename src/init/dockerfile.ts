@@ -381,12 +381,27 @@ RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
 // in APT_FEATURES. Layer placed after the toggle apt install (so curl + ca-
 // certificates from the baseline are guaranteed present) and before the
 // entrypoint shim (which is always last). Omitted entirely when disabled.
+//
+// The Anthropic installer drops `claude` at `$HOME/.local/bin/claude` and
+// emits a "~/.local/bin is not in your PATH" warning on every install on
+// bun:1-slim (PATH out of the box is `/usr/local/sbin:/usr/local/bin:/usr/
+// sbin:/usr/bin:/sbin:/bin:/usr/local/bun-node-fallback-bin`, no
+// `~/.local/bin`). Without intervention, every `which claude` from the
+// agent (and from the typeclaw-claude-code skill's verification step)
+// returns empty. Symlink into `/usr/local/bin/` — already on PATH, matches
+// what `cloudflared` does, survives `/root/.local/bin` getting rewritten
+// by the installer's "update" path. The symlink resolves to the
+// `~/.local/bin/claude` shim, which itself dereferences to the versioned
+// binary under `~/.local/share/claude/versions/<ver>/`, so upgrades via
+// `claude update` keep working without re-running this layer.
 function renderClaudeCodeInstallLayer(enabled: boolean): string {
   if (!enabled) return ''
-  return `# Layer 5.5 (toggle): install Anthropic's Claude Code CLI. Opt-in via
+  return `# Layer 5.6 (toggle): install Anthropic's Claude Code CLI. Opt-in via
 # typeclaw.json#docker.file.claudeCode. The skill \`typeclaw-claude-code\`
 # documents the auth + usage flow.
-RUN curl -fsSL https://claude.ai/install.sh | bash`
+RUN curl -fsSL https://claude.ai/install.sh | bash \\
+ && ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude \\
+ && claude --version > /dev/null`
 }
 
 // Shared-library runtime deps Chrome for Testing needs to launch on amd64
