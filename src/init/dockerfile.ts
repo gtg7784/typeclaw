@@ -30,8 +30,9 @@ export type BuildDockerfileOptions = {
 //
 // xvfb is intentionally NOT in baseline — it's a toggle (`xvfb: true` by
 // default, opt-out via `docker.file.xvfb: false`) because the shim
-// self-heals: it wraps with `xvfb-run` if the binary is on PATH and execs
-// directly otherwise. See APT_FEATURES.xvfb below and `buildEntrypointShim`.
+// self-heals: it spawns Xvfb (and exports DISPLAY) if the binary is on
+// PATH, and execs the agent directly otherwise. See APT_FEATURES.xvfb
+// below and `buildEntrypointShim`.
 const BASELINE_APT_PACKAGES = ['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux'] as const
 
 // curl-impersonate is the only currently-working way to query DuckDuckGo from
@@ -224,60 +225,96 @@ export function buildEntrypointShim(): string {
 # Source: src/init/dockerfile.ts \`buildEntrypointShim()\`.
 set -eu
 
-# When Xvfb is installed (docker.file.xvfb=true, the default), spawn it
-# in the background and export DISPLAY so any subprocess that wants a
-# real X11 display (agent-browser --headed, Playwright headful, etc.)
-# sees one. Headless containers have no display server; Chrome --headless
-# / --headless=new is fingerprinted by modern bot detection (Akamai/
-# Cloudflare BM) regardless of UA spoof, so the only way to get a "real"
-# Chrome from inside Docker is to run headed against a virtual framebuffer.
+# start_xvfb launches Xvfb in the background under a stripped capability
+# bounding set so headed Chrome (agent-browser --headed, Playwright
+# headful) has a real X11 display to connect to. Headless containers
+# have no display server; Chrome --headless / --headless=new is
+# fingerprinted by modern bot detection (Akamai / Cloudflare BM)
+# regardless of UA spoof, so real headed Chrome under a virtual
+# framebuffer is the only path to a passing sensor score from a
+# server-side container.
 #
-# We DO NOT use \`xvfb-run\`. xvfb-run hangs forever when it runs as PID 1
-# inside a container because it relies on \`wait\` interrupting on SIGUSR1
-# from Xvfb, and PID 1 has signal-handling semantics that break the
-# handshake (signals without explicit handlers are ignored; the trap-:-USR1
-# / wait || : dance races and stalls). The documented workarounds are
-# either to add tini as PID 1 OR to spawn Xvfb directly. We pick the
-# latter — no new dep, identical observable effect.
+# Two correctness invariants this function enforces:
 #
-# The shim self-heals: when \`Xvfb\` is absent from PATH (docker.file.xvfb
-# =false), HAS_XVFB stays 0 and the exec lines fall through to the
-# plain \`bun run typeclaw\` path. An agent that doesn't need a browser
-# pays zero — no Xvfb process running, identical to pre-xvfb behavior.
+# 1. Xvfb never holds CAP_NET_ADMIN. The shim runs as PID 1 with the
+#    container's full capability set (including NET_ADMIN when
+#    network.blockInternal=true). If we backgrounded Xvfb naked, it
+#    would inherit NET_ADMIN and keep it for the container's lifetime
+#    — defeating the capability-drop contract that setpriv applies to
+#    the agent process. Routing Xvfb through the same setpriv invocation
+#    we use for the agent strips NET_ADMIN before Xvfb's first exec.
+#    On the off-path (blockInternal=false) the bounding-set drop is a
+#    no-op (NET_ADMIN was never granted), but the call is harmless.
+#
+# 2. Xvfb startup failure is loud, not silent. \`Xvfb ... >/dev/null &\`
+#    under \`set -e\` does not fail the script if Xvfb exits immediately
+#    (missing library, port conflict, malformed args). Without the
+#    explicit liveness probe below, the shim would then export DISPLAY
+#    and exec bun, agent-browser launches would die with "cannot open
+#    display", and the operator would chase a phantom bug. We capture
+#    $! and \`kill -0\` it on every poll iteration so an early exit
+#    becomes a clear stderr line and a non-zero shim exit.
+#
+# We DO NOT use \`xvfb-run\`. xvfb-run hangs forever when it runs as
+# PID 1 inside a container: its SIGUSR1-based ready handshake races
+# and stalls because PID 1 ignores signals without explicit handlers,
+# so the \`trap : USR1 ; wait || :\` dance never wakes up. Observed in
+# practice: container alive, Xvfb running, PID 1 stuck in
+# \`rt_sigsuspend\`, no agent process ever spawns, \`docker logs\` empty.
+# Documented industry workarounds are tini-as-PID-1 or direct Xvfb
+# spawn; we pick the latter (no new dep).
 #
 # Xvfb args:
-#   :99                       fixed display number. Two parallel Compose
-#                             agents end up with PID-1-isolated namespaces
-#                             so the X socket at /tmp/.X11-unix/X99 does
-#                             not collide across containers.
-#   -screen 0 1920x1080x24    desktop viewport agent-browser advertises;
-#                             mismatched geometry is itself a fingerprint
-#                             signal.
-#   -ac                       disable host-based X access control so
-#                             Chrome connects without XAUTHORITY plumbing.
-#   +extension RANDR          expose the RandR extension; Chrome queries
-#                             it for screen geometry and without it
-#                             \`screen.*\` values come back inconsistent.
-#   -nolisten tcp             refuse TCP connections (Unix socket only).
-#                             Defense-in-depth — we are in a netns with
-#                             no inbound exposure anyway.
-if command -v Xvfb >/dev/null 2>&1; then
-  Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR -nolisten tcp >/dev/null 2>&1 &
+#   :99                     fixed display number. Filesystem
+#                           (/tmp/.X11-unix/X99) and abstract
+#                           (\\0/tmp/.X11-unix/X99) sockets are both
+#                           network-namespace-scoped, so :99 is safe
+#                           across all Compose'd containers.
+#   -screen 0 1920x1080x24  desktop viewport agent-browser advertises;
+#                           mismatched geometry is itself a fingerprint
+#                           signal.
+#   -ac                     disable host-based X access control so
+#                           Chrome connects without XAUTHORITY plumbing.
+#   +extension RANDR        expose the RandR extension; Chrome queries
+#                           it for screen geometry, and without it
+#                           \`screen.*\` values come back inconsistent.
+#   -nolisten tcp           refuse TCP connections (Unix socket only).
+#                           Defense-in-depth — we are in a netns with
+#                           no inbound exposure anyway.
+start_xvfb() {
+  if ! command -v Xvfb >/dev/null 2>&1; then
+    return 0
+  fi
+  setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin \\
+    -- Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR -nolisten tcp \\
+    >/dev/null 2>&1 &
+  xvfb_pid=$!
   export DISPLAY=:99
-  # Wait for Xvfb's socket to exist before exec'ing the agent. Without
-  # this, the first agent-browser launch races Xvfb startup and dies
-  # with "cannot open display". Poll every 10ms up to 500ms — Xvfb
-  # startup is ~20ms on a modern host; the cap covers slow CI runners.
+  # Poll the socket every 10ms up to ~3s. Xvfb cold start is typically
+  # ~20-50ms on a modern host; 3s covers slow Docker Desktop VMs,
+  # Rosetta/QEMU emulation, and loaded CI runners. We also \`kill -0\`
+  # the pid each iteration so an Xvfb that died immediately surfaces
+  # as a clear error instead of a 3-second hang followed by silent
+  # "cannot open display" downstream.
   i=0
-  while [ $i -lt 50 ]; do
-    if [ -S /tmp/.X11-unix/X99 ]; then break; fi
+  while [ $i -lt 300 ]; do
+    if [ -S /tmp/.X11-unix/X99 ]; then
+      unset i xvfb_pid
+      return 0
+    fi
+    if ! kill -0 "$xvfb_pid" 2>/dev/null; then
+      echo "typeclaw-entrypoint: Xvfb exited immediately; cannot start headed display (docker.file.xvfb=true)" >&2
+      exit 1
+    fi
     sleep 0.01
     i=$((i + 1))
   done
-  unset i
-fi
+  echo "typeclaw-entrypoint: Xvfb did not create /tmp/.X11-unix/X99 within 3s; refusing to continue (docker.file.xvfb=true)" >&2
+  exit 1
+}
 
 if [ "\${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then
+  start_xvfb
   exec bun run typeclaw "$@"
 fi
 
@@ -322,6 +359,7 @@ ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 ip6tables -A OUTPUT -o lo -j ACCEPT
 ${ipv6Rules.join('\n')}
 
+start_xvfb
 exec setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin -- bun run typeclaw "$@"
 `
 }
