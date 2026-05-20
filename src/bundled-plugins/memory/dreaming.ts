@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -8,6 +7,7 @@ import { z } from 'zod'
 import { lsTool, readTool, type Subagent, writeTool } from '@/plugin'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
 
+import { checkCitationSuperset, summarizeMissingCitations } from './citation-superset'
 import { parseCitations } from './citations'
 import {
   addDreamedIds,
@@ -208,12 +208,11 @@ async function loadCitedIds(agentDir: string): Promise<ReadonlyMap<string, Reado
   }
 }
 
-async function safeContentHash(path: string): Promise<string | null> {
+async function safeReadText(path: string): Promise<string> {
   try {
-    const raw = await readFile(path)
-    return createHash('sha256').update(raw).digest('hex')
+    return await readFile(path, 'utf8')
   } catch {
-    return null
+    return ''
   }
 }
 
@@ -502,11 +501,11 @@ fragments:
 
 The date in the prefix is the same as the filename you read the fragment from; the id after \`#\` is the full UUIDv7 from the event's \`id\` field. Do not abbreviate the id. Do not use line numbers — citations are id-based, not line-based, so daily streams can be compacted between dreaming runs without breaking your references.
 
-A fragment with no useful content (a watermark-only marker, a near-duplicate, a session-specific quirk that fails the generalizability bar) is discarded. Never invent fragments. Never cite a fragment id you did not see in the undreamed tail you actually read.
+A fragment with no useful content (a watermark-only marker, a near-duplicate, a session-specific quirk that fails the generalizability bar) is discarded. Never invent fragments. When you add a NEW citation, never cite a fragment id you did not see in the undreamed tail you actually read. EXISTING citations that are already in MEMORY.md (from prior dreaming runs, whose source fragments are no longer in the undreamed tail) must be preserved per rule 5 — they reference fragments still alive in already-consolidated daily streams.
 
 **4. Inherit the memory-logger's standards.** The memory-logger already filtered fragments using strict certainty rules (explicit / deductive / inductive). Your job is consolidation, not loosening the bar. If two fragments contradict, prefer the more recent. If a fragment is ambiguous in isolation but clarified by a later fragment, merge them under one topic. Never promote a single fragment from one day into a stable claim unless its certainty was already \`explicit\` or \`deductive\`.
 
-**5. Preserve existing MEMORY.md content.** MEMORY.md may already contain entries from prior dreaming runs. Fold new fragments into existing topics where they fit, or add new topics. Do not silently drop existing entries. If a new fragment contradicts an existing entry, replace the entry and update its fragment list. Existing fragment citations may reference dates whose streams are now fully consolidated; that is normal — leave them in place.
+**5. Rebalance every run. Preserve every fact and every cited fragment id.** MEMORY.md is a saturated surface (a fixed prompt-budget), not an append-only log — every run is consolidation, not just the runs that get new fragments. You may merge near-duplicate topics into one, fold weakly-reinforced topics into a parent or into the historical-observations bucket (see "Memory saturation" below), and rewrite verbose conclusion paragraphs more tightly. What you must NOT do: drop a fragment id. The merged topic's \`fragments:\` list is the **union** of its source topics' fragment ids. The daily-stream GC depends on MEMORY.md citations to keep evidence alive; an omitted id means the underlying fragment is permanently deleted on the next compaction. If two topics genuinely cover different facts, leave them separate — premature merging loses signal. If a new fragment contradicts an existing entry, replace the entry's conclusion paragraph and keep BOTH the old and new fragment ids in the citations list (the contradiction itself is evidence). The runtime cross-checks your rewrite against the prior MEMORY.md's citation set; a rewrite that drops a previously-cited id will be reverted and your run wasted.
 
 **6. Be concise.** Each topic conclusion is one short paragraph. No lists of preferences ("the user likes X, Y, Z"). One topic per concept. If a topic only earned one fragment and the fragment was already small, you may copy its conclusion verbatim — do not pad.
 
@@ -533,7 +532,40 @@ fragments:
 
 The first line is always \`# Memory\`. Topics are level-2 headings. No other top-level structure.
 
-# Muscle memory (skills, CLIs, plugins)
+# Memory saturation
+
+MEMORY.md is read into every session's system prompt, so its size is the prompt budget for everything else. Treat it like human long-term memory: **repetition strengthens, lack of repetition saturates**. The runtime gives you per-topic strength signals at the top of the user prompt — a table with \`cites\` (total citation count), \`days\` (distinct calendar days those citations span), \`last reinforced\`, and \`age (d)\`. Use these numbers to decide what to do with each existing topic on this run. \`days\` is the load-bearing signal: five citations all on one day means a single debugging session that mentioned the same thing five times (a transient burst); five citations across five days means a recurring fact the user keeps coming back to (a stable signal).
+
+## Strength tiers and promotion ladder
+
+Pick the wording in each conclusion paragraph from the topic's \`days\` count:
+
+- **\`days = 1\` — "mentioned":** the topic was observed in one session. Conclusion uses tentative language ("the user mentioned X in the context of Y"). Single-fragment one-day topics that are not reinforced on subsequent runs are demotion candidates (see below).
+- **\`days = 2\` — "observed":** seen twice, on different days. Still tentative — could be a recurring quirk, could be coincidence.
+- **\`days >= 3\` — "consistently":** the topic has been reinforced across at least three distinct days. Conclusion uses confident language ("the user consistently prefers X", "the user's pattern is Y"). Strong enough to anchor near the top of MEMORY.md.
+- **\`days >= 7\` — "always":** seen across at least seven distinct days. Conclusion uses declarative language ("the user always X", "Y is the user's standard"). These are the load-bearing topics; protect them from accidental merges.
+
+Promotion is gated on \`days\`, not on \`cites\`. A topic with \`cites = 12, days = 1\` is still "mentioned" — twelve citations in one debugging session is one event, not twelve. Order MEMORY.md so the strongest topics come first; weaker topics drift toward the bottom.
+
+## Demotion and the historical-observations bucket
+
+When a topic's \`days\` count is low AND \`age (d)\` is high (the user has not come back to it in weeks), it is decayed. Do not delete — **demote**. The bucket is a single topic, always last in MEMORY.md, with this exact shape:
+
+\`\`\`
+## Historical observations
+- yyyy-MM-dd: one-line summary of what was observed — memory/yyyy-MM-dd#<id>
+- yyyy-MM-dd: one-line summary of what was observed — memory/yyyy-MM-dd#<id>
+\`\`\`
+
+Each former topic becomes one bullet. The fact is preserved (in the summary), the citation is preserved (so daily-stream GC keeps the fragment), but the bytes shrink from a full topic+paragraph+citation-list to one line. Demotion candidates: a topic with \`cites = 1, days = 1, age >= 30\`, OR a topic with \`cites <= 3, days <= 2, age >= 60\`. Strong topics (\`days >= 3\`) are not demoted regardless of age — they stayed reinforced when they were active, so they earned their place.
+
+When you demote a topic, take its conclusion paragraph and compress it into one short summary sentence for the bullet. Keep the citation date prefix (\`yyyy-MM-dd:\`) so the bullet stays sortable and grep-able. The summary is your last chance to write a useful sentence about this fact — the next time the agent reads MEMORY.md, this bullet is all there is.
+
+The bucket grows monotonically: there is **no hard-deletion path**, no quarter-level synthesis, no removal of old bullets. Every demoted citation stays alive forever via its one-line bullet. The runtime safety net rejects any rewrite that drops a previously-cited fragment id, so attempting to collapse old bullets into a summary will be reverted and your run wasted. If the bucket becomes inconveniently long, that is a problem for a future runtime change to address — not something you can resolve from inside a dreaming run.
+
+## When MEMORY.md has no strength table
+
+A first-ever run sees no existing topics, so the strength table is omitted. In that case the saturation rules above do not apply yet — just consolidate the new fragments into fresh topics. The strength signals start appearing on the second run.
 
 While you read the streams, watch for **repeated multi-step procedures** the user has guided the main agent through. When you have evidence (across multiple fragments, ideally across multiple days) that the same procedure keeps happening the same way, you have three response shapes available — pick the smallest one that fits.
 
@@ -621,8 +653,8 @@ Do not suggest CLIs or plugins speculatively. The same recurrence + generalizabi
 
 1. \`read\` MEMORY.md (it may not exist — that is fine, you start from empty).
 2. For each JSONL daily stream undreamed-tail entry the user message lists, \`read\` the file with \`offset\` set to the first undreamed line. Read every undreamed tail before you start writing, then focus on fragment events' \`topic\` + \`body\` fields.
-3. Reason about what to consolidate. Most fragments will collapse into existing topics or be dropped as already-known / not generalizable.
-4. \`write\` the full new contents of MEMORY.md in one call (only if anything changed). \`write\` overwrites; that is the point — MEMORY.md is the single canonical artifact you produce.
+3. Reason about what to consolidate AND about how to rebalance existing topics using the strength signals at the top of the user prompt. Most fragments will collapse into existing topics or be dropped as already-known / not generalizable. Most existing topics will keep their shape; a few merge candidates and a few demotion candidates will surface every run.
+4. \`write\` the full new contents of MEMORY.md in one call. Even if no new fragments earned promotion, a rebalance pass (merging two near-duplicates, demoting a single weak old topic) is still a productive run. \`write\` overwrites; that is the point — MEMORY.md is the single canonical artifact you produce. Remember: every fragment id cited in the previous MEMORY.md must still appear somewhere in the new file (in its same topic, in a merged topic, OR in the historical-observations bucket). The runtime enforces this mechanically and will revert your rewrite if you drop an id.
 5. Decide whether any procedure in the new fragments meets the muscle-memory bar above, and which of the three forms fits.
    - **Form A (skill):** \`ls\` \`memory/skills/\` to see what already exists, \`read\` any candidate's existing \`SKILL.md\` if you might be refining it, then \`write\` the new or refined skill at \`memory/skills/<name>/SKILL.md\` with the frontmatter shape shown above.
    - **Form B (CLI suggestion) or Form C (plugin suggestion):** add a topic to MEMORY.md with the \`proposal:\` line shown above. The CLI/plugin itself is the main agent's responsibility — you do not write under \`packages/\`. Before adding the topic, check the existing MEMORY.md you just read so you do not duplicate a suggestion that's already there.
@@ -631,7 +663,7 @@ Do not suggest CLIs or plugins speculatively. The same recurrence + generalizabi
 
 # Doing nothing is a valid outcome
 
-If the undreamed tails contain only watermarks, or every new fragment is already represented in MEMORY.md and no procedure clears the muscle-memory bar, do not rewrite MEMORY.md and do not write a skill just to touch something. Stop without writing. The point of dreaming is consolidation, not activity. The runtime advances the watermark either way.`
+If the undreamed tails contain only watermarks, AND no procedure clears the muscle-memory bar, AND every existing topic looks well-shaped at its current strength (no obvious merge or demotion candidates), do not rewrite MEMORY.md and do not write a skill just to touch something. Stop without writing. The point of dreaming is consolidation, not activity. The runtime advances the watermark either way. But: if there ARE new fragments, or if the strength table shows topics that should clearly merge or demote, the run is productive even without skill activity — rebalancing IS work.`
 
 function buildInitialPrompt(payload: DreamingPayload, snapshots: StreamSnapshot[], strengths: TopicStrength[]): string {
   const today = formatLocalDate()
@@ -712,7 +744,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
       )
 
       const memoryFilePath = join(ctx.payload.agentDir, 'MEMORY.md')
-      const memoryHashBefore = await safeContentHash(memoryFilePath)
+      const memoryTextBefore = await safeReadText(memoryFilePath)
       const strengths = await loadTopicStrengths(ctx.payload.agentDir)
 
       try {
@@ -723,8 +755,40 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         throw err
       }
 
-      const memoryHashAfter = await safeContentHash(memoryFilePath)
-      const memoryRewrittenThisRun = memoryHashBefore !== memoryHashAfter
+      const memoryTextAfter = await safeReadText(memoryFilePath)
+      let memoryRewrittenThisRun = memoryTextBefore !== memoryTextAfter
+
+      // Citation-superset safety net: if the subagent's rewrite dropped any
+      // previously-cited fragment id, restore the pre-run bytes and turn
+      // fragment GC off so the next compactDailyStreams call does not
+      // permanently delete the underlying fragment. Dreamed-ids still
+      // advance on a successful revert: this run's UNDREAMED fragments are
+      // orphaned (they survive in the daily JSONL but never make it into
+      // MEMORY.md), which is the conscious tradeoff for avoiding an
+      // infinite loop on the same undreamed input. If the revert WRITE
+      // itself fails — disk full, EACCES, etc. — MEMORY.md is in an
+      // unknown state: we cannot advance dreamed-ids (next run must
+      // re-attempt), cannot run compaction (citations are now ambiguous),
+      // and cannot commit (would snapshot a known-bad state). The user has
+      // to `git checkout MEMORY.md` and re-run.
+      if (memoryRewrittenThisRun) {
+        const verdict = checkCitationSuperset(memoryTextBefore, memoryTextAfter)
+        if (!verdict.ok) {
+          try {
+            await writeFile(memoryFilePath, memoryTextBefore)
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            logger.error(
+              `[dreaming] citation-superset violation AND revert failed: ${message}. MEMORY.md is in an unknown state; not advancing dreamed-ids or running compaction. Recover with: git checkout -- MEMORY.md && typeclaw restart. missing=${summarizeMissingCitations(verdict.missing)} elapsed_ms=${Date.now() - start}`,
+            )
+            return
+          }
+          memoryRewrittenThisRun = false
+          logger.warn(
+            `[dreaming] citation-superset violation: rewrite dropped ${verdict.missing.length} previously-cited id(s); reverted MEMORY.md. The undreamed fragments from THIS run are orphaned: they advance into the dreamed-id set (survive in the daily JSONL, will not be re-shown to a future dreaming run) — conscious anti-loop tradeoff. missing=${summarizeMissingCitations(verdict.missing)}`,
+          )
+        }
+      }
 
       const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)

@@ -45,32 +45,40 @@ When dreaming fires, it reads:
 1. `MEMORY.md`
 2. The **undreamed fragments** of every `memory/yyyy-MM-dd.jsonl` (the runtime tells it which fragment ids are new — fragments whose ids are already in `memory/.dreaming-state.json#dreamedThrough[date].dreamedIds` have been consolidated and must NOT be re-cited)
 
-It rewrites `MEMORY.md` with the merged result, advances the per-day dreamed-id set in `memory/.dreaming-state.json`, optionally writes muscle-memory skills under `memory/skills/<name>/SKILL.md`, **compacts the touched daily streams** (drops superseded watermarks per source and fragments that are in `dreamedIds` but not cited from `MEMORY.md`), then commits the snapshot with a message shaped like `dream: <summary> <emoji>` — e.g. `dream: 3 fragments + new skill 'pr-review' 🔮`. The summary is derived from the staged diff (line additions in daily streams, newly-added skills, etc.), and the emoji is a random pick from a small thematic pool. After the commit, the runtime sets the `skip-worktree` index flag on the tracked memory artifacts so the user's `git status` and `git diff` stay clean. The flag is cleared and re-applied around every commit.
+It rewrites `MEMORY.md` with the merged result (treating it as a **saturated surface** that gets rebalanced every run, not an append-only log), advances the per-day dreamed-id set in `memory/.dreaming-state.json`, optionally writes muscle-memory skills under `memory/skills/<name>/SKILL.md`, **compacts the touched daily streams** (drops superseded watermarks per source and fragments that are in `dreamedIds` but not cited from `MEMORY.md`), then commits the snapshot with a message shaped like `dream: <summary> <emoji>` — e.g. `dream: 3 fragments + new skill 'pr-review' 🔮`. The summary is derived from the staged diff (line additions in daily streams, newly-added skills, etc.), and the emoji is a random pick from a small thematic pool. After the commit, the runtime sets the `skip-worktree` index flag on the tracked memory artifacts so the user's `git status` and `git diff` stay clean. The flag is cleared and re-applied around every commit.
 
 The dreaming subagent has only three tools: `read`, `write`, `ls`. No `bash`. No `edit`. It cannot run shell commands.
+
+**Strength-driven rebalancing.** On every run, the runtime computes per-topic strength signals from `MEMORY.md`'s existing citations (`cites`, `days` = distinct calendar days, `last reinforced` date, `age` in days) and injects them as a table at the top of the dreaming user prompt. Dreaming uses them to promote reinforced topics (`days >= 3` → "consistently", `days >= 7` → "always"), merge near-duplicates while preserving the **union** of their fragment ids, and demote decayed single-day topics into a `## Historical observations` bucket as one-line bullets that still cite the underlying fragment. Strong topics (`days >= 3`) are never demoted regardless of age. The bucket grows monotonically — there is no hard-deletion path today; every demoted citation stays alive forever via its bullet.
+
+**Citation-superset safety net.** The runtime cross-checks every MEMORY.md rewrite against the prior file's citation set. If dreaming's rewrite drops any previously-cited fragment id, the runtime reverts MEMORY.md to its pre-run bytes, skips fragment GC, but **advances dreamed-ids** anyway (so the same input cannot infinite-loop). The conscious tradeoff: a violation orphans this run's new undreamed fragments — they survive in the daily JSONL (force-committed, recoverable via `git log memory/`) but will never be re-shown to a future dreaming run. If the revert write itself fails, the runtime additionally skips the dreamed-id advance, skips compaction, and skips the commit, leaving recovery to the operator (`git checkout -- MEMORY.md && typeclaw restart`). Look for `[dreaming] citation-superset violation` log lines if `MEMORY.md` ever seems to stop updating.
 
 `MEMORY.md` after dreaming looks like:
 
 ```
 # Memory
 
-## <topic>
+## <strong topic — wording from days >= 3>
 <conclusion paragraph in dreaming's own words>
 
 fragments:
 - memory/yyyy-MM-dd#<fragment-id>
 - memory/yyyy-MM-dd#<fragment-id>
 
-## <topic>
+## <weaker topic>
 <conclusion paragraph>
 
 fragments:
 - memory/yyyy-MM-dd#<fragment-id>
+
+## Historical observations
+- yyyy-MM-dd: one-line summary of a demoted fact — memory/yyyy-MM-dd#<fragment-id>
+- yyyy-MM-dd: one-line summary of another demoted fact — memory/yyyy-MM-dd#<fragment-id>
 ```
 
-The first line is always `# Memory`. Topics are level-2 headings. Every topic cites the source fragments by `memory/yyyy-MM-dd#<uuidv7>` (the full id from the fragment event's `id` field) so any claim is traceable back to the daily stream entry that justified it. Citations are id-based, not line-based, so daily streams can be compacted between dreaming runs without invalidating prior references.
+The first line is always `# Memory`. Topics are level-2 headings. Every topic cites the source fragments by `memory/yyyy-MM-dd#<uuidv7>` (the full id from the fragment event's `id` field) so any claim is traceable back to the daily stream entry that justified it. Citations are id-based, not line-based, so daily streams can be compacted between dreaming runs without invalidating prior references. The `## Historical observations` bucket is always last when present.
 
-If the undreamed tails contain only watermarks, or every new fragment is already represented in `MEMORY.md`, dreaming **does nothing** and exits without writing. The watermark advances either way. "No-op dreaming" is a normal outcome, not a failure.
+Dreaming does NOT no-op just because there are no new fragments. Even with only watermarks past the tail, if the strength table shows obvious merge or demotion candidates (e.g. a stale single-day topic that has aged past the demotion threshold), the run is productive and rebalances. The truly-no-op case ("only watermarks AND every topic looks well-shaped at its current strength AND no procedure clears the muscle-memory bar") still exits without writing; the watermark advances either way.
 
 ### What gets injected into your prompt every turn
 
