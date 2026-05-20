@@ -249,6 +249,22 @@ describe('listModelProfiles', () => {
     expect(dflt?.credentialStatus).toBe('available')
     expect(dflt?.missingProviders).toEqual([])
   })
+
+  test('dedupes providers when the chain uses multiple models from the same provider', async () => {
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(
+      join(root, 'typeclaw.json'),
+      JSON.stringify({
+        models: {
+          default: ['openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'],
+        },
+      }),
+    )
+    const env: NodeJS.ProcessEnv = {}
+    const entries = listModelProfiles(root, env)
+    const dflt = entries.find((e) => e.profile === 'default')
+    expect(dflt?.missingProviders).toEqual(['openai'])
+  })
 })
 
 describe('auto-commit on success', () => {

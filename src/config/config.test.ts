@@ -78,6 +78,17 @@ describe('configSchema models field', () => {
   test('rejects empty profile names', () => {
     expect(() => configSchema.parse({ models: { '': VALID_MODEL } })).toThrow()
   })
+
+  test('rejects exact duplicate refs in a chain (config typo)', () => {
+    expect(() => configSchema.parse({ models: { default: [VALID_MODEL, VALID_MODEL] } })).toThrow(/duplicate/i)
+  })
+
+  test('accepts different models from the same provider in a chain', () => {
+    const parsed = configSchema.parse({
+      models: { default: ['openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'] },
+    })
+    expect(parsed.models.default).toEqual(['openai/gpt-5.4-nano', 'openai/gpt-5.4-mini'])
+  })
 })
 
 describe('resolveProfile', () => {

@@ -184,6 +184,7 @@ describe('promptWithFallback', () => {
     expect(result.success).toBe(false)
     expect(result.refUsed).toBe(REF_C)
     expect(result.attempts.map((a) => a.outcome)).toEqual(['hard', 'hard', 'hard'])
+    expect(result.attempts.map((a) => a.ref)).toEqual([REF_A, REF_B, REF_C])
     expect(result.lastError?.message).toBe('down: zai/glm-4.6')
     expect(created.every((c) => c.disposed)).toBe(true)
     // onAttemptFailed fires for every non-final attempt; the final attempt

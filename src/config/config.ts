@@ -299,7 +299,20 @@ const tunnelsArraySchema = z
 // on first load (and writes the result back to disk + commits via
 // `persistMigratedConfig`), so every downstream consumer sees the new shape.
 const modelRefOrChainSchema = z
-  .union([z.enum(knownModelRefs), z.array(z.enum(knownModelRefs)).min(1)])
+  .union([
+    z.enum(knownModelRefs),
+    z
+      .array(z.enum(knownModelRefs))
+      .min(1)
+      // Reject exact duplicates in a chain — retrying the same ref after the
+      // same class of failure is almost certainly a config typo, and silently
+      // deduping would mask user intent. Different models from the same
+      // provider (e.g. `["openai/gpt-5.4-nano", "openai/gpt-5.4-mini"]`) are
+      // still valid because they hit distinct upstream endpoints.
+      .refine((arr) => new Set(arr).size === arr.length, {
+        message: 'models chain must not contain duplicate refs',
+      }),
+  ])
   .transform((value) => (Array.isArray(value) ? value : [value]))
 export const modelsSchema = z
   .record(z.string().min(1), modelRefOrChainSchema)
