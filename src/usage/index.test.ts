@@ -655,7 +655,7 @@ describe('formatReport origin view', () => {
     ])
     const report = await runUsage({ agentDir })
     const out = formatReport(report, { view: 'summary' })
-    expect(out).toMatch(/Trend \(cost\):/)
+    expect(out).toMatch(/Trend \(tokens\):/)
     expect(out).toMatch(/[▁▂▃▄▅▆▇█]/)
   })
 
@@ -666,7 +666,7 @@ describe('formatReport origin view', () => {
     ])
     const report = await runUsage({ agentDir })
     const out = formatReport(report, { view: 'summary' })
-    expect(out).not.toMatch(/Trend \(cost\):/)
+    expect(out).not.toMatch(/Trend \(tokens\):/)
   })
 
   test('session view prepends an origin glyph to each row label', async () => {

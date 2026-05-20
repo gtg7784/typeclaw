@@ -145,27 +145,30 @@ function renderOriginLabel(kind: OriginKind, ctx: RenderCtx): string {
   }
 }
 
-// Sparkline trend across the full byDay range, scaled to the row's max cost.
-// Returns null when there are fewer than 2 days (a single point conveys no
-// trend information). The 8-level Unicode block scale `▁▂▃▄▅▆▇█` lets us
-// pack ~80 days into a one-line glance — wider than any table-based view
-// could fit at terminal widths under ~160 columns.
+// Sparkline trend across the full byDay range, scaled to the row's max token
+// count. Tokens (not cost) drive the chart because they're the load-bearing
+// usage signal — model price changes and free-tier credits shouldn't flatten
+// or distort the visible workload pattern. Returns null when there are fewer
+// than 2 days (a single point conveys no trend information). The 8-level
+// Unicode block scale `▁▂▃▄▅▆▇█` lets us pack ~80 days into a one-line glance
+// — wider than any table-based view could fit at terminal widths under ~160
+// columns.
 const SPARK_GLYPHS = '▁▂▃▄▅▆▇█'
 
-function renderDailyTrend(byDay: readonly { date: string; cost: number }[], ctx: RenderCtx): string | null {
+function renderDailyTrend(byDay: readonly { date: string; totalTokens: number }[], ctx: RenderCtx): string | null {
   if (byDay.length < 2) return null
-  const costs = byDay.map((d) => d.cost)
-  const max = costs.reduce((m, c) => Math.max(m, c), 0)
+  const tokens = byDay.map((d) => d.totalTokens)
+  const max = tokens.reduce((m, t) => Math.max(m, t), 0)
   if (max <= 0) return null
-  const spark = costs
-    .map((c) => {
-      const idx = Math.min(SPARK_GLYPHS.length - 1, Math.max(0, Math.round((c / max) * (SPARK_GLYPHS.length - 1))))
+  const spark = tokens
+    .map((t) => {
+      const idx = Math.min(SPARK_GLYPHS.length - 1, Math.max(0, Math.round((t / max) * (SPARK_GLYPHS.length - 1))))
       return SPARK_GLYPHS[idx]!
     })
     .join('')
   const first = byDay[0]!.date
   const last = byDay[byDay.length - 1]!.date
-  return `${dim('Trend (cost):', ctx)} ${color('cyan', spark, ctx)}  ${dim(`${first} → ${last}`, ctx)}`
+  return `${dim('Trend (tokens):', ctx)} ${color('cyan', spark, ctx)}  ${dim(`${first} → ${last}`, ctx)}`
 }
 
 function renderDaily(report: UsageReport, ctx: RenderCtx, limit: number | undefined): string {
