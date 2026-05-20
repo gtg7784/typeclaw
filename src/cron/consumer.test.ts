@@ -792,7 +792,7 @@ describe('createCronConsumer model fallback', () => {
     }
   })
 
-  test('logs final-attempt failure when every ref in the chain fails', async () => {
+  test('logs final-attempt failure when every ref in the chain fails, and attempts every ref in order', async () => {
     // given
     const { writeFile } = await import('node:fs/promises')
     const { reloadConfig, __resetConfigForTesting } = await import('@/config/config')
@@ -808,17 +808,21 @@ describe('createCronConsumer model fallback', () => {
     try {
       const stream = createStream()
       const errors: string[] = []
+      const attempted: string[] = []
       const consumer = createCronConsumer({
         stream,
         cwd: root,
-        createSessionForCron: async (_job, ref) => ({
-          prompt: async () => {
-            throw new Error(`down: ${ref}`)
-          },
-          session: stubAgentSession(async () => {
-            throw new Error(`down: ${ref}`)
-          }),
-        }),
+        createSessionForCron: async (_job, ref) => {
+          attempted.push(ref!)
+          return {
+            prompt: async () => {
+              throw new Error(`down: ${ref}`)
+            },
+            session: stubAgentSession(async () => {
+              throw new Error(`down: ${ref}`)
+            }),
+          }
+        },
         logger: { ...silentLogger, error: (m) => errors.push(m) },
       })
       consumer.start()
@@ -828,8 +832,91 @@ describe('createCronConsumer model fallback', () => {
       await new Promise((r) => setImmediate(r))
 
       // then
+      expect(attempted).toEqual(['openai/gpt-5.4-nano', 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'])
       expect(errors.some((e) => /all 2 model\(s\) failed/.test(e))).toBe(true)
       expect(errors.some((e) => /down: fireworks/.test(e))).toBe(true)
+
+      consumer.stop()
+    } finally {
+      __resetConfigForTesting()
+    }
+  })
+
+  test('disposes the successful final session and fires session.end exactly once per attempted session', async () => {
+    // given: a 2-ref chain where the first fails and the second succeeds.
+    // We track disposal calls per session and assert that BOTH sessions get
+    // their dispose+end hooks fired — without that, security plugin taint
+    // state and memory plugin debounce timers would orphan for the failed
+    // first attempt, and the successful session's resources would leak.
+    const { writeFile } = await import('node:fs/promises')
+    const { reloadConfig, __resetConfigForTesting } = await import('@/config/config')
+    await writeFile(
+      join(root, 'typeclaw.json'),
+      JSON.stringify({
+        models: {
+          default: ['openai/gpt-5.4-nano', 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo'],
+        },
+      }),
+    )
+    reloadConfig(root)
+    try {
+      const stream = createStream()
+      const events: string[] = []
+      const consumer = createCronConsumer({
+        stream,
+        cwd: root,
+        createSessionForCron: async (_job, ref) => {
+          const fail = ref === 'openai/gpt-5.4-nano'
+          const sessionId = `sess:${ref}`
+          const hooks: HookBus = {
+            registerAll: () => {},
+            unregisterAll: () => {},
+            runSessionStart: async () => {},
+            runSessionEnd: async (e) => {
+              events.push(`end:${e.sessionId}`)
+            },
+            runSessionIdle: async (e) => {
+              events.push(`idle:${e.sessionId}`)
+            },
+            runSessionPrompt: async () => {},
+            runSessionTurnStart: async () => {},
+            runSessionTurnEnd: async () => {},
+            runToolBefore: async () => undefined,
+            runToolAfter: async () => {},
+            count: () => 0,
+          }
+          return {
+            prompt: async () => {
+              if (fail) throw new Error(`down on ${ref}`)
+            },
+            session: stubAgentSession(async () => {
+              if (fail) throw new Error(`down on ${ref}`)
+            }),
+            hooks,
+            sessionId,
+            agentDir: '/agent',
+            dispose: () => {
+              events.push(`dispose:${sessionId}`)
+            },
+          }
+        },
+        logger: silentLogger,
+      })
+      consumer.start()
+
+      // when
+      publishCron(stream, promptJob('fb', 'go'))
+      await new Promise((r) => setImmediate(r))
+
+      // then: failed session gets end+dispose (no idle), successful session
+      // gets idle+end+dispose, all in the right order
+      expect(events).toEqual([
+        'end:sess:openai/gpt-5.4-nano',
+        'dispose:sess:openai/gpt-5.4-nano',
+        'idle:sess:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+        'end:sess:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+        'dispose:sess:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
+      ])
 
       consumer.stop()
     } finally {
