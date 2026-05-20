@@ -982,6 +982,38 @@ describe('scaffold', () => {
     }
     expect(cfg.channels).toEqual({ 'discord-bot': {} })
   })
+
+  // A freshly-hatched agent with no roles config silently drops every inbound
+  // chat message because no role's match[] covers the channel session, so the
+  // origin resolves to `guest` (no channel.respond). `roles.member.match: ["*"]`
+  // grants the built-in `member` role (which already carries channel.respond)
+  // to any channel origin, so the agent talks out of the box. The owner-claim
+  // flow is then a privilege upgrade (cron, security bypass) for one human,
+  // not a precondition for the agent to speak at all.
+  test('writes roles.member.match: ["*"] when any chat adapter is selected (so freshly hatched agents respond)', async () => {
+    await scaffold(root, { withSlack: true })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      roles?: { member?: { match?: string[] } }
+    }
+    expect(cfg.roles?.member?.match).toEqual(['*'])
+  })
+
+  test('writes roles.member.match: ["*"] exactly once when multiple chat adapters are selected', async () => {
+    await scaffold(root, { withDiscord: true, withSlack: true, withTelegram: true, withKakaotalk: true })
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
+      roles?: { member?: { match?: string[] } }
+    }
+    expect(cfg.roles?.member?.match).toEqual(['*'])
+  })
+
+  test('omits roles block entirely when no chat adapter is selected (greenfield is silent until configured)', async () => {
+    await scaffold(root)
+
+    const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
+    expect(cfg.roles).toBeUndefined()
+  })
 })
 
 describe('initGitRepo', () => {
