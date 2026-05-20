@@ -100,7 +100,7 @@ When unsure, skip. Recurrence will surface real patterns.
 The bar is high. A fragment is worth writing only when ALL of these hold:
 
 1. The fact is **durable** — it will still be true in a future session, not a one-off event.
-2. The fact is **operational** — a future agent acting without this knowledge would do something concretely wrong (give wrong answer, repeat a fixed mistake, violate an instruction, reinvent a workaround).
+2. The fact is **actionable context** — a future agent acting without this knowledge would likely do something worse: give a wrong answer, violate a stated preference, repeat a fixed mistake, miss relevant context, or reinvent a workaround. Stable preferences ("user prefers tabs over spaces") count even though they are not "operational" in a strict procedural sense.
 3. The evidence is **explicit** in the transcript — a direct quote, a code change, a configuration, a documented decision.
 
 Capture-worthy categories:
@@ -146,7 +146,7 @@ Before reading the transcript, read \`MEMORY.md\` and the current \`memory/yyyy-
 - **Notice violations.** If existing memory contains a commitment the agent just broke, that's a high-value fragment.
 - **Avoid pure restatement.** If a fact is already in MEMORY.md word-for-word, don't write the same fragment again. But: if the transcript shows the same fact occurring a second time, that recurrence is itself worth a fragment — dreaming uses repetition to decide what's stable.
 
-Strict dedup. If a fact is already in MEMORY.md or today's stream, do not re-record it just because it came up again. The exception is recurrence that itself is the news: write a new fragment only when the recurrence shifts the fact's status (e.g. a tentative pattern is now confirmed across multiple days, or an old commitment was just violated).
+Dedup byte-equivalent restatements, not meaningful recurrence. Do not write a fragment that is a near-copy of one already in MEMORY.md or today's stream. But when the transcript shows the same durable preference, pattern, workaround, or commitment recurring in a NEW session or on a NEW day, write a concise recurrence fragment anchored to the new evidence — even if the underlying fact is already known. The dreaming subagent uses distinct-day recurrence to promote tentative facts to confident ones; refusing to write the second or third occurrence starves that signal. The bar is "did the recurrence happen in a meaningfully new context", not "is the fact already on disk".
 
 The \`append\` tool refuses byte-equivalent fragments within the same daily stream — if your fragment's topic+body is identical to one already in today's file (modulo whitespace), the tool will reject it and you must rewrite. Two reasonable rewrites: (1) skip the fragment entirely, (2) frame the new occurrence explicitly as "this is the second time today" with a different topic. Do not retry an identical fragment with a different \`entry=\` hoping it will land — content-equality, not marker-equality, is what's checked.
 
@@ -280,8 +280,16 @@ export function createMemoryLoggerSubagent(
     customTools: [findEntryTool, appendTool, advanceWatermarkTool],
     payloadSchema: memoryLoggerPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,
+    // 768 KB read budget. Sized to cover one full buffer-trip cycle:
+    // ~30 KB MEMORY.md + ~50 KB today's stream + up to `DEFAULT_BUFFER_BYTES`
+    // (500 KB) of unread transcript chunk, with margin for re-reads. A
+    // smaller budget (the prior 256 KB) systematically exhausted on
+    // buffer-trip spawns once `bufferBytes` exceeded ~200 KB — the
+    // subagent would advance `bytesAtLastRun` to the full transcript size
+    // on completion, orphaning the unread tail until another full
+    // `bufferBytes` of growth arrived.
     toolResultBudget: {
-      maxTotalBytes: 256 * 1024,
+      maxTotalBytes: 768 * 1024,
       toolNames: ['read'],
       exhaustedMessage: memoryLoggerExhaustedMessage,
     },
