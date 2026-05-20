@@ -371,6 +371,7 @@ describe('docker.file schema', () => {
     tmux: true,
     cjkFonts: true,
     cloudflared: true,
+    xvfb: true,
     append: [],
   }
 
@@ -411,6 +412,7 @@ describe('docker.file schema', () => {
       tmux: false,
       cjkFonts: true,
       cloudflared: true,
+      xvfb: true,
       append: [],
     })
   })
@@ -456,6 +458,26 @@ describe('docker.file schema', () => {
     })
     expect(parsed.docker.file.cloudflared).toBe(false)
     expect(parsed.docker.file.gh).toBe(true)
+  })
+
+  test('xvfb defaults to true so headed agent-browser works in the container without extra config', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
+    expect(parsed.docker.file.xvfb).toBe(true)
+  })
+
+  test('xvfb: false is honored and merges with other defaults', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      docker: { file: { xvfb: false } },
+    })
+    expect(parsed.docker.file.xvfb).toBe(false)
+    expect(parsed.docker.file.python).toBe(true)
+  })
+
+  test('xvfb is boolean-only (the package tracks the upstream X server release; no meaningful apt pin)', () => {
+    expect(() =>
+      configSchema.parse({ models: { default: VALID_MODEL }, docker: { file: { xvfb: '21.1.0' } } }),
+    ).toThrow()
   })
 
   test('python is boolean-only (string version is not a meaningful apt pin for the python3 meta-package)', () => {

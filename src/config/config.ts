@@ -103,6 +103,19 @@ const dockerfileObjectSchema = z.object({
   // edit. Opt-out with `cloudflared: false` to skip the ~35MB binary on
   // agents that don't use tunnels.
   cloudflared: z.boolean().default(true),
+  // Install xvfb so the entrypoint shim can spawn an Xvfb virtual X
+  // server and export DISPLAY, giving headed Chrome (agent-browser
+  // --headed, Playwright headful) a real X11 display to connect to.
+  // Default `true` because modern bot detection (Akamai/Cloudflare Bot
+  // Manager) fingerprints `--headless` and `--headless=new` regardless
+  // of UA spoof, and headed-via-Xvfb is the cheapest path to a passing
+  // fingerprint from a container. Opt-out with `xvfb: false` to save
+  // ~5MB image + ~10MB RAM/idle on agents that never touch a browser.
+  // The shim self-heals — when Xvfb isn't on PATH it execs the agent
+  // directly, no other Dockerfile or shim change needed. Boolean-only
+  // because the package has no API-stable versioning that matters
+  // here; xvfb tracks the upstream X server release.
+  xvfb: z.boolean().default(true),
   append: z.array(dockerfileLineSchema).default([]),
 })
 

@@ -27,6 +27,12 @@ export type BuildDockerfileOptions = {
 // `util-linux` carries `setpriv`, which the shim uses to drop CAP_NET_ADMIN
 // from the bounding set before exec'ing the agent. Listed first in the
 // apt-get install line so the package set is self-documenting at a glance.
+//
+// xvfb is intentionally NOT in baseline — it's a toggle (`xvfb: true` by
+// default, opt-out via `docker.file.xvfb: false`) because the shim
+// self-heals: it spawns Xvfb (and exports DISPLAY) if the binary is on
+// PATH, and execs the agent directly otherwise. See APT_FEATURES.xvfb
+// below and `buildEntrypointShim`.
 const BASELINE_APT_PACKAGES = ['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux'] as const
 
 // curl-impersonate is the only currently-working way to query DuckDuckGo from
@@ -219,7 +225,96 @@ export function buildEntrypointShim(): string {
 # Source: src/init/dockerfile.ts \`buildEntrypointShim()\`.
 set -eu
 
+# start_xvfb launches Xvfb in the background under a stripped capability
+# bounding set so headed Chrome (agent-browser --headed, Playwright
+# headful) has a real X11 display to connect to. Headless containers
+# have no display server; Chrome --headless / --headless=new is
+# fingerprinted by modern bot detection (Akamai / Cloudflare BM)
+# regardless of UA spoof, so real headed Chrome under a virtual
+# framebuffer is the only path to a passing sensor score from a
+# server-side container.
+#
+# Two correctness invariants this function enforces:
+#
+# 1. Xvfb never holds CAP_NET_ADMIN. The shim runs as PID 1 with the
+#    container's full capability set (including NET_ADMIN when
+#    network.blockInternal=true). If we backgrounded Xvfb naked, it
+#    would inherit NET_ADMIN and keep it for the container's lifetime
+#    — defeating the capability-drop contract that setpriv applies to
+#    the agent process. Routing Xvfb through the same setpriv invocation
+#    we use for the agent strips NET_ADMIN before Xvfb's first exec.
+#    On the off-path (blockInternal=false) the bounding-set drop is a
+#    no-op (NET_ADMIN was never granted), but the call is harmless.
+#
+# 2. Xvfb startup failure is loud, not silent. \`Xvfb ... >/dev/null &\`
+#    under \`set -e\` does not fail the script if Xvfb exits immediately
+#    (missing library, port conflict, malformed args). Without the
+#    explicit liveness probe below, the shim would then export DISPLAY
+#    and exec bun, agent-browser launches would die with "cannot open
+#    display", and the operator would chase a phantom bug. We capture
+#    $! and \`kill -0\` it on every poll iteration so an early exit
+#    becomes a clear stderr line and a non-zero shim exit.
+#
+# We DO NOT use \`xvfb-run\`. xvfb-run hangs forever when it runs as
+# PID 1 inside a container: its SIGUSR1-based ready handshake races
+# and stalls because PID 1 ignores signals without explicit handlers,
+# so the \`trap : USR1 ; wait || :\` dance never wakes up. Observed in
+# practice: container alive, Xvfb running, PID 1 stuck in
+# \`rt_sigsuspend\`, no agent process ever spawns, \`docker logs\` empty.
+# Documented industry workarounds are tini-as-PID-1 or direct Xvfb
+# spawn; we pick the latter (no new dep).
+#
+# Xvfb args:
+#   :99                     fixed display number. Filesystem
+#                           (/tmp/.X11-unix/X99) and abstract
+#                           (\\0/tmp/.X11-unix/X99) sockets are both
+#                           network-namespace-scoped, so :99 is safe
+#                           across all Compose'd containers.
+#   -screen 0 1920x1080x24  desktop viewport agent-browser advertises;
+#                           mismatched geometry is itself a fingerprint
+#                           signal.
+#   -ac                     disable host-based X access control so
+#                           Chrome connects without XAUTHORITY plumbing.
+#   +extension RANDR        expose the RandR extension; Chrome queries
+#                           it for screen geometry, and without it
+#                           \`screen.*\` values come back inconsistent.
+#   -nolisten tcp           refuse TCP connections (Unix socket only).
+#                           Defense-in-depth — we are in a netns with
+#                           no inbound exposure anyway.
+start_xvfb() {
+  if ! command -v Xvfb >/dev/null 2>&1; then
+    return 0
+  fi
+  setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin \\
+    -- Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR -nolisten tcp \\
+    >/dev/null 2>&1 &
+  xvfb_pid=$!
+  export DISPLAY=:99
+  # Poll the socket every 10ms up to ~3s. Xvfb cold start is typically
+  # ~20-50ms on a modern host; 3s covers slow Docker Desktop VMs,
+  # Rosetta/QEMU emulation, and loaded CI runners. We also \`kill -0\`
+  # the pid each iteration so an Xvfb that died immediately surfaces
+  # as a clear error instead of a 3-second hang followed by silent
+  # "cannot open display" downstream.
+  i=0
+  while [ $i -lt 300 ]; do
+    if [ -S /tmp/.X11-unix/X99 ]; then
+      unset i xvfb_pid
+      return 0
+    fi
+    if ! kill -0 "$xvfb_pid" 2>/dev/null; then
+      echo "typeclaw-entrypoint: Xvfb exited immediately; cannot start headed display (docker.file.xvfb=true)" >&2
+      exit 1
+    fi
+    sleep 0.01
+    i=$((i + 1))
+  done
+  echo "typeclaw-entrypoint: Xvfb did not create /tmp/.X11-unix/X99 within 3s; refusing to continue (docker.file.xvfb=true)" >&2
+  exit 1
+}
+
 if [ "\${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then
+  start_xvfb
   exec bun run typeclaw "$@"
 fi
 
@@ -264,6 +359,7 @@ ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 ip6tables -A OUTPUT -o lo -j ACCEPT
 ${ipv6Rules.join('\n')}
 
+start_xvfb
 exec setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin -- bun run typeclaw "$@"
 `
 }
@@ -337,7 +433,7 @@ type AptFeature = {
   toAptArgs: (toggle: DockerfileFeatureToggle) => string[]
 }
 
-const APT_FEATURES: Record<'ffmpeg' | 'gh' | 'tmux' | 'python' | 'cjkFonts', AptFeature> = {
+const APT_FEATURES: Record<'ffmpeg' | 'gh' | 'tmux' | 'python' | 'cjkFonts' | 'xvfb', AptFeature> = {
   ffmpeg: { toAptArgs: (v) => singlePackageArgs('ffmpeg', v) },
   gh: { toAptArgs: (v) => singlePackageArgs('gh', v) },
   tmux: { toAptArgs: (v) => singlePackageArgs('tmux', v) },
@@ -345,6 +441,7 @@ const APT_FEATURES: Record<'ffmpeg' | 'gh' | 'tmux' | 'python' | 'cjkFonts', Apt
     toAptArgs: (v) => (v === true ? ['python3', 'python3-pip', 'python3-venv', 'python-is-python3'] : []),
   },
   cjkFonts: { toAptArgs: (v) => (v === true ? [CJK_FONTS_PACKAGE] : []) },
+  xvfb: { toAptArgs: (v) => (v === true ? ['xvfb'] : []) },
 }
 
 export function buildDockerfile(
@@ -616,12 +713,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \\
     fi`
 
 function defaultConfig(): DockerfileConfig {
-  return { ffmpeg: false, gh: true, python: true, tmux: true, cjkFonts: true, cloudflared: true, append: [] }
+  return {
+    ffmpeg: false,
+    gh: true,
+    python: true,
+    tmux: true,
+    cjkFonts: true,
+    cloudflared: true,
+    xvfb: true,
+    append: [],
+  }
 }
 
 function collectToggleAptArgs(config: DockerfileConfig): string[] {
   const args: string[] = []
-  for (const key of ['ffmpeg', 'gh', 'python', 'tmux', 'cjkFonts'] as const) {
+  for (const key of ['ffmpeg', 'gh', 'python', 'tmux', 'cjkFonts', 'xvfb'] as const) {
     args.push(...APT_FEATURES[key].toAptArgs(config[key]))
   }
   return args

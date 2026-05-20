@@ -121,12 +121,22 @@ describe('planStart', () => {
     expect(plan.runArgs).not.toContain('--rm')
     expect(plan.runArgs).toContain('--name')
     expect(plan.runArgs).toContain(plan.containerName)
+    expect(plan.runArgs).toContain('--shm-size=2g')
     expect(plan.runArgs).toContain('-p')
     expect(plan.runArgs).toContain('127.0.0.1:8973:8973')
     expect(plan.runArgs).toContain('--env-file')
     expect(plan.runArgs).toContain(join(root, '.env'))
     expect(plan.runArgs).toContain(`${root}:/agent`)
     expect(plan.runArgs.at(-1)).toBe(plan.imageTag)
+  })
+
+  test('sets --shm-size=2g unconditionally so the bundled Chrome survives heavy pages (Docker default /dev/shm is 64MB and crashes Chrome)', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    expect(plan.runArgs).toContain('--shm-size=2g')
   })
 
   test('can publish the TUI websocket port on all host interfaces', async () => {

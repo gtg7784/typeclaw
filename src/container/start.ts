@@ -455,7 +455,24 @@ export async function planStart({
   // the start() preflight force-removes any lingering corpse before the next
   // launch — so the only state Docker ever sees in `docker ps -a` is either
   // a running container or one the user has not started again yet.
-  const runArgs = ['run', '-d', '--name', containerName, '-p', `${publishHost}:${hostPort}:${CONTAINER_PORT}`]
+  //
+  // `--shm-size=2g` is mandatory for the bundled Chrome (agent-browser) to
+  // survive heavy pages. Docker's default /dev/shm is 64MB; Chrome uses
+  // shared memory for the renderer process and silently crashes mid-load
+  // on any site with a large DOM or non-trivial WebGL. The crash surfaces
+  // as a blank page or "target closed" with no clear cause — easy to
+  // misattribute to bot detection. 2g matches the Playwright/Puppeteer
+  // canonical recommendation and is a memory cap, not an allocation (only
+  // used pages count against the host).
+  const runArgs = [
+    'run',
+    '-d',
+    '--name',
+    containerName,
+    '--shm-size=2g',
+    '-p',
+    `${publishHost}:${hostPort}:${CONTAINER_PORT}`,
+  ]
 
   // Network egress filter: when `typeclaw.json#network.blockInternal` is true,
   // grant the container CAP_NET_ADMIN at boot so the entrypoint shim can

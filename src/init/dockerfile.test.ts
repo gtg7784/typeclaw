@@ -1,4 +1,8 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { dockerfileSchema } from '@/config/config'
 
@@ -95,13 +99,31 @@ describe('buildDockerfile feature toggles', () => {
     expect(pkgs).toContain('ffmpeg=7:5.1.4-0+deb12u1')
   })
 
-  test('all toggles off: only baseline packages remain (incl. the egress-shim deps that ship unconditionally)', () => {
+  test('all toggles off: only baseline packages remain (egress-shim deps ship unconditionally; xvfb is a toggle, off here)', () => {
     const pkgs = aptPackages(
       buildDockerfile(
-        dockerfileSchema.parse({ tmux: false, gh: false, python: false, ffmpeg: false, cjkFonts: false }),
+        dockerfileSchema.parse({
+          tmux: false,
+          gh: false,
+          python: false,
+          ffmpeg: false,
+          cjkFonts: false,
+          xvfb: false,
+        }),
       ),
     )
     expect(pkgs).toEqual(['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux'])
+  })
+
+  test('xvfb: true (the default) adds xvfb to the toggle apt package list, after the baseline packages', () => {
+    const pkgs = aptPackages(buildDockerfile(dockerfileSchema.parse({})))
+    expect(pkgs).toContain('xvfb')
+    expect(pkgs.indexOf('xvfb')).toBeGreaterThan(pkgs.indexOf('util-linux'))
+  })
+
+  test('xvfb: false omits xvfb from the apt package list (opt-out)', () => {
+    const pkgs = aptPackages(buildDockerfile(dockerfileSchema.parse({ xvfb: false })))
+    expect(pkgs).not.toContain('xvfb')
   })
 
   test('append lines render after the toggle layers and before ENTRYPOINT', () => {
@@ -330,7 +352,7 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
     expect(base).not.toContain('githubcli-archive-keyring.gpg')
   })
 
-  test('base Dockerfile main apt-get install line installs only the baseline packages (no gh/python/tmux/ffmpeg)', () => {
+  test('base Dockerfile main apt-get install line installs only the baseline packages (no gh/python/tmux/ffmpeg/xvfb — xvfb is a toggle layered onto the base by the per-agent Dockerfile)', () => {
     const base = buildBaseDockerfile()
     const match = base.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+?) \\\n/)
     if (!match || !match[1]) throw new Error('main apt-get install line not found in base Dockerfile')
@@ -396,7 +418,14 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
   test('with all toggles off: emits no apt install RUN block at all (zero-cost per-agent rebuild)', () => {
     // given: every toggle disabled, so no per-agent apt work is needed
     const out = buildDockerfile(
-      dockerfileSchema.parse({ tmux: false, gh: false, python: false, ffmpeg: false, cjkFonts: false }),
+      dockerfileSchema.parse({
+        tmux: false,
+        gh: false,
+        python: false,
+        ffmpeg: false,
+        cjkFonts: false,
+        xvfb: false,
+      }),
       {
         baseImageVersion: '0.1.1',
       },
@@ -407,9 +436,16 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
   })
 
   test('with toggles on: emits exactly one apt install RUN block containing only toggle packages', () => {
-    // given: gh + tmux enabled, python + ffmpeg + cjkFonts disabled
+    // given: gh + tmux enabled, python + ffmpeg + cjkFonts + xvfb disabled
     const out = buildDockerfile(
-      dockerfileSchema.parse({ gh: true, tmux: true, python: false, ffmpeg: false, cjkFonts: false }),
+      dockerfileSchema.parse({
+        gh: true,
+        tmux: true,
+        python: false,
+        ffmpeg: false,
+        cjkFonts: false,
+        xvfb: false,
+      }),
       {
         baseImageVersion: '0.1.1',
       },
@@ -420,6 +456,21 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
     expect(aptInstallMatch).not.toBeNull()
     const pkgs = aptInstallMatch![1]!.split(/\s+/).filter(Boolean)
     expect(pkgs).toEqual(['gh', 'tmux'])
+  })
+
+  test('versioned per-agent Dockerfile: xvfb: true (default) emits xvfb in the per-agent toggle layer so older base images without it still get a working virtual display', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })
+    const aptInstallMatch = out.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+)/)
+    expect(aptInstallMatch).not.toBeNull()
+    expect(aptInstallMatch![1]!.split(/\s+/).filter(Boolean)).toContain('xvfb')
+  })
+
+  test('versioned per-agent Dockerfile: xvfb: false omits xvfb on top of the base image (opt-out honored regardless of base-image vintage)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ xvfb: false }), { baseImageVersion: '0.1.1' })
+    const aptInstallMatch = out.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+)/)
+    if (aptInstallMatch !== null) {
+      expect(aptInstallMatch[1]!.split(/\s+/).filter(Boolean)).not.toContain('xvfb')
+    }
   })
 
   test('keeps gh keyring bootstrap when gh is enabled (per-agent toggle, not base-image content)', () => {
@@ -474,10 +525,29 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
 })
 
 describe('network egress entrypoint shim', () => {
-  test('is a no-op when TYPECLAW_NETWORK_BLOCK_INTERNAL is unset or not "1" (off-switch path: users who opted out via network.blockInternal=false)', () => {
+  test('off-switch path (network.blockInternal=false) installs no iptables rules and execs the agent directly (after start_xvfb runs to set DISPLAY)', () => {
     const shim = buildEntrypointShim()
     expect(shim).toContain('"${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1"')
-    expect(shim).toMatch(/!= "1" \];? then\s+exec bun run typeclaw "\$@"/)
+    expect(shim).toMatch(/!= "1" \];? then\s+start_xvfb\s+exec bun run typeclaw "\$@"/)
+  })
+
+  test('shim self-heals on Xvfb presence: spawns Xvfb directly (not xvfb-run, which hangs as PID 1) and exports DISPLAY', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('command -v Xvfb')
+    expect(shim).toContain('Xvfb :99 -screen 0 1920x1080x24 -ac +extension RANDR -nolisten tcp')
+    expect(shim).toContain('export DISPLAY=:99')
+    // Strip the rationale-block comment lines that explain why we avoid
+    // xvfb-run, then assert it is not invoked anywhere in executable code.
+    const executable = shim
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n')
+    expect(executable).not.toContain('xvfb-run')
+  })
+
+  test('shim waits for Xvfb socket to exist before exec-ing the agent (avoids "cannot open display" race)', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('/tmp/.X11-unix/X99')
   })
 
   test('installs a REJECT rule for every IPv4 network in NETWORK_BLOCK_IPV4_NETS', () => {
@@ -552,18 +622,54 @@ describe('network egress entrypoint shim', () => {
     )
   })
 
+  test('start_xvfb is called before each exec (off-path immediately before exec bun; on-path after iptables, before exec setpriv) so DISPLAY is exported before the agent inherits the env', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('export DISPLAY=:99')
+
+    const offBranchEnd = shim.indexOf('fi\n', shim.indexOf('!= "1"'))
+    expect(offBranchEnd).toBeGreaterThan(-1)
+    const offBranch = shim.slice(0, offBranchEnd)
+    const offStartXvfbIdx = offBranch.lastIndexOf('start_xvfb\n')
+    const offExecIdx = offBranch.search(/exec bun run typeclaw "\$@"/)
+    expect(offStartXvfbIdx).toBeGreaterThan(-1)
+    expect(offExecIdx).toBeGreaterThan(offStartXvfbIdx)
+
+    const onBranch = shim.slice(offBranchEnd)
+    const lastIptablesIdx = onBranch.lastIndexOf('iptables -A OUTPUT')
+    const onStartXvfbIdx = onBranch.lastIndexOf('start_xvfb\n')
+    const onExecIdx = onBranch.indexOf('exec setpriv')
+    expect(lastIptablesIdx).toBeGreaterThan(-1)
+    expect(onStartXvfbIdx).toBeGreaterThan(lastIptablesIdx)
+    expect(onExecIdx).toBeGreaterThan(onStartXvfbIdx)
+  })
+
+  test('Xvfb runs under the same setpriv capability-drop as the agent so it never holds NET_ADMIN on the network-block path', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toMatch(
+      /setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin \\\s+-- Xvfb :99/,
+    )
+  })
+
+  test('Xvfb startup failure is loud: helper polls liveness with kill -0 and exits non-zero with a stderr line on early exit or socket timeout', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('kill -0 "$xvfb_pid"')
+    expect(shim).toMatch(/typeclaw-entrypoint: Xvfb exited immediately[^\n]+\n[^\n]+exit 1/)
+    expect(shim).toMatch(/typeclaw-entrypoint: Xvfb did not create \/tmp\/\.X11-unix\/X99[^\n]+\n[^\n]+exit 1/)
+  })
+
   test('runs `set -eu` so an iptables failure brings PID 1 down (fail closed)', () => {
     const shim = buildEntrypointShim()
     expect(shim).toMatch(/^#!\/bin\/sh\n[\s\S]*?\nset -eu\n/)
   })
 
-  test('on-mode rules appear in the on-branch only, never in the off path', () => {
+  test('on-mode side effects (iptables OUTPUT rules, the agent-exec setpriv drop) appear only on the on-branch — the off-branch execs the agent directly without firewall installation', () => {
     const shim = buildEntrypointShim()
     const offBranchEnd = shim.indexOf('fi\n', shim.indexOf('!= "1"'))
     expect(offBranchEnd).toBeGreaterThan(-1)
     const offBranch = shim.slice(0, offBranchEnd)
     expect(offBranch).not.toContain('iptables -A OUTPUT')
-    expect(offBranch).not.toContain('setpriv')
+    expect(offBranch).toMatch(/exec bun run typeclaw "\$@"/)
+    expect(offBranch).not.toMatch(/exec setpriv [^\n]*-- bun run typeclaw/)
   })
 
   test('per-agent Dockerfile wires ENTRYPOINT to the shim path, not directly to bun run', () => {
@@ -644,3 +750,117 @@ describe('network egress entrypoint shim', () => {
     expect(shim).toContain('unset IFS')
   })
 })
+
+describe('entrypoint shim — executable behavior (Xvfb startup, fail-fast)', () => {
+  let workdir: string
+  let bindir: string
+  let logfile: string
+
+  beforeAll(async () => {
+    workdir = mkdtempSync(join(tmpdir(), 'typeclaw-shim-test-'))
+    bindir = join(workdir, 'bin')
+    await mkdir(bindir, { recursive: true })
+
+    logfile = join(workdir, 'agent-args.log')
+
+    // Fake `setpriv` that ignores all flags up to `--` and then execs the
+    // rest. Real setpriv drops capabilities; the test doesn't care about
+    // capabilities, only that the wrapped command runs.
+    await writeShellScript(
+      join(bindir, 'setpriv'),
+      `#!/bin/sh
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --) shift; break;;
+    --*) shift;;
+    *) shift;;
+  esac
+done
+exec "$@"
+`,
+    )
+
+    // Fake `bun` that records its argv and the value of $DISPLAY, then
+    // exits 0. Stands in for the real \`bun run typeclaw "$@"\` exec at
+    // the end of the shim.
+    await writeShellScript(
+      join(bindir, 'bun'),
+      `#!/bin/sh
+{
+  echo "argv: $*"
+  echo "DISPLAY: \${DISPLAY:-<unset>}"
+} > "${logfile}"
+exit 0
+`,
+    )
+  })
+
+  afterAll(() => {
+    rmSync(workdir, { recursive: true, force: true })
+  })
+
+  test('off-path: when Xvfb exits immediately, the shim writes a diagnostic to stderr and exits non-zero (no silent failure)', async () => {
+    // Fake Xvfb that exits 1 the instant it starts. The shim's
+    // `kill -0 $xvfb_pid` check should detect this on the next poll
+    // iteration and `exit 1` with a clear stderr line.
+    await writeShellScript(
+      join(bindir, 'Xvfb'),
+      `#!/bin/sh
+exit 1
+`,
+    )
+
+    const shim = buildEntrypointShim()
+    const failShimPath = join(workdir, 'shim-fail.sh')
+    await writeShellScript(failShimPath, shim)
+
+    const proc = Bun.spawn(['/bin/sh', failShimPath, 'run'], {
+      env: { PATH: `${bindir}:${process.env['PATH'] ?? ''}` },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const exitCode = await proc.exited
+    const stderr = await new Response(proc.stderr).text()
+
+    expect(exitCode).not.toBe(0)
+    expect(stderr).toContain('typeclaw-entrypoint: Xvfb exited immediately')
+  })
+
+  test('off-path: when Xvfb is not on PATH (docker.file.xvfb=false equivalent), the shim execs the agent directly without spawning anything or exporting DISPLAY', async () => {
+    // Make Xvfb unfindable by pointing PATH at a directory that lacks it.
+    // Keep the rest of the fakes (bun, setpriv) reachable via the same
+    // bindir but rename the Xvfb fake aside.
+    const isolatedBin = join(workdir, 'bin-no-xvfb')
+    await mkdir(isolatedBin, { recursive: true })
+    // Symlink in the bun + setpriv fakes only; leave Xvfb out.
+    await writeShellScript(
+      join(isolatedBin, 'bun'),
+      `#!/bin/sh\necho "DISPLAY: \${DISPLAY:-<unset>}" > "${logfile}"\nexit 0\n`,
+    )
+    await writeShellScript(
+      join(isolatedBin, 'setpriv'),
+      `#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in --) shift; break;; *) shift;; esac; done
+exec "$@"
+`,
+    )
+
+    const shim = buildEntrypointShim()
+    const noXvfbShimPath = join(workdir, 'shim-no-xvfb.sh')
+    await writeShellScript(noXvfbShimPath, shim)
+
+    const proc = Bun.spawn(['/bin/sh', noXvfbShimPath, 'run'], {
+      env: { PATH: isolatedBin },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const exitCode = await proc.exited
+    expect(exitCode).toBe(0)
+    const log = await Bun.file(logfile).text()
+    expect(log).toContain('DISPLAY: <unset>')
+  })
+})
+
+async function writeShellScript(path: string, contents: string): Promise<void> {
+  await writeFile(path, contents, { mode: 0o755 })
+}
