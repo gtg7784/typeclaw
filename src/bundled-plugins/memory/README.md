@@ -9,8 +9,8 @@ This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` 
 ```json
 {
   "memory": {
-    "idleMs": 10000,
-    "bufferBytes": 100000,
+    "idleMs": 60000,
+    "bufferBytes": 500000,
     "dreaming": { "schedule": "*/30 * * * *" }
   }
 }
@@ -18,8 +18,8 @@ This plugin is **auto-loaded** by every TypeClaw agent. There is no `plugins[]` 
 
 | Field                      | Default            | Effect                                                                                                                                                                                                                                                                                                                                                             |
 | -------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `memory.idleMs`            | `10000`            | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`.                                                                                                                                                                                                                                                                            |
-| `memory.bufferBytes`       | `100000`           | Size-based ceiling: spawns `memory-logger` when the transcript grows by this many bytes since the last run, even during continuous activity. `0` disables. Minimum `10000` when non-zero.                                                                                                                                                                          |
+| `memory.idleMs`            | `60000`            | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`. Default bumped from `10000` to `60000` to reduce spawn churn during conversational sessions where the agent goes idle for short periods between rapid back-and-forth turns.                                                                                                |
+| `memory.bufferBytes`       | `500000`           | Size-based ceiling: spawns `memory-logger` when the transcript grows by this many bytes since the last run, even during continuous activity. `0` disables. Minimum `10000` when non-zero. Default bumped from `100000` to `500000` so a single conversational session stays within one memory-logger run unless it grows past ~half a megabyte of transcript.      |
 | `memory.dreaming`          | `{}` (cron job on) | Dreaming cron job is always registered. Override `schedule` to change when it fires.                                                                                                                                                                                                                                                                               |
 | `memory.dreaming.schedule` | `"*/30 * * * *"`   | Five-field cron expression. Defaults to every 30 minutes; fires short-circuit with zero LLM cost when nothing sits past the watermark, so frequent no-op fires are cheap and let sporadic agents still consolidate while alive (`src/cron/scheduler.ts` has no catchup for missed fires). Second-level schedules are rejected to avoid noisy no-op dreaming loops. |
 

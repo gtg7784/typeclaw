@@ -1,6 +1,6 @@
 ---
 name: typeclaw-memory
-description: Use this skill whenever the user asks what you remember, what you forgot, what you dreamed, why a fact is or isn't in your memory, when memory consolidation happens, or whenever you are about to read or write `MEMORY.md`, anything under `memory/`, or `memory/skills/`. Triggers include "what do you remember", "do you remember X", "forget that", "what did you dream", "when do you dream next", "why did you forget X", "edit MEMORY.md", "add to memory", "your daily streams", "memory-logger", "dreaming", "muscle memory", or any mention of `memory.idleMs` / `memory.dreaming.schedule` in `typeclaw.json`. Read it before you touch any memory file — `MEMORY.md` and `memory/yyyy-MM-dd.jsonl` are runtime-owned, hand-edits are easy to do wrong, and the user almost always means something more specific than "edit memory" when they say it.
+description: Use this skill whenever the user asks what you remember, what you forgot, what you dreamed, why a fact is or isn't in your memory, when memory consolidation happens, or whenever you are about to read or write `MEMORY.md`, anything under `memory/`, or `memory/skills/`. Triggers include "what do you remember", "do you remember X", "forget that", "what did you dream", "when do you dream next", "why did you forget X", "edit MEMORY.md", "add to memory", "your daily streams", "memory-logger", "dreaming", "muscle memory", or any mention of `memory.idleMs` / `memory.bufferBytes` / `memory.dreaming.schedule` in `typeclaw.json`. Read it before you touch any memory file — `MEMORY.md` and `memory/yyyy-MM-dd.jsonl` are runtime-owned, hand-edits are easy to do wrong, and the user almost always means something more specific than "edit memory" when they say it.
 ---
 
 # typeclaw-memory
@@ -13,7 +13,7 @@ This skill exists so you can answer the user's questions about your own memory h
 
 ### Stage 1: memory-logger (online, per-session)
 
-After every prompt completes, the runtime fires the `session.idle` hook. The memory plugin starts a debounce timer (`memory.idleMs`, default `10_000` ms; minimum `1000`). Every subsequent prompt completion resets the timer. When the user has been quiet for `idleMs`, the plugin spawns the **memory-logger** subagent for the current session. It also fires immediately on `session.end` (websocket close) so the final transcript never gets lost.
+After every prompt completes, the runtime fires the `session.idle` hook. The memory plugin starts a debounce timer (`memory.idleMs`, default `60_000` ms; minimum `1000`). Every subsequent prompt completion resets the timer. When the user has been quiet for `idleMs`, the plugin spawns the **memory-logger** subagent for the current session. It also fires immediately on `session.end` (websocket close) so the final transcript never gets lost.
 
 The memory-logger reads:
 
@@ -139,24 +139,26 @@ Stay concrete. Use this map:
 
 `typeclaw init` does **not** scaffold any of these. They appear when needed — `MEMORY.md` and `memory/` are created by the first dreaming run; daily streams appear when the first memory-logger fires.
 
-## When the user asks about `memory.idleMs` or `memory.dreaming.schedule`
+## When the user asks about `memory.idleMs`, `memory.bufferBytes`, or `memory.dreaming.schedule`
 
-These are the only two configurable knobs. They live in the `memory` block of `typeclaw.json`:
+These are the configurable knobs. They live in the `memory` block of `typeclaw.json`:
 
 ```json
 {
   "memory": {
-    "idleMs": 10000,
+    "idleMs": 60000,
+    "bufferBytes": 500000,
     "dreaming": { "schedule": "*/30 * * * *" }
   }
 }
 ```
 
-| Field                      | Default              | Effect                                                                                                                                                                                                        | Reload class      |
-| -------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| `memory.idleMs`            | `10000` (min `1000`) | Debounce window before `memory-logger` spawns after a prompt completes.                                                                                                                                       | Restart-required. |
-| `memory.dreaming`          | `{}` (cron job on)   | Dreaming cron job is always registered. Override `schedule` to change when it fires.                                                                                                                          | Restart-required. |
-| `memory.dreaming.schedule` | `"*/30 * * * *"`     | Cron expression. Parsed via `cron-parser`; an invalid expression fails config load. Fires with nothing past the watermark short-circuit before any LLM call, so frequent no-op fires are intentionally cheap. | Restart-required. |
+| Field                      | Default               | Effect                                                                                                                                                                                                                                                                              | Reload class      |
+| -------------------------- | --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| `memory.idleMs`            | `60000` (min `1000`)  | Debounce window before `memory-logger` spawns after a prompt completes.                                                                                                                                                                                                             | Restart-required. |
+| `memory.bufferBytes`       | `500000` (0 disables) | Size-based ceiling. Spawns `memory-logger` immediately when the transcript has grown by this many bytes since the last run, regardless of `idleMs`. Lets busy channel sessions still produce memory updates without waiting for a full quiet window. Minimum `10000` when non-zero. | Restart-required. |
+| `memory.dreaming`          | `{}` (cron job on)    | Dreaming cron job is always registered. Override `schedule` to change when it fires.                                                                                                                                                                                                | Restart-required. |
+| `memory.dreaming.schedule` | `"*/30 * * * *"`      | Cron expression. Parsed via `cron-parser`; an invalid expression fails config load. Fires with nothing past the watermark short-circuit before any LLM call, so frequent no-op fires are intentionally cheap.                                                                       | Restart-required. |
 
 Both fields are restart-required because plugin config is read once at boot. After editing them, tell the user: "Edited `memory.<field>` — restart-required. Run `typeclaw restart` (host stage) to pick up the change." The bundled plugin's config schema is merged into `typeclaw.schema.json`, so editor autocomplete will validate these fields, but a `reload` will not re-instantiate the plugin.
 
