@@ -33,7 +33,7 @@ If `claude` is installed but no credential is set up, you have to broker the aut
 1. **Already authenticated?** Run `env | grep -E '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)='` — if either is present, skip auth entirely.
 2. **User has an Anthropic Console workspace** (API billing, no subscription) → API key path.
 3. **User has a Claude Pro/Max/Team/Enterprise subscription** → OAuth token path.
-4. **User is unsure** → prefer API key (simpler flow, no browser dependency).
+4. **User is unsure** → prefer API key (one fewer round-trip). OAuth works fine for remote-host typeclaw deployments via `claude setup-token`'s code-paste fallback (see below) — the bias is just "fewer steps", not "OAuth is fragile".
 
 ### API key path
 
@@ -48,9 +48,11 @@ If `claude` is installed but no credential is set up, you have to broker the aut
 
 ### OAuth path
 
-OAuth requires a browser. The flow is: agent runs `claude setup-token` in tmux → claude prints a URL + waits for a code → agent surfaces URL to user → user opens it, authorizes, copies the code back → agent feeds the code to tmux → claude prints the OAuth token → agent captures it.
+OAuth requires a browser. The flow is: agent runs `claude setup-token` in tmux → claude prints a URL + waits for a code → agent surfaces URL to user → user opens it on whatever device they have a browser on (their laptop, phone, etc.), authorizes, and either (a) copies the code shown on the post-auth page back to the agent, or (b) copies the full `http://localhost:...?code=...&state=...` callback URL from their browser's address bar if the page tried to redirect and failed — both work, the agent parses either shape — → agent extracts the code, feeds it to tmux → claude prints the OAuth token → agent captures it.
 
-The full pane-capture mechanics, the timing of when claude is ready for input, and the retry semantics on bad codes are in `references/auth-flow.md`. Read that file before you start the OAuth flow.
+**This works on remote-host typeclaw deployments** (container on a server, browser on the user's laptop, different machines). `claude setup-token` is built for that case — see the cross-device rationale in `references/auth-flow.md`. Do not try to launch a browser from inside the container (`xdg-open` won't work — no display), do not advise SSH port forwarding (unnecessary), do not branch on local-vs-remote in your code path (the flow is the same).
+
+The full pane-capture mechanics, the URL-or-code parsing rules, the cross-device explanation, and the retry semantics on bad codes are in `references/auth-flow.md`. Read that file before you start the OAuth flow.
 
 ### Cost-cap warning
 
