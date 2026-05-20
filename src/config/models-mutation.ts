@@ -28,11 +28,12 @@ export type ModelMutationResult = { ok: true } | { ok: false; reason: string }
 export function listModelProfiles(cwd: string, env: NodeJS.ProcessEnv = process.env): ModelProfileEntry[] {
   const models = loadConfigSync(cwd).models
   const out: ModelProfileEntry[] = []
-  for (const [profile, ref] of Object.entries(models)) {
-    const providerId = providerForModelRef(ref)
+  for (const [profile, refs] of Object.entries(models)) {
+    const headRef = refs[0]!
+    const providerId = providerForModelRef(headRef)
     out.push({
       profile,
-      ref,
+      ref: headRef,
       providerId,
       isDefault: profile === 'default',
       credentialStatus: hasUsableCredential(cwd, providerId, env) ? 'available' : 'missing-credentials',
@@ -158,14 +159,14 @@ export function removeProfile(cwd: string, profile: string): ModelMutationResult
 
 function writeProfile(cwd: string, profile: string, ref: KnownModelRef, message: string): ModelMutationResult {
   const existing = readModelsRaw(cwd)
-  const next = existing === null ? { default: ref } : { ...existing, [profile]: ref }
+  const next: Record<string, string | string[]> = existing === null ? { default: ref } : { ...existing, [profile]: ref }
   if (existing === null && profile !== 'default') {
     next.default = ref
   }
   return writeModels(cwd, next, message)
 }
 
-function writeModels(cwd: string, models: Record<string, string>, commitMessage: string): ModelMutationResult {
+function writeModels(cwd: string, models: Record<string, string | string[]>, commitMessage: string): ModelMutationResult {
   const path = join(cwd, CONFIG_FILE)
   let parsed: Record<string, unknown>
   try {
@@ -207,10 +208,10 @@ function writeModels(cwd: string, models: Record<string, string>, commitMessage:
   return { ok: true }
 }
 
-function readModelsRaw(cwd: string): Record<string, string> | null {
+function readModelsRaw(cwd: string): Record<string, string | string[]> | null {
   try {
     const raw = readFileSync(join(cwd, CONFIG_FILE), 'utf8')
-    const parsed = JSON.parse(raw) as { models?: Record<string, string> }
+    const parsed = JSON.parse(raw) as { models?: Record<string, string | string[]> }
     return parsed.models ?? null
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null
