@@ -17,6 +17,43 @@ import { AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT } from './dashboard-proxy'
 
 export const REAL_BIN_ENV = 'TYPECLAW_AGENT_BROWSER_REAL_BIN'
 
+// Recent desktop Chrome on macOS. The upstream binary defaults to a UA that
+// includes "HeadlessChrome" / a stale Chromium build, which is widely
+// fingerprinted as a bot and silently triggers CAPTCHAs, 403s, blank pages,
+// and A/B-test misrouting. Bump on Chrome major releases — same hygiene as
+// the curl-impersonate pin in src/init/dockerfile.ts.
+export const DEFAULT_USER_AGENT =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+
+export const USER_AGENT_ENV = 'AGENT_BROWSER_USER_AGENT'
+
+export function hasUserAgentFlag(argv: readonly string[]): boolean {
+  // Matches both `--user-agent <val>` and `--user-agent=<val>`. The upstream
+  // CLI does not document a short alias for --user-agent today (verified via
+  // `agent-browser --help`), so we only check the long form.
+  for (const arg of argv) {
+    if (arg === '--user-agent' || arg.startsWith('--user-agent=')) return true
+  }
+  return false
+}
+
+export function injectUserAgentEnv(
+  argv: readonly string[],
+  env: Record<string, string | undefined>,
+  defaultUa: string = DEFAULT_USER_AGENT,
+): void {
+  // Upstream's precedence is CLI flag > env > default. We only inject the
+  // env when BOTH layers above it are absent so:
+  //   - explicit `--user-agent foo` wins (mobile testing, intentional bot UA)
+  //   - operator-set AGENT_BROWSER_USER_AGENT wins (per-shell override)
+  //   - default UA fills the otherwise-empty slot
+  // `set device "iPhone 14"` is unaffected: it sets UA via CDP at runtime,
+  // not through this env var, so our injection doesn't fight device emulation.
+  if (env[USER_AGENT_ENV] !== undefined && env[USER_AGENT_ENV] !== '') return
+  if (hasUserAgentFlag(argv)) return
+  env[USER_AGENT_ENV] = defaultUa
+}
+
 export type DashboardIntent = 'start' | 'stop' | 'other'
 
 export function classifyDashboardCommand(argv: readonly string[]): DashboardIntent {
@@ -111,6 +148,7 @@ export type ShimOptions = {
   realBin?: string
   upstreamPort?: number
   spawn?: (cmd: string[]) => { exited: Promise<number> }
+  env?: Record<string, string | undefined>
 }
 
 export async function runShim(opts: ShimOptions = {}): Promise<number> {
@@ -118,6 +156,9 @@ export async function runShim(opts: ShimOptions = {}): Promise<number> {
   const realBin = opts.realBin ?? resolveRealAgentBrowserBin()
   const upstreamPort = opts.upstreamPort ?? AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT
   const spawn = opts.spawn ?? defaultSpawn
+  const env = opts.env ?? process.env
+
+  injectUserAgentEnv(argv, env)
 
   const intent = classifyDashboardCommand(argv)
   if (intent !== 'start') {
