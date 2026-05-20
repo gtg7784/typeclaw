@@ -1,7 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test'
 
 import { KNOWN_PROVIDERS, type KnownProviderId } from '@/config/providers'
-import type { LLMAuth } from '@/init'
 import type { ModelOption } from '@/init/models-dev'
 
 import { collectWizardInputs, decideExistingApiKeyReuse, WizardAbortedError, type WizardPrompts } from './init'
@@ -116,7 +115,7 @@ describe('collectWizardInputs back-aware flow', () => {
       hasExistingChannelSecrets: async () => false,
       askReuseExistingChannel: async () => ({ kind: 'value', value: 'prompt' }),
       runChannelFlow: async () => ({ kind: 'value', value: {} }),
-      buildOAuthAuth: () => ({ kind: 'oauth', runLogin: async () => ({ ok: true }) }) as LLMAuth,
+      runOAuthLogin: async () => ({ ok: true }),
       ...overrides,
     }
   }
@@ -813,5 +812,108 @@ describe('collectWizardInputs back-aware flow', () => {
         auth: { type: 'pat', pat: 'ghp_test' },
       },
     })
+  })
+
+  test('oauth path: runs login inside the wizard, before pick-channel', async () => {
+    const calls: string[] = []
+    const loginCalls: Array<{ cwd: string; model: string; providerName: string }> = []
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: codexModel }),
+      pickAuthMethod: async () => {
+        calls.push('pick-auth-method')
+        return { kind: 'value', value: 'oauth' }
+      },
+      runOAuthLogin: async (provider, cwd, model) => {
+        loginCalls.push({ cwd, model, providerName: provider.name })
+        calls.push('run-oauth-login')
+        return { ok: true }
+      },
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'none' }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(loginCalls).toEqual([
+      { cwd: '/agent', model: codexModel.ref, providerName: KNOWN_PROVIDERS['openai-codex'].name },
+    ])
+    expect(calls).toEqual(['pick-auth-method', 'run-oauth-login', 'pick-channel'])
+    expect(result.llmAuth).toEqual({ kind: 'oauth-completed' })
+  })
+
+  test('oauth path: login failure keeps user on pick-auth-method for retry', async () => {
+    const calls: string[] = []
+    let loginAttempt = 0
+    let authMethodCalls = 0
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: codexModel }),
+      pickAuthMethod: async () => {
+        authMethodCalls += 1
+        calls.push(`pick-auth-method:${authMethodCalls}`)
+        return { kind: 'value', value: 'oauth' }
+      },
+      runOAuthLogin: async () => {
+        loginAttempt += 1
+        calls.push(`run-oauth-login:${loginAttempt}`)
+        if (loginAttempt === 1) return { ok: false, reason: 'browser closed' }
+        return { ok: true }
+      },
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'none' }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(calls).toEqual([
+      'pick-auth-method:1',
+      'run-oauth-login:1',
+      'pick-auth-method:2',
+      'run-oauth-login:2',
+      'pick-channel',
+    ])
+    expect(result.llmAuth).toEqual({ kind: 'oauth-completed' })
+  })
+
+  test('oauth path: vision profile also runs login inside the wizard when provider differs', async () => {
+    const calls: string[] = []
+    const loginCalls: Array<{ cwd: string; model: string; providerName: string }> = []
+    const prompts = makePrompts({
+      loadCatalog: async () => ({ options: [zaiTextOnlyModel, codexModel], source: 'curated' }),
+      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
+      askApiKey: async () => ({ kind: 'value', value: 'zai_key' }),
+      pickVisionProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVisionModel: async () => ({ kind: 'value', value: codexModel }),
+      pickAuthMethod: async (provider) => {
+        calls.push(`pick-auth-method:${provider.id}`)
+        return { kind: 'value', value: provider.id === 'openai-codex' ? 'oauth' : 'api-key' }
+      },
+      runOAuthLogin: async (provider, cwd, model) => {
+        loginCalls.push({ cwd, model, providerName: provider.name })
+        calls.push('run-oauth-login')
+        return { ok: true }
+      },
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'none' }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(loginCalls).toEqual([
+      { cwd: '/agent', model: codexModel.ref, providerName: KNOWN_PROVIDERS['openai-codex'].name },
+    ])
+    expect(result.vision?.llmAuth).toEqual({ kind: 'oauth-completed' })
+    // OAuth login runs immediately after the vision provider's auth method is
+    // picked — before pick-channel. The default provider (Z.AI, api-key only)
+    // never reaches runOAuthLogin.
+    expect(calls).toEqual(['pick-auth-method:zai', 'pick-auth-method:openai-codex', 'run-oauth-login', 'pick-channel'])
   })
 })

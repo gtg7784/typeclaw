@@ -11,7 +11,7 @@ import {
   type KnownModelRef,
   type KnownProviderId,
 } from '@/config/providers'
-import type { DockerAvailability } from '@/container'
+import { checkDockerAvailable, type DockerAvailability } from '@/container'
 import {
   findAgentDir,
   formatEagerGithubWebhookInstallResult,
@@ -29,7 +29,7 @@ import {
 } from '@/init'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
-import { makeOAuthLoginRunner } from '@/init/oauth-login'
+import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
 
 import { buildOAuthCallbacks } from './oauth-callbacks'
 import { c, done, errorLine } from './ui'
@@ -102,6 +102,22 @@ export const init = defineCommand({
 
     intro('Initializing TypeClaw...')
     log.info('Press ESC at any prompt to go back. Press ESC twice in a row to abort.')
+
+    // Docker preflight runs BEFORE the wizard so an OAuth login (which the
+    // wizard fires the moment the user picks "OAuth (browser login)") doesn't
+    // burn a real browser flow on an agent folder we can't actually start.
+    // `runInit` re-runs the preflight as a defense-in-depth gate, but
+    // surfacing the failure here lets the user fix Docker without re-doing
+    // every wizard step.
+    const preflightSpinner = spinner()
+    preflightSpinner.start('Checking Docker...')
+    const preflight = await checkDockerAvailable()
+    if (!preflight.ok) {
+      preflightSpinner.error(preflightFailureSummary(preflight))
+      note(preflightFailureGuidance(preflight).join('\n'), 'Docker check failed')
+      process.exit(1)
+    }
+    preflightSpinner.stop('Docker is reachable.')
 
     let collected: CollectedInputs
     try {
@@ -310,7 +326,11 @@ export interface WizardPrompts {
   hasExistingChannelSecrets: (cwd: string, channel: Exclude<ChannelChoice, 'none'>) => Promise<boolean>
   askReuseExistingChannel: (channel: Exclude<ChannelChoice, 'none'>) => Promise<StepResult<'reuse' | 'prompt'>>
   runChannelFlow: (choice: ChannelChoice) => Promise<StepResult<CollectedInputs['channelSecrets']>>
-  buildOAuthAuth: (provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]) => LLMAuth
+  runOAuthLogin: (
+    provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
+    cwd: string,
+    model: KnownModelRef,
+  ) => Promise<OAuthLoginResult>
 }
 
 export const defaultWizardPrompts: WizardPrompts = {
@@ -327,10 +347,7 @@ export const defaultWizardPrompts: WizardPrompts = {
   hasExistingChannelSecrets,
   askReuseExistingChannel,
   runChannelFlow,
-  buildOAuthAuth: (provider) => ({
-    kind: 'oauth',
-    runLogin: makeOAuthLoginRunner(buildOAuthCallbacks(provider.name)),
-  }),
+  runOAuthLogin: (provider, cwd, model) => makeOAuthLoginRunner(buildOAuthCallbacks(provider.name))({ cwd, model }),
 }
 
 export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): Promise<CollectedInputs> {
@@ -411,7 +428,18 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
         }
         state.authMethod = result.value
         if (result.value === 'oauth') {
-          state.llmAuth = prompts.buildOAuthAuth(provider)
+          // Run the browser login eagerly so the user sees the OAuth URL the
+          // moment they pick "OAuth (browser login)" — not at the end of the
+          // wizard. On failure we stay on this step so the user can retry or
+          // fall back to API key without losing the rest of their inputs.
+          const login = await prompts.runOAuthLogin(provider, cwd, state.model!.ref)
+          if (!login.ok) {
+            log.error(`OAuth login failed: ${login.reason}`)
+            state.authMethod = undefined
+            state.llmAuth = undefined
+            break
+          }
+          state.llmAuth = { kind: 'oauth-completed' }
           step = stepAfterDefaultAuth(state)
         } else {
           step = 'enter-api-key'
@@ -499,7 +527,15 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
         }
         state.visionAuthMethod = result.value
         if (result.value === 'oauth') {
-          state.visionLlmAuth = prompts.buildOAuthAuth(provider)
+          // Same eager-login rationale as the default-provider branch above.
+          const login = await prompts.runOAuthLogin(provider, cwd, state.visionModel!.ref)
+          if (!login.ok) {
+            log.error(`OAuth login failed: ${login.reason}`)
+            state.visionAuthMethod = undefined
+            state.visionLlmAuth = undefined
+            break
+          }
+          state.visionLlmAuth = { kind: 'oauth-completed' }
           step = 'pick-channel'
         } else {
           step = 'enter-vision-api-key'

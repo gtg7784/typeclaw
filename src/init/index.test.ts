@@ -595,6 +595,25 @@ describe('runInit', () => {
     expect(events.some((e) => e.step === 'oauth-login')).toBe(false)
   })
 
+  test('oauth-completed: skips the oauth-login step and writes no API key', async () => {
+    const events: InitStepEvent[] = []
+
+    await runInit({
+      cwd: root,
+      model: 'openai-codex/gpt-5.5',
+      llmAuth: { kind: 'oauth-completed' },
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
+
+    expect(events.some((e) => e.step === 'oauth-login')).toBe(false)
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toContain('scaffold:done')
+    expect(existsSync(join(root, '.env'))).toBe(false)
+    expect(existsSync(join(root, 'secrets.json'))).toBe(false)
+  })
+
   test('throws when neither apiKey nor llmAuth is provided', async () => {
     await expect(
       runInit({ cwd: root, runHatching: okHatch, runBunInstall: okInstall, dockerExec: okDocker }),
