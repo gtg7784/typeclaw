@@ -864,3 +864,230 @@ exec "$@"
 async function writeShellScript(path: string, contents: string): Promise<void> {
   await writeFile(path, contents, { mode: 0o755 })
 }
+
+// vercel-labs/agent-browser issue #1083 ("headed silently ignored on
+// existing session") leaves --headed / AGENT_BROWSER_HEADED=1 a no-op
+// once a daemon has launched a browser headless. Three upstream fix PRs
+// are open and unmerged. Layer 4.5 shims the agent-browser binary so a
+// best-effort `agent-browser close` runs before any browser-launching
+// command when headed mode is requested. These tests pin the structural
+// invariants (wrapper present in every Dockerfile that ships
+// agent-browser, ordering after install, omitted when the base image
+// already carries it) plus the behavioral matrix (when does pre-close
+// fire, when does it not, re-entrancy).
+describe('agent-browser headed-mode wrapper (Layer 4.5)', () => {
+  test('per-agent inline Dockerfile installs the wrapper after the agent-browser bun install — pre-close depends on the real binary existing at the path the wrapper mv-aliases', () => {
+    const out = buildDockerfile()
+    const installIdx = out.indexOf('bun install -g agent-browser')
+    const wrapperIdx = out.indexOf('mv /usr/local/bin/agent-browser /usr/local/bin/agent-browser.real')
+    expect(installIdx).toBeGreaterThan(-1)
+    expect(wrapperIdx).toBeGreaterThan(-1)
+    expect(installIdx).toBeLessThan(wrapperIdx)
+  })
+
+  test('base Dockerfile carries the wrapper too — without it the prebuilt GHCR base ships an unpatched agent-browser, and the per-agent versioned Dockerfile (which omits the install layer) has no way to add the wrapper itself', () => {
+    const base = buildBaseDockerfile()
+    expect(base).toContain('mv /usr/local/bin/agent-browser /usr/local/bin/agent-browser.real')
+    expect(base).toContain('TYPECLAW_AGENT_BROWSER_WRAPPER_EOF')
+    const installIdx = base.indexOf('bun install -g agent-browser')
+    const wrapperIdx = base.indexOf('mv /usr/local/bin/agent-browser /usr/local/bin/agent-browser.real')
+    expect(installIdx).toBeLessThan(wrapperIdx)
+  })
+
+  test('versioned per-agent Dockerfile omits the wrapper RUN block — the base image already carries it (paired with the install layer) so re-applying would mv a non-existent .real file and break the build', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({}), { baseImageVersion: '0.1.1' })
+    expect(out).not.toContain('mv /usr/local/bin/agent-browser /usr/local/bin/agent-browser.real')
+    expect(out).not.toContain('TYPECLAW_AGENT_BROWSER_WRAPPER_EOF')
+  })
+
+  test('wrapper appears before the Chrome-for-Testing download — pre-close behavior cannot depend on whether the browser binary is present, and the layer ordering is the only thing that guarantees a clean mv+rewrite without racing the install step', () => {
+    const out = buildDockerfile()
+    const wrapperIdx = out.indexOf('mv /usr/local/bin/agent-browser /usr/local/bin/agent-browser.real')
+    const chromeIdx = out.indexOf('agent-browser install --with-deps')
+    expect(wrapperIdx).toBeGreaterThan(-1)
+    expect(chromeIdx).toBeGreaterThan(-1)
+    expect(wrapperIdx).toBeLessThan(chromeIdx)
+  })
+
+  test('Chrome-for-Testing download still uses the shimmed agent-browser binary — Layer 5 calls `agent-browser install` (the wrapper passes through unchanged for the `install` subcommand via the denylist)', () => {
+    const out = buildDockerfile()
+    expect(out).toContain('agent-browser install --with-deps')
+    const wrapperBody = extractWrapperBody(out)
+    expect(wrapperBody).toContain('install|upgrade|doctor')
+  })
+})
+
+describe('agent-browser headed-mode wrapper — executable behavior', () => {
+  let workdir: string
+  let bindir: string
+  let logfile: string
+  let wrapperPath: string
+
+  beforeAll(async () => {
+    workdir = mkdtempSync(join(tmpdir(), 'typeclaw-ab-wrap-'))
+    bindir = join(workdir, 'bin')
+    await mkdir(bindir, { recursive: true })
+    logfile = join(workdir, 'real-calls.log')
+
+    const realPath = join(bindir, 'agent-browser.real')
+    await writeShellScript(
+      realPath,
+      `#!/bin/sh
+{
+  echo "args=[$*]"
+  echo "HEADED=\${AGENT_BROWSER_HEADED:-unset}"
+  echo "handled=\${_TYPECLAW_AGENT_BROWSER_HEADED_HANDLED:-unset}"
+  echo "---"
+} >> "${logfile}"
+exit 0
+`,
+    )
+
+    wrapperPath = join(bindir, 'agent-browser')
+    await writeFile(wrapperPath, extractWrapperBody(buildDockerfile()), { mode: 0o755 })
+  })
+
+  afterAll(() => {
+    rmSync(workdir, { recursive: true, force: true })
+  })
+
+  async function runWrapper(
+    args: string[],
+    env: Record<string, string> = {},
+  ): Promise<{ exitCode: number; calls: string[] }> {
+    await writeFile(logfile, '')
+    const proc = Bun.spawn([wrapperPath, ...args], {
+      env: {
+        PATH: `${bindir}:${process.env['PATH'] ?? ''}`,
+        TYPECLAW_AGENT_BROWSER_REAL: join(bindir, 'agent-browser.real'),
+        ...env,
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const exitCode = await proc.exited
+    const log = await Bun.file(logfile).text()
+    const calls = log
+      .split('---\n')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    return { exitCode, calls }
+  }
+
+  test('no headed signal: skips pre-close and calls the real binary once with the original args', async () => {
+    const { exitCode, calls } = await runWrapper(['snapshot'])
+    expect(exitCode).toBe(0)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain('args=[snapshot]')
+    expect(calls[0]).toContain('handled=unset')
+  })
+
+  test('AGENT_BROWSER_HEADED=1 + browser-launching command: pre-closes first, then exec-passes through to the real binary', async () => {
+    const { exitCode, calls } = await runWrapper(['open', 'https://example.com'], { AGENT_BROWSER_HEADED: '1' })
+    expect(exitCode).toBe(0)
+    expect(calls).toHaveLength(2)
+    expect(calls[0]).toContain('args=[close]')
+    expect(calls[1]).toContain('args=[open https://example.com]')
+  })
+
+  test('--headed flag in argv (no env): triggers pre-close — matches CLI invocations that pass --headed but not AGENT_BROWSER_HEADED', async () => {
+    const { exitCode, calls } = await runWrapper(['click', '#btn', '--headed'])
+    expect(exitCode).toBe(0)
+    expect(calls).toHaveLength(2)
+    expect(calls[0]).toContain('args=[close]')
+    expect(calls[1]).toContain('args=[click #btn --headed]')
+  })
+
+  test('--headed=true and --headed=1 forms: both trigger pre-close, matching upstream flag parser', async () => {
+    const { calls: callsTrue } = await runWrapper(['--headed=true', 'open', 'https://x'])
+    expect(callsTrue).toHaveLength(2)
+    expect(callsTrue[0]).toContain('args=[close]')
+    expect(callsTrue[1]).toContain('args=[--headed=true open https://x]')
+
+    const { calls: callsOne } = await runWrapper(['--headed=1', 'open', 'https://x'])
+    expect(callsOne).toHaveLength(2)
+    expect(callsOne[0]).toContain('args=[close]')
+    expect(callsOne[1]).toContain('args=[--headed=1 open https://x]')
+  })
+
+  test('AGENT_BROWSER_HEADED=0 / =false / empty: treated as falsy, no pre-close — env vars set to disable must not accidentally trigger the workaround', async () => {
+    for (const value of ['0', 'false', '', 'no', 'random']) {
+      const { calls } = await runWrapper(['snapshot'], { AGENT_BROWSER_HEADED: value })
+      expect(calls).toHaveLength(1)
+      expect(calls[0]).toContain('args=[snapshot]')
+    }
+  })
+
+  test('AGENT_BROWSER_HEADED=1 + close subcommand: denylist short-circuits to the real binary — without this, the wrapper would recurse and the user-issued `close` would never run their actual close, only the wrapper-injected one', async () => {
+    const { exitCode, calls } = await runWrapper(['close'], { AGENT_BROWSER_HEADED: '1' })
+    expect(exitCode).toBe(0)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain('args=[close]')
+    expect(calls[0]).toContain('handled=unset')
+  })
+
+  test("AGENT_BROWSER_HEADED=1 + non-browser subcommands (status, session, skills, install, doctor): denylist skips pre-close — these commands either don't touch the daemon or have their own lifecycle", async () => {
+    for (const sub of ['status', 'session', 'skills', 'install', 'doctor', 'upgrade', 'dashboard']) {
+      const { calls } = await runWrapper([sub], { AGENT_BROWSER_HEADED: '1' })
+      expect(calls).toHaveLength(1)
+      expect(calls[0]).toContain(`args=[${sub}]`)
+    }
+  })
+
+  test("re-entrancy guard: when _TYPECLAW_AGENT_BROWSER_HEADED_HANDLED=1 is already set, top-of-script bypass exec's the real binary without running the pre-close (defends against future subcommands that shell out to agent-browser as a subprocess)", async () => {
+    const { calls } = await runWrapper(['open', 'https://x'], {
+      AGENT_BROWSER_HEADED: '1',
+      _TYPECLAW_AGENT_BROWSER_HEADED_HANDLED: '1',
+    })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain('args=[open https://x]')
+    expect(calls[0]).toContain('handled=1')
+  })
+
+  test("exit code passes through from the real binary even when pre-close was attempted — the wrapper must never mask the real command's exit status", async () => {
+    const failingReal = join(bindir, 'agent-browser-fail.real')
+    await writeShellScript(failingReal, `#!/bin/sh\nexit 42\n`)
+    const proc = Bun.spawn([wrapperPath, 'open', 'https://x'], {
+      env: {
+        PATH: `${bindir}:${process.env['PATH'] ?? ''}`,
+        TYPECLAW_AGENT_BROWSER_REAL: failingReal,
+        AGENT_BROWSER_HEADED: '1',
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(await proc.exited).toBe(42)
+  })
+
+  test("pre-close failure is tolerated: when the real binary returns non-zero on close (e.g. stale socket, network blip), the wrapper still execs the user's actual command — false negatives on pre-close must never block legitimate calls", async () => {
+    const flakyReal = join(bindir, 'agent-browser-flaky.real')
+    await writeShellScript(
+      flakyReal,
+      `#!/bin/sh
+case "$1" in
+  close) exit 7 ;;
+  *) echo "open_ran" > "${join(workdir, 'flaky-open.flag')}"; exit 0 ;;
+esac
+`,
+    )
+    const proc = Bun.spawn([wrapperPath, 'open', 'https://x'], {
+      env: {
+        PATH: `${bindir}:${process.env['PATH'] ?? ''}`,
+        TYPECLAW_AGENT_BROWSER_REAL: flakyReal,
+        AGENT_BROWSER_HEADED: '1',
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(await proc.exited).toBe(0)
+    const flagPath = join(workdir, 'flaky-open.flag')
+    expect(await Bun.file(flagPath).text()).toContain('open_ran')
+  })
+})
+
+function extractWrapperBody(dockerfile: string): string {
+  const shebangIdx = dockerfile.indexOf('#!/bin/sh')
+  const endIdx = dockerfile.indexOf('\nTYPECLAW_AGENT_BROWSER_WRAPPER_EOF', shebangIdx)
+  if (shebangIdx < 0 || endIdx < 0) throw new Error('wrapper heredoc not found in Dockerfile')
+  return dockerfile.slice(shebangIdx, endIdx)
+}
