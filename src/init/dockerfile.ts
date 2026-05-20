@@ -704,23 +704,47 @@ RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \\
     bun install -g agent-browser`
 
 // Layer 4.5: shim the agent-browser binary with a wrapper that calls
-// \`agent-browser close\` before any browser-launching command when
-// AGENT_BROWSER_HEADED=1 or --headed is on the CLI. Works around
-// vercel-labs/agent-browser issue #1083 ("headed silently ignored on
-// existing session"): when a daemon is already running with a headless
-// browser, subsequent commands with --headed / AGENT_BROWSER_HEADED=1
-// reuse the existing headless browser regardless of the requested mode.
-// Three upstream fix PRs (#660, #370, #387) have been open and unmerged
-// for months as of 2026-05, so we patch this locally rather than block on
-// upstream. The wrapper is a no-op when neither --headed nor
-// AGENT_BROWSER_HEADED is set, so the worst case for non-headed callers
-// is one extra fork+exec per invocation.
+// \`agent-browser close\` before \`open\`/\`goto\`/\`navigate\` when headed
+// mode is requested. Works around vercel-labs/agent-browser issue #1083
+// ("headed silently ignored on existing session"): when a daemon is
+// already running with a headless browser, subsequent commands with
+// --headed / AGENT_BROWSER_HEADED reuse the existing headless browser
+// regardless of the requested mode. Three upstream fix PRs (#660, #370,
+// #387) have been open and unmerged for months as of 2026-05, so we
+// patch this locally rather than block on upstream.
 //
-// Re-entrancy: \`agent-browser close\` itself goes through the wrapper.
-// The \`close|quit|exit\` denylist below short-circuits to the real binary
-// without recursing into another close. A second guard
-// (_TYPECLAW_AGENT_BROWSER_HEADED_HANDLED) covers the case where a future
-// subcommand we don't recognize spawns the wrapper as a subprocess.
+// Allowlist, not denylist. The wrapper only pre-closes on the three
+// commands that explicitly start a new browsing session (\`open\`,
+// \`goto\`, \`navigate\`). Every other agent-browser subcommand — \`click\`,
+// \`snapshot\`, \`chat\`, \`connect\`, \`batch\`, \`tab\`, \`record\`, \`trace\`,
+// \`stream\`, \`cookies\`, \`network\`, ... — passes through untouched.
+// Rationale: those subcommands may operate on the live browser/page
+// state (cookies, in-progress recording, attached external CDP, etc.),
+// and a pre-close from us would silently destroy it. The user-reported
+// scenario for #1083 (\"\`agent-browser open <url> --headed\` after a
+// previous headless invocation\") is fully covered because the
+// follow-up commands inherit the now-headed browser the \`open\`
+// pre-close forced. An earlier draft used a deny-list approach that
+// pre-closed on every non-skip subcommand under headed env; oracle
+// self-review flagged the state-destruction risk for stateful commands,
+// and the allowlist fix is the resulting narrower contract.
+//
+// Truthy contract mirrors upstream's \`env_var_is_truthy\`
+// (cli/src/flags.rs:183): any non-empty value EXCEPT case-insensitive
+// "0" / "false" / "no" counts as truthy. So
+// \`AGENT_BROWSER_HEADED=yes\`, \`=y\`, \`=on\`, \`=anything-non-falsy\` all
+// trigger the workaround — matching what upstream's CLI parser would
+// see — instead of the original narrower 1|true match that left the
+// bug present for legitimate truthy values.
+//
+// Re-entrancy is defended at two layers. (1) The pre-close path is
+// \`open\`/\`goto\`/\`navigate\` only, and the close subcommand isn't in the
+// allowlist, so the pre-close never recurses through the wrapper into
+// another pre-close. (2) \`_TYPECLAW_AGENT_BROWSER_HEADED_HANDLED=1\` is
+// set on the env passed to both the pre-close and the final exec; if a
+// future subcommand we don't recognize shells out to \`agent-browser\` as
+// a subprocess while headed env is still set, the child sees the guard
+// and bypasses straight to .real without recursing.
 const LAYER_4_5_AGENT_BROWSER_HEADED_WRAPPER = `# Layer 4.5 (cheap): wrap agent-browser to work around upstream issue
 # #1083 (--headed / AGENT_BROWSER_HEADED ignored on existing session).
 # See src/init/dockerfile.ts for the full rationale.
@@ -738,12 +762,21 @@ if [ "\${_TYPECLAW_AGENT_BROWSER_HEADED_HANDLED:-}" = "1" ]; then
   exec "$real" "$@"
 fi
 # Pre-close is only needed when the caller is requesting headed mode.
-# Treat AGENT_BROWSER_HEADED=1|true and any --headed flag in argv as
-# triggers. Match the upstream truthy contract (cli/src/flags.rs):
-# 1/true (case-insensitive) -> truthy; everything else -> falsy.
+# Match upstream's env_var_is_truthy contract (cli/src/flags.rs:183):
+# truthy = any non-empty value except case-insensitive "0", "false", "no".
+# Argv triggers: bare --headed, --headed=true, --headed=1. (A bare
+# --headed followed by a separate "false" argument is upstream-supported
+# to FORCE headless; the wrapper still pre-closes on the --headed match
+# and the real binary launches headless — wasted close, correct end
+# state. The narrower argv match keeps the wrapper from triggering on
+# unrelated --headed-prefixed flags that may exist in future upstream
+# versions.)
 headed=0
-case "\${AGENT_BROWSER_HEADED:-}" in
-  1|true|TRUE|True) headed=1 ;;
+val=\${AGENT_BROWSER_HEADED:-}
+lower=$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')
+case "$lower" in
+  ''|'0'|'false'|'no') ;;
+  *) headed=1 ;;
 esac
 for arg in "$@"; do
   case "$arg" in
@@ -753,9 +786,11 @@ done
 if [ "$headed" != "1" ]; then
   exec "$real" "$@"
 fi
-# Some subcommands either ARE the close path, would recurse, or don't
-# touch the browser daemon. Skip the pre-close for them so we don't slow
-# them down or break their semantics.
+# Allowlist of commands where pre-close is safe and necessary. Only
+# user-visible "start a new browsing session" verbs go here. Everything
+# else (click, snapshot, chat, connect, batch, tab, record, trace,
+# stream, cookies, ...) may depend on live browser/page state and must
+# not be pre-closed by us.
 first=""
 for arg in "$@"; do
   case "$arg" in
@@ -764,12 +799,12 @@ for arg in "$@"; do
   esac
 done
 case "$first" in
-  close|quit|exit|status|session|skills|auth|install|upgrade|doctor|dashboard|confirm|deny)
-    exec "$real" "$@" ;;
+  open|goto|navigate) ;;
+  *) exec "$real" "$@" ;;
 esac
 # Best-effort pre-close. If the daemon is already gone, the real binary
-# prints "No active sessions" and exits 0 — safe to call unconditionally. We
-# discard its output so it never pollutes the caller's stdout/stderr,
+# prints "No active sessions" and exits 0 — safe to call unconditionally.
+# We discard its output so it never pollutes the caller's stdout/stderr,
 # and we tolerate failures (network blip, stale socket) by falling
 # through to the real command anyway.
 _TYPECLAW_AGENT_BROWSER_HEADED_HANDLED=1 "$real" close >/dev/null 2>&1 || true
