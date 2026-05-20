@@ -1,5 +1,14 @@
 # Agent Guidelines
 
+> **Audience.** This file is for the AI assistant (or human contributor) working on the typeclaw source tree in this repo — the **dev stage** in `## Stages` below. It is **NOT** the runtime prompt for typeclaw agents (the in-container `typeclaw run` process). That prompt is composed in `src/agent/index.ts` via `composeSystemPrompt` and can be dumped with `bun run debug:prompt`. When sections below describe runtime behavior (secrets, permissions, hostd, etc.), they are describing what the code in `src/` does — not handing instructions to the runtime agent.
+>
+> The file is split into two parts:
+>
+> 1. **Part 1 — For you (the dev-stage assistant)**: scope, pre-commit, testing philosophy, file layout, where to put new code. Read top to bottom on first session.
+> 2. **Part 2 — Architecture reference**: stages, hostd, stream, secrets, permissions, tunnels, websearch, Xvfb. Long-form notes on what the runtime does and where it lives in the source tree. Consult on demand.
+
+# Part 1 — For you (the dev-stage assistant)
+
 ## Default scope
 
 If the user asks something, it's always about the typeclaw project itself until the user specifies another scope. Don't drift into upstream/downstream projects (agent-messenger, plugins consumed via npm, etc.) just because the conversation mentions them — answer in terms of typeclaw, and only switch scope when the user explicitly redirects you.
@@ -232,6 +241,10 @@ Domain logic lives in `src/<domain>/`. Examples: `src/init/`, `src/config/`, `sr
 - `src/cli/` is **UI only** — citty commands, clack prompts, spinners, `process.exit`. Delegate to `src/<domain>/` for anything testable.
 - Tests live next to code as `<file>.test.ts`.
 - Domain entry points are `src/<domain>/index.ts`. Split into multiple files only when a single file gets complex.
+
+# Part 2 — Architecture reference
+
+> The sections below describe what the runtime does and where it lives in the source tree. Use them as a map when working on a specific subsystem; you don't need to read them all on first session. When a section says "the agent," it means the **runtime typeclaw agent** (the in-container `typeclaw run` process), not you.
 
 ## Skills
 
