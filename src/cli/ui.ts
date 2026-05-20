@@ -134,22 +134,46 @@ export const SLACK_APP_MANIFEST = {
   display_information: { name: 'TypeClaw' },
   features: {
     bot_user: { display_name: 'TypeClaw', always_online: true },
+    // Enable the Messages tab so users can DM the bot from its app profile,
+    // and disable the Home tab — TypeClaw does not publish a custom App Home
+    // view, and leaving it enabled would surface an empty default tab.
+    app_home: {
+      home_tab_enabled: false,
+      messages_tab_enabled: true,
+      messages_tab_read_only_enabled: false,
+    },
   },
   oauth_config: {
     scopes: {
+      // Ordered alphabetically so the manifest stays a stable diff target.
+      // Read scopes cover every conversation type the agent might observe;
+      // write scopes (chat, files, im/mpim/groups, pins, reactions) let the
+      // agent post replies, upload attachments, open DMs, pin messages, and
+      // react to messages. `channels:join` lets the bot self-join public
+      // channels it's invited to discuss in.
       bot: [
         'app_mentions:read',
-        'chat:write',
-        'users:read',
-        'files:read',
         'channels:history',
+        'channels:join',
         'channels:read',
+        'chat:write',
+        'emoji:read',
+        'files:read',
+        'files:write',
         'groups:history',
         'groups:read',
+        'groups:write',
         'im:history',
         'im:read',
+        'im:write',
         'mpim:history',
         'mpim:read',
+        'mpim:write',
+        'pins:read',
+        'pins:write',
+        'reactions:read',
+        'reactions:write',
+        'users:read',
       ],
     },
   },
