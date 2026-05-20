@@ -12,7 +12,7 @@
 // TLS handshake + HTTP/2 settings + header ordering. See that file's header
 // for the full rationale and AGENTS.md §"Web search" for the original story.
 
-import { CurlImpersonateError, curlImpersonate } from './curl-impersonate'
+import { curlImpersonate } from './curl-impersonate'
 
 export { _setCurlBinaryForTest } from './curl-impersonate'
 
@@ -40,20 +40,13 @@ export class DdgCaptchaError extends Error {
 }
 
 export async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise<string> {
-  try {
-    const response = await curlImpersonate({
-      url: DDG_LITE_URL,
-      method: 'POST',
-      formFields: [{ name: 'q', value: query }],
-      signal,
-    })
-    return response.body
-  } catch (error) {
-    if (error instanceof CurlImpersonateError) {
-      throw new Error(error.message)
-    }
-    throw error
-  }
+  const response = await curlImpersonate({
+    url: DDG_LITE_URL,
+    method: 'POST',
+    formFields: [{ name: 'q', value: query }],
+    signal,
+  })
+  return response.body
 }
 
 // The `lite` endpoint's CAPTCHA page is plainer than `html`'s anomaly-modal:

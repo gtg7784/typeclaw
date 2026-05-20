@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
+import { _setForceFallbackForTest } from './fetch'
 import { webfetchTool } from './tool'
 import type { WebfetchDetails } from './types'
 
@@ -18,10 +19,15 @@ beforeEach(() => {
     fetchCalls.push(args)
     return fetchResponse(args)
   }) as typeof fetch
+  // Force the Bun.fetch fallback transport so these tool-level tests don't
+  // accidentally hit a real curl-impersonate binary on dev/CI environments
+  // where it happens to be installed. fetch.test.ts owns curl-path coverage.
+  _setForceFallbackForTest(true)
 })
 
 afterEach(() => {
   globalThis.fetch = originalFetch
+  _setForceFallbackForTest(false)
 })
 
 const ctx = {} as Parameters<typeof webfetchTool.execute>[4]

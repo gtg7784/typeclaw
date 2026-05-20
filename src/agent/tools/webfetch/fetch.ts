@@ -21,7 +21,13 @@
 // translates non-2xx into a tool-level error message that's useful to the
 // model.
 
-import { CurlImpersonateError, curlImpersonate, isCurlImpersonateAvailable } from '../curl-impersonate'
+import {
+  CurlImpersonateError,
+  curlImpersonate,
+  isCurlExitFilesizeExceeded,
+  isCurlExitTimeout,
+  isCurlImpersonateAvailable,
+} from '../curl-impersonate'
 import { MAX_RESPONSE_BYTES } from './types'
 
 export type FetchResult = {
@@ -97,11 +103,10 @@ async function fetchWithCurlImpersonate(
       throw new WebfetchError('Request aborted')
     }
     if (error instanceof CurlImpersonateError) {
-      if (/max-time/i.test(error.stderr) || /timed? out/i.test(error.stderr)) {
+      if (isCurlExitTimeout(error)) {
         throw new WebfetchError(`Request timed out after ${timeoutSeconds}s`)
       }
-      // curl --max-filesize trips exit 63
-      if (error.exitCode === 63 || /maximum file size/i.test(error.stderr)) {
+      if (isCurlExitFilesizeExceeded(error)) {
         throw new WebfetchError(`Response too large (exceeds ${formatBytes(MAX_RESPONSE_BYTES)} limit)`)
       }
       throw new WebfetchError(`Fetch failed: ${error.message}`)
@@ -110,9 +115,6 @@ async function fetchWithCurlImpersonate(
     throw new WebfetchError(`Fetch failed: ${message}`)
   }
 
-  if (response.httpStatus === 0) {
-    throw new WebfetchError('Fetch failed: no HTTP status returned')
-  }
   if (response.httpStatus < 200 || response.httpStatus >= 300) {
     throw new WebfetchError(`Fetch failed: HTTP ${response.httpStatus}`)
   }

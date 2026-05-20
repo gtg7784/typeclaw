@@ -13,7 +13,33 @@ let fetchCalls: FetchArgs[]
 let fetchResponse: (args: FetchArgs) => Response | Promise<Response>
 const originalFetch = globalThis.fetch
 
-const CURL_META_SENTINEL = '\n--TYPECLAW-CURL-META-9c3f5e4d2a1b4f8e9c7a6b5d4e3f2a1b0--\n'
+// Fake-curl shell-script template. We read the -w arg value (the curl
+// write-out template containing the per-request random sentinel) directly
+// out of argv by index — `printf '%s\\n' "$@"` collapses multi-line argv
+// values into adjacent lines, but Bun spawns each argv element as a
+// separate process argument, so positional `$N` accessors preserve the
+// raw value verbatim. We find the position of '-w' via a small loop and
+// emit `$N+1` as the template. Then substitute curl's %{...} codes for
+// our static body. Same pattern as curl-impersonate.test.ts.
+const FAKE_CURL = (body: string, status: number, finalUrl: string, contentType: string) => `
+ARGV_FILE="\${SCRATCH_ARGV:-/tmp/argv.txt}"
+printf '%s\\n' "$@" > "$ARGV_FILE"
+WTPL=""
+i=1
+for arg in "$@"; do
+  if [ "$arg" = "-w" ]; then
+    j=$((i + 1))
+    eval "WTPL=\\"\\\${$j}\\""
+    break
+  fi
+  i=$((i + 1))
+done
+# WTPL is e.g. "\\n--TYPECLAW-CURL-META-<hex>--\\n%{http_code}\\n..."
+# Replace curl's %{...} codes by hand.
+RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/${status}/' -e 's|%{url_effective}|${finalUrl}|' -e 's|%{content_type}|${contentType}|' -e 's/%{size_download}/${body.length}/')
+printf '%s' '${body}'
+printf '%s' "$RENDERED"
+`
 
 beforeEach(() => {
   fetchCalls = []
@@ -145,17 +171,24 @@ describe('fetchWithLimits — curl-impersonate path', () => {
 
   function installFakeBinary(script: string): void {
     const path = join(scratchDir, 'fake-curl')
-    writeFileSync(path, `#!/bin/sh\n${script}\n`, 'utf8')
+    const argvPath = join(scratchDir, 'argv.txt')
+    // Short-circuit --version (the availability probe) to exit 0 regardless
+    // of what the script body does on real invocations. Otherwise tests
+    // that simulate an error exit (e.g. exit 56) would also fail the
+    // availability check, silently falling through to the Bun.fetch path.
+    writeFileSync(
+      path,
+      `#!/bin/sh\nSCRATCH_ARGV="${argvPath}"\nif [ "$1" = "--version" ]; then exit 0; fi\n${script}\n`,
+      'utf8',
+    )
     chmodSync(path, 0o755)
     _setCurlBinaryForTest(path)
     _resetAvailabilityCacheForTest()
   }
 
   test('uses curl-impersonate when the binary is available', async () => {
-    // given: fake binary that emits a body + the metadata sentinel
-    installFakeBinary(
-      `printf '<html>ok</html>'; printf '${CURL_META_SENTINEL}200\nhttps://example.com/final\ntext/html; charset=utf-8\n15\n'`,
-    )
+    // given: fake binary that round-trips the per-request sentinel
+    installFakeBinary(FAKE_CURL('<html>ok</html>', 200, 'https://example.com/final', 'text/html; charset=utf-8'))
 
     // when
     const result = await fetchWithLimits('https://example.com', 30)
@@ -170,13 +203,40 @@ describe('fetchWithLimits — curl-impersonate path', () => {
 
   test('translates curl non-2xx response into WebfetchError matching the fallback contract', async () => {
     // given: fake binary that emits a 403-shaped response (Akamai-style block)
-    installFakeBinary(
-      `printf '<html>blocked</html>'; printf '${CURL_META_SENTINEL}403\nhttps://example.com\ntext/html\n20\n'`,
-    )
+    installFakeBinary(FAKE_CURL('<html>blocked</html>', 403, 'https://example.com', 'text/html'))
 
     // when / then
     await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(WebfetchError)
     await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/HTTP 403/)
+  })
+
+  test('translates curl exit 28 (timeout) into a timeout-specific WebfetchError', async () => {
+    // given: fake binary that exits with code 28 (Operation timeout)
+    installFakeBinary('echo "Operation timed out after 30000 milliseconds" >&2; exit 28')
+
+    // when / then
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/timed out after 30s/)
+  })
+
+  test('translates curl exit 63 (content-length filesize overflow) into a too-large WebfetchError', async () => {
+    installFakeBinary('echo "Maximum file size exceeded" >&2; exit 63')
+
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/Response too large/)
+  })
+
+  test('translates curl exit 56 + filesize stderr into a too-large WebfetchError', async () => {
+    // given: fake emits the transfer-time variant Oracle verified empirically
+    installFakeBinary('echo "Exceeded the maximum allowed file size (1) with 1 bytes" >&2; exit 56')
+
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/Response too large/)
+  })
+
+  test('does NOT misclassify generic exit 56 (recv failure) as filesize exceeded', async () => {
+    installFakeBinary('echo "Recv failure: Connection reset by peer" >&2; exit 56')
+
+    // when / then: it's a generic Fetch failed:, not "Response too large"
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.toThrow(/Fetch failed.*exited 56/)
+    await expect(fetchWithLimits('https://example.com', 30)).rejects.not.toThrow(/Response too large/)
   })
 
   test('falls back to Bun.fetch when curl-impersonate is not installed', async () => {

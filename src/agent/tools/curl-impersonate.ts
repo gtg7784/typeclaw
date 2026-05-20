@@ -11,18 +11,14 @@
 // /usr/local/bin/curl_chrome136 — see src/init/dockerfile.ts for the version
 // and SHA pin.
 //
-// The original site of this code was ddg.ts; this file is the extraction so
-// webfetch can share it. AGENTS.md explicitly warns against adding `-H`
-// overrides because the curl_chrome wrapper already sends the full Chrome
-// header set (correct ordering, sec-ch-ua, sec-fetch-*, accept-encoding,
-// etc.) and any custom header corrupts the impersonation. The optional
-// headers passed here are layered ON TOP of curl_chrome's defaults via `-H`,
-// so use it ONLY for things curl can't infer (e.g. an explicit Authorization
-// token, a custom API key). Don't override User-Agent, Accept, sec-* headers,
-// or anything in curl_chrome's standard set.
-//
-// AGENTS.md §"Web search" describes why the spawn path is load-bearing for
-// the DDG-specific case; the same reasoning applies to webfetch.
+// AGENTS.md explicitly warns against adding `-H` overrides because the
+// curl_chrome wrapper already sends the full Chrome header set (correct
+// ordering, sec-ch-ua, sec-fetch-*, accept-encoding, etc.) and any custom
+// header corrupts the impersonation. We therefore expose NO header-override
+// surface from this primitive; add one only when a real caller needs it AND
+// the override is something curl_chrome can't be told to send another way.
+
+import { randomBytes } from 'node:crypto'
 
 import { spawn } from 'bun'
 
@@ -41,15 +37,11 @@ export function _setCurlBinaryForTest(binary: string | null): void {
 
 export type CurlImpersonateRequest = {
   url: string
-  method?: 'GET' | 'POST' | 'HEAD'
+  method?: 'GET' | 'POST'
   // Form-urlencoded body fields for POST. Each entry is passed as a separate
   // --data-urlencode argument so curl handles the encoding. Required if
   // method is 'POST' and you want a body.
   formFields?: Array<{ name: string; value: string }>
-  // Extra headers layered on top of curl_chrome's Chrome 136 defaults. Use
-  // sparingly — see the file header for the "don't override standard headers"
-  // rule. Each entry becomes `-H "<name>: <value>"`.
-  extraHeaders?: Record<string, string>
   // Hard cap on bytes accepted from the response (passed as --max-filesize).
   // The actual buffer is still bounded by the caller; this just makes curl
   // bail early instead of streaming gigabytes.
@@ -59,18 +51,27 @@ export type CurlImpersonateRequest = {
 }
 
 export type CurlImpersonateResponse = {
-  // Decoded response body. `--compressed` is always passed so we receive
-  // plain bytes regardless of what content-encoding the server negotiated.
   body: string
-  // Final URL after redirects (curl `-w '%{url_effective}'`).
   finalUrl: string
-  // HTTP status of the final response (curl `-w '%{http_code}'`).
   httpStatus: number
-  // Content-Type of the final response, lowercased and trimmed.
   contentType: string
-  // Raw byte length of the body buffer (pre-decode).
   bytesIn: number
 }
+
+// Specific curl exit codes we map to typed errors. The full list is in
+// `man curl` § "EXIT CODES"; these are the only ones we translate at the
+// primitive layer. Everything else surfaces as a generic CurlImpersonateError
+// with stderr attached for caller-side diagnostics.
+export const CURL_EXIT_TIMEOUT = 28
+export const CURL_EXIT_MAX_FILESIZE_PRECHECK = 63
+// Observed empirically (and corroborated by Oracle review): curl returns
+// exit 56 with stderr `Exceeded the maximum allowed file size (...)` when
+// --max-filesize is hit at TRANSFER time (e.g. server omitted Content-Length
+// and curl discovered the overflow mid-stream). The Linux man page lists 56
+// as the more general "Failure in receiving network data," so we additionally
+// gate on a stderr match to avoid mis-classifying real network drops as
+// size-exceeded.
+export const CURL_EXIT_RECV_FAILURE_OR_FILESIZE = 56
 
 export class CurlImpersonateError extends Error {
   constructor(
@@ -83,41 +84,70 @@ export class CurlImpersonateError extends Error {
   }
 }
 
-// `-w` write-out template. We emit a sentinel followed by status, final URL,
-// content-type, and size, each on its own line, AFTER the body. This is the
-// standard pattern for getting metadata back from curl without parsing
-// response headers ourselves.
-//
-// The sentinel must be (a) extremely unlikely to appear in a real HTML/JSON
-// response body, and (b) free of null bytes (Bun's spawn rejects argv
-// entries with NULs). We pick a long ASCII tag with a UUID-shaped suffix:
-// the chance of this exact 56-byte string appearing in a fetched page is
-// vanishingly small in practice.
-const METADATA_SENTINEL = '\n--TYPECLAW-CURL-META-9c3f5e4d2a1b4f8e9c7a6b5d4e3f2a1b0--\n'
-const WRITE_OUT_TEMPLATE = `${METADATA_SENTINEL}%{http_code}\n%{url_effective}\n%{content_type}\n%{size_download}\n`
+export function isCurlExitFilesizeExceeded(error: CurlImpersonateError): boolean {
+  if (error.exitCode === CURL_EXIT_MAX_FILESIZE_PRECHECK) return true
+  if (error.exitCode === CURL_EXIT_RECV_FAILURE_OR_FILESIZE && /maximum.{0,30}file size/i.test(error.stderr)) {
+    return true
+  }
+  return false
+}
+
+export function isCurlExitTimeout(error: CurlImpersonateError): boolean {
+  return error.exitCode === CURL_EXIT_TIMEOUT
+}
 
 export async function curlImpersonate(req: CurlImpersonateRequest): Promise<CurlImpersonateResponse> {
   const timeoutSeconds = req.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS
   const method = req.method ?? 'GET'
 
+  // Per-request random sentinel + UTF-8-safe parsing. The static sentinel
+  // approach (previous revision) had a hardening hole: webfetch reads
+  // attacker-controlled pages, and a static sentinel is a public, fixed
+  // string. A page could include the sentinel byte sequence plus fabricated
+  // metadata before the real write-out tail and `indexOf` would split at
+  // the attacker-controlled occurrence. Per-request randomness (96 bits)
+  // removes the attacker's ability to predict the sentinel, and the parser
+  // anchors on the LAST occurrence (curl writes `-w` after the body, so the
+  // real metadata block is always last). Both defenses are needed: random
+  // alone fails if the attacker can read the sentinel from a previous
+  // response and replay it; last-match alone fails if the attacker can
+  // append text after curl's write-out (they can't, but defense in depth).
+  const sentinel = generateSentinel()
+  const writeOutTemplate = `${sentinel}%{http_code}\n%{url_effective}\n%{content_type}\n%{size_download}\n`
+
   const cmd: string[] = [
     curlBinary,
+    // `--disable` (alias -q) MUST be the first argument to suppress reading
+    // ~/.curlrc and /etc/curlrc. Without it, a user or attacker-controlled
+    // curlrc could inject --proxy, --header, --resolve, --no-location, etc.,
+    // silently subverting both the Chrome impersonation contract and the
+    // protocol restrictions below. Order is load-bearing: curl ignores
+    // --disable if it appears after any other flag.
+    '--disable',
     '--silent',
     '--show-error',
-    // `--fail-with-body` makes curl exit non-zero on >=400 BUT still write
-    // the body — so consumers see what the server actually said (useful for
-    // 403/404 debugging) while still being able to detect failure via exit
-    // code. We override exit-code handling below: we want callers to inspect
-    // httpStatus themselves, so we DO NOT pass --fail-with-body here. Curl
-    // exits 0 on a 404 with body, and the caller decides what to do.
+    // Protocol allowlist. curl-impersonate supports many protocols by default
+    // (ftp, file, dict, etc.). normalizeUrl() already rejects non-http(s) at
+    // the call-site, but redirects are followed by curl after that gate fires
+    // and a 301/302 to ftp://... would otherwise be silently honored. The
+    // `=http,https` syntax means "ONLY these two" rather than "add these to
+    // defaults." --proto-redir governs the redirect chain specifically.
+    '--proto',
+    '=http,https',
+    '--proto-redir',
+    '=http,https',
+    // `--fail-with-body` would make curl exit non-zero on >=400 but still
+    // write the body. We intentionally DO NOT pass it: callers (webfetch,
+    // ddg) want to inspect httpStatus themselves and decide. Curl exits 0
+    // on a 404-with-body in this mode, which matches our contract.
     '--compressed',
-    '--location', // follow redirects (essential for Akamai's _abck dance)
+    '--location',
     '--max-redirs',
     '10',
     '--max-time',
     String(timeoutSeconds),
     '-w',
-    WRITE_OUT_TEMPLATE,
+    writeOutTemplate,
     '-X',
     method,
   ]
@@ -132,13 +162,10 @@ export async function curlImpersonate(req: CurlImpersonateRequest): Promise<Curl
     }
   }
 
-  if (req.extraHeaders) {
-    for (const [name, value] of Object.entries(req.extraHeaders)) {
-      cmd.push('-H', `${name}: ${value}`)
-    }
-  }
-
-  cmd.push(req.url)
+  // `--` terminates option parsing so a URL beginning with `-` (e.g. an
+  // attacker-supplied "-K /etc/passwd" sneaking through normalizeUrl as
+  // "https://-K /etc/passwd") cannot be reinterpreted as a curl option.
+  cmd.push('--', req.url)
 
   // Spawn detached so the child becomes the leader of its own process group.
   // The curl-impersonate wrappers (curl_chrome136 et al.) are bash scripts
@@ -181,30 +208,36 @@ export async function curlImpersonate(req: CurlImpersonateRequest): Promise<Curl
       throw new CurlImpersonateError(`curl-impersonate exited ${exitCode}: ${detail}`, exitCode, stderr)
     }
 
-    return parseCurlOutput(stdoutBuf)
+    return parseCurlOutput(stdoutBuf, sentinel, stderr)
   } finally {
     req.signal?.removeEventListener('abort', onAbort)
   }
 }
 
-// Split the curl stdout into body + write-out metadata at the sentinel.
-// The sentinel is appended AFTER curl finishes writing the body, so the
-// split is unambiguous in well-formed output. If the sentinel doesn't appear
-// at all (curl failed to emit -w, e.g. on a very early abort), we treat the
-// whole buffer as the body with status 0.
-function parseCurlOutput(buf: ArrayBuffer): CurlImpersonateResponse {
-  const sentinelBytes = new TextEncoder().encode(METADATA_SENTINEL)
+// Generates a per-request sentinel. Format: `\n--TYPECLAW-CURL-META-<hex>--\n`.
+// 24 hex chars = 96 bits of entropy, plenty to defeat any attempt by an
+// attacker-controlled response body to inject a colliding marker. ASCII-only
+// + leading/trailing newlines means it's unambiguous in textual responses
+// and free of NUL bytes (Bun's spawn rejects NULs in argv).
+function generateSentinel(): string {
+  const hex = randomBytes(12).toString('hex')
+  return `\n--TYPECLAW-CURL-META-${hex}--\n`
+}
+
+function parseCurlOutput(buf: ArrayBuffer, sentinel: string, stderr: string): CurlImpersonateResponse {
+  const sentinelBytes = new TextEncoder().encode(sentinel)
   const bytes = new Uint8Array(buf)
 
-  const sentinelIndex = indexOfBytes(bytes, sentinelBytes)
+  // Anchor on the LAST occurrence (defense in depth alongside the random
+  // sentinel). curl writes the `-w` output strictly AFTER the body, so the
+  // real metadata block is always the trailing one.
+  const sentinelIndex = lastIndexOfBytes(bytes, sentinelBytes)
   if (sentinelIndex < 0) {
-    return {
-      body: new TextDecoder('utf-8', { fatal: false }).decode(bytes),
-      finalUrl: '',
-      httpStatus: 0,
-      contentType: '',
-      bytesIn: bytes.byteLength,
-    }
+    throw new CurlImpersonateError(
+      'curl-impersonate produced no metadata block (sentinel missing). Wrapper or output corruption suspected.',
+      0,
+      stderr,
+    )
   }
 
   const bodyBytes = bytes.subarray(0, sentinelIndex)
@@ -227,14 +260,17 @@ function parseCurlOutput(buf: ArrayBuffer): CurlImpersonateResponse {
   }
 }
 
-function indexOfBytes(haystack: Uint8Array, needle: Uint8Array): number {
-  if (needle.byteLength === 0) return 0
-  const end = haystack.byteLength - needle.byteLength
-  outer: for (let i = 0; i <= end; i++) {
+function lastIndexOfBytes(haystack: Uint8Array, needle: Uint8Array): number {
+  if (needle.byteLength === 0) return haystack.byteLength
+  for (let i = haystack.byteLength - needle.byteLength; i >= 0; i--) {
+    let matched = true
     for (let j = 0; j < needle.byteLength; j++) {
-      if (haystack[i + j] !== needle[j]) continue outer
+      if (haystack[i + j] !== needle[j]) {
+        matched = false
+        break
+      }
     }
-    return i
+    if (matched) return i
   }
   return -1
 }
