@@ -614,6 +614,29 @@ describe('runInit', () => {
     expect(existsSync(join(root, 'secrets.json'))).toBe(false)
   })
 
+  test('oauth-completed (vision): different provider with oauth-completed skips oauth-login, no vision API key', async () => {
+    const events: InitStepEvent[] = []
+
+    await runInit({
+      cwd: root,
+      model: 'zai/glm-4.6',
+      apiKey: 'zai_test_key',
+      visionModel: 'openai-codex/gpt-5.5',
+      visionAuth: { kind: 'oauth-completed' },
+      runHatching: okHatch,
+      runBunInstall: okInstall,
+      dockerExec: okDocker,
+      onProgress: (e) => events.push(e),
+    })
+
+    expect(events.some((e) => e.step === 'oauth-login')).toBe(false)
+    expect(events.map((e) => `${e.step}:${e.phase}`)).toContain('scaffold:done')
+
+    const secrets = await readSecrets(root)
+    expect(secrets.providers?.zai).toBeDefined()
+    expect(secrets.providers?.['openai-codex']).toBeUndefined()
+  })
+
   test('throws when neither apiKey nor llmAuth is provided', async () => {
     await expect(
       runInit({ cwd: root, runHatching: okHatch, runBunInstall: okInstall, dockerExec: okDocker }),
