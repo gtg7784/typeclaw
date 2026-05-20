@@ -167,9 +167,10 @@ export async function createSession(options: CreateSessionOptions = {}): Promise
 
 export async function createSessionWithDispose(options: CreateSessionOptions = {}): Promise<CreateSessionResult> {
   const resolved = resolveProfile(getConfig().models, options.profile)
-  if (resolved.fellBackToDefault && options.profile !== undefined && options.profile !== 'default') {
-    warnProfileFallbackOnce(options.profile, resolved.ref)
-  }
+  // Unknown profiles silently fall back to `default`. The fallback is by design
+  // (see `resolveProfile`) and surfacing a warning here just creates noise on
+  // every memory-logger / dreaming subagent spawn for advanced users who know
+  // exactly what they're doing.
   // `refOverride` lets the model-fallback helper pin a specific entry from
   // the chain when it recreates a session after the previous ref failed.
   const activeRef: KnownModelRef = options.refOverride ?? resolved.ref
@@ -745,26 +746,4 @@ function resolveRoleContext(
 
 export function getBundledSkillsDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), '..', 'skills')
-}
-
-// Profile-fallback warning is fired once per (profile, ref) pair per process.
-// Without rate-limiting, every memory-logger spawn (~every idle event) would
-// emit a fresh warning when the user has only `default` configured — tens of
-// warnings per channel session is noise the operator will learn to ignore.
-// The pair includes `ref` so a config reload that changes `default` re-warns.
-const profileFallbackWarned = new Set<string>()
-
-function warnProfileFallbackOnce(profile: string, ref: string): void {
-  const key = `${profile}\x00${ref}`
-  if (profileFallbackWarned.has(key)) return
-  profileFallbackWarned.add(key)
-  console.warn(
-    `[agent] unknown model profile "${profile}"; falling back to "default" (${ref}). Add it under \`models\` in typeclaw.json to remove this warning. (further occurrences suppressed)`,
-  )
-}
-
-// Test-only: clear the rate-limit cache so a test can assert the warning fires
-// once after rate-limit reset.
-export function __resetProfileFallbackWarningsForTesting(): void {
-  profileFallbackWarned.clear()
 }
