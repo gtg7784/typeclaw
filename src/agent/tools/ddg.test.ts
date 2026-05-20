@@ -149,9 +149,28 @@ describe('fetchDdgHtml', () => {
     _setCurlBinaryForTest(path)
   }
 
+  // The fake binary must round-trip the per-request random sentinel from
+  // curl's `-w` argument back to stdout (otherwise the primitive rejects
+  // the output as corrupted). See fetch.test.ts for the rationale.
+  const FAKE_CURL_BODY = (body: string) => `
+WTPL=""
+i=1
+for arg in "$@"; do
+  if [ "$arg" = "-w" ]; then
+    j=$((i + 1))
+    eval "WTPL=\\"\\\${$j}\\""
+    break
+  fi
+  i=$((i + 1))
+done
+RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/200/' -e 's|%{url_effective}|https://lite.duckduckgo.com/lite/|' -e 's|%{content_type}|text/html|' -e 's/%{size_download}/${body.length}/')
+printf '%s' '${body}'
+printf '%s' "$RENDERED"
+`
+
   test('returns stdout verbatim on exit 0', async () => {
-    // given: fake binary that prints a fixed HTML body
-    installFakeBinary("printf '<html>hello world</html>'")
+    // given: fake binary that prints a fixed HTML body + the sentinel
+    installFakeBinary(FAKE_CURL_BODY('<html>hello world</html>'))
 
     // when
     const html = await fetchDdgHtml('ignored')
@@ -178,9 +197,9 @@ describe('fetchDdgHtml', () => {
   })
 
   test('passes query as POST form data with --data-urlencode', async () => {
-    // given: fake binary records argv to a side file then prints empty body
+    // given: fake binary records argv AND emits the required sentinel
     const argvFile = join(scratchDir, 'argv.txt')
-    installFakeBinary(`printf '%s\\n' "$@" > ${argvFile}; printf ''`)
+    installFakeBinary(`printf '%s\\n' "$@" > ${argvFile}\n${FAKE_CURL_BODY('')}`)
 
     // when
     await fetchDdgHtml('hello world')

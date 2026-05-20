@@ -7,40 +7,16 @@
 // single bad fingerprint match. `lite` exists for non-browser clients (text
 // browsers, accessibility tools) and historically gates less aggressively —
 // but as of 2026 it ALSO fingerprints at the TLS layer (JA3/JA4) and the
-// HTTP/2 SETTINGS frame, well before any HTTP header is read. Bun's native
-// fetch cannot match Chrome's handshake (upstream issue #11368), so requests
-// from `fetch()` get gated regardless of headers, body shape, or pacing —
-// confirmed empirically over a multi-hour session against a single home IP
-// where real Chromium succeeded continuously while every fetch variant got
-// 202 anomaly-modal or HTTP-200-with-anomaly responses.
-//
-// The fix is to shell out to `curl-impersonate` (lexiforest fork), which
-// replays Chrome's exact TLS handshake + HTTP/2 settings + header ordering.
-// The binary is installed by the typeclaw Dockerfile (see
-// src/init/dockerfile.ts CURL_IMPERSONATE_* constants) at /usr/local/bin/
-// and invoked via the version-pinned wrapper `curl_chrome136`.
-//
-// Why no `-H` overrides: curl_chrome136 already sends the full Chrome 136
-// header set with correct ordering, sec-ch-ua values, etc. Adding our own
-// headers would corrupt the impersonation. The previous code's
-// BROWSER_HEADERS const has been removed for the same reason.
+// HTTP/2 SETTINGS frame, well before any HTTP header is read. The shared
+// curl-impersonate primitive (./curl-impersonate.ts) replays Chrome's exact
+// TLS handshake + HTTP/2 settings + header ordering. See that file's header
+// for the full rationale and AGENTS.md §"Web search" for the original story.
 
-import { spawn } from 'bun'
+import { curlImpersonate } from './curl-impersonate'
+
+export { _setCurlBinaryForTest } from './curl-impersonate'
 
 const DDG_LITE_URL = 'https://lite.duckduckgo.com/lite/'
-const CURL_IMPERSONATE_BINARY = 'curl_chrome136'
-const REQUEST_TIMEOUT_SECONDS = 30
-
-let curlBinary = CURL_IMPERSONATE_BINARY
-
-// Test-only seam: lets ddg.test.ts and websearch.test.ts point the spawn
-// at a fake `curl_chrome136` script in a tmpdir so we exercise the real
-// Bun.spawn path without depending on a curl-impersonate install on the
-// test host. Production code never calls this — the const-import default
-// above is what production sees.
-export function _setCurlBinaryForTest(binary: string | null): void {
-  curlBinary = binary ?? CURL_IMPERSONATE_BINARY
-}
 
 export type DdgResult = {
   title: string
@@ -64,64 +40,13 @@ export class DdgCaptchaError extends Error {
 }
 
 export async function fetchDdgHtml(query: string, signal?: AbortSignal): Promise<string> {
-  // Spawn detached so the child becomes the leader of its own process group.
-  // The curl-impersonate wrappers (curl_chrome136 et al.) are bash scripts
-  // that call the real curl-impersonate binary WITHOUT `exec` — meaning the
-  // wrapper is the parent and curl-impersonate is its child. On a plain
-  // SIGKILL to the wrapper PID, the curl child becomes orphaned and keeps
-  // the stdout pipe open until --max-time fires (30s default), turning a
-  // 50ms abort into a 30s hang. process.kill(-pid) addresses the negative
-  // PID, which signals the entire process group, killing both the wrapper
-  // and the inner curl atomically. detached: true is what makes the child
-  // the pgid leader so -pid is well-defined; without it, the child shares
-  // our pgid and we'd nuke our own process.
-  const proc = spawn({
-    cmd: [
-      curlBinary,
-      '--silent',
-      '--show-error',
-      '--fail-with-body',
-      '--compressed',
-      '--max-time',
-      String(REQUEST_TIMEOUT_SECONDS),
-      '-X',
-      'POST',
-      '--data-urlencode',
-      `q=${query}`,
-      DDG_LITE_URL,
-    ],
-    stdout: 'pipe',
-    stderr: 'pipe',
-    detached: true,
+  const response = await curlImpersonate({
+    url: DDG_LITE_URL,
+    method: 'POST',
+    formFields: [{ name: 'q', value: query }],
+    signal,
   })
-
-  const onAbort = () => {
-    try {
-      process.kill(-proc.pid, 'SIGKILL')
-    } catch {
-      proc.kill('SIGKILL')
-    }
-  }
-  signal?.addEventListener('abort', onAbort, { once: true })
-
-  try {
-    const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
-      proc.exited,
-    ])
-
-    if (signal?.aborted) {
-      throw new Error('aborted')
-    }
-    if (exitCode !== 0) {
-      const detail = stderr.trim() || 'no stderr'
-      throw new Error(`curl-impersonate exited ${exitCode}: ${detail}`)
-    }
-    return stdout
-  } finally {
-    signal?.removeEventListener('abort', onAbort)
-  }
+  return response.body
 }
 
 // The `lite` endpoint's CAPTCHA page is plainer than `html`'s anomaly-modal:

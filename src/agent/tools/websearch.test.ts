@@ -57,8 +57,28 @@ describe('websearch tool: web (DuckDuckGo)', () => {
     _setCurlBinaryForTest(path)
   }
 
+  // Emits a body plus the per-request random sentinel + fake metadata,
+  // mirroring how a real curl-impersonate response is shaped. The sentinel
+  // is round-tripped from argv (the value of -w) because we can't predict
+  // its random value. See fetch.test.ts for the full rationale.
   function installFakePrintingBinary(body: string): void {
-    installFakeBinary(`cat <<'TYPECLAW_EOF'\n${body}\nTYPECLAW_EOF`)
+    installFakeBinary(`
+WTPL=""
+i=1
+for arg in "$@"; do
+  if [ "$arg" = "-w" ]; then
+    j=$((i + 1))
+    eval "WTPL=\\"\\\${$j}\\""
+    break
+  fi
+  i=$((i + 1))
+done
+RENDERED=$(printf '%s' "$WTPL" | sed -e 's/%{http_code}/200/' -e 's|%{url_effective}|https://lite.duckduckgo.com/lite/|' -e 's|%{content_type}|text/html|' -e 's/%{size_download}/0/')
+cat <<'TYPECLAW_EOF'
+${body}
+TYPECLAW_EOF
+printf '%s' "$RENDERED"
+`)
   }
 
   test('parses DuckDuckGo HTML and returns formatted results', async () => {
