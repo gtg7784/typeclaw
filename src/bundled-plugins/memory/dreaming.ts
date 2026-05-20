@@ -501,7 +501,7 @@ fragments:
 
 The date in the prefix is the same as the filename you read the fragment from; the id after \`#\` is the full UUIDv7 from the event's \`id\` field. Do not abbreviate the id. Do not use line numbers — citations are id-based, not line-based, so daily streams can be compacted between dreaming runs without breaking your references.
 
-A fragment with no useful content (a watermark-only marker, a near-duplicate, a session-specific quirk that fails the generalizability bar) is discarded. Never invent fragments. Never cite a fragment id you did not see in the undreamed tail you actually read.
+A fragment with no useful content (a watermark-only marker, a near-duplicate, a session-specific quirk that fails the generalizability bar) is discarded. Never invent fragments. When you add a NEW citation, never cite a fragment id you did not see in the undreamed tail you actually read. EXISTING citations that are already in MEMORY.md (from prior dreaming runs, whose source fragments are no longer in the undreamed tail) must be preserved per rule 5 — they reference fragments still alive in already-consolidated daily streams.
 
 **4. Inherit the memory-logger's standards.** The memory-logger already filtered fragments using strict certainty rules (explicit / deductive / inductive). Your job is consolidation, not loosening the bar. If two fragments contradict, prefer the more recent. If a fragment is ambiguous in isolation but clarified by a later fragment, merge them under one topic. Never promote a single fragment from one day into a stable claim unless its certainty was already \`explicit\` or \`deductive\`.
 
@@ -561,19 +561,7 @@ Each former topic becomes one bullet. The fact is preserved (in the summary), th
 
 When you demote a topic, take its conclusion paragraph and compress it into one short summary sentence for the bullet. Keep the citation date prefix (\`yyyy-MM-dd:\`) so the bullet stays sortable and grep-able. The summary is your last chance to write a useful sentence about this fact — the next time the agent reads MEMORY.md, this bullet is all there is.
 
-## Historical-observations bucket overflow
-
-The bucket itself can saturate. When it grows past **roughly 30 bullets**, synthesize the oldest bullets into a quarter-level summary and drop the originals:
-
-\`\`\`
-## Historical observations
-- Q1 2026: one-paragraph synthesis of the period's themes (project names, recurring quirks, debugging arcs that did not generalize)
-- 2026-04-12: ...
-- 2026-04-19: ...
-(newer bullets continue)
-\`\`\`
-
-This is the **only place hard deletion happens** in MEMORY.md, and it deletes citations along with the bullets — the runtime's safety net will allow this because the synthesis bullet replaces multiple specific bullets with one summary line that the runtime cannot mechanically prove was a strict superset. Therefore: only do quarter-summary collapses when the bullets being collapsed are genuinely small and old (the runtime cannot stop you, but the user can git-revert the snapshot commit if you over-collapse). Bias toward leaving the bucket long rather than over-synthesizing.
+The bucket grows monotonically: there is **no hard-deletion path**, no quarter-level synthesis, no removal of old bullets. Every demoted citation stays alive forever via its one-line bullet. The runtime safety net rejects any rewrite that drops a previously-cited fragment id, so attempting to collapse old bullets into a summary will be reverted and your run wasted. If the bucket becomes inconveniently long, that is a problem for a future runtime change to address — not something you can resolve from inside a dreaming run.
 
 ## When MEMORY.md has no strength table
 
@@ -772,17 +760,32 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
 
       // Citation-superset safety net: if the subagent's rewrite dropped any
       // previously-cited fragment id, restore the pre-run bytes and turn
-      // fragment GC off for this run. Dreamed-ids still advance per spec so
-      // we do not infinite-loop on the same fragments. The dropped citation
-      // would otherwise cause the next compactDailyStreams call to
-      // permanently delete the underlying fragment.
+      // fragment GC off so the next compactDailyStreams call does not
+      // permanently delete the underlying fragment. Dreamed-ids still
+      // advance on a successful revert: this run's UNDREAMED fragments are
+      // orphaned (they survive in the daily JSONL but never make it into
+      // MEMORY.md), which is the conscious tradeoff for avoiding an
+      // infinite loop on the same undreamed input. If the revert WRITE
+      // itself fails — disk full, EACCES, etc. — MEMORY.md is in an
+      // unknown state: we cannot advance dreamed-ids (next run must
+      // re-attempt), cannot run compaction (citations are now ambiguous),
+      // and cannot commit (would snapshot a known-bad state). The user has
+      // to `git checkout MEMORY.md` and re-run.
       if (memoryRewrittenThisRun) {
         const verdict = checkCitationSuperset(memoryTextBefore, memoryTextAfter)
         if (!verdict.ok) {
-          await writeFile(memoryFilePath, memoryTextBefore)
+          try {
+            await writeFile(memoryFilePath, memoryTextBefore)
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err)
+            logger.error(
+              `[dreaming] citation-superset violation AND revert failed: ${message}. MEMORY.md is in an unknown state; not advancing dreamed-ids or running compaction. Recover with: git checkout -- MEMORY.md && typeclaw restart. missing=${summarizeMissingCitations(verdict.missing)} elapsed_ms=${Date.now() - start}`,
+            )
+            return
+          }
           memoryRewrittenThisRun = false
           logger.warn(
-            `[dreaming] citation-superset violation: rewrite dropped ${verdict.missing.length} previously-cited id(s); reverting MEMORY.md. missing=${summarizeMissingCitations(verdict.missing)}`,
+            `[dreaming] citation-superset violation: rewrite dropped ${verdict.missing.length} previously-cited id(s); reverted MEMORY.md. The undreamed fragments from THIS run are orphaned: they advance into the dreamed-id set (survive in the daily JSONL, will not be re-shown to a future dreaming run) — conscious anti-loop tradeoff. missing=${summarizeMissingCitations(verdict.missing)}`,
           )
         }
       }

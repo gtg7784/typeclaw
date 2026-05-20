@@ -199,11 +199,21 @@ describe('dreaming subagent declarations', () => {
     expect(prompt).toContain('`days >= 3`) are not demoted')
   })
 
-  test('teaches the bucket-overflow synthesis policy with quarter-level summaries', () => {
+  test('explicitly names the no-hard-deletion contract so the subagent does not attempt bucket-overflow synthesis (the runtime will revert it)', () => {
     const prompt = createDreamingSubagent().systemPrompt
-    expect(prompt).toContain('only place hard deletion happens')
-    expect(prompt).toContain('Q1 2026')
-    expect(prompt).toContain('30 bullets')
+    expect(prompt).toContain('no hard-deletion path')
+    expect(prompt).toContain('grows monotonically')
+    expect(prompt).toContain('will be reverted')
+    // No example illustrating a quarter-level summary as a thing to write — those
+    // led the subagent into a runtime-reverted dead end in the prior draft.
+    expect(prompt).not.toContain('Q1 2026:')
+    expect(prompt).not.toContain('one-paragraph synthesis of the period')
+  })
+
+  test('resolves the rule-3-vs-rule-5 contradiction by carving out existing citations from the no-invented-ids rule', () => {
+    const prompt = createDreamingSubagent().systemPrompt
+    expect(prompt).toContain('EXISTING citations that are already in MEMORY.md')
+    expect(prompt).toContain('must be preserved per rule 5')
   })
 })
 
@@ -423,6 +433,62 @@ describe('dreaming subagent (compaction wiring)', () => {
 
     expect(await readFile(join(agentDir, 'MEMORY.md'), 'utf8')).toBe(mergedText)
     expect(warnings.some((m) => m.includes('citation-superset'))).toBe(false)
+  })
+
+  test('on revert-write failure, refuses to advance dreamed-ids or run compaction (leaves recovery to the operator)', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('only'))
+    await writeFile(
+      join(agentDir, 'MEMORY.md'),
+      ['# Memory', '', '## Cited', 'C.', '', 'fragments:', '- memory/2026-04-27#f-already-cited'].join('\n'),
+    )
+    // The subagent drops the previously-cited id (forcing a superset
+    // violation), AND replaces MEMORY.md with a directory so the revert
+    // writeFile cannot succeed. Both conditions together exercise the
+    // revert-failure recovery path.
+    const runSession: RunSession = async () => {
+      await rm(join(agentDir, 'MEMORY.md'))
+      await mkdir(join(agentDir, 'MEMORY.md'))
+    }
+
+    const errors: string[] = []
+    const logger: DreamingLogger = { info: () => {}, warn: () => {}, error: (m) => errors.push(m) }
+    let committed = false
+
+    await invokeDreaming(agentDir, {
+      runSession,
+      logger,
+      commitMemory: async () => {
+        committed = true
+      },
+    })
+
+    expect(errors.some((m) => m.includes('citation-superset violation AND revert failed'))).toBe(true)
+    expect(errors.some((m) => m.includes('git checkout -- MEMORY.md'))).toBe(true)
+    // Dreamed-ids must NOT have advanced — next run gets a second chance.
+    const state = await loadDreamingState(agentDir)
+    expect(state.dreamedThrough['2026-04-27']).toBeUndefined()
+    // commit must not have run on a known-bad on-disk state.
+    expect(committed).toBe(false)
+  })
+
+  test('on a successful revert, the warning explicitly names the new-fragment-orphaning tradeoff so operators can read the log', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), [fragmentLine('new')].join(''))
+    await writeFile(
+      join(agentDir, 'MEMORY.md'),
+      ['# Memory', '', '## Old', 'C.', '', 'fragments:', '- memory/2026-04-26#f-old-cite'].join('\n'),
+    )
+    const runSession: RunSession = async () => {
+      await writeFile(join(agentDir, 'MEMORY.md'), ['# Memory', '', '## Dropped old citation', 'C.'].join('\n'))
+    }
+
+    const warnings: string[] = []
+    const logger: DreamingLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
+
+    await invokeDreaming(agentDir, { runSession, logger })
+
+    const violation = warnings.find((m) => m.includes('citation-superset violation'))
+    expect(violation).toBeDefined()
+    expect(violation).toContain('orphaned')
   })
 
   test('does NOT trigger the safety net on first-ever run (empty prior MEMORY.md is the empty citation set)', async () => {

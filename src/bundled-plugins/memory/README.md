@@ -52,20 +52,26 @@ The subagent uses these numbers to:
 1. **Promote strong topics.** `days = 1` → tentative ("the user mentioned"). `days >= 3` → confident ("the user consistently"). `days >= 7` → declarative ("the user always"). Promotion is gated on distinct days, not raw citation count — five citations on one day is one debugging session, five citations across five days is a recurring pattern.
 2. **Merge near-duplicates.** Topics that overlap in subject matter get folded into one, with the merged topic's `fragments:` list as the **union** of the source topics' fragment ids.
 3. **Demote decayed topics.** A topic with `cites = 1, days = 1, age >= 30` (or `cites <= 3, days <= 2, age >= 60`) routes into a `## Historical observations` bucket as a one-line bullet. The fact is preserved in the summary, the citation is preserved (so daily-stream GC keeps the underlying fragment), but the bytes shrink from a full topic+paragraph+citation-list to one line. Strong topics (`days >= 3`) are never demoted.
-4. **Synthesize the bucket on overflow.** When the historical bucket grows past ~30 bullets, the subagent synthesizes the oldest bullets into a quarter-level summary (`Q1 2026: <one-paragraph synthesis>`) and drops the originals. This is the only place hard deletion happens.
+
+**There is no hard-deletion path** in this iteration. The historical bucket grows monotonically; the subagent is explicitly told not to attempt quarter-summary collapses because the safety net (below) would revert them. If the bucket becomes inconveniently long in practice, a future runtime change will provide a structured drop mechanism — until then every demoted citation stays alive forever via its one-line bullet.
 
 ### The citation-superset safety net
 
 After every dreaming run that rewrote MEMORY.md, `src/bundled-plugins/memory/citation-superset.ts` checks that the union of fragment ids cited in the NEW file is a superset of the union cited in the OLD file. If any previously-cited id is missing from the rewrite, the runtime:
 
-1. Restores MEMORY.md to its pre-run bytes.
+1. Restores MEMORY.md to its pre-run bytes via `writeFile(memoryFilePath, memoryTextBefore)`. The pre-run bytes are captured **before** `runSession` so the revert always has a clean source.
 2. Skips daily-stream fragment GC for this run (no fragments are dropped).
-3. Advances the dreamed-id set anyway (so the same undreamed fragments are not retried in an infinite loop).
-4. Logs a `[dreaming] citation-superset violation: …` warning naming the dropped ids.
+3. Advances the dreamed-id set anyway — the **conscious anti-loop tradeoff**: this means the run's NEW undreamed fragments are orphaned (they survive in the daily JSONL forever, force-committed, but will not be re-shown to a future dreaming run and therefore never make it into MEMORY.md). The alternative (don't advance) would infinite-loop if the LLM keeps making the same mistake on the same inputs. The orphaned fragments are recoverable from git history (`git log memory/`) by a human operator.
+4. Logs a `[dreaming] citation-superset violation: …` warning naming the dropped ids and explicitly stating the orphaning tradeoff.
+
+**Revert-write failure path.** If the `writeFile` in step 1 itself throws (disk full, EACCES, MEMORY.md replaced by a directory by a buggy subagent, etc.), MEMORY.md is in an unknown state. The runtime then:
+
+- Skips the dreamed-id advance (so the next run gets a second chance at the same input).
+- Skips compaction (so no fragments are GC'd against an ambiguous citation set).
+- Skips the commit (so a known-bad on-disk state is not snapshotted).
+- Logs a `[dreaming] citation-superset violation AND revert failed: …` ERROR with the recovery command (`git checkout -- MEMORY.md && typeclaw restart`).
 
 The check exists because the daily-stream GC in `compactDailyStreams` drops any fragment that is `dreamedIds ∧ ¬citedIds`. Citations in MEMORY.md are the only thing that keeps a fragment alive past its first dreaming run — an omitted id means the underlying fragment would be permanently deleted on the next compaction.
-
-The one explicit exception is the historical-bucket overflow synthesis (rule 4 above): the subagent is allowed to drop multiple specific bullets in favor of one quarter-summary line, because the runtime cannot mechanically prove a synthesis-replaces-detail move is correct. This is documented in the dreaming system prompt as "the only place hard deletion happens" and the human can `git revert` the snapshot commit if the synthesis over-collapses.
 
 ## Files on disk
 

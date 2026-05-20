@@ -31,10 +31,12 @@ export type Topic = {
   // round-trips through the parser; the strength layer surfaces empty
   // headings as themselves so the subagent can clean them up.
   heading: string
-  // Citations in order of appearance. Duplicates within one topic ARE
-  // preserved here (callers that want unique ids should dedupe) because the
-  // subagent may legitimately cite the same fragment in both the inline
-  // prose and the fragments: block.
+  // Citations attached to this topic, deduplicated per `(date, fragmentId)`.
+  // The dedupe happens inside parseCitations (which returns a Set of ids per
+  // date), so a fragment cited twice in one topic — once in inline prose,
+  // once in the fragments: block — counts only once toward strength signals.
+  // Order is by date insertion in parseCitations, not by appearance in the
+  // topic body; consumers that need appearance order should re-parse.
   citations: Citation[]
 }
 
