@@ -121,7 +121,18 @@ export type KakaotalkAuthRunner = (options: { cwd: string }) => Promise<Kakaotal
 // API-key provider". Optional model defaults to DEFAULT_MODEL_REF, which is
 // an OpenAI api-key provider — so test fixtures that omit both fields keep
 // working under the api-key path.
-export type LLMAuth = { kind: 'api-key'; apiKey: string } | { kind: 'oauth'; runLogin: OAuthLoginRunner }
+//
+// `oauth-completed` is the CLI wizard's signal that the browser login already
+// happened up-front (right after the user picked the auth method) and the
+// resulting credentials are already in `secrets.json`. `runInit` then skips
+// the `oauth-login` step but still treats this as an OAuth provider (no API
+// key written, etc.). The wizard runs OAuth eagerly so the browser opens the
+// moment the user picks "OAuth (browser login)" instead of waiting until the
+// end of the wizard — see `collectWizardInputs` in `src/cli/init.ts`.
+export type LLMAuth =
+  | { kind: 'api-key'; apiKey: string }
+  | { kind: 'oauth'; runLogin: OAuthLoginRunner }
+  | { kind: 'oauth-completed' }
 
 export type InitOptions = {
   cwd: string
@@ -223,8 +234,8 @@ export async function runInit({
   // Same trap as kakaotalk-auth: scaffold-then-fail-auth would leave
   // typeclaw.json without working credentials and the runtime would silently
   // refuse to boot. The login itself doesn't need the agent folder to exist
-  // — pi-ai's OAuth helper just needs a writable path for secrets.json, which
-  // we create on demand inside scaffold().
+  // — pi-ai's OAuth helper just needs a writable path for secrets.json, and
+  // the `mkdir` below creates it on demand before the login runs.
   if (resolvedAuth.kind === 'oauth') {
     emit({ step: 'oauth-login', phase: 'start' })
     await mkdir(cwd, { recursive: true })
