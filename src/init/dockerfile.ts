@@ -561,6 +561,8 @@ ${LAYER_3_AGENT_BROWSER_ARM64_CONFIG}
 
 ${LAYER_4_AGENT_BROWSER_INSTALL}
 
+${LAYER_4_5_AGENT_BROWSER_HEADED_WRAPPER}
+
 ${LAYER_5_CHROME_FOR_TESTING}
 
 ${cloudflaredLayer}${renderEntrypointShimLayer()}
@@ -638,6 +640,8 @@ ${LAYER_3_AGENT_BROWSER_ARM64_CONFIG}
 
 ${LAYER_4_AGENT_BROWSER_INSTALL}
 
+${LAYER_4_5_AGENT_BROWSER_HEADED_WRAPPER}
+
 ${LAYER_5_CHROME_FOR_TESTING}
 
 ${renderEntrypointShimLayer()}
@@ -698,6 +702,114 @@ const LAYER_4_AGENT_BROWSER_INSTALL = `# Layer 4 (volatile): install agent-brows
 # runtime bind-mount over /agent/node_modules.
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \\
     bun install -g agent-browser`
+
+// Layer 4.5: shim the agent-browser binary with a wrapper that calls
+// \`agent-browser close\` before \`open\`/\`goto\`/\`navigate\` when headed
+// mode is requested. Works around vercel-labs/agent-browser issue #1083
+// ("headed silently ignored on existing session"): when a daemon is
+// already running with a headless browser, subsequent commands with
+// --headed / AGENT_BROWSER_HEADED reuse the existing headless browser
+// regardless of the requested mode. Three upstream fix PRs (#660, #370,
+// #387) have been open and unmerged for months as of 2026-05, so we
+// patch this locally rather than block on upstream.
+//
+// Allowlist, not denylist. The wrapper only pre-closes on the three
+// commands that explicitly start a new browsing session (\`open\`,
+// \`goto\`, \`navigate\`). Every other agent-browser subcommand — \`click\`,
+// \`snapshot\`, \`chat\`, \`connect\`, \`batch\`, \`tab\`, \`record\`, \`trace\`,
+// \`stream\`, \`cookies\`, \`network\`, ... — passes through untouched.
+// Rationale: those subcommands may operate on the live browser/page
+// state (cookies, in-progress recording, attached external CDP, etc.),
+// and a pre-close from us would silently destroy it. The user-reported
+// scenario for #1083 (\"\`agent-browser open <url> --headed\` after a
+// previous headless invocation\") is fully covered because the
+// follow-up commands inherit the now-headed browser the \`open\`
+// pre-close forced. An earlier draft used a deny-list approach that
+// pre-closed on every non-skip subcommand under headed env; oracle
+// self-review flagged the state-destruction risk for stateful commands,
+// and the allowlist fix is the resulting narrower contract.
+//
+// Truthy contract mirrors upstream's \`env_var_is_truthy\`
+// (cli/src/flags.rs:183): any non-empty value EXCEPT case-insensitive
+// "0" / "false" / "no" counts as truthy. So
+// \`AGENT_BROWSER_HEADED=yes\`, \`=y\`, \`=on\`, \`=anything-non-falsy\` all
+// trigger the workaround — matching what upstream's CLI parser would
+// see — instead of the original narrower 1|true match that left the
+// bug present for legitimate truthy values.
+//
+// Re-entrancy is defended at two layers. (1) The pre-close path is
+// \`open\`/\`goto\`/\`navigate\` only, and the close subcommand isn't in the
+// allowlist, so the pre-close never recurses through the wrapper into
+// another pre-close. (2) \`_TYPECLAW_AGENT_BROWSER_HEADED_HANDLED=1\` is
+// set on the env passed to both the pre-close and the final exec; if a
+// future subcommand we don't recognize shells out to \`agent-browser\` as
+// a subprocess while headed env is still set, the child sees the guard
+// and bypasses straight to .real without recursing.
+const LAYER_4_5_AGENT_BROWSER_HEADED_WRAPPER = `# Layer 4.5 (cheap): wrap agent-browser to work around upstream issue
+# #1083 (--headed / AGENT_BROWSER_HEADED ignored on existing session).
+# See src/init/dockerfile.ts for the full rationale.
+RUN mv /usr/local/bin/agent-browser /usr/local/bin/agent-browser.real \\
+ && cat > /usr/local/bin/agent-browser <<'TYPECLAW_AGENT_BROWSER_WRAPPER_EOF' \\
+ && chmod +x /usr/local/bin/agent-browser
+#!/bin/sh
+# typeclaw wrapper for agent-browser — see src/init/dockerfile.ts.
+set -e
+real="\${TYPECLAW_AGENT_BROWSER_REAL:-/usr/local/bin/agent-browser.real}"
+# Re-entrancy guard: if the wrapper invoked us, skip straight to the real
+# binary. Prevents infinite recursion if a subcommand shells out to
+# agent-browser while AGENT_BROWSER_HEADED is still set.
+if [ "\${_TYPECLAW_AGENT_BROWSER_HEADED_HANDLED:-}" = "1" ]; then
+  exec "$real" "$@"
+fi
+# Pre-close is only needed when the caller is requesting headed mode.
+# Match upstream's env_var_is_truthy contract (cli/src/flags.rs:183):
+# truthy = any non-empty value except case-insensitive "0", "false", "no".
+# Argv triggers: bare --headed, --headed=true, --headed=1. (A bare
+# --headed followed by a separate "false" argument is upstream-supported
+# to FORCE headless; the wrapper still pre-closes on the --headed match
+# and the real binary launches headless — wasted close, correct end
+# state. The narrower argv match keeps the wrapper from triggering on
+# unrelated --headed-prefixed flags that may exist in future upstream
+# versions.)
+headed=0
+val=\${AGENT_BROWSER_HEADED:-}
+lower=$(printf '%s' "$val" | tr '[:upper:]' '[:lower:]')
+case "$lower" in
+  ''|'0'|'false'|'no') ;;
+  *) headed=1 ;;
+esac
+for arg in "$@"; do
+  case "$arg" in
+    --headed|--headed=true|--headed=1) headed=1; break ;;
+  esac
+done
+if [ "$headed" != "1" ]; then
+  exec "$real" "$@"
+fi
+# Allowlist of commands where pre-close is safe and necessary. Only
+# user-visible "start a new browsing session" verbs go here. Everything
+# else (click, snapshot, chat, connect, batch, tab, record, trace,
+# stream, cookies, ...) may depend on live browser/page state and must
+# not be pre-closed by us.
+first=""
+for arg in "$@"; do
+  case "$arg" in
+    -*) continue ;;
+    *) first="$arg"; break ;;
+  esac
+done
+case "$first" in
+  open|goto|navigate) ;;
+  *) exec "$real" "$@" ;;
+esac
+# Best-effort pre-close. If the daemon is already gone, the real binary
+# prints "No active sessions" and exits 0 — safe to call unconditionally.
+# We discard its output so it never pollutes the caller's stdout/stderr,
+# and we tolerate failures (network blip, stale socket) by falling
+# through to the real command anyway.
+_TYPECLAW_AGENT_BROWSER_HEADED_HANDLED=1 "$real" close >/dev/null 2>&1 || true
+exec env _TYPECLAW_AGENT_BROWSER_HEADED_HANDLED=1 "$real" "$@"
+TYPECLAW_AGENT_BROWSER_WRAPPER_EOF`
 
 // Layer 5: download the pinned Chrome for Testing build into
 // ~/.agent-browser/browsers/. NO cache mount on that path because the
