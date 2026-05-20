@@ -215,6 +215,19 @@ describe('runShim', () => {
   })
 })
 
+describe('DEFAULT_USER_AGENT', () => {
+  test('advertises Linux x86_64 to match the container runtime', () => {
+    // The shim only runs inside the TypeClaw Linux container. A macOS or
+    // Windows UA would create a platform mismatch that stricter bot detectors
+    // (Cloudflare, Akamai) flag as suspicious. Linux UA is also correct on
+    // linux/arm64 containers because Chrome does not expose ARM in the UA.
+    expect(DEFAULT_USER_AGENT).toContain('X11; Linux x86_64')
+    expect(DEFAULT_USER_AGENT).not.toContain('Macintosh')
+    expect(DEFAULT_USER_AGENT).not.toContain('Windows')
+    expect(DEFAULT_USER_AGENT).not.toContain('HeadlessChrome')
+  })
+})
+
 describe('hasUserAgentFlag', () => {
   test.each([
     [['--user-agent', 'foo'], true],

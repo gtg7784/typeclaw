@@ -17,13 +17,19 @@ import { AGENT_BROWSER_DASHBOARD_UPSTREAM_PORT } from './dashboard-proxy'
 
 export const REAL_BIN_ENV = 'TYPECLAW_AGENT_BROWSER_REAL_BIN'
 
-// Recent desktop Chrome on macOS. The upstream binary defaults to a UA that
-// includes "HeadlessChrome" / a stale Chromium build, which is widely
-// fingerprinted as a bot and silently triggers CAPTCHAs, 403s, blank pages,
-// and A/B-test misrouting. Bump on Chrome major releases — same hygiene as
-// the curl-impersonate pin in src/init/dockerfile.ts.
+// Recent desktop Chrome on Linux x86_64. The shim runs inside the TypeClaw
+// container (always Linux), so a macOS or Windows UA would mismatch the TCP
+// fingerprint, Accept-Language, and JS-side platform — itself a bot signal on
+// stricter sites (Cloudflare, Akamai, PerimeterX). `X11; Linux x86_64` is
+// also correct on linux/arm64 hosts: Chrome on Linux does not expose ARM in
+// the UA string at all (verified against current Chrome 131 releases).
+// The upstream binary defaults to a UA that includes "HeadlessChrome" /
+// a stale Chromium build, which is widely fingerprinted as a bot and
+// silently triggers CAPTCHAs, 403s, blank pages, and A/B-test misrouting.
+// Bump on Chrome major releases — same hygiene as the curl-impersonate pin
+// in src/init/dockerfile.ts.
 export const DEFAULT_USER_AGENT =
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
 
 export const USER_AGENT_ENV = 'AGENT_BROWSER_USER_AGENT'
 
