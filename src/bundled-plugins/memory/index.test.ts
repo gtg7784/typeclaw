@@ -119,7 +119,13 @@ describe('memory plugin shape', () => {
     expect(exports.cronJobs?.dreaming?.schedule).toBe('*/30 * * * *')
   })
 
-  test('default config injects an idleMs of 10 seconds and a default dreaming schedule', async () => {
+  test('default config injects an idleMs of 60 seconds and a default dreaming schedule', async () => {
+    const parsed = memoryPlugin.configSchema!.safeParse({})
+    expect(parsed.success).toBe(true)
+    if (parsed.success) {
+      expect((parsed.data as { idleMs: number }).idleMs).toBe(60_000)
+    }
+
     const { exports: noDream } = await bootMemoryPlugin(agentDir, {})
     expect(noDream.cronJobs?.dreaming?.schedule).toBe('*/30 * * * *')
 
@@ -320,11 +326,11 @@ describe('session.end hook', () => {
 })
 
 describe('bufferBytes config', () => {
-  test('defaults to 100_000 when omitted', async () => {
+  test('defaults to 500_000 when omitted', async () => {
     const parsed = memoryPlugin.configSchema!.safeParse({})
     expect(parsed.success).toBe(true)
     if (parsed.success) {
-      expect((parsed.data as { bufferBytes: number }).bufferBytes).toBe(100_000)
+      expect((parsed.data as { bufferBytes: number }).bufferBytes).toBe(500_000)
     }
   })
 

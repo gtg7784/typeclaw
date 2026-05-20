@@ -113,10 +113,17 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('under-writing')
   })
 
-  test('declares a "when in doubt, capture" capture philosophy (no behavior-change gate)', () => {
+  test('declares a "when in doubt, SKIP" capture philosophy biased toward low fragment counts', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
-    expect(lower).toContain('when in doubt')
-    expect(lower).toMatch(/lean toward capture|err on writing it|cheaper than a missed/)
+    expect(lower).toContain('when in doubt, skip')
+    expect(lower).toMatch(/zero or one fragment|recurrence|skipping costs nothing/)
+  })
+
+  test('lists chat-mechanical anti-patterns explicitly so the subagent stops recording them', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toContain('conversational mechanics')
+    expect(lower).toContain('group-chat membership events')
+    expect(lower).toMatch(/single-occurrence|one event produces at most one fragment/)
   })
 
   test('does not require fragments to articulate a future behavior change', () => {

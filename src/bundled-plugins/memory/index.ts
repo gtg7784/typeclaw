@@ -12,8 +12,8 @@ import { createDreamingSubagent, type DreamingPayload } from './dreaming'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 import { runMigration } from './migration'
 
-const DEFAULT_IDLE_MS = 10_000
-const DEFAULT_BUFFER_BYTES = 100_000
+const DEFAULT_IDLE_MS = 60_000
+const DEFAULT_BUFFER_BYTES = 500_000
 const MIN_BUFFER_BYTES = 10_000
 // 30-minute default. Fires short-circuit before any LLM call when nothing
 // sits past the watermark (`dreaming.ts` handler returns when

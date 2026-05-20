@@ -13,7 +13,7 @@ This skill exists so you can answer the user's questions about your own memory h
 
 ### Stage 1: memory-logger (online, per-session)
 
-After every prompt completes, the runtime fires the `session.idle` hook. The memory plugin starts a debounce timer (`memory.idleMs`, default `10_000` ms; minimum `1000`). Every subsequent prompt completion resets the timer. When the user has been quiet for `idleMs`, the plugin spawns the **memory-logger** subagent for the current session. It also fires immediately on `session.end` (websocket close) so the final transcript never gets lost.
+After every prompt completes, the runtime fires the `session.idle` hook. The memory plugin starts a debounce timer (`memory.idleMs`, default `60_000` ms; minimum `1000`). Every subsequent prompt completion resets the timer. When the user has been quiet for `idleMs`, the plugin spawns the **memory-logger** subagent for the current session. It also fires immediately on `session.end` (websocket close) so the final transcript never gets lost.
 
 The memory-logger reads:
 
@@ -146,7 +146,7 @@ These are the only two configurable knobs. They live in the `memory` block of `t
 ```json
 {
   "memory": {
-    "idleMs": 10000,
+    "idleMs": 60000,
     "dreaming": { "schedule": "*/30 * * * *" }
   }
 }
@@ -154,7 +154,7 @@ These are the only two configurable knobs. They live in the `memory` block of `t
 
 | Field                      | Default              | Effect                                                                                                                                                                                                        | Reload class      |
 | -------------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
-| `memory.idleMs`            | `10000` (min `1000`) | Debounce window before `memory-logger` spawns after a prompt completes.                                                                                                                                       | Restart-required. |
+| `memory.idleMs`            | `60000` (min `1000`) | Debounce window before `memory-logger` spawns after a prompt completes.                                                                                                                                       | Restart-required. |
 | `memory.dreaming`          | `{}` (cron job on)   | Dreaming cron job is always registered. Override `schedule` to change when it fires.                                                                                                                          | Restart-required. |
 | `memory.dreaming.schedule` | `"*/30 * * * *"`     | Cron expression. Parsed via `cron-parser`; an invalid expression fails config load. Fires with nothing past the watermark short-circuit before any LLM call, so frequent no-op fires are intentionally cheap. | Restart-required. |
 
