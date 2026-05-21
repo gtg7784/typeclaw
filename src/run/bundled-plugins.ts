@@ -1,5 +1,6 @@
 import agentBrowserPlugin from '@/bundled-plugins/agent-browser'
 import backupPlugin from '@/bundled-plugins/backup'
+import explorerPlugin from '@/bundled-plugins/explorer'
 import guardPlugin from '@/bundled-plugins/guard'
 import memoryPlugin from '@/bundled-plugins/memory'
 import securityPlugin from '@/bundled-plugins/security'
@@ -36,4 +37,5 @@ export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'memory', version: undefined, source: '<bundled>', defined: memoryPlugin },
   { name: 'backup', version: undefined, source: '<bundled>', defined: backupPlugin },
   { name: 'agent-browser', version: undefined, source: '<bundled>', defined: agentBrowserPlugin },
+  { name: 'explorer', version: undefined, source: '<bundled>', defined: explorerPlugin },
 ]
