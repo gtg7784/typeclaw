@@ -1,0 +1,52 @@
+---
+title: What is TypeClaw?
+description: A TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime
+icon: Info
+---
+
+TypeClaw is an agent runtime built end-to-end in TypeScript. The core, the plugins, the channel adapters, the CLI, the TUI — all the same language. Every agent runs inside its own Docker container. Plugins are plain TS modules with no IPC and no FFI. The host CLI is a launcher; everything else lives in the container.
+
+## Why TypeClaw?
+
+There are great agent runtimes out there. None of them were quite the shape I wanted:
+
+| Runtime          | What it gets right | Why it didn't fit                        |
+| ---------------- | ------------------ | ---------------------------------------- |
+| **OpenClaw**     | Feature-rich       | Heavy                                    |
+| **NanoClaw**     | Simple             | No plugin system                         |
+| **PicoClaw**     | Fast               | Go — plugins live outside the runtime    |
+| **ZeroClaw**     | Light              | Rust — same problem, different ecosystem |
+| **Hermes Agent** | Awesome            | Python                                   |
+
+If you like one of those, use it. If you want one TypeScript codebase from the entrypoint down to the message bus, TypeClaw is the answer.
+
+## What you get
+
+- 🐳 **Sandboxed by default** — every agent is its own container, with bind-mounted host folders and a per-agent `.env`
+- 🔌 **Plugins as TS modules** — contribute tools, skills, subagents, channel adapters, and typed config from one source file
+- 💬 **Multi-channel** — Slack, Discord, GitHub, KakaoTalk, Telegram, and a websocket TUI; one agent, many inboxes
+- 👥 **Group-chat aware** — the agent knows who's in the room, distinguishes humans from bots, and stays engaged after a reply without re-mentioning
+- ⏰ **Cron** — schedule prompts or shell commands with per-job coalescing
+- 📚 **Skills on demand** — markdown procedures loaded only when relevant, zero token cost until used
+- 🌱 **Self-improving memory** — the agent observes its own work, distills it into long-term memory and reusable skills
+- 🔄 **Hot reload** — change `typeclaw.json`, run `typeclaw reload`, no restart for most fields
+- 🌐 **Auto port-forward** — dev servers inside the container appear on `localhost`, even loopback-only ones
+- 🌍 **Public tunnels** — Cloudflare Quick (zero signup) or bring-your-own external URL
+
+## How it's built
+
+TypeClaw runs code in three stages, each with a different filesystem and process owner:
+
+1. **Dev stage** — the TypeClaw source tree itself
+2. **Host stage** — the user's machine, where `typeclaw init` / `start` / `tui` live
+3. **Container stage** — inside Docker, where the agent loop actually runs
+
+The host stage owns nothing the agent owns. The container stage has no Docker access. They talk over a small RPC daemon (`hostd`) that survives across container restarts. This split is what makes "the agent restarts itself" and "auto port-forward" possible without giving the agent the keys to the host.
+
+## Next steps
+
+- [Quickstart](/docs/quickstart) — running in under a minute
+- [Configuration](/docs/configuration) — what's in `typeclaw.json`
+- [Plugins](/docs/plugins) — write your first plugin
+- [Channels](/docs/channels) — wire Slack, Discord, GitHub
+- [Memory](/docs/memory) — how the agent learns over time

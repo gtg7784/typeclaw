@@ -1,0 +1,65 @@
+---
+title: Tunnels
+description: Public URLs for inbound webhooks and ad-hoc browser exposure
+icon: Globe
+---
+
+Two distinct use cases share one primitive:
+
+- **Inbound webhooks** — the GitHub channel needs `api.github.com` to be able to POST to it past your NAT
+- **Ad-hoc exposure** — "let my friend see the dashboard I just built"
+
+Both reduce to: give me a public URL that proxies to `127.0.0.1:<port>` inside the container.
+
+## Declare a tunnel
+
+```json
+{
+  "tunnels": [
+    {
+      "name": "github-webhook",
+      "provider": "cloudflare-quick",
+      "for": { "kind": "channel", "name": "github" }
+    },
+    {
+      "name": "demo",
+      "provider": "cloudflare-quick",
+      "for": { "kind": "manual" },
+      "upstreamPort": 5173
+    }
+  ]
+}
+```
+
+`tunnels[]` is restart-required (the tunnel manager reads it once at boot). URL changes from running tunnels (cloudflared restart, rotation) propagate live via the message stream — you don't need to reload for those.
+
+## Providers
+
+| Provider           | Subprocess                     | URL                                             | When to use                                                         |
+| ------------------ | ------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------- |
+| `cloudflare-quick` | `cloudflared tunnel --url ...` | Parsed from cloudflared stderr; rotates per run | Default — zero signup, fine for dev and most webhook use cases      |
+| `external`         | None                           | Static, from `externalUrl` in config            | You run your own reverse proxy (Caddy, ngrok, fly.io, etc.)         |
+| `cloudflare-named` | `cloudflared tunnel run <id>`  | Known from Cloudflare config (stable hostname)  | After `typeclaw tunnel upgrade` — requires Cloudflare account + DNS |
+
+## Channel-owned tunnels
+
+When a tunnel declares `for: { kind: "channel", name: "github" }`, the GitHub adapter subscribes to URL changes for that tunnel and re-registers its webhook automatically. URL rotation is handled without restarting the container — the adapter just deregisters the old webhook and registers the new one.
+
+No config mutation is involved. The rotating `trycloudflare.com` URL is runtime state owned by the tunnel manager; writing it into `typeclaw.json` would be stale on the next start.
+
+## Manual tunnels
+
+`for: { kind: "manual" }` tunnels are owned by `typeclaw tunnel add` / `tunnel remove`. They're useful when you want to expose a dev server temporarily:
+
+```sh
+typeclaw tunnel add my-demo --provider cloudflare-quick --port 5173
+typeclaw tunnel status my-demo
+typeclaw tunnel logs my-demo
+typeclaw tunnel remove my-demo
+```
+
+## Auto port-forward vs. tunnels
+
+These are different things. Auto port-forward (`portForward` in config) makes a container port reachable on **`localhost`** of your machine. Tunnels make it reachable on the **public internet**.
+
+Most dev workflows want both: `portForward` lets you open `http://localhost:5173` in your browser, while a tunnel makes that same dev server visible to someone else.

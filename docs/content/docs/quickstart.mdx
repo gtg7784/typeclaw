@@ -1,0 +1,93 @@
+---
+title: Quickstart
+description: Get a TypeClaw agent running in under a minute
+icon: Rocket
+---
+
+## Prerequisites
+
+- [Bun](https://bun.sh/) ≥ 1.1
+- Docker or [OrbStack](https://orbstack.dev/)
+
+## Install
+
+```sh
+bun add -g typeclaw
+```
+
+## Scaffold a new agent
+
+```sh
+mkdir my-agent && cd my-agent
+typeclaw init
+```
+
+`init` writes `typeclaw.json`, `.env`, a `Dockerfile`, a `package.json` with `typeclaw` as a dependency, a managed `.gitignore`, and a few placeholder folders (`workspace/`, `sessions/`, `memory/`).
+
+## Start the container
+
+```sh
+typeclaw start
+```
+
+The first run builds the per-agent image; subsequent runs start in seconds. `start` also spawns `hostd`, the host-side daemon that handles auto port-forward and container self-restart.
+
+## Attach a TUI
+
+```sh
+typeclaw tui
+```
+
+You're talking to the agent. Send it a prompt, watch it think.
+
+## Add a channel
+
+```sh
+typeclaw channel add slack-bot
+typeclaw channel add discord-bot
+typeclaw channel add github
+```
+
+The agent picks up the new channel on the next reload — no restart needed.
+
+## Add a cron
+
+Edit `cron.json` in your agent folder:
+
+```json
+{
+  "jobs": [
+    {
+      "name": "morning-status",
+      "schedule": "0 9 * * *",
+      "kind": "prompt",
+      "prompt": "Summarize yesterday's commits and post to #standup"
+    }
+  ]
+}
+```
+
+Reload:
+
+```sh
+typeclaw reload
+```
+
+The job is now live.
+
+## Inspect what's running
+
+```sh
+typeclaw status          # container + daemon registration state
+typeclaw logs -f         # follow container stdout/stderr
+typeclaw cron list       # every cron registered in the running agent
+typeclaw shell           # drop into a shell inside the container
+```
+
+## Stop
+
+```sh
+typeclaw stop
+```
+
+That's it. The agent is fully sandboxed in its own container; nothing on your host changed except for the agent folder you just created and the per-host `~/.typeclaw/` daemon state.
