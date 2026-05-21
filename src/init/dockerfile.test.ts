@@ -205,13 +205,31 @@ describe('claudeCode toggle', () => {
     expect(out).toContain('"theme":"dark"')
   })
 
-  test('pre-seed runs AFTER `claude --version` smoke test — order matters because the smoke test creates ~/.claude.json with an unrelated default shape that would clobber our seed if it ran second', () => {
+  test('pre-seed is the LAST step in the install chain so the final layer state is exactly the seeded config — independent of whether any earlier command (current or future) writes a default ~/.claude.json partway through', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
     const smokeIdx = out.indexOf('claude --version > /dev/null')
     const seedIdx = out.indexOf('"hasCompletedOnboarding":true')
     expect(smokeIdx).toBeGreaterThan(-1)
     expect(seedIdx).toBeGreaterThan(-1)
     expect(smokeIdx).toBeLessThan(seedIdx)
+  })
+
+  test('pre-seed payload is valid JSON — extract the printf argument and JSON.parse it so quote-mangling bugs fail the test, not the docker build', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    const match = out.match(/printf '%s\\n' '([^']+)' > "\$HOME\/\.claude\.json"/)
+    expect(match).not.toBeNull()
+    const payload = match?.[1]
+    expect(payload).toBeDefined()
+    const parsed = JSON.parse(payload as string)
+    expect(parsed.hasCompletedOnboarding).toBe(true)
+    expect(parsed.theme).toBe('dark')
+  })
+
+  test('pre-seed JSON contains no single quotes — required by the printf %s shell-quoting pattern, and guaranteed by JSON.stringify which only emits double quotes', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    const match = out.match(/printf '%s\\n' '([^']+)' > "\$HOME\/\.claude\.json"/)
+    const payload = match?.[1] ?? ''
+    expect(payload).not.toContain("'")
   })
 
   test('pre-seed does NOT contain trust-dialog or permission-bypass flags — those should remain explicit user decisions, not silent Dockerfile defaults', () => {

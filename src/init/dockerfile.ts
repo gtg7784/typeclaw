@@ -396,34 +396,44 @@ RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
 // `claude update` keep working without re-running this layer.
 // `~/.claude.json` is Claude Code's internal state file (NOT
 // `~/.claude/settings.json`, which is user-facing). On first run with an
-// empty or missing file, `claude` enters a TTY-only onboarding wizard:
+// empty or missing file, `claude` enters a TTY-only theme picker:
 // "Welcome to Claude Code … Choose the text style that looks best with
-// your terminal" with a 7-option theme picker, then the trust dialog,
-// then the first prompt. The wizard is unskippable via CLI flags or env
-// vars (no `--skip-onboarding`, no `--theme=dark`; `IS_DEMO=1` exists
-// but has documented side effects). The single official escape hatch
-// is writing `{"hasCompletedOnboarding": true, "theme": "dark"}` to
-// `~/.claude.json` before the first launch — confirmed by Anthropic in
-// multiple GitHub issues (anthropics/claude-code#4714, #8938, #13827)
-// and the empirical answer used by metabase/metabase's
-// `bin/claude-dangerous`, the `claudeCodeAlDevContainer` feature, and
-// dozens of other Docker integrations.
+// your terminal" with 7 options. The picker is unskippable via CLI
+// flags or env vars (no `--skip-onboarding`, no `--theme=dark`;
+// `IS_DEMO=1` exists but has documented side effects). The single
+// official escape hatch is writing `{"hasCompletedOnboarding": true,
+// "theme": "dark"}` to `~/.claude.json` before the first launch —
+// confirmed by Anthropic in multiple GitHub issues
+// (anthropics/claude-code#4714, #8938, #13827) and the empirical
+// answer used by metabase/metabase's `bin/claude-dangerous`, the
+// `claudeCodeAlDevContainer` feature, and dozens of other Docker
+// integrations.
 //
 // Without the pre-seed, the very first agent-driven `tmux new-session …
 // claude` invocation hangs on the theme picker: the agent's
-// `send-keys "<prompt>" Enter` arrives at the wizard, gets interpreted
-// as theme-picker input, and corrupts the session. The
+// `send-keys "<prompt>" Enter` arrives at the picker, gets interpreted
+// as picker input, and never reaches claude's actual prompt. The
 // `typeclaw-claude-code` skill is structured around a `Stop`-hook
-// sentinel, which never fires while the wizard is up, so the polling
+// sentinel, which never fires while the picker is up, so the polling
 // loop only learns of the hang at the 10-minute wall-clock budget.
-// Pre-seeding here costs ~70 bytes on disk and zero runtime overhead.
+// Pre-seeding here costs ~85 bytes on disk and zero runtime overhead.
 //
-// The seed contains only ONBOARDING flags (`hasCompletedOnboarding`,
-// `theme`, `installMethod`, `numStartups`). Trust dialogs and
-// permission-bypass flags are deliberately omitted: those should
-// remain explicit user decisions, not silent defaults. The skill's
-// auth flow still requires the user to provide their own credentials
-// via `.env`; nothing here changes that contract.
+// SCOPE: this seed is NECESSARY but not SUFFICIENT for a fully
+// no-questions-asked first launch. Claude Code also shows two
+// post-seed modal dialogs that this file deliberately does NOT
+// pre-clear:
+//   1. "Detected a custom API key from environment. Do you want to use
+//      this API key?" (fires when ANTHROPIC_API_KEY is set, default
+//      selection No)
+//   2. Workspace trust ("Do you trust the files in this folder?",
+//      fires on first cwd, default safe option)
+// Both are kept as runtime decisions handled by the
+// `typeclaw-claude-code` skill (see its "Driving the session" section,
+// "Clear startup dialogs" step). Pre-seeding `hasTrustDialogAccepted`
+// or `customApiKeyResponses.approved` here would silently widen the
+// trust surface in ways the operator hasn't consented to — the seed's
+// job is strictly cosmetic-wizard removal, not trust/permission
+// preemption.
 //
 // `theme: "dark"` matches typeclaw's default TUI theme so the visual
 // transition between the typeclaw TUI and a tmux-attached claude pane
@@ -432,16 +442,47 @@ RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
 // they mount it; in the default container-ephemeral state it resets
 // to this default on every rebuild, which is fine — `claude` reads
 // the file at startup and the theme has no behavioral impact).
-const CLAUDE_CODE_ONBOARDING_SEED =
-  '{"hasCompletedOnboarding":true,"theme":"dark","installMethod":"native","numStartups":1}'
+//
+// `lastOnboardingVersion` is INTENTIONALLY OMITTED. ii-agent and a
+// few other templates ship `lastOnboardingVersion: "1.0.30"`, but
+// that value is version-coupled and goes stale on every Claude Code
+// release. Empirically against Claude Code 2.1.146, the current
+// `hasCompletedOnboarding: true` alone is honored without a version
+// pin. If a future Claude version starts re-triggering the picker
+// when the field is missing, capture `claude --version` output at
+// build time and inject it then — don't hardcode a stale value.
+//
+// `installMethod: "native"` and `numStartups: 1` match the shape
+// Claude Code itself writes after a clean first launch; keeping them
+// makes our seed indistinguishable from a real post-onboarding state,
+// which minimizes the chance of a future "if the file looks like
+// agent-pre-seed, redo onboarding" detection heuristic landing on us.
+//
+// Built via `JSON.stringify` rather than a hand-written string
+// literal so quote/escape bugs surface as TS errors at compile time,
+// not as a corrupt `~/.claude.json` discovered only when the build
+// runs. The `printf '%s\\n' '<JSON>'` shell pattern relies on the
+// JSON containing no single quotes (true by construction — JSON.
+// stringify only emits double quotes); a regression test parses the
+// emitted JSON back to confirm.
+const CLAUDE_CODE_ONBOARDING_SEED = JSON.stringify({
+  hasCompletedOnboarding: true,
+  theme: 'dark',
+  installMethod: 'native',
+  numStartups: 1,
+})
 
 function renderClaudeCodeInstallLayer(enabled: boolean): string {
   if (!enabled) return ''
   return `# Layer 5.6 (toggle): install Anthropic's Claude Code CLI. Opt-in via
 # typeclaw.json#docker.file.claudeCode. The skill \`typeclaw-claude-code\`
 # documents the auth + usage flow. Pre-seed ~/.claude.json so the first
-# launch skips the TTY-only onboarding wizard (theme picker + welcome);
-# see CLAUDE_CODE_ONBOARDING_SEED above for the rationale.
+# launch skips the TTY-only theme picker; see CLAUDE_CODE_ONBOARDING_SEED
+# above for the rationale and what the seed deliberately does NOT cover.
+# The seed write runs LAST in the chain so the final layer state is
+# exactly the seeded config — independent of whether any earlier command
+# (or a future Claude version's \`--version\` smoke test) writes a
+# default \`~/.claude.json\` partway through the layer.
 RUN curl -fsSL https://claude.ai/install.sh | bash \\
  && ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude \\
  && claude --version > /dev/null \\

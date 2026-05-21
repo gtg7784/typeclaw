@@ -85,7 +85,7 @@ Before you spawn `claude` for any real work:
 - **`docker.file.claudeCode: true`** in `typeclaw.json`. Verify with `which claude`; if missing, the toggle isn't on. Tell the user to enable it and `typeclaw start --build`.
 - **`docker.file.tmux: true`** (default `true`, but check). Verify with `which tmux`.
 - **Auth set up** — see above. Verify with `env | grep -E '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)='`.
-- **Onboarding pre-seeded.** The Dockerfile layer writes `~/.claude.json` with `hasCompletedOnboarding: true` and `theme: "dark"` so the first `claude` invocation skips the TTY-only theme picker / welcome wizard. If `~/.claude.json` is somehow empty or missing (custom mount, manual `rm`, a `CLAUDE_CONFIG_DIR` pointing at a fresh directory), the wizard reappears and `send-keys "<prompt>" Enter` will be eaten by the picker instead of reaching claude. Self-heal: `printf '%s\n' '{"hasCompletedOnboarding":true,"theme":"dark","installMethod":"native","numStartups":1}' > "$HOME/.claude.json"` before spawning, then retry. Trust dialogs and permission flags are NOT pre-seeded — claude will still ask the user (through you) for permission to edit files in `/tmp/cc-<id>` on the first turn; that's expected.
+- **Onboarding pre-seeded.** The Dockerfile layer writes `~/.claude.json` with `hasCompletedOnboarding: true` and `theme: "dark"` so the first `claude` invocation skips the TTY-only theme picker / welcome wizard. **This is necessary but not sufficient** — even with the seed, Claude Code can still land on two other modal dialogs before reaching its input prompt: the "Detected a custom API key from environment. Do you want to use this API key?" confirmation (default selection: No, when `ANTHROPIC_API_KEY` is in env) and the workspace trust dialog ("Do you trust the files in this folder?"). The next section's startup-dialog handling phase clears those. If `~/.claude.json` is empty or missing entirely (custom mount, manual `rm`, a `CLAUDE_CONFIG_DIR` pointing at a fresh directory), the theme picker also reappears. Self-heal: `printf '%s\n' '{"hasCompletedOnboarding":true,"theme":"dark","installMethod":"native","numStartups":1}' > "$HOME/.claude.json"` before spawning, then retry.
 - **Agent folder is a git repo.** Verify with `git -C /agent rev-parse --is-inside-work-tree`. The worktree model below requires it. If the user's agent folder somehow isn't a repo (rare — `typeclaw init` scaffolds one), tell them to `git init && git add -A && git commit -m "initial"` first.
 - **No uncommitted changes that you care about.** `git -C /agent status --porcelain` should be clean, or you should be willing to set the working tree aside before delegating. The worktree is a separate checkout, so claude can't see your uncommitted changes — meaning claude operates on the last committed state. If the user wants claude to work with in-progress edits, commit them first (even on a WIP branch).
 
@@ -172,11 +172,19 @@ The minimum protocol — translate to your actual tool calls:
 1. Create the worktree, write the hook config (above).
 2. `tmux new-session -d -s cc-<id> -c /tmp/cc-<id> claude`.
 3. Wait ~3 seconds for the TUI to initialize.
-4. `tmux send-keys -t cc-<id> "<your prompt>" Enter`.
-5. **Poll** for `/tmp/cc-<id>/.done` in a 500ms-cadence loop with a wall-clock budget (default 10 minutes). On every iteration, also check `tmux has-session -t cc-<id>` — if the session died, claude crashed or auth failed.
-6. When `.done` exists: `rm .done`, read `sentinel.json`, examine `last_assistant_message`.
-7. Decide using the multi-turn loop below.
-8. When done: `tmux send-keys -t cc-<id> "/exit" Enter && sleep 1 && tmux kill-session -t cc-<id>`.
+4. **Clear startup dialogs (BEFORE sending the task prompt).** Even with `~/.claude.json` pre-seeded, claude can land on one or both of these dialogs before its actual input prompt:
+   - **Custom API key confirmation** — "Detected a custom API key from environment. Do you want to use this API key?" Default selection is **No**. Fires when `ANTHROPIC_API_KEY` is set in env (which is exactly typeclaw's auth path). Resolution: `tmux send-keys -t cc-<id> Up Enter` to move selection to **Yes** and submit.
+   - **Workspace trust** — "Do you trust the files in this folder?" Default selection is also commonly the safe (No) option. Fires on first launch in any new cwd, so every fresh `/tmp/cc-<id>/` worktree triggers it. Resolution: same pattern — move selection to **Yes**, press Enter.
+
+   Capture the pane (`tmux capture-pane -t cc-<id> -p -S -10` for the last 10 lines) and look for the dialog text BEFORE sending the task prompt. Send keystrokes one at a time with brief sleeps between them — these are interactive menu pickers, not text inputs. If neither dialog appears within ~2 seconds of capture, claude is ready for the task prompt.
+
+   **Safety note**: clearing trust is a real decision, not a rubber-stamp. The worktree at `/tmp/cc-<id>/` is a fresh checkout of files the user just committed, so trusting it is equivalent to trusting the user's own repo — fine to accept on the user's behalf. Do NOT extend this to accepting permission prompts later in the session (Bash, Edit, etc.) without per-turn judgment per the multi-turn decision loop below.
+
+5. `tmux send-keys -t cc-<id> "<your prompt>" Enter`.
+6. **Poll** for `/tmp/cc-<id>/.done` in a 500ms-cadence loop with a wall-clock budget (default 10 minutes). On every iteration, also check `tmux has-session -t cc-<id>` — if the session died, claude crashed or auth failed.
+7. When `.done` exists: `rm .done`, read `sentinel.json`, examine `last_assistant_message`.
+8. Decide using the multi-turn loop below.
+9. When done: `tmux send-keys -t cc-<id> "/exit" Enter && sleep 1 && tmux kill-session -t cc-<id>`.
 
 The full polling implementation, the ANSI-handling rules for `capture-pane` fallbacks, and the "tmux session died unexpectedly" recovery path are in `references/tmux-driving.md`.
 
