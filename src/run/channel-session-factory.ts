@@ -1,6 +1,8 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession as defaultCreateSession } from '@/agent'
+import type { LiveSubagentRegistry } from '@/agent/live-subagents'
+import type { CreateSessionForSubagent, SubagentRegistry } from '@/agent/subagents'
 import { capJsonlFileInPlace } from '@/bundled-plugins/tool-result-cap/cap-jsonl'
 import type { CapOptions } from '@/bundled-plugins/tool-result-cap/cap-result'
 import type { CreateSessionForChannel, ChannelRouter } from '@/channels'
@@ -48,6 +50,18 @@ export type BuildChannelSessionFactoryDeps = {
   // can assert exactly which CreateSessionOptions the factory builds without
   // needing a live LLM, plugin runtime, or session manager on disk.
   createSession?: typeof defaultCreateSession
+  // Subagent orchestration plumbing. All three (or none) are forwarded to
+  // createSession so the TUI/channel session exposes spawn_subagent,
+  // subagent_output, subagent_cancel. Subagent sessions never receive these
+  // — that branch is gated by pluginSubagent in createSessionWithDispose.
+  //
+  // `getCreateSessionForSubagent` is late-bound to break the construction
+  // cycle: channelManager owns the channel-session factory, which needs
+  // createSessionForSubagent, which needs channelManager.router. Same shape
+  // as `getChannelRouter` above.
+  liveSubagentRegistry?: LiveSubagentRegistry
+  subagentRegistry?: SubagentRegistry
+  getCreateSessionForSubagent?: () => CreateSessionForSubagent
 }
 
 // Tight basename validation so a tampered or corrupt channels/sessions.json
@@ -108,6 +122,11 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
       ...(deps.containerName !== undefined ? { containerName: deps.containerName } : {}),
       ...(deps.runtimeVersion !== undefined ? { runtimeVersion: deps.runtimeVersion } : {}),
       ...(deps.permissions !== undefined ? { permissions: deps.permissions } : {}),
+      ...(deps.liveSubagentRegistry !== undefined ? { liveSubagentRegistry: deps.liveSubagentRegistry } : {}),
+      ...(deps.subagentRegistry !== undefined ? { subagentRegistry: deps.subagentRegistry } : {}),
+      ...(deps.getCreateSessionForSubagent !== undefined
+        ? { createSessionForSubagent: deps.getCreateSessionForSubagent() }
+        : {}),
     })
 
     return {
