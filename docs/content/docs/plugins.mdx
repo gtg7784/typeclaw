@@ -1,0 +1,80 @@
+---
+title: Plugins
+description: Plain TypeScript modules that contribute tools, skills, subagents, channels, and typed config
+icon: Plug
+---
+
+A TypeClaw plugin is a TypeScript module. No IPC. No FFI. No subprocess. It runs in the same Bun process as the agent loop.
+
+## Anatomy
+
+```ts
+import { definePlugin } from 'typeclaw/plugin'
+import { z } from 'zod'
+
+export default definePlugin({
+  name: 'my-plugin',
+  permissions: ['myplugin.send.notification'],
+  configSchema: z.object({
+    apiKey: z.string().optional(),
+  }),
+  factory(ctx) {
+    return {
+      tools: {
+        send_notification: {
+          description: 'Send a notification',
+          inputSchema: z.object({ text: z.string() }),
+          async execute({ text }) {
+            // …
+            return { ok: true }
+          },
+        },
+      },
+    }
+  },
+})
+```
+
+Reference it from `typeclaw.json`:
+
+```json
+{
+  "plugins": ["./plugins/my-plugin.ts"]
+}
+```
+
+Then `typeclaw start` picks it up.
+
+## What plugins can contribute
+
+- **Tools** — Zod-typed functions the agent can call
+- **Skills** — markdown procedures loaded on demand
+- **Subagents** — focused worker sessions spawned via the message stream
+- **Channel adapters** — new inbound/outbound message platforms
+- **Cron jobs** — scheduled prompts or exec commands
+- **Permissions** — declared up front; consumed by the bundled security plugin and the channel router
+- **Typed config blocks** — namespaced under `typeclaw.json#<plugin-name>`, validated by your Zod schema
+
+## Plugin context
+
+The `factory(ctx)` callback receives a `PluginContext` with the live `permissions` service, the message stream, the agent's session store, the agent folder path, and a few other capabilities. Everything plugins talk to flows through this object — there are no module-global imports of agent state.
+
+## Bundled plugins
+
+Three plugins ship with TypeClaw and load automatically:
+
+- **`memory`** — observes work, writes daily memory streams, distills them into `MEMORY.md` and muscle-memory skills on a cron schedule
+- **`security`** — gates `tool.before` events on a two-axis severity policy (audience-leak vs. silent-attack), with per-guard and tier-level bypass permissions
+- **`operator`** — exposes the `do-things` subagent that can write files and edit the workspace
+
+You don't list these in `plugins[]`; they're always on. Their config blocks (`memory.*`, etc.) live at the top level of `typeclaw.json` and are validated at boot.
+
+## Lifecycle
+
+Plugins are loaded once at container start. They can:
+
+- Mutate behavior at runtime via tool execution and stream subscriptions
+- Read live config via `ctx.config.getConfig()` (boot-only fields are snapshots; reloadable fields are live)
+- Spawn subagents with provenance (the spawning role is stamped so security gates apply)
+
+Plugins **cannot** change which other plugins are loaded, or rewrite the Dockerfile, or escape the container. The trust boundary is the container, not the plugin.

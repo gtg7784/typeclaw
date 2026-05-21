@@ -1,0 +1,51 @@
+---
+title: Configuration
+description: Everything in typeclaw.json, what's hot-reloadable, what isn't
+icon: Settings
+---
+
+`typeclaw.json` is the agent's single source of truth. It's JSON Schema–validated (see `typeclaw.schema.json` at the agent folder root after `typeclaw init`).
+
+## Agent folder layout
+
+```
+my-agent/
+├── typeclaw.json     # main config
+├── cron.json         # scheduled jobs (optional)
+├── .env              # secrets, injected via --env-file
+├── secrets.json      # structured credential store
+├── Dockerfile        # auto-managed; rewritten every start
+├── package.json      # typeclaw as a dependency
+├── .gitignore        # auto-managed
+├── workspace/        # agent's free-write zone (gitignored)
+├── sessions/         # JSONL session logs (gitignored, force-committed)
+└── memory/           # MEMORY.md + muscle-memory skills (force-committed)
+```
+
+## Common fields
+
+| Field         | What it does                                                                  | Reload behavior      |
+| ------------- | ----------------------------------------------------------------------------- | -------------------- |
+| `port`        | Preferred host port (CLI falls back to ephemeral on conflict)                 | restart-required     |
+| `mounts`      | Host directories exposed inside the container                                 | restart-required     |
+| `plugins`     | Plugin module specifiers                                                      | restart-required     |
+| `channels`    | Per-adapter config (`slack-bot`, `discord-bot`, `github`, `kakaotalk`, …)     | live for most fields |
+| `portForward` | Allow/deny list for auto port forwarding (default `*`)                        | restart-required     |
+| `tunnels`     | Public URLs for inbound webhooks and ad-hoc exposure                          | restart-required     |
+| `roles`       | Permission roles bundling allowed actions and match rules                     | restart-required     |
+| `dockerfile`  | Toggles for `gh`, `python`, `tmux`, `ffmpeg`, `cjkFonts`, plus `append` lines | rebuild via `start`  |
+| `memory`      | Idle window and dreaming schedule for the bundled memory plugin               | restart-required     |
+
+## Hot reload
+
+```sh
+typeclaw reload
+```
+
+Most channel fields, role lists, and plugin-owned config blocks reload live. Boot-only fields (`port`, `mounts`, `plugins`, `portForward`, `tunnels`) are captured once at container start; `reload` will tell you which fields require a restart.
+
+## Managed files
+
+TypeClaw owns the `Dockerfile` and `.gitignore` for your agent folder, and **rewrites them on every `start`**. This is deliberate — the source of truth is the CLI version installed in `node_modules/typeclaw`, not the on-disk file. To pick up a Dockerfile template change, just run `typeclaw start` again.
+
+`sessions/` and `memory/` are gitignored but force-committed by TypeClaw itself: `sessions/` via auto-backup, `memory/` via the dreaming subagent. The agent doesn't stage them by hand, but their history is preserved.
