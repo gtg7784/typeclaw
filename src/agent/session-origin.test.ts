@@ -82,6 +82,29 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('Plain-text output is invisible')
   })
 
+  test('channel origin disciplines the model toward one reply per inbound and names the legitimate split cases', () => {
+    // The four legitimate multi-send cases here mirror codebase vocabulary
+    // (see channel-reply.ts:120-123 and router.ts:82-87) so the model is
+    // not asked to invent the exception list from scratch. The negative
+    // clause (no rephrase / restate / summarize) names the observed
+    // failure mode — different-text follow-up sends that the router's
+    // exact-byte duplicate guard cannot catch.
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: '1700000000.000100',
+    })
+    expect(out).toContain('Default to ONE reply per inbound')
+    expect(out).toMatch(/multiple distinct things/i)
+    expect(out).toMatch(/exceeds the platform message limit/i)
+    expect(out).toMatch(/attachment AND commentary on it on Discord/i)
+    expect(out).toMatch(/progress updates during a long-running task/i)
+    expect(out).toMatch(/Do NOT send a second reply just to rephrase, restate, summarize/i)
+    expect(out).toMatch(/end your turn — the user will respond if they want more/i)
+  })
+
   test('channel origin teaches channel_reply as the default and channel_send as the escape hatch', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
