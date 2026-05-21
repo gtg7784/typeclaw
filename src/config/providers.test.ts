@@ -69,6 +69,21 @@ describe('KNOWN_PROVIDERS', () => {
       expect(codingPlanSupported.has(modelId), `${modelId} is not officially Coding-Plan-supported`).toBe(true)
     }
   })
+
+  test('anthropic supports both api-key and oauth on the same provider id', () => {
+    const anthropic = KNOWN_PROVIDERS.anthropic
+    expect(anthropic.baseUrl).toBe('https://api.anthropic.com')
+    expect(anthropic.apiKeyEnv).toBe('ANTHROPIC_API_KEY')
+    expect(anthropic.oauthProviderId).toBe('anthropic')
+    expect(supportsApiKey(anthropic)).toBe(true)
+    expect(supportsOAuth(anthropic)).toBe(true)
+  })
+
+  test('every anthropic model uses the anthropic-messages api so pi-ai routes correctly', () => {
+    for (const [modelId, model] of Object.entries(KNOWN_PROVIDERS.anthropic.models)) {
+      expect(model.api, `anthropic/${modelId} api drift`).toBe('anthropic-messages')
+    }
+  })
 })
 
 describe('providerForModelRef', () => {
@@ -91,5 +106,22 @@ describe('listKnownModelRefs', () => {
     const refs = listKnownModelRefs()
     expect(refs).toContain('zai/glm-4.6')
     expect(refs).toContain('zai-coding/glm-5.1')
+  })
+
+  test('includes the current Anthropic GA tier (Haiku 4.5 / Sonnet 4.6 / Opus 4.7)', () => {
+    const refs = listKnownModelRefs()
+    expect(refs).toContain('anthropic/claude-haiku-4-5')
+    expect(refs).toContain('anthropic/claude-sonnet-4-6')
+    expect(refs).toContain('anthropic/claude-opus-4-7')
+  })
+})
+
+describe('providerForModelRef anthropic', () => {
+  test('routes claude-sonnet-4-6 to anthropic', () => {
+    expect(providerForModelRef('anthropic/claude-sonnet-4-6')).toBe('anthropic')
+  })
+
+  test('routes claude-opus-4-7 to anthropic', () => {
+    expect(providerForModelRef('anthropic/claude-opus-4-7')).toBe('anthropic')
   })
 })
