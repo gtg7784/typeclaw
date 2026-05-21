@@ -27,7 +27,13 @@ import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
 import type { LiveSubagentRegistry } from './live-subagents'
 import { lookAtTool } from './multimodal'
-import { resolveBuiltinToolRefs, wrapPluginTool, wrapSystemAgentTool, wrapSystemTool } from './plugin-tools'
+import {
+  buildBuiltinPiToolOverrides,
+  resolveBuiltinToolRefs,
+  wrapPluginTool,
+  wrapSystemAgentTool,
+  wrapSystemTool,
+} from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { SESSION_META_CUSTOM_TYPE, sessionMetaPayload } from './session-meta'
@@ -313,7 +319,22 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
               stream: options.stream,
             }),
           ]
-  const customToolsPreBudget = [...wrapSystemTools(customSystemTools, options.plugins, getOrigin), ...pluginCustomTools]
+  // Hook coverage for pi's builtin coding tools (read/bash/edit/write/grep/
+  // find/ls) — pi 0.67.3 ignores `tools:` for implementation, so the only
+  // way to interpose typeclaw guards is to ship same-named ToolDefinition
+  // entries through `customTools`. Skipped when there are no tool hooks,
+  // since wrapping reduces to a passthrough in that case.
+  const builtinPiToolOverrides =
+    options.plugins && hasToolHooks(options.plugins)
+      ? buildBuiltinPiToolOverrides({
+          agentDir: options.plugins.agentDir,
+          sessionId: options.plugins.sessionId,
+          hooks: options.plugins.hooks,
+          getOrigin,
+        })
+      : []
+  const wrappedCustomSystemTools = wrapSystemTools(customSystemTools, options.plugins, getOrigin)
+  const customToolsPreBudget = [...wrappedCustomSystemTools, ...pluginCustomTools, ...builtinPiToolOverrides]
   const customTools =
     sessionBudget && sessionBudgetState
       ? customToolsPreBudget.map((t) => wrapToolDefinitionWithBudget(t, sessionBudget, sessionBudgetState))
@@ -330,6 +351,21 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     ...(tools ? { tools } : {}),
     customTools,
   })
+
+  // Re-narrow the active tool set after `createAgentSession`. pi 0.67.3's
+  // `_refreshToolRegistry` runs with `includeAllExtensionTools: true` and
+  // pushes every customTool name into the active set, which would widen
+  // a subagent's declared `[edit]` to all 7 builtin overrides plus every
+  // typeclaw custom tool. The intended active set is the names the caller
+  // would have gotten WITHOUT the builtin overrides: pi's `initialActiveToolNames`
+  // (derived from `tools:`) union the names from typeclaw/plugin customTools.
+  // `builtinPiToolOverrides` are implementation overrides, never additions.
+  if (builtinPiToolOverrides.length > 0) {
+    const baseActiveNames = tools !== undefined ? tools.map((t) => t.name) : ['read', 'bash', 'edit', 'write']
+    const customToolActiveNames = [...wrappedCustomSystemTools, ...pluginCustomTools].map((t) => t.name)
+    const intendedActive = [...new Set([...baseActiveNames, ...customToolActiveNames])]
+    session.setActiveToolsByName(intendedActive)
+  }
 
   const unsubRestart = subscribeRestartNotice(options.stream, sessionManager)
 

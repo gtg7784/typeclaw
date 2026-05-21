@@ -44,19 +44,20 @@ const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
   ),
 )
 
-// `BuiltinToolRef.__builtinTool` strings are dual-routed when a plugin
-// subagent declares them: pi-coding-agent's own coding tools flow through
-// `createAgentSession({ tools: AgentTool[] })` (which pi treats as a strict
-// base-tool override — exactly the declared subset becomes active), and
-// typeclaw's own web tools flow through `customTools: ToolDefinition[]` (the
-// only path pi accepts for non-pi tool definitions). Routing typeclaw tools
-// through `tools:` silently drops them (pi's `tools` validator rejects shapes
-// it doesn't recognize); routing pi tools through `customTools:` would work
-// but ALSO auto-injects pi's default 4 base tools (read/bash/edit/write),
-// widening every plugin subagent's allowlist beyond what it declared. The
-// dual route is the only shape that gives "subagent gets exactly what it
-// asked for, nothing more." See `src/agent/index.ts` `createSessionWithDispose`
-// for the consumer that splits the resolved arrays into the two pi fields.
+// pi-coding-agent 0.67.3 contract (load-bearing for hook coverage):
+//   - `createAgentSession({ tools: AgentTool[] })` is ONLY a name filter for
+//     `initialActiveToolNames`. It does NOT swap builtin implementations.
+//   - `customTools: ToolDefinition[]` entries override builtins by name in
+//     `_refreshToolRegistry` (the registry merge writes customTools last).
+//
+// Consequence: to put a `tool.before` hook around pi's builtin read/bash/edit/
+// write, TypeClaw must wrap them as `ToolDefinition`s and pass them via
+// `customTools` — not via `tools`. `wrapAgentToolAsCustomToolDefinition`
+// produces those wrapped definitions; `setupSession` in `src/agent/index.ts`
+// appends them whenever the session has any `tool.before` / `tool.after`
+// hooks registered. Subagent narrowing still comes from `tools:` (the
+// name-filter path); the wrapped customTools just replace the implementation
+// underneath so subagent and channel sessions share the same hook coverage.
 type PiAgentToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls'
 type TypeclawToolName = 'websearch' | 'webfetch'
 
@@ -299,6 +300,70 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       }
     },
   }
+}
+
+// Wraps a pi-coding-agent AgentTool into a ToolDefinition so it can ride in
+// `customTools` and override pi's same-named builtin (see top-of-file contract
+// block). The hook + guard pipeline matches `wrapSystemAgentTool`; only the
+// input/output shape differs.
+export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDetails = unknown>(
+  tool: AgentTool<TParams, TDetails>,
+  opts: WrapSystemToolOptions,
+): ToolDefinition<TParams, TDetails> {
+  return piDefineTool({
+    name: tool.name,
+    label: tool.label,
+    description: tool.description,
+    parameters: withGuardAcknowledgements(tool.name, tool.parameters),
+    prepareArguments: tool.prepareArguments,
+    async execute(toolCallId, params, signal, onUpdate) {
+      const mutableArgs = params as Record<string, unknown>
+      const liveOrigin = opts.getOrigin?.()
+      const blockResult = await opts.hooks.runToolBefore({
+        tool: tool.name,
+        sessionId: opts.sessionId,
+        callId: toolCallId,
+        args: mutableArgs,
+        ...(liveOrigin !== undefined ? { origin: liveOrigin } : {}),
+      })
+      if (blockResult !== undefined) {
+        throw new Error(`blocked: ${blockResult.reason}`)
+      }
+      const guardResult = await runFinalWriteGuards({
+        tool: tool.name,
+        args: mutableArgs,
+        agentDir: opts.agentDir,
+      })
+      if (guardResult !== undefined) {
+        throw new Error(`blocked: ${guardResult.reason}`)
+      }
+      stripGuardAcknowledgements(mutableArgs)
+
+      const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate)
+      const hookResult: ToolResult = {
+        content: result.content as ContentPart[],
+        details: result.details,
+      }
+      await opts.hooks.runToolAfter({
+        tool: tool.name,
+        sessionId: opts.sessionId,
+        callId: toolCallId,
+        result: hookResult,
+      })
+      return {
+        content: hookResult.content as ContentPart[],
+        details: hookResult.details as TDetails,
+      }
+    },
+  })
+}
+
+export function defaultBuiltinPiAgentTools(): AgentTool<any, any>[] {
+  return [piReadTool, piBashTool, piEditTool, piWriteTool, piGrepTool, piFindTool, piLsTool]
+}
+
+export function buildBuiltinPiToolOverrides(opts: WrapSystemToolOptions): ToolDefinition<any, any>[] {
+  return defaultBuiltinPiAgentTools().map((tool) => wrapAgentToolAsCustomToolDefinition(tool, opts))
 }
 
 function errorResult(message: string) {
