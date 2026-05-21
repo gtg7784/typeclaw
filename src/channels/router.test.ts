@@ -1162,6 +1162,55 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sent).toHaveLength(0)
   })
 
+  test('suppresses upstream `(Empty response: ...)` sentinel instead of leaking thinking/signature', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      // given: the upstream provider SDK fabricated a single text block whose
+      // body is a Python-repr dump of the raw API response (observed shape
+      // verbatim from the 2026-05-21 production leak — thinking content +
+      // Anthropic signature inlined).
+      sessions[0]!.setAssistantText(
+        "(Empty response: {'content': [{'type': 'thinking', 'thinking': 'no need', " +
+          "'signature': 'EpQCCkYI...'}], 'stop_reason': 'end_turn', 'model': 'claude-opus-4-5'})",
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed upstream_empty_response_sentinel'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('still recovers legit prose that happens to mention "Empty response" without the python-dict shape', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('Empty response from the cache layer, retrying.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toEqual([{ text: 'Empty response from the cache layer, retrying.' }])
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
+    expect(logs.some((m) => m.includes('suppressed upstream_empty_response_sentinel'))).toBe(false)
+  })
+
   test('recovers visible assistant text when no channel tool sent a message', async () => {
     const dir = await tempDir()
     const logs: string[] = []
