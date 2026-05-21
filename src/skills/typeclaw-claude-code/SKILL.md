@@ -85,6 +85,7 @@ Before you spawn `claude` for any real work:
 - **`docker.file.claudeCode: true`** in `typeclaw.json`. Verify with `which claude`; if missing, the toggle isn't on. Tell the user to enable it and `typeclaw start --build`.
 - **`docker.file.tmux: true`** (default `true`, but check). Verify with `which tmux`.
 - **Auth set up** — see above. Verify with `env | grep -E '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)='`.
+- **Onboarding pre-seeded.** The Dockerfile layer writes `~/.claude.json` with `hasCompletedOnboarding: true` and `theme: "dark"` so the first `claude` invocation skips the TTY-only theme picker / welcome wizard. **This is necessary but not sufficient** — even with the seed, Claude Code can still land on two other pre-prompt modals: the "Detected a custom API key from environment. Do you want to use this API key?" confirmation (when `ANTHROPIC_API_KEY` is set in env — default focus is **No**, so `Down Enter` is needed to accept) and the workspace trust dialog ("Do you trust the files in this folder?", default focus already on **Yes**, so a bare `Enter` accepts). The "Driving the session" section below clears them as a loop. If `~/.claude.json` is empty or missing entirely (custom mount, manual `rm`, a `CLAUDE_CONFIG_DIR` pointing at a fresh directory), the theme picker also reappears. Self-heal: `printf '%s\n' '{"hasCompletedOnboarding":true,"theme":"dark","installMethod":"native","numStartups":1}' > "$HOME/.claude.json"` before spawning, then retry.
 - **Agent folder is a git repo.** Verify with `git -C /agent rev-parse --is-inside-work-tree`. The worktree model below requires it. If the user's agent folder somehow isn't a repo (rare — `typeclaw init` scaffolds one), tell them to `git init && git add -A && git commit -m "initial"` first.
 - **No uncommitted changes that you care about.** `git -C /agent status --porcelain` should be clean, or you should be willing to set the working tree aside before delegating. The worktree is a separate checkout, so claude can't see your uncommitted changes — meaning claude operates on the last committed state. If the user wants claude to work with in-progress edits, commit them first (even on a WIP branch).
 
@@ -171,11 +172,29 @@ The minimum protocol — translate to your actual tool calls:
 1. Create the worktree, write the hook config (above).
 2. `tmux new-session -d -s cc-<id> -c /tmp/cc-<id> claude`.
 3. Wait ~3 seconds for the TUI to initialize.
-4. `tmux send-keys -t cc-<id> "<your prompt>" Enter`.
-5. **Poll** for `/tmp/cc-<id>/.done` in a 500ms-cadence loop with a wall-clock budget (default 10 minutes). On every iteration, also check `tmux has-session -t cc-<id>` — if the session died, claude crashed or auth failed.
-6. When `.done` exists: `rm .done`, read `sentinel.json`, examine `last_assistant_message`.
-7. Decide using the multi-turn loop below.
-8. When done: `tmux send-keys -t cc-<id> "/exit" Enter && sleep 1 && tmux kill-session -t cc-<id>`.
+4. **Clear startup dialogs (BEFORE sending the task prompt).** Even with `~/.claude.json` pre-seeded, claude can land on one or both pre-prompt modals. Run this as a **loop**, not a one-shot: clearing one dialog can immediately reveal the next, and you must keep polling until claude's actual input prompt is visible (it renders a bottom-of-pane input box with a `╭` / `╰` border).
+
+   The two known modals, with the exact keystrokes for each (Claude Code's select widget does NOT wrap — pressing `Up` from the first option is a no-op, so the direction must match the dialog's option order):
+   - **Custom API key confirmation** — "Detected a custom API key from environment. Do you want to use this API key?" Fires when `ANTHROPIC_API_KEY` is set (exactly typeclaw's auth path). Options are `[No (recommended), Yes]` with focus initialized on **No**. Resolution: `tmux send-keys -t cc-<id> Down Enter` to advance to **Yes** and submit. Sending `Up Enter` would submit the **No** answer, which can persist as a rejection in `customApiKeyResponses.rejected` and break subsequent launches — never do that here.
+
+   - **Workspace trust** — "Do you trust the files in this folder?" Fires on first launch in any new cwd, so every fresh `/tmp/cc-<id>/` worktree triggers it. Options are `[Yes, proceed, No, exit]` with focus on the first option (**Yes**) by default. Resolution: bare `tmux send-keys -t cc-<id> Enter` — no arrow key needed. Always verify the pane text matches the trust dialog before pressing Enter; a misidentified modal would submit a different default.
+
+   Loop shape (translate to your tool calls):
+   1. Capture the last ~15 lines: `tmux capture-pane -t cc-<id> -p -S -15`.
+   2. If the capture contains the API key dialog text → `send-keys Down Enter`, sleep 500ms, goto 1.
+   3. If the capture contains the trust dialog text → `send-keys Enter`, sleep 500ms, goto 1.
+   4. If the capture shows the input box (`╭` border on a bottom line, no dialog text above it) → ready; exit the loop.
+   5. Otherwise sleep 500ms, goto 1. Apply a wall-clock budget of ~10 seconds; if the loop hasn't reached step 4 by then, abort with `/exit` and surface to the user — claude is in a state this skill doesn't model.
+
+   Do not use a fixed 2-second wait then send the prompt — cold-start and slow-disk cases can deliver a dialog at 2.5s+, and sending the task prompt into a modal corrupts the session.
+
+   **Safety note**: accepting workspace trust on a fresh `/tmp/cc-<id>/` worktree is the right call **only when its `HEAD` is the intended clean state** — typically the agent folder's last good commit on a branch the user controls. If the user just merged a third-party PR, pulled a remote branch, or checked out an untrusted ref, the worktree carries that content too and "trusting" it gives claude tool access on potentially hostile code. Before auto-accepting trust, sanity-check: if the user hasn't said something equivalent to "delegate this to Claude Code", or if you're not confident the current `HEAD` is one the user authored or reviewed, surface the trust dialog to them instead. Do NOT extend even a legitimate trust acceptance to in-session permission prompts (Bash, Edit, etc.) — those still need per-turn judgment per the multi-turn decision loop below.
+
+5. `tmux send-keys -t cc-<id> "<your prompt>" Enter`.
+6. **Poll** for `/tmp/cc-<id>/.done` in a 500ms-cadence loop with a wall-clock budget (default 10 minutes). On every iteration, also check `tmux has-session -t cc-<id>` — if the session died, claude crashed or auth failed.
+7. When `.done` exists: `rm .done`, read `sentinel.json`, examine `last_assistant_message`.
+8. Decide using the multi-turn loop below.
+9. When done: `tmux send-keys -t cc-<id> "/exit" Enter && sleep 1 && tmux kill-session -t cc-<id>`.
 
 The full polling implementation, the ANSI-handling rules for `capture-pane` fallbacks, and the "tmux session died unexpectedly" recovery path are in `references/tmux-driving.md`.
 
