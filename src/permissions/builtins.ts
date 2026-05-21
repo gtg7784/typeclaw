@@ -12,6 +12,9 @@ export const CORE_PERMISSIONS = {
   channelRespond: 'channel.respond',
   cronSchedule: 'cron.schedule',
   cronModify: 'cron.modify',
+  subagentSpawn: 'subagent.spawn',
+  subagentCancel: 'subagent.cancel',
+  subagentOutput: 'subagent.output',
 } as const
 
 // Sentinel that `expandOwnerWildcard` swaps for the concrete union of
@@ -47,6 +50,9 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.channelRespond,
       CORE_PERMISSIONS.cronSchedule,
       CORE_PERMISSIONS.cronModify,
+      CORE_PERMISSIONS.subagentSpawn,
+      CORE_PERMISSIONS.subagentCancel,
+      CORE_PERMISSIONS.subagentOutput,
       'security.bypass.low',
       'security.bypass.medium',
       OWNER_SECURITY_WILDCARD,
@@ -54,11 +60,23 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
   },
   trusted: {
     match: [],
-    permissions: [CORE_PERMISSIONS.channelRespond, CORE_PERMISSIONS.cronSchedule, 'security.bypass.low'],
+    permissions: [
+      CORE_PERMISSIONS.channelRespond,
+      CORE_PERMISSIONS.cronSchedule,
+      CORE_PERMISSIONS.subagentSpawn,
+      CORE_PERMISSIONS.subagentCancel,
+      CORE_PERMISSIONS.subagentOutput,
+      'security.bypass.low',
+    ],
   },
   member: {
     match: [],
-    permissions: [CORE_PERMISSIONS.channelRespond],
+    permissions: [
+      CORE_PERMISSIONS.channelRespond,
+      CORE_PERMISSIONS.subagentSpawn,
+      CORE_PERMISSIONS.subagentCancel,
+      CORE_PERMISSIONS.subagentOutput,
+    ],
   },
   guest: {
     match: [],

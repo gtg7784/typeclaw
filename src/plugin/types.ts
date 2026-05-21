@@ -69,6 +69,22 @@ export type Subagent<P = unknown> = {
   // bounds the blast radius without changing per-call semantics for healthy
   // runs.
   toolResultBudget?: ToolResultBudget
+  // Whether the LLM-driven main agent can invoke this subagent via the
+  // `spawn_subagent` tool.
+  // - 'internal' (default): only invokable via cron jobs, plugin lifecycle
+  //   hooks, or programmatic `ctx.spawnSubagent` calls. The main agent does
+  //   NOT see this subagent in its tool surface. Existing bundled subagents
+  //   (memory-logger, dreaming, backup, backup-message, backup-diagnose)
+  //   omit this field and therefore remain internal — they are infrastructure,
+  //   not orchestration targets, and accidentally exposing a write-capable
+  //   one (e.g. `backup` mutates git history) to agent-initiated invocation
+  //   would be a real footgun.
+  // - 'public': exposed to the main agent via `spawn_subagent`. The agent
+  //   can decide mid-conversation to invoke this subagent. Reserved for
+  //   subagents explicitly designed as orchestration targets (e.g. explorer,
+  //   operator). The default is 'internal' specifically so adding a new
+  //   bundled subagent never accidentally widens the agent-facing surface.
+  visibility?: 'public' | 'internal'
 }
 
 // Cron job map keys are local; the runtime prefixes with `__plugin_<plugin-name>_`

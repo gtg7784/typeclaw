@@ -1,6 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, createSessionWithDispose } from '@/agent'
+import { LiveSubagentRegistry } from '@/agent/live-subagents'
 import type { SessionOrigin } from '@/agent/session-origin'
 import {
   createSubagentConsumer,
@@ -176,6 +177,8 @@ export async function startAgent({
     },
   })
 
+  const liveSubagentRegistry = new LiveSubagentRegistry()
+
   const channelManager = createChannelManagerFor({
     agentDir: cwd,
     channelsConfigRef: () => getConfig().channels,
@@ -191,6 +194,9 @@ export async function startAgent({
       getChannelRouter: () => channelManager.router,
       rehydrateCapOptions: resolveCapOptionsFromConfig(pluginConfigsByName['tool-result-cap']),
       permissions: pluginsLoaded.permissions,
+      liveSubagentRegistry,
+      subagentRegistry: pluginRuntime.get().subagents,
+      getCreateSessionForSubagent: () => createSessionForSubagent,
       ...containerNameOpt,
       ...runtimeVersionOpt,
     }),
@@ -347,6 +353,9 @@ export async function startAgent({
               },
             }
           : {}),
+        liveSubagentRegistry,
+        subagentRegistry: pluginRuntime.get().subagents,
+        createSessionForSubagent,
         ...containerNameOpt,
         ...runtimeVersionOpt,
       })

@@ -30,6 +30,7 @@ export type Subagent<P = unknown> = {
   payloadSchema?: z.ZodType<P>
   handler?: (ctx: SubagentContext<P>, runSession: RunSession) => Promise<void>
   toolResultBudget?: ToolResultBudget
+  visibility?: 'public' | 'internal'
 }
 
 export type SubagentRegistry = Readonly<Record<string, Subagent<any>>>
@@ -136,6 +137,17 @@ export type InvokeSubagentOptions = {
   spawnedByRole?: string
   spawnedByOrigin?: SessionOrigin
   onProviderError?: (errorMessage: string) => void
+  // Fires synchronously after the AgentSession is created and before
+  // session.prompt() is invoked, with both the live session reference and
+  // its allocated sessionId. The only consumer in production is the spawn
+  // tool's LiveSubagentRegistry path, which uses it to attach a progress
+  // subscriber and register the abort handle while invokeSubagent retains
+  // its `Promise<void>` external contract.
+  onSessionCreated?: (event: {
+    session: AgentSession
+    sessionId: string | undefined
+    abort: () => Promise<void>
+  }) => void
 }
 
 export async function invokeSubagent(name: string, options: InvokeSubagentOptions): Promise<void> {
@@ -155,6 +167,15 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
     const { session, dispose, hooks, sessionId, agentDir, origin, getTranscriptPath } = normalizeSubagentSession(
       await createSessionForSubagent(subagent, sessionOptions),
     )
+    if (options.onSessionCreated !== undefined) {
+      options.onSessionCreated({
+        session,
+        sessionId,
+        abort: async () => {
+          await session.abort()
+        },
+      })
+    }
     const unsubProviderErrors =
       options.onProviderError !== undefined
         ? subscribeProviderErrors(session, (err) => options.onProviderError!(err.message))
@@ -202,6 +223,100 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
   } else {
     await runSession()
   }
+}
+
+export type SubagentHandle = {
+  taskId: string
+  sessionId: string | undefined
+  abort: () => Promise<void>
+}
+
+export type StartSubagentResult = {
+  handle: Promise<SubagentHandle>
+  completion: Promise<{ ok: true; finalMessage?: string } | { ok: false; error: string }>
+}
+
+export type StartSubagentOptions = InvokeSubagentOptions & {
+  taskId: string
+  onSession?: (event: { session: AgentSession; sessionId: string | undefined; abort: () => Promise<void> }) => void
+}
+
+// Non-blocking alternative to invokeSubagent. Returns immediately with two
+// promises:
+// - `handle` resolves with { taskId, sessionId, abort } once the AgentSession
+//   has been created (typically the first microtask). The taskId is what the
+//   caller chose; sessionId is allocated by the session factory.
+// - `completion` resolves when the subagent's prompt finishes, ok=true with
+//   an optional final message, or ok=false with an error message.
+// The two promises share a single underlying invokeSubagent invocation;
+// `completion` settles after dispose, so the session reference exposed via
+// `handle.abort` becomes a no-op once `completion` resolves.
+export function startSubagent(name: string, options: StartSubagentOptions): StartSubagentResult {
+  let resolveHandle: (h: SubagentHandle) => void
+  let rejectHandle: (err: Error) => void
+  const handle = new Promise<SubagentHandle>((resolve, reject) => {
+    resolveHandle = resolve
+    rejectHandle = reject
+  })
+  let handleSettled = false
+  let finalMessage: string | undefined
+
+  const completion = invokeSubagent(name, {
+    ...options,
+    onSessionCreated: (event) => {
+      handleSettled = true
+      resolveHandle({ taskId: options.taskId, sessionId: event.sessionId, abort: event.abort })
+      if (options.onSession !== undefined) {
+        options.onSession(event)
+      }
+      attachFinalMessageCapture(event.session, (msg) => {
+        finalMessage = msg
+      })
+    },
+  })
+    .then(() => ({ ok: true as const, ...(finalMessage !== undefined ? { finalMessage } : {}) }))
+    .catch((err: unknown) => {
+      const error = err instanceof Error ? err.message : String(err)
+      if (!handleSettled) {
+        rejectHandle(err instanceof Error ? err : new Error(error))
+      }
+      return { ok: false as const, error }
+    })
+
+  return { handle, completion }
+}
+
+function attachFinalMessageCapture(session: AgentSession, onFinalMessage: (msg: string) => void): void {
+  try {
+    session.subscribe((event: unknown) => {
+      const ev = event as { type?: string; message?: { content?: unknown } }
+      if (ev?.type !== 'message_end') return
+      const text = extractFinalMessageText(ev.message?.content)
+      if (text !== null) onFinalMessage(text)
+    })
+  } catch {
+    // session.subscribe is a stable upstream API; defensive try is for test
+    // doubles that don't implement it.
+  }
+}
+
+function extractFinalMessageText(content: unknown): string | null {
+  if (typeof content === 'string') {
+    const trimmed = content.trim()
+    return trimmed ? trimmed : null
+  }
+  if (Array.isArray(content)) {
+    const parts: string[] = []
+    for (const part of content) {
+      if (part && typeof part === 'object' && (part as { type?: unknown }).type === 'text') {
+        const text = (part as { text?: unknown }).text
+        if (typeof text === 'string') parts.push(text)
+      }
+    }
+    const joined = parts.join('').trim()
+    return joined ? joined : null
+  }
+  return null
 }
 
 export type SubagentConsumerLogger = {

@@ -21,12 +21,21 @@ describe('built-in role contract', () => {
     expect([...BUILTIN_ROLES.owner.permissions]).not.toContain('security.bypass.high')
   })
 
-  test('trusted has empty default match and ONLY core perms + bypass.low (no per-guard medium/high grants)', () => {
+  test('owner carries all three subagent permissions (spawn / cancel / output)', () => {
+    expect(BUILTIN_ROLES.owner.permissions).toContain('subagent.spawn')
+    expect(BUILTIN_ROLES.owner.permissions).toContain('subagent.cancel')
+    expect(BUILTIN_ROLES.owner.permissions).toContain('subagent.output')
+  })
+
+  test('trusted has empty default match and core perms + bypass.low + subagent perms (no per-guard medium/high grants)', () => {
     expect(BUILTIN_ROLES.trusted.match).toEqual([])
     expect([...BUILTIN_ROLES.trusted.permissions].sort()).toEqual([
       'channel.respond',
       'cron.schedule',
       'security.bypass.low',
+      'subagent.cancel',
+      'subagent.output',
+      'subagent.spawn',
     ])
   })
 
@@ -40,9 +49,19 @@ describe('built-in role contract', () => {
     expect([...BUILTIN_ROLES.trusted.permissions]).not.toContain('security.bypass.secretExfilBash')
   })
 
-  test('member has empty default match and only channel.respond', () => {
+  test('member has empty default match and channel.respond + subagent perms (agent-side proactive fan-out)', () => {
     expect(BUILTIN_ROLES.member.match).toEqual([])
-    expect([...BUILTIN_ROLES.member.permissions]).toEqual(['channel.respond'])
+    expect([...BUILTIN_ROLES.member.permissions].sort()).toEqual([
+      'channel.respond',
+      'subagent.cancel',
+      'subagent.output',
+      'subagent.spawn',
+    ])
+  })
+
+  test('member does NOT carry security bypass (subagent.spawn does not imply write capability — explorer/operator gate write-capable subagents via subagent.spawn.operator)', () => {
+    expect([...BUILTIN_ROLES.member.permissions]).not.toContain('security.bypass.low')
+    expect([...BUILTIN_ROLES.member.permissions]).not.toContain('security.bypass.medium')
   })
 
   test('guest has no match and no permissions', () => {

@@ -25,12 +25,14 @@ import type { Stream } from '@/stream'
 import { getAuthFor } from './auth'
 import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
+import type { LiveSubagentRegistry } from './live-subagents'
 import { lookAtTool } from './multimodal'
 import { resolveBuiltinToolRefs, wrapPluginTool, wrapSystemAgentTool, wrapSystemTool } from './plugin-tools'
 import { createReloadTool } from './reload-tool'
 import { loadSelf } from './self'
 import { SESSION_META_CUSTOM_TYPE, sessionMetaPayload } from './session-meta'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
+import type { CreateSessionForSubagent, SubagentRegistry } from './subagents'
 import { DEFAULT_SYSTEM_PROMPT, renderRuntimeBlock, SLIM_SYSTEM_PROMPT } from './system-prompt'
 import {
   createBudgetState,
@@ -43,7 +45,10 @@ import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
 import { createRestartTool } from './tools/restart'
+import { createSpawnSubagentTool } from './tools/spawn-subagent'
 import { createStreamSnapshotTool } from './tools/stream-snapshot'
+import { createSubagentCancelTool } from './tools/subagent-cancel'
+import { createSubagentOutputTool } from './tools/subagent-output'
 import { webfetchTool } from './tools/webfetch'
 import { websearchTool } from './tools/websearch'
 
@@ -153,6 +158,16 @@ export type CreateSessionOptions = {
   // already seen") provide their own here. See `ToolResultBudget` for the
   // shared shape.
   toolResultBudgetMessage?: ToolResultBudget['exhaustedMessage']
+  // Orchestration wiring. When all three of `liveSubagentRegistry`,
+  // `subagentRegistry`, and `createSessionForSubagent` are present (AND
+  // `pluginSubagent` is unset), the session exposes the spawn_subagent,
+  // subagent_output, and subagent_cancel tools. Subagent-origin sessions
+  // get an empty tool set via the `pluginSubagent` branch; the gate here
+  // (omitting these for subagent sessions) is what prevents recursive
+  // spawning.
+  liveSubagentRegistry?: LiveSubagentRegistry
+  subagentRegistry?: SubagentRegistry
+  createSessionForSubagent?: CreateSessionForSubagent
 }
 
 export type CreateSessionResult = {
@@ -282,6 +297,16 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
                   }),
                 ]
               : []),
+            ...buildSubagentOrchestrationTools({
+              liveRegistry: options.liveSubagentRegistry,
+              registry: options.subagentRegistry,
+              createSessionForSubagent: options.createSessionForSubagent,
+              agentDir: options.plugins?.agentDir,
+              parentSessionId: sessionManager.getSessionId(),
+              getOrigin,
+              permissions: options.permissions,
+              stream: options.stream,
+            }),
           ]
   const customToolsPreBudget = [...wrapSystemTools(customSystemTools, options.plugins, getOrigin), ...pluginCustomTools]
   const customTools =
@@ -428,6 +453,48 @@ export function buildChannelTools(
     tools.push(createChannelSendTool({ router: channelRouter }))
   }
   return tools
+}
+
+export function buildSubagentOrchestrationTools(opts: {
+  liveRegistry: LiveSubagentRegistry | undefined
+  registry: SubagentRegistry | undefined
+  createSessionForSubagent: CreateSessionForSubagent | undefined
+  agentDir: string | undefined
+  parentSessionId: string
+  getOrigin: () => SessionOrigin | undefined
+  permissions: PermissionService | undefined
+  stream: Stream | undefined
+}): ToolDefinition[] {
+  if (
+    opts.liveRegistry === undefined ||
+    opts.registry === undefined ||
+    opts.createSessionForSubagent === undefined ||
+    opts.agentDir === undefined
+  ) {
+    return []
+  }
+  return [
+    createSpawnSubagentTool({
+      registry: opts.registry,
+      liveRegistry: opts.liveRegistry,
+      createSessionForSubagent: opts.createSessionForSubagent,
+      agentDir: opts.agentDir,
+      parentSessionId: opts.parentSessionId,
+      getOrigin: opts.getOrigin,
+      ...(opts.permissions ? { permissions: opts.permissions } : {}),
+      ...(opts.stream ? { stream: opts.stream } : {}),
+    }),
+    createSubagentOutputTool({
+      liveRegistry: opts.liveRegistry,
+      getOrigin: opts.getOrigin,
+      ...(opts.permissions ? { permissions: opts.permissions } : {}),
+    }),
+    createSubagentCancelTool({
+      liveRegistry: opts.liveRegistry,
+      getOrigin: opts.getOrigin,
+      ...(opts.permissions ? { permissions: opts.permissions } : {}),
+    }),
+  ]
 }
 
 function wrapRegistryTools(

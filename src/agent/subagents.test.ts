@@ -6,7 +6,13 @@ import type { HookBus } from '@/plugin'
 import { createStream } from '@/stream'
 
 import type { AgentSession } from './index'
-import { createSubagentConsumer, invokeSubagent, type Subagent, validateSubagentPayload } from './subagents'
+import {
+  createSubagentConsumer,
+  invokeSubagent,
+  startSubagent,
+  type Subagent,
+  validateSubagentPayload,
+} from './subagents'
 
 function makeFakeHookBus(events: string[]): HookBus {
   return {
@@ -535,5 +541,250 @@ describe('createSubagentConsumer', () => {
     expect(errors.some((e) => /\[subagent\] greeter: LLM call failed: billing failed/.test(e))).toBe(true)
 
     consumer.stop()
+  })
+})
+
+describe('startSubagent', () => {
+  function subscribableFakeSession(): {
+    session: AgentSession
+    calls: { prompt: string[]; disposed: number }
+    emit: (event: unknown) => void
+  } {
+    const calls = { prompt: [] as string[], disposed: 0 }
+    let listener: ((event: unknown) => void) | null = null
+    const session = {
+      prompt: async (text: string) => {
+        calls.prompt.push(text)
+      },
+      dispose: () => {
+        calls.disposed += 1
+      },
+      subscribe: (l: (event: unknown) => void) => {
+        listener = l
+        return () => {
+          listener = null
+        }
+      },
+      abort: async () => {},
+    } as unknown as AgentSession
+    return {
+      session,
+      calls,
+      emit: (event) => listener?.(event),
+    }
+  }
+
+  test('handle promise resolves before completion settles, with the taskId we provided', async () => {
+    // given
+    const { session } = subscribableFakeSession()
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    // when
+    const { handle, completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'hi',
+      taskId: 'bg_xyz',
+    })
+
+    // then
+    const h = await handle
+    expect(h.taskId).toBe('bg_xyz')
+    await completion
+  })
+
+  test('completion resolves ok=true when prompt finishes', async () => {
+    // given
+    const { session, calls } = subscribableFakeSession()
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    // when
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'hello',
+      taskId: 'bg_1',
+    })
+    const result = await completion
+
+    // then
+    expect(result.ok).toBe(true)
+    expect(calls.prompt).toEqual(['hello'])
+    expect(calls.disposed).toBe(1)
+  })
+
+  test('completion captures the final assistant message', async () => {
+    // given
+    let listener: ((event: unknown) => void) | null = null
+    const session = {
+      prompt: async () => {
+        listener?.({
+          type: 'message_end',
+          message: { content: 'Found 42 results.' },
+        })
+      },
+      dispose: () => {},
+      subscribe: (l: (event: unknown) => void) => {
+        listener = l
+        return () => {
+          listener = null
+        }
+      },
+      abort: async () => {},
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    // when
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_msg',
+    })
+    const result = await completion
+
+    // then
+    if (result.ok) {
+      expect(result.finalMessage).toBe('Found 42 results.')
+    } else {
+      throw new Error(`expected ok=true, got error: ${result.error}`)
+    }
+  })
+
+  test('completion resolves ok=false with error message when prompt throws', async () => {
+    // given
+    const session = {
+      prompt: async () => {
+        throw new Error('boom')
+      },
+      dispose: () => {},
+      subscribe: () => () => {},
+      abort: async () => {},
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    // when
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_err',
+    })
+    const result = await completion
+
+    // then
+    expect(result.ok).toBe(false)
+    if (!result.ok) {
+      expect(result.error).toBe('boom')
+    }
+  })
+
+  test('onSession fires once with the live session and abort handle', async () => {
+    // given
+    const { session } = subscribableFakeSession()
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+    let captured: { abortCount: number } | null = null
+
+    // when
+    const { completion } = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'q',
+      taskId: 'bg_session',
+      onSession: (event) => {
+        captured = { abortCount: 0 }
+        void event.abort().then(() => {
+          if (captured) captured.abortCount += 1
+        })
+      },
+    })
+    await completion
+
+    // then
+    expect(captured).not.toBeNull()
+    expect(captured!.abortCount).toBe(1)
+  })
+
+  test('parallel starts with different taskIds run concurrently (proves handle settles independently)', async () => {
+    // given
+    let resolveProm1: () => void = () => {}
+    let resolveProm2: () => void = () => {}
+    const session1 = {
+      prompt: async () =>
+        new Promise<void>((r) => {
+          resolveProm1 = r
+        }),
+      dispose: () => {},
+      subscribe: () => () => {},
+      abort: async () => {},
+    } as unknown as AgentSession
+    const session2 = {
+      prompt: async () =>
+        new Promise<void>((r) => {
+          resolveProm2 = r
+        }),
+      dispose: () => {},
+      subscribe: () => () => {},
+      abort: async () => {},
+    } as unknown as AgentSession
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+    let createCount = 0
+
+    // when
+    const start1 = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => {
+        createCount += 1
+        return session1
+      },
+      agentDir: '/agent',
+      userPrompt: 'q1',
+      taskId: 'bg_a',
+    })
+    const start2 = startSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => {
+        createCount += 1
+        return session2
+      },
+      agentDir: '/agent',
+      userPrompt: 'q2',
+      taskId: 'bg_b',
+    })
+    const h1 = await start1.handle
+    const h2 = await start2.handle
+
+    // then
+    expect(h1.taskId).toBe('bg_a')
+    expect(h2.taskId).toBe('bg_b')
+    expect(createCount).toBe(2)
+    // Both handles resolved before either prompt finished — proves non-blocking shape.
+    resolveProm1()
+    resolveProm2()
+    await Promise.all([start1.completion, start2.completion])
+  })
+
+  test('invokeSubagent (the wrapper) still returns Promise<void> and runs unchanged', async () => {
+    // given (this asserts no behavioral regression from the refactor)
+    const { session, calls } = fakeSession()
+    const registry = { greeter: { systemPrompt: 'X' } satisfies Subagent }
+
+    // when
+    const result = await invokeSubagent('greeter', {
+      registry,
+      createSessionForSubagent: async () => session,
+      agentDir: '/agent',
+      userPrompt: 'wrapper',
+    })
+
+    // then
+    expect(result).toBeUndefined()
+    expect(calls.prompt).toEqual(['wrapper'])
+    expect(calls.disposed).toBe(1)
   })
 })
