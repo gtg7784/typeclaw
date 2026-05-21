@@ -423,17 +423,19 @@ RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
 // post-seed modal dialogs that this file deliberately does NOT
 // pre-clear:
 //   1. "Detected a custom API key from environment. Do you want to use
-//      this API key?" (fires when ANTHROPIC_API_KEY is set, default
-//      selection No)
-//   2. Workspace trust ("Do you trust the files in this folder?",
-//      fires on first cwd, default safe option)
+//      this API key?" — fires when ANTHROPIC_API_KEY is set. Options
+//      `[No (recommended), Yes]`, focus on No, picker does NOT wrap.
+//   2. Workspace trust ("Do you trust the files in this folder?") —
+//      fires on every new cwd. Options `[Yes, proceed, No, exit]`,
+//      focus on Yes.
 // Both are kept as runtime decisions handled by the
 // `typeclaw-claude-code` skill (see its "Driving the session" section,
-// "Clear startup dialogs" step). Pre-seeding `hasTrustDialogAccepted`
-// or `customApiKeyResponses.approved` here would silently widen the
-// trust surface in ways the operator hasn't consented to — the seed's
-// job is strictly cosmetic-wizard removal, not trust/permission
-// preemption.
+// "Clear startup dialogs" step, which uses dialog-specific keystrokes
+// because the picker doesn't wrap). Pre-seeding
+// `hasTrustDialogAccepted` or `customApiKeyResponses.approved` here
+// would silently widen the trust surface in ways the operator hasn't
+// consented to — the seed's job is strictly cosmetic-wizard removal,
+// not trust/permission preemption.
 //
 // `theme: "dark"` matches typeclaw's default TUI theme so the visual
 // transition between the typeclaw TUI and a tmux-attached claude pane

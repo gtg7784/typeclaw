@@ -228,7 +228,9 @@ describe('claudeCode toggle', () => {
   test('pre-seed JSON contains no single quotes — required by the printf %s shell-quoting pattern, and guaranteed by JSON.stringify which only emits double quotes', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
     const match = out.match(/printf '%s\\n' '([^']+)' > "\$HOME\/\.claude\.json"/)
-    const payload = match?.[1] ?? ''
+    expect(match).not.toBeNull()
+    const payload = match?.[1]
+    expect(payload).toBeDefined()
     expect(payload).not.toContain("'")
   })
 
