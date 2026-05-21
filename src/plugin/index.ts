@@ -9,6 +9,8 @@ export {
   grepTool,
   lsTool,
   readTool,
+  webfetchTool,
+  websearchTool,
   writeTool,
 } from './define'
 

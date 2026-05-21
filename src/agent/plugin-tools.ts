@@ -31,6 +31,39 @@ import type {
 } from '@/plugin'
 
 import type { SessionOrigin } from './session-origin'
+import { webfetchTool } from './tools/webfetch'
+import { websearchTool } from './tools/websearch'
+
+// `ToolDefinition.execute` carries a 5th `ctx: ExtensionContext` argument that
+// `AgentTool.execute` does not — TypeScript correctly refuses the assignment
+// because the wider signature can't satisfy a position that the consumer
+// believes accepts at most 4 args. At runtime, the 5th arg is unused by
+// websearch/webfetch (their executes only read `params` and `signal`), so the
+// adapter is a thin pass-through that drops the extra parameter and keeps the
+// hook/budget/wrap pipeline (which is keyed on AgentTool shape) working
+// uniformly for every entry in `BUILTIN_TOOL_MAP`. Don't reach for this for
+// pi-coding-agent's own bashTool/readTool etc. — those are already AgentTools.
+function toAgentTool<TParams extends TSchema, TDetails = unknown>(
+  tool: ToolDefinition<TParams, TDetails, never>,
+): AgentTool<TParams, TDetails> {
+  return {
+    name: tool.name,
+    label: tool.label,
+    description: tool.description,
+    parameters: tool.parameters,
+    ...(tool.prepareArguments ? { prepareArguments: tool.prepareArguments } : {}),
+    async execute(toolCallId, params, signal, onUpdate) {
+      return tool.execute(toolCallId, params, signal, onUpdate, undefined as never)
+    },
+  }
+}
+
+const websearchAgentTool = toAgentTool(
+  websearchTool as unknown as ToolDefinition<typeof websearchTool.parameters, unknown, never>,
+)
+const webfetchAgentTool = toAgentTool(
+  webfetchTool as unknown as ToolDefinition<typeof webfetchTool.parameters, unknown, never>,
+)
 
 type AnyAgentTool =
   | typeof piReadTool
@@ -40,6 +73,8 @@ type AnyAgentTool =
   | typeof piGrepTool
   | typeof piFindTool
   | typeof piLsTool
+  | typeof websearchAgentTool
+  | typeof webfetchAgentTool
 
 const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
   Type.Object(
@@ -58,6 +93,8 @@ const BUILTIN_TOOL_MAP: Record<string, AnyAgentTool> = {
   ls: piLsTool,
   read: piReadTool,
   write: piWriteTool,
+  websearch: websearchAgentTool,
+  webfetch: webfetchAgentTool,
 }
 
 export function resolveBuiltinToolRefs(refs: BuiltinToolRef[]): AnyAgentTool[] {
