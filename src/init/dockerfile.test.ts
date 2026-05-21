@@ -146,6 +146,55 @@ describe('buildDockerfile feature toggles', () => {
   })
 })
 
+describe('claudeCode toggle', () => {
+  test('defaults to false (the install layer is opt-in via the typeclaw-claude-code skill)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({}))
+    expect(out).not.toContain('claude.ai/install.sh')
+  })
+
+  test('claudeCode: false omits the install layer entirely', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: false }))
+    expect(out).not.toContain('claude.ai/install.sh')
+  })
+
+  test('claudeCode: true emits the curl-piped install layer in the inline (dev) form', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('RUN curl -fsSL https://claude.ai/install.sh | bash')
+  })
+
+  test('claudeCode: true emits the install layer in the versioned (base-image) form too — drift guard', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }), { baseImageVersion: '0.1.1' })
+    expect(out).toContain('RUN curl -fsSL https://claude.ai/install.sh | bash')
+  })
+
+  test('install layer renders before the entrypoint shim so the shim is always the final RUN', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    const claudeIdx = out.indexOf('claude.ai/install.sh')
+    const shimIdx = out.indexOf(TYPECLAW_ENTRYPOINT_PATH)
+    expect(claudeIdx).toBeGreaterThan(-1)
+    expect(shimIdx).toBeGreaterThan(-1)
+    expect(claudeIdx).toBeLessThan(shimIdx)
+  })
+
+  test('install layer symlinks ~/.local/bin/claude into /usr/local/bin (the Anthropic installer emits a "~/.local/bin is not in your PATH" warning on bun:1-slim; without the symlink every `which claude` returns empty)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude')
+  })
+
+  test('install layer smoke-tests the binary with `claude --version` so a broken install fails the build instead of the first delegation', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('claude --version > /dev/null')
+  })
+
+  test('install layer is rejected by parse: claudeCode does not accept string version pins (the upstream installer is not a versioned apt package)', () => {
+    expect(() => dockerfileSchema.parse({ claudeCode: '1.2.3' })).toThrow()
+  })
+
+  test('base Dockerfile never embeds the claude install — toggle-driven layers stay in the per-agent file so changing the flag does not rebuild the base image', () => {
+    expect(buildBaseDockerfile()).not.toContain('claude.ai/install.sh')
+  })
+})
+
 function amd64ElseBranchPackages(out: string): string[] {
   const m = out.match(/else \\\n\s+apt-get install -y --no-install-recommends \\\n\s+([^\n]+); \\\n\s+fi/)
   if (!m || !m[1]) throw new Error('amd64 else-branch apt-get install line not found')

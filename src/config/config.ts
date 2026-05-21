@@ -116,6 +116,11 @@ const dockerfileObjectSchema = z.object({
   // because the package has no API-stable versioning that matters
   // here; xvfb tracks the upstream X server release.
   xvfb: z.boolean().default(true),
+  // `claudeCode` is boolean-only (not an apt feature toggle): the upstream
+  // installer is `curl | bash` and manages versions via env vars at install
+  // time, not via version pins like apt. Default `false`; the bundled
+  // `typeclaw-claude-code` skill prompts the user to opt in.
+  claudeCode: z.boolean().default(false),
   append: z.array(dockerfileLineSchema).default([]),
 })
 

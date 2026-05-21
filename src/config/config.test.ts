@@ -372,6 +372,7 @@ describe('docker.file schema', () => {
     cjkFonts: true,
     cloudflared: true,
     xvfb: true,
+    claudeCode: false,
     append: [],
   }
 
@@ -413,6 +414,7 @@ describe('docker.file schema', () => {
       cjkFonts: true,
       cloudflared: true,
       xvfb: true,
+      claudeCode: false,
       append: [],
     })
   })
@@ -484,6 +486,20 @@ describe('docker.file schema', () => {
     expect(() =>
       configSchema.parse({ models: { default: VALID_MODEL }, docker: { file: { python: '3.11' } } }),
     ).toThrow()
+  })
+
+  test('claudeCode is boolean-only (no version-string variant); defaults to false', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.docker.file.claudeCode).toBe(false)
+  })
+
+  test('claudeCode: true is preserved when explicitly enabled', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, docker: { file: { claudeCode: true } } })
+    expect(parsed.docker.file.claudeCode).toBe(true)
+  })
+
+  test('claudeCode rejects string version pins (the upstream installer manages versions via env, not apt pins)', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, docker: { file: { claudeCode: '1.2.3' } } })).toThrow()
   })
 
   test('empty docker object resolves to defaulted docker.file', () => {
