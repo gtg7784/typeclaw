@@ -4,6 +4,7 @@ import explorerPlugin from '@/bundled-plugins/explorer'
 import guardPlugin from '@/bundled-plugins/guard'
 import memoryPlugin from '@/bundled-plugins/memory'
 import operatorPlugin from '@/bundled-plugins/operator'
+import scoutPlugin from '@/bundled-plugins/scout'
 import securityPlugin from '@/bundled-plugins/security'
 import toolResultCapPlugin from '@/bundled-plugins/tool-result-cap'
 import type { ResolvedPlugin } from '@/plugin'
@@ -39,5 +40,6 @@ export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'backup', version: undefined, source: '<bundled>', defined: backupPlugin },
   { name: 'agent-browser', version: undefined, source: '<bundled>', defined: agentBrowserPlugin },
   { name: 'explorer', version: undefined, source: '<bundled>', defined: explorerPlugin },
+  { name: 'scout', version: undefined, source: '<bundled>', defined: scoutPlugin },
   { name: 'operator', version: undefined, source: '<bundled>', defined: operatorPlugin },
 ]
