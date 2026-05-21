@@ -1,21 +1,11 @@
 'use client'
 
 import { useTheme } from 'next-themes'
+import Image from 'next/image'
 import Link from 'next/link'
 import { useEffect, useState } from 'react'
 
-function PawIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-      <title>TypeClaw paw</title>
-      <ellipse cx="6" cy="9" rx="2.2" ry="3" />
-      <ellipse cx="18" cy="9" rx="2.2" ry="3" />
-      <ellipse cx="10" cy="5" rx="2" ry="2.8" />
-      <ellipse cx="14" cy="5" rx="2" ry="2.8" />
-      <path d="M12 11.5c-3.5 0-6 2.4-6 5.2 0 2.3 1.8 3.8 4 3.8 1.2 0 1.4-.6 2-.6s.8.6 2 .6c2.2 0 4-1.5 4-3.8 0-2.8-2.5-5.2-6-5.2z" />
-    </svg>
-  )
-}
+import logo from './icon.png'
 
 function ContainerIcon({ className }: { className?: string }) {
   return (
@@ -486,7 +476,7 @@ function CyclingTerminal() {
               }}
               className={`px-3 py-2 font-mono text-xs whitespace-nowrap transition-colors duration-200 ${
                 i === active
-                  ? 'border-b-2 border-emerald-500 text-zinc-800 dark:text-zinc-200'
+                  ? 'border-b-2 border-cyan-500 text-zinc-800 dark:text-zinc-200'
                   : 'border-b-2 border-transparent text-zinc-400 hover:text-zinc-600 dark:text-zinc-600 dark:hover:text-zinc-400'
               }`}
             >
@@ -508,7 +498,7 @@ function CyclingTerminal() {
               ) : (
                 <>
                   <span className="text-zinc-400 dark:text-zinc-500">{'  '}</span>
-                  <span className="text-emerald-600 dark:text-emerald-400">{line.output}</span>
+                  <span className="text-cyan-600 dark:text-cyan-400">{line.output}</span>
                 </>
               )}
               {i < demo.commands.length - 1 ? '\n' : ''}
@@ -524,8 +514,8 @@ export default function Home() {
   return (
     <div className="min-h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <div className="pointer-events-none fixed inset-0 overflow-hidden">
-        <div className="absolute -top-[20%] left-1/2 h-[900px] w-[900px] -translate-x-1/2 rounded-full bg-[radial-gradient(circle,rgba(16,185,129,0.18)_0%,rgba(59,130,246,0.08)_40%,transparent_70%)] opacity-[0.04] dark:opacity-[0.09]" />
-        <div className="absolute -right-[5%] -bottom-[10%] h-[600px] w-[600px] rounded-full bg-[radial-gradient(circle,rgba(99,102,241,0.5)_0%,transparent_60%)] opacity-[0.02] dark:opacity-[0.05]" />
+        <div className="absolute -top-[20%] left-1/2 h-[900px] w-[900px] -translate-x-1/2 rounded-full bg-[radial-gradient(circle,rgba(8,189,242,0.22)_0%,rgba(59,130,246,0.08)_40%,transparent_70%)] opacity-[0.04] dark:opacity-[0.09]" />
+        <div className="absolute -right-[5%] -bottom-[10%] h-[600px] w-[600px] rounded-full bg-[radial-gradient(circle,rgba(6,43,95,0.55)_0%,transparent_60%)] opacity-[0.025] dark:opacity-[0.1]" />
       </div>
 
       <nav className="fixed inset-x-0 top-0 z-50 flex h-16 items-center justify-between border-b border-zinc-200/40 bg-white/80 px-4 backdrop-blur-xl sm:px-6 dark:border-white/[0.06] dark:bg-zinc-950/80">
@@ -533,7 +523,7 @@ export default function Home() {
           href="/"
           className="flex items-center gap-2 font-mono text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-100"
         >
-          <PawIcon className="size-5 text-emerald-600 dark:text-emerald-400" />
+          <Image src={logo} alt="TypeClaw" width={24} height={24} className="rounded-md" priority />
           typeclaw
         </Link>
         <div className="flex items-center gap-1 sm:gap-2">
@@ -563,20 +553,32 @@ export default function Home() {
         </div>
       </nav>
 
-      <section className="relative z-10 px-4 pt-36 pb-20 sm:px-6 sm:pt-44 sm:pb-24">
+      <section className="relative z-10 px-4 pt-28 pb-20 sm:px-6 sm:pt-32 sm:pb-24">
         <div className="mx-auto max-w-4xl text-center">
-          <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200/40 bg-zinc-50/80 px-4 py-1.5 font-mono text-xs tracking-wide text-zinc-600 backdrop-blur-sm dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-zinc-400">
-            <span className="size-2 animate-pulse rounded-full bg-emerald-500" />
+          <div className="relative mx-auto flex size-40 items-center justify-center sm:size-48">
+            <div className="absolute inset-0 -z-10 rounded-full bg-[radial-gradient(circle,rgba(8,189,242,0.35)_0%,transparent_65%)] blur-2xl" />
+            <Image
+              src={logo}
+              alt="TypeClaw mascot"
+              width={192}
+              height={192}
+              priority
+              className="size-40 drop-shadow-[0_8px_30px_rgba(8,189,242,0.25)] sm:size-48 dark:drop-shadow-[0_8px_30px_rgba(8,189,242,0.35)]"
+            />
+          </div>
+
+          <div className="mt-6 inline-flex items-center gap-2 rounded-full border border-zinc-200/40 bg-zinc-50/80 px-4 py-1.5 font-mono text-xs tracking-wide text-zinc-600 backdrop-blur-sm dark:border-white/[0.06] dark:bg-white/[0.03] dark:text-zinc-400">
+            <span className="size-2 animate-pulse rounded-full bg-cyan-500" />
             open source · MIT
           </div>
 
-          <h1 className="mt-8 text-4xl font-bold tracking-tight sm:text-5xl lg:text-6xl">
-            <span className="bg-gradient-to-br from-zinc-900 to-zinc-500 bg-clip-text text-transparent dark:from-white dark:to-zinc-400">
-              The TypeScript agent runtime
+          <h1 className="mt-6 text-4xl font-bold tracking-tight sm:text-5xl lg:text-6xl">
+            <span className="bg-gradient-to-br from-zinc-900 to-zinc-600 bg-clip-text text-transparent dark:from-white dark:to-zinc-300">
+              A TypeScript agent runtime
             </span>
             <br />
-            <span className="bg-gradient-to-br from-emerald-600 to-blue-600 bg-clip-text text-transparent dark:from-emerald-400 dark:to-blue-400">
-              that fits how you already work
+            <span className="bg-gradient-to-br from-cyan-600 to-[#062B5F] bg-clip-text text-transparent dark:from-cyan-400 dark:to-cyan-200">
+              with a friendly little claw
             </span>
           </h1>
 
@@ -588,7 +590,7 @@ export default function Home() {
           <div className="mt-10 flex flex-col items-center justify-center gap-4 sm:flex-row">
             <Link
               href="/docs/quickstart"
-              className="inline-flex items-center justify-center rounded-xl bg-zinc-900 px-6 py-3 text-sm font-medium text-white transition-all duration-300 hover:bg-zinc-800 dark:border dark:border-white/15 dark:bg-white/10 dark:backdrop-blur-xl dark:hover:bg-white/15 dark:hover:shadow-[0_0_30px_-5px_rgba(16,185,129,0.25)]"
+              className="inline-flex items-center justify-center rounded-xl bg-zinc-900 px-6 py-3 text-sm font-medium text-white transition-all duration-300 hover:bg-zinc-800 dark:border dark:border-white/15 dark:bg-white/10 dark:backdrop-blur-xl dark:hover:bg-white/15 dark:hover:shadow-[0_0_30px_-5px_rgba(8,189,242,0.3)]"
             >
               Quickstart
             </Link>
@@ -611,7 +613,7 @@ export default function Home() {
       <section className="relative z-10 border-y border-zinc-100/50 px-4 py-16 sm:px-6 dark:border-white/[0.04]">
         <div className="mx-auto max-w-5xl">
           <div className="text-center">
-            <p className="font-mono text-xs font-medium tracking-widest text-emerald-600 uppercase dark:text-emerald-400">
+            <p className="font-mono text-xs font-medium tracking-widest text-cyan-600 uppercase dark:text-cyan-400">
               Why TypeClaw?
             </p>
             <h2 className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl">
@@ -647,8 +649,8 @@ export default function Home() {
                     <td className="px-4 py-3 text-zinc-500 dark:text-zinc-500">{row.weakness}</td>
                   </tr>
                 ))}
-                <tr className="border-t-2 border-emerald-500/30 bg-emerald-50/30 dark:bg-emerald-950/10">
-                  <td className="px-4 py-3 font-mono text-sm font-semibold whitespace-nowrap text-emerald-700 dark:text-emerald-400">
+                <tr className="border-t-2 border-cyan-500/30 bg-cyan-50/30 dark:bg-cyan-950/10">
+                  <td className="px-4 py-3 font-mono text-sm font-semibold whitespace-nowrap text-cyan-700 dark:text-cyan-400">
                     TypeClaw
                   </td>
                   <td className="px-4 py-3 text-zinc-700 dark:text-zinc-300">TypeScript end to end, Bun-native</td>
@@ -670,7 +672,7 @@ export default function Home() {
       <section className="relative z-10 px-4 py-20 sm:px-6 sm:py-24">
         <div className="mx-auto max-w-5xl">
           <div className="text-center">
-            <p className="font-mono text-xs font-medium tracking-widest text-emerald-600 uppercase dark:text-emerald-400">
+            <p className="font-mono text-xs font-medium tracking-widest text-cyan-600 uppercase dark:text-cyan-400">
               What you get
             </p>
             <h2 className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl">Built for agents, sized for humans</h2>
@@ -680,9 +682,9 @@ export default function Home() {
             {FEATURES.map((f) => (
               <div
                 key={f.title}
-                className="group rounded-2xl border border-zinc-200/40 bg-white/60 p-6 backdrop-blur-xl transition-all duration-300 hover:border-zinc-300/60 hover:shadow-lg dark:border-white/[0.06] dark:bg-white/[0.03] dark:hover:border-white/15 dark:hover:shadow-[0_0_40px_-15px_rgba(16,185,129,0.18)]"
+                className="group rounded-2xl border border-zinc-200/40 bg-white/60 p-6 backdrop-blur-xl transition-all duration-300 hover:border-zinc-300/60 hover:shadow-lg dark:border-white/[0.06] dark:bg-white/[0.03] dark:hover:border-white/15 dark:hover:shadow-[0_0_40px_-15px_rgba(8,189,242,0.22)]"
               >
-                <div className="flex size-10 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600 transition-colors duration-300 dark:bg-emerald-950/40 dark:text-emerald-400">
+                <div className="flex size-10 items-center justify-center rounded-xl bg-cyan-50 text-cyan-600 transition-colors duration-300 dark:bg-cyan-950/40 dark:text-cyan-400">
                   {f.icon}
                 </div>
                 <h3 className="mt-4 font-mono text-sm font-semibold text-zinc-900 dark:text-zinc-100">{f.title}</h3>
@@ -696,7 +698,7 @@ export default function Home() {
       <section className="relative z-10 border-t border-zinc-100/50 px-4 py-20 sm:px-6 sm:py-24 dark:border-white/[0.04]">
         <div className="mx-auto max-w-5xl">
           <div className="text-center">
-            <p className="font-mono text-xs font-medium tracking-widest text-emerald-600 uppercase dark:text-emerald-400">
+            <p className="font-mono text-xs font-medium tracking-widest text-cyan-600 uppercase dark:text-cyan-400">
               Architecture
             </p>
             <h2 className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl">Three stages, one boundary</h2>
@@ -714,7 +716,7 @@ export default function Home() {
                 className="relative rounded-2xl border border-zinc-200/40 bg-white/60 p-6 backdrop-blur-xl transition-all duration-300 hover:border-zinc-300/60 dark:border-white/[0.06] dark:bg-white/[0.03] dark:hover:border-white/15"
               >
                 <div className="flex items-center gap-3">
-                  <span className="flex size-8 items-center justify-center rounded-lg bg-emerald-50 font-mono text-xs font-bold text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400">
+                  <span className="flex size-8 items-center justify-center rounded-lg bg-cyan-50 font-mono text-xs font-bold text-cyan-600 dark:bg-cyan-950/40 dark:text-cyan-400">
                     {String(i + 1).padStart(2, '0')}
                   </span>
                   <h3 className="font-mono text-sm font-semibold text-zinc-900 dark:text-zinc-100">{stage.name}</h3>
@@ -727,10 +729,10 @@ export default function Home() {
 
           <div className="mt-10 rounded-2xl border border-zinc-200/40 bg-white/60 p-6 backdrop-blur-xl dark:border-white/[0.06] dark:bg-white/[0.03]">
             <p className="font-mono text-xs tracking-wide text-zinc-500 dark:text-zinc-500">
-              <span className="text-emerald-600 dark:text-emerald-400">hostd</span> — the host-side daemon — is the
-              small RPC seam between the host and container stages. It owns container restart, port forwarding, and
-              per-host singleton state in ~/.typeclaw/. The container has no Docker access; everything that requires it
-              goes through this one channel.
+              <span className="text-cyan-600 dark:text-cyan-400">hostd</span> — the host-side daemon — is the small RPC
+              seam between the host and container stages. It owns container restart, port forwarding, and per-host
+              singleton state in ~/.typeclaw/. The container has no Docker access; everything that requires it goes
+              through this one channel.
             </p>
           </div>
         </div>
@@ -739,20 +741,20 @@ export default function Home() {
       <section className="relative z-10 border-t border-zinc-100/50 px-4 py-20 sm:px-6 sm:py-24 dark:border-white/[0.04]">
         <div className="mx-auto max-w-4xl">
           <div className="text-center">
-            <p className="font-mono text-xs font-medium tracking-widest text-emerald-600 uppercase dark:text-emerald-400">
+            <p className="font-mono text-xs font-medium tracking-widest text-cyan-600 uppercase dark:text-cyan-400">
               Self-improving memory
             </p>
             <h2 className="mt-3 text-3xl font-bold tracking-tight sm:text-4xl">Observe. Dream. Apply.</h2>
             <p className="mx-auto mt-4 max-w-2xl text-zinc-600 dark:text-zinc-400">
-              The bundled <code className="font-mono text-emerald-700 dark:text-emerald-400">memory</code> plugin turns
-              lived experience into reusable knowledge. No manual prompt engineering. No curated example library.
+              The bundled <code className="font-mono text-cyan-700 dark:text-cyan-400">memory</code> plugin turns lived
+              experience into reusable knowledge. No manual prompt engineering. No curated example library.
             </p>
           </div>
 
           <div className="mt-14 space-y-6">
             <div className="rounded-2xl border border-zinc-200/40 bg-white/60 p-6 backdrop-blur-xl dark:border-white/[0.06] dark:bg-white/[0.03]">
               <div className="flex items-start gap-4">
-                <span className="flex size-9 flex-shrink-0 items-center justify-center rounded-lg bg-emerald-50 font-mono text-sm font-bold text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400">
+                <span className="flex size-9 flex-shrink-0 items-center justify-center rounded-lg bg-cyan-50 font-mono text-sm font-bold text-cyan-600 dark:bg-cyan-950/40 dark:text-cyan-400">
                   1
                 </span>
                 <div>
@@ -770,7 +772,7 @@ export default function Home() {
 
             <div className="rounded-2xl border border-zinc-200/40 bg-white/60 p-6 backdrop-blur-xl dark:border-white/[0.06] dark:bg-white/[0.03]">
               <div className="flex items-start gap-4">
-                <span className="flex size-9 flex-shrink-0 items-center justify-center rounded-lg bg-emerald-50 font-mono text-sm font-bold text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400">
+                <span className="flex size-9 flex-shrink-0 items-center justify-center rounded-lg bg-cyan-50 font-mono text-sm font-bold text-cyan-600 dark:bg-cyan-950/40 dark:text-cyan-400">
                   2
                 </span>
                 <div>
@@ -791,7 +793,7 @@ export default function Home() {
 
             <div className="rounded-2xl border border-zinc-200/40 bg-white/60 p-6 backdrop-blur-xl dark:border-white/[0.06] dark:bg-white/[0.03]">
               <div className="flex items-start gap-4">
-                <span className="flex size-9 flex-shrink-0 items-center justify-center rounded-lg bg-emerald-50 font-mono text-sm font-bold text-emerald-600 dark:bg-emerald-950/40 dark:text-emerald-400">
+                <span className="flex size-9 flex-shrink-0 items-center justify-center rounded-lg bg-cyan-50 font-mono text-sm font-bold text-cyan-600 dark:bg-cyan-950/40 dark:text-cyan-400">
                   3
                 </span>
                 <div>
@@ -816,7 +818,7 @@ export default function Home() {
       <section className="relative z-10 border-t border-zinc-100/50 px-4 py-20 sm:px-6 sm:py-24 dark:border-white/[0.04]">
         <div className="mx-auto max-w-2xl">
           <div className="relative overflow-hidden rounded-3xl border border-zinc-200/40 bg-white/60 p-10 text-center backdrop-blur-xl dark:border-white/[0.08] dark:bg-white/[0.03]">
-            <div className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_at_center,rgba(16,185,129,0.1)_0%,transparent_60%)] opacity-0 dark:opacity-100" />
+            <div className="absolute inset-0 -z-10 bg-[radial-gradient(ellipse_at_center,rgba(8,189,242,0.14)_0%,transparent_60%)] opacity-0 dark:opacity-100" />
 
             <h2 className="text-3xl font-bold tracking-tight sm:text-4xl">Get your agent running</h2>
             <p className="mt-4 text-zinc-600 dark:text-zinc-400">Requires Bun ≥ 1.1 and Docker or OrbStack.</p>

@@ -14,27 +14,30 @@ const geistMono = Geist_Mono({
   subsets: ['latin'],
 })
 
+const SITE_TITLE = 'TypeClaw — A TypeScript-native agent runtime'
+const SITE_DESCRIPTION =
+  'TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime. Sandboxed by default, plugins as plain TS modules, self-improving via memory.'
+
 export const metadata: Metadata = {
   metadataBase: new URL('https://typeclaw.dev'),
   title: {
-    default: 'TypeClaw — A TypeScript-native agent runtime',
+    default: SITE_TITLE,
     template: '%s · TypeClaw',
   },
-  description:
-    'TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime. Sandboxed by default, plugins as plain TS modules, self-improving via memory.',
+  description: SITE_DESCRIPTION,
   openGraph: {
-    title: 'TypeClaw — A TypeScript-native agent runtime',
-    description:
-      'TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime. Sandboxed by default, plugins as plain TS modules, self-improving via memory.',
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
     url: 'https://typeclaw.dev',
     siteName: 'TypeClaw',
     type: 'website',
+    images: [{ url: '/typeclaw.png', width: 1024, height: 1024, alt: 'TypeClaw mascot' }],
   },
   twitter: {
-    card: 'summary_large_image',
-    title: 'TypeClaw — A TypeScript-native agent runtime',
-    description:
-      'TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime. Sandboxed by default, plugins as plain TS modules, self-improving via memory.',
+    card: 'summary',
+    title: SITE_TITLE,
+    description: SITE_DESCRIPTION,
+    images: ['/typeclaw.png'],
   },
 }
 
