@@ -39,10 +39,7 @@ export async function checkManagedConfigGuard(options: {
   }
 }
 
-async function resolveManagedTarget(
-  agentDir: string,
-  targetPath: string,
-): Promise<{ file: ManagedFile } | undefined> {
+async function resolveManagedTarget(agentDir: string, targetPath: string): Promise<{ file: ManagedFile } | undefined> {
   const resolvedAgentDir = path.resolve(agentDir)
   const realAgentDir = await resolveRealIntendedPath(resolvedAgentDir)
   const realTargetPath = await resolveRealIntendedPath(targetPath)
@@ -59,10 +56,10 @@ function isManagedFile(basename: string): basename is ManagedFile {
 
 function validateManagedContent(file: ManagedFile, content: string): { ok: true } | { ok: false; reason: string } {
   if (file === 'typeclaw.json') {
-    const result = parseConfigJson(content)
+    const result = parseConfigJson(content, { migrate: false })
     return result.ok ? { ok: true } : { ok: false, reason: result.reason }
   }
-  const result = parseCronJson(content)
+  const result = parseCronJson(content, { migrate: false })
   return result.ok ? { ok: true } : { ok: false, reason: result.reason }
 }
 
