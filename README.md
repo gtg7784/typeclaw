@@ -140,6 +140,10 @@ bun run format
 
 See [AGENTS.md](./AGENTS.md) for the long-form architecture notes — stages, hostd internals, message stream, plugin contracts, and the testing philosophy.
 
+## Website
+
+The landing page and documentation site at [typeclaw.dev](https://typeclaw.dev) lives in [`docs/`](./docs/). It's a Next.js + Fumadocs app — see [`docs/README.md`](./docs/README.md) for layout and the contributor workflow.
+
 ## License
 
 MIT
