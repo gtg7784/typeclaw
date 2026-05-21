@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { select, text, isCancel, cancel, log } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
-import { loadConfigSync } from '@/config'
+import { loadConfigSync, validateConfig } from '@/config'
 import { resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir, isInitialized } from '@/init'
 import type { ClientMessage, ServerMessage, TunnelLogsServerMessage, TunnelSnapshot } from '@/shared'
@@ -168,6 +168,15 @@ export async function runTunnelAddFlow(
   args: AddArgs,
   prompts: TunnelPrompts = defaultPrompts,
 ): Promise<LiveResult<TunnelConfig>> {
+  // Strict gate before any read: a malformed or schema-invalid `typeclaw.json`
+  // would otherwise throw out of the subsequent `loadConfigSync` and surface
+  // as an uncaught exception instead of the clean exit-1-with-reason that
+  // every other LiveResult consumer expects. Same fence PR #288 documented
+  // for the `start`/`restart`/`reload` path: destructive paths route through
+  // `validateConfig` so the file's invariants are checked once, up front,
+  // and the rest of the flow can lean on them.
+  const validation = validateConfig(cwd)
+  if (!validation.ok) return { ok: false, reason: validation.reason }
   const config = loadConfigSync(cwd)
   if (config.tunnels.some((entry) => entry.name === args.name))
     return { ok: false, reason: `tunnel "${args.name}" already exists` }
@@ -206,6 +215,9 @@ export async function runTunnelAddFlow(
 }
 
 export function runTunnelRemoveFlow(cwd: string, args: RemoveArgs): LiveResult<{ removed: TunnelConfig }> {
+  // Same strict gate as `runTunnelAddFlow`. See the comment there for why.
+  const validation = validateConfig(cwd)
+  if (!validation.ok) return { ok: false, reason: validation.reason }
   const config = loadConfigSync(cwd)
   const tunnel = config.tunnels.find((entry) => entry.name === args.name)
   if (tunnel === undefined) return { ok: false, reason: `unknown tunnel: ${args.name}` }

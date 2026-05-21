@@ -70,6 +70,62 @@ describe('tunnel add/remove config flows', () => {
     ])
   })
 
+  test('add refuses cleanly with a result-shaped reason when typeclaw.json is malformed JSON', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-tunnel-broken-'))
+    await writeFile(join(cwd, 'typeclaw.json'), 'NOT JSON AT ALL {{{', 'utf8')
+
+    const result = await tunnel.runTunnelAddFlow(cwd, {
+      name: 'demo',
+      provider: 'external',
+      forManual: true,
+      upstreamPort: '5173',
+      externalUrl: 'https://demo.example.com',
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/not valid JSON/)
+  })
+
+  test('add refuses cleanly with a result-shaped reason when typeclaw.json is schema-invalid', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-tunnel-broken-'))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'not-a-known-model' } }), 'utf8')
+
+    const result = await tunnel.runTunnelAddFlow(cwd, {
+      name: 'demo',
+      provider: 'external',
+      forManual: true,
+      upstreamPort: '5173',
+      externalUrl: 'https://demo.example.com',
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/typeclaw\.json is invalid/)
+  })
+
+  test('remove refuses cleanly with a result-shaped reason when typeclaw.json is malformed JSON', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-tunnel-broken-'))
+    await writeFile(join(cwd, 'typeclaw.json'), '{ not json', 'utf8')
+
+    const result = tunnel.runTunnelRemoveFlow(cwd, { name: 'demo' })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/not valid JSON/)
+  })
+
+  test('remove refuses cleanly with a result-shaped reason when typeclaw.json is schema-invalid', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-tunnel-broken-'))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'not-a-known-model' } }), 'utf8')
+
+    const result = tunnel.runTunnelRemoveFlow(cwd, { name: 'demo' })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/typeclaw\.json is invalid/)
+  })
+
   test('remove refuses channel-owned tunnels and removes manual tunnels', async () => {
     const cwd = await makeAgentDir({
       tunnels: [
