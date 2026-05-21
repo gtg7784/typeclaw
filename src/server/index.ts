@@ -7,8 +7,10 @@ import {
   type CreateSessionResult,
 } from '@/agent'
 import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
+import type { LiveSubagentRegistry } from '@/agent/live-subagents'
 import { detectProviderError } from '@/agent/provider-error'
 import type { SessionOrigin } from '@/agent/session-origin'
+import type { CreateSessionForSubagent } from '@/agent/subagents'
 import type { ChannelRouter } from '@/channels/router'
 import { aggregateCronList, type CronListEntry, loadCron } from '@/cron'
 import type { HookBus } from '@/plugin'
@@ -79,6 +81,27 @@ export type ServerOptions = {
   // without it the four `exec_command`-family messages are answered with
   // `command_error` so the host CLI sees a clean failure.
   commandRunnerFactory?: (outbound: CommandOutbound) => CommandRunner
+  // Subagent orchestration plumbing for TUI sessions. Both fields must be
+  // present together for the spawn_subagent / subagent_output / subagent_cancel
+  // tools to surface; `createSession` gates registration on all three of
+  // (liveSubagentRegistry, subagentRegistry, createSessionForSubagent), and
+  // we derive subagentRegistry per WS connection from the same `pluginRuntime`
+  // snapshot that already feeds `plugins.registry` — so a reload landing
+  // mid-connection keeps using the snapshot the session opened with, matching
+  // the existing per-session lifecycle invariant.
+  //
+  // `createSessionForSubagent` is passed eagerly (not late-bound) because the
+  // TUI server is constructed AFTER the channel manager in `startAgent`,
+  // breaking the construction cycle that forces the channel session factory's
+  // `getCreateSessionForSubagent` late-binding.
+  //
+  // Channel and cron sessions get the same plumbing through
+  // `buildChannelSessionFactory` / `createSessionForCron` (see src/run/). The
+  // three top-level callers must stay aligned; otherwise the agent's tool
+  // surface diverges across origin kinds — exactly the gap PR #281 flagged
+  // as out-of-scope follow-up.
+  liveSubagentRegistry?: LiveSubagentRegistry
+  createSessionForSubagent?: CreateSessionForSubagent
 }
 
 const consoleLogger: ServerLogger = {
@@ -176,6 +199,8 @@ export function createServer({
   logger = consoleLogger,
   claimController,
   commandRunnerFactory,
+  liveSubagentRegistry,
+  createSessionForSubagent,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
   const callIdToWs = new Map<string, AnyOwnerWs>()
@@ -351,6 +376,15 @@ export function createServer({
                   }
                 : undefined
             const origin: SessionOrigin = { kind: 'tui', sessionId: sessionFileId }
+            // Derive subagentRegistry from the same runtimeSnapshot that
+            // populates `plugins.registry`. createSession gates the orchestration
+            // tools on (liveRegistry, subagentRegistry, createSessionForSubagent,
+            // agentDir) being all-present; threading the registry alongside the
+            // two server-owned fields gives the gate a complete tuple for TUI
+            // sessions whenever the host plumbed in plugin runtime + subagent
+            // wiring (production), while keeping every existing test that omits
+            // either side at exactly its current tool surface.
+            const subagentRegistry = runtimeSnapshot?.subagents
             const result = await createSession({
               reloadRegistry,
               sessionManager,
@@ -360,6 +394,9 @@ export function createServer({
               ...(pluginsWiring ? { plugins: pluginsWiring } : {}),
               ...(containerName !== undefined ? { containerName } : {}),
               ...(runtimeVersion !== undefined ? { runtimeVersion } : {}),
+              ...(liveSubagentRegistry !== undefined ? { liveSubagentRegistry } : {}),
+              ...(subagentRegistry !== undefined ? { subagentRegistry } : {}),
+              ...(createSessionForSubagent !== undefined ? { createSessionForSubagent } : {}),
             })
             const session = 'session' in result ? result.session : result
             const dispose = 'session' in result && result.dispose ? result.dispose : async () => {}

@@ -6,6 +6,8 @@ import { join } from 'node:path'
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import type { AgentSession, CreateSessionOptions } from '@/agent'
+import { LiveSubagentRegistry } from '@/agent/live-subagents'
+import type { CreateSessionForSubagent, SubagentRegistry } from '@/agent/subagents'
 import type { CronJob } from '@/cron'
 import { createHookBus, type HookBus, type PluginRegistry } from '@/plugin'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
@@ -23,6 +25,28 @@ function makeRuntime(opts: { registry: PluginRegistry; hooks: HookBus }): Plugin
     registry: opts.registry,
     hooks: opts.hooks,
     subagents: {},
+    pluginSubagentByShim: new WeakMap(),
+    hasAnyPluginContent: false,
+    loadedPlugins: [],
+    materializedSkills: null,
+  })
+}
+
+const EMPTY_REGISTRY: PluginRegistry = {
+  tools: [],
+  subagents: [],
+  cronJobs: [],
+  skills: [],
+  skillsDirs: [],
+  doctorChecks: [],
+  commands: [],
+}
+
+function makeRuntimeWith(opts: { subagents: SubagentRegistry }): PluginRuntime {
+  return createPluginRuntime({
+    registry: EMPTY_REGISTRY,
+    hooks: createHookBus(),
+    subagents: opts.subagents,
     pluginSubagentByShim: new WeakMap(),
     hasAnyPluginContent: false,
     loadedPlugins: [],
@@ -550,6 +574,105 @@ describe('createServer session persistence wiring', () => {
     // then
     if (connected.type !== 'connected') throw new Error('unreachable')
     expect(connected.serverVersion).toBeUndefined()
+
+    ws.close()
+  })
+})
+
+describe('createServer TUI subagent orchestration wiring', () => {
+  test('forwards liveSubagentRegistry, subagentRegistry (from runtimeSnapshot), and createSessionForSubagent into createSession on ws open', async () => {
+    // given
+    const session = createFakeSession()
+    const liveSubagentRegistry = new LiveSubagentRegistry()
+    const subagents: SubagentRegistry = { scout: { systemPrompt: 's', visibility: 'public' } }
+    const createSessionForSubagent: CreateSessionForSubagent = async () =>
+      ({ session, hooks: {} as HookBus, sessionId: 'sub' }) as never
+    const pluginRuntime = makeRuntimeWith({ subagents })
+    const observed: CreateSessionOptions[] = []
+    const built = createServer({
+      port: 0,
+      createSession: async (options = {}) => {
+        observed.push(options)
+        return session
+      },
+      agentDir: '/agent',
+      pluginRuntime,
+      liveSubagentRegistry,
+      createSessionForSubagent,
+    }).start()
+    server = built
+
+    // when
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    await waitFor((m) => m.type === 'connected')
+
+    // then
+    expect(observed).toHaveLength(1)
+    expect(observed[0]?.liveSubagentRegistry).toBe(liveSubagentRegistry)
+    expect(observed[0]?.subagentRegistry).toBe(subagents)
+    expect(observed[0]?.createSessionForSubagent).toBe(createSessionForSubagent)
+
+    ws.close()
+  })
+
+  test('omits each orchestration field when the corresponding ServerOption is unset (regression: gate stays closed for tests that did not opt in)', async () => {
+    // given
+    const session = createFakeSession()
+    const observed: CreateSessionOptions[] = []
+    const built = createServer({
+      port: 0,
+      createSession: async (options = {}) => {
+        observed.push(options)
+        return session
+      },
+    }).start()
+    server = built
+
+    // when
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    await waitFor((m) => m.type === 'connected')
+
+    // then
+    expect(observed).toHaveLength(1)
+    expect(observed[0]?.liveSubagentRegistry).toBeUndefined()
+    expect(observed[0]?.subagentRegistry).toBeUndefined()
+    expect(observed[0]?.createSessionForSubagent).toBeUndefined()
+
+    ws.close()
+  })
+
+  test('subagentRegistry stays bound to the snapshot taken at ws open (later pluginRuntime swap does not affect already-connected session)', async () => {
+    // given
+    const session = createFakeSession()
+    const firstSubagents: SubagentRegistry = { scout: { systemPrompt: 'first', visibility: 'public' } }
+    const pluginRuntime = makeRuntimeWith({ subagents: firstSubagents })
+    const observed: CreateSessionOptions[] = []
+    const built = createServer({
+      port: 0,
+      createSession: async (options = {}) => {
+        observed.push(options)
+        return session
+      },
+      agentDir: '/agent',
+      pluginRuntime,
+    }).start()
+    server = built
+
+    // when
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    await waitFor((m) => m.type === 'connected')
+    pluginRuntime.swap({
+      registry: EMPTY_REGISTRY,
+      hooks: createHookBus(),
+      subagents: { explorer: { systemPrompt: 'second', visibility: 'public' } },
+      pluginSubagentByShim: new WeakMap(),
+      hasAnyPluginContent: false,
+      loadedPlugins: [],
+      materializedSkills: null,
+    })
+
+    // then
+    expect(observed[0]?.subagentRegistry).toBe(firstSubagents)
 
     ws.close()
   })
