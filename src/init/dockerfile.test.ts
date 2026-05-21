@@ -193,6 +193,44 @@ describe('claudeCode toggle', () => {
   test('base Dockerfile never embeds the claude install — toggle-driven layers stay in the per-agent file so changing the flag does not rebuild the base image', () => {
     expect(buildBaseDockerfile()).not.toContain('claude.ai/install.sh')
   })
+
+  test('install layer pre-seeds ~/.claude.json with hasCompletedOnboarding so the first launch skips the TTY-only theme picker that would otherwise hang the typeclaw-claude-code skill on its Stop-hook polling loop', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('"hasCompletedOnboarding":true')
+    expect(out).toContain('> "$HOME/.claude.json"')
+  })
+
+  test('pre-seed sets a default theme so claude does not block on "Choose the text style that looks best with your terminal"', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('"theme":"dark"')
+  })
+
+  test('pre-seed runs AFTER `claude --version` smoke test — order matters because the smoke test creates ~/.claude.json with an unrelated default shape that would clobber our seed if it ran second', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    const smokeIdx = out.indexOf('claude --version > /dev/null')
+    const seedIdx = out.indexOf('"hasCompletedOnboarding":true')
+    expect(smokeIdx).toBeGreaterThan(-1)
+    expect(seedIdx).toBeGreaterThan(-1)
+    expect(smokeIdx).toBeLessThan(seedIdx)
+  })
+
+  test('pre-seed does NOT contain trust-dialog or permission-bypass flags — those should remain explicit user decisions, not silent Dockerfile defaults', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).not.toContain('hasTrustDialogAccepted')
+    expect(out).not.toContain('bypassPermissionsModeAccepted')
+    expect(out).not.toContain('dangerouslySkipPermissions')
+  })
+
+  test('pre-seed is omitted when claudeCode is false (no orphan ~/.claude.json on agents that do not use claude)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: false }))
+    expect(out).not.toContain('hasCompletedOnboarding')
+    expect(out).not.toContain('.claude.json')
+  })
+
+  test('pre-seed appears in the versioned (base-image) form too — drift guard so GHCR-base users get the same onboarding-skip behavior as dev/inline users', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }), { baseImageVersion: '0.1.1' })
+    expect(out).toContain('"hasCompletedOnboarding":true')
+  })
 })
 
 function amd64ElseBranchPackages(out: string): string[] {

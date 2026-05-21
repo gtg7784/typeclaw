@@ -394,14 +394,58 @@ RUN echo "${encoded}" | base64 -d > ${TYPECLAW_ENTRYPOINT_PATH} \\
 // `~/.local/bin/claude` shim, which itself dereferences to the versioned
 // binary under `~/.local/share/claude/versions/<ver>/`, so upgrades via
 // `claude update` keep working without re-running this layer.
+// `~/.claude.json` is Claude Code's internal state file (NOT
+// `~/.claude/settings.json`, which is user-facing). On first run with an
+// empty or missing file, `claude` enters a TTY-only onboarding wizard:
+// "Welcome to Claude Code … Choose the text style that looks best with
+// your terminal" with a 7-option theme picker, then the trust dialog,
+// then the first prompt. The wizard is unskippable via CLI flags or env
+// vars (no `--skip-onboarding`, no `--theme=dark`; `IS_DEMO=1` exists
+// but has documented side effects). The single official escape hatch
+// is writing `{"hasCompletedOnboarding": true, "theme": "dark"}` to
+// `~/.claude.json` before the first launch — confirmed by Anthropic in
+// multiple GitHub issues (anthropics/claude-code#4714, #8938, #13827)
+// and the empirical answer used by metabase/metabase's
+// `bin/claude-dangerous`, the `claudeCodeAlDevContainer` feature, and
+// dozens of other Docker integrations.
+//
+// Without the pre-seed, the very first agent-driven `tmux new-session …
+// claude` invocation hangs on the theme picker: the agent's
+// `send-keys "<prompt>" Enter` arrives at the wizard, gets interpreted
+// as theme-picker input, and corrupts the session. The
+// `typeclaw-claude-code` skill is structured around a `Stop`-hook
+// sentinel, which never fires while the wizard is up, so the polling
+// loop only learns of the hang at the 10-minute wall-clock budget.
+// Pre-seeding here costs ~70 bytes on disk and zero runtime overhead.
+//
+// The seed contains only ONBOARDING flags (`hasCompletedOnboarding`,
+// `theme`, `installMethod`, `numStartups`). Trust dialogs and
+// permission-bypass flags are deliberately omitted: those should
+// remain explicit user decisions, not silent defaults. The skill's
+// auth flow still requires the user to provide their own credentials
+// via `.env`; nothing here changes that contract.
+//
+// `theme: "dark"` matches typeclaw's default TUI theme so the visual
+// transition between the typeclaw TUI and a tmux-attached claude pane
+// is consistent. Users on light terminals can override by editing
+// `~/.claude.json` (which persists across container restarts only if
+// they mount it; in the default container-ephemeral state it resets
+// to this default on every rebuild, which is fine — `claude` reads
+// the file at startup and the theme has no behavioral impact).
+const CLAUDE_CODE_ONBOARDING_SEED =
+  '{"hasCompletedOnboarding":true,"theme":"dark","installMethod":"native","numStartups":1}'
+
 function renderClaudeCodeInstallLayer(enabled: boolean): string {
   if (!enabled) return ''
   return `# Layer 5.6 (toggle): install Anthropic's Claude Code CLI. Opt-in via
 # typeclaw.json#docker.file.claudeCode. The skill \`typeclaw-claude-code\`
-# documents the auth + usage flow.
+# documents the auth + usage flow. Pre-seed ~/.claude.json so the first
+# launch skips the TTY-only onboarding wizard (theme picker + welcome);
+# see CLAUDE_CODE_ONBOARDING_SEED above for the rationale.
 RUN curl -fsSL https://claude.ai/install.sh | bash \\
  && ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude \\
- && claude --version > /dev/null`
+ && claude --version > /dev/null \\
+ && printf '%s\\n' '${CLAUDE_CODE_ONBOARDING_SEED}' > "$HOME/.claude.json"`
 }
 
 // Shared-library runtime deps Chrome for Testing needs to launch on amd64
