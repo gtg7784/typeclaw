@@ -475,6 +475,8 @@ export async function startAgent({
     claimController,
     commandRunnerFactory,
     tunnelManager,
+    liveSubagentRegistry,
+    createSessionForSubagent,
     ...containerNameOpt,
     ...runtimeVersionOpt,
     ...tuiTokenOpt,
