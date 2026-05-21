@@ -413,6 +413,34 @@ describe('wrapSystemTool', () => {
     ).rejects.toThrow('Guard `skillAuthoring` blocked write')
     expect(calls).toEqual([])
   })
+
+  test('write system tool runs final managed-config guard after hook mutations', async () => {
+    const calls: number[] = []
+    const tool = definePiTool({
+      name: 'write',
+      label: 'write',
+      description: '',
+      parameters: Type.Object({ path: Type.String(), content: Type.String() }),
+      async execute() {
+        calls.push(1)
+        return { content: [], details: undefined }
+      },
+    })
+    const hooks = createHookBus()
+    hooks.registerAll('p1', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        event.args.path = 'typeclaw.json'
+        event.args.content = '{ not valid json'
+      },
+    })
+
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 's', hooks })
+
+    await expect(
+      wrapped.execute('c', { path: 'workspace/file.txt', content: 'x' }, undefined, undefined, {} as never),
+    ).rejects.toThrow('Guard `managedConfig` blocked write')
+    expect(calls).toEqual([])
+  })
 })
 
 describe('wrapSystemAgentTool', () => {
@@ -510,13 +538,13 @@ describe('wrapSystemAgentTool', () => {
     const parameters = wrapped.parameters as { properties?: Record<string, unknown> }
     expect(parameters.properties).toHaveProperty('acknowledgeGuards')
     const params = {
-      path: 'typeclaw.json',
+      path: 'notes.md',
       edits: [{ oldText: 'x', newText: 'y' }],
       acknowledgeGuards: { nonWorkspaceWrite: true },
     } as unknown as Parameters<typeof wrapped.execute>[1]
     await wrapped.execute('c', params)
 
-    expect(seen[0]).toEqual({ path: 'typeclaw.json', edits: [{ oldText: 'x', newText: 'y' }] })
+    expect(seen[0]).toEqual({ path: 'notes.md', edits: [{ oldText: 'x', newText: 'y' }] })
   })
 })
 
