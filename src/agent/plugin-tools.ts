@@ -16,6 +16,7 @@ import { z } from 'zod'
 
 import {
   ACKNOWLEDGE_GUARDS,
+  checkManagedConfigGuard,
   checkNonWorkspaceWriteGuard,
   checkSkillAuthoringGuard,
 } from '@/bundled-plugins/guard/policy'
@@ -311,7 +312,11 @@ function errorResult(message: string) {
 }
 
 async function runFinalWriteGuards(options: { tool: string; args: Record<string, unknown>; agentDir: string }) {
-  return (await checkSkillAuthoringGuard(options)) ?? checkNonWorkspaceWriteGuard(options)
+  return (
+    (await checkManagedConfigGuard(options)) ??
+    (await checkSkillAuthoringGuard(options)) ??
+    checkNonWorkspaceWriteGuard(options)
+  )
 }
 
 function withGuardAcknowledgements<TParams extends TSchema>(toolName: string, parameters: TParams): TParams {

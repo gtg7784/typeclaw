@@ -72,19 +72,41 @@ describe('guard plugin', () => {
   test('allows known writable files at the agent root', async () => {
     const hook = await toolBeforeHook()
 
-    for (const file of [
-      'AGENTS.md',
-      'IDENTITY.md',
-      'MEMORY.md',
-      'SOUL.md',
-      'USER.md',
-      'cron.json',
-      'package.json',
-      'typeclaw.json',
-    ]) {
-      const result = await hook(toolEvent('write', { path: file, content: 'x' }), hookContext('/agent'))
+    const cases: Array<[string, string]> = [
+      ['AGENTS.md', 'x'],
+      ['IDENTITY.md', 'x'],
+      ['MEMORY.md', 'x'],
+      ['SOUL.md', 'x'],
+      ['USER.md', 'x'],
+      ['package.json', 'x'],
+      ['cron.json', JSON.stringify({ jobs: [] })],
+      ['typeclaw.json', JSON.stringify({})],
+    ]
+    for (const [file, content] of cases) {
+      const result = await hook(toolEvent('write', { path: file, content }), hookContext('/agent'))
       expect(result).toBeUndefined()
     }
+  })
+
+  test('rejects write to typeclaw.json with malformed JSON via managedConfig', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(
+      toolEvent('write', { path: 'typeclaw.json', content: '{ not json' }),
+      hookContext('/agent'),
+    )
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('managedConfig')
+    expect(result?.reason).toContain('not valid JSON')
+  })
+
+  test('rejects write to cron.json with an invalid schedule via managedConfig', async () => {
+    const hook = await toolBeforeHook()
+    const content = JSON.stringify({
+      jobs: [{ id: 'j', schedule: 'bogus', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+    })
+    const result = await hook(toolEvent('write', { path: 'cron.json', content }), hookContext('/agent'))
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('managedConfig')
   })
 
   test('allows writes under the agent root mounts directory', async () => {

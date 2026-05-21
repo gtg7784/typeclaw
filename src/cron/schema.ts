@@ -151,6 +151,26 @@ function describeCronStep(step: CronMigrationStep): string {
   }
 }
 
+export type ParseCronJsonOptions = ParseCronOptions & {
+  // Apply `migrateLegacyCronShape` before schema validation. Defaults to true
+  // so the guard accepts the same legacy shapes `loadCron` would auto-migrate
+  // on disk; pass false to validate the exact bytes (used in tests).
+  migrate?: boolean
+}
+
+export function parseCronJson(raw: string, options: ParseCronJsonOptions = {}): ParseCronResult {
+  let json: unknown
+  try {
+    json = JSON.parse(raw)
+  } catch (err) {
+    return { ok: false, reason: `cron.json is not valid JSON: ${err instanceof Error ? err.message : String(err)}` }
+  }
+
+  const shouldMigrate = options.migrate ?? true
+  const migrated = shouldMigrate ? migrateLegacyCronShape(json) : { json, changed: false, applied: [] }
+  return parseCronFile(migrated.json, options.subagents !== undefined ? { subagents: options.subagents } : {})
+}
+
 export function parseCronFile(raw: unknown, options: ParseCronOptions = {}): ParseCronResult {
   const parsed = cronFileSchema.safeParse(raw)
   if (!parsed.success) {

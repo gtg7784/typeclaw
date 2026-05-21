@@ -1,11 +1,22 @@
 import { definePlugin } from '@/plugin'
 
-import { checkNonWorkspaceWriteGuard, checkSkillAuthoringGuard, checkUncommittedChangesAdvice } from './policy'
+import {
+  checkManagedConfigGuard,
+  checkNonWorkspaceWriteGuard,
+  checkSkillAuthoringGuard,
+  checkUncommittedChangesAdvice,
+} from './policy'
 
 export default definePlugin({
   plugin: async () => ({
     hooks: {
       'tool.before': async (event, ctx) => {
+        const managedConfigResult = await checkManagedConfigGuard({
+          tool: event.tool,
+          args: event.args,
+          agentDir: ctx.agentDir,
+        })
+        if (managedConfigResult) return managedConfigResult
         const skillResult = await checkSkillAuthoringGuard({
           tool: event.tool,
           args: event.args,
