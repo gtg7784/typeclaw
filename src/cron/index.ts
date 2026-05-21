@@ -41,6 +41,9 @@ export {
   type ExecJob,
   type HandlerJob,
   migrateLegacyCronShape,
+  parseCronJson,
+  type ParseCronJsonOptions,
+  type ParseCronResult,
   type ParsedCronJob,
   type PromptJob,
 } from './schema'

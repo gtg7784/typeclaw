@@ -1013,6 +1013,39 @@ export function validateConfig(cwd: string, options: ValidateConfigOptions = {})
     return { ok: true }
   }
 
+  const parsed = parseConfigJson(raw, { migrate: true, persistTarget: cwd })
+  if (!parsed.ok) return parsed
+
+  if (!options.skipMounts) {
+    for (const mount of parsed.config.mounts) {
+      const check = validateMount(mount, cwd)
+      if (!check.ok) return check
+    }
+  }
+
+  return { ok: true }
+}
+
+export type ParseConfigJsonResult = { ok: true; config: Config } | { ok: false; reason: string }
+
+export type ParseConfigJsonOptions = {
+  // Run `migrateLegacyConfigShape` before schema validation. Defaults to true
+  // so callers don't reject content the agent could have written through
+  // legacy keys; pass false to validate the exact bytes (used in tests).
+  migrate?: boolean
+  // When set, persist + commit the migrated shape to this agent dir if the
+  // migration ran. Only `validateConfig` uses this; the guard's in-memory
+  // validation never persists (the bytes aren't yet on disk).
+  persistTarget?: string
+}
+
+// Pure validator for an in-memory `typeclaw.json` string. Used by the
+// managed-config guard to reject `write`/`edit` calls that would land an
+// invalid file on disk. Does NOT check mount accessibility — that is the
+// runtime concern handled by `validateConfig` at `typeclaw start` time, and
+// the file the agent is producing may legitimately reference a mount path
+// that only exists on the host outside the container.
+export function parseConfigJson(raw: string, options: ParseConfigJsonOptions = {}): ParseConfigJsonResult {
   let json: unknown
   try {
     json = JSON.parse(raw)
@@ -1021,24 +1054,19 @@ export function validateConfig(cwd: string, options: ValidateConfigOptions = {})
     return { ok: false, reason: `${CONFIG_FILE} is not valid JSON: ${detail}` }
   }
 
-  const migrated = migrateLegacyConfigShape(json)
-  if (migrated.changed) {
-    persistMigratedConfig(cwd, migrated.json, migrated.applied)
+  const shouldMigrate = options.migrate ?? true
+  const migrated = shouldMigrate
+    ? migrateLegacyConfigShape(json)
+    : { json, changed: false, applied: [] as MigrationStep[] }
+  if (migrated.changed && options.persistTarget !== undefined) {
+    persistMigratedConfig(options.persistTarget, migrated.json, migrated.applied)
   }
 
   const result = configSchema.safeParse(migrated.json)
   if (!result.success) {
     return { ok: false, reason: `${CONFIG_FILE} is invalid: ${formatZodError(result.error)}` }
   }
-
-  if (!options.skipMounts) {
-    for (const mount of result.data.mounts) {
-      const check = validateMount(mount, cwd)
-      if (!check.ok) return check
-    }
-  }
-
-  return { ok: true }
+  return { ok: true, config: result.data }
 }
 
 // Verifies a mount's host path: exists, is a directory, is readable, and is
