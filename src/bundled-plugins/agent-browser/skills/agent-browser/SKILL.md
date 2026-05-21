@@ -53,6 +53,32 @@ Tailscale and other remote networks. No special flag, tool, or config required.
 **Always share the proxy port URL — never `localhost:<raw-session-port>`** —
 those raw ports are inside the container and unreachable from the host.
 
+### Don't confuse the proxy port with the dashboard port
+
+There are two ports in play. Both sockets live inside the container, but
+they have very different audiences:
+
+| File                                        | Audience                 | What it's for                                                                                                                                                                                                                                                        |
+| ------------------------------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/tmp/typeclaw-agent-browser-proxy-port`    | **Host browser**         | The port the host browser opens (`http://localhost:<proxy-port>`). Host-forwarded via hostd; the compatibility proxy rewrites the dashboard's hardcoded loopback URLs so they work over Tailscale/LAN. **Default `4848`, falls back to `4849`–`4857` on collision.** |
+| `/tmp/typeclaw-agent-browser-upstream-port` | **In-container clients** | The actual `agent-browser dashboard` server. **Default `4849`.** This is what other in-container processes (Cloudflare tunnels, in-container `curl`, in-container scripts) must talk to. Not host-forwarded — there's no point.                                      |
+
+**For Cloudflare tunnels and anything else that originates inside the
+container, use the upstream-port file, NOT the proxy-port file.** Cloudflare's
+`cloudflared` runs in the container's netns and connects to `127.0.0.1:<port>`
+directly — it doesn't traverse the compatibility proxy and gains nothing from
+it. Pointing a tunnel at the proxy port silently tunnels the proxy's listen
+socket instead of the dashboard; the tunnel comes up, the URL "works" against
+the proxy's pass-through paths, but anything dashboard-specific (sessions,
+WebSocket activity feed, JSON API) breaks in non-obvious ways.
+
+Common-failure shape: reading `proxy-port` mechanically because it's the
+file you remembered, then passing that to `typeclaw tunnel add` or to a
+`cloudflared --url http://127.0.0.1:<port>` invocation. **Read the
+`upstream-port` file for tunnel upstreams.** When in doubt, run
+`agent-browser dashboard status` (or check the `agent-browser dashboard
+start` log line — it prints the upstream URL).
+
 ### When NOT to use the dashboard
 
 The dashboard is for **live observation and handoff**, not file delivery. If
