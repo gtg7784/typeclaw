@@ -1,0 +1,59 @@
+---
+title: Cron
+description: Scheduled prompts and shell commands with per-job coalescing
+icon: Clock
+---
+
+Cron jobs live in `cron.json` at your agent folder root:
+
+```json
+{
+  "jobs": [
+    {
+      "name": "morning-status",
+      "schedule": "0 9 * * *",
+      "kind": "prompt",
+      "prompt": "Summarize yesterday's commits and post to #standup"
+    },
+    {
+      "name": "backup-db",
+      "schedule": "0 3 * * *",
+      "kind": "exec",
+      "exec": "/agent/scripts/backup.sh"
+    }
+  ]
+}
+```
+
+`reload` after editing — no restart needed.
+
+## Two kinds
+
+- **`prompt`** — fires a prompt into a fresh session. Use this when you want LLM reasoning.
+- **`exec`** — runs a shell command inside the container. Use this for deterministic side-effects.
+
+## Per-job coalescing
+
+If a job is still running when its next tick fires, the next tick is **dropped** for that specific job (and logged), not queued. This means a slow daily job can't pile up overnight into 24 backlogged runs.
+
+The scheduler itself is a pure clock — it just emits "this job's time has come" events. The consumer (the part that actually runs the prompt or exec) owns the per-jobId in-flight set and decides whether to start a new run or skip.
+
+## Provenance and permissions
+
+Cron jobs are **stamped with the role that scheduled them**. A job hand-written in `cron.json` defaults to `scheduledByRole: "owner"`. A job scheduled at runtime by an agent in a Slack thread carries the role that session resolved to.
+
+When the job fires, the resulting session resolves to the **stamped role**, not the role the cron consumer happens to be running as. This closes a class of laundering attacks where a low-privilege session would otherwise schedule itself a high-privilege future run.
+
+## Listing live jobs
+
+```sh
+typeclaw cron list
+```
+
+Shows every cron registered in the running agent — both your `cron.json` and any plugins that contribute jobs at boot.
+
+## Limits
+
+- Cron triggers `prompt` and `exec` only — there's no third kind, and adding one requires extending the consumer.
+- Scheduling expressions use [`cron-parser`](https://github.com/harrisiirak/cron-parser) syntax (standard 5-field cron, no seconds field).
+- The scheduler ticks every second; sub-minute precision is not supported.
