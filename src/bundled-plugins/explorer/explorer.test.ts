@@ -32,12 +32,43 @@ describe('explorer subagent — load-bearing prompt phrases', () => {
     expect(EXPLORER_SYSTEM_PROMPT).toContain('git commit')
   })
 
-  test('prompt names the dedicated tools instead of leaving them implicit', () => {
-    expect(EXPLORER_SYSTEM_PROMPT).toContain('find —')
-    expect(EXPLORER_SYSTEM_PROMPT).toContain('grep —')
-    expect(EXPLORER_SYSTEM_PROMPT).toContain('read —')
-    expect(EXPLORER_SYSTEM_PROMPT).toContain('ls —')
-    expect(EXPLORER_SYSTEM_PROMPT).toContain('bash — ONLY for')
+  test('prompt names the dedicated tools by their exact runtime names', () => {
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('`find`')
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('`grep`')
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('`read`')
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('`ls`')
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('`bash`')
+  })
+
+  test('prompt frames the role as local-search (not codebase-only) and names the non-code surfaces', () => {
+    // Drift guard: the widened scope is the whole point of the PR. If a
+    // future edit reverts the prompt back to "codebase search specialist",
+    // sessions/memory/cron/config never get mentioned and this test fails.
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('local-search specialist')
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('Sessions')
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('Memory')
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('Cron')
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('Git history')
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('Mounts')
+  })
+
+  test('prompt redirects EXTERNAL questions to scout (so explorer does not hallucinate web answers from memory)', () => {
+    // Without this guard, a user asking "what's the latest version of X?"
+    // gets a guessed answer instead of a delegated scout spawn. The
+    // explorer/scout split only works if the prompt names the boundary.
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('scout')
+    expect(EXPLORER_SYSTEM_PROMPT.toLowerCase()).toContain('external')
+  })
+
+  test('prompt warns about credential-bearing config files (.env / secrets.json) without forbidding read', () => {
+    // Reading these files is in scope (you need to be able to answer
+    // "is provider X configured?") — but echoing the literal token values
+    // back to the caller is the leak vector. The wording must say the
+    // latter, not the former, or explorer becomes useless for config
+    // questions.
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('.env')
+    expect(EXPLORER_SYSTEM_PROMPT).toContain('secrets.json')
+    expect(EXPLORER_SYSTEM_PROMPT.toLowerCase()).toContain('credentials')
   })
 })
 

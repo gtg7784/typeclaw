@@ -78,3 +78,5 @@ export const writeTool: BuiltinToolRef = { __builtinTool: 'write' }
 export const grepTool: BuiltinToolRef = { __builtinTool: 'grep' }
 export const findTool: BuiltinToolRef = { __builtinTool: 'find' }
 export const lsTool: BuiltinToolRef = { __builtinTool: 'ls' }
+export const websearchTool: BuiltinToolRef = { __builtinTool: 'websearch' }
+export const webfetchTool: BuiltinToolRef = { __builtinTool: 'webfetch' }
