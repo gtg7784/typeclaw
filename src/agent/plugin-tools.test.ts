@@ -595,3 +595,79 @@ describe('getOrigin (live origin holder)', () => {
     expect((seenOrigins[1] as { jobId: string }).jobId).toBe('j2')
   })
 })
+
+describe('resolveBuiltinToolRefs (dual-route)', () => {
+  test('pi-side coding tools go to agentTools, typeclaw-side web tools go to toolDefinitions', async () => {
+    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
+    const resolved = resolveBuiltinToolRefs([
+      { __builtinTool: 'read' },
+      { __builtinTool: 'bash' },
+      { __builtinTool: 'edit' },
+      { __builtinTool: 'write' },
+      { __builtinTool: 'grep' },
+      { __builtinTool: 'find' },
+      { __builtinTool: 'ls' },
+      { __builtinTool: 'websearch' },
+      { __builtinTool: 'webfetch' },
+    ])
+    expect(resolved.agentTools.map((t) => t.name)).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
+    expect(resolved.toolDefinitions.map((t) => t.name)).toEqual(['websearch', 'webfetch'])
+  })
+
+  test('pi-side resolve to pi-coding-agent AgentTool exports by reference equality (not *ToolDefinition variant)', async () => {
+    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
+    const pi = await import('@mariozechner/pi-coding-agent')
+    const cases: { name: string; expected: unknown }[] = [
+      { name: 'read', expected: pi.readTool },
+      { name: 'bash', expected: pi.bashTool },
+      { name: 'edit', expected: pi.editTool },
+      { name: 'write', expected: pi.writeTool },
+      { name: 'grep', expected: pi.grepTool },
+      { name: 'find', expected: pi.findTool },
+      { name: 'ls', expected: pi.lsTool },
+    ]
+    for (const { name, expected } of cases) {
+      const r = resolveBuiltinToolRefs([{ __builtinTool: name }])
+      expect(r.agentTools.length).toBe(1)
+      expect(r.toolDefinitions.length).toBe(0)
+      expect(r.agentTools[0]).toBe(expected as never)
+    }
+  })
+
+  test('typeclaw-side resolve to the original ToolDefinition imports by reference equality', async () => {
+    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
+    const { websearchTool } = await import('./tools/websearch')
+    const { webfetchTool } = await import('./tools/webfetch')
+    const ws = resolveBuiltinToolRefs([{ __builtinTool: 'websearch' }])
+    const wf = resolveBuiltinToolRefs([{ __builtinTool: 'webfetch' }])
+    expect(ws.agentTools).toEqual([])
+    expect(ws.toolDefinitions[0]).toBe(websearchTool)
+    expect(wf.agentTools).toEqual([])
+    expect(wf.toolDefinitions[0]).toBe(webfetchTool)
+  })
+
+  test('mixed refs partition correctly: scout-shape (web only) leaves agentTools empty', async () => {
+    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
+    const r = resolveBuiltinToolRefs([{ __builtinTool: 'websearch' }, { __builtinTool: 'webfetch' }])
+    expect(r.agentTools).toEqual([])
+    expect(r.toolDefinitions.map((t) => t.name).sort()).toEqual(['webfetch', 'websearch'])
+  })
+
+  test('mixed refs partition correctly: explorer-shape (coding only) leaves toolDefinitions empty', async () => {
+    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
+    const r = resolveBuiltinToolRefs([
+      { __builtinTool: 'read' },
+      { __builtinTool: 'grep' },
+      { __builtinTool: 'find' },
+      { __builtinTool: 'ls' },
+      { __builtinTool: 'bash' },
+    ])
+    expect(r.toolDefinitions).toEqual([])
+    expect(r.agentTools.map((t) => t.name).sort()).toEqual(['bash', 'find', 'grep', 'ls', 'read'])
+  })
+
+  test('throws on unknown built-in names', async () => {
+    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
+    expect(() => resolveBuiltinToolRefs([{ __builtinTool: 'nope' }])).toThrow(/unknown built-in tool ref/)
+  })
+})

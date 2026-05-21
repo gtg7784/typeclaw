@@ -34,48 +34,6 @@ import type { SessionOrigin } from './session-origin'
 import { webfetchTool } from './tools/webfetch'
 import { websearchTool } from './tools/websearch'
 
-// `ToolDefinition.execute` carries a 5th `ctx: ExtensionContext` argument that
-// `AgentTool.execute` does not — TypeScript correctly refuses the assignment
-// because the wider signature can't satisfy a position that the consumer
-// believes accepts at most 4 args. At runtime, the 5th arg is unused by
-// websearch/webfetch (their executes only read `params` and `signal`), so the
-// adapter is a thin pass-through that drops the extra parameter and keeps the
-// hook/budget/wrap pipeline (which is keyed on AgentTool shape) working
-// uniformly for every entry in `BUILTIN_TOOL_MAP`. Don't reach for this for
-// pi-coding-agent's own bashTool/readTool etc. — those are already AgentTools.
-function toAgentTool<TParams extends TSchema, TDetails = unknown>(
-  tool: ToolDefinition<TParams, TDetails, never>,
-): AgentTool<TParams, TDetails> {
-  return {
-    name: tool.name,
-    label: tool.label,
-    description: tool.description,
-    parameters: tool.parameters,
-    ...(tool.prepareArguments ? { prepareArguments: tool.prepareArguments } : {}),
-    async execute(toolCallId, params, signal, onUpdate) {
-      return tool.execute(toolCallId, params, signal, onUpdate, undefined as never)
-    },
-  }
-}
-
-const websearchAgentTool = toAgentTool(
-  websearchTool as unknown as ToolDefinition<typeof websearchTool.parameters, unknown, never>,
-)
-const webfetchAgentTool = toAgentTool(
-  webfetchTool as unknown as ToolDefinition<typeof webfetchTool.parameters, unknown, never>,
-)
-
-type AnyAgentTool =
-  | typeof piReadTool
-  | typeof piBashTool
-  | typeof piEditTool
-  | typeof piWriteTool
-  | typeof piGrepTool
-  | typeof piFindTool
-  | typeof piLsTool
-  | typeof websearchAgentTool
-  | typeof webfetchAgentTool
-
 const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
   Type.Object(
     {
@@ -85,24 +43,64 @@ const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
   ),
 )
 
-const BUILTIN_TOOL_MAP: Record<string, AnyAgentTool> = {
+// `BuiltinToolRef.__builtinTool` strings are dual-routed when a plugin
+// subagent declares them: pi-coding-agent's own coding tools flow through
+// `createAgentSession({ tools: AgentTool[] })` (which pi treats as a strict
+// base-tool override — exactly the declared subset becomes active), and
+// typeclaw's own web tools flow through `customTools: ToolDefinition[]` (the
+// only path pi accepts for non-pi tool definitions). Routing typeclaw tools
+// through `tools:` silently drops them (pi's `tools` validator rejects shapes
+// it doesn't recognize); routing pi tools through `customTools:` would work
+// but ALSO auto-injects pi's default 4 base tools (read/bash/edit/write),
+// widening every plugin subagent's allowlist beyond what it declared. The
+// dual route is the only shape that gives "subagent gets exactly what it
+// asked for, nothing more." See `src/agent/index.ts` `createSessionWithDispose`
+// for the consumer that splits the resolved arrays into the two pi fields.
+type PiAgentToolName = 'read' | 'bash' | 'edit' | 'write' | 'grep' | 'find' | 'ls'
+type TypeclawToolName = 'websearch' | 'webfetch'
+
+const PI_AGENT_TOOL_MAP: Record<PiAgentToolName, AgentTool<any, any>> = {
+  read: piReadTool,
   bash: piBashTool,
   edit: piEditTool,
-  find: piFindTool,
-  grep: piGrepTool,
-  ls: piLsTool,
-  read: piReadTool,
   write: piWriteTool,
-  websearch: websearchAgentTool,
-  webfetch: webfetchAgentTool,
+  grep: piGrepTool,
+  find: piFindTool,
+  ls: piLsTool,
 }
 
-export function resolveBuiltinToolRefs(refs: BuiltinToolRef[]): AnyAgentTool[] {
-  return refs.map((ref) => {
-    const tool = BUILTIN_TOOL_MAP[ref.__builtinTool]
-    if (!tool) throw new Error(`unknown built-in tool ref: ${ref.__builtinTool}`)
-    return tool
-  })
+const TYPECLAW_TOOL_DEFINITION_MAP: Record<TypeclawToolName, ToolDefinition<any, any, any>> = {
+  websearch: websearchTool,
+  webfetch: webfetchTool,
+}
+
+function isPiAgentToolName(name: string): name is PiAgentToolName {
+  return name in PI_AGENT_TOOL_MAP
+}
+
+function isTypeclawToolName(name: string): name is TypeclawToolName {
+  return name in TYPECLAW_TOOL_DEFINITION_MAP
+}
+
+export type ResolvedBuiltinTools = {
+  agentTools: AgentTool<any, any>[]
+  toolDefinitions: ToolDefinition<any, any, any>[]
+}
+
+export function resolveBuiltinToolRefs(refs: BuiltinToolRef[]): ResolvedBuiltinTools {
+  const agentTools: AgentTool<any, any>[] = []
+  const toolDefinitions: ToolDefinition<any, any, any>[] = []
+  for (const ref of refs) {
+    const name = ref.__builtinTool
+    if (isPiAgentToolName(name)) {
+      agentTools.push(PI_AGENT_TOOL_MAP[name])
+    } else if (isTypeclawToolName(name)) {
+      toolDefinitions.push(TYPECLAW_TOOL_DEFINITION_MAP[name])
+    } else {
+      throw new Error(`unknown built-in tool ref: ${name}`)
+    }
+  }
+  return { agentTools, toolDefinitions }
 }
 
 export type WrapToolOptions = {
