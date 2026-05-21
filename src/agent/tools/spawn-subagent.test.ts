@@ -335,6 +335,47 @@ describe('createSpawnSubagentTool — permissions gating', () => {
     const details = result.details as { ok: boolean }
     expect(details.ok).toBe(true)
   })
+
+  test('requiresSpecificPermission=true subagent IGNORES the generic subagent.spawn (per-subagent only)', async () => {
+    const session = stubSession()
+    const restrictedRegistry: SubagentRegistry = {
+      operator: {
+        systemPrompt: 'You are restricted.',
+        visibility: 'public',
+        requiresSpecificPermission: true,
+      },
+    }
+    const { tool } = fixedSpawn({
+      createSession: async () => session,
+      registry: restrictedRegistry,
+      permissions: permService(new Set(['subagent.spawn'])),
+    })
+
+    const result = await tool.execute('call_1', { subagent_type: 'operator', prompt: 'q' }, undefined, undefined, ctx)
+    const details = result.details as { ok: boolean; error?: string }
+    expect(details.ok).toBe(false)
+    expect(details.error).toContain('denied')
+  })
+
+  test('requiresSpecificPermission=true subagent IS spawnable when the specific permission is held', async () => {
+    const session = stubSession()
+    const restrictedRegistry: SubagentRegistry = {
+      operator: {
+        systemPrompt: 'You are restricted.',
+        visibility: 'public',
+        requiresSpecificPermission: true,
+      },
+    }
+    const { tool } = fixedSpawn({
+      createSession: async () => session,
+      registry: restrictedRegistry,
+      permissions: permService(new Set(['subagent.spawn.operator'])),
+    })
+
+    const result = await tool.execute('call_1', { subagent_type: 'operator', prompt: 'q' }, undefined, undefined, ctx)
+    const details = result.details as { ok: boolean }
+    expect(details.ok).toBe(true)
+  })
 })
 
 describe('createSpawnSubagentTool — concurrency', () => {

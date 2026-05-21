@@ -21,13 +21,14 @@ describe('built-in role contract', () => {
     expect([...BUILTIN_ROLES.owner.permissions]).not.toContain('security.bypass.high')
   })
 
-  test('owner carries all three subagent permissions (spawn / cancel / output)', () => {
+  test('owner carries all three subagent permissions (spawn / cancel / output) AND the operator-specific spawn permission', () => {
     expect(BUILTIN_ROLES.owner.permissions).toContain('subagent.spawn')
     expect(BUILTIN_ROLES.owner.permissions).toContain('subagent.cancel')
     expect(BUILTIN_ROLES.owner.permissions).toContain('subagent.output')
+    expect(BUILTIN_ROLES.owner.permissions).toContain('subagent.spawn.operator')
   })
 
-  test('trusted has empty default match and core perms + bypass.low + subagent perms (no per-guard medium/high grants)', () => {
+  test('trusted has empty default match and core perms + bypass.low + subagent perms + operator-specific spawn (no per-guard medium/high grants)', () => {
     expect(BUILTIN_ROLES.trusted.match).toEqual([])
     expect([...BUILTIN_ROLES.trusted.permissions].sort()).toEqual([
       'channel.respond',
@@ -36,6 +37,7 @@ describe('built-in role contract', () => {
       'subagent.cancel',
       'subagent.output',
       'subagent.spawn',
+      'subagent.spawn.operator',
     ])
   })
 
@@ -59,7 +61,11 @@ describe('built-in role contract', () => {
     ])
   })
 
-  test('member does NOT carry security bypass (subagent.spawn does not imply write capability — explorer/operator gate write-capable subagents via subagent.spawn.operator)', () => {
+  test('member does NOT carry the operator-specific spawn permission (write-capable subagents are owner+trusted only)', () => {
+    expect([...BUILTIN_ROLES.member.permissions]).not.toContain('subagent.spawn.operator')
+  })
+
+  test('member does NOT carry security bypass (subagent.spawn does not imply write capability — explorer is read-only, operator is gated separately via subagent.spawn.operator)', () => {
     expect([...BUILTIN_ROLES.member.permissions]).not.toContain('security.bypass.low')
     expect([...BUILTIN_ROLES.member.permissions]).not.toContain('security.bypass.medium')
   })

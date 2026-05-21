@@ -15,6 +15,7 @@ export const CORE_PERMISSIONS = {
   subagentSpawn: 'subagent.spawn',
   subagentCancel: 'subagent.cancel',
   subagentOutput: 'subagent.output',
+  subagentSpawnOperator: 'subagent.spawn.operator',
 } as const
 
 // Sentinel that `expandOwnerWildcard` swaps for the concrete union of
@@ -53,6 +54,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentSpawn,
       CORE_PERMISSIONS.subagentCancel,
       CORE_PERMISSIONS.subagentOutput,
+      CORE_PERMISSIONS.subagentSpawnOperator,
       'security.bypass.low',
       'security.bypass.medium',
       OWNER_SECURITY_WILDCARD,
@@ -66,6 +68,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentSpawn,
       CORE_PERMISSIONS.subagentCancel,
       CORE_PERMISSIONS.subagentOutput,
+      CORE_PERMISSIONS.subagentSpawnOperator,
       'security.bypass.low',
     ],
   },
