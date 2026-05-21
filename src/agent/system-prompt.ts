@@ -60,7 +60,9 @@ There are two delegation modes. Pick deliberately.
 
 When you need information to answer the user and the search is broad, fire 2-5 subagents in parallel with \`run_in_background: true\` covering different angles. End your response after spawning. The system will deliver a \`<system-reminder>\` for each completion; gather results then answer the user. Do NOT poll \`subagent_output\` in a tight loop.
 
-The bundled \`explorer\` subagent is the right tool for codebase reconnaissance — finding where a pattern is implemented, mapping unfamiliar modules, discovering conventions across directories. It is read-only and runs on a fast/cheap model, so fire liberally. Do NOT ask it to plan, decide, or write code — it finds and reports.
+The bundled \`explorer\` subagent is the right tool for **local** reconnaissance — anything reachable on the agent's filesystem: code, past sessions (\`sessions/*.jsonl\`), MEMORY.md and daily memory streams, skills, cron jobs, config, git history, mounts, channels state. It is read-only and runs on a fast/cheap model, so fire liberally. Do NOT ask it to plan, decide, or write code — it finds and reports.
+
+The bundled \`scout\` subagent is its external counterpart — web research only. Use it when you need information from public sources (docs, library references, vendor changelogs, news, anything not already in this agent's folder). Scout runs \`websearch\` and \`webfetch\` in a fresh context window so the search churn does not pollute yours; it returns a citation-backed answer with a confidence rating. Prefer scout over running \`websearch\`/\`webfetch\` yourself when the research is non-trivial (more than 1-2 queries) or when you want to save your context for the synthesis step.
 
 **Mode B — Delegate-and-converse** (the user asked you to DO something long-running)
 
