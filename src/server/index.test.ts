@@ -789,6 +789,124 @@ describe('createServer with stream — input queueing bugfix', () => {
   })
 })
 
+describe('createServer subagent.completed broadcast → session reminder injection', () => {
+  test('matching parentSessionId enqueues a <system-reminder> prompt', async () => {
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    const connected = await waitFor((m) => m.type === 'connected')
+    if (connected.type !== 'connected') throw new Error('unreachable')
+    const sessionId = connected.sessionId
+
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: {
+        kind: 'subagent.completed',
+        taskId: 'bg_xyz',
+        subagent: 'explorer',
+        parentSessionId: sessionId,
+        ok: true,
+        durationMs: 5_000,
+      },
+    })
+
+    await waitForState(() => session.promptCalls.length > 0)
+    const text = session.promptCalls[0] ?? ''
+    expect(text).toContain('<system-reminder>')
+    expect(text).toContain('explorer')
+    expect(text).toContain('bg_xyz')
+    expect(text).toContain('completed')
+    expect(text).toContain('subagent_output')
+
+    session.resolvePrompt()
+    ws.close()
+  })
+
+  test('non-matching parentSessionId is ignored (no reminder enqueued)', async () => {
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: {
+        kind: 'subagent.completed',
+        taskId: 'bg_other',
+        subagent: 'explorer',
+        parentSessionId: 'someone-else',
+        ok: true,
+        durationMs: 100,
+      },
+    })
+
+    await expectStable(() => session.promptCalls.length > 0, {
+      durationMs: 20,
+      description: 'foreign completion reminder',
+    })
+    expect(session.promptCalls).toEqual([])
+
+    ws.close()
+  })
+
+  test('failed subagent reminder includes error message and FAILED marker', async () => {
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    const connected = await waitFor((m) => m.type === 'connected')
+    if (connected.type !== 'connected') throw new Error('unreachable')
+
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: {
+        kind: 'subagent.completed',
+        taskId: 'bg_err',
+        subagent: 'explorer',
+        parentSessionId: connected.sessionId,
+        ok: false,
+        durationMs: 1_500,
+        error: 'provider rate limit',
+      },
+    })
+
+    await waitForState(() => session.promptCalls.length > 0)
+    const text = session.promptCalls[0] ?? ''
+    expect(text).toContain('FAILED')
+    expect(text).toContain('provider rate limit')
+
+    session.resolvePrompt()
+    ws.close()
+  })
+
+  test('non subagent.completed broadcasts do not enqueue prompts', async () => {
+    const session = createFakeSession()
+    const stream = createStream()
+    const { url } = await startWithSession(session, { stream })
+    const { ws, waitFor } = await connect(url)
+    const connected = await waitFor((m) => m.type === 'connected')
+    if (connected.type !== 'connected') throw new Error('unreachable')
+
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: {
+        kind: 'something-else',
+        parentSessionId: connected.sessionId,
+      },
+    })
+
+    await expectStable(() => session.promptCalls.length > 0, {
+      durationMs: 20,
+      description: 'unrelated broadcast',
+    })
+    expect(session.promptCalls).toEqual([])
+
+    ws.close()
+  })
+})
+
 describe('createServer fires session.idle hook after every prompt completion', () => {
   function stubSessionFactory(opts: { transcriptPath?: string }): SessionFactory {
     return {
