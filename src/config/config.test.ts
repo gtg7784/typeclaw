@@ -10,6 +10,7 @@ import {
   extractPluginConfigs,
   expandMountPath,
   loadConfigSync,
+  loadConfigSyncOrDefaults,
   loadPluginConfigsSync,
   migrateLegacyConfigShape,
   mountSchema,
@@ -1402,6 +1403,52 @@ describe('loadConfigSync', () => {
       }),
     )
     expect(() => loadConfigSync(cwd)).toThrow(/typeclaw\.json is invalid/)
+  })
+})
+
+describe('loadConfigSyncOrDefaults', () => {
+  let cwd: string
+
+  beforeEach(async () => {
+    cwd = await mkdtemp(join(tmpdir(), 'typeclaw-load-soft-'))
+  })
+
+  afterEach(async () => {
+    await rm(cwd, { recursive: true, force: true })
+  })
+
+  test('returns the real config when typeclaw.json is valid (no warning)', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: VALID_MODEL }, port: 9100 }))
+    const warnings: string[] = []
+    const cfg = loadConfigSyncOrDefaults(cwd, { warn: (msg) => warnings.push(msg) })
+    expect(cfg.port).toBe(9100)
+    expect(warnings).toEqual([])
+  })
+
+  test('returns schema defaults when typeclaw.json is missing (no warning — this is the fresh-agent path)', () => {
+    const warnings: string[] = []
+    const cfg = loadConfigSyncOrDefaults(cwd, { warn: (msg) => warnings.push(msg) })
+    expect(cfg.port).toBe(8973)
+    expect(warnings).toEqual([])
+  })
+
+  test('returns schema defaults + warning when typeclaw.json is malformed JSON', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), '{ not json')
+    const warnings: string[] = []
+    const cfg = loadConfigSyncOrDefaults(cwd, { warn: (msg) => warnings.push(msg) })
+    expect(cfg.port).toBe(8973)
+    expect(warnings.length).toBe(1)
+    expect(warnings[0]).toMatch(/not valid JSON/)
+    expect(warnings[0]).toMatch(/diagnostic commands still work/)
+  })
+
+  test('returns schema defaults + warning when typeclaw.json is schema-invalid', async () => {
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'not-a-known-model' } }))
+    const warnings: string[] = []
+    const cfg = loadConfigSyncOrDefaults(cwd, { warn: (msg) => warnings.push(msg) })
+    expect(cfg.port).toBe(8973)
+    expect(warnings.length).toBe(1)
+    expect(warnings[0]).toMatch(/typeclaw\.json is invalid/)
   })
 })
 

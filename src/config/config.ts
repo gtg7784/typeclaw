@@ -420,15 +420,39 @@ export function expandMountPath(input: string, cwd: string): string {
 
 // Loaded eagerly from process.cwd()/typeclaw.json at module-import time so
 // citty arg defaults (e.g. config.port in src/cli/*.ts) see real values, not
-// hardcoded fallbacks. Missing file → schema defaults; malformed file → throw,
-// which surfaces during CLI startup instead of silently reverting to defaults
-// and confusing the user.
+// hardcoded fallbacks. Missing file → schema defaults; malformed file → ALSO
+// schema defaults plus a stderr warning.
+//
+// Why soft-fail and not throw: every CLI command — including diagnostic ones
+// (`typeclaw status`, `typeclaw doctor`, `typeclaw logs`, `typeclaw stop`,
+// `typeclaw usage`, `typeclaw tui`) — pays this eager-load cost through its
+// import graph, regardless of whether the command actually reads config. A
+// hard throw here turns every read-only diagnostic into a crash exactly when
+// the user needs the diagnostic to figure out what's wrong with their config.
+// `validateConfig` (called by `start`/`restart`/`reload`/host-side mutations)
+// is the strict gate for destructive paths; that's where malformed-config
+// errors should surface, not at module-import time.
 //
 // `config` is a module-import-time snapshot. Container-stage code that must
 // observe `typeclaw run` reloads should call `getConfig()` instead, which
 // returns the current swapped-in value. Host-stage CLI processes are
 // short-lived, so they keep using `config` directly.
-export const config: Config = loadConfigSync(process.cwd())
+export const config: Config = loadConfigSyncOrDefaults(process.cwd())
+
+export function loadConfigSyncOrDefaults(cwd: string, options: { warn?: (message: string) => void } = {}): Config {
+  try {
+    return loadConfigSync(cwd)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    const warn = options.warn ?? ((message: string) => process.stderr.write(message))
+    warn(
+      `warning: ${detail}\n` +
+        `warning: continuing with default config so diagnostic commands still work; ` +
+        `run \`typeclaw doctor\` or fix ${CONFIG_FILE} before \`typeclaw start\`/\`restart\`/\`reload\`.\n`,
+    )
+    return configSchema.parse({})
+  }
+}
 
 let current: Config = config
 
