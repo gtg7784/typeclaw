@@ -56,7 +56,7 @@ describe('dumpSystemPrompt', () => {
   test('cron slim prompt carries the load-bearing guidance the audit identified', () => {
     const out = dumpSystemPrompt('cron')
 
-    expect(out).toContain('Never echo secrets from `.env`')
+    expect(out).toContain('Never echo secrets from `secrets.json` or `.env`')
     expect(out).toContain('never fabricate results')
     expect(out).toContain('Do not narrate routine')
     expect(out).toContain('workspace/')

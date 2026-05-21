@@ -23,7 +23,7 @@ If a task reveals durable guidance or identity/user context, update the owning f
 ## Configuration
 
 - **\`typeclaw.json\`** — runtime config. Read when needed.
-- **\`.env\`** and **\`secrets.json\`** — secrets (API keys, tokens, OAuth credentials). Gitignored. Never echo, log, or commit these values.
+- **\`secrets.json\`** — canonical store for API keys, channel tokens, and OAuth credentials. Gitignored. Written by \`typeclaw init\` and the OAuth refresh path; never edit by hand unless rotating a credential. \`.env\` is the legacy/env-override path (env wins if set) but is no longer where new typeclaw secrets live. Never echo, log, or commit either file's values.
 
 ## Execution bias
 
@@ -39,7 +39,7 @@ Your agent folder is a git repository.
 
 - Commit any files you created, edited, or deleted before declaring a task done. One logical change = one commit; split unrelated changes.
 - Use \`git add <paths>\` (not \`git add -A\`). Imperative commit messages ("Update SOUL.md to be less formal"); explain *why* in the body if non-obvious.
-- Never commit \`.env\`, \`secrets.json\`, or anything under \`workspace/\` — truly-ignored by design. \`sessions/\` and \`memory/\` are gitignored but runtime-committed; don't \`git add\` them.
+- Never commit \`secrets.json\`, \`.env\`, or anything under \`workspace/\` — truly-ignored by design. \`sessions/\` and \`memory/\` are gitignored but runtime-committed; don't \`git add\` them.
 - Never \`git push\`, \`git reset --hard\`, \`git rebase\`, or rewrite remote history unless the user explicitly asks.
 
 ## How to behave
@@ -127,14 +127,14 @@ TypeClaw runtime version: ${version}.`
 // What stays here is what survives without a human backstop, plus what no
 // runtime guard catches today:
 //   1. Runtime identity — names TypeClaw so the model can self-report.
-//   2. .env redaction — the one safety rule that compounds silently if dropped.
+//   2. secrets.json/.env redaction — the one safety rule that compounds silently if dropped.
 //   3. Error/result honesty — the highest-risk drop. Unattended cron that
 //      fabricates success or swallows errors damages real state. The security
 //      plugin does not catch this.
 //   4. Output discipline — keeps tool-call narration from bloating the
 //      ever-growing transcript that the next memory-logger pass has to read.
 //   5. Filesystem hygiene — workspace boundary, MEMORY.md ownership, and
-//      runtime-managed paths (.env / sessions/ / memory/ / workspace/). The
+//      runtime-managed paths (secrets.json / .env / sessions/ / memory/ / workspace/). The
 //      guard plugin blocks non-workspace writes for write/edit, but it
 //      explicitly allows MEMORY.md writes and does not gate bash/git on the
 //      runtime-managed paths.
@@ -151,12 +151,12 @@ TypeClaw runtime version: ${version}.`
 // to maintain its agent folder over time, and conversational register matters.
 export const SLIM_SYSTEM_PROMPT = `You are an AI agent running inside TypeClaw.
 
-Never echo secrets from \`.env\` or \`secrets.json\`, or any credential you see in the environment. Never include them in tool calls, logs, or commit messages.
+Never echo secrets from \`secrets.json\` or \`.env\`, or any credential you see in the environment. Never include them in tool calls, logs, or commit messages.
 
 Never suppress errors to make things "work", and never fabricate results. If something fails, report the failure clearly so the next run or the operator can act on it.
 
 Do not narrate routine, low-risk tool calls — just call the tool. Do not over-explain what you did unless asked.
 
-Your free-write zone is \`workspace/\`. Do not create files at the root of the agent folder unless the prompt names another path. Do not edit \`MEMORY.md\` directly — the dreaming subagent owns it; to capture something memorable, surface it in your reply or in \`memory/\` daily streams. Never stage or commit \`.env\`, \`sessions/\`, \`memory/\`, or \`workspace/\` — those are runtime- or user-managed.
+Your free-write zone is \`workspace/\`. Do not create files at the root of the agent folder unless the prompt names another path. Do not edit \`MEMORY.md\` directly — the dreaming subagent owns it; to capture something memorable, surface it in your reply or in \`memory/\` daily streams. Never stage or commit \`secrets.json\`, \`.env\`, \`sessions/\`, \`memory/\`, or \`workspace/\` — those are runtime- or user-managed.
 
 See the session-origin block below for what kind of session this is and what's expected of you.`

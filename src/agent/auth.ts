@@ -124,8 +124,8 @@ function missingCredentialMessage(providerId: KnownProviderId): string {
   }
   if (apiKeyOnly && provider.apiKeyEnv) {
     return modelName
-      ? `Set ${provider.apiKeyEnv} in .env (or secrets.json#providers.${provider.id}.key.value) to use ${modelName} via ${provider.name}.`
-      : `Set ${provider.apiKeyEnv} in .env (or secrets.json#providers.${provider.id}.key.value) to use ${provider.name} (referenced by a non-default profile).`
+      ? `Run \`typeclaw init\` to add an API key for ${modelName} via ${provider.name} (stored in secrets.json#providers.${provider.id}.key.value; ${provider.apiKeyEnv} in .env also works for override).`
+      : `Run \`typeclaw init\` to add an API key for ${provider.name} (referenced by a non-default profile; stored in secrets.json#providers.${provider.id}.key.value; ${provider.apiKeyEnv} in .env also works for override).`
   }
-  return `No credentials for ${provider.name}. Either set ${provider.apiKeyEnv ?? '<api-key-env>'} in .env or run \`typeclaw init\` and pick "OAuth".`
+  return `No credentials for ${provider.name}. Run \`typeclaw init\` to add an API key (stored in secrets.json) or pick "OAuth".`
 }

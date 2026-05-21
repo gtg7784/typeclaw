@@ -9,7 +9,7 @@ Your agent folder is a git repo. Almost every file in it (`typeclaw.json`, `cron
 
 The contents of `.gitignore` split into two distinct categories — the distinction matters for this skill:
 
-- **Truly ignored** (`.env`, `node_modules/`, `workspace/`, `mounts/`, `Dockerfile`, `.DS_Store`) — never in history, ever. Secrets, runtime junk, your free-write zone, and regenerated-on-start system files.
+- **Truly ignored** (`secrets.json`, `.env`, `node_modules/`, `workspace/`, `mounts/`, `Dockerfile`, `.DS_Store`) — never in history, ever. Secrets, runtime junk, your free-write zone, and regenerated-on-start system files.
 - **System-managed** (`sessions/`, `memory/`, `channels/`) — gitignored so _you_ don't stage them, but TypeClaw force-commits them on its own schedule. `sessions/` is auto-backed up by the runtime; `memory/` is committed by the dreaming subagent; `channels/` is runtime-owned channel state. Treat them as runtime-owned: do not `git add` them, do not write commit messages about them, and do not be alarmed when they appear in `git log`.
 
 Everything not in either bucket is yours to commit.
@@ -80,7 +80,7 @@ If you discover an unrelated dirty file from a previous turn, commit it separate
 - **Do not skip the commit** "because the change is small." Small changes are exactly the ones that get lost. Toggling `enabled: false` on a cron job is a decision; commit it.
 - **Do not write empty or generic messages** ("update", "fix", "change config"). The history exists to be read.
 - **Do not amend or force-push** to clean up later. Sloppy history with real commits beats clean history that lies about when decisions happened.
-- **Do not commit `.env` or anything truly-ignored.** If `git status` shows a truly-ignored file as staged, something is wrong with `.gitignore` — fix that first, don't commit the secret.
+- **Do not commit `secrets.json`, `.env`, or anything truly-ignored.** If `git status` shows a truly-ignored file as staged, something is wrong with `.gitignore` — fix that first, don't commit the secret.
 - **Do not commit `sessions/` or `memory/` either, even though `git log` shows them.** They're system-managed: TypeClaw's auto-backup and dreaming subagent own those commits. If you find one of them staged in your working tree, unstage it (`git restore --staged sessions/ memory/`) — your edit got mixed up with the runtime's domain.
 - **Do not bundle unrelated changes.** One commit, one decision.
 
