@@ -1613,6 +1613,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
+    if (isUpstreamEmptyResponseSentinel(assistantText)) {
+      logger.warn(
+        `[channels] ${live.keyId}: suppressed upstream_empty_response_sentinel text_len=${assistantText.length}`,
+      )
+      return
+    }
+
     logger.warn(
       `[channels] ${live.keyId}: recovering assistant_text_without_channel_tool text_len=${assistantText.length}`,
     )
@@ -1998,6 +2005,31 @@ export function isNoReplySignal(text: string): boolean {
   if (trimmed === 'NO_REPLY') return true
   if (trimmed === '(NO_REPLY)') return true
   return false
+}
+
+// Detects the upstream "empty response" debug sentinel: when the LLM ends a
+// turn with only a `thinking` block, some provider SDK paths (observed
+// against claude-opus-4-5 via pi-ai) fabricate a single text block whose
+// body is a Python-repr dump of the raw API response — including the
+// model's thinking content and Anthropic's tamper-proof signature. The
+// recovery path in validateChannelTurn would otherwise post that sentinel
+// straight to the channel (production: signature leaked into a public
+// Slack channel on 2026-05-21).
+//
+// Kept separate from isNoReplySignal on purpose: that helper is the agent's
+// deliberate silent-turn protocol, this is upstream damage control. They
+// log under distinct subjects (`upstream_empty_response_sentinel` vs
+// `no_reply`) so an operator can tell a healthy quiet turn from a stream of
+// upstream empties that warrant investigation.
+//
+// Strict detection: leading `(Empty response:` AND a dict-encoded
+// `'stop_reason'` key. Catches the observed shape
+// `(Empty response: {'content': [...], 'stop_reason': 'end_turn', ...})`
+// while allowing legit prose like "Empty response from the cache layer".
+export function isUpstreamEmptyResponseSentinel(text: string): boolean {
+  const trimmed = text.trim()
+  if (!trimmed.startsWith('(Empty response:')) return false
+  return trimmed.includes("'stop_reason'")
 }
 
 function describe(err: unknown): string {

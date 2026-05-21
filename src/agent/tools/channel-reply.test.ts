@@ -353,6 +353,44 @@ describe('createChannelReplyTool', () => {
     })
   })
 
+  describe('upstream empty-response sentinel guard', () => {
+    test('blocks `(Empty response: {...stop_reason...})` so thinking content + signature never reach the channel', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, {
+        text:
+          "(Empty response: {'content': [{'type': 'thinking', 'thinking': 'leak', " +
+          "'signature': 'EpQC...'}], 'stop_reason': 'end_turn'})",
+      })
+      expect(calls).toHaveLength(0)
+      expect(result.details).toMatchObject({ ok: false })
+      expect((result.details as { error: string }).error).toContain('Empty response')
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toContain('channel_reply denied')
+      expect(text).not.toContain('posted to')
+    })
+
+    test('does NOT block legit prose mentioning "Empty response" without the python-dict shape', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, { text: 'Empty response from the cache layer; retrying now.' })
+      expect(calls).toHaveLength(1)
+      expect(result.details).toEqual({ ok: true })
+    })
+  })
+
   describe('structured router failures surface as denials', () => {
     test('duplicate code from router renders as channel_reply denied with router error text', async () => {
       const tool = createChannelReplyTool({
