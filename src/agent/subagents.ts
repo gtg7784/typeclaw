@@ -30,6 +30,7 @@ export type Subagent<P = unknown> = {
   payloadSchema?: z.ZodType<P>
   handler?: (ctx: SubagentContext<P>, runSession: RunSession) => Promise<void>
   toolResultBudget?: ToolResultBudget
+  visibility?: 'public' | 'internal'
 }
 
 export type SubagentRegistry = Readonly<Record<string, Subagent<any>>>
