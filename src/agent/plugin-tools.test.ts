@@ -1,15 +1,24 @@
-import { describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp } from 'node:fs/promises'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { defineTool as definePiTool } from '@mariozechner/pi-coding-agent'
+import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import { Type } from '@sinclair/typebox'
 import { z } from 'zod'
 
-import { createHookBus, defineTool } from '@/plugin'
+import { createHookBus, defineTool, type PluginRegistry } from '@/plugin'
 
-import { wrapPluginTool, wrapSystemAgentTool, wrapSystemTool, zodToToolParameters } from './plugin-tools'
+import {
+  buildBuiltinPiToolOverrides,
+  defaultBuiltinPiAgentTools,
+  wrapAgentToolAsCustomToolDefinition,
+  wrapPluginTool,
+  wrapSystemAgentTool,
+  wrapSystemTool,
+  zodToToolParameters,
+} from './plugin-tools'
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
@@ -697,5 +706,304 @@ describe('resolveBuiltinToolRefs (dual-route)', () => {
   test('throws on unknown built-in names', async () => {
     const { resolveBuiltinToolRefs } = await import('./plugin-tools')
     expect(() => resolveBuiltinToolRefs([{ __builtinTool: 'nope' }])).toThrow(/unknown built-in tool ref/)
+  })
+})
+
+describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', () => {
+  test('the returned ToolDefinition runs tool.before/runFinalWriteGuards before delegating to the underlying pi AgentTool', async () => {
+    let executedUnderlying = 0
+    const beforeArgs: unknown[] = []
+    const tool = {
+      name: 'edit',
+      label: 'edit',
+      description: '',
+      parameters: Type.Object({
+        path: Type.String(),
+        edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
+      }),
+      async execute(_id: string, _params: unknown) {
+        executedUnderlying++
+        return { content: [{ type: 'text' as const, text: 'underlying ran' }], details: undefined }
+      },
+    }
+    const hooks = createHookBus()
+    hooks.registerAll('p1', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        beforeArgs.push({ ...event.args })
+      },
+    })
+
+    const wrapped = wrapAgentToolAsCustomToolDefinition(tool, { agentDir: '/agent', sessionId: 's', hooks })
+
+    expect(wrapped.name).toBe('edit')
+    const result = await wrapped.execute(
+      'c',
+      { path: 'workspace/notes.md', edits: [{ oldText: 'a', newText: 'b' }] },
+      undefined,
+      undefined,
+      {} as never,
+    )
+    expect(textOfFirstContent(result)).toBe('underlying ran')
+    expect(executedUnderlying).toBe(1)
+    expect(beforeArgs).toEqual([{ path: 'workspace/notes.md', edits: [{ oldText: 'a', newText: 'b' }] }])
+  })
+
+  test('regression: managedConfig guard blocks an edit that would produce invalid typeclaw.json, on the customTool override path', async () => {
+    // PR #283's failure mode: pi 0.67.3 ignores `tools:` for implementation
+    // overrides, so the channel-session `edit` tool that landed commit
+    // 6d1c42c in ~/typeclaw/servant ran pi's internal builtin and bypassed
+    // both `tool.before` and `runFinalWriteGuards`. The fix routes wrapped
+    // builtin pi tools through `customTools`, which IS the override path
+    // pi honors. This test pins the post-fix behavior end-to-end: a tool
+    // call that mutates typeclaw.json to an invalid shape MUST be blocked
+    // by `runFinalWriteGuards` (which calls `checkManagedConfigGuard`),
+    // before the underlying pi `edit` is invoked.
+    const dir = await mkdtemp(path.join(tmpdir(), 'typeclaw-managed-config-'))
+    const configPath = path.join(dir, 'typeclaw.json')
+    const validConfig = {
+      models: { default: 'anthropic/claude-haiku-4-5' },
+    }
+    await Bun.write(configPath, `${JSON.stringify(validConfig, null, 2)}\n`)
+
+    let executedUnderlying = 0
+    const tool = {
+      name: 'edit',
+      label: 'edit',
+      description: '',
+      parameters: Type.Object({
+        path: Type.String(),
+        edits: Type.Array(Type.Object({ oldText: Type.String(), newText: Type.String() })),
+      }),
+      async execute(_id: string, _params: unknown) {
+        executedUnderlying++
+        return { content: [{ type: 'text' as const, text: 'should not run' }], details: undefined }
+      },
+    }
+    const hooks = createHookBus()
+    hooks.registerAll('p1', dir, noopLogger, {})
+
+    const wrapped = wrapAgentToolAsCustomToolDefinition(tool, { agentDir: dir, sessionId: 's', hooks })
+
+    await expect(
+      wrapped.execute(
+        'c',
+        {
+          path: configPath,
+          edits: [{ oldText: 'anthropic/claude-haiku-4-5', newText: 'kimi' }],
+        },
+        undefined,
+        undefined,
+        {} as never,
+      ),
+    ).rejects.toThrow(/Guard `managedConfig` blocked edit/)
+    expect(executedUnderlying).toBe(0)
+  })
+
+  test('defaultBuiltinPiAgentTools returns the seven pi coding-tool refs that need hook coverage', async () => {
+    const tools = defaultBuiltinPiAgentTools()
+    expect(tools.map((t) => t.name)).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
+  })
+
+  test('buildBuiltinPiToolOverrides produces same-named ToolDefinitions ready for customTools', async () => {
+    const hooks = createHookBus()
+    const overrides = buildBuiltinPiToolOverrides({ agentDir: '/agent', sessionId: 's', hooks })
+    expect(overrides.map((t) => t.name)).toEqual(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
+  })
+
+  test('buildBuiltinPiToolOverrides preserves edit guard-acknowledgement schema (so the model can pass acknowledgeGuards on edit)', async () => {
+    const hooks = createHookBus()
+    const overrides = buildBuiltinPiToolOverrides({ agentDir: '/agent', sessionId: 's', hooks })
+    const edit = overrides.find((t) => t.name === 'edit')
+    expect(edit).toBeDefined()
+    const params = (edit as ToolDefinition).parameters as { properties?: Record<string, unknown> }
+    expect(params.properties).toBeDefined()
+    expect(params.properties).toHaveProperty('acknowledgeGuards')
+  })
+})
+
+describe('setupSession integration: builtin pi tools route through customTools when hooks are present', () => {
+  // End-to-end seam test for the bug PR #283 thought it had closed: PR #283's
+  // managedConfig guard only fires when the active `edit` tool is the wrapped
+  // one — but pi 0.67.3 ignores `tools:` for implementation, so without
+  // routing wrapped builtins through `customTools`, the active `edit` is
+  // pi's internal builtin and the guard never sees the call. This test
+  // builds a real AgentSession via `createSession` and asserts that the
+  // active `edit` came from `sdk` (customTools override) rather than
+  // `builtin`. If the override wiring in `setupSession` is removed, this
+  // test fails immediately.
+  let agentDir: string
+  let prevCwd: string
+  let prevFireworks: string | undefined
+
+  beforeEach(async () => {
+    agentDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-guard-wiring-'))
+    prevCwd = process.cwd()
+    prevFireworks = process.env.FIREWORKS_API_KEY
+    process.env.FIREWORKS_API_KEY = 'fw_test'
+    process.chdir(agentDir)
+    await Bun.write(
+      path.join(agentDir, 'typeclaw.json'),
+      JSON.stringify({ models: { default: 'fireworks/accounts/fireworks/routers/kimi-k2p6-turbo' } }),
+    )
+    const { reloadConfig } = await import('@/config/config')
+    reloadConfig(agentDir)
+  })
+
+  afterEach(async () => {
+    if (prevFireworks === undefined) delete process.env.FIREWORKS_API_KEY
+    else process.env.FIREWORKS_API_KEY = prevFireworks
+    const { __resetConfigForTesting } = await import('@/config/config')
+    const { resetAuthForTesting } = await import('./auth')
+    __resetConfigForTesting()
+    resetAuthForTesting()
+    process.chdir(prevCwd)
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('with tool.before hooks present, the active `edit` is the customTools override (sourceInfo.source === "sdk"), not pi\'s builtin', async () => {
+    const { createSession } = await import('./index')
+    const hooks = createHookBus()
+    hooks.registerAll('p1', agentDir, noopLogger, {
+      'tool.before': () => undefined,
+    })
+    const registry: PluginRegistry = {
+      tools: [],
+      subagents: [],
+      cronJobs: [],
+      skills: [],
+      skillsDirs: [],
+      doctorChecks: [],
+      commands: [],
+    }
+
+    const session = await createSession({
+      plugins: { registry, hooks, sessionId: 'test-session', agentDir },
+    })
+
+    const allTools = session.getAllTools()
+    const editInfo = allTools.find((t) => t.name === 'edit')
+    expect(editInfo).toBeDefined()
+    expect(editInfo?.sourceInfo.source).toBe('sdk')
+
+    session.dispose()
+  })
+
+  test("without any tool hooks, the active `edit` falls through to pi's builtin (no wrapping overhead)", async () => {
+    const { createSession } = await import('./index')
+
+    const session = await createSession({})
+
+    const allTools = session.getAllTools()
+    const editInfo = allTools.find((t) => t.name === 'edit')
+    expect(editInfo).toBeDefined()
+    expect(editInfo?.sourceInfo.source).toBe('builtin')
+
+    session.dispose()
+  })
+
+  test('regression: subagent declaring [edit] only must NOT also activate read/bash/write/grep/find/ls just because builtin overrides exist in customTools', async () => {
+    // The customTools override path widens pi's active tool set as a side effect:
+    // pi's `_refreshToolRegistry` runs with `includeAllExtensionTools: true`,
+    // which appends every customTool name into `nextActiveToolNames` even when
+    // the caller passed a narrow `tools:` filter. Without explicit re-narrowing,
+    // a subagent declaring `toolRefs: [{ __builtinTool: 'edit' }]` ends up with
+    // all 7 builtin pi tools (read/bash/edit/write/grep/find/ls) active, which
+    // is a security regression — a read-only memory-logger subagent silently
+    // gets full edit/write/bash capability. See QA finding for PR #290.
+    const { createSession } = await import('./index')
+    const hooks = createHookBus()
+    hooks.registerAll('p1', agentDir, noopLogger, {
+      'tool.before': () => undefined,
+    })
+    const registry: PluginRegistry = {
+      tools: [],
+      subagents: [],
+      cronJobs: [],
+      skills: [],
+      skillsDirs: [],
+      doctorChecks: [],
+      commands: [],
+    }
+
+    const session = await createSession({
+      plugins: { registry, hooks, sessionId: 'test-session', agentDir },
+      pluginSubagent: { pluginName: 'p1', toolRefs: [{ __builtinTool: 'edit' }], toolNamePrefix: 's' },
+    })
+
+    expect(session.getActiveToolNames().sort()).toEqual(['edit'])
+
+    session.dispose()
+  })
+
+  test('subagent declaring [read, grep] gets exactly those two active, with the wrapped (sdk) implementations', async () => {
+    const { createSession } = await import('./index')
+    const hooks = createHookBus()
+    hooks.registerAll('p1', agentDir, noopLogger, {
+      'tool.before': () => undefined,
+    })
+    const registry: PluginRegistry = {
+      tools: [],
+      subagents: [],
+      cronJobs: [],
+      skills: [],
+      skillsDirs: [],
+      doctorChecks: [],
+      commands: [],
+    }
+
+    const session = await createSession({
+      plugins: { registry, hooks, sessionId: 'test-session', agentDir },
+      pluginSubagent: {
+        pluginName: 'p1',
+        toolRefs: [{ __builtinTool: 'read' }, { __builtinTool: 'grep' }],
+        toolNamePrefix: 's',
+      },
+    })
+
+    expect(session.getActiveToolNames().sort()).toEqual(['grep', 'read'])
+    const all = session.getAllTools()
+    const readInfo = all.find((t) => t.name === 'read')
+    const grepInfo = all.find((t) => t.name === 'grep')
+    expect(readInfo?.sourceInfo.source).toBe('sdk')
+    expect(grepInfo?.sourceInfo.source).toBe('sdk')
+
+    session.dispose()
+  })
+
+  test('TUI session with hooks gets exactly pi default 4 active builtins (read/bash/edit/write) plus typeclaw customTools, not all 7 pi builtins', async () => {
+    // TUI/channel sessions pass no `options.tools`, so the intended active
+    // set is pi's defaultActiveToolNames union the typeclaw customSystemTools.
+    // The unconditional inclusion of grep/find/ls overrides would otherwise
+    // widen the TUI's active set silently — not a security regression like
+    // the subagent case, but still an unintended scope expansion.
+    const { createSession } = await import('./index')
+    const hooks = createHookBus()
+    hooks.registerAll('p1', agentDir, noopLogger, {
+      'tool.before': () => undefined,
+    })
+    const registry: PluginRegistry = {
+      tools: [],
+      subagents: [],
+      cronJobs: [],
+      skills: [],
+      skillsDirs: [],
+      doctorChecks: [],
+      commands: [],
+    }
+
+    const session = await createSession({
+      plugins: { registry, hooks, sessionId: 'test-session', agentDir },
+    })
+
+    const active = new Set(session.getActiveToolNames())
+    expect(active.has('read')).toBe(true)
+    expect(active.has('bash')).toBe(true)
+    expect(active.has('edit')).toBe(true)
+    expect(active.has('write')).toBe(true)
+    expect(active.has('grep')).toBe(false)
+    expect(active.has('find')).toBe(false)
+    expect(active.has('ls')).toBe(false)
+
+    session.dispose()
   })
 })

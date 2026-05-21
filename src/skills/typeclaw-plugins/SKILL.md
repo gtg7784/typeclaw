@@ -718,7 +718,7 @@ Plugin `ToolContext` is `{ signal, sessionId, agentDir, logger }`. There is no `
   - `session.prompt`: `src/agent/index.ts` `createResourceLoader` (after default prompt assembly)
   - `session.idle`: `src/server/index.ts` `drain()` — fires immediately after every `session.prompt()` resolves (success or error)
   - `session.start`/`session.end`: `src/server/index.ts` ws open/close
-  - `tool.before`/`tool.after`: `src/agent/plugin-tools.ts` `wrapPluginTool`, `wrapSystemTool`, and `wrapSystemAgentTool`
+  - `tool.before`/`tool.after`: `src/agent/plugin-tools.ts` `wrapPluginTool`, `wrapSystemTool`, `wrapSystemAgentTool`, and `wrapAgentToolAsCustomToolDefinition`. The last one is the load-bearing path for pi's builtin coding tools (`read`/`bash`/`edit`/`write`/`grep`/`find`/`ls`): pi-coding-agent 0.67.3 treats `createAgentSession({ tools })` as a name filter only, so the wrapping has to ride in `customTools` to actually override the builtin implementations. See the top-of-file contract block in `plugin-tools.ts` for the full reasoning.
 - **Schema additions**: `src/config/config.ts` (`plugins` array, `.catchall(z.unknown())` for per-plugin blocks, `extractPluginConfigs`)
 
 ### Audit log on boot
