@@ -1,0 +1,14 @@
+{
+  "pages": [
+    "index",
+    "quickstart",
+    "configuration",
+    "---",
+    "plugins",
+    "channels",
+    "memory",
+    "secrets",
+    "cron",
+    "tunnels"
+  ]
+}
