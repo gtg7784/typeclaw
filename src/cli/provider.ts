@@ -367,10 +367,15 @@ async function runOAuthLogin(cwd: string, providerId: KnownProviderId): Promise<
   }
   const modelRef = `${providerId}/${ref}` as const
 
-  const runner = makeOAuthLoginRunner(buildOAuthCallbacks(provider.name))
-  const result = await runner({ cwd, model: modelRef as Parameters<typeof runner>[0]['model'] })
-  if (!result.ok) return { ok: false, reason: result.reason }
-  return { ok: true }
+  const { callbacks, dispose } = buildOAuthCallbacks(provider.name)
+  try {
+    const runner = makeOAuthLoginRunner(callbacks)
+    const result = await runner({ cwd, model: modelRef as Parameters<typeof runner>[0]['model'] })
+    if (!result.ok) return { ok: false, reason: result.reason }
+    return { ok: true }
+  } finally {
+    dispose()
+  }
 }
 
 function authHint(id: KnownProviderId): string {
