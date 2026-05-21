@@ -7,7 +7,7 @@ export const baseOptions: BaseLayoutProps = {
   nav: {
     title: (
       <span className="flex items-center gap-2 text-sm font-semibold tracking-tight">
-        <Image src={icon} alt="TypeClaw" width={24} height={24} className="rounded-md" priority />
+        <Image src={icon} alt="TypeClaw" width={24} height={24} className="rounded-md" />
         TypeClaw
       </span>
     ),

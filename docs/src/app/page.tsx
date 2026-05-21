@@ -17,11 +17,11 @@ interface Feature {
 const FEATURES: Feature[] = [
   { title: 'Sandboxed by default', detail: 'every agent runs in its own Docker container' },
   { title: 'TypeScript end to end', detail: 'core, plugins, channels, CLI, TUI' },
-  { title: 'Bun-native plugins', detail: 'plain .ts modules; no IPC, no FFI' },
-  { title: 'Multi-channel', detail: 'Slack, Discord, Telegram, KakaoTalk, GitHub, TUI' },
+  { title: 'Plugins as TS modules', detail: 'plain .ts files; no IPC, no FFI' },
+  { title: 'Multi-channel', detail: 'Slack, Discord, Telegram, KakaoTalk, GitHub — plus a websocket TUI' },
   { title: 'Cron', detail: 'scheduled prompts and shell commands, with coalescing' },
   { title: 'Self-improving memory', detail: 'observes its own work and writes its own skills' },
-  { title: 'Hot reload', detail: 'edit typeclaw.json, run typeclaw reload' },
+  { title: 'Hot reload', detail: 'most config reloads live; boot-only fields ask for a restart' },
   { title: 'Auto port-forward', detail: 'dev servers in the container appear on localhost' },
   { title: 'Public tunnels', detail: 'Cloudflare Quick or your own URL — built in' },
   { title: 'Skills on demand', detail: 'markdown procedures with zero token cost until used' },
@@ -172,26 +172,24 @@ function ExampleBlock() {
           <span className="text-zinc-400 dark:text-zinc-600">$ </span>
           <span className="text-zinc-800 dark:text-zinc-100">typeclaw init</span>
           {'\n'}
-          <span className="text-cyan-700 dark:text-cyan-400">✓</span>
-          <span className="text-zinc-600 dark:text-zinc-400"> wrote typeclaw.json, .env, Dockerfile</span>
+          <span className="text-zinc-600 dark:text-zinc-400">Egg laid. 🥚</span>
           {'\n\n'}
           <span className="text-zinc-400 dark:text-zinc-600">$ </span>
           <span className="text-zinc-800 dark:text-zinc-100">typeclaw start</span>
           {'\n'}
-          <span className="text-cyan-700 dark:text-cyan-400">✓</span>
-          <span className="text-zinc-600 dark:text-zinc-400"> container my-agent up on :8973</span>
+          <span className="text-cyan-700 dark:text-cyan-400">●</span>
+          <span className="text-zinc-600 dark:text-zinc-400"> my-agent started on host port 8973</span>
           {'\n\n'}
           <span className="text-zinc-400 dark:text-zinc-600">$ </span>
           <span className="text-zinc-800 dark:text-zinc-100">typeclaw channel add slack-bot</span>
           {'\n'}
-          <span className="text-cyan-700 dark:text-cyan-400">✓</span>
-          <span className="text-zinc-600 dark:text-zinc-400"> answering in #standup as @typeclaw</span>
+          <span className="text-zinc-600 dark:text-zinc-400">Slack channel added.</span>
           {'\n\n'}
           <span className="text-zinc-400 dark:text-zinc-600">$ </span>
           <span className="text-zinc-800 dark:text-zinc-100">git log memory/ --oneline</span>
           {'\n'}
-          <span className="text-zinc-500">a3f2c1d </span>
-          <span className="text-zinc-600 dark:text-zinc-400">dream: 4 fragments + new skill {`'pr-review'`} 🔮</span>
+          <span className="text-zinc-500 dark:text-zinc-500">a3f2c1d</span>
+          <span className="text-zinc-600 dark:text-zinc-400"> dream: 4 fragments + new skill {`'pr-review'`} 🔮</span>
         </code>
       </pre>
     </div>
@@ -217,7 +215,7 @@ export default function Home() {
     <div className="min-h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
       <nav className="sticky top-0 z-50 flex h-14 items-center justify-between border-b border-zinc-100 bg-white/85 px-5 backdrop-blur-md sm:px-8 dark:border-white/[0.06] dark:bg-zinc-950/85">
         <Link href="/" className="flex items-center gap-2 text-sm font-semibold tracking-tight">
-          <Image src={logo} alt="TypeClaw" width={22} height={22} className="rounded-md" priority />
+          <Image src={logo} alt="TypeClaw" width={22} height={22} className="rounded-md" />
           typeclaw
         </Link>
         <div className="flex items-center gap-1 sm:gap-2">
@@ -252,15 +250,29 @@ export default function Home() {
           <h1 className="text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
             A TypeScript agent runtime,
             <br />
-            <span className="text-cyan-700 dark:text-cyan-400">with batteries included.</span>
+            <span className="text-cyan-700 dark:text-cyan-400">yours in one command.</span>
           </h1>
           <p className="mx-auto mt-5 max-w-xl text-balance text-base leading-relaxed text-zinc-600 sm:text-lg dark:text-zinc-400">
-            Scaffold an AI agent in a folder. It runs in its own Docker container, talks to you in a terminal, and wires
-            into Slack or Discord when you tell it to.
+            TypeClaw gives you a local AI agent that lives in a folder. It can answer in Slack, run on a schedule, and
+            remember what it did yesterday — sandboxed in its own container, so trying it costs nothing.
           </p>
           <div className="mt-10">
             <InstallBlock />
           </div>
+          <p className="mx-auto mt-4 max-w-md text-xs text-zinc-400 dark:text-zinc-600">
+            Requires{' '}
+            <a href="https://bun.sh" className="underline-offset-2 hover:underline">
+              Bun
+            </a>{' '}
+            and Docker or OrbStack. Then{' '}
+            <Link
+              href="/docs/quickstart"
+              className="text-cyan-700 underline-offset-2 hover:underline dark:text-cyan-400"
+            >
+              the quickstart
+            </Link>{' '}
+            walks you through the first run.
+          </p>
         </section>
 
         <section className="mx-auto max-w-4xl px-6 pb-16 sm:pb-20">
@@ -282,8 +294,8 @@ export default function Home() {
             <ExampleBlock />
           </div>
           <p className="mx-auto mt-6 max-w-2xl text-center text-sm text-zinc-500 dark:text-zinc-500">
-            Four commands. The agent is live in its own container, answering in Slack, and has already started building
-            its own memory.
+            Four commands. The agent is live in its own container, wired into Slack, and — after a few days of work —
+            keeps a log of what it learned, committed back into git.
           </p>
         </section>
 
