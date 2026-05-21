@@ -1,7 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
-import { isNoReplySignal, type ChannelRouter } from '@/channels/router'
+import { isNoReplySignal, isUpstreamEmptyResponseSentinel, type ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
@@ -86,6 +86,15 @@ export function createChannelReplyTool({
         return {
           content: [{ type: 'text' as const, text: `channel_reply denied: ${noReplyError}` }],
           details: { ok: false, error: noReplyError },
+        }
+      }
+
+      const upstreamSentinelError = upstreamEmptyResponseSentinelError(text)
+      if (upstreamSentinelError) {
+        logger.warn(formatChannelToolFailure('channel_reply', upstreamSentinelError))
+        return {
+          content: [{ type: 'text' as const, text: `channel_reply denied: ${upstreamSentinelError}` }],
+          details: { ok: false, error: upstreamSentinelError },
         }
       }
 
@@ -185,6 +194,20 @@ function noReplyMisuseError(text: string | undefined): string {
     '`NO_REPLY` is the silent-turn signal, not a message body. ' +
     'To stay silent, end your turn with `NO_REPLY` as your entire visible response and NO channel tool call. ' +
     'To send an actual reply, call this tool again with different text.'
+  )
+}
+
+// Mirror of the same guard used by channel_send. Blocks the upstream
+// `(Empty response: ...)` debug sentinel from being sent verbatim — that
+// payload carries the model's thinking content and signature, never a
+// real user-facing message.
+function upstreamEmptyResponseSentinelError(text: string | undefined): string {
+  if (text === undefined) return ''
+  if (!isUpstreamEmptyResponseSentinel(text)) return ''
+  return (
+    'refusing to forward an upstream `(Empty response: ...)` sentinel; ' +
+    "that string is a provider-SDK debug dump containing the model's thinking content and signature, " +
+    'not a message body. End your turn silently (visible text empty or `NO_REPLY`) instead.'
   )
 }
 

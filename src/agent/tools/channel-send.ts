@@ -1,7 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
-import { isNoReplySignal, type ChannelRouter } from '@/channels/router'
+import { isNoReplySignal, isUpstreamEmptyResponseSentinel, type ChannelRouter } from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
@@ -112,6 +112,15 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
         }
       }
 
+      const upstreamSentinelError = upstreamEmptyResponseSentinelError(bodyText)
+      if (upstreamSentinelError) {
+        logger.warn(formatChannelToolFailure('channel_send', upstreamSentinelError))
+        return {
+          content: [{ type: 'text' as const, text: `channel_send denied: ${upstreamSentinelError}` }],
+          details: { ok: false, error: upstreamSentinelError },
+        }
+      }
+
       const result = await router.send({
         adapter,
         workspace: params.workspace,
@@ -205,6 +214,22 @@ function noReplyMisuseError(text: string | undefined): string {
     '`NO_REPLY` is the silent-turn signal, not a message body. ' +
     'To stay silent, end your turn with `NO_REPLY` as your entire visible response and NO channel tool call. ' +
     'To send an actual reply, call this tool again with different text.'
+  )
+}
+
+// Defense-in-depth mirror of the recovery-path guard in router.ts. Blocks
+// the upstream "(Empty response: {...})" sentinel from being sent verbatim
+// as a channel message — the body of that sentinel carries the model's
+// thinking content and Anthropic's tamper-proof signature, which must
+// never reach a channel reader. Shape detection lives in
+// `isUpstreamEmptyResponseSentinel` so all call sites stay in lockstep.
+function upstreamEmptyResponseSentinelError(text: string | undefined): string {
+  if (text === undefined) return ''
+  if (!isUpstreamEmptyResponseSentinel(text)) return ''
+  return (
+    'refusing to forward an upstream `(Empty response: ...)` sentinel; ' +
+    "that string is a provider-SDK debug dump containing the model's thinking content and signature, " +
+    'not a message body. End your turn silently (visible text empty or `NO_REPLY`) instead.'
   )
 }
 
