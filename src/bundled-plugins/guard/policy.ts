@@ -8,6 +8,7 @@ export function isGuardAcknowledged(args: Record<string, unknown>, guard: string
   return (acknowledgements as Record<string, unknown>)[guard] === true
 }
 
+export { GUARD_MANAGED_CONFIG, checkManagedConfigGuard } from './policies/managed-config'
 export { GUARD_NON_WORKSPACE_WRITE, checkNonWorkspaceWriteGuard } from './policies/non-workspace-write'
 export {
   GUARD_SKILL_AUTHORING,

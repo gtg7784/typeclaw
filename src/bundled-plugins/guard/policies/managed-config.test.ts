@@ -1,0 +1,282 @@
+import { describe, expect, test } from 'bun:test'
+import { mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
+
+import { checkManagedConfigGuard } from './managed-config'
+
+async function makeAgentDir(): Promise<string> {
+  return mkdtemp(path.join(tmpdir(), 'typeclaw-managed-config-'))
+}
+
+describe('managedConfig guard — typeclaw.json', () => {
+  test('accepts a valid typeclaw.json write', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: JSON.stringify({ port: 9000 }) },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('rejects malformed JSON on write', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: '{ not valid json' },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('not valid JSON')
+  })
+
+  test('rejects a write that violates the schema (port out of range)', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: JSON.stringify({ port: 70000 }) },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('typeclaw.json is invalid')
+  })
+
+  test('rejects an empty-string write (parse error)', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: '' },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+  })
+
+  test('accepts a valid edit that produces a schema-valid file', async () => {
+    const agentDir = await makeAgentDir()
+    await writeFile(path.join(agentDir, 'typeclaw.json'), JSON.stringify({ port: 9000 }, null, 2))
+
+    const result = await checkManagedConfigGuard({
+      tool: 'edit',
+      args: {
+        path: 'typeclaw.json',
+        edits: [{ oldText: '"port": 9000', newText: '"port": 9001' }],
+      },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('rejects an edit that produces an invalid file', async () => {
+    const agentDir = await makeAgentDir()
+    await writeFile(path.join(agentDir, 'typeclaw.json'), JSON.stringify({ port: 9000 }, null, 2))
+
+    const result = await checkManagedConfigGuard({
+      tool: 'edit',
+      args: {
+        path: 'typeclaw.json',
+        edits: [{ oldText: '"port": 9000', newText: '"port": 70000' }],
+      },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('typeclaw.json is invalid')
+  })
+
+  test('rejects an edit whose oldText does not match the file', async () => {
+    const agentDir = await makeAgentDir()
+    await writeFile(path.join(agentDir, 'typeclaw.json'), JSON.stringify({ port: 9000 }, null, 2))
+
+    const result = await checkManagedConfigGuard({
+      tool: 'edit',
+      args: {
+        path: 'typeclaw.json',
+        edits: [{ oldText: 'NOT-IN-FILE', newText: 'x' }],
+      },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('oldText was not found')
+  })
+})
+
+describe('managedConfig guard — cron.json', () => {
+  test('accepts a valid cron.json write', async () => {
+    const agentDir = await makeAgentDir()
+    const content = JSON.stringify({
+      jobs: [
+        {
+          id: 'daily',
+          schedule: '30 23 * * *',
+          kind: 'prompt',
+          prompt: 'summarize',
+          scheduledByRole: 'owner',
+        },
+      ],
+    })
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('rejects malformed JSON on write', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content: 'not json' },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('cron.json is not valid JSON')
+  })
+
+  test('rejects an invalid cron schedule', async () => {
+    const agentDir = await makeAgentDir()
+    const content = JSON.stringify({
+      jobs: [{ id: 'j', schedule: 'bogus', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+    })
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('bogus')
+  })
+
+  test('rejects duplicate job ids', async () => {
+    const agentDir = await makeAgentDir()
+    const content = JSON.stringify({
+      jobs: [
+        { id: 'dup', schedule: '* * * * *', kind: 'prompt', prompt: 'a', scheduledByRole: 'owner' },
+        { id: 'dup', schedule: '* * * * *', kind: 'prompt', prompt: 'b', scheduledByRole: 'owner' },
+      ],
+    })
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('duplicate job id')
+  })
+
+  test('accepts a write missing scheduledByRole (migration absorbs legacy shape)', async () => {
+    const agentDir = await makeAgentDir()
+    const content = JSON.stringify({
+      jobs: [{ id: 'j', schedule: '* * * * *', kind: 'prompt', prompt: 'x' }],
+    })
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('accepts a valid edit', async () => {
+    const agentDir = await makeAgentDir()
+    const initial = JSON.stringify(
+      {
+        jobs: [{ id: 'j', schedule: '0 9 * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      },
+      null,
+      2,
+    )
+    await writeFile(path.join(agentDir, 'cron.json'), initial)
+
+    const result = await checkManagedConfigGuard({
+      tool: 'edit',
+      args: {
+        path: 'cron.json',
+        edits: [{ oldText: '"schedule": "0 9 * * *"', newText: '"schedule": "0 10 * * *"' }],
+      },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('rejects an edit that produces an invalid cron file', async () => {
+    const agentDir = await makeAgentDir()
+    const initial = JSON.stringify(
+      {
+        jobs: [{ id: 'j', schedule: '0 9 * * *', kind: 'prompt', prompt: 'x', scheduledByRole: 'owner' }],
+      },
+      null,
+      2,
+    )
+    await writeFile(path.join(agentDir, 'cron.json'), initial)
+
+    const result = await checkManagedConfigGuard({
+      tool: 'edit',
+      args: {
+        path: 'cron.json',
+        edits: [{ oldText: '"schedule": "0 9 * * *"', newText: '"schedule": "bogus"' }],
+      },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('bogus')
+  })
+})
+
+describe('managedConfig guard — scope', () => {
+  test('ignores tools other than write/edit', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'read',
+      args: { path: 'typeclaw.json' },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('ignores writes to other files at the agent root', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'AGENTS.md', content: 'anything' },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('ignores nested files that happen to share a basename', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'workspace/typeclaw.json', content: 'not json at all' },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('accepts absolute paths that resolve to the managed file', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: path.join(agentDir, 'typeclaw.json'), content: '{ broken' },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+  })
+
+  test('ignores non-string paths and non-string content', async () => {
+    const agentDir = await makeAgentDir()
+    const badPath = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 42, content: 'x' },
+      agentDir,
+    })
+    const badContent = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: 42 },
+      agentDir,
+    })
+    expect(badPath).toBeUndefined()
+    expect(badContent?.block).toBe(true)
+  })
+})
