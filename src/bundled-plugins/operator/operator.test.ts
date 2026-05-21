@@ -49,6 +49,11 @@ describe('operator subagent declaration', () => {
     expect(sub.visibility).toBe('public')
   })
 
+  test('declares requiresSpecificPermission=true (member with generic subagent.spawn cannot spawn it)', () => {
+    const sub = createOperatorSubagent()
+    expect(sub.requiresSpecificPermission).toBe(true)
+  })
+
   test('uses the default model profile (needs reasoning for multi-step work, not the fast tier)', () => {
     const sub = createOperatorSubagent()
     expect(sub.profile).toBe('default')

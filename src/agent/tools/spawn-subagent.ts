@@ -88,12 +88,12 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
 
     async execute(_toolCallId, params): Promise<ToolReturn> {
       const origin = getOrigin()
-      if (!hasPermissionForSubagent(permissions, origin, params.subagent_type)) {
-        return errorResult('subagent.spawn denied: insufficient permissions')
-      }
       const subagent = lookupPublicSubagent(registry, params.subagent_type)
       if (subagent === null) {
         return errorResult(formatUnknownSubagentError(registry, params.subagent_type))
+      }
+      if (!hasPermissionForSubagent(permissions, origin, params.subagent_type, subagent)) {
+        return errorResult('subagent.spawn denied: insufficient permissions')
       }
 
       const taskId = generateTaskId()
@@ -248,9 +248,13 @@ function hasPermissionForSubagent(
   permissions: PermissionService | undefined,
   origin: SessionOrigin | undefined,
   subagentName: string,
+  subagent: Subagent<unknown>,
 ): boolean {
   if (permissions === undefined) return true
   const specific = `subagent.spawn.${subagentName}`
+  if (subagent.requiresSpecificPermission === true) {
+    return permissions.has(origin, specific)
+  }
   if (permissions.has(origin, specific)) return true
   return permissions.has(origin, 'subagent.spawn')
 }

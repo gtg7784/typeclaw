@@ -66,6 +66,7 @@ export function createOperatorSubagent(): Subagent<OperatorPayload> {
     tools: [readTool, grepTool, findTool, lsTool, bashTool, writeTool, editTool],
     payloadSchema: operatorPayloadSchema,
     visibility: 'public',
+    requiresSpecificPermission: true,
     inFlightKey: (payload) => payload?.requestId ?? `anon-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     toolResultBudget: {
       maxTotalBytes: 1_000_000,

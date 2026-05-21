@@ -85,6 +85,16 @@ export type Subagent<P = unknown> = {
   //   operator). The default is 'internal' specifically so adding a new
   //   bundled subagent never accidentally widens the agent-facing surface.
   visibility?: 'public' | 'internal'
+  // Whether spawning this subagent requires a per-subagent permission of
+  // the form `subagent.spawn.<name>`, rather than the generic
+  // `subagent.spawn`. Default false: the generic spawn permission is
+  // sufficient (suitable for read-only / cheap subagents like explorer).
+  // Set true for subagents whose blast radius warrants a separate gate
+  // (the bundled operator is write-capable, so its spawn permission must
+  // NOT be implied by the generic permission held by every channel
+  // member). When true, the spawn tool checks ONLY the per-subagent
+  // permission and never falls back to the generic.
+  requiresSpecificPermission?: boolean
 }
 
 // Cron job map keys are local; the runtime prefixes with `__plugin_<plugin-name>_`

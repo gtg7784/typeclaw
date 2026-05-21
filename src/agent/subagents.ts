@@ -31,6 +31,7 @@ export type Subagent<P = unknown> = {
   handler?: (ctx: SubagentContext<P>, runSession: RunSession) => Promise<void>
   toolResultBudget?: ToolResultBudget
   visibility?: 'public' | 'internal'
+  requiresSpecificPermission?: boolean
 }
 
 export type SubagentRegistry = Readonly<Record<string, Subagent<any>>>
