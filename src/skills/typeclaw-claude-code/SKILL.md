@@ -33,7 +33,9 @@ If `claude` is installed but no credential is set up, you have to broker the aut
 1. **Already authenticated?** Run `env | grep -E '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)='` — if either is present, skip auth entirely.
 2. **User has an Anthropic Console workspace** (API billing, no subscription) → API key path.
 3. **User has a Claude Pro/Max/Team/Enterprise subscription** → OAuth token path.
-4. **User is unsure** → prefer API key (one fewer round-trip). OAuth works fine for remote-host typeclaw deployments via `claude setup-token`'s code-paste fallback (see below) — the bias is just "fewer steps", not "OAuth is fragile".
+4. **User is unsure** → ask which kind of Claude account they have. Both paths are now equally low-friction (one user action each — paste an API key, or run one command on their machine and paste the result), so the old "prefer API key when unsure" bias is gone. Pick by account shape, not by flow complexity.
+
+Both paths converge on the same final steps: read `.env`, merge one new `KEY=value` line, write back with the `nonWorkspaceWrite` guard ack, verify, and prompt the user to restart the container. Only the credential differs.
 
 ### API key path
 
@@ -48,11 +50,23 @@ If `claude` is installed but no credential is set up, you have to broker the aut
 
 ### OAuth path
 
-OAuth requires a browser. The flow is: agent runs `claude setup-token` in tmux → claude prints a URL + waits for a code → agent surfaces URL to user → user opens it on whatever device they have a browser on (their laptop, phone, etc.), authorizes, and either (a) copies the code shown on the post-auth page back to the agent, or (b) copies the full `http://localhost:...?code=...&state=...` callback URL from their browser's address bar if the page tried to redirect and failed — both work, the agent parses either shape — → agent extracts the code, feeds it to tmux → claude prints the OAuth token → agent captures it.
+The OAuth flow runs **on the user's own machine**, not inside the container. The user generates a long-lived `CLAUDE_CODE_OAUTH_TOKEN` with `claude setup-token` on whatever local machine they're already authenticated on, copies the printed token, and pastes it back to you. You write it to `.env` exactly like the API key path.
 
-**This works on remote-host typeclaw deployments** (container on a server, browser on the user's laptop, different machines). `claude setup-token` is built for that case — see the cross-device rationale in `references/auth-flow.md`. Do not try to launch a browser from inside the container (`xdg-open` won't work — no display), do not advise SSH port forwarding (unnecessary), do not branch on local-vs-remote in your code path (the flow is the same).
+Why this works: `claude setup-token` is Anthropic's documented path for "CI pipelines, scripts, or other environments where interactive browser login isn't available" ([code.claude.com/docs/en/authentication](https://code.claude.com/docs/en/authentication)). A typeclaw container is exactly that environment. The token is one-year-lived, authenticates against the user's Claude subscription, and is scoped to inference only — it can't establish Remote Control sessions or otherwise act outside of `claude` CLI calls.
 
-The full pane-capture mechanics, the URL-or-code parsing rules, the cross-device explanation, and the retry semantics on bad codes are in `references/auth-flow.md`. Read that file before you start the OAuth flow.
+Do **not** run `claude setup-token` inside the container. The container has no browser, no display, and (for remote-host typeclaw deployments) is on a different machine from the user's browser anyway. The user's local machine already has `claude` installed for them to be a subscriber in the first place — they're the right place to run the one-off `setup-token` command.
+
+1. Confirm with the user: "Do you have the `claude` CLI installed on your local machine and are you signed in to it with your Claude Pro/Max/Team/Enterprise account? If not, install it from claude.com/code and `claude login` first."
+2. Once they confirm, instruct them: "Run `claude setup-token` on your machine. It opens a browser, you authorize, and the terminal prints a long token (looks like `sk-ant-oat01-...` or similar). Copy that token and paste it back to me. The token is long-lived (one year) and authenticates against your Claude subscription — keep it private."
+3. When they paste, **validate** before writing: `/^[A-Za-z0-9_-]{30,}$/`. Strip surrounding whitespace first. If it doesn't match (too short, contains slashes, looks like a URL or a sentence), refuse and ask again — the user may have pasted a partial copy or the wrong line.
+4. **Read** the existing `.env` first. Parse it into a key→value map.
+5. **Reconstruct** the full `.env` content with `CLAUDE_CODE_OAUTH_TOKEN=<value>` added or replaced.
+6. **Write** with `acknowledgeGuards: { nonWorkspaceWrite: true }`.
+7. **Verify** by re-reading the file.
+8. **Ask before restart** (same prompt as the API key path).
+9. On yes → call the `restart` tool. On no → `typeclaw restart` themselves when ready.
+
+The full validation rules, the failure modes on the user's side (their `claude` CLI is signed out, their `setup-token` command 401s, their subscription is expired), and the rationale for not doing the OAuth dance in-container are in `references/auth-flow.md`.
 
 ### Cost-cap warning
 
@@ -243,13 +257,15 @@ A re-statement, because this is where the skill is most often misused:
 - **Do not poll the JSONL transcript directly as the done-signal.** The JSONL has documented race conditions (the file can be stale when `Stop` fires, or occasionally missing entirely). The sentinel is the reliable signal; the JSONL is for content, not lifecycle.
 - **Do not write to `.env` without `acknowledgeGuards: { nonWorkspaceWrite: true }`.** The guard will refuse, the agent loop will retry the same broken write, and you'll waste tokens fighting the guard. The ack is required every write, not just the first one.
 - **Do not edit `.env` with the `edit` tool's patch semantics.** Use read-modify-write: read the whole file, reconstruct the new content, write the whole file. `.env` is a flat KV store; a fragile `oldText` match could corrupt unrelated lines.
+- **Do not run `claude setup-token` inside the container.** It's a TUI OAuth flow that wants a browser. The container has no display, no browser, and is often on a different machine from the user anyway. Always have the user run `setup-token` on their own machine and paste the resulting token back; never spawn it in tmux on this side.
+- **Do not echo, log, or transcribe the pasted `CLAUDE_CODE_OAUTH_TOKEN` value back to the user, into a sentinel, into a commit message, or into any message you send.** It's a one-year credential. Confirm receipt with "got it, validating" — never with the token itself.
 - **Do not invent answers to Claude's clarifying questions.** If you can't derive the answer from the original task brief, surface the question to the user. Wrong answers compound across multi-turn delegations.
 - **Do not exceed 8 turns per delegation.** Abort, capture what you have, surface. Long delegations almost always mean the task wasn't shaped right.
 - **Do not assume `claude` exists.** If `which claude` returns empty, the `docker.file.claudeCode` toggle isn't on. Tell the user, don't try to install it yourself.
 
 ## Cross-references
 
-- **`references/auth-flow.md`** — full OAuth pane-capture mechanics, code-paste retry semantics, what `claude setup-token` actually prints, common failure modes.
+- **`references/auth-flow.md`** — both auth paths in detail: the API-key recap, the OAuth user-machine flow (what to tell the user, what their `claude setup-token` output looks like, validation rules), and the failure-mode catalogue (expired subscription, wrong account, malformed paste).
 - **`references/tmux-driving.md`** — full polling implementation, ANSI handling, session-died recovery, the `capture-pane` fallback details, the worktree-is-not-scratch distinction.
 - **`references/stop-hook.md`** — complete `Stop` event JSON schema, `SubagentStop` differences, transcript JSONL schema (unofficial but reverse-engineered), documented race conditions to handle.
 - **`typeclaw-config`** — the `docker.file.claudeCode` toggle that gates the install.

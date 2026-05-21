@@ -16,7 +16,7 @@ The cwd of the spawned `claude` process must be the git worktree at `/tmp/cc-<id
 2. **Claude's `.claude/settings.json` is read relative to cwd.** It must live at `/tmp/cc-<id>/.claude/settings.json` so claude picks up the per-task `Stop` hook.
 3. **The worktree IS the codebase.** Claude can read every file at `HEAD` directly — it doesn't need a separate scratch area.
 
-Auth scratch (`/tmp/cc-auth/`) is plain — not a worktree, no git operations, just a tmux pane to host `claude setup-token`.
+Auth has no in-container scratch directory at all — the OAuth `setup-token` flow runs on the user's machine, not in tmux here. See `references/auth-flow.md`.
 
 ## Spawning the session
 
