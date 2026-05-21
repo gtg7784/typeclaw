@@ -95,8 +95,13 @@ const listSub = defineCommand({
   },
   async run() {
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
-    const { loadConfigSync } = await import('@/config')
-    const config = loadConfigSync(cwd)
+    // Diagnostic command: route through `loadConfigSyncOrDefaults` (same
+    // soft-fail pattern as PR #288's `status`/`doctor` and the follow-up for
+    // `model list`) so a broken `typeclaw.json` doesn't crash the very
+    // command users reach for to see which roles the agent thinks it has.
+    // Defaults have no `roles` block, so the empty-state hint fires next.
+    const { loadConfigSyncOrDefaults } = await import('@/config')
+    const config = loadConfigSyncOrDefaults(cwd)
     if (!config.roles || Object.keys(config.roles).length === 0) {
       console.log(c.dim('No roles declared. Run `typeclaw role claim` to add one, or edit typeclaw.json by hand.'))
       return
