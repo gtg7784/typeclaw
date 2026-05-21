@@ -10,6 +10,7 @@ export {
   gitSchema,
   gitignoreSchema,
   loadConfigSync,
+  loadConfigSyncOrDefaults,
   loadPluginConfigsSync,
   migrateLegacyConfigShape,
   modelsSchema,
