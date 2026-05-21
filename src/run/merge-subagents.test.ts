@@ -151,6 +151,40 @@ describe('mergeSubagents', () => {
     expect(pluginSubagentByName.get('roundtrip')?.pluginSubagent).toBe(plugin)
   })
 
+  test('drops tools, customTools, and inFlightKey from the registry-visible shim', () => {
+    // The shim must NOT carry plugin-only fields through to the internal
+    // registry. `tools` and `customTools` have different shapes on each side
+    // (BuiltinToolRef[] vs AgentSessionTools, Tool<any>[] vs ToolDefinition[]),
+    // so they get resolved later via the pluginSubagentByShim WeakMap.
+    // `inFlightKey` is consumed only by the SubagentConsumer via
+    // pluginSubagentByName, not through the registry path. Confirming these
+    // are absent on the shim pins the negative boundary so the rest-spread
+    // can't silently leak a future plugin-only field into the internal type.
+    const registry = registerSubagent(emptyRegistry(), 'rich', {
+      systemPrompt: 'fake',
+      visibility: 'public',
+      tools: [{ __builtinTool: 'read' }],
+      customTools: [
+        {
+          description: 'noop',
+          parameters: z.object({}),
+          execute: async () => ({ content: [] }),
+        },
+      ],
+      inFlightKey: () => 'k',
+    })
+
+    const { registry: merged } = mergeSubagents(registry)
+    const shim = merged.rich
+    if (shim === undefined) throw new Error('shim missing from merged registry')
+
+    expect(Object.hasOwn(shim, 'tools')).toBe(false)
+    expect(Object.hasOwn(shim, 'customTools')).toBe(false)
+    expect(Object.hasOwn(shim, 'inFlightKey')).toBe(false)
+    expect(Object.hasOwn(shim, 'visibility')).toBe(true)
+    expect(Object.hasOwn(shim, 'systemPrompt')).toBe(true)
+  })
+
   test('rejects duplicate subagent names across plugins', () => {
     const registry = emptyRegistry()
     registry.subagents.push({ pluginName: 'a', subagentName: 'dup', subagent: { systemPrompt: 'a' } })

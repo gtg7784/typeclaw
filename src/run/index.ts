@@ -10,6 +10,7 @@ import {
   type Subagent as InternalSubagent,
   type SubagentConsumer,
   type SubagentRegistry,
+  type SubagentShared,
 } from '@/agent/subagents'
 import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
 import { createChannelManager, createChannelsReloadable, type ChannelManager } from '@/channels'
@@ -637,6 +638,26 @@ export function mergeSubagents(pluginRegistry: PluginRegistry): {
   return { registry: merged, pluginSubagentByShim, pluginSubagentByName }
 }
 
+// Compile-time proof that every plugin-only key on `@/plugin`'s `Subagent`
+// (i.e. every key NOT inherited from `SubagentShared`) has been classified
+// for the shim. When a future maintainer introduces a new field on plugin-side
+// `Subagent` that isn't on `SubagentShared`, the `satisfies` clause on
+// `PLUGIN_ONLY_KEYS_DROPPED_BY_SHIM` below fails at compile time until the
+// new key is listed there — and the destructuring in `pluginSubagentShim`
+// is updated to discard it. Without this guard, the shim's rest-spread
+// would silently leak future plugin-only fields into the internal registry —
+// the opposite-direction drift from the bug this PR fixes for shared fields.
+type PluginOnlySubagentKeys = Exclude<keyof import('@/plugin').Subagent<any>, keyof SubagentShared<any>>
+const PLUGIN_ONLY_KEYS_DROPPED_BY_SHIM = {
+  tools: true,
+  customTools: true,
+  inFlightKey: true,
+} satisfies Record<PluginOnlySubagentKeys, true>
+// Reference the table so it's not dead code. The value is a runtime no-op;
+// the load-bearing work is the `satisfies` clause above which forces
+// exhaustive classification of plugin-only keys at compile time.
+void PLUGIN_ONLY_KEYS_DROPPED_BY_SHIM
+
 function pluginSubagentShim(subagent: import('@/plugin').Subagent<any>): InternalSubagent<any> {
   // The two diverging fields (`tools` is `BuiltinToolRef[]` plugin-side vs
   // `AgentSessionTools` internal-side; `customTools` similarly differs) are
@@ -649,7 +670,8 @@ function pluginSubagentShim(subagent: import('@/plugin').Subagent<any>): Interna
   // verbatim — including `visibility` and `requiresSpecificPermission`,
   // whose silent drop in the previous shim made every plugin-contributed
   // public subagent (scout, explorer, operator) invisible to the
-  // `spawn_subagent` tool.
+  // `spawn_subagent` tool. The list of keys removed here is enforced
+  // exhaustive at compile time by `PLUGIN_ONLY_KEYS_DROPPED_BY_SHIM` above.
   const { tools: _tools, customTools: _customTools, inFlightKey: _inFlightKey, ...shared } = subagent
   return shared
 }
