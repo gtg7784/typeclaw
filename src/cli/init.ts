@@ -374,7 +374,14 @@ export const defaultWizardPrompts: WizardPrompts = {
   hasExistingChannelSecrets,
   askReuseExistingChannel,
   runChannelFlow,
-  runOAuthLogin: (provider, cwd, model) => makeOAuthLoginRunner(buildOAuthCallbacks(provider.name))({ cwd, model }),
+  runOAuthLogin: async (provider, cwd, model) => {
+    const { callbacks, dispose } = buildOAuthCallbacks(provider.name)
+    try {
+      return await makeOAuthLoginRunner(callbacks)({ cwd, model })
+    } finally {
+      dispose()
+    }
+  },
   askOAuthFailureRecovery,
 }
 

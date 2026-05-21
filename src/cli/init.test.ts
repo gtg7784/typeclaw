@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from 'bun:test'
 
-import { KNOWN_PROVIDERS, type KnownProviderId } from '@/config/providers'
+import { KNOWN_PROVIDERS, supportsApiKey, supportsOAuth, type KnownProviderId } from '@/config/providers'
 import type { ModelOption } from '@/init/models-dev'
 
 import { collectWizardInputs, decideExistingApiKeyReuse, WizardAbortedError, type WizardPrompts } from './init'
@@ -93,6 +93,17 @@ describe('collectWizardInputs back-aware flow', () => {
     reasoning: true,
     curated: true,
     supportsVision: false,
+  }
+  const anthropicModel: ModelOption = {
+    providerId: 'anthropic',
+    providerName: 'Anthropic',
+    modelId: 'claude-sonnet-4-6',
+    modelName: 'Claude Sonnet 4.6',
+    ref: 'anthropic/claude-sonnet-4-6',
+    contextWindow: 1000000,
+    reasoning: true,
+    curated: true,
+    supportsVision: true,
   }
 
   function makeRecorder(): { steps: string[]; record: (name: string) => void } {
@@ -1089,5 +1100,75 @@ describe('collectWizardInputs back-aware flow', () => {
       expect(error).toBeInstanceOf(WizardAbortedError)
       expect((error as WizardAbortedError).oauthCredentialsSaved).toBe(false)
     }
+  })
+
+  test('dual-auth provider (anthropic): pickAuthMethod is REAL prompt with both options, not autoValue', async () => {
+    // given: anthropic supports both api-key and oauth. Unlike openai
+    //   (api-key-only) and openai-codex (oauth-only), pickAuthMethod must
+    //   actually ask the user — autoValue is wrong here. We assert the
+    //   prompt sees the live provider and that the wizard honors the
+    //   user's selection literally.
+    let seenProviderId: string | undefined
+    let seenBothAuthModes: boolean | undefined
+    const prompts = makePrompts({
+      loadCatalog: async () => ({ options: [anthropicModel], source: 'curated' }),
+      pickProvider: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: anthropicModel }),
+      pickAuthMethod: async (provider) => {
+        seenProviderId = provider.id
+        seenBothAuthModes = supportsApiKey(provider) && supportsOAuth(provider)
+        return { kind: 'value', value: 'api-key' }
+      },
+      askApiKey: async () => ({ kind: 'value', value: 'sk-ant-test' }),
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(seenProviderId).toBe('anthropic')
+    expect(seenBothAuthModes).toBe(true)
+    expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk-ant-test' })
+  })
+
+  test('dual-auth provider (anthropic): user picks oauth → runOAuthLogin fires with anthropic ref', async () => {
+    const loginCalls: Array<{ cwd: string; model: string; providerId: string }> = []
+    const prompts = makePrompts({
+      loadCatalog: async () => ({ options: [anthropicModel], source: 'curated' }),
+      pickProvider: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: anthropicModel }),
+      pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
+      runOAuthLogin: async (provider, cwd, model) => {
+        loginCalls.push({ cwd, model, providerId: provider.id })
+        return { ok: true }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(loginCalls).toEqual([{ cwd: '/agent', model: 'anthropic/claude-sonnet-4-6', providerId: 'anthropic' }])
+    expect(result.llmAuth).toEqual({ kind: 'oauth-completed' })
+  })
+
+  test('dual-auth provider (anthropic): oauth failure offers api-key fallback (apiKeyAvailable=true)', async () => {
+    // given: anthropic's OAuth login fails — distinct from openai-codex,
+    //   where api-key fallback is unavailable. The recovery prompt MUST see
+    //   apiKeyAvailable=true so the wizard can route to enter-api-key.
+    let apiKeyAvailableSeen: boolean | undefined
+    const prompts = makePrompts({
+      loadCatalog: async () => ({ options: [anthropicModel], source: 'curated' }),
+      pickProvider: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: anthropicModel }),
+      pickAuthMethod: async () => ({ kind: 'value', value: 'oauth' }),
+      runOAuthLogin: async () => ({ ok: false, reason: 'browser closed' }),
+      askOAuthFailureRecovery: async (_provider, _reason, apiKeyAvailable) => {
+        apiKeyAvailableSeen = apiKeyAvailable
+        return 'api-key'
+      },
+      askApiKey: async () => ({ kind: 'value', value: 'sk-ant-recovered' }),
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(apiKeyAvailableSeen).toBe(true)
+    expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk-ant-recovered' })
   })
 })

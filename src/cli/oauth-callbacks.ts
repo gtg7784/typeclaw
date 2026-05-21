@@ -9,41 +9,71 @@ import type { OAuthCallbacks } from '@/init/oauth-login'
 // concurrent `onManualCodeInput` prompt for users whose browser is on a
 // different host than the CLI. See src/init/oauth-login.ts for the contract
 // on each callback and why onManualCodeInput is required for cross-device.
-export function buildOAuthCallbacks(providerName: string): OAuthCallbacks {
+//
+// Returns `{ callbacks, dispose }` rather than bare callbacks because of a
+// pi-ai contract gap: pi-ai races `onManualCodeInput()` against the local
+// callback server (packages/ai/src/utils/oauth/anthropic.ts:210-253). When
+// the browser wins the race, pi-ai sets `result.code` and falls through to
+// token exchange WITHOUT calling `server.cancelWait()` on the manual side —
+// the manual `text()` prompt is left dangling in clack's render pipeline,
+// re-appearing after every subsequent log line. Without the dispose hook,
+// the user sees "Logged in to {Provider}" immediately followed by the stale
+// "paste the redirect URL here" prompt that's now meaningless. Each call
+// site (init/provider) MUST call `dispose()` in a finally after the OAuth
+// runner returns so the orphaned prompt aborts cleanly; clack honors the
+// signal by resolving the prompt with cancel state, the cancel branch
+// throws inside our callback, and pi-ai's outer `.catch()` swallows it
+// (since it stops awaiting the manual promise on the winning-browser path).
+export type OAuthCallbackHandle = {
+  callbacks: OAuthCallbacks
+  dispose: () => void
+}
+
+export function buildOAuthCallbacks(providerName: string): OAuthCallbackHandle {
+  const controller = new AbortController()
+  const { signal } = controller
   return {
-    onAuth: (url, instructions) => {
-      // Don't put the URL inside note(): clack wraps long lines with the box
-      // border `│` on each wrapped segment, which corrupts the URL when the
-      // user copy-pastes it. Keep instructional text in the box, but print
-      // the URL itself as a bare console.log line that any terminal will
-      // hyperlink intact.
-      const preamble = [
-        `Open this URL in your browser to sign in to ${providerName}.`,
-        '',
-        'If your browser shows "this site can\'t be reached" after you sign in,',
-        'copy the full address from the top of the browser and paste it below.',
-      ]
-      if (instructions) preamble.push('', instructions)
-      note(preamble.join('\n'), 'Browser login')
-      console.log(url)
-      console.log('')
-    },
-    onProgress: (message) => {
-      log.info(message)
-    },
-    onPrompt: async (message, placeholder) => {
-      const value = await text({ message, ...(placeholder !== undefined ? { placeholder } : {}) })
-      if (isCancel(value)) return null
-      return value
-    },
-    onManualCodeInput: async () => {
-      const value = await text({
-        message:
-          'If your browser shows "this site can\'t be reached" after you sign in, copy the full address from the top of the browser and paste it here:',
-        placeholder: 'http://localhost:1455/auth/callback?code=...&state=...',
-      })
-      if (isCancel(value)) throw new Error('Login cancelled by user')
-      return value
+    dispose: () => controller.abort(),
+    callbacks: {
+      onAuth: (url, instructions) => {
+        // Don't put the URL inside note(): clack wraps long lines with the box
+        // border `│` on each wrapped segment, which corrupts the URL when the
+        // user copy-pastes it. Keep instructional text in the box, but print
+        // the URL itself as a bare console.log line that any terminal will
+        // hyperlink intact.
+        const preamble = [
+          `Open this URL in your browser to sign in to ${providerName}.`,
+          '',
+          'If your browser shows "this site can\'t be reached" after you sign in,',
+          'copy the full address from the top of the browser and paste it below.',
+        ]
+        if (instructions) preamble.push('', instructions)
+        note(preamble.join('\n'), 'Browser login')
+        console.log(url)
+        console.log('')
+      },
+      onProgress: (message) => {
+        log.info(message)
+      },
+      onPrompt: async (message, placeholder) => {
+        const value = await text({
+          message,
+          signal,
+          ...(placeholder !== undefined ? { placeholder } : {}),
+        })
+        if (isCancel(value)) return null
+        return value
+      },
+      onManualCodeInput: async () => {
+        const value = await text({
+          message:
+            'If your browser shows "this site can\'t be reached" after you sign in, copy the full address from the top of the browser and paste it here:',
+          placeholder: 'http://localhost:1455/auth/callback?code=...&state=...',
+          signal,
+        })
+        if (isCancel(value)) throw new Error('Login cancelled by user')
+        return value
+      },
     },
   }
 }

@@ -13,6 +13,7 @@ const PROVIDER_TO_MODELS_DEV: Record<KnownProviderId, string> = {
   // (Codex is a backend, not a separate provider in their taxonomy). Curated
   // entries are surfaced regardless of upstream membership.
   'openai-codex': 'openai',
+  anthropic: 'anthropic',
   fireworks: 'fireworks-ai',
   zai: 'zai',
   // zai-coding (GLM Coding Plan) is a billing surface, not a separate model

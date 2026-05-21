@@ -108,6 +108,112 @@ export const KNOWN_PROVIDERS = {
       },
     },
   },
+  // Anthropic Claude — both the Anthropic Console API (ANTHROPIC_API_KEY)
+  // and Claude Pro/Max/Team/Enterprise subscriptions (OAuth) reach the same
+  // /v1/messages endpoint and share one provider id. Auth path determines
+  // which headers pi-ai's `anthropic-messages` transport injects: API key
+  // sends a plain `x-api-key`; OAuth sends Bearer + Claude Code identity
+  // (anthropic-beta: claude-code-20250219,oauth-2025-04-20 +
+  // user-agent: claude-cli/<version>), which is exactly the surface a
+  // subscriber's `claude setup-token` credential authorizes. The OAuth dance
+  // itself is authorization-code + PKCE against `claude.ai/oauth/authorize`
+  // with a localhost callback server (not device-code); the existing
+  // `typeclaw-claude-code` skill documents the user-side flow for getting
+  // a subscription credential onto the agent when the in-container browser
+  // callback can't reach the user's machine.
+  //
+  // anthropic is the FIRST provider in the registry where both auth modes
+  // coexist on one entry. The runtime in src/agent/auth.ts has a load-bearing
+  // resolution rule: when secrets.json#providers.anthropic carries an OAuth
+  // credential, `ANTHROPIC_API_KEY` in .env is IGNORED (OAuth-on-disk wins
+  // because env-wins only applies to api-key-shaped credentials). For
+  // api-key-only providers this is invisible; for anthropic it surfaces as
+  // "I added the env var but the agent still uses OAuth." The mitigation is
+  // to remove the OAuth credential explicitly (`typeclaw provider remove
+  // anthropic`) before relying on the env-var path. Same rule applies to any
+  // future dual-auth provider — keep the surprise in mind when expanding.
+  //
+  // Model lineup is the current GA tier as of 2026-04-16: Opus 4.7 (top,
+  // released Apr 16 2026), Sonnet 4.6 (mid, Feb 5 2026), Haiku 4.5 (fast,
+  // Oct 1 2025). Anthropic's own model overview lists these three as the
+  // current recommended set and flags earlier Opus/Sonnet variants with
+  // "Consider migrating to current models." Opus 4 / Sonnet 4 are deprecated
+  // (retirement: Jun 15 2026); the 4.5/4.6 alternates remain Active but are
+  // not the recommended path.
+  //
+  // ID semantics differ across the lineup and matter for forward-compat:
+  //   - `claude-haiku-4-5` is a 4.5-generation CONVENIENCE ALIAS that
+  //     resolves to the latest dated snapshot (currently `-20251001`). Per
+  //     Anthropic's model-id docs, pre-4.6 dateless ids are evergreen
+  //     pointers — Anthropic can ship a new dated snapshot under the same
+  //     alias and we pick it up automatically.
+  //   - `claude-sonnet-4-6` and `claude-opus-4-7` are 4.6+-generation PINNED
+  //     SNAPSHOTS, not aliases. Anthropic explicitly says "the dateless ID is
+  //     the canonical model ID for that release. It maps to a single, fixed
+  //     model snapshot." A future Sonnet 4.6.1 (if it ever exists) would ship
+  //     under a new id, NOT silently replace `claude-sonnet-4-6`.
+  // Consequence for refresh discipline: bumping Haiku is a no-op (alias
+  // catches the latest); bumping Sonnet/Opus to a future 4.7+ family is a
+  // real edit here. Don't assume `claude-opus-4-7` will silently advance.
+  //
+  // Opus 4.7 specifics that affect cost accounting:
+  //   - New tokenizer: same input maps to 1.0-1.3x more tokens than prior
+  //     generations depending on content type. Per-token price is unchanged
+  //     vs Opus 4.6, but total cost on identical workloads can rise meaningfully.
+  //   - 1M token context window (vs 200k on Haiku) and 128k max output (vs
+  //     64k on Sonnet/Haiku). 1M context is at standard pricing — no surcharge.
+  //   - New `xhigh` effort level between `high` and `max` (pi-ai 0.67.x may
+  //     not surface this knob yet; check before relying on it).
+  //
+  // Pricing mirrors Anthropic's official table as of 2026-05; cacheWrite is
+  // the 5m-TTL rate (1.25x input). 1h TTL is ~2x input (not modeled here —
+  // pi-ai's `cacheWrite` field captures the default 5m rate only).
+  anthropic: {
+    id: 'anthropic',
+    name: 'Anthropic',
+    baseUrl: 'https://api.anthropic.com',
+    auth: ['api-key', 'oauth'],
+    apiKeyEnv: 'ANTHROPIC_API_KEY',
+    oauthProviderId: 'anthropic',
+    models: {
+      'claude-haiku-4-5': {
+        id: 'claude-haiku-4-5',
+        name: 'Claude Haiku 4.5',
+        api: 'anthropic-messages',
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 },
+        contextWindow: 200000,
+        maxTokens: 64000,
+      },
+      'claude-sonnet-4-6': {
+        id: 'claude-sonnet-4-6',
+        name: 'Claude Sonnet 4.6',
+        api: 'anthropic-messages',
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+        contextWindow: 1000000,
+        maxTokens: 64000,
+      },
+      'claude-opus-4-7': {
+        id: 'claude-opus-4-7',
+        name: 'Claude Opus 4.7',
+        api: 'anthropic-messages',
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+        contextWindow: 1000000,
+        maxTokens: 128000,
+      },
+    },
+  },
   // ChatGPT Plus/Pro subscription via the OAuth Codex backend. No API key
   // path here on purpose — the Codex backend is OAuth-only upstream.
   //
