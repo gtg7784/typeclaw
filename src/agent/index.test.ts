@@ -13,6 +13,7 @@ import { createStream } from '@/stream'
 
 import {
   buildChannelTools,
+  buildSubagentOrchestrationTools,
   composeSystemPrompt,
   createOverrideResourceLoader,
   createResourceLoader,
@@ -22,7 +23,9 @@ import {
   getBundledSkillsDir,
   subscribeRestartNotice,
 } from './index'
+import { LiveSubagentRegistry } from './live-subagents'
 import type { SessionOrigin } from './session-origin'
+import type { CreateSessionForSubagent, SubagentRegistry } from './subagents'
 import { DEFAULT_SYSTEM_PROMPT, SLIM_SYSTEM_PROMPT } from './system-prompt'
 
 async function runGit(cwd: string, args: string[]): Promise<void> {
@@ -912,6 +915,82 @@ describe('buildChannelTools', () => {
     const tools = buildChannelTools(makeRouter(), undefined)
     // then
     expect(tools.map((t) => t.name)).toEqual(['channel_send'])
+  })
+})
+
+describe('buildSubagentOrchestrationTools', () => {
+  const stubCreateSession = (async () => ({}) as unknown) as CreateSessionForSubagent
+  const stubRegistry: SubagentRegistry = {}
+  const getOrigin = () => ({ kind: 'tui' as const, sessionId: 'ses_parent' })
+
+  test('exposes the three orchestration tools when all four dependencies are present', () => {
+    const tools = buildSubagentOrchestrationTools({
+      liveRegistry: new LiveSubagentRegistry(),
+      registry: stubRegistry,
+      createSessionForSubagent: stubCreateSession,
+      agentDir: '/agent',
+      parentSessionId: 'ses_parent',
+      getOrigin,
+      permissions: undefined,
+      stream: undefined,
+    })
+    expect(tools.map((t) => t.name).sort()).toEqual(['spawn_subagent', 'subagent_cancel', 'subagent_output'])
+  })
+
+  test('returns [] when liveRegistry is missing (subagent-session context — primary recursive-spawn defense)', () => {
+    const tools = buildSubagentOrchestrationTools({
+      liveRegistry: undefined,
+      registry: stubRegistry,
+      createSessionForSubagent: stubCreateSession,
+      agentDir: '/agent',
+      parentSessionId: 'ses_parent',
+      getOrigin,
+      permissions: undefined,
+      stream: undefined,
+    })
+    expect(tools).toEqual([])
+  })
+
+  test('returns [] when registry is missing', () => {
+    const tools = buildSubagentOrchestrationTools({
+      liveRegistry: new LiveSubagentRegistry(),
+      registry: undefined,
+      createSessionForSubagent: stubCreateSession,
+      agentDir: '/agent',
+      parentSessionId: 'ses_parent',
+      getOrigin,
+      permissions: undefined,
+      stream: undefined,
+    })
+    expect(tools).toEqual([])
+  })
+
+  test('returns [] when createSessionForSubagent is missing', () => {
+    const tools = buildSubagentOrchestrationTools({
+      liveRegistry: new LiveSubagentRegistry(),
+      registry: stubRegistry,
+      createSessionForSubagent: undefined,
+      agentDir: '/agent',
+      parentSessionId: 'ses_parent',
+      getOrigin,
+      permissions: undefined,
+      stream: undefined,
+    })
+    expect(tools).toEqual([])
+  })
+
+  test('returns [] when agentDir is missing', () => {
+    const tools = buildSubagentOrchestrationTools({
+      liveRegistry: new LiveSubagentRegistry(),
+      registry: stubRegistry,
+      createSessionForSubagent: stubCreateSession,
+      agentDir: undefined,
+      parentSessionId: 'ses_parent',
+      getOrigin,
+      permissions: undefined,
+      stream: undefined,
+    })
+    expect(tools).toEqual([])
   })
 })
 
