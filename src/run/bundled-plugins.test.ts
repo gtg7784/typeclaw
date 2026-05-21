@@ -23,6 +23,7 @@ describe('BUNDLED_PLUGINS', () => {
       'backup',
       'agent-browser',
       'explorer',
+      'operator',
     ])
   })
 })
