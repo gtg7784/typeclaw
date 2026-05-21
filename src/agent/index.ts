@@ -220,9 +220,16 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
   const getOrigin: () => SessionOrigin | undefined =
     options.originRef !== undefined ? () => options.originRef!.current : () => options.origin
 
-  const subagentBuiltinTools = options.pluginSubagent?.toolRefs
+  // Subagent built-in tool refs are dual-routed (see BUILTIN_TOOL_DEFINITION
+  // dual-map in plugin-tools.ts): pi-side coding tools go to `tools:` so they
+  // become the strict base set, typeclaw-side web tools go to `customTools:`.
+  // The two `tools:` fields below (effective `options.tools` and the resolved
+  // subagent pi-side builtins) are mutually exclusive — `options.tools` is only
+  // passed by non-subagent callers like multimodal look-at; subagent sessions
+  // never set both.
+  const resolvedSubagentBuiltins = options.pluginSubagent?.toolRefs
     ? resolveBuiltinToolRefs(options.pluginSubagent.toolRefs)
-    : undefined
+    : { agentTools: [], toolDefinitions: [] }
   const pluginCustomTools = options.pluginSubagent
     ? wrapSubagentCustomTools(options.pluginSubagent, options.plugins, getOrigin)
     : wrapRegistryTools(options.plugins, getOrigin)
@@ -239,11 +246,9 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     : undefined
   const sessionBudgetState = sessionBudget ? createBudgetState() : undefined
 
-  const hookWrappedTools = wrapSystemAgentTools(
-    options.tools ?? (subagentBuiltinTools as AgentSessionTools | undefined),
-    options.plugins,
-    getOrigin,
-  )
+  const effectiveTools =
+    options.tools ?? (options.pluginSubagent ? (resolvedSubagentBuiltins.agentTools as AgentSessionTools) : undefined)
+  const hookWrappedTools = wrapSystemAgentTools(effectiveTools, options.plugins, getOrigin)
   const tools =
     sessionBudget && sessionBudgetState && hookWrappedTools
       ? (hookWrappedTools.map((t) =>
@@ -280,7 +285,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     options.customTools !== undefined
       ? options.customTools
       : options.pluginSubagent
-        ? []
+        ? resolvedSubagentBuiltins.toolDefinitions
         : [
             websearchTool,
             webfetchTool,
