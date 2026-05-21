@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
 
 import { parseConfigJson } from '@/config'
@@ -23,23 +23,34 @@ export async function checkManagedConfigGuard(options: {
   const rawPath = args.path
   if (typeof rawPath !== 'string') return undefined
 
-  const resolvedAgentDir = path.resolve(agentDir)
   const targetPath = path.resolve(agentDir, rawPath)
-  if (path.dirname(targetPath) !== resolvedAgentDir) return undefined
-
-  const basename = path.basename(targetPath)
-  if (!isManagedFile(basename)) return undefined
+  const managed = await resolveManagedTarget(agentDir, targetPath)
+  if (!managed) return undefined
 
   const contentResult = await intendedContent(tool, args, targetPath)
   if ('block' in contentResult) return contentResult
 
-  const validation = validateManagedContent(basename, contentResult.content)
+  const validation = validateManagedContent(managed.file, contentResult.content)
   if (validation.ok) return undefined
 
   return {
     block: true,
     reason: `Guard \`${GUARD_MANAGED_CONFIG}\` blocked ${tool} for ${targetPath}: ${validation.reason}.`,
   }
+}
+
+async function resolveManagedTarget(
+  agentDir: string,
+  targetPath: string,
+): Promise<{ file: ManagedFile } | undefined> {
+  const resolvedAgentDir = path.resolve(agentDir)
+  const realAgentDir = await resolveRealIntendedPath(resolvedAgentDir)
+  const realTargetPath = await resolveRealIntendedPath(targetPath)
+
+  if (path.dirname(realTargetPath) !== realAgentDir) return undefined
+
+  const basename = path.basename(realTargetPath)
+  return isManagedFile(basename) ? { file: basename } : undefined
 }
 
 function isManagedFile(basename: string): basename is ManagedFile {
@@ -105,4 +116,27 @@ function blockReason(tool: string, targetPath: string, reason: string): GuardBlo
     block: true,
     reason: `Guard \`${GUARD_MANAGED_CONFIG}\` blocked ${tool} for ${targetPath}: ${reason}.`,
   }
+}
+
+async function resolveRealIntendedPath(absolutePath: string): Promise<string> {
+  const pending: string[] = []
+  let current = absolutePath
+
+  while (true) {
+    try {
+      const realCurrent = await realpath(current)
+      return path.join(realCurrent, ...pending.reverse())
+    } catch (err) {
+      if (!isNotFoundError(err)) throw err
+    }
+
+    const parent = path.dirname(current)
+    if (parent === current) throw new Error(`could not resolve existing parent for ${absolutePath}`)
+    pending.push(path.basename(current))
+    current = parent
+  }
+}
+
+function isNotFoundError(err: unknown): boolean {
+  return err instanceof Error && 'code' in err && err.code === 'ENOENT'
 }

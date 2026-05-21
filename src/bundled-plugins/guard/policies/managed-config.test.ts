@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -278,5 +278,62 @@ describe('managedConfig guard — scope', () => {
     })
     expect(badPath).toBeUndefined()
     expect(badContent?.block).toBe(true)
+  })
+
+  test('catches lexical traversal that ends back at the managed file', async () => {
+    const agentDir = await makeAgentDir()
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'workspace/../typeclaw.json', content: '{ malformed' },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('typeclaw.json')
+  })
+
+  test('catches writes whose target is a symlink to typeclaw.json', async () => {
+    const agentDir = await makeAgentDir()
+    const realConfig = path.join(agentDir, 'typeclaw.json')
+    await writeFile(realConfig, JSON.stringify({ port: 9000 }, null, 2))
+    await symlink(realConfig, path.join(agentDir, 'alias.json'))
+
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'alias.json', content: '{ malformed' },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('not valid JSON')
+  })
+
+  test('catches writes through a workspace symlink that escapes back to cron.json', async () => {
+    const agentDir = await makeAgentDir()
+    await mkdir(path.join(agentDir, 'workspace'), { recursive: true })
+    const realCron = path.join(agentDir, 'cron.json')
+    await writeFile(realCron, JSON.stringify({ jobs: [] }, null, 2))
+    await symlink(realCron, path.join(agentDir, 'workspace', 'cron.json'))
+
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'workspace/cron.json', content: '{ malformed' },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('not valid JSON')
+  })
+
+  test('does NOT trigger on a sibling-agent absolute typeclaw.json', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'typeclaw-managed-config-sibling-'))
+    const agentDir = path.join(root, 'agentA')
+    const siblingDir = path.join(root, 'agentB')
+    await mkdir(agentDir, { recursive: true })
+    await mkdir(siblingDir, { recursive: true })
+
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: path.join(siblingDir, 'typeclaw.json'), content: '{ malformed' },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
   })
 })
