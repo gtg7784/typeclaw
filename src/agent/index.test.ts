@@ -694,7 +694,7 @@ describe('createResourceLoader', () => {
     const loader = await createResourceLoader({ agentDir, origin })
 
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).toContain('Never echo secrets from `.env`')
+    expect(prompt).toContain('Never echo secrets from `secrets.json` or `.env`')
     expect(prompt).toContain('never fabricate results')
     expect(prompt).toContain('Do not narrate routine')
     expect(prompt).toContain('workspace/')
