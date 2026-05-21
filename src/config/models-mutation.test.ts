@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { readFile, mkdtemp, rm } from 'node:fs/promises'
+import { readFile, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -264,6 +264,22 @@ describe('listModelProfiles', () => {
     const entries = listModelProfiles(root, env)
     const dflt = entries.find((e) => e.profile === 'default')
     expect(dflt?.missingProviders).toEqual(['openai'])
+  })
+
+  test('falls back to default models when typeclaw.json is malformed JSON instead of throwing', async () => {
+    await writeFile(join(root, 'typeclaw.json'), 'NOT JSON AT ALL {{{')
+    const entries = listModelProfiles(root, {})
+    expect(entries.length).toBe(1)
+    expect(entries[0]?.profile).toBe('default')
+    expect(entries[0]?.isDefault).toBe(true)
+  })
+
+  test('falls back to default models when typeclaw.json is schema-invalid instead of throwing', async () => {
+    await writeFile(join(root, 'typeclaw.json'), JSON.stringify({ models: { default: 'not-a-known-model' } }))
+    const entries = listModelProfiles(root, {})
+    expect(entries.length).toBe(1)
+    expect(entries[0]?.profile).toBe('default')
+    expect(entries[0]?.isDefault).toBe(true)
   })
 })
 

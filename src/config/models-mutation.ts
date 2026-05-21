@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 import { commitSystemFileSync } from '@/git/system-commit'
 
-import { configSchema, loadConfigSync, validateConfig } from './config'
+import { configSchema, loadConfigSyncOrDefaults, validateConfig } from './config'
 import {
   KNOWN_PROVIDERS,
   listKnownModelRefs,
@@ -33,8 +33,16 @@ export type ModelProfileEntry = {
 
 export type ModelMutationResult = { ok: true } | { ok: false; reason: string }
 
+// `listModelProfiles` is the read-only path behind `typeclaw model list`, a
+// diagnostic command. It routes through `loadConfigSyncOrDefaults` (same
+// soft-fail pattern as `typeclaw status` / `doctor`, PR #288) so a broken
+// `typeclaw.json` doesn't crash the command users reach for to see what
+// model config the agent thinks it has. Mutation paths (`setProfile`,
+// `addProfile`, `removeProfile`) stay on the strict gate via `validateConfig`
+// in `writeModels`, because writing through a broken-on-disk file would
+// silently land schema-invalid bytes.
 export function listModelProfiles(cwd: string, env: NodeJS.ProcessEnv = process.env): ModelProfileEntry[] {
-  const models = loadConfigSync(cwd).models
+  const models = loadConfigSyncOrDefaults(cwd).models
   const out: ModelProfileEntry[] = []
   for (const [profile, refs] of Object.entries(models)) {
     const headRef = refs[0]!
