@@ -19,19 +19,40 @@ export type SubagentContext<P = unknown> = {
 
 export type RunSession = (override?: { userPrompt?: string }) => Promise<void>
 
-export type Subagent<P = unknown> = {
+// Fields shared verbatim between the plugin-author-facing `Subagent` in
+// `@/plugin/types` and the runtime-internal `Subagent` below. Every consumer
+// that reads from `SubagentRegistry` (the spawn_subagent tool, payload
+// validation, default session construction) only touches these fields, so
+// keeping them in a single declaration makes the plugin→internal shim a
+// rest-spread instead of a hand-maintained property list. Adding a new field
+// here surfaces it on both types in one edit, which is the regression class
+// the previous shim shape suffered: `visibility` and `requiresSpecificPermission`
+// existed on the plugin type but were silently dropped by the shim, so every
+// plugin-contributed public subagent appeared internal at the registry layer.
+//
+// The two fields that intentionally diverge — `tools` and `customTools` —
+// live on each concrete `Subagent` type below. The plugin side uses
+// `BuiltinToolRef[]` + `Tool<any>[]` (the public plugin API, decoupled from
+// pi-coding-agent's internal tool shape); the internal side uses the resolved
+// `AgentSessionTools` + `ToolDefinition[]` that pi-coding-agent actually
+// consumes. The boundary is real and load-bearing — collapsing it would
+// expose pi-coding-agent's internal API as part of the plugin contract.
+export type SubagentShared<P = unknown> = {
   systemPrompt: string
   // Model profile this subagent prefers. Resolved against `config.models` at
   // session construction. Unknown profile names fall back to `default` with
   // a warning. See `Subagent` in `@/plugin/types` for the full contract.
   profile?: string
-  tools?: AgentSessionTools
-  customTools?: ToolDefinition[]
   payloadSchema?: z.ZodType<P>
   handler?: (ctx: SubagentContext<P>, runSession: RunSession) => Promise<void>
   toolResultBudget?: ToolResultBudget
   visibility?: 'public' | 'internal'
   requiresSpecificPermission?: boolean
+}
+
+export type Subagent<P = unknown> = SubagentShared<P> & {
+  tools?: AgentSessionTools
+  customTools?: ToolDefinition[]
 }
 
 export type SubagentRegistry = Readonly<Record<string, Subagent<any>>>

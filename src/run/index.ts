@@ -602,7 +602,15 @@ function makeDefaultSchedulerFactory(internalJobs: () => CronJob[]): SchedulerFa
   return ({ file, onFire }) => createScheduler({ jobs: [...file.jobs, ...internalJobs()], onFire })
 }
 
-function mergeSubagents(pluginRegistry: PluginRegistry): {
+// Exported for the regression test in `merge-subagents.test.ts`. The shim
+// layer between the plugin-author-facing `Subagent` (`@/plugin/types`) and
+// the runtime-internal `Subagent` (`@/agent/subagents`) is the load-bearing
+// translation point for visibility, payload-schema, and permission gating —
+// fields that flow through the `SubagentRegistry` without going through the
+// `pluginSubagentByShim` recovery path. Previous regressions silently
+// dropped fields here, hiding every public bundled subagent (scout,
+// explorer, operator) from the `spawn_subagent` tool surface.
+export function mergeSubagents(pluginRegistry: PluginRegistry): {
   registry: SubagentRegistry
   pluginSubagentByShim: WeakMap<InternalSubagent<any>, PluginSubagentEntry>
   pluginSubagentByName: Map<string, PluginSubagentEntry>
@@ -630,9 +638,18 @@ function mergeSubagents(pluginRegistry: PluginRegistry): {
 }
 
 function pluginSubagentShim(subagent: import('@/plugin').Subagent<any>): InternalSubagent<any> {
-  return {
-    systemPrompt: subagent.systemPrompt,
-    ...(subagent.payloadSchema ? { payloadSchema: subagent.payloadSchema } : {}),
-    ...(subagent.handler ? { handler: subagent.handler as InternalSubagent<any>['handler'] } : {}),
-  }
+  // The two diverging fields (`tools` is `BuiltinToolRef[]` plugin-side vs
+  // `AgentSessionTools` internal-side; `customTools` similarly differs) are
+  // resolved later in `createSessionForSubagent` via the
+  // `pluginSubagentByShim` lookup, which recovers the original plugin
+  // reference. `inFlightKey` is consumed only by the SubagentConsumer via
+  // `pluginSubagentByName`, not through this shim's registry path. Every
+  // other plugin-side field lives on `SubagentShared` and is structurally
+  // assignable to the internal `Subagent`, so a rest-spread carries them
+  // verbatim — including `visibility` and `requiresSpecificPermission`,
+  // whose silent drop in the previous shim made every plugin-contributed
+  // public subagent (scout, explorer, operator) invisible to the
+  // `spawn_subagent` tool.
+  const { tools: _tools, customTools: _customTools, inFlightKey: _inFlightKey, ...shared } = subagent
+  return shared
 }

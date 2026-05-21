@@ -1,7 +1,7 @@
 import type { z } from 'zod'
 
 import type { SessionOrigin } from '@/agent/session-origin'
-import type { ToolResultBudget } from '@/agent/tool-result-budget'
+import type { SubagentShared } from '@/agent/subagents'
 import type { PermissionService } from '@/permissions'
 
 export type ContentPart = { type: 'text'; text: string } | { type: 'image'; mimeType: string; data: string }
@@ -40,61 +40,28 @@ export type SubagentContext<P = unknown> = {
 
 export type RunSession = (override?: { userPrompt?: string }) => Promise<void>
 
-export type Subagent<P = unknown> = {
-  systemPrompt: string
-  // Model profile this subagent prefers. Resolved against `models` in
-  // typeclaw.json at session construction. Unknown profile names fall back to
-  // `default` with a warning. Well-known names: `default`, `fast`, `deep`,
-  // `vision`. Subagents that want a specific tier (e.g. memory-logger wants
-  // `fast`, dreaming wants `deep`) declare it here so the user only has to
-  // map tier → model in config rather than wire each subagent individually.
-  profile?: string
+// The plugin-author-facing subagent declaration. Differs from
+// `@/agent/subagents`'s `Subagent` only in the shape of `tools`/`customTools`:
+// plugins reference builtin tools via tagged `BuiltinToolRef` strings (the
+// stable plugin API) and contribute their own `Tool<any>[]`; the runtime
+// resolves those refs to pi-coding-agent's wrapped tool shapes before the
+// session sees them. Every other field is inherited from `SubagentShared`
+// so a new shared field surfaces on both types in one edit. See
+// `SubagentShared`'s doc-comment for the regression history.
+//
+// `inFlightKey` lives here only (not on the shared shape) because it is
+// consumed exclusively by the `SubagentConsumer` via the
+// `pluginSubagentByName` map, which holds the original plugin reference —
+// the registry-flowing shim never needs to carry it.
+export type Subagent<P = unknown> = SubagentShared<P> & {
   tools?: BuiltinToolRef[]
   customTools?: Tool<any>[]
-  payloadSchema?: z.ZodType<P>
-  handler?: (ctx: SubagentContext<P>, runSession: RunSession) => Promise<void>
   // Coalescing key for the SubagentConsumer's in-flight set. Default is the
   // subagent name alone (only one instance of the subagent runs at a time).
   // Override to allow per-payload concurrency, e.g. memory-logger keyed by
   // parentSessionId so different parent sessions run in parallel while
   // duplicate runs against the same session deduplicate.
   inFlightKey?: (payload: P) => string
-  // Defensive ceiling on cumulative bytes of tool-result text per subagent
-  // run, applied to the named tools only. Once exceeded, subsequent calls to
-  // those tools short-circuit with a fixed message instructing the agent to
-  // stop reading. See `src/agent/tool-result-budget.ts` for the full
-  // rationale; the short version is: a single broken tool (e.g. find_entry
-  // failing because of a schema mismatch) can cause an agent to fall back to
-  // chunked reads of huge files, ballooning subagent token cost. The budget
-  // bounds the blast radius without changing per-call semantics for healthy
-  // runs.
-  toolResultBudget?: ToolResultBudget
-  // Whether the LLM-driven main agent can invoke this subagent via the
-  // `spawn_subagent` tool.
-  // - 'internal' (default): only invokable via cron jobs, plugin lifecycle
-  //   hooks, or programmatic `ctx.spawnSubagent` calls. The main agent does
-  //   NOT see this subagent in its tool surface. Existing bundled subagents
-  //   (memory-logger, dreaming, backup, backup-message, backup-diagnose)
-  //   omit this field and therefore remain internal — they are infrastructure,
-  //   not orchestration targets, and accidentally exposing a write-capable
-  //   one (e.g. `backup` mutates git history) to agent-initiated invocation
-  //   would be a real footgun.
-  // - 'public': exposed to the main agent via `spawn_subagent`. The agent
-  //   can decide mid-conversation to invoke this subagent. Reserved for
-  //   subagents explicitly designed as orchestration targets (e.g. explorer,
-  //   operator). The default is 'internal' specifically so adding a new
-  //   bundled subagent never accidentally widens the agent-facing surface.
-  visibility?: 'public' | 'internal'
-  // Whether spawning this subagent requires a per-subagent permission of
-  // the form `subagent.spawn.<name>`, rather than the generic
-  // `subagent.spawn`. Default false: the generic spawn permission is
-  // sufficient (suitable for read-only / cheap subagents like explorer).
-  // Set true for subagents whose blast radius warrants a separate gate
-  // (the bundled operator is write-capable, so its spawn permission must
-  // NOT be implied by the generic permission held by every channel
-  // member). When true, the spawn tool checks ONLY the per-subagent
-  // permission and never falls back to the generic.
-  requiresSpecificPermission?: boolean
 }
 
 // Cron job map keys are local; the runtime prefixes with `__plugin_<plugin-name>_`
