@@ -9,6 +9,12 @@ You can delegate work to Claude Code, Anthropic's official coding agent. The age
 
 This skill is for the case where Claude Code is the right tool: hard architecture work, multi-file refactors, deep code analysis, a second-opinion read on something you wrote. It is **not** for trivial edits — the round-trip cost (worktree setup + process spawn + auth check + TUI init + at least one full Claude turn) is 15–45 seconds and several thousand tokens of someone else's context window. Do trivial edits yourself.
 
+## Run the delegation inside `operator`, not inline
+
+Once you've decided Claude Code is the right tool, spawn the bundled `operator` subagent to do the actual driving — don't run the worktree setup, the tmux session, the polling loop, the multi-turn decision loop, and the cleanup inline in your own context. The whole loop typically takes several minutes and produces large amounts of intermediate output (TUI buffer captures, Stop sentinels per turn, JSONL transcript references); running it inline blocks the user from talking to you and burns through your context window before you ever get to the synthesis step. `operator` is write-capable and runs the same loop, then returns a clean final report (what claude produced, what `git diff main..cc-<id>` shows, what you should review). You ship the worktree, the prompt, and the safety constraints to operator; operator ships you back the diff and the summary.
+
+Exception: a quick sanity ping (`claude --version` to check the binary exists, `env | grep ANTHROPIC` to check auth). Those are single fast bash calls — do them inline. The "spawn through operator" rule applies to anything that runs `claude` itself as an interactive TUI.
+
 ## When to delegate to Claude Code
 
 Use Claude Code for:
