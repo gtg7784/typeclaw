@@ -81,6 +81,20 @@ async function intendedContent(
     return blockReason(tool, targetPath, 'edit calls must include an edits array')
   }
 
+  // Oracle PR #305 finding #4: refuse multi-edit on managed files to
+  // avoid simulator-vs-pi divergence. The canonical workflow for
+  // typeclaw.json / cron.json is read + modify in memory + write the
+  // whole file back; multi-edit is not required and the divergence
+  // would let an attacker validate a different final file here than
+  // the one pi actually writes.
+  if (edits.length > 1) {
+    return blockReason(
+      tool,
+      targetPath,
+      'multi-edit calls on managed files are refused — use `write` with full content instead',
+    )
+  }
+
   let content: string
   try {
     content = await readFile(targetPath, 'utf8')
@@ -100,10 +114,14 @@ async function intendedContent(
     if (oldText.length === 0) {
       return blockReason(tool, targetPath, 'edit oldText must not be empty')
     }
-    if (!content.includes(oldText)) {
+    const firstIdx = content.indexOf(oldText)
+    if (firstIdx === -1) {
       return blockReason(tool, targetPath, 'edit oldText was not found in existing file')
     }
-    content = content.replace(oldText, newText)
+    if (content.indexOf(oldText, firstIdx + 1) !== -1) {
+      return blockReason(tool, targetPath, 'edit oldText is not unique in the existing file')
+    }
+    content = content.slice(0, firstIdx) + newText + content.slice(firstIdx + oldText.length)
   }
   return { content }
 }
