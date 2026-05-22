@@ -33,16 +33,31 @@ export const GUARD_CRON_PROMOTION = 'cronPromotion'
 //      privilege grant being introduced; the audit point is the
 //      addition itself, regardless of the role value.
 //   2. An existing job's `scheduledByRole` changed to a different value.
+//   3. An existing job's EXECUTABLE BODY changed — `kind`, `prompt`,
+//      `command`, `subagent`, or `payload`. Rewriting only the body of
+//      an existing privileged job (leaving `scheduledByRole` untouched)
+//      is the same deferred-laundering attack as job creation: the
+//      cron consumer fires the new body as the stamped role, and the
+//      attacker has co-opted the role without changing it. Oracle
+//      review (PR #305) called this out as a critical bypass of the
+//      first design. The fields chosen are exactly those the cron
+//      consumer reads when it fires; metadata-only edits do not
+//      reach this list.
+//   4. An existing job had `enabled: false` flipped to true (or
+//      unset, which schema-defaults to true). A previously-disabled
+//      privileged job becoming live is a privilege grant in the
+//      same sense as adding the job fresh.
 //
 // What does NOT count (allowed without ack):
 //   - Removing a job entirely.
-//   - Changing `schedule`, `enabled`, `timezone`, or `payload` on an
-//     existing job (these are scheduling/tuning decisions, not
-//     privilege).
-//   - Changing the `prompt` text on a prompt job or `command` array on
-//     an exec job. Treated as ordinary content edits; out of scope for
-//     this guard. (A prompt that smuggles in attacker text is the
-//     prompt-injection defense's surface, not cron's.)
+//   - Changing `schedule` or `timezone` on an existing job (cadence
+//     decisions; do not change what runs, only when).
+//   - Setting `enabled: true -> false` (disabling a privileged job is
+//     a privilege REDUCTION; allowed).
+//   - Any change to a job that has no `scheduledByRole` at all (the
+//     schema rejects such jobs at managedConfig before we run, so
+//     this branch is unreachable in practice; the guard treats it as
+//     a non-finding for forward compatibility).
 //
 // Failure-open is deliberate, same direction as `rolePromotion`: if
 // the existing `cron.json` cannot be read or parsed, every proposed job
@@ -54,6 +69,8 @@ export const GUARD_CRON_PROMOTION_SEVERITY: SecuritySeverity = 'high'
 export type CronPromotionFinding =
   | { kind: 'job-added'; id: string; scheduledByRole: string }
   | { kind: 'role-changed'; id: string; from: string; to: string }
+  | { kind: 'body-changed'; id: string; scheduledByRole: string; fields: readonly string[] }
+  | { kind: 'enabled-flipped'; id: string; scheduledByRole: string }
 
 export async function checkCronPromotionGuard(options: {
   tool: string
@@ -166,8 +183,78 @@ export function diffJobs(before: readonly ParsedCronJob[], after: readonly Parse
         to: newRole ?? '<unset>',
       })
     }
+    const bodyDelta = diffJobBody(prior, job)
+    if (bodyDelta.length > 0) {
+      findings.push({
+        kind: 'body-changed',
+        id: job.id,
+        scheduledByRole: newRole ?? '<unset>',
+        fields: bodyDelta,
+      })
+    }
+    if (isPreviouslyDisabled(prior) && !isPreviouslyDisabled(job)) {
+      findings.push({
+        kind: 'enabled-flipped',
+        id: job.id,
+        scheduledByRole: newRole ?? '<unset>',
+      })
+    }
   }
   return findings
+}
+
+// `enabled` defaults to true at the schema layer (parseCronJson fills
+// it in). After parse, the field is always boolean-typed. "Previously
+// disabled" means literally `false`; everything else is live.
+function isPreviouslyDisabled(job: ParsedCronJob): boolean {
+  return job.enabled === false
+}
+
+// Executable-body field set. Anything the cron consumer reads when it
+// fires a job belongs here; metadata/cadence fields (schedule, timezone,
+// id, enabled) are out of scope for body-mutation detection because
+// they are handled separately (role-changed, enabled-flipped) or are
+// not privilege grants at all (schedule, timezone).
+function diffJobBody(before: ParsedCronJob, after: ParsedCronJob): string[] {
+  const changed: string[] = []
+  if (before.kind !== after.kind) {
+    changed.push('kind')
+    return changed
+  }
+  if (before.kind === 'prompt' && after.kind === 'prompt') {
+    if (before.prompt !== after.prompt) changed.push('prompt')
+    if (before.subagent !== after.subagent) changed.push('subagent')
+    if (!stableEqual(before.payload, after.payload)) changed.push('payload')
+  } else if (before.kind === 'exec' && after.kind === 'exec') {
+    if (!arrayEqual(before.command, after.command)) changed.push('command')
+  }
+  return changed
+}
+
+function arrayEqual(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
+}
+
+// JSON-stable equality for the opaque `payload` field. We use canonical
+// JSON serialization (sorted keys via the comparator below) so a write
+// that only reorders payload object keys does not flag.
+function stableEqual(a: unknown, b: unknown): boolean {
+  return stableStringify(a) === stableStringify(b)
+}
+
+function stableStringify(value: unknown): string {
+  if (value === undefined) return 'undefined'
+  return JSON.stringify(value, (_key, v: unknown) => {
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      const obj = v as Record<string, unknown>
+      const sorted: Record<string, unknown> = {}
+      for (const k of Object.keys(obj).sort()) sorted[k] = obj[k]
+      return sorted
+    }
+    return v
+  })
 }
 
 function buildBlockReason(tool: string, targetPath: string, findings: readonly CronPromotionFinding[]): string {
@@ -176,6 +263,13 @@ function buildBlockReason(tool: string, targetPath: string, findings: readonly C
     const id = sanitizeForReason(f.id)
     if (f.kind === 'job-added') {
       lines.push(`new job \`${id}\` would run as role \`${sanitizeForReason(f.scheduledByRole)}\``)
+    } else if (f.kind === 'body-changed') {
+      const fieldList = f.fields.map(sanitizeForReason).join(', ')
+      lines.push(
+        `job \`${id}\` (running as \`${sanitizeForReason(f.scheduledByRole)}\`) executable body changed: ${fieldList}`,
+      )
+    } else if (f.kind === 'enabled-flipped') {
+      lines.push(`job \`${id}\` re-enabled (would now fire as role \`${sanitizeForReason(f.scheduledByRole)}\`)`)
     } else {
       lines.push(
         `job \`${id}\` changes scheduledByRole \`${sanitizeForReason(f.from)}\` -> \`${sanitizeForReason(f.to)}\``,
