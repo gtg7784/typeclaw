@@ -89,6 +89,9 @@ export async function checkCronPromotionGuard(options: {
 
   if (isGuardAcknowledged(args, GUARD_CRON_PROMOTION)) return undefined
 
+  const editRefusal = refuseRiskyEdit(tool, args, targetPath)
+  if (editRefusal) return editRefusal
+
   const newContent = await intendedContent(tool, args, targetPath)
   if (newContent === undefined) return undefined
 
@@ -113,6 +116,31 @@ async function pathIsCronJson(agentDir: string, targetPath: string): Promise<boo
   return path.basename(realTargetPath) === 'cron.json'
 }
 
+// Symmetric with role-promotion's refuseRiskyEdit. See Oracle PR #305
+// finding #4: simulator-vs-real divergence on multi-edit, plus
+// non-unique-oldText ambiguity. Conservative refusal keeps the guard
+// honest without re-implementing pi-coding-agent/edit-diff.js inside
+// the security plugin.
+function refuseRiskyEdit(
+  tool: string,
+  args: Record<string, unknown>,
+  targetPath: string,
+): SecurityBlock | undefined {
+  if (tool !== 'edit') return undefined
+  const edits = args.edits
+  if (!Array.isArray(edits)) return undefined
+  if (edits.length > 1) {
+    return {
+      block: true,
+      reason: [
+        `Guard \`${GUARD_CRON_PROMOTION}\` refuses multi-edit on ${targetPath}: the security guard's edit simulator cannot match the pi-coding-agent edit tool's original-content semantics for multi-edit calls.`,
+        'Use `write` with the full file content instead — this is the canonical workflow for managed config files (see the `typeclaw-cron` skill).',
+      ].join(' '),
+    }
+  }
+  return undefined
+}
+
 async function intendedContent(
   tool: string,
   args: Record<string, unknown>,
@@ -134,8 +162,10 @@ async function intendedContent(
     const { oldText, newText } = edit as Record<string, unknown>
     if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined
     if (oldText.length === 0) return undefined
-    if (!content.includes(oldText)) return undefined
-    content = content.replace(oldText, newText)
+    const firstIdx = content.indexOf(oldText)
+    if (firstIdx === -1) return undefined
+    if (content.indexOf(oldText, firstIdx + 1) !== -1) return undefined
+    content = content.slice(0, firstIdx) + newText + content.slice(firstIdx + oldText.length)
   }
   return content
 }

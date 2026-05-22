@@ -243,6 +243,27 @@ describe('checkCronPromotionGuard — write (the canonical attack)', () => {
   })
 })
 
+describe('checkCronPromotionGuard — edit safety (Oracle PR #305 finding #4)', () => {
+  test('refuses multi-edit on cron.json', async () => {
+    const agentDir = await makeAgentDir()
+    await writeCron(agentDir, BASELINE_CRON)
+
+    const result = await checkCronPromotionGuard({
+      tool: 'edit',
+      args: {
+        path: 'cron.json',
+        edits: [
+          { oldText: '"daily"', newText: '"daily"' },
+          { oldText: '"prompt"', newText: '"prompt"' },
+        ],
+      },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('multi-edit')
+  })
+})
+
 describe('checkCronPromotionGuard — first-init', () => {
   test('blocks a fresh write that introduces any privileged job', async () => {
     const agentDir = await makeAgentDir()
