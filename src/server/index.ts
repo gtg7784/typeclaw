@@ -7,6 +7,7 @@ import {
   type CreateSessionResult,
 } from '@/agent'
 import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
+import type { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { LiveSubagentRegistry } from '@/agent/live-subagents'
 import { detectProviderError } from '@/agent/provider-error'
 import type { SessionOrigin } from '@/agent/session-origin'
@@ -102,6 +103,13 @@ export type ServerOptions = {
   // as out-of-scope follow-up.
   liveSubagentRegistry?: LiveSubagentRegistry
   createSessionForSubagent?: CreateSessionForSubagent
+  // Id-keyed registry of live AgentSessions, used by `/inspect` (and any
+  // future read-only session-event consumer) to subscribe to session
+  // events without owning the session lifecycle. Populated by every
+  // session-creation site that wants its sessions inspectable; an absent
+  // registry is fine — `/inspect` will report "session not live, replay
+  // from JSONL only" when it can't resolve the id.
+  liveSessionRegistry?: LiveSessionRegistry
 }
 
 const consoleLogger: ServerLogger = {
@@ -201,6 +209,7 @@ export function createServer({
   commandRunnerFactory,
   liveSubagentRegistry,
   createSessionForSubagent,
+  liveSessionRegistry,
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
   const callIdToWs = new Map<string, AnyOwnerWs>()
@@ -421,6 +430,7 @@ export function createServer({
               await runtimeSnapshot.hooks.runSessionStart({ sessionId: sessionFileId, agentDir })
             }
 
+            liveSessionRegistry?.register({ sessionId: sessionFileId, session })
             forwardSessionEvents(ws, session, logger, sessionFileId)
 
             if (stream) {
@@ -677,6 +687,7 @@ export function createServer({
             if (state) {
               state.session.dispose()
               await state.dispose()
+              liveSessionRegistry?.unregister(state.sessionFileId)
             }
             sessionStates.delete(ws)
             console.log(`session ${state?.sessionFileId ?? ws.data.sessionId}: close`)

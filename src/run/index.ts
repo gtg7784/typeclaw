@@ -1,6 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession, createSessionWithDispose } from '@/agent'
+import { LiveSessionRegistry } from '@/agent/live-sessions'
 import { LiveSubagentRegistry } from '@/agent/live-subagents'
 import type { SessionOrigin } from '@/agent/session-origin'
 import {
@@ -179,6 +180,7 @@ export async function startAgent({
   })
 
   const liveSubagentRegistry = new LiveSubagentRegistry()
+  const liveSessionRegistry = new LiveSessionRegistry()
 
   const channelManager = createChannelManagerFor({
     agentDir: cwd,
@@ -196,6 +198,7 @@ export async function startAgent({
       rehydrateCapOptions: resolveCapOptionsFromConfig(pluginConfigsByName['tool-result-cap']),
       permissions: pluginsLoaded.permissions,
       liveSubagentRegistry,
+      liveSessionRegistry,
       subagentRegistry: pluginRuntime.get().subagents,
       getCreateSessionForSubagent: () => createSessionForSubagent,
       ...containerNameOpt,
@@ -245,8 +248,14 @@ export async function startAgent({
           : {}),
         ...runtimeVersionOpt,
       })
+      liveSessionRegistry.register({ sessionId, session: created.session })
+      const originalDispose = created.dispose
       return {
         ...created,
+        dispose: async () => {
+          liveSessionRegistry.unregister(sessionId)
+          await originalDispose()
+        },
         hooks: snap.hooks,
         sessionId,
         agentDir: cwd,
@@ -360,9 +369,13 @@ export async function startAgent({
         ...containerNameOpt,
         ...runtimeVersionOpt,
       })
+      liveSessionRegistry.register({ sessionId, session })
       return {
         prompt: (text) => session.prompt(text),
-        dispose: () => session.dispose(),
+        dispose: () => {
+          liveSessionRegistry.unregister(sessionId)
+          session.dispose()
+        },
         sessionId,
         agentDir: cwd,
         origin: cronOrigin,
@@ -477,6 +490,7 @@ export async function startAgent({
     tunnelManager,
     liveSubagentRegistry,
     createSessionForSubagent,
+    liveSessionRegistry,
     ...containerNameOpt,
     ...runtimeVersionOpt,
     ...tuiTokenOpt,
