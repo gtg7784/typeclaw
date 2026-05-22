@@ -51,7 +51,11 @@ function assistantLine(text: string, timestamp = 1_000_002): string {
   })
 }
 
-function captureSink(): { out: string[]; err: string[]; push: { stdout: (l: string) => void; stderr: (l: string) => void } } {
+function captureSink(): {
+  out: string[]
+  err: string[]
+  push: { stdout: (l: string) => void; stderr: (l: string) => void }
+} {
   const out: string[] = []
   const err: string[] = []
   return {
@@ -92,11 +96,7 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
   })
 
   test('--json emits one event per line and omits the header/footer', async () => {
-    await seedSession(
-      'a_ses_jsonout.jsonl',
-      [metaLine({ kind: 'tui' }), userLine('hi')],
-      1000,
-    )
+    await seedSession('a_ses_jsonout.jsonl', [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
@@ -139,11 +139,7 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
   test('--since filters out older events by their timestamp', async () => {
     await seedSession(
       'a_ses_since.jsonl',
-      [
-        metaLine({ kind: 'tui' }),
-        userLine('old', Date.now() - 86_400_000),
-        userLine('new', Date.now()),
-      ],
+      [metaLine({ kind: 'tui' }), userLine('old', Date.now() - 86_400_000), userLine('new', Date.now())],
       1000,
     )
     const sink = captureSink()

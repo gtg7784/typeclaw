@@ -73,7 +73,9 @@ describe('renderEvent (plain, no color)', () => {
       totalTokens: 150,
       cost: 0.0123,
     }
-    expect(stripTime(renderEvent(ev, PLAIN))).toBe('HH:MM:SS  done       tokens: 100 in / 50 out · $0.0123 · stop=end_turn')
+    expect(stripTime(renderEvent(ev, PLAIN))).toBe(
+      'HH:MM:SS  done       tokens: 100 in / 50 out · $0.0123 · stop=end_turn',
+    )
   })
 
   test('error event prints the error message', () => {
@@ -95,16 +97,18 @@ describe('renderEvent (plain, no color)', () => {
 })
 
 describe('renderEvent (with color)', () => {
+  const ANSI_ESC = String.fromCharCode(0x1b)
+
   test('emits ANSI codes when color enabled', () => {
     const ev: InspectEvent = { cat: 'user', ts: dateMs('15:08:42'), text: 'hi' }
     const out = renderEvent(ev, { color: true })
-    expect(out).toMatch(/\u001b\[/)
+    expect(out.includes(ANSI_ESC)).toBe(true)
   })
 
   test('plain mode emits zero ANSI codes', () => {
     const ev: InspectEvent = { cat: 'user', ts: dateMs('15:08:42'), text: 'hi' }
     const out = renderEvent(ev, { color: false })
-    expect(out).not.toMatch(/\u001b\[/)
+    expect(out.includes(ANSI_ESC)).toBe(false)
   })
 })
 

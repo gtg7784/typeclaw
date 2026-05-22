@@ -1,8 +1,8 @@
 import { join } from 'node:path'
 
 import { originLabel, shortSessionId } from './label'
-import { replayJsonl } from './replay'
 import { renderEvent } from './render'
+import { replayJsonl } from './replay'
 import type { SessionSummary } from './session-list'
 import { listSessions, resolveSession } from './session-list'
 import { matchesFilter, parseDuration, parseFilter } from './types'

@@ -67,10 +67,7 @@ function renderBody(event: InspectEvent, opts: RenderOptions): string {
   }
 }
 
-function renderDone(
-  event: Extract<InspectEvent, { cat: 'done' }>,
-  opts: RenderOptions,
-): string {
+function renderDone(event: Extract<InspectEvent, { cat: 'done' }>, opts: RenderOptions): string {
   const parts: string[] = []
   if (event.totalTokens > 0) parts.push(`tokens: ${event.input} in / ${event.output} out`)
   if (event.cost > 0) parts.push(`$${event.cost.toFixed(4)}`)

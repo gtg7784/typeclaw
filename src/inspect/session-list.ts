@@ -34,7 +34,9 @@ export async function listSessions(opts: ListSessionsOptions): Promise<SessionSu
       return { ...entry, mtimeMs }
     }),
   )
-  const valid = withStats.filter((v): v is { path: string; basename: string; sessionId: string; mtimeMs: number } => v !== null)
+  const valid = withStats.filter(
+    (v): v is { path: string; basename: string; sessionId: string; mtimeMs: number } => v !== null,
+  )
   valid.sort((a, b) => b.mtimeMs - a.mtimeMs)
   const limited = opts.limit !== undefined ? valid.slice(0, opts.limit) : valid
 
@@ -124,7 +126,7 @@ async function peekSession(
   let origin: MinimalSessionOrigin | null = null
   let firstPrompt: string | null = null
   let bytesRead = 0
-  for await (const event of replayJsonl(path, { ...(onWarn !== undefined ? { onWarn } : {}) })) {
+  for await (const event of replayJsonl(path, onWarn !== undefined ? { onWarn } : {})) {
     if (event.cat === 'meta' && origin === null) origin = event.origin
     if (event.cat === 'user' && firstPrompt === null) firstPrompt = event.text
     if (origin !== null && firstPrompt !== null) break
