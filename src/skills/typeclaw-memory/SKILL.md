@@ -9,7 +9,7 @@ The agent's long-term memory is sharded across files in `memory/topics/<slug>.md
 
 ## Reading
 
-The `# Memory` section of every system prompt comes from these shards plus undreamed daily-stream tails. When total shard bytes are above the 16 KB injection budget (or when speaking in a channel), only the heading + `cites=N, days=N, lastReinforced=YYYY-MM-DD` shows; call `memory_search` to fetch the bodies you need.
+The `# Memory` section of every system prompt comes from these shards plus undreamed daily-stream tails. When total shard bytes are above the 16 KB injection budget (or when speaking in a channel), only the heading + `cites=N, days=N, lastReinforced=YYYY-MM-DD` shows; call `memory_search` to fetch the bodies you need. `memory_search` also covers undreamed stream events directly — useful when looking for something the dreaming subagent hasn't yet consolidated into a shard.
 
 ## Writing
 
@@ -23,7 +23,14 @@ Citations in shard bodies use the canonical form `streams/yyyy-MM-dd#<fragment-i
 
 ## `memory_search` tool
 
-When index-mode injection hides bodies, use `memory_search({query, asRegex?, full?, maxResults?})` to find and load specific topics. Substring (case-insensitive) by default; `asRegex: true` for regex. Returns matches with line-context excerpts; `full: true` returns the entire shard body.
+When index-mode injection hides bodies, or when you need recent fragments the dreaming subagent hasn't consolidated yet, use `memory_search({query, asRegex?, full?, maxResults?})`. It searches BOTH topic shards under `memory/topics/` and undreamed stream events under `memory/streams/`. Substring (case-insensitive) by default; `asRegex: true` for regex.
+
+Results are discriminated by `source`:
+
+- `source: "topic"` — fields `shardPath`, `slug`, `heading`, `excerpt`, `fullBody?`
+- `source: "stream"` — fields `streamPath`, `date`, `eventId?` (citation-format `streams/yyyy-MM-dd#<id>` for fragments; absent for legacy prose), `topic`, `excerpt`, `fullBody?`
+
+Topic matches come first (alphabetical by slug); then stream matches (newest day first). `full: true` returns the entire shard or fragment body. `maxResults` truncates streams before topics when exhausted.
 
 ## Per-shard truncation
 

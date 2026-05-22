@@ -1,6 +1,12 @@
-import { readFile, appendFile, writeFile, rename } from 'node:fs/promises'
+import { readFile, appendFile, readdir, writeFile, rename } from 'node:fs/promises'
+import { join } from 'node:path'
 
+import { getDreamedIds, loadDreamingState } from './dreaming-state'
+import { streamsDir } from './paths'
 import { parseEventLine, type StreamEvent } from './stream-events'
+
+const STREAM_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}\.jsonl$/
+const STREAM_DATE_FROM_FILENAME = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
 
 export async function readEvents(path: string): Promise<StreamEvent[]> {
   let raw: string
@@ -39,6 +45,114 @@ export async function writeEventsAtomic(path: string, events: readonly StreamEve
   const tmp = `${path}.tmp`
   await writeFile(tmp, joined, 'utf-8')
   await rename(tmp, path)
+}
+
+// Daily-stream directory for this agent. New layout is `memory/streams/`;
+// pre-migration agents kept them flat under `memory/`. `displayPrefix` is
+// the path string consumers render so the agent sees a stable identifier
+// regardless of which layout is on disk.
+export type StreamDirectory = {
+  dir: string
+  displayPrefix: 'memory' | 'memory/streams'
+  names: string[]
+}
+
+export async function listStreamFiles(agentDir: string): Promise<StreamDirectory | null> {
+  const streamsDirPath = streamsDir(agentDir)
+  try {
+    const names = await readdir(streamsDirPath)
+    return { dir: streamsDirPath, displayPrefix: 'memory/streams', names }
+  } catch (err) {
+    if (!isEnoent(err)) throw err
+  }
+
+  const legacyDir = join(agentDir, 'memory')
+  try {
+    const names = await readdir(legacyDir)
+    return { dir: legacyDir, displayPrefix: 'memory', names }
+  } catch (err) {
+    if (!isEnoent(err)) throw err
+    return null
+  }
+}
+
+// Per-file slice with dreamed events removed. `events` is whatever
+// `readEvents` returned for the file; `dreamedIds` is the day's slice from
+// `getDreamedIds(state, date)`. Returns the events the next consumer should
+// see — empty when every event has been dreamed.
+//
+// `legacy_prose` events pre-date the dreamed-id contract (they have no `id`)
+// and are always kept. Same rule as the injection-side filter; lifted here
+// so injection and search agree on what counts as undreamed.
+export function filterUndreamedEvents(events: StreamEvent[], dreamedIds: ReadonlySet<string>): StreamEvent[] {
+  if (dreamedIds.size === 0) return events
+  return events.filter((event) => {
+    if (event.type === 'legacy_prose') return true
+    return !dreamedIds.has(event.id)
+  })
+}
+
+// Pre-filter daily streams: raw events + per-day dreamed-id set, oldest day
+// first. Consumers that care about filter ordering use this; consumers that
+// just want "undreamed events" use `readAllUndreamedStreamDays` instead.
+//
+// The injection path (`loadMemory`) needs ordering: self-session filter must
+// run BEFORE dreamed-id filter, because the rendered "(undreamed tail)"
+// label is meant to signal "your visible slice lost events to dreaming",
+// not "this day has any dreamed events at all." Pre-applying the dreamed
+// filter in this helper would conflate those.
+export type StreamDay = {
+  date: string
+  path: string
+  name: string
+  events: StreamEvent[]
+  dreamedIds: ReadonlySet<string>
+}
+
+export async function readAllStreamDays(agentDir: string): Promise<StreamDay[]> {
+  const streamFiles = await listStreamFiles(agentDir)
+  if (streamFiles === null) return []
+
+  const { dir, displayPrefix, names } = streamFiles
+  const dated = names.filter((n) => STREAM_FILE_PATTERN.test(n)).sort()
+  const state = await loadDreamingState(agentDir)
+  return Promise.all(
+    dated.map(async (name): Promise<StreamDay> => {
+      const date = STREAM_DATE_FROM_FILENAME.exec(name)?.[1] ?? ''
+      const filePath = join(dir, name)
+      return {
+        date,
+        path: filePath,
+        name: `${displayPrefix}/${name}`,
+        events: await readEvents(filePath),
+        dreamedIds: getDreamedIds(state, date),
+      }
+    }),
+  )
+}
+
+// Convenience wrapper for consumers that just want undreamed events without
+// caring about filter ordering: pre-applies `filterUndreamedEvents` per day
+// and drops fully-dreamed days. The injection path uses `readAllStreamDays`
+// instead because it must order self-session and dreamed-id filters.
+export type UndreamedStreamDay = {
+  date: string
+  path: string
+  name: string
+  events: StreamEvent[]
+}
+
+export async function readAllUndreamedStreamDays(agentDir: string): Promise<UndreamedStreamDay[]> {
+  const days = await readAllStreamDays(agentDir)
+  return days.flatMap((day) => {
+    const undreamed = filterUndreamedEvents(day.events, day.dreamedIds)
+    if (undreamed.length === 0) return []
+    return [{ date: day.date, path: day.path, name: day.name, events: undreamed }]
+  })
+}
+
+function isEnoent(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code: string }).code === 'ENOENT'
 }
 
 export async function countEvents(path: string): Promise<number> {

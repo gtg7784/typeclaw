@@ -405,6 +405,37 @@ describe('loadMemory self-session fragment filtering', () => {
     expect(section).toContain('## other')
   })
 
+  test('does NOT label day as undreamed tail when only dreamed events were also self-session events', async () => {
+    // Regression: label must not fire when dreamed events were all self-filtered.
+    await writeStream(agentDir, '2026-04-27', [
+      fragment('dreamed-self', 'ses_self', 'self dreamed', 'self body'),
+      fragment('fresh-other', 'ses_other', 'other fresh', 'other body'),
+    ])
+    await writeDreamingState(agentDir, { '2026-04-27': { dreamedIds: ['dreamed-self'], ts: 'past' } })
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self' })
+
+    expect(section).toContain('## memory/streams/2026-04-27.jsonl')
+    expect(section).not.toContain('(undreamed tail)')
+    expect(section).toContain('## other fresh')
+    expect(section).not.toContain('## self dreamed')
+  })
+
+  test('labels day as undreamed tail when other-session events were dreamed', async () => {
+    // Complement of the regression above: label MUST fire when dreaming pruned sibling-session events.
+    await writeStream(agentDir, '2026-04-27', [
+      fragment('dreamed-other', 'ses_other', 'other dreamed', 'other body'),
+      fragment('fresh-other', 'ses_other', 'other fresh', 'other body'),
+    ])
+    await writeDreamingState(agentDir, { '2026-04-27': { dreamedIds: ['dreamed-other'], ts: 'past' } })
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self' })
+
+    expect(section).toContain('## memory/streams/2026-04-27.jsonl (undreamed tail)')
+    expect(section).toContain('## other fresh')
+    expect(section).not.toContain('## other dreamed')
+  })
+
   test('appends the filesystem retrieval cache for the current session when present', async () => {
     await mkdir(join(agentDir, 'memory', '.retrieval-cache'), { recursive: true })
     await writeFile(join(agentDir, 'memory', '.retrieval-cache', 'ses_self.md'), 'focused retrieved context\n', 'utf8')
@@ -493,7 +524,7 @@ describe('loadMemory injection threshold (T13)', () => {
 
     const section = await loadMemory(agentDir)
 
-    expect(section).toContain('Memory is large. Call `memory_search` to fetch specific topics.')
+    expect(section).toContain('Memory is large. Call `memory_search` to fetch specific topics or recent stream events.')
   })
 
   test('index mode renders cites/days/lastReinforced metadata line per shard', async () => {
