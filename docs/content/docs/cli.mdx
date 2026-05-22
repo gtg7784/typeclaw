@@ -1,0 +1,121 @@
+---
+title: CLI Reference
+description: Every typeclaw command, what stage it runs in, and the flags that matter
+icon: Terminal
+---
+
+TypeClaw runs code in three stages with different filesystems. The CLI command names encode the stage. `init` creates the host stage; `start`/`stop`/`restart`/`logs`/`tui`/`reload`/`shell` etc. are **host-stage launchers**; `run` is the **container-stage** entrypoint Docker actually executes. You almost never run `typeclaw run` directly.
+
+This page covers the commands not already documented in dedicated pages. See also: [Channels](/docs/channels), [Cron](/docs/cron), [Tunnels](/docs/tunnels), [Permissions](/docs/permissions).
+
+## Lifecycle
+
+| Command            | Description                                                                                                                                  |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `typeclaw init`    | Interactive wizard. Scaffolds the agent folder; optionally wires the first provider + first channel.                                         |
+| `typeclaw start`   | `docker run` the container with the configured ports + mounts + env-file. Spawns `hostd` on first call per host. Flags: `--port`, `--build`. |
+| `typeclaw restart` | `stop` + `start` with the same flag set as `start`.                                                                                          |
+| `typeclaw stop`    | `docker stop` then `docker rm` so a clean stop leaves no trace.                                                                              |
+| `typeclaw status`  | Container + daemon registration state.                                                                                                       |
+| `typeclaw logs`    | Print container stdout/stderr with reformatted local timestamps. `-f` / `--follow` to stream.                                                |
+| `typeclaw shell`   | Drop into a shell inside the running container. `--shell` to pick (defaults to `bash` if present, else `sh`).                                |
+| `typeclaw tui`     | Attach an interactive TUI. Takes an optional one-shot prompt argument; `--url` to override the websocket URL.                                |
+| `typeclaw reload`  | Re-read `typeclaw.json` and apply hot-reloadable fields. Reports which fields require a restart.                                             |
+
+`--port` is the **preferred** host port. On bind conflict, `start` allocates an ephemeral port; subsequent commands (`tui`, `reload`, etc.) resolve the actual port by querying Docker.
+
+## Providers
+
+```sh
+typeclaw provider add        # interactive: pick provider + auth method
+typeclaw provider add fireworks --key fw_xxx
+typeclaw provider add openai --oauth
+typeclaw provider add openai --env MY_OPENAI_KEY    # bind to a custom env var
+typeclaw provider set <id>   # rotate
+typeclaw provider remove <id> [--force]
+typeclaw provider list       # shows resolution: file vs env
+```
+
+Providers are LLM credentials. The store is `secrets.json#providers`; see [Secrets](/docs/secrets) for the env-wins / file-never-auto-mutated policy.
+
+## Models
+
+```sh
+typeclaw model set default fireworks/kimi-k2
+typeclaw model add deep anthropic/claude-opus-4-5
+typeclaw model remove fast
+typeclaw model list                # current profiles
+typeclaw model list --available    # every known provider/model ref
+```
+
+Profiles (`default`, `fast`, `deep`, `vision`, or any custom name) map to a single ref or a fallback chain. Unknown profile names resolve to `default` with a one-time warning at session construction.
+
+## Roles
+
+See [Permissions](/docs/permissions) for the full role model. Quick reference:
+
+```sh
+typeclaw role claim --as owner --channel slack-bot     # pair a channel author to a role
+typeclaw role list                                     # show declared roles + match rules
+```
+
+`--ttl` (default 600000 ms) controls how long the claim code stays valid. Drop `--channel` to listen on every wired adapter.
+
+## Channels, Cron, Tunnels
+
+Covered on their own pages:
+
+- [`typeclaw channel add | set | reauth`](/docs/channels)
+- [`typeclaw cron list`](/docs/cron) (edit `cron.json` directly, then `reload`)
+- [`typeclaw tunnel add | list | status | logs | remove`](/docs/tunnels)
+
+## Compose
+
+`typeclaw compose` orchestrates multiple agents across immediate subdirectories of cwd. Each subdirectory is an independent agent folder (own container, own `~/.typeclaw/` registration, own port).
+
+```sh
+cd ~/my-agent-fleet/
+
+typeclaw compose start           # docker run every agent subfolder
+typeclaw compose start --build   # regenerate Dockerfiles and rebuild
+typeclaw compose stop            # stop all
+typeclaw compose restart         # stop + start
+typeclaw compose status          # one row per agent
+typeclaw compose logs -f         # follow logs from every agent, interleaved
+typeclaw compose usage --since 7d
+typeclaw compose doctor          # run doctor in every agent, summarize
+typeclaw compose doctor --fix --only docker,config
+```
+
+Compose is a thin loop over the per-agent commands — there is no shared lifecycle, no orchestration manifest, no inter-agent networking magic. Just "do `X` on every agent in this directory."
+
+## Doctor
+
+```sh
+typeclaw doctor                  # human-readable report; exit 0/1
+typeclaw doctor -v               # show per-check details
+typeclaw doctor --json           # JSON for scripting
+typeclaw doctor --fix            # attempt auto-fixes and commit changes
+typeclaw doctor --only docker,config   # narrow to specific categories
+```
+
+Diagnoses the host, agent folder, and plugins. Categories include `docker`, `config`, `secrets`, `network`, `git`, plus per-plugin checks. `--fix` is safe by design: every fix is git-committed so you can audit and revert.
+
+## Usage
+
+```sh
+typeclaw usage                          # summary across recent sessions
+typeclaw usage daily --since 7d         # one row per calendar day
+typeclaw usage session --limit 20       # top sessions by cost
+typeclaw usage models                   # one row per provider/model
+typeclaw usage origin                   # one row per session origin (tui/cron/channel/subagent)
+typeclaw usage --json                   # machine-readable
+```
+
+Common flags on every subcommand: `--since <duration>` / `--until <iso>`, `--cwd <path>`, `--json`.
+
+## Hidden commands
+
+`typeclaw _hostd` is the host-side daemon entry, spawned automatically by the first `start` on the host. It's hidden from `--help` and not intended for direct invocation. State lives at `~/.typeclaw/` (override with `TYPECLAW_HOME` for tests).
+
+`typeclaw run` is the container-stage entrypoint Docker actually executes. The host CLI never invokes it directly.
