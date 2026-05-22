@@ -486,6 +486,63 @@ describe('runShardingMigration', () => {
     expect(parsed.frontmatter).toMatchObject({ heading: 'Strength', cites: 3, days: 2, lastReinforced: '2026-05-19' })
   })
 
+  test('commits sharded layout when the agent directory is a git repo', async () => {
+    await initGitRepo(agentDir)
+    await writeRootMemory(memoryWithTopics(['Alpha', 'Beta']))
+    await writeFlatStream('2026-05-18', '{"type":"fragment","id":"id-1"}\n')
+    await git(agentDir, ['add', '--', 'MEMORY.md', 'memory/2026-05-18.jsonl'])
+    await git(agentDir, ['commit', '-m', 'pre-shard state'])
+
+    const result = await runShardingMigration({ agentDir, logger })
+
+    expect(result.migrated).toBe(true)
+    const latest = await git(agentDir, ['log', '--oneline', '-1'])
+    expect(latest.stdout).toContain('memory: shard MEMORY.md into 2 topic(s) and 1 daily stream(s)')
+
+    const porcelain = await git(agentDir, ['status', '--porcelain'])
+    expect(porcelain.stdout).toBe('')
+
+    const tracked = await git(agentDir, ['ls-tree', '-r', '--name-only', 'HEAD'])
+    const files = new Set(tracked.stdout.split('\n').filter((line) => line !== ''))
+    expect(files.has('memory/topics/alpha.md')).toBe(true)
+    expect(files.has('memory/topics/beta.md')).toBe(true)
+    expect(files.has('memory/streams/2026-05-18.jsonl')).toBe(true)
+    expect(files.has('memory/MEMORY.md.pre-shard.bak')).toBe(true)
+    expect(files.has('MEMORY.md')).toBe(false)
+    expect(files.has('memory/2026-05-18.jsonl')).toBe(false)
+  })
+
+  test('sharding migration does not throw outside a git repo', async () => {
+    await writeRootMemory(memoryWithTopics(['Alpha']))
+    await writeFlatStream('2026-05-18', '{"type":"fragment","id":"id-1"}\n')
+
+    const result = await runShardingMigration({ agentDir, logger })
+
+    expect(result.migrated).toBe(true)
+    expect(messages.info.some((message) => message.includes('not in a git repo'))).toBe(true)
+  })
+
+  test('sharding migration commits new files even when MEMORY.md and flat streams were never tracked', async () => {
+    await initGitRepo(agentDir)
+    await writeRootMemory(memoryWithTopics(['Alpha']))
+    await writeFlatStream('2026-05-18', '{"type":"fragment","id":"id-1"}\n')
+
+    const result = await runShardingMigration({ agentDir, logger })
+
+    expect(result.migrated).toBe(true)
+    const latest = await git(agentDir, ['log', '--oneline', '-1'])
+    expect(latest.stdout).toContain('memory: shard MEMORY.md into 1 topic(s) and 1 daily stream(s)')
+
+    const porcelain = await git(agentDir, ['status', '--porcelain'])
+    expect(porcelain.stdout).toBe('')
+
+    const tracked = await git(agentDir, ['ls-tree', '-r', '--name-only', 'HEAD'])
+    const files = new Set(tracked.stdout.split('\n').filter((line) => line !== ''))
+    expect(files.has('memory/topics/alpha.md')).toBe(true)
+    expect(files.has('memory/streams/2026-05-18.jsonl')).toBe(true)
+    expect(files.has('memory/MEMORY.md.pre-shard.bak')).toBe(true)
+  })
+
   async function writeRepresentativeFixture(): Promise<{ dreaming: string; skill: string }> {
     await writeRootMemory(representativeMemory())
     await writeFlatStream('2026-05-18', '{"type":"fragment","id":"id-1"}\n')
