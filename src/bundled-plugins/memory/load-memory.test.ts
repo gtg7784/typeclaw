@@ -405,6 +405,44 @@ describe('loadMemory self-session fragment filtering', () => {
     expect(section).toContain('## other')
   })
 
+  test('does NOT label day as undreamed tail when only dreamed events were also self-session events', async () => {
+    // Regression: the "(undreamed tail)" suffix means "the visible-to-this-
+    // session slice lost events to dreaming." Removing your OWN session's
+    // events through self-filtering is not a dreaming-driven loss, so the
+    // label must not fire when self-fragments happen to also be dreamed
+    // while the remaining other-session fragments are entirely undreamed.
+    await writeStream(agentDir, '2026-04-27', [
+      fragment('dreamed-self', 'ses_self', 'self dreamed', 'self body'),
+      fragment('fresh-other', 'ses_other', 'other fresh', 'other body'),
+    ])
+    await writeDreamingState(agentDir, { '2026-04-27': { dreamedIds: ['dreamed-self'], ts: 'past' } })
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self' })
+
+    expect(section).toContain('## memory/streams/2026-04-27.jsonl')
+    expect(section).not.toContain('(undreamed tail)')
+    expect(section).toContain('## other fresh')
+    expect(section).not.toContain('## self dreamed')
+  })
+
+  test('labels day as undreamed tail when other-session events were dreamed', async () => {
+    // The complement of the regression above: when dreaming has consumed
+    // events from a sibling session and the remaining visible slice has
+    // been pruned by dreaming, the label SHOULD fire to surface that
+    // dreaming progress to the agent.
+    await writeStream(agentDir, '2026-04-27', [
+      fragment('dreamed-other', 'ses_other', 'other dreamed', 'other body'),
+      fragment('fresh-other', 'ses_other', 'other fresh', 'other body'),
+    ])
+    await writeDreamingState(agentDir, { '2026-04-27': { dreamedIds: ['dreamed-other'], ts: 'past' } })
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self' })
+
+    expect(section).toContain('## memory/streams/2026-04-27.jsonl (undreamed tail)')
+    expect(section).toContain('## other fresh')
+    expect(section).not.toContain('## other dreamed')
+  })
+
   test('appends the filesystem retrieval cache for the current session when present', async () => {
     await mkdir(join(agentDir, 'memory', '.retrieval-cache'), { recursive: true })
     await writeFile(join(agentDir, 'memory', '.retrieval-cache', 'ses_self.md'), 'focused retrieved context\n', 'utf8')

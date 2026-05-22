@@ -7,7 +7,7 @@ import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, type InjectionPlan 
 import { loadAllShards, type TopicShard } from './load-shards'
 import { topicsDir } from './paths'
 import type { StreamEvent } from './stream-events'
-import { readAllUndreamedStreamDays, type UndreamedStreamDay } from './stream-io'
+import { filterUndreamedEvents, readAllStreamDays, type StreamDay } from './stream-io'
 
 const MAX_FILE_BYTES = 12 * 1024
 const MEMORY_FRAMING =
@@ -109,37 +109,39 @@ async function readEntry(agentDir: string, name: string): Promise<FileEntry> {
 }
 
 async function readStreamEntries(agentDir: string, currentSessionId: string | undefined): Promise<FileEntry[]> {
-  const days = await readAllUndreamedStreamDays(agentDir)
+  const days = await readAllStreamDays(agentDir)
   return days
-    .map((day) => undreamedDayToStreamEntry(day, currentSessionId))
+    .map((day) => streamDayToStreamEntry(day, currentSessionId))
+    .filter((entry): entry is StreamEntry => entry !== null)
     .map(renderStreamEntry)
     .filter((entry): entry is FileEntry => entry !== null)
 }
 
-// Drop events authored by the current session: the raw turns they
-// distilled from are already in the LLM's conversation history, so re-injecting
-// the memory-logger summary is duplication. More importantly, new fragments are
+// Apply self-session filter, then dreamed-id filter, in that order. The
+// "(undreamed tail)" label fires only when the dreamed filter removes at
+// least one event from the already-self-filtered set — preserves the
+// pre-extraction semantic where the label means "your visible slice lost
+// events to dreaming," not "this day has any dreamed events at all."
+//
+// Self-session filtering rationale: fragments authored by the current session
+// are already in the LLM's conversation history; re-injecting the
+// memory-logger summary is duplication. More importantly, new fragments are
 // appended after every idle turn, so without this filter the daily-stream
 // region of the system prompt mutates every turn and busts provider prefix
-// caching from that point downward. Fragments from *other* sessions on the
-// same day are kept intact — that's the cross-session bridge daily streams
-// exist for.
-//
-// The "(undreamed tail)" suffix comes from the upstream dreamed-id filter
-// (`readAllUndreamedStreamDays.partiallyDreamed`) and is independent of
-// self-session filtering: removing your own fragments doesn't change the
-// dreaming state visibility, so the label only reflects what dreaming has
-// consolidated.
-function undreamedDayToStreamEntry(day: UndreamedStreamDay, currentSessionId: string | undefined): StreamEntry {
-  const events =
+// caching. Fragments from *other* sessions on the same day are kept intact —
+// that's the cross-session bridge daily streams exist for.
+function streamDayToStreamEntry(day: StreamDay, currentSessionId: string | undefined): StreamEntry | null {
+  const selfFiltered =
     currentSessionId === undefined
       ? day.events
       : day.events.filter((event) => {
           if (event.type !== 'fragment' && event.type !== 'watermark') return true
           return event.source !== currentSessionId
         })
-  const name = day.partiallyDreamed ? `${day.name} (undreamed tail)` : day.name
-  return { name, path: day.path, events }
+  const undreamed = filterUndreamedEvents(selfFiltered, day.dreamedIds)
+  if (undreamed.length === 0) return null
+  const name = undreamed.length < selfFiltered.length ? `${day.name} (undreamed tail)` : day.name
+  return { name, path: day.path, events: undreamed }
 }
 
 function renderStreamEntry(entry: StreamEntry): FileEntry | null {

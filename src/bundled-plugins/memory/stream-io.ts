@@ -95,16 +95,52 @@ export function filterUndreamedEvents(events: StreamEvent[], dreamedIds: Readonl
   })
 }
 
-// All undreamed events from every daily-stream file, oldest day first.
-// One disk read per file plus one dreaming-state read total. Each entry
-// carries the date, the on-disk path, the user-visible name, the post-filter
-// event list, and a `partiallyDreamed` flag that callers can surface in
-// rendered output (the injection path appends "(undreamed tail)" to the
-// section heading). Days that come back fully dreamed are omitted.
+// Pre-filter daily streams: raw events + per-day dreamed-id set, oldest day
+// first. Consumers that care about filter ordering use this; consumers that
+// just want "undreamed events" use `readAllUndreamedStreamDays` instead.
 //
-// Returned in chronological order; callers that want newest-first should
-// reverse. This matches the order the injection path already established
-// so search results render in the same sequence.
+// The injection path (`loadMemory`) needs ordering: self-session filter must
+// run BEFORE dreamed-id filter, because the rendered "(undreamed tail)"
+// label is meant to signal "your visible slice lost events to dreaming",
+// not "this day has any dreamed events at all." Pre-applying the dreamed
+// filter in this helper would conflate those.
+export type StreamDay = {
+  date: string
+  path: string
+  name: string
+  events: StreamEvent[]
+  dreamedIds: ReadonlySet<string>
+}
+
+export async function readAllStreamDays(agentDir: string): Promise<StreamDay[]> {
+  const streamFiles = await listStreamFiles(agentDir)
+  if (streamFiles === null) return []
+
+  const { dir, displayPrefix, names } = streamFiles
+  const dated = names.filter((n) => STREAM_FILE_PATTERN.test(n)).sort()
+  const state = await loadDreamingState(agentDir)
+  return Promise.all(
+    dated.map(async (name): Promise<StreamDay> => {
+      const date = STREAM_DATE_FROM_FILENAME.exec(name)?.[1] ?? ''
+      const filePath = join(dir, name)
+      return {
+        date,
+        path: filePath,
+        name: `${displayPrefix}/${name}`,
+        events: await readEvents(filePath),
+        dreamedIds: getDreamedIds(state, date),
+      }
+    }),
+  )
+}
+
+// Convenience wrapper: pre-applies `filterUndreamedEvents` per day and drops
+// fully-dreamed days. `partiallyDreamed` is true when the dreamed-id filter
+// removed at least one event from this day's raw events.
+//
+// Search consumers want this shape; the injection path uses
+// `readAllStreamDays` instead so it can order self-session and dreamed-id
+// filters correctly.
 export type UndreamedStreamDay = {
   date: string
   path: string
@@ -114,30 +150,20 @@ export type UndreamedStreamDay = {
 }
 
 export async function readAllUndreamedStreamDays(agentDir: string): Promise<UndreamedStreamDay[]> {
-  const streamFiles = await listStreamFiles(agentDir)
-  if (streamFiles === null) return []
-
-  const { dir, displayPrefix, names } = streamFiles
-  const dated = names.filter((n) => STREAM_FILE_PATTERN.test(n)).sort()
-  const state = await loadDreamingState(agentDir)
-  const days = await Promise.all(
-    dated.map(async (name): Promise<UndreamedStreamDay | null> => {
-      const date = STREAM_DATE_FROM_FILENAME.exec(name)?.[1] ?? ''
-      const dreamedIds = getDreamedIds(state, date)
-      const filePath = join(dir, name)
-      const rawEvents = await readEvents(filePath)
-      const undreamed = filterUndreamedEvents(rawEvents, dreamedIds)
-      if (undreamed.length === 0) return null
-      return {
-        date,
-        path: filePath,
-        name: `${displayPrefix}/${name}`,
+  const days = await readAllStreamDays(agentDir)
+  return days.flatMap((day) => {
+    const undreamed = filterUndreamedEvents(day.events, day.dreamedIds)
+    if (undreamed.length === 0) return []
+    return [
+      {
+        date: day.date,
+        path: day.path,
+        name: day.name,
         events: undreamed,
-        partiallyDreamed: undreamed.length < rawEvents.length,
-      }
-    }),
-  )
-  return days.filter((d): d is UndreamedStreamDay => d !== null)
+        partiallyDreamed: undreamed.length < day.events.length,
+      },
+    ]
+  })
 }
 
 function isEnoent(err: unknown): boolean {
