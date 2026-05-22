@@ -40,7 +40,22 @@ export type Topic = {
   citations: Citation[]
 }
 
+export type TopicWithBody = Topic & { body: string }
+
 const HEADING_LEVEL_2 = /^##\s+(.*)$/
+const HISTORICAL_BUCKET = /^historical observations$/i
+const BULLET_LINE = /^-\s+(.*)$/
+const LEADING_DATE = /^\d{4}-\d{2}-\d{2}:\s*/
+const CITATION_TAIL = /\s*—\s+memory\/.*$/
+
+function collectCitations(bodyText: string): Citation[] {
+  const grouped = parseCitations(bodyText)
+  const citations: Citation[] = []
+  for (const [date, ids] of grouped) {
+    for (const fragmentId of ids) citations.push({ date, fragmentId })
+  }
+  return citations
+}
 
 // Split MEMORY.md into ordered topics with their citations attached. Returns
 // an empty array when no `## ` heading appears.
@@ -51,13 +66,55 @@ export function parseTopics(text: string): Topic[] {
 
   const flush = (): void => {
     if (!current) return
-    const bodyText = current.body.join('\n')
-    const grouped = parseCitations(bodyText)
-    const citations: Citation[] = []
-    for (const [date, ids] of grouped) {
-      for (const fragmentId of ids) citations.push({ date, fragmentId })
-    }
+    const citations = collectCitations(current.body.join('\n'))
     topics.push({ heading: current.heading, citations })
+  }
+
+  for (const line of lines) {
+    const match = HEADING_LEVEL_2.exec(line)
+    if (match) {
+      flush()
+      current = { heading: (match[1] ?? '').trim(), body: [] }
+      continue
+    }
+    if (current) current.body.push(line)
+  }
+  flush()
+
+  return topics
+}
+
+// Like parseTopics, but preserves the full body text of each topic. The
+// `## Historical observations` bucket is expanded into one entry per bullet.
+export function parseTopicsWithBodies(text: string): TopicWithBody[] {
+  const lines = text.split('\n')
+  const topics: TopicWithBody[] = []
+  let current: { heading: string; body: string[] } | undefined
+
+  const flush = (): void => {
+    if (!current) return
+    const bodyText = current.body.join('\n')
+    if (HISTORICAL_BUCKET.test(current.heading)) {
+      let index = 0
+      for (const line of current.body) {
+        const bulletMatch = BULLET_LINE.exec(line)
+        if (!bulletMatch) continue
+        const bulletText = bulletMatch[1] ?? ''
+        let heading = bulletText.replace(LEADING_DATE, '').replace(CITATION_TAIL, '').trim()
+        const citations = collectCitations(bulletText)
+        if (!heading) {
+          heading = citations[0]?.date ?? `historical-${index}`
+        }
+        topics.push({ heading, body: bulletText, citations })
+        index++
+      }
+      return
+    }
+    topics.push({
+      heading: current.heading,
+      body: bodyText,
+      citations: collectCitations(bodyText),
+    })
   }
 
   for (const line of lines) {
