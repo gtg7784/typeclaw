@@ -209,4 +209,88 @@ describe('streamLive — live session events', () => {
     expect(caught).toBeInstanceOf(Error)
     expect(String((caught as Error).message)).toContain('invalid')
   })
+
+  test('unknown server message types are ignored without crashing', async () => {
+    // Forward-compat: a future server may add new top-level message `type`
+    // values. The client must not crash when it sees one — especially since
+    // such a message will not carry the `payload` field that `frame` carries.
+    // Regression for: TypeError: undefined is not an object (evaluating 'payload.kind')
+    const FakeWS = makeFakeWebSocket([
+      { type: 'subscribed', sessionId: 'ses_a', sessionLive: true },
+      { type: 'future_unknown_kind', whatever: 'data' },
+      {
+        type: 'frame',
+        ts: 1,
+        payload: { kind: 'broadcast', payload: { ok: true } },
+      },
+    ])
+
+    const ctrl = new AbortController()
+    const gen = streamLive({
+      url: 'ws://unused',
+      sessionId: 'ses_a',
+      signal: ctrl.signal,
+      WebSocketImpl: FakeWS,
+    })
+
+    const events = await collectN(gen, 1)
+    ctrl.abort()
+    const ev = events[0]!
+    if (ev.cat !== 'broadcast') throw new Error('expected broadcast')
+    expect(ev.payload).toEqual({ ok: true })
+  })
 })
+
+// Hand-rolled fake WebSocket that delivers a scripted sequence of server
+// messages immediately after subscribe. Used to drive client-side branches
+// (unknown server `type` values, malformed frames) that real servers don't
+// produce in normal operation.
+function makeFakeWebSocket(scripted: unknown[]): typeof WebSocket {
+  class FakeWS {
+    readonly url: string
+    readyState = 0
+    private readonly listeners = new Map<string, Set<(e: unknown) => void>>()
+
+    constructor(url: string) {
+      this.url = url
+      queueMicrotask(() => {
+        this.readyState = 1
+        this.dispatch('open', {})
+      })
+    }
+
+    addEventListener(type: string, fn: (e: unknown) => void, _opts?: unknown): void {
+      let set = this.listeners.get(type)
+      if (set === undefined) {
+        set = new Set()
+        this.listeners.set(type, set)
+      }
+      set.add(fn)
+    }
+
+    removeEventListener(type: string, fn: (e: unknown) => void): void {
+      this.listeners.get(type)?.delete(fn)
+    }
+
+    send(_data: string): void {
+      // After the client subscribes, deliver the scripted messages.
+      for (const msg of scripted) {
+        queueMicrotask(() => {
+          this.dispatch('message', { data: JSON.stringify(msg) })
+        })
+      }
+    }
+
+    close(): void {
+      this.readyState = 3
+      queueMicrotask(() => this.dispatch('close', {}))
+    }
+
+    private dispatch(type: string, event: unknown): void {
+      const set = this.listeners.get(type)
+      if (set === undefined) return
+      for (const fn of set) fn(event)
+    }
+  }
+  return FakeWS as unknown as typeof WebSocket
+}
