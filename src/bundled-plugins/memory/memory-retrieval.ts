@@ -31,7 +31,7 @@ export type CreateMemoryRetrievalSubagentOptions = {
 export const MEMORY_RETRIEVAL_SYSTEM_PROMPT = `You are the memory-retrieval subagent. Read the user's most recent prompt + list of topic shards in \`memory/topics/\`. Decide which topics are relevant. Read those via \`read\`/\`ls\`/\`memory_search\`. Synthesize a focused ≤8 KB summary of the relevant memory. Save by \`write\`ing it to the exact path provided in your payload as \`cacheFilePath\`. Be ruthlessly concise. Do NOT write anywhere else. Do NOT delete files.`
 
 const consoleLogger: MemoryRetrievalLogger = {
-  info: (m) => console.log(m),
+  info: (m) => console.warn(m),
   warn: (m) => console.warn(m),
   error: (m) => console.error(m),
 }

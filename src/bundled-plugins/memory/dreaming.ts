@@ -55,7 +55,7 @@ type ShardStrength = {
 }
 
 const consoleLogger: DreamingLogger = {
-  info: (m) => console.log(m),
+  info: (m) => console.warn(m),
   warn: (m) => console.warn(m),
   error: (m) => console.error(m),
 }

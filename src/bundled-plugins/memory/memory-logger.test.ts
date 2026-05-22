@@ -414,7 +414,7 @@ describe('memoryLoggerSubagent', () => {
     expect(prompt.toLowerCase()).toMatch(/per-fragment provenance|specific transcript entry that anchors/i)
   })
 
-  test('handler points the subagent at MEMORY.md so it can read existing memory first', async () => {
+  test('handler points the subagent at memory/topics/ so it can read existing memory first', async () => {
     const agentDir = makeAgentDir()
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
@@ -424,8 +424,8 @@ describe('memoryLoggerSubagent', () => {
       agentDir,
     )
 
-    expect(runSessionCalls[0]!.userPrompt!).toContain(join(agentDir, 'MEMORY.md'))
-    expect(runSessionCalls[0]!.userPrompt!).toMatch(/read MEMORY\.md/i)
+    expect(runSessionCalls[0]!.userPrompt!).toContain(join(agentDir, 'memory', 'topics'))
+    expect(runSessionCalls[0]!.userPrompt!).toMatch(/read memory\/topics\//i)
   })
 
   test('handler indicates "no prior watermark" when none exists', async () => {
