@@ -12,6 +12,7 @@ export const GUARD_SYSTEM_PROMPT_LEAK_SEVERITY: SecuritySeverity = 'high'
 const FINGERPRINT_PATTERNS: ReadonlyArray<{ label: string; pattern: RegExp }> = [
   { label: 'TypeClaw runtime preamble', pattern: /You are a general-purpose AI agent running inside TypeClaw\./ },
   { label: 'TypeClaw "Your agent folder" header', pattern: /^##\s+Your\s+agent\s+folder\b/m },
+  // kept: pre-migration agents may still have a root MEMORY.md.
   {
     label: 'IDENTITY.md / SOUL.md / MEMORY.md / USER.md / AGENTS.md identity-file recital',
     pattern: /IDENTITY\.md\b[\s\S]{0,400}SOUL\.md\b[\s\S]{0,400}(?:MEMORY\.md|USER\.md|AGENTS\.md)/,

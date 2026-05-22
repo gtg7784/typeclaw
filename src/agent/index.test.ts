@@ -151,7 +151,7 @@ describe('createResourceLoader', () => {
 
     const prompt = loader.getSystemPrompt() ?? ''
     const nudgeIdx = prompt.indexOf('tracked.md')
-    const memoryIdx = prompt.indexOf('memory-content-marker')
+    const memoryIdx = prompt.indexOf('## [PRE-MIGRATION CONTENT]')
     expect(nudgeIdx).toBeGreaterThan(-1)
     expect(memoryIdx).toBeGreaterThan(-1)
     expect(nudgeIdx).toBeLessThan(memoryIdx)
@@ -230,7 +230,7 @@ describe('createResourceLoader', () => {
     const prompt = loader.getSystemPrompt() ?? ''
     const roleIdx = prompt.indexOf('## Your role in this session')
     const nudgeIdx = prompt.indexOf('tracked.md')
-    const memoryIdx = prompt.indexOf('memory-content-marker')
+    const memoryIdx = prompt.indexOf('## [PRE-MIGRATION CONTENT]')
     expect(roleIdx).toBeGreaterThan(-1)
     expect(nudgeIdx).toBeGreaterThan(-1)
     expect(memoryIdx).toBeGreaterThan(-1)
@@ -736,7 +736,7 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('standup-summary-marker')
   })
 
-  test('slim cron prompt carries the load-bearing guidance review surfaced (errors, narration, workspace, MEMORY.md, runtime-managed paths)', async () => {
+  test('slim cron prompt carries the load-bearing guidance review surfaced (errors, narration, workspace, memory shards, runtime-managed paths)', async () => {
     const origin: SessionOrigin = { kind: 'cron', jobId: 'job-1', jobKind: 'prompt' }
 
     const loader = await createResourceLoader({ agentDir, origin })
@@ -746,7 +746,7 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('never fabricate results')
     expect(prompt).toContain('Do not narrate routine')
     expect(prompt).toContain('workspace/')
-    expect(prompt).toContain('Do not edit `MEMORY.md` directly')
+    expect(prompt).toContain('Do not edit `memory/topics/` directly')
     expect(prompt).toContain('Never stage or commit')
   })
 
@@ -760,14 +760,14 @@ describe('createResourceLoader', () => {
     expect(prompt).not.toContain('plain-text output is invisible')
   })
 
-  test('trimmed full prompt still carries every load-bearing phrase (workspace, MEMORY.md, secrets, git hygiene, persona, error honesty)', async () => {
+  test('trimmed full prompt still carries every load-bearing phrase (workspace, memory shards, secrets, git hygiene, persona, error honesty)', async () => {
     const origin: SessionOrigin = { kind: 'tui', sessionId: 'ses_t' }
 
     const loader = await createResourceLoader({ agentDir, origin })
 
     const prompt = loader.getSystemPrompt() ?? ''
     expect(prompt).toContain('`workspace/`')
-    expect(prompt).toContain('never edit MEMORY.md directly')
+    expect(prompt).toContain('never edit memory shards directly')
     expect(prompt).toContain('`.env`')
     expect(prompt).toContain('`secrets.json`')
     expect(prompt).toContain('Never echo, log, or commit')

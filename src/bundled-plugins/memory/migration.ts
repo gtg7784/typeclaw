@@ -1,10 +1,16 @@
 import { existsSync } from 'node:fs'
-import { readdir, readFile, unlink } from 'node:fs/promises'
+import { cp, mkdir, readdir, readFile, rename, rm, rmdir, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { checkCitationSupersetAcrossShards, summarizeMissingCitations } from './citation-superset'
+import { normalizeCitation, parseCitations } from './citations'
 import { clearDreamedIds, loadDreamingState, saveDreamingState } from './dreaming-state'
+import { renderShard, type ShardFrontmatter } from './frontmatter'
+import { migratingTmpDir, preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
+import { headingToSlug } from './slug'
 import { newEventId, type StreamEvent, streamEventSchema, timestampFromId } from './stream-events'
 import { writeEventsAtomic as defaultWriteEventsAtomic } from './stream-io'
+import { parseTopicsWithBodies } from './topics'
 
 export type MigrationResult = {
   migrated: string[]
@@ -31,11 +37,94 @@ export type RunMigrationOptions = {
   writeEventsAtomic?: (path: string, events: readonly StreamEvent[]) => Promise<void>
 }
 
+export type ShardingMigrationResult = {
+  migrated: boolean
+  topicCount: number
+  streamCount: number
+  legacy: MigrationResult
+  error?: string
+}
+
+export type RunShardingMigrationOptions = RunMigrationOptions & {
+  hooks?: {
+    onAfterStageTopics?: () => Promise<void> | void
+    onAfterStageStreams?: () => Promise<void> | void
+    onAfterStageBackup?: () => Promise<void> | void
+  }
+}
+
 const DAILY_MD_NAME = /^(\d{4}-\d{2}-\d{2})\.md$/
 const DAILY_JSONL_NAME = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
 const LEGACY_FRAGMENT_RE =
   /<!-- fragment source=(\S+) entry=(\S+) -->\n## (.+)\n([\s\S]*?)(?=<!-- fragment |<!-- watermark |$)/g
 const LEGACY_WATERMARK_RE = /<!-- watermark source=(\S+) entry=(\S+) -->/g
+
+export async function runShardingMigration(options: RunShardingMigrationOptions): Promise<ShardingMigrationResult> {
+  await recoverShardingMigration(options.agentDir, options.logger)
+  const legacy = await runMigration(options)
+  const empty = (extra?: Partial<ShardingMigrationResult>): ShardingMigrationResult => ({
+    migrated: false,
+    topicCount: 0,
+    streamCount: 0,
+    legacy,
+    ...extra,
+  })
+
+  await recoverShardingOrphans(options.agentDir, options.logger)
+
+  if (existsSync(topicsDir(options.agentDir)) || !existsSync(rootMemoryPath(options.agentDir))) {
+    return empty()
+  }
+
+  const memoryDir = join(options.agentDir, 'memory')
+  const tmpDir = migratingTmpDir(options.agentDir)
+  await rm(tmpDir, { recursive: true, force: true })
+  await mkdir(join(tmpDir, 'topics'), { recursive: true })
+  await mkdir(join(tmpDir, 'streams'), { recursive: true })
+
+  const rootContent = await readFile(rootMemoryPath(options.agentDir), 'utf8')
+  const topics = parseTopicsWithBodies(rootContent)
+  if (topics.length === 0) {
+    await rm(tmpDir, { recursive: true, force: true })
+    options.logger.warn('[memory:migration] MEMORY.md has no topics; skipping sharding migration')
+    return empty()
+  }
+
+  const existingSlugs = new Set<string>()
+  for (const topic of topics) {
+    const slug = headingToSlug(topic.heading, existingSlugs)
+    existingSlugs.add(slug)
+    const body = normalizeCitation(topic.body)
+    const frontmatter = frontmatterForTopic(topic.heading, body)
+    await writeFile(join(tmpDir, 'topics', `${slug}.md`), renderShard(frontmatter, body), 'utf8')
+  }
+  await options.hooks?.onAfterStageTopics?.()
+
+  const streamDates = await collectFlatJsonlDates(memoryDir)
+  for (const date of streamDates) {
+    await cp(join(memoryDir, `${date}.jsonl`), join(tmpDir, 'streams', `${date}.jsonl`))
+  }
+  await options.hooks?.onAfterStageStreams?.()
+
+  await cp(rootMemoryPath(options.agentDir), join(tmpDir, 'MEMORY.md.pre-shard.bak'))
+  await options.hooks?.onAfterStageBackup?.()
+
+  const newShardTexts = await readShardTexts(join(tmpDir, 'topics'))
+  const verdict = checkCitationSupersetAcrossShards(new Map([['MEMORY.md', rootContent]]), newShardTexts)
+  if (!verdict.ok) {
+    const error = `citation superset violation: ${summarizeMissingCitations(verdict.missing)}`
+    options.logger.error(`[memory:migration] ${error}`)
+    return empty({ error })
+  }
+
+  const finalized = await finalizeShardingMigration(options.agentDir, streamDates, options.logger)
+  if (!finalized.ok) return empty({ error: finalized.error })
+
+  options.logger.info(
+    `[memory:migration] sharded MEMORY.md into ${topics.length} topic shard(s) and ${streamDates.length} stream file(s)`,
+  )
+  return { migrated: true, topicCount: topics.length, streamCount: streamDates.length, legacy }
+}
 
 export async function runMigration(options: RunMigrationOptions): Promise<MigrationResult> {
   const memoryDir = join(options.agentDir, 'memory')
@@ -121,6 +210,129 @@ function collectDailyDates(entries: readonly string[]): string[] {
     if (jsonl?.[1] !== undefined) dates.add(jsonl[1])
   }
   return Array.from(dates).sort()
+}
+
+async function recoverShardingMigration(agentDir: string, logger: MigrationLogger): Promise<void> {
+  const tmpDir = migratingTmpDir(agentDir)
+  if (!existsSync(tmpDir)) return
+
+  const hasTopics = existsSync(topicsDir(agentDir))
+  await rm(tmpDir, { recursive: true, force: true })
+  logger.info(
+    hasTopics
+      ? '[memory:migration] removed leftover sharding tmpdir after completed migration'
+      : '[memory:migration] removed stale sharding tmpdir; retrying migration from originals',
+  )
+}
+
+async function recoverShardingOrphans(agentDir: string, logger: MigrationLogger): Promise<void> {
+  if (!existsSync(topicsDir(agentDir))) return
+
+  let cleaned = false
+  const memoryPath = rootMemoryPath(agentDir)
+  if (existsSync(memoryPath)) {
+    await unlink(memoryPath)
+    cleaned = true
+  }
+
+  const memoryDir = join(agentDir, 'memory')
+  const dates = await collectFlatJsonlDates(memoryDir)
+  for (const date of dates) {
+    if (!existsSync(streamFilePath(agentDir, date))) continue
+    await unlink(join(memoryDir, `${date}.jsonl`))
+    cleaned = true
+  }
+
+  if (cleaned) logger.info('[memory:migration] cleaned orphaned pre-shard memory files')
+}
+
+async function collectFlatJsonlDates(memoryDir: string): Promise<string[]> {
+  let entries: string[]
+  try {
+    entries = await readdir(memoryDir)
+  } catch {
+    return []
+  }
+  return entries
+    .map((entry) => DAILY_JSONL_NAME.exec(entry)?.[1])
+    .filter((date): date is string => date !== undefined)
+    .sort()
+}
+
+function frontmatterForTopic(heading: string, body: string): ShardFrontmatter {
+  const citations = parseCitations(body)
+  const dates = [...citations.keys()].sort()
+  let cites = 0
+  for (const ids of citations.values()) cites += ids.size
+
+  return {
+    heading,
+    cites,
+    days: dates.length,
+    lastReinforced: dates.at(-1) ?? todayDate(),
+  }
+}
+
+async function readShardTexts(dir: string): Promise<Map<string, string>> {
+  const entries = (await readdir(dir)).filter((entry) => entry.endsWith('.md')).sort()
+  const out = new Map<string, string>()
+  for (const entry of entries) {
+    out.set(entry, await readFile(join(dir, entry), 'utf8'))
+  }
+  return out
+}
+
+async function finalizeShardingMigration(
+  agentDir: string,
+  streamDates: readonly string[],
+  logger: MigrationLogger,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  const tmpDir = migratingTmpDir(agentDir)
+  const renames: Array<[string, string]> = [
+    [join(tmpDir, 'topics'), topicsDir(agentDir)],
+    [join(tmpDir, 'streams'), streamsDir(agentDir)],
+    [join(tmpDir, 'MEMORY.md.pre-shard.bak'), preShardBackupPath(agentDir)],
+  ]
+
+  for (const [from, to] of renames) {
+    try {
+      await rename(from, to)
+    } catch (err) {
+      const error = `failed to finalize sharding migration: ${describeError(err)}`
+      logger.error(`[memory:migration] ${error}`)
+      return { ok: false, error }
+    }
+  }
+
+  for (const date of streamDates) {
+    try {
+      await unlink(join(agentDir, 'memory', `${date}.jsonl`))
+    } catch (err) {
+      logger.warn(`[memory:migration] failed to remove flat stream ${date}.jsonl: ${describeError(err)}`)
+    }
+  }
+
+  try {
+    await unlink(rootMemoryPath(agentDir))
+  } catch (err) {
+    logger.warn(`[memory:migration] failed to remove root MEMORY.md: ${describeError(err)}`)
+  }
+
+  try {
+    await rmdir(tmpDir)
+  } catch (err) {
+    logger.warn(`[memory:migration] failed to remove sharding tmpdir: ${describeError(err)}`)
+  }
+
+  return { ok: true }
+}
+
+function rootMemoryPath(agentDir: string): string {
+  return join(agentDir, 'MEMORY.md')
+}
+
+function todayDate(): string {
+  return new Date().toISOString().slice(0, 10)
 }
 
 function parseLegacyMarkdown(content: string): StreamEvent[] {

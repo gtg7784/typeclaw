@@ -1,7 +1,11 @@
 import { realpath } from 'node:fs/promises'
 import path from 'node:path'
 
+import type { SessionOrigin } from '@/agent/session-origin'
+
 import { ACKNOWLEDGE_GUARDS, type GuardBlock, isGuardAcknowledged } from '../policy'
+import { isMemoryRetrievalCacheWriteAllowed } from './memory-retrieval-cache-write'
+import { isMemoryTopicsWriteAllowed } from './memory-topics-write'
 import { isSkillAuthoringAllowed } from './skill-authoring'
 
 export const GUARD_NON_WORKSPACE_WRITE = 'nonWorkspaceWrite'
@@ -9,7 +13,6 @@ export const GUARD_NON_WORKSPACE_WRITE = 'nonWorkspaceWrite'
 const AGENT_ROOT_WRITE_ALLOWLIST = new Set([
   'AGENTS.md',
   'IDENTITY.md',
-  'MEMORY.md',
   'SOUL.md',
   'USER.md',
   'cron.json',
@@ -28,8 +31,9 @@ export async function checkNonWorkspaceWriteGuard(options: {
   tool: string
   args: Record<string, unknown>
   agentDir: string
+  origin?: SessionOrigin
 }): Promise<GuardBlock | undefined> {
-  const { tool, args, agentDir } = options
+  const { tool, args, agentDir, origin } = options
   if (tool !== 'write' && tool !== 'edit') return undefined
 
   const rawPath = args.path
@@ -42,6 +46,8 @@ export async function checkNonWorkspaceWriteGuard(options: {
     resolveRealIntendedPath(workspacePath),
   ])
   if (await isSkillAuthoringAllowed({ tool, args, agentDir })) return undefined
+  if (await isMemoryRetrievalCacheWriteAllowed({ tool, args, agentDir, origin })) return undefined
+  if (await isMemoryTopicsWriteAllowed({ tool, args, agentDir, origin })) return undefined
   if (await isAllowedAgentRootWrite(agentDir, targetPath, realTargetPath)) return undefined
   if (isInside(realWorkspacePath, realTargetPath)) return undefined
   if (isGuardAcknowledged(args, GUARD_NON_WORKSPACE_WRITE)) return undefined

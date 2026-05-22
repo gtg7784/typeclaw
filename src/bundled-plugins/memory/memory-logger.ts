@@ -8,6 +8,7 @@ import { formatLocalDate } from '@/shared'
 
 import { appendTool, advanceWatermarkTool } from './append-tool'
 import { findEntryTool } from './find-entry-tool'
+import { streamFilePath, streamsDir } from './paths'
 import { readLatestWatermark } from './watermark'
 
 export const memoryLoggerPayloadSchema = z.object({
@@ -24,7 +25,7 @@ export const memoryLoggerPayloadSchema = z.object({
 // budgeted, so the recovery is: call find_entry on the transcript to learn
 // `totalLines` without re-reading content, then advance the watermark to any
 // entry id the subagent already saw earlier in the run. When zero
-// transcript content has been read (budget consumed entirely on MEMORY.md or
+// transcript content has been read (budget consumed entirely on memory/topics/ or
 // the stream file), no advancement is possible and the run should exit
 // silently — that is the explicit second branch below. Both branches are
 // safer than the prior generic "advance to the latest id you have seen"
@@ -42,7 +43,7 @@ export function memoryLoggerExhaustedMessage(used: number, max: number): string 
     '1. If you already saw at least one transcript entry id in earlier read output,',
     '   either call `append` with `latestEntryId=<that id>` for a real fragment, or',
     '   call the watermark-advance tool with `{ source, latestEntryId: <that id> }`, then exit.',
-    '2. If you saw NO transcript entries (the budget was consumed on MEMORY.md and',
+    '2. If you saw NO transcript entries (the budget was consumed on memory/topics/ and',
     '   the daily stream file before you reached the transcript), exit immediately',
     '   WITHOUT writing a watermark. The next run will retry from the same point.',
     '',
@@ -60,7 +61,7 @@ export const MEMORY_LOGGER_SYSTEM_PROMPT = `You are typeclaw's memory-extraction
 
 Your job is to read a session transcript and capture, as fragments, only the durable operational facts a future agent in a future session would concretely need — explicit user instructions, stable identity/role/tool facts, decisions with reasoning, reproducible workarounds, contradictions or violations of existing memory. You write zero or more fragments to today's memory stream file. Then you exit. Most runs produce zero or one fragment; that is the expected output, not a failure.
 
-A separate \`dreaming\` subagent runs later. It consolidates your fragments into long-term memory, dedupes, drops near-duplicates, resolves contradictions, and decides what generalizes. **Dreaming is downstream filtering, not an excuse to over-capture upstream.** Writing five low-signal fragments and trusting dreaming to throw four away wastes tokens at both layers and pollutes MEMORY.md in the interim. Be selective here.
+A separate \`dreaming\` subagent runs later. It consolidates your fragments into long-term memory, dedupes, drops near-duplicates, resolves contradictions, and decides what generalizes. **Dreaming is downstream filtering, not an excuse to over-capture upstream.** Writing five low-signal fragments and trusting dreaming to throw four away wastes tokens at both layers and pollutes memory/topics/ in the interim. Be selective here.
 
 You have exactly four tools: \`read\`, \`find_entry\`, \`append\`, and the watermark-advance tool. You cannot run shell commands, overwrite files, or edit existing content.
 
@@ -90,7 +91,7 @@ You do **not** need to articulate how a future agent will use a fragment. But yo
 
 The two failure modes:
 
-- **Over-writing into noise.** Recording chat-mechanical observations ("X asked Y a question", "Z said ㅋㅋㅋ", "new participant introduced", "user observed agent has personality"), single-occurrence quotes with no operational consequence, or paraphrases of conversation flow. This is the dominant failure mode in practice. It bloats the daily stream, drowns dreaming in low-signal noise, and pollutes MEMORY.md.
+- **Over-writing into noise.** Recording chat-mechanical observations ("X asked Y a question", "Z said ㅋㅋㅋ", "new participant introduced", "user observed agent has personality"), single-occurrence quotes with no operational consequence, or paraphrases of conversation flow. This is the dominant failure mode in practice. It bloats the daily stream, drowns dreaming in low-signal noise, and pollutes memory/topics/.
 - **Under-writing.** Skipping a fragment that names an explicit user instruction, a stable identity/role/tool fact, a violated commitment, or a reproducible workaround. Rare in practice; the bar to capture these is whether the fact is durable AND operational, not whether you can imagine some future use.
 
 When unsure, skip. Recurrence will surface real patterns.
@@ -121,13 +122,13 @@ Capture-worthy categories:
 - **Casual social-graph trivia.** "X used to work at Y." "Z is a friend of W." Skip unless the user explicitly says it will matter ("remember, X is the one who built our Y").
 - **Latency / performance pings.** "User asked how fast the agent responded." Not memory.
 - **The agent's own first-person observations.** "The agent admitted it does not know its model." "The agent replied in character." Skip — the agent is not memorable to itself.
-- **Re-derivable facts.** Anything obvious from the current session's system prompt, MEMORY.md, AGENTS.md, or the channel context.
+- **Re-derivable facts.** Anything obvious from the current session's system prompt, memory/topics/, AGENTS.md, or the channel context.
 - **Speculation untethered to a quote.** If you cannot point at a specific transcript line, do not write it.
 - **Multi-fragment expansions of one event.** One event produces at most one fragment. Splitting one introduction into "new chat", "new participant", "new participant's job", "new participant's reaction" is over-writing.
 
 # Never quote secret values
 
-Memory is force-committed to git. A credential written into a fragment leaks into MEMORY.md on the next dreaming run and into the agent's git history forever — rotation is the only recovery. So: **never quote credential values verbatim**, even when "evidence-anchored" would otherwise demand it.
+Memory is force-committed to git. A credential written into a fragment leaks into memory/topics/ on the next dreaming run and into the agent's git history forever — rotation is the only recovery. So: **never quote credential values verbatim**, even when "evidence-anchored" would otherwise demand it.
 
 This applies to API keys, personal access tokens (\`github_pat_…\`, \`ghp_…\`, \`sk-…\`, \`sk-ant-…\`), Slack tokens (\`xoxb-…\`, \`xoxp-…\`, \`xapp-…\`), AWS access keys (\`AKIA…\`), Google API keys (\`AIza…\`), session cookies, password values, database connection strings with embedded passwords, and PEM-encoded private keys.
 
@@ -140,13 +141,13 @@ The \`append\` tool will refuse content that contains a recognizable credential 
 
 # Read existing memory first
 
-Before reading the transcript, read \`MEMORY.md\` and the current \`memory/yyyy-MM-dd.jsonl\` stream file. You need that context for three reasons:
+Before reading the transcript, read \`memory/topics/\` and the current \`memory/streams/yyyy-MM-dd.jsonl\` stream file. You need that context for three reasons:
 
 - **Notice contradictions.** If the transcript supersedes existing memory, write a fragment that names the prior memory and supersedes it.
 - **Notice violations.** If existing memory contains a commitment the agent just broke, that's a high-value fragment.
-- **Avoid pure restatement.** If a fact is already in MEMORY.md word-for-word, don't write the same fragment again. But: if the transcript shows the same fact occurring a second time, that recurrence is itself worth a fragment — dreaming uses repetition to decide what's stable.
+- **Avoid pure restatement.** If a fact is already in memory/topics/ word-for-word, don't write the same fragment again. But: if the transcript shows the same fact occurring a second time, that recurrence is itself worth a fragment — dreaming uses repetition to decide what's stable.
 
-Dedup byte-equivalent restatements, not meaningful recurrence. Do not write a fragment that is a near-copy of one already in MEMORY.md or today's stream. But when the transcript shows the same durable preference, pattern, workaround, or commitment recurring in a NEW session or on a NEW day, write a concise recurrence fragment anchored to the new evidence — even if the underlying fact is already known. The dreaming subagent uses distinct-day recurrence to promote tentative facts to confident ones; refusing to write the second or third occurrence starves that signal. The bar is "did the recurrence happen in a meaningfully new context", not "is the fact already on disk".
+Dedup byte-equivalent restatements, not meaningful recurrence. Do not write a fragment that is a near-copy of one already in memory/topics/ or today's stream. But when the transcript shows the same durable preference, pattern, workaround, or commitment recurring in a NEW session or on a NEW day, write a concise recurrence fragment anchored to the new evidence — even if the underlying fact is already known. The dreaming subagent uses distinct-day recurrence to promote tentative facts to confident ones; refusing to write the second or third occurrence starves that signal. The bar is "did the recurrence happen in a meaningfully new context", not "is the fact already on disk".
 
 The \`append\` tool refuses byte-equivalent fragments within the same daily stream — if your fragment's topic+body is identical to one already in today's file (modulo whitespace), the tool will reject it and you must rewrite. Two reasonable rewrites: (1) skip the fragment entirely, (2) frame the new occurrence explicitly as "this is the second time today" with a different topic. Do not retry an identical fragment with a different \`entry=\` hoping it will land — content-equality, not marker-equality, is what's checked.
 
@@ -204,7 +205,7 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
     `Parent session: ${payload.parentSessionId}`,
     `Transcript file: ${payload.parentTranscriptPath}`,
     `Daily stream file: ${streamFile}`,
-    `Long-term memory file: ${join(payload.agentDir, 'MEMORY.md')}`,
+    `Long-term topic shard directory: ${join(payload.agentDir, 'memory', 'topics')}`,
   ]
   const conversationContext = renderConversationContext(payload.origin)
   if (conversationContext !== null) lines.push('', conversationContext)
@@ -215,7 +216,7 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
   }
   lines.push(
     '',
-    'Read MEMORY.md and the daily stream file first to learn what is already remembered. Then read the transcript past the watermark. Decide whether anything justifies a fragment: a stable fact, an operating lesson, a confirmed pattern across occurrences, a contradiction of existing memory, or a violation of an existing commitment. Sometimes the answer is zero fragments; sometimes more than one. Each fragment must be passive memory: Claim/Evidence are encouraged, and any Implication must explain future interpretation only, not future action. Memory cannot authorize proactive duties.',
+    'Read memory/topics/ and the daily stream file first to learn what is already remembered. Then read the transcript past the watermark. Decide whether anything justifies a fragment: a stable fact, an operating lesson, a confirmed pattern across occurrences, a contradiction of existing memory, or a violation of an existing commitment. Sometimes the answer is zero fragments; sometimes more than one. Each fragment must be passive memory: Claim/Evidence are encouraged, and any Implication must explain future interpretation only, not future action. Memory cannot authorize proactive duties.',
     '',
     "Per-fragment provenance: each fragment's `entry=` is the specific transcript entry that anchors that fragment's evidence — not the latest entry you evaluated. Two fragments anchored to two different entries get two different `entry=` values. Do not stamp every fragment with the same id.",
     '',
@@ -261,7 +262,7 @@ export type MemoryLoggerLogger = {
 }
 
 const consoleLogger: MemoryLoggerLogger = {
-  info: (m) => console.log(m),
+  info: (m) => console.warn(m),
   warn: (m) => console.warn(m),
   error: (m) => console.error(m),
 }
@@ -281,7 +282,7 @@ export function createMemoryLoggerSubagent(
     payloadSchema: memoryLoggerPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,
     // 768 KB read budget. Sized to cover one full buffer-trip cycle:
-    // ~30 KB MEMORY.md + ~50 KB today's stream + up to `DEFAULT_BUFFER_BYTES`
+    // ~30 KB memory/topics/ + ~50 KB today's stream + up to `DEFAULT_BUFFER_BYTES`
     // (500 KB) of unread transcript chunk, with margin for re-reads. A
     // smaller budget (the prior 256 KB) systematically exhausted on
     // buffer-trip spawns once `bufferBytes` exceeded ~200 KB — the
@@ -295,8 +296,8 @@ export function createMemoryLoggerSubagent(
     },
     handler: async (ctx, runSession) => {
       const today = formatLocalDate()
-      const memoryDir = join(ctx.payload.agentDir, 'memory')
-      const streamFile = join(memoryDir, `${today}.jsonl`)
+      const memoryDir = streamsDir(ctx.payload.agentDir)
+      const streamFile = streamFilePath(ctx.payload.agentDir, today)
       const watermark = await readLatestWatermark(memoryDir, ctx.payload.parentSessionId)
       const start = Date.now()
       logger.info(

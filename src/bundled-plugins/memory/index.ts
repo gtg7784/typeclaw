@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
-import { access, constants as fsConstants, mkdir, readdir, stat, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { access, constants as fsConstants, mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import { CronExpressionParser } from 'cron-parser'
 import { z } from 'zod'
@@ -9,8 +9,13 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { definePlugin } from '@/plugin'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
+import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGET_BYTES } from './injection-plan'
+import { loadAllShards } from './load-shards'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
-import { runMigration } from './migration'
+import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
+import { runMigration, runShardingMigration } from './migration'
+import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
+import { memorySearchTool } from './search-tool'
 
 const DEFAULT_IDLE_MS = 60_000
 const DEFAULT_BUFFER_BYTES = 500_000
@@ -75,6 +80,7 @@ const memoryConfigSchema = z
         message: `memory.bufferBytes must be 0 (disabled) or >= ${MIN_BUFFER_BYTES}`,
       })
       .default(DEFAULT_BUFFER_BYTES),
+    injectionBudgetBytes: z.number().int().min(MIN_INJECTION_BUDGET_BYTES).default(DEFAULT_INJECTION_BUDGET_BYTES),
     // Test seam: per-spawn ceiling for memory-logger. Operators have no
     // reason to tune this; it exists so the wedge-recovery test can fire
     // the timeout in milliseconds instead of the production 50s. Kept
@@ -82,7 +88,12 @@ const memoryConfigSchema = z
     spawnTimeoutMs: z.number().int().min(1).default(SPAWN_TIMEOUT_MS),
     dreaming: dreamingConfigSchema.optional(),
   })
-  .default({ idleMs: DEFAULT_IDLE_MS, bufferBytes: DEFAULT_BUFFER_BYTES, spawnTimeoutMs: SPAWN_TIMEOUT_MS })
+  .default({
+    idleMs: DEFAULT_IDLE_MS,
+    bufferBytes: DEFAULT_BUFFER_BYTES,
+    injectionBudgetBytes: DEFAULT_INJECTION_BUDGET_BYTES,
+    spawnTimeoutMs: SPAWN_TIMEOUT_MS,
+  })
 
 export default definePlugin({
   configSchema: memoryConfigSchema,
@@ -98,6 +109,18 @@ export default definePlugin({
     })
     if (migrationResult.migrated.length > 0) {
       ctx.logger.info(`[memory] migrated ${migrationResult.migrated.length} daily stream(s) to JSONL`)
+    }
+
+    const shardingResult = await runShardingMigration({
+      agentDir: ctx.agentDir,
+      logger: ctx.logger,
+    })
+    if (shardingResult.migrated) {
+      ctx.logger.info(
+        `[memory] sharded ${shardingResult.topicCount} topics + ${shardingResult.streamCount} streams (pre-shard backup at memory/MEMORY.md.pre-shard.bak)`,
+      )
+    } else if (shardingResult.error !== undefined) {
+      ctx.logger.warn(`[memory] sharding migration aborted: ${shardingResult.error}`)
     }
 
     const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -177,7 +200,11 @@ export default definePlugin({
     return {
       subagents: {
         'memory-logger': createMemoryLoggerSubagent({ logger: subagentLogger }),
+        'memory-retrieval': createMemoryRetrievalSubagent({ logger: subagentLogger }),
         dreaming: createDreamingSubagent({ logger: subagentLogger }),
+      },
+      tools: {
+        memory_search: memorySearchTool,
       },
       cronJobs: {
         dreaming: {
@@ -193,7 +220,7 @@ export default definePlugin({
         // directly, appended LAST in the system prompt). It does not run from a
         // plugin hook because positioning matters for cache-prefix stability:
         // the daily-stream file grows after every channel turn (memory-logger
-        // appends a fragment + watermark) and MEMORY.md changes on every dream.
+        // appends a fragment + watermark) and memory/topics/ changes on every dream.
         // A volatile region in the middle of the system prompt invalidates the
         // entire cacheable suffix below it on every session resurrection
         // (channel sessions evicted by idle GC, container restarts). Pinning
@@ -230,27 +257,58 @@ export default definePlugin({
             await fireMemoryLogger(sessionId, 'buffer-trip')
           }
         },
+        'session.prompt': async (event) => {
+          if (event.origin?.kind === 'subagent') return
+
+          const shards = await loadAllShards(event.agentDir)
+          const plan = buildInjectionPlan(shards, { budgetBytes: ctx.config.injectionBudgetBytes })
+          if (plan.mode === 'direct') return
+
+          const cacheFilePath = join(ctx.agentDir, 'memory', '.retrieval-cache', `${event.sessionId}.md`)
+          const payload: MemoryRetrievalPayload = {
+            parentSessionId: event.sessionId,
+            agentDir: event.agentDir,
+            recentPrompt: event.prompt,
+            cacheFilePath,
+            ...(event.origin !== undefined ? { origin: event.origin } : {}),
+          }
+          await ctx.spawnSubagent('memory-retrieval', payload, {
+            parentSessionId: event.sessionId,
+            ...(event.origin !== undefined ? { spawnedByOrigin: event.origin } : {}),
+          })
+        },
         'session.end': async (event) => {
           if (event.origin?.kind === 'subagent') return
           cancelTimer(event.sessionId)
           await fireMemoryLogger(event.sessionId, 'session-end')
+          const cacheFilePath = join(ctx.agentDir, 'memory', '.retrieval-cache', `${event.sessionId}.md`)
+          try {
+            await unlink(cacheFilePath)
+          } catch (err) {
+            if (!isEnoent(err)) ctx.logger.warn(`[memory] failed to clean retrieval cache: ${err}`)
+          }
           lastIdleEvent.delete(event.sessionId)
           bytesAtLastRun.delete(event.sessionId)
         },
       },
       doctorChecks: {
         'dir-writable': {
-          description: 'memory/ exists and is writable',
+          description: 'memory/topics/ exists and is writable',
           run: async (dctx) => {
-            const dir = join(dctx.agentDir, 'memory')
+            const dir = topicsDir(dctx.agentDir)
             try {
               await access(dir, fsConstants.W_OK)
               return { status: 'ok', message: `${dir} writable` }
             } catch {
-              return {
-                status: 'error',
-                message: `${dir} is missing or not writable`,
-                fix: { description: 'Create memory/ in the agent folder or fix its permissions on the host.' },
+              try {
+                await mkdir(dir, { recursive: true })
+                return { status: 'ok', message: `created ${dir}` }
+              } catch {
+                return {
+                  status: 'error',
+                  message: `${dir} is missing and could not be created`,
+                  fix: { description: 'Create memory/topics/ in the agent folder or fix its permissions on the host.' },
+                }
               }
             }
           },
@@ -259,8 +317,8 @@ export default definePlugin({
           description: "today's daily stream file exists",
           run: async (dctx) => {
             const today = new Date().toISOString().slice(0, 10)
-            const rel = `memory/${today}.jsonl`
-            const abs = join(dctx.agentDir, rel)
+            const rel = join('memory', 'streams', `${today}.jsonl`)
+            const abs = streamFilePath(dctx.agentDir, today)
             if (existsSync(abs)) return { status: 'ok', message: `${rel} present` }
             return {
               status: 'warning',
@@ -268,7 +326,7 @@ export default definePlugin({
               fix: {
                 description: `Create empty ${rel} so memory-logger has a target.`,
                 apply: async () => {
-                  await mkdir(dirname(abs), { recursive: true })
+                  await mkdir(streamsDir(dctx.agentDir), { recursive: true })
                   await writeFile(abs, '', 'utf8')
                   return { summary: `created ${rel}`, changedPaths: [rel] }
                 },
@@ -277,17 +335,85 @@ export default definePlugin({
           },
         },
         'legacy-md-cleanup': {
-          description: 'Check for legacy .md daily stream files that should have been migrated to .jsonl',
+          description: 'Check for legacy .md daily stream files and un-migrated root MEMORY.md',
           run: async (dctx) => {
             const memoryDir = join(dctx.agentDir, 'memory')
+            // kept: pre-migration agents may still have a root MEMORY.md.
+            const rootMemoryPath = join(dctx.agentDir, 'MEMORY.md')
+            const hasRootMemory = existsSync(rootMemoryPath)
+            const hasTopicsDir = existsSync(topicsDir(dctx.agentDir))
+
             let files: string[]
             try {
               files = await readdir(memoryDir)
             } catch {
-              return { status: 'ok', message: 'memory/ does not exist yet' }
+              if (!hasRootMemory) return { status: 'ok', message: 'memory/ does not exist yet' }
+              return {
+                status: 'warning',
+                message: 'root MEMORY.md present but not sharded',
+                fix: {
+                  description: 'Run sharding migration to convert root MEMORY.md to topic shards',
+                  apply: async (fixCtx) => {
+                    const result = await runShardingMigration({ agentDir: fixCtx.agentDir, logger: fixCtx.logger })
+                    return {
+                      summary: result.migrated
+                        ? `sharded ${result.topicCount} topic(s) and ${result.streamCount} stream(s)`
+                        : `sharding migration did not run${result.error ? `: ${result.error}` : ''}`,
+                      changedPaths: result.migrated
+                        ? [
+                            join('memory', 'topics'),
+                            join('memory', 'streams'),
+                            join('memory', 'MEMORY.md.pre-shard.bak'),
+                          ]
+                        : [],
+                    }
+                  },
+                },
+              }
             }
 
             const mdFiles = files.filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+
+            if (hasRootMemory) {
+              if (!hasTopicsDir) {
+                const mdMsg = mdFiles.length > 0 ? `; also ${mdFiles.length} legacy .md daily stream(s)` : ''
+                return {
+                  status: 'warning',
+                  message: `root MEMORY.md present but not sharded${mdMsg}`,
+                  fix: {
+                    description: 'Run sharding migration to convert root MEMORY.md to topic shards',
+                    apply: async (fixCtx) => {
+                      const result = await runShardingMigration({ agentDir: fixCtx.agentDir, logger: fixCtx.logger })
+                      return {
+                        summary: result.migrated
+                          ? `sharded ${result.topicCount} topic(s) and ${result.streamCount} stream(s)`
+                          : `sharding migration did not run${result.error ? `: ${result.error}` : ''}`,
+                        changedPaths: result.migrated
+                          ? [
+                              join('memory', 'topics'),
+                              join('memory', 'streams'),
+                              join('memory', 'MEMORY.md.pre-shard.bak'),
+                            ]
+                          : [],
+                      }
+                    },
+                  },
+                }
+              }
+              const mdMsg = mdFiles.length > 0 ? `; also ${mdFiles.length} legacy .md daily stream(s)` : ''
+              return {
+                status: 'warning',
+                message: `orphaned root MEMORY.md after sharding migration${mdMsg}`,
+                fix: {
+                  description: 'Delete the orphaned root MEMORY.md file',
+                  apply: async () => {
+                    await unlink(rootMemoryPath)
+                    return { summary: 'deleted orphaned root MEMORY.md', changedPaths: ['MEMORY.md'] }
+                  },
+                },
+              }
+            }
+
             if (mdFiles.length === 0) return { status: 'ok', message: 'no legacy .md daily streams found' }
 
             const caseA: string[] = []
@@ -335,6 +461,39 @@ export default definePlugin({
             return { status: 'ok', message: 'no legacy .md daily streams found' }
           },
         },
+        'pre-shard-backup-age': {
+          description: 'Warn when pre-shard backup is older than 30 days',
+          run: async (dctx) => {
+            const backupPath = preShardBackupPath(dctx.agentDir)
+            let s
+            try {
+              s = await stat(backupPath)
+            } catch {
+              return { status: 'ok', message: 'no pre-shard backup present' }
+            }
+            const ageDays = (Date.now() - s.mtimeMs) / 86_400_000
+            if (ageDays > 30) {
+              return {
+                status: 'warning',
+                message: `pre-shard backup is ${Math.round(ageDays)} days old; safe to delete if migration is verified`,
+                fix: {
+                  description: 'Delete the pre-shard backup file',
+                  apply: async () => {
+                    await unlink(backupPath)
+                    return {
+                      summary: 'deleted pre-shard backup',
+                      changedPaths: [join('memory', 'MEMORY.md.pre-shard.bak')],
+                    }
+                  },
+                },
+              }
+            }
+            return {
+              status: 'ok',
+              message: `pre-shard backup is ${Math.round(ageDays)} days old (under 30-day threshold)`,
+            }
+          },
+        },
       },
     }
   },
@@ -359,4 +518,8 @@ async function raceSpawn(work: Promise<void>, ms: number): Promise<void> {
   } finally {
     if (timer !== null) clearTimeout(timer)
   }
+}
+
+function isEnoent(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT'
 }

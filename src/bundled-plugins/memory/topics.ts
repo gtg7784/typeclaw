@@ -1,10 +1,7 @@
-// Topic-aware parser for MEMORY.md. The dreaming subagent writes MEMORY.md as
-// a flat list of level-2 topic headings (`## <topic>`), each followed by a
-// conclusion paragraph and a `fragments:` bullet list of citations. The
-// citation parser in citations.ts is global (every citation in the file);
-// this module attributes citations to their owning topic so the dreaming
-// subagent can see per-topic strength signals (citation count, distinct
-// reinforcement days, recency) on its next run.
+// Topic-aware parser for the pre-shard root-memory migration and legacy strength
+// tests. Sharded runtime memory stores each topic as its own file under
+// memory/topics/, but the one-shot migrator still needs to split a legacy root
+// file into level-2 topic sections before writing shards.
 //
 // Format assumptions match what dreaming.ts's DREAMING_SYSTEM_PROMPT teaches:
 //   - First line is `# Memory` (an h1). Treated as a non-topic header.
@@ -17,9 +14,9 @@
 //     aggregation. parseCitations from citations.ts still picks them up if
 //     anything downstream needs the global view.
 //
-// The parser is intentionally permissive: it never throws on malformed
-// MEMORY.md. A subagent that writes a header with no body or a topic with no
-// citations still parses cleanly with an empty `citations` array. The
+// The parser is intentionally permissive: it never throws on malformed legacy
+// topic prose. A header with no body or a topic with no citations still parses
+// cleanly with an empty `citations` array. The
 // strength layer then treats those topics as "weak" — which is the right
 // behavior, since they ARE weak.
 
@@ -40,9 +37,24 @@ export type Topic = {
   citations: Citation[]
 }
 
-const HEADING_LEVEL_2 = /^##\s+(.*)$/
+export type TopicWithBody = Topic & { body: string }
 
-// Split MEMORY.md into ordered topics with their citations attached. Returns
+const HEADING_LEVEL_2 = /^##\s+(.*)$/
+const HISTORICAL_BUCKET = /^historical observations$/i
+const BULLET_LINE = /^-\s+(.*)$/
+const LEADING_DATE = /^\d{4}-\d{2}-\d{2}:\s*/
+const CITATION_TAIL = /\s*—\s+memory\/.*$/
+
+function collectCitations(bodyText: string): Citation[] {
+  const grouped = parseCitations(bodyText)
+  const citations: Citation[] = []
+  for (const [date, ids] of grouped) {
+    for (const fragmentId of ids) citations.push({ date, fragmentId })
+  }
+  return citations
+}
+
+// Split legacy topic prose into ordered topics with their citations attached. Returns
 // an empty array when no `## ` heading appears.
 export function parseTopics(text: string): Topic[] {
   const lines = text.split('\n')
@@ -51,13 +63,55 @@ export function parseTopics(text: string): Topic[] {
 
   const flush = (): void => {
     if (!current) return
-    const bodyText = current.body.join('\n')
-    const grouped = parseCitations(bodyText)
-    const citations: Citation[] = []
-    for (const [date, ids] of grouped) {
-      for (const fragmentId of ids) citations.push({ date, fragmentId })
-    }
+    const citations = collectCitations(current.body.join('\n'))
     topics.push({ heading: current.heading, citations })
+  }
+
+  for (const line of lines) {
+    const match = HEADING_LEVEL_2.exec(line)
+    if (match) {
+      flush()
+      current = { heading: (match[1] ?? '').trim(), body: [] }
+      continue
+    }
+    if (current) current.body.push(line)
+  }
+  flush()
+
+  return topics
+}
+
+// Like parseTopics, but preserves the full body text of each topic. The
+// `## Historical observations` bucket is expanded into one entry per bullet.
+export function parseTopicsWithBodies(text: string): TopicWithBody[] {
+  const lines = text.split('\n')
+  const topics: TopicWithBody[] = []
+  let current: { heading: string; body: string[] } | undefined
+
+  const flush = (): void => {
+    if (!current) return
+    const bodyText = current.body.join('\n')
+    if (HISTORICAL_BUCKET.test(current.heading)) {
+      let index = 0
+      for (const line of current.body) {
+        const bulletMatch = BULLET_LINE.exec(line)
+        if (!bulletMatch) continue
+        const bulletText = bulletMatch[1] ?? ''
+        let heading = bulletText.replace(LEADING_DATE, '').replace(CITATION_TAIL, '').trim()
+        const citations = collectCitations(bulletText)
+        if (!heading) {
+          heading = citations[0]?.date ?? `historical-${index}`
+        }
+        topics.push({ heading, body: bulletText, citations })
+        index++
+      }
+      return
+    }
+    topics.push({
+      heading: current.heading,
+      body: bodyText,
+      citations: collectCitations(bodyText),
+    })
   }
 
   for (const line of lines) {

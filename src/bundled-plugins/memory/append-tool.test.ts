@@ -24,7 +24,7 @@ function tmpRoot(): string {
 }
 
 function streamPath(root: string): string {
-  return join(root, 'memory', `${formatLocalDate()}.jsonl`)
+  return join(root, 'memory', 'streams', `${formatLocalDate()}.jsonl`)
 }
 
 function ctx(root: string): ToolContext {
@@ -221,7 +221,7 @@ describe('appendTool', () => {
   test('dedups against pre-existing JSONL fragment events', async () => {
     const root = tmpRoot()
     const path = streamPath(root)
-    mkdirSync(join(root, 'memory'), { recursive: true })
+    mkdirSync(join(root, 'memory', 'streams'), { recursive: true })
     await Bun.write(
       path,
       `${JSON.stringify({
