@@ -54,7 +54,10 @@ export async function* replayLines(
   }
 }
 
-function* eventsFromEntry(entry: unknown, pending: Map<string, { name: string; startTs: number }>): Iterable<InspectEvent> {
+function* eventsFromEntry(
+  entry: unknown,
+  pending: Map<string, { name: string; startTs: number }>,
+): Iterable<InspectEvent> {
   const meta = readSessionMeta(entry)
   if (meta !== null) {
     yield { cat: 'meta', ts: numberOr(readField(entry, 'timestamp'), 0), origin: meta }
@@ -70,7 +73,7 @@ function* eventsFromEntry(entry: unknown, pending: Map<string, { name: string; s
     return
   }
   if (role === 'assistant') {
-    yield* assistantEvents(message, ts, pending)
+    yield* assistantEvents(message as AssistantMessage, ts, pending)
     return
   }
 }
@@ -106,7 +109,7 @@ function* assistantEvents(
     yield { cat: 'error', ts, message: message.errorMessage }
   }
   const usage = readUsage(message.usage)
-  if (usage !== null) {
+  if (usage !== null && (usage.totalTokens > 0 || typeof message.stopReason === 'string')) {
     yield {
       cat: 'done',
       ts,

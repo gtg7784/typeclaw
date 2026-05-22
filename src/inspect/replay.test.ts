@@ -142,7 +142,7 @@ describe('replayLines', () => {
       }),
     ]
     const events = await collect(replayLines(asLines(lines)))
-    expect(events.map((e) => e.cat)).toEqual(['assistant', 'tool', 'done', 'tool', 'done'])
+    expect(events.map((e) => e.cat)).toEqual(['assistant', 'tool', 'done', 'tool'])
 
     const start = events[1]!
     if (start.cat !== 'tool' || start.phase !== 'start') throw new Error('expected tool start')
@@ -161,6 +161,25 @@ describe('replayLines', () => {
     expect(done0.input).toBe(100)
     expect(done0.totalTokens).toBe(150)
     expect(done0.cost).toBe(0.0012)
+  })
+
+  test('assistant turn with zero usage and no stopReason yields no done event (avoids noisy "(no usage)" lines on tool-result turns)', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'assistant',
+              content: [{ type: 'toolResult', toolCallId: 'c1', output: 'x', isError: false }],
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
+              timestamp: 1000,
+            },
+          }),
+        ]),
+      ),
+    )
+    expect(events.find((e) => e.cat === 'done')).toBeUndefined()
   })
 
   test('assistant errorMessage surfaces as error event', async () => {
@@ -205,9 +224,12 @@ describe('replayLines', () => {
   test('blank lines are ignored without warning', async () => {
     const warnings: string[] = []
     const events = await collect(
-      replayLines(asLines(['', '  ', JSON.stringify({ type: 'message', message: { role: 'user', content: 'x', timestamp: 1 } })]), {
-        onWarn: (m) => warnings.push(m),
-      }),
+      replayLines(
+        asLines(['', '  ', JSON.stringify({ type: 'message', message: { role: 'user', content: 'x', timestamp: 1 } })]),
+        {
+          onWarn: (m) => warnings.push(m),
+        },
+      ),
     )
     expect(events).toHaveLength(1)
     expect(warnings).toHaveLength(0)
