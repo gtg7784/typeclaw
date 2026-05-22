@@ -63,7 +63,7 @@ describe('dumpSystemPrompt', () => {
     expect(out).toContain('never fabricate results')
     expect(out).toContain('Do not narrate routine')
     expect(out).toContain('workspace/')
-    expect(out).toContain('Do not edit `MEMORY.md` directly')
+    expect(out).toContain('Do not edit `memory/topics/` directly')
   })
 
   test('slim prompt does NOT contain the subagent-breaking "plain prose is invisible" claim', () => {
