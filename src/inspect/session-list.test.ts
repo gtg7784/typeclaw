@@ -91,12 +91,12 @@ describe('listSessions', () => {
 
   test('skips non-jsonl entries and bad filenames with warnings', async () => {
     await writeFile(join(dir, 'random.txt'), 'not jsonl')
-    await writeFile(join(dir, 'broken-name.jsonl'), '{}')
+    await writeFile(join(dir, '_.jsonl'), '{}')
     await writeSession(`2026-05-22T00-00-00-000Z_${UUID_A}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
     const warnings: string[] = []
     const sessions = await listSessions({ sessionsDir: dir, onWarn: (m) => warnings.push(m) })
     expect(sessions.map((s) => s.sessionId)).toEqual([UUID_A])
-    expect(warnings.some((w) => w.includes('broken-name.jsonl'))).toBe(true)
+    expect(warnings.some((w) => w.includes('_.jsonl'))).toBe(true)
   })
 
   test('subagent system spawn with no user message → firstPrompt is null (renders as "system spawn" in selector)', async () => {
@@ -142,12 +142,39 @@ describe('listSessions', () => {
     expect(warnings.filter((w) => w.includes('unexpected name'))).toEqual([])
   })
 
-  test('rejects filename with empty session id (a__.jsonl)', async () => {
-    await writeFile(join(dir, 'a__.jsonl'), '{}')
+  test('regression: legacy bare-UUID filename (pre-May-2026 channel session) is not skipped', async () => {
+    const basename = `${UUID_A}.jsonl`
+    await writeSession(basename, [metaLine({ kind: 'tui' }), userLine('legacy session')], 1000)
+    const warnings: string[] = []
+    const sessions = await listSessions({ sessionsDir: dir, onWarn: (m) => warnings.push(m) })
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0]?.sessionId).toBe(UUID_A)
+    expect(sessions[0]?.basename).toBe(basename)
+    expect(sessions[0]?.firstPrompt).toBe('legacy session')
+    expect(warnings.filter((w) => w.includes('unexpected name'))).toEqual([])
+  })
+
+  test('legacy bare-UUID and ISO_UUID files coexist in the same directory', async () => {
+    await writeSession(`${UUID_OLD}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    await writeSession(`2026-05-22T00-00-00-000Z_${UUID_NEW}.jsonl`, [metaLine({ kind: 'tui' })], 2000)
+    const sessions = await listSessions({ sessionsDir: dir })
+    expect(sessions.map((s) => s.sessionId)).toEqual([UUID_NEW, UUID_OLD])
+  })
+
+  test('rejects filename with only an underscore (_.jsonl) and no id', async () => {
+    await writeFile(join(dir, '_.jsonl'), '{}')
     const warnings: string[] = []
     const sessions = await listSessions({ sessionsDir: dir, onWarn: (m) => warnings.push(m) })
     expect(sessions).toEqual([])
-    expect(warnings.some((w) => w.includes('a__.jsonl'))).toBe(true)
+    expect(warnings.some((w) => w.includes('_.jsonl'))).toBe(true)
+  })
+
+  test('rejects filename with only an extension (.jsonl) and no id', async () => {
+    await writeFile(join(dir, '.jsonl'), '{}')
+    const warnings: string[] = []
+    const sessions = await listSessions({ sessionsDir: dir, onWarn: (m) => warnings.push(m) })
+    expect(sessions).toEqual([])
+    expect(warnings.some((w) => w.includes('.jsonl'))).toBe(true)
   })
 })
 

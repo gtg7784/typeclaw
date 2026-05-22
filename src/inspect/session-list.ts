@@ -22,10 +22,15 @@ export type ListSessionsOptions = {
 }
 
 // pi-coding-agent writes session files as `${ISO_TIMESTAMP}_${SESSION_ID}.jsonl`,
-// where SESSION_ID is a UUIDv7 by default (overridable via `SessionManager.create({ id })`).
-// The trailing token is the id; require it to be filesystem-safe (no `/`, `\`, or whitespace)
-// and start with a non-`_` character so `a__.jsonl` (empty id) doesn't slip through.
-const FILENAME_PATTERN = /^.+_([^_/\\\s][^/\\\s]*)\.jsonl$/
+// where SESSION_ID is a UUIDv7 by default. Older typeclaw versions (pre-May
+// 2026, before the channel session-file basename was persisted) also produced
+// bare `${SESSION_ID}.jsonl` files; legacy agent folders still carry those
+// alongside the canonical form, and skipping them hides real history from
+// `typeclaw inspect`. Accept both shapes: take whatever follows the last `_`
+// as the id, or the whole stem when no `_` is present. The id must be
+// filesystem-safe (no `/`, `\`, or whitespace) and must start with a non-`_`
+// character so empty-id filenames like `_.jsonl` don't slip through.
+const FILENAME_PATTERN = /^(?:.*_)?([^_/\\\s][^/\\\s]*)\.jsonl$/
 
 export async function listSessions(opts: ListSessionsOptions): Promise<SessionSummary[]> {
   const entries = await readSessionFiles(opts.sessionsDir, opts.onWarn)
