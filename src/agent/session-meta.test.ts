@@ -40,7 +40,7 @@ describe('sessionMetaPayload (minimal projection)', () => {
     })
   })
 
-  test('channel origin keeps addressing ids, drops participants/membership/names', () => {
+  test('channel origin keeps addressing ids and workspace/chat names, drops participants/membership/authors', () => {
     const origin: SessionOrigin = {
       kind: 'channel',
       adapter: 'slack-bot',
@@ -57,10 +57,35 @@ describe('sessionMetaPayload (minimal projection)', () => {
         kind: 'channel',
         adapter: 'slack-bot',
         workspace: 'T0123',
+        workspaceName: 'Acme Corp',
         chat: 'C0ABC',
+        chatName: '#general',
         thread: '1234.567',
       },
     })
+  })
+
+  test('channel origin omits workspaceName/chatName fields when unset (does not write key:undefined)', () => {
+    const origin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0123',
+      chat: 'C0ABC',
+      thread: null,
+    }
+    const out = sessionMetaPayload(origin)
+    expect(out).toEqual({
+      origin: {
+        kind: 'channel',
+        adapter: 'slack-bot',
+        workspace: 'T0123',
+        chat: 'C0ABC',
+        thread: null,
+      },
+    })
+    if (out.origin.kind !== 'channel') throw new Error('unreachable')
+    expect('workspaceName' in out.origin).toBe(false)
+    expect('chatName' in out.origin).toBe(false)
   })
 
   test('subagent origin keeps subagent name and parentSessionId, drops spawnedByOrigin', () => {
@@ -76,14 +101,14 @@ describe('sessionMetaPayload (minimal projection)', () => {
     })
   })
 
-  test('does not include any field that would leak workspace/user names to disk', () => {
+  test('does not include author handles or participants on disk', () => {
     const origin: SessionOrigin = {
       kind: 'channel',
       adapter: 'discord-bot',
       workspace: '9999',
-      workspaceName: 'Sensitive Org Name',
+      workspaceName: 'Acme Org',
       chat: '8888',
-      chatName: 'secret-channel',
+      chatName: 'general',
       thread: null,
       lastInboundAuthorId: 'U_SENSITIVE',
       participants: [
@@ -91,10 +116,10 @@ describe('sessionMetaPayload (minimal projection)', () => {
       ],
     }
     const stamped = JSON.stringify(sessionMetaPayload(origin))
-    expect(stamped).not.toContain('Sensitive Org Name')
-    expect(stamped).not.toContain('secret-channel')
     expect(stamped).not.toContain('Real Person Name')
     expect(stamped).not.toContain('U_SENSITIVE')
+    expect(stamped).not.toContain('"participants"')
+    expect(stamped).not.toContain('"lastInboundAuthorId"')
   })
 })
 

@@ -1,0 +1,137 @@
+import { styleText } from 'node:util'
+
+import { originLabel } from './label'
+import type { InspectEvent } from './types'
+
+export type RenderOptions = {
+  color: boolean
+  maxTextLength?: number
+}
+
+export function renderEvent(event: InspectEvent, opts: RenderOptions): string {
+  const time = renderTime(event.ts, opts)
+  const tag = renderTag(event, opts)
+  const body = renderBody(event, opts)
+  return `${time}  ${tag}  ${body}`
+}
+
+const DEFAULT_MAX_TEXT = 200
+
+function renderTime(ts: number, opts: RenderOptions): string {
+  if (ts === 0) return tint(opts, 'dim', '--:--:--')
+  const d = new Date(ts)
+  const hh = String(d.getHours()).padStart(2, '0')
+  const mm = String(d.getMinutes()).padStart(2, '0')
+  const ss = String(d.getSeconds()).padStart(2, '0')
+  return tint(opts, 'dim', `${hh}:${mm}:${ss}`)
+}
+
+function renderTag(event: InspectEvent, opts: RenderOptions): string {
+  switch (event.cat) {
+    case 'meta':
+      return tint(opts, 'magenta', padEnd('meta', 9))
+    case 'user':
+      return tint(opts, 'cyan', padEnd('user', 9))
+    case 'assistant':
+      return tint(opts, 'green', padEnd('assist', 9))
+    case 'tool':
+      return tint(opts, 'yellow', padEnd(event.phase === 'start' ? 'tool ▸' : 'tool ◂', 9))
+    case 'error':
+      return tint(opts, 'red', padEnd('error', 9))
+    case 'done':
+      return tint(opts, 'gray', padEnd('done', 9))
+  }
+}
+
+function renderBody(event: InspectEvent, opts: RenderOptions): string {
+  switch (event.cat) {
+    case 'meta':
+      return `origin: ${originLabel(event.origin)}`
+    case 'user':
+      return truncate(singleLine(event.text), opts.maxTextLength ?? DEFAULT_MAX_TEXT)
+    case 'assistant':
+      return truncate(singleLine(event.text), opts.maxTextLength ?? DEFAULT_MAX_TEXT)
+    case 'tool': {
+      if (event.phase === 'start') {
+        return `${event.name}(${renderArgs(event.args)})`
+      }
+      const dur = formatDuration(event.durationMs ?? 0)
+      const status = event.isError ? tint(opts, 'red', 'error') : 'ok'
+      const result = renderResult(event.result, opts.maxTextLength ?? DEFAULT_MAX_TEXT)
+      return `${event.name} → ${status}${result ? ` ${result}` : ''} (${dur})`
+    }
+    case 'error':
+      return tint(opts, 'red', truncate(singleLine(event.message), opts.maxTextLength ?? DEFAULT_MAX_TEXT))
+    case 'done':
+      return renderDone(event, opts)
+  }
+}
+
+function renderDone(event: Extract<InspectEvent, { cat: 'done' }>, opts: RenderOptions): string {
+  const parts: string[] = []
+  if (event.totalTokens > 0) parts.push(`tokens: ${event.input} in / ${event.output} out`)
+  if (event.cost > 0) parts.push(`$${event.cost.toFixed(4)}`)
+  if (event.stopReason !== undefined) parts.push(`stop=${event.stopReason}`)
+  return tint(opts, 'dim', parts.join(' · ') || '(no usage)')
+}
+
+function renderArgs(args: unknown): string {
+  if (args === undefined) return ''
+  if (typeof args === 'string') return JSON.stringify(args)
+  try {
+    const compact = JSON.stringify(args)
+    if (compact === undefined) return ''
+    if (compact.length <= 120) return compact
+    return `${compact.slice(0, 120)}…`
+  } catch {
+    return '<unserializable>'
+  }
+}
+
+function renderResult(result: unknown, maxLen: number): string {
+  if (result === undefined || result === null) return ''
+  if (typeof result === 'string') {
+    const text = singleLine(result)
+    if (text === '') return ''
+    return `"${truncate(text, Math.min(80, maxLen))}"`
+  }
+  if (typeof result === 'number' || typeof result === 'boolean') return String(result)
+  try {
+    const compact = JSON.stringify(result)
+    if (compact === undefined) return ''
+    if (compact.length <= 80) return compact
+    return `${compact.slice(0, 80)}…`
+  } catch {
+    return ''
+  }
+}
+
+function truncate(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text
+  return `${text.slice(0, maxLen)}…`
+}
+
+function singleLine(text: string): string {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function padEnd(text: string, width: number): string {
+  if (text.length >= width) return text
+  return text + ' '.repeat(width - text.length)
+}
+
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  const s = ms / 1000
+  if (s < 60) return `${s.toFixed(1)}s`
+  const m = Math.floor(s / 60)
+  const sec = Math.round(s % 60)
+  return `${m}m${sec}s`
+}
+
+type ColorName = 'dim' | 'magenta' | 'cyan' | 'green' | 'yellow' | 'red' | 'gray'
+
+function tint(opts: RenderOptions, color: ColorName, text: string): string {
+  if (!opts.color) return text
+  return styleText(color, text)
+}

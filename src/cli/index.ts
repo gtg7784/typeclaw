@@ -22,6 +22,7 @@ const main = defineCommand({
     status: () => import('./status').then((m) => m.statusCommand),
     reload: () => import('./reload').then((m) => m.reload),
     logs: () => import('./logs').then((m) => m.logsCommand),
+    inspect: () => import('./inspect').then((m) => m.inspectCommand),
     shell: () => import('./shell').then((m) => m.shellCommand),
     compose: () => import('./compose').then((m) => m.composeCommand),
     channel: () => import('./channel').then((m) => m.channelCommand),

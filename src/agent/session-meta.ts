@@ -9,12 +9,29 @@ export type SessionMetaPayload = {
 export type MinimalSessionOrigin =
   | { kind: 'tui' }
   | { kind: 'cron'; jobId: string; jobKind: 'prompt' | 'exec' | 'subagent' | 'handler' }
-  | { kind: 'channel'; adapter: string; workspace: string; chat: string; thread: string | null }
+  | {
+      kind: 'channel'
+      adapter: string
+      workspace: string
+      // Optional human-readable names persisted alongside IDs so offline
+      // tooling (`typeclaw inspect`, future report commands) can render
+      // sessions as `Slack acme-corp/#general` instead of bare IDs without
+      // re-querying the adapter at runtime. Workspace/chat NAMES are not
+      // secrets — they are visible to any participant — and they are
+      // stable across reopens, so the tradeoff is one-time write cost for
+      // permanent offline readability. Author handles, participant lists,
+      // and membership counts remain dropped (those carry author identity
+      // and would land in `sessions/`'s auto-backup git history).
+      workspaceName?: string
+      chat: string
+      chatName?: string
+      thread: string | null
+    }
   | { kind: 'subagent'; subagent: string; parentSessionId: string }
 
 // Reduce a full SessionOrigin to the minimum projection persisted to disk.
 // Drops participant lists, membership counts, recursive provenance, and
-// platform-rendered names — none of which `typeclaw usage` reads, and all of
+// author identifiers — none of which `typeclaw usage` reads, and all of
 // which would otherwise land in git history when sessions/ is auto-backed-up.
 // Kept as a separate function so the boundary between "data the LLM sees in
 // the system prompt" (full origin) and "data persisted for usage reporting"
@@ -34,7 +51,9 @@ function minimalOrigin(origin: SessionOrigin): MinimalSessionOrigin {
         kind: 'channel',
         adapter: origin.adapter,
         workspace: origin.workspace,
+        ...(origin.workspaceName !== undefined ? { workspaceName: origin.workspaceName } : {}),
         chat: origin.chat,
+        ...(origin.chatName !== undefined ? { chatName: origin.chatName } : {}),
         thread: origin.thread,
       }
     case 'subagent':
