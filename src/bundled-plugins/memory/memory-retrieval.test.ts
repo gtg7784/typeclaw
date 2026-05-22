@@ -46,7 +46,7 @@ describe('memoryRetrievalSubagent', () => {
   test('tool surface includes write and memory_search', () => {
     expect(memoryRetrievalSubagent.tools?.map((tool) => tool.__builtinTool)).toEqual(['read', 'write', 'ls'])
     expect(memoryRetrievalSubagent.customTools).toContainEqual(
-      expect.objectContaining({ description: expect.stringContaining('Search long-term memory topic shards') }),
+      expect.objectContaining({ description: expect.stringContaining("Search the agent's long-term memory") }),
     )
   })
 

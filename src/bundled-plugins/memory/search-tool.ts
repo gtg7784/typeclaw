@@ -3,11 +3,14 @@ import { z } from 'zod'
 import { defineTool } from '@/plugin'
 
 import { loadAllShards, type TopicShard } from './load-shards'
+import type { FragmentEvent, LegacyProseEvent, StreamEvent } from './stream-events'
+import { readAllUndreamedStreamDays, type UndreamedStreamDay } from './stream-io'
 
 const DEFAULT_MAX_RESULTS = 10
 const EXCERPT_CONTEXT_LINES = 3
 
-type MemorySearchMatch = {
+type TopicMatch = {
+  source: 'topic'
   shardPath: string
   slug: string
   heading: string
@@ -15,13 +18,25 @@ type MemorySearchMatch = {
   fullBody?: string
 }
 
+type StreamMatch = {
+  source: 'stream'
+  streamPath: string
+  date: string
+  eventId?: string
+  topic: string
+  excerpt: string
+  fullBody?: string
+}
+
+type MemorySearchMatch = TopicMatch | StreamMatch
+
 type MemorySearchResult = { matches: MemorySearchMatch[]; truncatedAt?: number } | { error: string }
 
 type Matcher = (haystack: string) => boolean
 
 export const memorySearchTool = defineTool({
   description:
-    'Search long-term memory topic shards under memory/topics using case-insensitive substring matching by default or a JavaScript regex when asRegex=true. Returns shard paths, headings, and contextual excerpts; full=true includes full shard bodies.',
+    'Search the agent\'s long-term memory. Covers both topic shards under memory/topics/ (consolidated facts) and undreamed daily-stream events under memory/streams/ (recent fragments not yet folded into shards). Case-insensitive substring by default; asRegex=true treats query as a JavaScript regex. Returns matches discriminated by `source: "topic" | "stream"`, each with line-context excerpts; full=true includes complete bodies. Topic matches come first (alphabetical by slug), then stream matches (newest day first).',
   parameters: z.object({
     query: z.string(),
     asRegex: z.boolean().default(false),
@@ -34,12 +49,15 @@ export const memorySearchTool = defineTool({
       return resultToToolResult({ error: matcherOrError })
     }
 
-    const shards = await loadAllShards(ctx.agentDir, { logger: ctx.logger })
-    if (shards.length === 0) {
+    const [shards, streamDays] = await Promise.all([
+      loadAllShards(ctx.agentDir, { logger: ctx.logger }),
+      readAllUndreamedStreamDays(ctx.agentDir),
+    ])
+    if (shards.length === 0 && streamDays.length === 0) {
       return resultToToolResult({ matches: [], truncatedAt: 0 })
     }
 
-    const result = searchShards(shards, matcherOrError, { full, maxResults })
+    const result = searchAll(shards, streamDays, matcherOrError, { full, maxResults })
     return resultToToolResult(result)
   },
 })
@@ -59,29 +77,49 @@ function buildMatcher(query: string, asRegex: boolean): Matcher | string {
   return (haystack) => haystack.toLowerCase().includes(needle)
 }
 
-function searchShards(
+// Result-ordering contract: topic shards first (alphabetical by slug, the
+// order `loadAllShards` returns), then stream days (newest first). Truncation
+// cuts from the tail of this concatenation — stream matches are sacrificed
+// before topic matches when `maxResults` is exhausted. The agent reading
+// results in this order sees long-term consolidated truth before recent
+// ephemeral fragments, which mirrors the injection-side rendering order.
+function searchAll(
   shards: TopicShard[],
+  streamDays: UndreamedStreamDay[],
   matcher: Matcher,
   options: { full: boolean; maxResults: number },
 ): MemorySearchResult {
   const matches: MemorySearchMatch[] = []
   let truncatedAt: number | undefined
 
+  const push = (match: MemorySearchMatch): boolean => {
+    if (matches.length >= options.maxResults) {
+      truncatedAt = options.maxResults
+      return false
+    }
+    matches.push(match)
+    return true
+  }
+
   for (const shard of shards) {
     const match = matchShard(shard, matcher, options.full)
     if (match === null) continue
+    if (!push(match)) return { matches, truncatedAt: truncatedAt! }
+  }
 
-    if (matches.length >= options.maxResults) {
-      truncatedAt = options.maxResults
-      break
+  for (let i = streamDays.length - 1; i >= 0; i--) {
+    const day = streamDays[i]!
+    for (const event of day.events) {
+      const match = matchStreamEvent(day, event, matcher, options.full)
+      if (match === null) continue
+      if (!push(match)) return { matches, truncatedAt: truncatedAt! }
     }
-    matches.push(match)
   }
 
   return truncatedAt === undefined ? { matches } : { matches, truncatedAt }
 }
 
-function matchShard(shard: TopicShard, matcher: Matcher, full: boolean): MemorySearchMatch | null {
+function matchShard(shard: TopicShard, matcher: Matcher, full: boolean): TopicMatch | null {
   const bodyLines = splitBodyLines(shard.body)
   const firstBodyLineIndex = bodyLines.findIndex((line) => matcher(line))
 
@@ -92,7 +130,8 @@ function matchShard(shard: TopicShard, matcher: Matcher, full: boolean): MemoryS
     firstBodyLineIndex !== -1
   if (!matched) return null
 
-  const match: MemorySearchMatch = {
+  const match: TopicMatch = {
+    source: 'topic',
     shardPath: shard.path,
     slug: shard.slug,
     heading: shard.frontmatter.heading,
@@ -100,6 +139,70 @@ function matchShard(shard: TopicShard, matcher: Matcher, full: boolean): MemoryS
       firstBodyLineIndex === -1 ? fallbackExcerpt(shard, matcher) : excerptForLine(bodyLines, firstBodyLineIndex),
   }
   if (full) match.fullBody = shard.body
+  return match
+}
+
+// Stream-event matcher. `fragment` events expose `topic` + `body` for search;
+// `legacy_prose` exposes `text` (no id, no topic). `watermark` events carry
+// no human content and are skipped — they only mark dreaming progress.
+//
+// Fragment matches set `eventId` to the canonical citation format
+// `streams/yyyy-MM-dd#<id>` so the agent can paste search hits straight into
+// shard citations. Legacy prose has no fragment id and therefore omits
+// `eventId` — `parseCitations` would reject any value we synthesised, so we
+// leave the field absent to make the asymmetry visible to the agent.
+function matchStreamEvent(
+  day: UndreamedStreamDay,
+  event: StreamEvent,
+  matcher: Matcher,
+  full: boolean,
+): StreamMatch | null {
+  if (event.type === 'watermark') return null
+  if (event.type === 'fragment') return matchFragmentEvent(day, event, matcher, full)
+  return matchLegacyProseEvent(day, event, matcher, full)
+}
+
+function matchFragmentEvent(
+  day: UndreamedStreamDay,
+  event: FragmentEvent,
+  matcher: Matcher,
+  full: boolean,
+): StreamMatch | null {
+  const bodyLines = splitBodyLines(event.body)
+  const firstBodyLineIndex = bodyLines.findIndex((line) => matcher(line))
+  const matched = matcher(event.topic) || firstBodyLineIndex !== -1
+  if (!matched) return null
+
+  const match: StreamMatch = {
+    source: 'stream',
+    streamPath: day.path,
+    date: day.date,
+    eventId: `streams/${day.date}#${event.id}`,
+    topic: event.topic,
+    excerpt: firstBodyLineIndex === -1 ? event.topic : excerptForLine(bodyLines, firstBodyLineIndex),
+  }
+  if (full) match.fullBody = event.body
+  return match
+}
+
+function matchLegacyProseEvent(
+  day: UndreamedStreamDay,
+  event: LegacyProseEvent,
+  matcher: Matcher,
+  full: boolean,
+): StreamMatch | null {
+  const lines = splitBodyLines(event.text)
+  const firstLineIndex = lines.findIndex((line) => matcher(line))
+  if (firstLineIndex === -1) return null
+
+  const match: StreamMatch = {
+    source: 'stream',
+    streamPath: day.path,
+    date: day.date,
+    topic: '[legacy prose from pre-shard migration]',
+    excerpt: excerptForLine(lines, firstLineIndex),
+  }
+  if (full) match.fullBody = event.text
   return match
 }
 
