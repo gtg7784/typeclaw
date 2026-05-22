@@ -4,6 +4,10 @@ import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import * as FakeTimers from '@sinonjs/fake-timers'
+
+type Clock = FakeTimers.Clock
+
 import { noopPermissionService } from '@/permissions'
 import type {
   PluginContext,
@@ -18,6 +22,61 @@ import { createPluginContext, createPluginLogger } from '@/plugin/context'
 import { renderShard } from './frontmatter'
 import memoryPlugin from './index'
 import { topicShardPath, topicsDir } from './paths'
+
+// Fake timers replace ~10s of real setTimeout waits used to exercise the idle
+// debouncer and spawn-timeout race. Date is included in `toFake` so the
+// per-agent spawn serialization tests' `Date.now()` non-overlap assertions
+// observe the fake clock instead of wall-clock skew.
+let clock: Clock | null = null
+
+function installFakeClock(): void {
+  clock = FakeTimers.install({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] })
+}
+
+async function uninstallFakeClock(): Promise<void> {
+  // Drain any in-flight spawn-chain microtasks AND advance any leftover fake
+  // timers (e.g. raceSpawn's spawnTimeoutMs timer that the plugin clears in a
+  // `finally` block) so they settle before the clock is uninstalled. Without
+  // this, a pending fake-timer outlives the install and resumes against real
+  // time in the next test, intermittently corrupting per-test assertions.
+  if (clock) {
+    await clock.runAllAsync()
+    for (let i = 0; i < 10; i++) await new Promise((r) => setImmediate(r))
+    clock.uninstall()
+    clock = null
+  }
+}
+
+async function tickMs(ms: number): Promise<void> {
+  if (!clock) throw new Error('clock not installed; call installFakeClock() in beforeEach')
+  // The fire chain awaits real fs.stat (libuv) AND faked setTimeout chained
+  // AFTER it (e.g. mock spawnSubagent's spawnDelayMs). One big tickAsync(ms)
+  // fires only the setTimeouts scheduled BEFORE the first libuv yield — every
+  // subsequent chain link's setTimeout is registered later, after a real
+  // event-loop turn settles its predecessor's fs.stat. So we interleave:
+  // advance some fake time, yield to libuv, advance more, yield again.
+  let remaining = ms
+  while (remaining > 0) {
+    const step = Math.min(remaining, 25)
+    await clock.tickAsync(step)
+    remaining -= step
+    for (let j = 0; j < 5; j++) await new Promise((r) => setImmediate(r))
+  }
+  for (let j = 0; j < 30; j++) await new Promise((r) => setImmediate(r))
+}
+
+// Wait for a condition that depends on the spawn chain settling. Use this when
+// asserting on captured side effects (`spawned`, `logs.info`) after tickMs,
+// since libuv-and-faked-setTimeout interleavings can leave the final chain
+// link's microtasks pending past the last drain cycle. The poll uses real
+// setImmediate (libuv) not the fake clock.
+async function waitFor(predicate: () => boolean, label: string, attempts = 200): Promise<void> {
+  for (let i = 0; i < attempts; i++) {
+    if (predicate()) return
+    await new Promise((r) => setImmediate(r))
+  }
+  throw new Error(`waitFor(${label}) exhausted ${attempts} attempts without predicate becoming true`)
+}
 
 type SpawnCall = { name: string; payload: unknown; options: unknown; startedAt: number; finishedAt: number }
 
@@ -230,6 +289,9 @@ describe('session.prompt hook', () => {
 })
 
 describe('session.idle hook (debouncer)', () => {
+  beforeEach(installFakeClock)
+  afterEach(uninstallFakeClock)
+
   test('does NOT spawn memory-logger synchronously on idle', async () => {
     const { exports, spawned } = await bootMemoryPlugin(agentDir, { idleMs: 1000 })
     const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }
@@ -242,7 +304,8 @@ describe('session.idle hook (debouncer)', () => {
     const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }
     await exports.hooks!['session.idle']!(event, { agentDir, pluginName: 'memory', logger: createPluginLogger('m') })
 
-    await new Promise((r) => setTimeout(r, 1100))
+    await tickMs(1100)
+    await waitFor(() => spawned.length >= 1, 'spawned.length>=1')
 
     expect(spawned).toHaveLength(1)
     expect(spawned[0]!.name).toBe('memory-logger')
@@ -277,7 +340,8 @@ describe('session.idle hook (debouncer)', () => {
     const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0, origin }
 
     await exports.hooks!['session.idle']!(event, { agentDir, pluginName: 'memory', logger: createPluginLogger('m') })
-    await new Promise((r) => setTimeout(r, 1100))
+    await tickMs(1100)
+    await waitFor(() => spawned.length >= 1, 'spawned.length>=1')
 
     expect(spawned).toHaveLength(1)
     expect(spawned[0]!.payload).toEqual({
@@ -294,14 +358,15 @@ describe('session.idle hook (debouncer)', () => {
     const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }
 
     await exports.hooks!['session.idle']!(event, ctx)
-    await new Promise((r) => setTimeout(r, 400))
+    await tickMs(400)
     await exports.hooks!['session.idle']!(event, ctx)
-    await new Promise((r) => setTimeout(r, 400))
+    await tickMs(400)
     await exports.hooks!['session.idle']!(event, ctx)
 
     expect(spawned).toHaveLength(0)
 
-    await new Promise((r) => setTimeout(r, 1200))
+    await tickMs(1200)
+    await waitFor(() => spawned.length >= 1, 'spawned.length>=1')
 
     expect(spawned).toHaveLength(1)
   })
@@ -313,7 +378,8 @@ describe('session.idle hook (debouncer)', () => {
     await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: '/tmp/a.jsonl', idleMs: 0 }, ctx)
     await exports.hooks!['session.idle']!({ sessionId: 'ses_b', parentTranscriptPath: '/tmp/b.jsonl', idleMs: 0 }, ctx)
 
-    await new Promise((r) => setTimeout(r, 1200))
+    await tickMs(1200)
+    await waitFor(() => spawned.length >= 2, 'spawned.length>=2')
 
     expect(spawned).toHaveLength(2)
     const sessions = spawned.map((c) => (c.payload as { parentSessionId: string }).parentSessionId).sort()
@@ -325,7 +391,7 @@ describe('session.idle hook (debouncer)', () => {
     const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: undefined, idleMs: 0 }
     await exports.hooks!['session.idle']!(event, { agentDir, pluginName: 'memory', logger: createPluginLogger('m') })
 
-    await new Promise((r) => setTimeout(r, 1200))
+    await tickMs(1200)
 
     expect(spawned).toHaveLength(0)
   })
@@ -345,13 +411,16 @@ describe('session.idle hook (debouncer)', () => {
     }
     await exports.hooks!['session.idle']!(event, { agentDir, pluginName: 'memory', logger: createPluginLogger('m') })
 
-    await new Promise((r) => setTimeout(r, 1200))
+    await tickMs(1200)
 
     expect(spawned).toHaveLength(0)
   })
 })
 
 describe('session.end hook', () => {
+  beforeEach(installFakeClock)
+  afterEach(uninstallFakeClock)
+
   test('cancels the idle timer and spawns memory-logger immediately on close', async () => {
     const { exports, spawned } = await bootMemoryPlugin(agentDir, { idleMs: 10_000 })
     const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
@@ -425,7 +494,7 @@ describe('session.end hook', () => {
     await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }, ctx)
     await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
 
-    await new Promise((r) => setTimeout(r, 1200))
+    await tickMs(1200)
 
     expect(spawned).toHaveLength(1)
   })
@@ -591,6 +660,12 @@ describe('session.idle hook (buffer-bytes ceiling)', () => {
 })
 
 describe('per-agent spawn serialization', () => {
+  // Real time used here. These tests assert non-overlap via Date.now() inside
+  // the mock spawnSubagent (which captures startedAt / finishedAt). Total real
+  // wall cost is ~200ms across the three tests — much cheaper than wiring fake
+  // timers around the libuv-and-faked-setTimeout interleaving these chains
+  // need. Re-evaluate if spawnDelayMs grows significantly.
+
   // Two concurrent channel sessions must never call spawnSubagent in parallel —
   // the subagent consumer keys memory-logger by agentDir and would silently drop
   // a colliding fire. The plugin owns this serialization via a chained Promise.
@@ -751,13 +826,20 @@ describe('per-agent spawn serialization', () => {
 })
 
 describe('lifecycle logging', () => {
+  beforeEach(installFakeClock)
+  afterEach(uninstallFakeClock)
+
   test('logs `memory-logger spawn` with reason=idle when the debounce timer fires', async () => {
     const { logger, logs } = makeCapturingLogger()
     const { exports } = await bootMemoryPlugin(agentDir, { idleMs: 1000 }, { logger })
     const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }
 
     await exports.hooks!['session.idle']!(event, { agentDir, pluginName: 'memory', logger })
-    await new Promise((r) => setTimeout(r, 1100))
+    await tickMs(1100)
+    await waitFor(
+      () => logs.info.some((m) => m.includes('memory-logger spawn ses_a') && m.includes('reason=idle')),
+      'memory-logger spawn ses_a reason=idle',
+    )
 
     expect(logs.info.some((m) => m.includes('memory-logger spawn ses_a') && m.includes('reason=idle'))).toBe(true)
   })
