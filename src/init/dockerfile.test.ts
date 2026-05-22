@@ -253,6 +253,275 @@ describe('claudeCode toggle', () => {
   })
 })
 
+describe('Claude Code global Stop hook (pre-baked into the image)', () => {
+  function extractStopHookScript(out: string): string {
+    const match = out.match(
+      /cat > \/usr\/local\/bin\/typeclaw-cc-stop-hook <<'TYPECLAW_CC_STOP_HOOK_EOF'\n([\s\S]*?)TYPECLAW_CC_STOP_HOOK_EOF/,
+    )
+    if (!match || !match[1]) throw new Error('typeclaw-cc-stop-hook heredoc not found')
+    return match[1]
+  }
+
+  function extractGlobalSettings(out: string): unknown {
+    const match = out.match(/printf '%s\\n' '([^']+)' > "\$HOME\/\.claude\/settings\.json"/)
+    if (!match || !match[1]) throw new Error('global settings.json printf not found')
+    return JSON.parse(match[1])
+  }
+
+  test('claudeCode: true writes the hook script at /usr/local/bin/typeclaw-cc-stop-hook (stable absolute path so the global settings can name it without $PATH concerns) and chmods it executable in the same chmod call as the SessionStart hook', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('cat > /usr/local/bin/typeclaw-cc-stop-hook')
+    expect(out).toMatch(/chmod \+x [^\n]*\/usr\/local\/bin\/typeclaw-cc-stop-hook/)
+  })
+
+  test('hook script is delivered via a single-quoted heredoc so $PWD and $sid survive docker build and are expanded at runtime (NOT at build time)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain("<<'TYPECLAW_CC_STOP_HOOK_EOF'")
+    const script = extractStopHookScript(out)
+    expect(script).toContain('${PWD}/sentinel-${sid}.json')
+    expect(script).toContain('${PWD}/.done-${sid}')
+  })
+
+  test('hook script writes to $PWD, NOT $CLAUDE_PROJECT_DIR — critical bug guard: CLAUDE_PROJECT_DIR resolves to the git root of cwd, which inside a `git worktree add`d directory is the MAIN repo, not the worktree path (anthropics/claude-code#27343, #44450). For the typeclaw-claude-code skill, that would land sentinel.json in /agent (and into git history via the backup plugin auto-commit) while the polling loop watches /tmp/cc-<id>/.', () => {
+    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).not.toContain('CLAUDE_PROJECT_DIR')
+  })
+
+  test('hook script encodes session_id in the filename — concurrent-claude race safety: if two callers share a cwd (operators A+B, future plugin, out-of-band caller) they must not collide on the same sentinel/.done. session_id comes from the Stop event JSON stdin per BaseHookInputSchema; the operator learns the UUID via the .session-id file the SessionStart hook writes (NOT via claude --session-id, which does not propagate to hook events in interactive mode per anthropics/claude-code#44607).', () => {
+    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).toContain('sentinel-${sid}.json')
+    expect(script).toContain('.done-${sid}')
+    expect(script).not.toMatch(/"\$\{PWD\}\/sentinel\.json"/)
+    expect(script).not.toMatch(/"\$\{PWD\}\/\.done"\s/)
+  })
+
+  test('hook script extracts session_id via `bun -e` (real JSON parser, not sed regex) — defense against shadow attacks where last_assistant_message contains escaped `"session_id":"..."` text that greedy sed would extract instead of the structural top-level field', () => {
+    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).toContain('bun -e ')
+    expect(script).toContain('Bun.file')
+    expect(script).toContain('.session_id')
+    expect(script).not.toContain('sed -n ')
+    expect(script).not.toContain('jq ')
+    expect(script).not.toContain('python3')
+  })
+
+  test('hook script validates extracted session_id against UUID shape (8-4-4-4-12 hex) — defense against path-traversal session_id values like "../etc/passwd" that would otherwise resolve to a write outside $PWD', () => {
+    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    // POSIX `case` pattern matching the UUID shape; the [0-9a-f] character
+    // classes match exactly 8-4-4-4-12 hex digits with dashes.
+    expect(script).toContain('case "$sid" in')
+    expect(script).toMatch(
+      /\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]/,
+    )
+  })
+
+  test('hook script falls back to sid=malformed when session_id extraction or validation fails — operator polling-loop times out (no .done-<their-uuid>), but $PWD/sentinel-malformed.json exists so a post-mortem inspector can tell "hook fired with bad input" from "hook never fired"', () => {
+    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).toContain('sid=malformed')
+  })
+
+  test('hook script writes sentinel atomically via temp-then-rename — the polling loop never sees a partial JSON payload', () => {
+    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).toContain('.cc-stop-hook-in')
+    expect(script).toMatch(/cat > "\$tmp_in"[\s\S]*mv "\$tmp_in" "\$\{PWD\}\/sentinel-/)
+  })
+
+  test('Stop hook script reads the temp file via process.argv[1] (NOT argv[2]) — bun -e strips the -e flag and code-string from argv, unlike Node which preserves them. argv[1] is the FIRST positional argument after the -e code; passing the temp_in path as such gives bun.file the right path. Bug caught empirically inside docker: using argv[2] gave undefined, the catch block returned empty string, and every Stop hook fell back to sid=malformed.', () => {
+    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).toContain('process.argv[1]')
+    expect(script).not.toContain('process.argv[2]')
+  })
+
+  test('hook script touches .done-<sid> AFTER moving sentinel-<sid>.json into place — polling loop watches .done as the readiness signal, so a touch-before-rename would let readers see .done before sentinel exists', () => {
+    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    const mvIdx = script.indexOf('mv "$tmp_in"')
+    const touchIdx = script.indexOf('touch "${PWD}/.done-${sid}"')
+    expect(mvIdx).toBeGreaterThan(-1)
+    expect(touchIdx).toBeGreaterThan(-1)
+    expect(mvIdx).toBeLessThan(touchIdx)
+  })
+
+  test('hook script sets `set -eu` for fail-fast on missing PWD or sed errors — without it, an empty PWD would silently write to /sentinel-<sid>.json at filesystem root', () => {
+    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).toContain('set -eu')
+  })
+
+  test('hook script has a POSIX shebang (/bin/sh, not /bin/bash) — the script uses no bashisms and bun:1-slim ships dash as /bin/sh; depending on bash would add a layer for one bash invocation', () => {
+    const script = extractStopHookScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script.startsWith('#!/bin/sh')).toBe(true)
+  })
+
+  test('global settings.json is written at ~/.claude/settings.json (user-level scope, applies to every claude invocation regardless of cwd)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('mkdir -p "$HOME/.claude"')
+    expect(out).toContain('"$HOME/.claude/settings.json"')
+  })
+
+  test("global settings.json registers BOTH the SessionStart hook (so the operator can learn the session UUID via the .session-id file) and the Stop hook (so the operator can poll for turn-completion). The two-hook design exists because `claude --session-id <uuid>` does not propagate to hook payloads in interactive mode (anthropics/claude-code#44607), so the operator cannot pre-generate the UUID; instead it learns claude's actual UUID from the SessionStart hook output.", () => {
+    const parsed = extractGlobalSettings(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(parsed).toEqual({
+      hooks: {
+        SessionStart: [
+          {
+            matcher: 'startup|resume|clear|compact',
+            hooks: [{ type: 'command', command: '/usr/local/bin/typeclaw-cc-session-start-hook', args: [] }],
+          },
+        ],
+        Stop: [
+          {
+            matcher: '*',
+            hooks: [{ type: 'command', command: '/usr/local/bin/typeclaw-cc-stop-hook', args: [] }],
+          },
+        ],
+      },
+    })
+  })
+
+  test('SessionStart matcher is `startup|resume|clear|compact` (all four upstream-documented session-origin types) so the operator learns the UUID regardless of how the session started — startup (fresh claude), resume (--resume <uuid>), clear (/clear command), compact (auto-compaction)', () => {
+    const parsed = extractGlobalSettings(buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))) as {
+      hooks: { SessionStart: Array<{ matcher: string }> }
+    }
+    expect(parsed.hooks.SessionStart[0]?.matcher).toBe('startup|resume|clear|compact')
+  })
+
+  test('settings.json uses exec form (args: []) NOT shell form (no args) — per docs.claude.com/en/docs/claude-code/hooks, args present triggers execvp with kernel-handled shebang and no shell tokenization, vs shell form that wraps in sh -c "<command>" (works for our path today, but fragile to any future change that introduces special chars)', () => {
+    const parsed = extractGlobalSettings(buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))) as {
+      hooks: { Stop: Array<{ hooks: Array<{ args?: unknown[] }> }> }
+    }
+    const args = parsed.hooks.Stop[0]?.hooks[0]?.args
+    expect(args).toBeDefined()
+    expect(Array.isArray(args)).toBe(true)
+    expect(args).toEqual([])
+  })
+
+  test('global settings.json command path is absolute, not relative — Claude Code user-level hooks fire with arbitrary cwds, so a relative path would resolve unpredictably', () => {
+    const parsed = extractGlobalSettings(buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))) as {
+      hooks: { Stop: Array<{ hooks: Array<{ command: string }> }> }
+    }
+    const cmd = parsed.hooks.Stop[0]?.hooks[0]?.command
+    expect(cmd).toBeDefined()
+    expect(cmd?.startsWith('/')).toBe(true)
+  })
+
+  test('global settings.json payload contains no single quotes — required by the printf %s shell-quoting pattern, guaranteed by JSON.stringify', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    const match = out.match(/printf '%s\\n' '([^']+)' > "\$HOME\/\.claude\/settings\.json"/)
+    expect(match).not.toBeNull()
+    expect(match?.[1]).toBeDefined()
+    expect(match?.[1]).not.toContain("'")
+  })
+
+  test('hook script + global settings + onboarding seed are ALL omitted when claudeCode: false (no orphan artifacts for agents that do not use claude)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: false }))
+    expect(out).not.toContain('typeclaw-cc-stop-hook')
+    expect(out).not.toContain('typeclaw-cc-session-start-hook')
+    expect(out).not.toContain('.claude/settings.json')
+    expect(out).not.toContain('hasCompletedOnboarding')
+  })
+
+  test('hook script + global settings appear in the versioned (base-image) form too — drift guard so GHCR-base users get the same Stop-hook wiring as dev/inline users', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }), { baseImageVersion: '0.1.1' })
+    expect(out).toContain('typeclaw-cc-stop-hook')
+    expect(out).toContain('"$HOME/.claude/settings.json"')
+  })
+
+  test('hook layer runs BEFORE the entrypoint shim — same final-layer-is-last invariant as the rest of Layer 5.6', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    const hookIdx = out.indexOf('typeclaw-cc-stop-hook')
+    const shimIdx = out.indexOf(TYPECLAW_ENTRYPOINT_PATH)
+    expect(hookIdx).toBeGreaterThan(-1)
+    expect(shimIdx).toBeGreaterThan(-1)
+    expect(hookIdx).toBeLessThan(shimIdx)
+  })
+
+  test('hook script writes go BEFORE the claude --version smoke test, no — they go AFTER, because the smoke test verifies claude itself launches without onboarding (the hook + settings layer is downstream of the install)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    const smokeIdx = out.indexOf('claude --version > /dev/null')
+    const hookScriptIdx = out.indexOf('cat > /usr/local/bin/typeclaw-cc-stop-hook')
+    const settingsIdx = out.indexOf('"$HOME/.claude/settings.json"')
+    expect(smokeIdx).toBeGreaterThan(-1)
+    expect(hookScriptIdx).toBeGreaterThan(-1)
+    expect(settingsIdx).toBeGreaterThan(-1)
+    expect(smokeIdx).toBeLessThan(hookScriptIdx)
+    expect(hookScriptIdx).toBeLessThan(settingsIdx)
+  })
+
+  test('the onboarding seed is the LAST write in the layer — preserves the "final layer state is exactly the seeded config" invariant even with the new hook/settings writes interleaved', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    const settingsIdx = out.indexOf('"$HOME/.claude/settings.json"')
+    const seedIdx = out.indexOf('"hasCompletedOnboarding":true')
+    expect(settingsIdx).toBeGreaterThan(-1)
+    expect(seedIdx).toBeGreaterThan(-1)
+    expect(settingsIdx).toBeLessThan(seedIdx)
+  })
+
+  test('the heredoc is the only build-time mechanism that writes the Stop hook script (no second printf-based copy that could drift) — single source of truth for the script body', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    const heredocMatches = out.match(/cat > \/usr\/local\/bin\/typeclaw-cc-stop-hook/g) ?? []
+    expect(heredocMatches.length).toBe(1)
+  })
+})
+
+describe('Claude Code global SessionStart hook (pre-baked into the image)', () => {
+  function extractSessionStartScript(out: string): string {
+    const match = out.match(
+      /cat > \/usr\/local\/bin\/typeclaw-cc-session-start-hook <<'TYPECLAW_CC_SESSION_START_HOOK_EOF'\n([\s\S]*?)TYPECLAW_CC_SESSION_START_HOOK_EOF/,
+    )
+    if (!match || !match[1]) throw new Error('typeclaw-cc-session-start-hook heredoc not found')
+    return match[1]
+  }
+
+  test('claudeCode: true writes the SessionStart hook script at /usr/local/bin/typeclaw-cc-session-start-hook (stable absolute path, chmod +x in the same RUN as the Stop hook)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('cat > /usr/local/bin/typeclaw-cc-session-start-hook')
+    expect(out).toContain('chmod +x /usr/local/bin/typeclaw-cc-session-start-hook')
+  })
+
+  test("SessionStart hook script writes $PWD/.session-id with the validated UUID — operator polls this file after spawning claude to learn the session UUID (and then watches .done-<uuid> per turn). Without this file the operator would have to parse claude's TUI startup output to discover the UUID, which is exactly the fragile capture-pane heuristic the skill avoids.", () => {
+    const script = extractSessionStartScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).toContain('"${PWD}/.session-id"')
+    expect(script).toContain('printf')
+  })
+
+  test('SessionStart hook script uses a PID-scoped temp filename (.session-id.$$.tmp) — without it, two SessionStart hooks firing concurrently in the same cwd race on .session-id.tmp, with the loser failing `mv` and returning non-zero (which Claude Code may surface as a hook error). Empirically verified inside docker: PID-scoping fixes the concurrent-mv race. (The SessionStart hook reads stdin directly via Bun.stdin.stream() so it does NOT need a stdin temp file; only the output .session-id is staged via a temp file.)', () => {
+    const script = extractSessionStartScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).toContain('.session-id.$$.tmp')
+  })
+
+  test('SessionStart hook script extracts session_id via `bun -e` (real JSON parser, not sed) and validates it against the same UUID-shape regex as the Stop hook — defense against path-traversal session_id values like "../etc/passwd", and so the operator reading .session-id can trust it as a filename component', () => {
+    const script = extractSessionStartScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).toContain('bun -e ')
+    expect(script).toContain('Bun.stdin')
+    expect(script).toContain('case "$sid" in')
+    expect(script).toContain('sid=malformed')
+    expect(script).not.toContain('sed -n ')
+    expect(script).toMatch(
+      /\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]-\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]\[0-9a-f\]/,
+    )
+  })
+
+  test("SessionStart hook writes .session-id atomically via temp-then-rename — the operator's polling reader never sees a half-written file even if it polls mid-hook-execution", () => {
+    const script = extractSessionStartScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).toMatch(/printf '%s\\n' "\$sid" > "\$tmp_out"\nmv "\$tmp_out" "\$\{PWD\}\/.session-id"/)
+  })
+
+  test('SessionStart hook script does NOT use $CLAUDE_PROJECT_DIR — same critical-bug guard as the Stop hook (CLAUDE_PROJECT_DIR resolves to git-root, not cwd, per anthropics/claude-code#27343 + #44450)', () => {
+    const script = extractSessionStartScript(buildDockerfile(dockerfileSchema.parse({ claudeCode: true })))
+    expect(script).not.toContain('CLAUDE_PROJECT_DIR')
+  })
+
+  test('SessionStart hook layer is omitted when claudeCode: false (no orphan SessionStart artifacts)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: false }))
+    expect(out).not.toContain('typeclaw-cc-session-start-hook')
+    expect(out).not.toContain('SessionStart')
+  })
+
+  test('both hook scripts are made executable in the SAME chmod +x invocation — defense against a future edit that accidentally only chmods one (the other would still be installed but Claude Code would silently fail to invoke it, surfacing as a polling-loop timeout)', () => {
+    const out = buildDockerfile(dockerfileSchema.parse({ claudeCode: true }))
+    expect(out).toContain('chmod +x /usr/local/bin/typeclaw-cc-session-start-hook /usr/local/bin/typeclaw-cc-stop-hook')
+  })
+})
+
 function amd64ElseBranchPackages(out: string): string[] {
   const m = out.match(/else \\\n\s+apt-get install -y --no-install-recommends \\\n\s+([^\n]+); \\\n\s+fi/)
   if (!m || !m[1]) throw new Error('amd64 else-branch apt-get install line not found')
