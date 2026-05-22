@@ -765,7 +765,22 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   const agentDir = options.agentDir ?? process.cwd()
   const mode: SystemPromptMode = options.mode ?? deriveSystemPromptMode(options.origin)
   const basePrompt = mode === 'slim' ? SLIM_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT
-  let self = await loadSelf(agentDir)
+
+  // Kick off the three independent I/O paths concurrently. Sequential awaits
+  // here used to be the dominant cold-start cost amplifier: loadSelf is 2
+  // file reads, renderGitNudge spawns a subprocess, loadMemory reads N topic
+  // shards. None of them depend on each other, so we run them in parallel.
+  // The plugin hook (runSessionPrompt) only needs `self`, so it can overlap
+  // with the gitNudge subprocess and the shard reads while `self` is in
+  // flight too.
+  const selfPromise = loadSelf(agentDir)
+  const gitNudgePromise = mode === 'slim' ? Promise.resolve('') : renderGitNudge(agentDir)
+  const memoryPromise = loadMemory(agentDir, {
+    ...(options.origin !== undefined ? { origin: options.origin } : {}),
+    ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
+  })
+
+  let self = await selfPromise
 
   if (options.plugins) {
     // The plugin hook receives the partially-assembled prompt (base + identity)
@@ -788,11 +803,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   // commit guidance the nudge points back to is itself excluded from the slim
   // base prompt. Memory is still included so cron jobs that depend on MEMORY.md
   // context (e.g. "send today's standup summary") keep working.
-  const gitNudge = mode === 'slim' ? '' : await renderGitNudge(agentDir)
-  const memorySection = await loadMemory(agentDir, {
-    ...(options.origin !== undefined ? { origin: options.origin } : {}),
-    ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
-  })
+  const [gitNudge, memorySection] = await Promise.all([gitNudgePromise, memoryPromise])
 
   const systemPrompt = composeSystemPrompt({
     mode,
