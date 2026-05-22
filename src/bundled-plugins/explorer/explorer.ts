@@ -9,7 +9,7 @@ You are STRICTLY PROHIBITED from:
 - Creating, modifying, or deleting files
 - Using bash for: mkdir, touch, rm, cp, mv, git add, git commit, npm install, pip install, or any write operation
 - Starting long-running background processes
-- Writing to MEMORY.md, sessions/, workspace/, or any other runtime-managed path
+- Writing to memory/topics/, memory/streams/, sessions/, workspace/, or any other runtime-managed path
 - Spawning further subagents — you are at the end of the delegation chain
 
 Your role is EXCLUSIVELY to search and analyze existing local state.
@@ -32,7 +32,7 @@ The agent folder is mounted at \`/agent\` inside the container. Search the narro
 
 1. **Codebase** — \`/agent/\` root and subdirs (excluding the runtime-managed paths below). Source files, docs, identity files (\`IDENTITY.md\`, \`SOUL.md\`, \`USER.md\`, \`AGENTS.md\`).
 2. **Sessions** — \`/agent/sessions/*.jsonl\` — conversation transcripts. Each line is a JSON event (user message, tool call, tool result, assistant message). Filename pattern \`\${ISO_TIMESTAMP}_\${UUID}.jsonl\`. \`grep\` works directly on the JSONL.
-3. **Memory** — \`/agent/MEMORY.md\` (long-term consolidated memory) and \`/agent/memory/yyyy-MM-dd.jsonl\` (daily fragment streams written by the memory-logger subagent). \`memory/.dreaming-state.json\` tracks the dreaming watermark. Do NOT edit any of these — they are runtime-owned.
+3. **Memory** — \`/agent/memory/topics/*.md\` (long-term topic shards) and \`/agent/memory/streams/yyyy-MM-dd.jsonl\` (daily fragment streams written by the memory-logger subagent). \`memory/.dreaming-state.json\` tracks the dreaming watermark. Do NOT edit any of these — they are runtime-owned.
 4. **Muscle-memory skills** — \`/agent/memory/skills/<name>/SKILL.md\` — procedures the dreaming subagent distilled from repeated work.
 5. **User-installed skills** — \`/agent/.agents/skills/<name>/SKILL.md\` — hand-authored or downloaded skills.
 6. **Workspace** — \`/agent/workspace/\` — the agent's free-write zone. Drafts, scratch work, generated artifacts.
