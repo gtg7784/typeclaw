@@ -1,4 +1,4 @@
-import { SlackBotClient, SlackBotListener } from 'agent-messenger/slackbot'
+import { SlackBotClient, SlackBotListener, type SlackSocketModeSlashCommandArgs } from 'agent-messenger/slackbot'
 
 import {
   MEMBERSHIP_ENUMERATION_CAP,
@@ -33,7 +33,26 @@ import {
   type SlackInboundMessageEvent,
 } from './slack-bot-classify'
 import { createSlackDedupe } from './slack-bot-dedupe'
+import {
+  buildSlashAckPayload,
+  parseSlashCommand,
+  SLACK_SLASH_REPLY_ABORTED,
+  SLACK_SLASH_REPLY_AMBIGUOUS,
+  SLACK_SLASH_REPLY_FAILED,
+  SLACK_SLASH_REPLY_NO_LIVE_SESSION,
+  SLACK_SLASH_REPLY_PERMISSION_DENIED,
+} from './slack-bot-slash-commands'
 import { slackTsToMillis } from './slack-bot-time'
+
+// One slash command per logical agent gesture. Mirrors the discord-bot
+// SLASH_COMMANDS constant so the cross-platform set stays consistent — when
+// we add a new command (e.g. /memory), it appears in both adapters together.
+// The actual registration lives in the Slack App Manifest at src/cli/ui.ts;
+// this constant is the runtime allow-list that gates which delivered
+// slash_commands events we route vs drop. The ui.test.ts manifest-drift
+// test asserts equality between this set and SLACK_APP_MANIFEST.features.
+// slash_commands so the two can never silently diverge.
+export const SLACK_SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set(['stop'])
 
 // Resolvers fall back to the raw id on failure, so a name equal to the id
 // means resolution failed; we render the bare id rather than `id(id)`. The
@@ -42,6 +61,101 @@ import { slackTsToMillis } from './slack-bot-time'
 function formatLabel(name: string | undefined, id: string, prefix = ''): string {
   if (name === undefined || name === '' || name === id) return id
   return `${prefix}${name}(${id})`
+}
+
+export type SlackBotAdapterLoggerLike = {
+  info: (msg: string) => void
+  warn: (msg: string) => void
+  error: (msg: string) => void
+}
+
+export type SlashCommandHandlerDeps = {
+  router: Pick<ChannelRouter, 'executeCommand'>
+  knownCommandNames: ReadonlySet<string>
+  logger: SlackBotAdapterLoggerLike
+  formatChannelTag: (workspace: string, chat: string) => Promise<string>
+}
+
+// Ack-first invariant: the handler must call args.ack() exactly once on
+// every path AND must do so before any slow network work (resolver calls,
+// post-ack logging). Slack's 3s ack deadline starts when the slash command
+// envelope arrives on the WebSocket; missing it shows the user
+// "/stop didn't respond in time". The synchronous executeCommand happy
+// path is fast (in-memory map lookup + abort), so ack-after-execute is
+// safe; everything else (formatChannelTag, post-ack logging) runs after.
+//
+// Ack failure handling: a thrown ack on the happy path is logged but does
+// NOT trigger the catch-all error-ack below, which would attempt a second
+// ack call and break the exactly-once contract.
+export function createSlashCommandHandler(
+  deps: SlashCommandHandlerDeps,
+): (args: SlackSocketModeSlashCommandArgs) => Promise<void> {
+  return async ({ ack, body }) => {
+    const parsed = parseSlashCommand(body, deps.knownCommandNames)
+    if (parsed.kind === 'ignore') {
+      deps.logger.warn(`[slack-bot] slash command dropped reason=${parsed.reason} command=${body.command}`)
+      try {
+        ack(buildSlashAckPayload(SLACK_SLASH_REPLY_FAILED))
+      } catch (err) {
+        deps.logger.warn(`[slack-bot] slash command ack (drop path) failed: ${describe(err)}`)
+      }
+      return
+    }
+    const { command } = parsed
+
+    // Pre-ACK log: bare ids only (no formatChannelTag — would burn ack budget
+    // on a slow Slack API minute via the channel-name resolver).
+    deps.logger.info(
+      `[slack-bot] slash /${command.name} invoker=${command.invokerId} team=${command.key.workspace} channel=${command.key.chat}`,
+    )
+
+    let result: Awaited<ReturnType<typeof deps.router.executeCommand>>
+    try {
+      result = await deps.router.executeCommand(command.key, command.name, {
+        invokerId: command.invokerId,
+      })
+    } catch (err) {
+      deps.logger.error(`[slack-bot] slash command handler failed: ${describe(err)}`)
+      try {
+        ack(buildSlashAckPayload(SLACK_SLASH_REPLY_FAILED))
+      } catch (ackErr) {
+        deps.logger.warn(`[slack-bot] slash command error-ack failed: ${describe(ackErr)}`)
+      }
+      return
+    }
+
+    const replyContent =
+      result.kind === 'handled'
+        ? SLACK_SLASH_REPLY_ABORTED
+        : result.kind === 'no-live-session'
+          ? SLACK_SLASH_REPLY_NO_LIVE_SESSION
+          : result.kind === 'permission-denied'
+            ? SLACK_SLASH_REPLY_PERMISSION_DENIED
+            : result.kind === 'ambiguous'
+              ? SLACK_SLASH_REPLY_AMBIGUOUS
+              : SLACK_SLASH_REPLY_FAILED
+
+    // Final ack on the happy path: own try/catch so a thrown ack here does
+    // NOT cascade into the error-path ack above (which would violate the
+    // exactly-once contract). The abort already happened server-side; only
+    // the user-visible confirmation is lost.
+    try {
+      ack(buildSlashAckPayload(replyContent))
+    } catch (err) {
+      deps.logger.warn(`[slack-bot] slash command ack failed: ${describe(err)}`)
+    }
+
+    // Decorative post-ack logging: resolve channel names now that the 3s
+    // budget is no longer a concern. Best-effort.
+    try {
+      const inboundTag = await deps.formatChannelTag(command.key.workspace, command.key.chat)
+      deps.logger.info(`[slack-bot] slash /${command.name} result=${result.kind} ${inboundTag}`)
+    } catch (err) {
+      deps.logger.info(
+        `[slack-bot] slash /${command.name} result=${result.kind} (channel-tag resolution failed: ${describe(err)})`,
+      )
+    }
+  }
 }
 
 // app_mention payloads omit channel_type and never carry a subtype, so we
@@ -661,6 +775,13 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
 
   const dedupe = createSlackDedupe()
 
+  const handleSlashCommand = createSlashCommandHandler({
+    router: options.router,
+    knownCommandNames: SLACK_SLASH_COMMAND_NAMES,
+    logger,
+    formatChannelTag,
+  })
+
   const handleMessageEvent = async (
     event: SlackInboundMessageEvent,
     source: 'message' | 'app_mention',
@@ -776,6 +897,23 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       listener.on('app_mention', ({ ack, event }) => {
         ack()
         void handleMessageEvent(promoteAppMentionToMessage(event as SlackInboundAppMentionEvent), 'app_mention')
+      })
+      listener.on('slash_commands', (args) => {
+        // The handler owns the ack call itself (the ack payload carries the
+        // user-visible reply text), so we do NOT ack here. inflightInbounds
+        // wrapping mirrors handleMessageEvent so stop() can drain the
+        // handler before tearing down the listener — otherwise a /stop
+        // arriving during stop() would lose its ack and the user sees
+        // "didn't respond in time" even though the abort succeeded.
+        inflightInbounds++
+        void handleSlashCommand(args).finally(() => {
+          inflightInbounds--
+          if (inflightInbounds === 0 && stopWaiters.length > 0) {
+            const waiters = stopWaiters
+            stopWaiters = []
+            for (const w of waiters) w()
+          }
+        })
       })
 
       options.router.registerOutbound('slack-bot', outboundCallback)

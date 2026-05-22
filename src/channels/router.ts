@@ -312,6 +312,7 @@ export type ExecuteCommandResult =
   | { kind: 'unknown-command'; name: string }
   | { kind: 'no-live-session' }
   | { kind: 'permission-denied' }
+  | { kind: 'ambiguous'; matchCount: number }
 
 // Identifies who invoked an adapter-driven command. Required so the router
 // can run the same channel.respond permission gate the text-prefix command
@@ -377,6 +378,8 @@ export type ChannelRouter = {
   //   - handled: command ran
   //   - permission-denied: invoker lacks channel.respond
   //   - no-live-session: channel has no active session
+  //   - ambiguous: multiple thread-keyed sessions in same chat (Slack);
+  //     caller should refuse to act rather than abort an arbitrary one
   //   - unknown-command: name is not registered
   executeCommand: (key: ChannelKey, name: string, options: ExecuteCommandOptions) => Promise<ExecuteCommandResult>
   // Lowered self-aliases (configured + implicit dir-name). Adapters use
@@ -1792,12 +1795,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (!permissions.has(partial, CORE_PERMISSIONS.channelRespond)) {
       return { kind: 'permission-denied' }
     }
-    const keyId = channelKeyId(key)
-    const live = liveSessions.get(keyId)
-    if (!live || live.destroyed) {
+    const resolved = resolveLiveSessionForCommand(liveSessions, key)
+    if (resolved.kind === 'none') {
       return { kind: 'no-live-session' }
     }
-    const result = await commands.execute(`/${lowered}`, { live, event: null })
+    if (resolved.kind === 'ambiguous') {
+      return { kind: 'ambiguous', matchCount: resolved.count }
+    }
+    const result = await commands.execute(`/${lowered}`, { live: resolved.session, event: null })
     if (result.kind === 'handled') {
       return { kind: 'handled', name: result.name }
     }
@@ -1985,6 +1990,52 @@ function tryOpenSessionManager(
 
 function consecutiveSendKey(chat: string, thread: string | null | undefined): string {
   return `${chat}:${thread ?? ''}`
+}
+
+export type ResolveLiveSessionResult =
+  | { kind: 'found'; session: LiveSession }
+  | { kind: 'none' }
+  | { kind: 'ambiguous'; count: number }
+
+// Lookup policy for adapter-driven commands. Exact-key match always wins.
+// On miss, fall back to (adapter, workspace, chat) without thread — but
+// only when EXACTLY ONE non-destroyed candidate exists. Ambiguous matches
+// return 'ambiguous' so the caller can refuse to act rather than abort an
+// arbitrary session.
+//
+// Why the fallback: Slack slash commands carry channel_id but no thread_ts,
+// so a slash invocation from a thread-keyed live session would otherwise
+// report no-live-session. Discord doesn't hit this — Discord treats threads
+// as channels, so the exact-key path already resolves.
+//
+// Why ambiguity-rejection: "first match wins" map-iteration semantics would
+// abort an arbitrary thread when multiple thread-keyed sessions coexist in
+// one channel (plausible on Slack: bot mentioned in multiple threads). The
+// user's slash command picker doesn't know about threads; we don't know
+// which they meant; refusing is safer than guessing.
+export function resolveLiveSessionForCommand(
+  liveSessions: ReadonlyMap<string, LiveSession>,
+  key: ChannelKey,
+): ResolveLiveSessionResult {
+  const exact = liveSessions.get(channelKeyId(key))
+  if (exact && !exact.destroyed) return { kind: 'found', session: exact }
+
+  const matches: LiveSession[] = []
+  for (const candidate of liveSessions.values()) {
+    if (candidate.destroyed) continue
+    if (
+      candidate.key.adapter === key.adapter &&
+      candidate.key.workspace === key.workspace &&
+      candidate.key.chat === key.chat
+    ) {
+      matches.push(candidate)
+      if (matches.length > 1) {
+        return { kind: 'ambiguous', count: matches.length }
+      }
+    }
+  }
+  if (matches.length === 1) return { kind: 'found', session: matches[0]! }
+  return { kind: 'none' }
 }
 
 function normalizeSendText(text: string | undefined): string | undefined {
