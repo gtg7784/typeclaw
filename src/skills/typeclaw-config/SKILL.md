@@ -191,7 +191,7 @@ This says: the `discord-bot` adapter is enabled with default engagement; one spe
 This is a **`roles`** edit, not a `channels` edit. See the `typeclaw-permissions` skill for the full procedure. Short version:
 
 1. Get the platform ID (Discord channel ID, Slack channel ID, Telegram chat ID, KakaoTalk chat ID).
-2. Append a match-rule to `roles.member.match` using the canonical DSL (`discord:<guild>/<channel>`, `slack:<team>/<channel>`, `telegram:<chat>`, `kakao:<chat>`).
+2. Append a match-rule to `roles.member.match` using the canonical DSL (`discord:<guild>/<channel>`, `slack:<team>/<channel>`, `telegram:<chat>`, `kakao:<chat>`). Pass `acknowledgeGuards: { rolePromotion: true }` in the `write`/`edit` args — the `rolePromotion` security guard blocks any widening of `roles.<role>.match` without an ack (see `typeclaw-permissions`).
 3. **`roles` is restart-required** — `typeclaw reload` won't apply it; the user needs `typeclaw restart`.
 
 ### When the user asks "stop replying in this channel"
