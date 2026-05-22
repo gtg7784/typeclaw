@@ -151,7 +151,7 @@ describe('createResourceLoader', () => {
 
     const prompt = loader.getSystemPrompt() ?? ''
     const nudgeIdx = prompt.indexOf('tracked.md')
-    const memoryIdx = prompt.indexOf('memory-content-marker')
+    const memoryIdx = prompt.indexOf('## [PRE-MIGRATION CONTENT]')
     expect(nudgeIdx).toBeGreaterThan(-1)
     expect(memoryIdx).toBeGreaterThan(-1)
     expect(nudgeIdx).toBeLessThan(memoryIdx)
@@ -230,7 +230,7 @@ describe('createResourceLoader', () => {
     const prompt = loader.getSystemPrompt() ?? ''
     const roleIdx = prompt.indexOf('## Your role in this session')
     const nudgeIdx = prompt.indexOf('tracked.md')
-    const memoryIdx = prompt.indexOf('memory-content-marker')
+    const memoryIdx = prompt.indexOf('## [PRE-MIGRATION CONTENT]')
     expect(roleIdx).toBeGreaterThan(-1)
     expect(nudgeIdx).toBeGreaterThan(-1)
     expect(memoryIdx).toBeGreaterThan(-1)

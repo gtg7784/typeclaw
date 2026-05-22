@@ -6,7 +6,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { getDreamedIds, loadDreamingState } from './dreaming-state'
 import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, type InjectionPlan } from './injection-plan'
 import { loadAllShards, type TopicShard } from './load-shards'
-import { topicsDir } from './paths'
+import { streamsDir, topicsDir } from './paths'
 import type { StreamEvent } from './stream-events'
 import { readEvents } from './stream-io'
 
@@ -63,12 +63,10 @@ export async function loadMemory(agentDir: string, options: LoadMemoryOptions = 
   const rootMemory = await readEntry(agentDir, 'MEMORY.md')
   const hasTopicsDir = await pathExists(topicsDir(agentDir))
   if (rootMemory.content !== null && !hasTopicsDir) {
+    const plan = buildInjectionPlan([rootFallbackEntry(rootMemory)], { budgetBytes: options.injectionBudgetBytes })
+    const effectivePlan = forceIndexForChannel(plan, options)
     const streams = await readStreamEntries(agentDir, options.currentSessionId)
-    return appendRetrievalCache(
-      renderSection({ mode: 'direct', shards: [rootFallbackEntry(rootMemory)] }, streams, options),
-      agentDir,
-      options,
-    )
+    return appendRetrievalCache(renderSection(effectivePlan, streams, options), agentDir, options)
   }
 
   const shards = await loadAllShards(agentDir)
@@ -86,7 +84,8 @@ async function appendRetrievalCache(result: string, agentDir: string, options: L
     const trimmed = cacheContent.trim()
     if (trimmed.length === 0) return result
     return `${result}\n\n## Retrieved memory (session ${options.currentSessionId})\n\n${trimmed}`
-  } catch {
+  } catch (err) {
+    if (!isEnoent(err)) throw err
     return result
   }
 }
@@ -95,7 +94,8 @@ async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path)
     return true
-  } catch {
+  } catch (err) {
+    if (!isEnoent(err)) throw err
     return false
   }
 }
@@ -106,33 +106,52 @@ async function readEntry(agentDir: string, name: string): Promise<FileEntry> {
     const raw = await readFile(filePath, 'utf8')
     const trimmed = raw.length > MAX_FILE_BYTES ? `${raw.slice(0, MAX_FILE_BYTES)}\n\n[truncated]` : raw
     return { name, path: filePath, content: trimmed }
-  } catch {
+  } catch (err) {
+    if (!isEnoent(err)) throw err
     return { name, path: filePath, content: null }
   }
 }
 
 async function readStreamEntries(agentDir: string, currentSessionId: string | undefined): Promise<FileEntry[]> {
-  const memoryDir = join(agentDir, 'memory')
-  let names: string[]
-  try {
-    names = await readdir(memoryDir)
-  } catch {
-    return []
-  }
+  const streamFiles = await listStreamFiles(agentDir)
+  if (streamFiles === null) return []
 
+  const { dir, displayPrefix, names } = streamFiles
   const state = await loadDreamingState(agentDir)
   const dated = names.filter((n) => STREAM_FILE_PATTERN.test(n)).sort()
   const entries = await Promise.all(
     dated.map(async (name) => {
       const date = STREAM_DATE_FROM_FILENAME.exec(name)?.[1] ?? ''
       const dreamedIds = getDreamedIds(state, date)
-      const entry = await readStreamEntry(memoryDir, name)
-      const filtered = dropSelfSessionFragments({ ...entry, name: `memory/${name}` }, currentSessionId)
+      const entry = await readStreamEntry(dir, name)
+      const filtered = dropSelfSessionFragments({ ...entry, name: `${displayPrefix}/${name}` }, currentSessionId)
       const tail = sliceUndreamedTail(filtered, dreamedIds)
       return renderStreamEntry(tail)
     }),
   )
   return entries.filter((e) => !e.fullyDreamed)
+}
+
+async function listStreamFiles(
+  agentDir: string,
+): Promise<{ dir: string; displayPrefix: 'memory' | 'memory/streams'; names: string[] } | null> {
+  const streamsDirPath = streamsDir(agentDir)
+  let names: string[]
+  try {
+    names = await readdir(streamsDirPath)
+    return { dir: streamsDirPath, displayPrefix: 'memory/streams', names }
+  } catch (err) {
+    if (!isEnoent(err)) throw err
+  }
+
+  const memoryDir = join(agentDir, 'memory')
+  try {
+    names = await readdir(memoryDir)
+    return { dir: memoryDir, displayPrefix: 'memory', names }
+  } catch (err) {
+    if (!isEnoent(err)) throw err
+    return null
+  }
 }
 
 async function readStreamEntry(memoryDir: string, name: string): Promise<StreamEntry> {
@@ -260,4 +279,8 @@ function renderBody(entry: FileEntry): string {
   if (entry.content === null) return `[MISSING] Expected at: ${entry.path}`
   if (entry.content.trim() === '') return `[EMPTY] Present at ${entry.path} but has no content yet.`
   return entry.content.trimEnd()
+}
+
+function isEnoent(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && (err as { code: string }).code === 'ENOENT'
 }
