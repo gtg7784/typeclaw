@@ -114,7 +114,7 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('SOUL.md')
   })
 
-  test('injects MEMORY.md and undreamed daily-stream contents under a # Memory section', async () => {
+  test('injects MEMORY.md under # Memory but leaves undreamed stream events for memory_search to retrieve on demand', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), 'Neo prefers terse replies.')
     await mkdir(join(agentDir, 'memory'))
     const fragmentEvent = JSON.stringify({
@@ -133,8 +133,10 @@ describe('createResourceLoader', () => {
     const prompt = loader.getSystemPrompt() ?? ''
     expect(prompt).toContain('# Memory')
     expect(prompt).toContain('Neo prefers terse replies.')
-    expect(prompt).toContain('tuesday-fragment-marker')
-    expect(prompt).toContain('## memory/2026-04-27.jsonl')
+    expect(prompt).not.toContain('tuesday-fragment-marker')
+    expect(prompt).not.toContain('tuesday-fragment-body')
+    expect(prompt).not.toContain('## memory/2026-04-27.jsonl')
+    expect(prompt).toContain('`memory_search`')
   })
 
   test('places the memory section AFTER gitNudge so the dirty-files list stays in the cache prefix relative to the most-volatile memory region', async () => {

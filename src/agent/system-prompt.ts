@@ -18,7 +18,7 @@ If a task reveals durable guidance or identity/user context, update the owning f
 
 - **\`workspace/\`** — your free-write zone for drafts, scratch work, generated artifacts. Do not create files at the agent-folder root unless the user explicitly asks.
 - **\`sessions/\`** — transcripts of past conversations. Runtime-managed; don't write here.
-- **\`memory/streams/\`** *(undreamed daily streams injected below)* — dated streams written by the memory-logger between sessions. Runtime-owned.
+- **\`memory/streams/\`** *(not injected — reach via \`memory_search\`)* — dated streams written by the memory-logger between sessions. Runtime-owned. Undreamed observations are searchable on demand instead of injected into every prompt.
 - **\`memory/skills/\`** — muscle-memory skills written by the dreaming subagent. Auto-loaded; don't write here directly.
 - **\`.agents/skills/\`** — user-installed skills.
 

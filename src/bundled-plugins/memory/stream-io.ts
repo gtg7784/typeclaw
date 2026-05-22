@@ -92,15 +92,10 @@ export function filterUndreamedEvents(events: StreamEvent[], dreamedIds: Readonl
   })
 }
 
-// Pre-filter daily streams: raw events + per-day dreamed-id set, oldest day
-// first. Consumers that care about filter ordering use this; consumers that
-// just want "undreamed events" use `readAllUndreamedStreamDays` instead.
-//
-// The injection path (`loadMemory`) needs ordering: self-session filter must
-// run BEFORE dreamed-id filter, because the rendered "(undreamed tail)"
-// label is meant to signal "your visible slice lost events to dreaming",
-// not "this day has any dreamed events at all." Pre-applying the dreamed
-// filter in this helper would conflate those.
+// Raw events + per-day dreamed-id set, oldest day first. The dreamed filter
+// is applied per-day by `readAllUndreamedStreamDays` — keeping it separate
+// here lets callers that need unfiltered events read dreaming state once
+// rather than re-loading it for every day.
 export type StreamDay = {
   date: string
   path: string
