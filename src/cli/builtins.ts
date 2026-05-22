@@ -12,6 +12,7 @@ export const BUILTIN_COMMAND_NAMES = [
   'status',
   'reload',
   'logs',
+  'inspect',
   'shell',
   'compose',
   'channel',
