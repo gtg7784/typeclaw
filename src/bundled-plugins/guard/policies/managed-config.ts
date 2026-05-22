@@ -39,19 +39,31 @@ export async function checkManagedConfigGuard(options: {
   }
 }
 
+// Oracle PR #305 findings #5 and #6: identity-based managed-file
+// detection. The earlier shape compared `basename(realpath(target))` to
+// the managed-file list, which missed two attacks: (5) a symlink at
+// agent root `typeclaw.json -> workspace/tc.json` realpathed to a name
+// outside the managed list, and (6) on case-insensitive filesystems,
+// `TYPECLAW.JSON` addresses the same file as `typeclaw.json` but
+// basename string-equality missed the casing variant.
+//
+// New shape: for each managed-file name, compute the canonical agent-
+// root path and compare against the target. We accept if EITHER the
+// lexical paths match OR they realpath to the same file. Branch (a)
+// covers symlinks and case-aliased filesystems; branch (b) keeps the
+// canonical lexical name authoritative even before the file exists
+// (first-init writes).
 async function resolveManagedTarget(agentDir: string, targetPath: string): Promise<{ file: ManagedFile } | undefined> {
   const resolvedAgentDir = path.resolve(agentDir)
-  const realAgentDir = await resolveRealIntendedPath(resolvedAgentDir)
-  const realTargetPath = await resolveRealIntendedPath(targetPath)
-
-  if (path.dirname(realTargetPath) !== realAgentDir) return undefined
-
-  const basename = path.basename(realTargetPath)
-  return isManagedFile(basename) ? { file: basename } : undefined
-}
-
-function isManagedFile(basename: string): basename is ManagedFile {
-  return MANAGED_FILES.has(basename as ManagedFile)
+  const resolvedTarget = path.resolve(targetPath)
+  for (const file of MANAGED_FILES) {
+    const canonical = path.join(resolvedAgentDir, file)
+    if (canonical === resolvedTarget) return { file }
+    const realCanonical = await resolveRealIntendedPath(canonical)
+    const realTarget = await resolveRealIntendedPath(resolvedTarget)
+    if (realCanonical === realTarget) return { file }
+  }
+  return undefined
 }
 
 function validateManagedContent(file: ManagedFile, content: string): { ok: true } | { ok: false; reason: string } {
@@ -81,6 +93,20 @@ async function intendedContent(
     return blockReason(tool, targetPath, 'edit calls must include an edits array')
   }
 
+  // Oracle PR #305 finding #4: refuse multi-edit on managed files to
+  // avoid simulator-vs-pi divergence. The canonical workflow for
+  // typeclaw.json / cron.json is read + modify in memory + write the
+  // whole file back; multi-edit is not required and the divergence
+  // would let an attacker validate a different final file here than
+  // the one pi actually writes.
+  if (edits.length > 1) {
+    return blockReason(
+      tool,
+      targetPath,
+      'multi-edit calls on managed files are refused — use `write` with full content instead',
+    )
+  }
+
   let content: string
   try {
     content = await readFile(targetPath, 'utf8')
@@ -100,10 +126,14 @@ async function intendedContent(
     if (oldText.length === 0) {
       return blockReason(tool, targetPath, 'edit oldText must not be empty')
     }
-    if (!content.includes(oldText)) {
+    const firstIdx = content.indexOf(oldText)
+    if (firstIdx === -1) {
       return blockReason(tool, targetPath, 'edit oldText was not found in existing file')
     }
-    content = content.replace(oldText, newText)
+    if (content.indexOf(oldText, firstIdx + 1) !== -1) {
+      return blockReason(tool, targetPath, 'edit oldText is not unique in the existing file')
+    }
+    content = content.slice(0, firstIdx) + newText + content.slice(firstIdx + oldText.length)
   }
   return { content }
 }

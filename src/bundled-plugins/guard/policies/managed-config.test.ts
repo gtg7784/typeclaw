@@ -83,6 +83,54 @@ describe('managedConfig guard — typeclaw.json', () => {
     expect(result?.reason).toContain('typeclaw.json is invalid')
   })
 
+  test('refuses multi-edit on managed files (Oracle PR #305 finding #4)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeFile(path.join(agentDir, 'typeclaw.json'), JSON.stringify({ port: 9000 }, null, 2))
+
+    const result = await checkManagedConfigGuard({
+      tool: 'edit',
+      args: {
+        path: 'typeclaw.json',
+        edits: [
+          { oldText: '9000', newText: '9001' },
+          { oldText: '"port"', newText: '"port"' },
+        ],
+      },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('multi-edit')
+  })
+
+  test('refuses single edit when oldText is non-unique in the existing file', async () => {
+    const agentDir = await makeAgentDir()
+    await writeFile(
+      path.join(agentDir, 'typeclaw.json'),
+      JSON.stringify(
+        {
+          port: 9000,
+          mounts: [
+            { name: 'a', host: '/a' },
+            { name: 'b', host: '/b' },
+          ],
+        },
+        null,
+        2,
+      ),
+    )
+
+    const result = await checkManagedConfigGuard({
+      tool: 'edit',
+      args: {
+        path: 'typeclaw.json',
+        edits: [{ oldText: '"name"', newText: '"name"' }],
+      },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('not unique')
+  })
+
   test('rejects an edit whose oldText does not match the file', async () => {
     const agentDir = await makeAgentDir()
     await writeFile(path.join(agentDir, 'typeclaw.json'), JSON.stringify({ port: 9000 }, null, 2))
@@ -317,6 +365,22 @@ describe('managedConfig guard — scope', () => {
     const result = await checkManagedConfigGuard({
       tool: 'write',
       args: { path: 'workspace/cron.json', content: '{ malformed' },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('not valid JSON')
+  })
+
+  test('Oracle PR #305 finding #5: catches a write through a typeclaw.json that is itself a symlink into workspace', async () => {
+    const agentDir = await makeAgentDir()
+    await mkdir(path.join(agentDir, 'workspace'), { recursive: true })
+    const realConfigPath = path.join(agentDir, 'workspace', 'tc.json')
+    await writeFile(realConfigPath, JSON.stringify({ port: 9000 }, null, 2))
+    await symlink(realConfigPath, path.join(agentDir, 'typeclaw.json'))
+
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: '{ malformed' },
       agentDir,
     })
     expect(result?.block).toBe(true)

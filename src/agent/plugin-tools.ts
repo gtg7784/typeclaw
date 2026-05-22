@@ -40,6 +40,8 @@ const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
   Type.Object(
     {
       nonWorkspaceWrite: Type.Optional(Type.Boolean()),
+      rolePromotion: Type.Optional(Type.Boolean()),
+      cronPromotion: Type.Optional(Type.Boolean()),
     },
     { additionalProperties: false },
   ),

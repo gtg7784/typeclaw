@@ -93,8 +93,10 @@ Inhabitants:
 - `systemPromptLeak` — outbound message echoes the system prompt
 - `gitExfil` — `git push` to an unfamiliar remote
 - `gitRemoteTainted` — push after a same-session `git remote set-url`
+- `rolePromotion` — `write`/`edit` to `typeclaw.json` widens a role's `permissions[]` or `match[]`, or introduces a new privileged role
+- `cronPromotion` — `write`/`edit` to `cron.json` adds a new job, or changes an existing job's `scheduledByRole`
 
-The canonical motivating case: an owner-permissioned operator asks the agent to "post deploy status to #general" — even with full permissions, the agent must not silently include a stack-trace `Bearer ghp_…` line.
+The canonical motivating case: an owner-permissioned operator asks the agent to "post deploy status to #general" — even with full permissions, the agent must not silently include a stack-trace `Bearer ghp_…` line. The same logic generalizes to `rolePromotion` and `cronPromotion`: even an `owner` from TUI must not silently rewrite the access-control table (or schedule a deferred-privileged job) on behalf of a channel message.
 
 ### `medium` — silent-attack
 

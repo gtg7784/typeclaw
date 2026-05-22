@@ -819,6 +819,47 @@ describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', (
     expect(params.properties).toBeDefined()
     expect(params.properties).toHaveProperty('acknowledgeGuards')
   })
+
+  // given: the security plugin's tool.before policies read
+  //   `acknowledgeGuards.<guardName>: true` keys
+  // when: a new high-tier guard ships expecting an ack key
+  // then: the published JSON Schema for `acknowledgeGuards` MUST advertise
+  //       that key, OR strict-mode LLM clients (OpenAI strict tool calling,
+  //       Anthropic with `additionalProperties: false`) will refuse to emit
+  //       it AND lax clients will strip it before the tool wrapper sees it.
+  //       This test pins every ack key the security/guard plugins read.
+  test('ACKNOWLEDGE_GUARDS_SCHEMA advertises every guard key the security/guard plugins read', async () => {
+    const hooks = createHookBus()
+    const overrides = buildBuiltinPiToolOverrides({ agentDir: '/agent', sessionId: 's', hooks })
+    const write = overrides.find((t) => t.name === 'write')
+    const params = (write as ToolDefinition).parameters as { properties?: Record<string, unknown> }
+    const ack = params.properties?.acknowledgeGuards as { properties?: Record<string, unknown> } | undefined
+    expect(ack).toBeDefined()
+    const ackProps = ack?.properties ?? {}
+    expect(ackProps).toHaveProperty('nonWorkspaceWrite')
+    expect(ackProps).toHaveProperty('rolePromotion')
+    expect(ackProps).toHaveProperty('cronPromotion')
+  })
+
+  // given: the acknowledgeGuards schema permits exactly the keys we
+  //   advertise
+  // when: a future refactor relaxes the schema to allow arbitrary keys
+  // then: typos like `acknowledgeGuards: { rolePromotin: true }` would
+  //   silently no-op (the strict schema currently rejects them, so the
+  //   model gets immediate feedback). Pin additionalProperties:false on
+  //   BOTH write and edit since both expose the schema. Oracle PR #305
+  //   finding #7.
+  test('ACKNOWLEDGE_GUARDS_SCHEMA pins additionalProperties:false on write and edit (no silent typo passthrough)', async () => {
+    const hooks = createHookBus()
+    const overrides = buildBuiltinPiToolOverrides({ agentDir: '/agent', sessionId: 's', hooks })
+    for (const toolName of ['write', 'edit'] as const) {
+      const tool = overrides.find((t) => t.name === toolName)
+      const params = (tool as ToolDefinition).parameters as { properties?: Record<string, unknown> }
+      const ack = params.properties?.acknowledgeGuards as { additionalProperties?: boolean } | undefined
+      expect(ack).toBeDefined()
+      expect(ack?.additionalProperties).toBe(false)
+    }
+  })
 })
 
 describe('setupSession integration: builtin pi tools route through customTools when hooks are present', () => {
