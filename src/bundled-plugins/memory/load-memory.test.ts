@@ -406,11 +406,7 @@ describe('loadMemory self-session fragment filtering', () => {
   })
 
   test('does NOT label day as undreamed tail when only dreamed events were also self-session events', async () => {
-    // Regression: the "(undreamed tail)" suffix means "the visible-to-this-
-    // session slice lost events to dreaming." Removing your OWN session's
-    // events through self-filtering is not a dreaming-driven loss, so the
-    // label must not fire when self-fragments happen to also be dreamed
-    // while the remaining other-session fragments are entirely undreamed.
+    // Regression: label must not fire when dreamed events were all self-filtered.
     await writeStream(agentDir, '2026-04-27', [
       fragment('dreamed-self', 'ses_self', 'self dreamed', 'self body'),
       fragment('fresh-other', 'ses_other', 'other fresh', 'other body'),
@@ -426,10 +422,7 @@ describe('loadMemory self-session fragment filtering', () => {
   })
 
   test('labels day as undreamed tail when other-session events were dreamed', async () => {
-    // The complement of the regression above: when dreaming has consumed
-    // events from a sibling session and the remaining visible slice has
-    // been pruned by dreaming, the label SHOULD fire to surface that
-    // dreaming progress to the agent.
+    // Complement of the regression above: label MUST fire when dreaming pruned sibling-session events.
     await writeStream(agentDir, '2026-04-27', [
       fragment('dreamed-other', 'ses_other', 'other dreamed', 'other body'),
       fragment('fresh-other', 'ses_other', 'other fresh', 'other body'),

@@ -47,13 +47,10 @@ export async function writeEventsAtomic(path: string, events: readonly StreamEve
   await rename(tmp, path)
 }
 
-// Locate the directory that holds daily-stream JSONL files for this agent.
-// New layout is `memory/streams/`; pre-migration agents kept them flat under
-// `memory/`. Returns `null` only when neither directory exists.
-//
-// `displayPrefix` is the user-visible path prefix consumers should render in
-// prompt headings and search results so the agent sees stable identifiers
-// regardless of which layout this particular folder is on.
+// Daily-stream directory for this agent. New layout is `memory/streams/`;
+// pre-migration agents kept them flat under `memory/`. `displayPrefix` is
+// the path string consumers render so the agent sees a stable identifier
+// regardless of which layout is on disk.
 export type StreamDirectory = {
   dir: string
   displayPrefix: 'memory' | 'memory/streams'
@@ -134,19 +131,15 @@ export async function readAllStreamDays(agentDir: string): Promise<StreamDay[]> 
   )
 }
 
-// Convenience wrapper: pre-applies `filterUndreamedEvents` per day and drops
-// fully-dreamed days. `partiallyDreamed` is true when the dreamed-id filter
-// removed at least one event from this day's raw events.
-//
-// Search consumers want this shape; the injection path uses
-// `readAllStreamDays` instead so it can order self-session and dreamed-id
-// filters correctly.
+// Convenience wrapper for consumers that just want undreamed events without
+// caring about filter ordering: pre-applies `filterUndreamedEvents` per day
+// and drops fully-dreamed days. The injection path uses `readAllStreamDays`
+// instead because it must order self-session and dreamed-id filters.
 export type UndreamedStreamDay = {
   date: string
   path: string
   name: string
   events: StreamEvent[]
-  partiallyDreamed: boolean
 }
 
 export async function readAllUndreamedStreamDays(agentDir: string): Promise<UndreamedStreamDay[]> {
@@ -154,15 +147,7 @@ export async function readAllUndreamedStreamDays(agentDir: string): Promise<Undr
   return days.flatMap((day) => {
     const undreamed = filterUndreamedEvents(day.events, day.dreamedIds)
     if (undreamed.length === 0) return []
-    return [
-      {
-        date: day.date,
-        path: day.path,
-        name: day.name,
-        events: undreamed,
-        partiallyDreamed: undreamed.length < day.events.length,
-      },
-    ]
+    return [{ date: day.date, path: day.path, name: day.name, events: undreamed }]
   })
 }
 

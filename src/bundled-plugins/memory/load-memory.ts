@@ -40,7 +40,6 @@ type FileEntry = {
   name: string
   path: string
   content: string | null
-  fullyDreamed?: boolean
 }
 
 type TopicEntry = {
@@ -119,17 +118,10 @@ async function readStreamEntries(agentDir: string, currentSessionId: string | un
 
 // Apply self-session filter, then dreamed-id filter, in that order. The
 // "(undreamed tail)" label fires only when the dreamed filter removes at
-// least one event from the already-self-filtered set — preserves the
-// pre-extraction semantic where the label means "your visible slice lost
-// events to dreaming," not "this day has any dreamed events at all."
-//
-// Self-session filtering rationale: fragments authored by the current session
-// are already in the LLM's conversation history; re-injecting the
-// memory-logger summary is duplication. More importantly, new fragments are
-// appended after every idle turn, so without this filter the daily-stream
-// region of the system prompt mutates every turn and busts provider prefix
-// caching. Fragments from *other* sessions on the same day are kept intact —
-// that's the cross-session bridge daily streams exist for.
+// least one event from the already-self-filtered set — the label means
+// "your visible slice lost events to dreaming," not "this day has any
+// dreamed events at all." See `currentSessionId` on `LoadMemoryOptions`
+// for the self-filter rationale.
 function streamDayToStreamEntry(day: StreamDay, currentSessionId: string | undefined): StreamEntry | null {
   const selfFiltered =
     currentSessionId === undefined

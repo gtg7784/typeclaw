@@ -286,7 +286,7 @@ describe('readAllUndreamedStreamDays', () => {
     expect(days.map((d) => d.date)).toEqual(['2026-05-20'])
   })
 
-  test('sets partiallyDreamed when some but not all events are dreamed', async () => {
+  test('keeps only undreamed events on partially-dreamed days', async () => {
     await mkdir(streamsDir(agentDir), { recursive: true })
     await appendEvents(streamFilePath(agentDir, '2026-05-20'), [
       fragmentFor('e1', 'dreamed'),
@@ -304,7 +304,6 @@ describe('readAllUndreamedStreamDays', () => {
     const days = await readAllUndreamedStreamDays(agentDir)
 
     expect(days.length).toBe(1)
-    expect(days[0]!.partiallyDreamed).toBe(true)
     expect(days[0]!.events.map((e) => (e.type === 'fragment' ? e.topic : null))).toEqual(['fresh'])
   })
 
@@ -329,7 +328,6 @@ describe('readAllUndreamedStreamDays', () => {
     expect(days.length).toBe(1)
     expect(days[0]!.name).toBe('memory/2026-04-15.jsonl')
     expect(days[0]!.events.map((e) => (e.type === 'fragment' ? e.topic : null))).toEqual(['fresh legacy'])
-    expect(days[0]!.partiallyDreamed).toBe(true)
   })
 
   test('keeps legacy_prose events even when other events on the day are dreamed', async () => {
@@ -358,9 +356,9 @@ describe('readAllUndreamedStreamDays', () => {
 })
 
 describe('filterUndreamedEvents', () => {
-  test('passes through unchanged when dreamedIds is empty', () => {
+  test('returns the same array reference when dreamedIds is empty (no allocation)', () => {
     const events = [fragmentFor('e1', 't1'), fragmentFor('e2', 't2')]
-    expect(filterUndreamedEvents(events, new Set())).toEqual(events)
+    expect(filterUndreamedEvents(events, new Set())).toBe(events)
   })
 
   test('drops events whose id is in the dreamed set', () => {
