@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -470,6 +470,47 @@ describe('checkRolePromotionGuard — edit safety (Oracle PR #305 finding #4)', 
       agentDir,
     })
     expect(result).toBeUndefined()
+  })
+})
+
+describe('checkRolePromotionGuard — managed-file identity (Oracle PR #305 findings #5/#6)', () => {
+  test('blocks a write through a symlinked typeclaw.json (symlink target outside agent root would otherwise escape detection)', async () => {
+    const agentDir = await makeAgentDir()
+    const realConfigDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-role-promotion-target-'))
+    const realConfigPath = path.join(realConfigDir, 'tc.json')
+    await writeFile(realConfigPath, JSON.stringify(BEFORE_BASELINE, null, 2))
+    await symlink(realConfigPath, path.join(agentDir, 'typeclaw.json'))
+
+    const after = {
+      ...BEFORE_BASELINE,
+      roles: { ...BEFORE_BASELINE.roles, owner: { match: ['tui', 'discord:* author:U_NEW'] } },
+    }
+    const result = await checkRolePromotionGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: JSON.stringify(after) },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('owner')
+  })
+
+  test('blocks a write to the absolute realpath of the symlinked typeclaw.json (the same identity check works in reverse)', async () => {
+    const agentDir = await makeAgentDir()
+    const realConfigDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-role-promotion-target-'))
+    const realConfigPath = path.join(realConfigDir, 'tc.json')
+    await writeFile(realConfigPath, JSON.stringify(BEFORE_BASELINE, null, 2))
+    await symlink(realConfigPath, path.join(agentDir, 'typeclaw.json'))
+
+    const after = {
+      ...BEFORE_BASELINE,
+      roles: { ...BEFORE_BASELINE.roles, owner: { match: ['tui', 'discord:* author:U_NEW'] } },
+    }
+    const result = await checkRolePromotionGuard({
+      tool: 'write',
+      args: { path: realConfigPath, content: JSON.stringify(after) },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
   })
 })
 

@@ -106,12 +106,49 @@ export async function checkRolePromotionGuard(options: {
   }
 }
 
+// Oracle PR #305 findings #5 and #6. The earlier shape compared
+// `basename(realpath(target))` to `'typeclaw.json'`. That misses two
+// real attacks:
+//
+//   (5) Symlink: root `typeclaw.json` is a symlink into workspace
+//       (`typeclaw.json -> workspace/tc.json`). Writing to
+//       `typeclaw.json` realpaths to a workspace file whose basename
+//       is `tc.json` — the guard skips, but the next reload follows
+//       the symlink and consumes the attacker's content.
+//   (6) Case-insensitive FS (macOS APFS, default): `TYPECLAW.JSON`
+//       addresses the same file as `typeclaw.json` but basename
+//       string-equality misses the casing variant.
+//
+// Both are closed by treating the canonical agent-root config file as
+// an identity to compare against, not a basename to match. We accept
+// a write/edit if EITHER:
+//
+//   (a) the lexical agent-root path `<agentDir>/<managed-file-name>`
+//       resolves (after realpath) to the same file as the target, OR
+//   (b) the target's lexical path is exactly `<agentDir>/<managed-
+//       file-name>` regardless of what's at that path (symlink, file,
+//       missing — preserves first-init writes).
+//
+// Branch (a) catches both the symlink-into-workspace and the macOS-
+// case-aliased attacks because realpath canonicalizes both. Branch
+// (b) keeps the lexical name authoritative (a fresh write through the
+// canonical name is always managed, even before the file exists).
 async function pathIsTypeclawJson(agentDir: string, targetPath: string): Promise<boolean> {
+  return identifiesManagedFile(agentDir, targetPath, 'typeclaw.json')
+}
+
+async function identifiesManagedFile(
+  agentDir: string,
+  targetPath: string,
+  managedBasename: string,
+): Promise<boolean> {
   const resolvedAgentDir = path.resolve(agentDir)
-  const realAgentDir = await resolveRealPath(resolvedAgentDir)
-  const realTargetPath = await resolveRealPath(targetPath)
-  if (path.dirname(realTargetPath) !== realAgentDir) return false
-  return path.basename(realTargetPath) === 'typeclaw.json'
+  const canonicalManagedPath = path.join(resolvedAgentDir, managedBasename)
+  const resolvedTarget = path.resolve(targetPath)
+  if (canonicalManagedPath === resolvedTarget) return true
+  const realCanonical = await resolveRealPath(canonicalManagedPath)
+  const realTarget = await resolveRealPath(resolvedTarget)
+  return realCanonical === realTarget
 }
 
 // Oracle PR #305 finding #4. Our guard simulates edits as sequential
