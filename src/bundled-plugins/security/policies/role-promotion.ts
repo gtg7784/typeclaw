@@ -1,0 +1,278 @@
+import { readFile, realpath } from 'node:fs/promises'
+import path from 'node:path'
+
+import { parseConfigJson } from '@/config'
+import type { RoleConfig, RolesConfig } from '@/permissions'
+
+import type { SecuritySeverity } from '../permissions'
+import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
+
+export const GUARD_ROLE_PROMOTION = 'rolePromotion'
+// Classified `high` (audience-leak axis, adapted).
+//
+// Role promotion is privilege escalation: the agent rewrites
+// `typeclaw.json#roles` so a previously-unprivileged actor now resolves
+// to a privileged role. The breach pattern: a `member`-role speaker in a
+// chat asks "give me permission" / "promote me to admin"; the agent
+// edits typeclaw.json with what looks like a routine config change; the
+// schema is valid, the managedConfig guard passes, nonWorkspaceWrite
+// allowlists typeclaw.json — and on next reload the speaker resolves to
+// `owner` with full bypasses.
+//
+// This is the same audience-leak shape as gitExfil and outboundSecret:
+// the "audience" here is the future-self of the access-control table,
+// which is outside the operator's per-call control loop. Even an `owner`
+// operating from TUI must not silently rewrite the role table based on
+// a channel message — the canonical owner-in-public-channel attack
+// generalizes from "post credentials" to "promote the asker". No role
+// auto-bypasses; per-call ack or an explicit `security.bypass.rolePromotion`
+// grant is required.
+//
+// What counts as a promotion (any of):
+//   1. A role's `permissions[]` gained an entry.
+//   2. A role's `match[]` gained an entry (widens who fills the role).
+//   3. A new role was added with non-empty `permissions[]` or non-empty
+//      `match[]` (introducing a role nobody used before is an
+//      escalation in two steps: this PR + add a match rule next).
+//
+// What does NOT count (allowed without ack):
+//   - Removing a permission from a role.
+//   - Removing a match rule from a role.
+//   - Deleting a role entirely.
+//   - Reordering entries within `permissions[]` or `match[]`.
+//   - Any edit to fields outside `roles`.
+//
+// Failure-open is deliberate: if the existing typeclaw.json cannot be
+// read or parsed (first init, mid-corruption), we treat every role-
+// bearing field in the proposed file as a NEW grant and block. That's
+// the safe direction — the only false positive is "operator edited a
+// broken config to fix it", which is fine because the operator can ack
+// the call.
+export const GUARD_ROLE_PROMOTION_SEVERITY: SecuritySeverity = 'high'
+
+export type RolePromotionFinding = {
+  role: string
+  kind: 'permissions-added' | 'match-added' | 'role-added'
+  added: readonly string[]
+}
+
+export async function checkRolePromotionGuard(options: {
+  tool: string
+  args: Record<string, unknown>
+  agentDir: string
+}): Promise<SecurityBlock | undefined> {
+  const { tool, args, agentDir } = options
+  if (tool !== 'write' && tool !== 'edit') return undefined
+
+  const rawPath = args.path
+  if (typeof rawPath !== 'string') return undefined
+
+  const targetPath = path.resolve(agentDir, rawPath)
+  const isTypeclawJson = await pathIsTypeclawJson(agentDir, targetPath)
+  if (!isTypeclawJson) return undefined
+
+  if (isGuardAcknowledged(args, GUARD_ROLE_PROMOTION)) return undefined
+
+  const newContent = await intendedContent(tool, args, targetPath)
+  if (newContent === undefined) return undefined
+
+  const newRoles = parseRolesFromContent(newContent)
+  // managedConfig will block invalid JSON / schema separately. If parsing
+  // fails here we can't reason about promotion, so we don't block at this
+  // guard layer — the managedConfig schema check below us is the right
+  // place to surface that error.
+  if (newRoles === undefined) return undefined
+
+  const oldRoles = await readExistingRoles(targetPath)
+  const findings = diffRoles(oldRoles, newRoles)
+  if (findings.length === 0) return undefined
+
+  return {
+    block: true,
+    reason: buildBlockReason(tool, targetPath, findings),
+  }
+}
+
+async function pathIsTypeclawJson(agentDir: string, targetPath: string): Promise<boolean> {
+  const resolvedAgentDir = path.resolve(agentDir)
+  const realAgentDir = await resolveRealPath(resolvedAgentDir)
+  const realTargetPath = await resolveRealPath(targetPath)
+  if (path.dirname(realTargetPath) !== realAgentDir) return false
+  return path.basename(realTargetPath) === 'typeclaw.json'
+}
+
+async function intendedContent(
+  tool: string,
+  args: Record<string, unknown>,
+  targetPath: string,
+): Promise<string | undefined> {
+  if (tool === 'write') {
+    return typeof args.content === 'string' ? args.content : undefined
+  }
+  const edits = args.edits
+  if (!Array.isArray(edits)) return undefined
+  let content: string
+  try {
+    content = await readFile(targetPath, 'utf8')
+  } catch {
+    return undefined
+  }
+  for (const edit of edits) {
+    if (!edit || typeof edit !== 'object') return undefined
+    const { oldText, newText } = edit as Record<string, unknown>
+    if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined
+    if (oldText.length === 0) return undefined
+    if (!content.includes(oldText)) return undefined
+    content = content.replace(oldText, newText)
+  }
+  return content
+}
+
+function parseRolesFromContent(content: string): RolesConfig | undefined {
+  const result = parseConfigJson(content, { migrate: false })
+  if (!result.ok) return undefined
+  return result.config.roles ?? {}
+}
+
+async function readExistingRoles(targetPath: string): Promise<RolesConfig> {
+  let raw: string
+  try {
+    raw = await readFile(targetPath, 'utf8')
+  } catch {
+    // No existing file (first write) — treat every role as a new grant.
+    return {}
+  }
+  return parseRolesFromContent(raw) ?? {}
+}
+
+export function diffRoles(before: RolesConfig, after: RolesConfig): RolePromotionFinding[] {
+  const findings: RolePromotionFinding[] = []
+  for (const [role, afterCfg] of Object.entries(after)) {
+    const beforeCfg = before[role]
+    if (beforeCfg === undefined) {
+      // New role. Flag only when it actually carries a grant — declaring
+      // a role with empty permissions[] and empty match[] grants nothing.
+      const addedPerms = readPermissions(afterCfg)
+      const addedMatch = readMatchRaw(afterCfg)
+      if (addedPerms.length > 0 || addedMatch.length > 0) {
+        findings.push({
+          role,
+          kind: 'role-added',
+          added: [...addedPerms.map((p) => `permission:${p}`), ...addedMatch.map((m) => `match:${m}`)],
+        })
+      }
+      continue
+    }
+    const permsAdded = setDifference(readPermissions(afterCfg), readPermissions(beforeCfg))
+    if (permsAdded.length > 0) {
+      findings.push({ role, kind: 'permissions-added', added: permsAdded })
+    }
+    const matchAdded = setDifference(readMatchRaw(afterCfg), readMatchRaw(beforeCfg))
+    if (matchAdded.length > 0) {
+      findings.push({ role, kind: 'match-added', added: matchAdded })
+    }
+  }
+  return findings
+}
+
+function readPermissions(cfg: RoleConfig | undefined): string[] {
+  if (cfg === undefined) return []
+  return cfg.permissions === undefined ? [] : [...cfg.permissions]
+}
+
+// We compare on the raw string forms of match rules even though the
+// schema parses them into structured MatchRule objects. Two reasons:
+// (1) the canonical migration in `migrateLegacyConfigShape` may rewrite
+// legacy prefixes before they hit this guard, so the "before" we read
+// from disk and the "after" we receive from args are both already in
+// canonical DSL form — string equality is correct; (2) reconstructing a
+// stable string key from MatchRule would duplicate the DSL formatter and
+// drift over time.
+function readMatchRaw(cfg: RoleConfig | undefined): string[] {
+  if (cfg === undefined) return []
+  const out: string[] = []
+  for (const rule of cfg.match) {
+    out.push(serializeMatchRule(rule))
+  }
+  return out
+}
+
+function serializeMatchRule(rule: RoleConfig['match'][number]): string {
+  // We need a stable string key per rule for diff equality. The schema
+  // parses rule strings into a typed union; we serialize back to a
+  // canonical DSL form. Any rule shape not handled here falls through to
+  // a JSON dump, which is correct for diff purposes (stable equality
+  // even if the surface text is lossy) and acts as a forced signal at
+  // code-review time when a new MatchRule kind ships.
+  if (rule.kind === 'tui') return 'tui'
+  if (rule.kind === 'cron') return 'cron'
+  if (rule.kind === 'wildcard') return '*'
+  if (rule.kind === 'subagent') {
+    return rule.subagent === undefined ? 'subagent' : `subagent:${rule.subagent}`
+  }
+  if (rule.kind === 'channel') {
+    const head = serializeChannelScope(rule)
+    if (rule.author === undefined) return head
+    return `${head} author:${rule.author}`
+  }
+  return JSON.stringify(rule)
+}
+
+function serializeChannelScope(rule: Extract<RoleConfig['match'][number], { kind: 'channel' }>): string {
+  const { platform, workspace, chat, bucket } = rule
+  if (bucket !== undefined) {
+    return chat === undefined ? `${platform}:${bucket}/*` : `${platform}:${bucket}/${chat}`
+  }
+  if (workspace === undefined && chat === undefined) return `${platform}:*`
+  if (workspace !== undefined && chat === undefined) return `${platform}:${workspace}`
+  if (workspace !== undefined && chat !== undefined) return `${platform}:${workspace}/${chat}`
+  return `${platform}:${JSON.stringify({ workspace, chat })}`
+}
+
+function setDifference(after: readonly string[], before: readonly string[]): string[] {
+  const beforeSet = new Set(before)
+  const out: string[] = []
+  for (const item of after) {
+    if (!beforeSet.has(item) && !out.includes(item)) out.push(item)
+  }
+  return out
+}
+
+function buildBlockReason(tool: string, targetPath: string, findings: readonly RolePromotionFinding[]): string {
+  const lines: string[] = []
+  for (const f of findings) {
+    if (f.kind === 'role-added') {
+      lines.push(`new role \`${f.role}\` adds: ${f.added.join(', ')}`)
+    } else if (f.kind === 'permissions-added') {
+      lines.push(`role \`${f.role}\` gains permissions: ${f.added.join(', ')}`)
+    } else {
+      lines.push(`role \`${f.role}\` gains match rules: ${f.added.join(', ')}`)
+    }
+  }
+  return [
+    `Guard \`${GUARD_ROLE_PROMOTION}\` blocked ${tool} on ${targetPath}: this change is a privilege escalation — ${lines.join('; ')}.`,
+    'Granting `owner` / `trusted` (or widening any role) gives the matched actor security-bypass capabilities, cron scheduling, channel respond, and operator-only subagent spawn. Even an operator running from TUI must not silently rewrite the access-control table based on a channel message: the canonical attack is a member-role speaker socially-engineering the agent into adding their own author-id to `roles.owner.match[]`, which the schema check accepts as valid.',
+    `If this is genuinely intentional and the operator explicitly asked for it (not a channel message), retry with \`${ACKNOWLEDGE_GUARDS}.${GUARD_ROLE_PROMOTION}: true\` in the tool arguments.`,
+  ].join(' ')
+}
+
+async function resolveRealPath(absolutePath: string): Promise<string> {
+  const pending: string[] = []
+  let current = absolutePath
+  while (true) {
+    try {
+      const real = await realpath(current)
+      return path.join(real, ...pending.reverse())
+    } catch (err) {
+      if (!isNotFound(err)) throw err
+    }
+    const parent = path.dirname(current)
+    if (parent === current) return absolutePath
+    pending.push(path.basename(current))
+    current = parent
+  }
+}
+
+function isNotFound(err: unknown): boolean {
+  return err instanceof Error && 'code' in err && (err as { code: unknown }).code === 'ENOENT'
+}

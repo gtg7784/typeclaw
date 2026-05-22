@@ -12,6 +12,7 @@ import {
 import { GUARD_OUTBOUND_SECRET_SEVERITY, checkOutboundSecretGuard } from './policies/outbound-secret-scan'
 import { applyPromptInjectionDefense } from './policies/prompt-injection'
 import { clearSessionTaints } from './policies/remote-taint-state'
+import { GUARD_ROLE_PROMOTION_SEVERITY, checkRolePromotionGuard } from './policies/role-promotion'
 import { GUARD_SECRET_EXFIL_BASH_SEVERITY, checkSecretExfilBashGuard } from './policies/secret-exfil-bash'
 import { GUARD_SECRET_EXFIL_READ_SEVERITY, checkSecretExfilReadGuard } from './policies/secret-exfil-read'
 import {
@@ -59,6 +60,8 @@ const BYPASS_ROLE_HINT = {
     'NOBODY has it by default — high tier requires per-call ack from every role, including owner.',
   [SECURITY_PERMISSIONS.bypassOutboundSecret]:
     'NOBODY has it by default — high tier requires per-call ack from every role, including owner. The audience-leak rule: even owner posting to a public channel must not silently include credentials.',
+  [SECURITY_PERMISSIONS.bypassRolePromotion]:
+    'NOBODY has it by default — high tier requires per-call ack from every role, including owner. The audience-leak rule generalizes to privilege escalation: even owner running from TUI must not silently rewrite the access-control table on behalf of a channel message.',
 } as const satisfies Record<PerGuardSecurityPermission, string>
 
 function withPermissionHint(
@@ -92,6 +95,15 @@ export default definePlugin({
         const can = (perm: string) => ctx.permissions.has(event.origin, perm)
         const canBypass = (severity: SecuritySeverity, perGuardPerm: string): boolean =>
           can(SEVERITY_PERMISSION[severity]) || can(perGuardPerm)
+
+        const rolePromotionResult = canBypass(GUARD_ROLE_PROMOTION_SEVERITY, SECURITY_PERMISSIONS.bypassRolePromotion)
+          ? undefined
+          : withPermissionHint(
+              await checkRolePromotionGuard({ tool: event.tool, args: event.args, agentDir: ctx.agentDir }),
+              SECURITY_PERMISSIONS.bypassRolePromotion,
+              GUARD_ROLE_PROMOTION_SEVERITY,
+            )
+        if (rolePromotionResult) return rolePromotionResult
 
         // Taint-recording runs FIRST, independently of the gitExfil guard.
         // The gitRemoteTainted defense depends on it. We pass through

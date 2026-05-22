@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import { HIGH_TIER_PER_GUARD_PERMISSIONS, SECURITY_PERMISSIONS, SEVERITY_PERMISSION } from './permissions'
 import { GUARD_GIT_EXFIL_SEVERITY, GUARD_GIT_REMOTE_TAINTED_SEVERITY } from './policies/git-exfil'
 import { GUARD_OUTBOUND_SECRET_SEVERITY } from './policies/outbound-secret-scan'
+import { GUARD_ROLE_PROMOTION_SEVERITY } from './policies/role-promotion'
 import { GUARD_SECRET_EXFIL_BASH_SEVERITY } from './policies/secret-exfil-bash'
 import { GUARD_SECRET_EXFIL_READ_SEVERITY } from './policies/secret-exfil-read'
 import { GUARD_SESSION_SEARCH_SECRETS_SEVERITY } from './policies/session-search-secrets'
@@ -32,17 +33,19 @@ describe('security tier surface', () => {
         SECURITY_PERMISSIONS.bypassGitRemoteTainted,
         SECURITY_PERMISSIONS.bypassOutboundSecret,
         SECURITY_PERMISSIONS.bypassSystemPromptLeak,
+        SECURITY_PERMISSIONS.bypassRolePromotion,
       ].sort(),
     )
   })
 })
 
 describe('per-guard severity classification', () => {
-  test('high-tier guards (audience-leak axis): outboundSecret, systemPromptLeak, gitExfil, gitRemoteTainted', () => {
+  test('high-tier guards (audience-leak axis): outboundSecret, systemPromptLeak, gitExfil, gitRemoteTainted, rolePromotion', () => {
     expect(GUARD_OUTBOUND_SECRET_SEVERITY).toBe('high')
     expect(GUARD_SYSTEM_PROMPT_LEAK_SEVERITY).toBe('high')
     expect(GUARD_GIT_EXFIL_SEVERITY).toBe('high')
     expect(GUARD_GIT_REMOTE_TAINTED_SEVERITY).toBe('high')
+    expect(GUARD_ROLE_PROMOTION_SEVERITY).toBe('high')
   })
 
   test('medium-tier guards (silent-attack axis): secretExfilBash, secretExfilRead, ssrf, sessionSearchSecrets', () => {
@@ -62,6 +65,7 @@ describe('per-guard severity classification', () => {
       GUARD_OUTBOUND_SECRET_SEVERITY,
       GUARD_SYSTEM_PROMPT_LEAK_SEVERITY,
       GUARD_SESSION_SEARCH_SECRETS_SEVERITY,
+      GUARD_ROLE_PROMOTION_SEVERITY,
     ]
     expect(severities.filter((s) => s === 'low')).toEqual([])
   })
@@ -72,6 +76,7 @@ describe('per-guard severity classification', () => {
       { perm: SECURITY_PERMISSIONS.bypassGitRemoteTainted, sev: GUARD_GIT_REMOTE_TAINTED_SEVERITY },
       { perm: SECURITY_PERMISSIONS.bypassOutboundSecret, sev: GUARD_OUTBOUND_SECRET_SEVERITY },
       { perm: SECURITY_PERMISSIONS.bypassSystemPromptLeak, sev: GUARD_SYSTEM_PROMPT_LEAK_SEVERITY },
+      { perm: SECURITY_PERMISSIONS.bypassRolePromotion, sev: GUARD_ROLE_PROMOTION_SEVERITY },
     ]
     const declared = new Set(HIGH_TIER_PER_GUARD_PERMISSIONS)
     for (const { perm, sev } of highTierGuardSeverities) {
