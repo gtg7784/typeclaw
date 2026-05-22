@@ -35,11 +35,12 @@ Both reduce to: give me a public URL that proxies to `127.0.0.1:<port>` inside t
 
 ## Providers
 
-| Provider           | Subprocess                     | URL                                             | When to use                                                         |
-| ------------------ | ------------------------------ | ----------------------------------------------- | ------------------------------------------------------------------- |
-| `cloudflare-quick` | `cloudflared tunnel --url ...` | Parsed from cloudflared stderr; rotates per run | Default — zero signup, fine for dev and most webhook use cases      |
-| `external`         | None                           | Static, from `externalUrl` in config            | You run your own reverse proxy (Caddy, ngrok, fly.io, etc.)         |
-| `cloudflare-named` | `cloudflared tunnel run <id>`  | Known from Cloudflare config (stable hostname)  | After `typeclaw tunnel upgrade` — requires Cloudflare account + DNS |
+| Provider           | URL                                             | When to use                                                    |
+| ------------------ | ----------------------------------------------- | -------------------------------------------------------------- |
+| `cloudflare-quick` | Parsed from cloudflared stderr; rotates per run | Default — zero signup, fine for dev and most webhook use cases |
+| `external`         | Static, from `externalUrl` in config            | You run your own reverse proxy (Caddy, ngrok, fly.io, etc.)    |
+
+Adding a `cloudflare-quick` tunnel automatically sets `docker.file.cloudflared: true` so the next `typeclaw start` rebuilds the image with the cloudflared binary.
 
 ## Channel-owned tunnels
 
@@ -52,11 +53,22 @@ No config mutation is involved. The rotating `trycloudflare.com` URL is runtime 
 `for: { kind: "manual" }` tunnels are owned by `typeclaw tunnel add` / `tunnel remove`. They're useful when you want to expose a dev server temporarily:
 
 ```sh
-typeclaw tunnel add my-demo --provider cloudflare-quick --port 5173
+typeclaw tunnel add my-demo \
+  --provider cloudflare-quick \
+  --for-manual \
+  --upstream-port 5173
+
+typeclaw tunnel list
 typeclaw tunnel status my-demo
 typeclaw tunnel logs my-demo
 typeclaw tunnel remove my-demo
 ```
+
+`--for-manual` flags the tunnel as user-owned (vs `--for-channel <name>` which scopes it to an adapter's webhook). `--upstream-port` is the container-local port the tunnel proxies to. If you omit either flag, the CLI prompts interactively.
+
+## Pointing a tunnel at a service with a proxy port
+
+Some services pair a host-facing compatibility proxy with a separate in-container server (the bundled `agent-browser` skill is the canonical example: it publishes both `/tmp/typeclaw-agent-browser-proxy-port` and `/tmp/typeclaw-agent-browser-upstream-port`). The tunnel's `upstreamPort` must name the **in-container server**, not the proxy. Tunneling the proxy port silently double-hops and looks like it works until something downstream times out.
 
 ## Auto port-forward vs. tunnels
 

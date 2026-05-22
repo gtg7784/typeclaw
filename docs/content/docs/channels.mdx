@@ -8,13 +8,13 @@ A **channel** is any platform the agent talks through. Inbound messages route to
 
 ## Built-in adapters
 
-| Adapter        | Authentication                                        | Notes                                                                 |
-| -------------- | ----------------------------------------------------- | --------------------------------------------------------------------- |
-| `slack-bot`    | Bot token + app token                                 | Socket Mode, no public URL required                                   |
-| `discord-bot`  | Bot token                                             | Standard intent-based connection                                      |
-| `telegram-bot` | Bot token                                             | Long polling, no webhook required                                     |
-| `github`       | PAT or GitHub App                                     | Pairs with a tunnel for webhook delivery                              |
-| `kakaotalk`    | Sub-device login (email + password, stored encrypted) | LOCO protocol; survives 7-day token expiry via host-side renewal cron |
+| Adapter        | Authentication                                                                       | Notes                                                                 |
+| -------------- | ------------------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| `slack-bot`    | Bot token + app token                                                                | Socket Mode, no public URL required                                   |
+| `discord-bot`  | Bot token                                                                            | Standard intent-based connection                                      |
+| `telegram-bot` | Bot token                                                                            | Long polling, no webhook required                                     |
+| `github`       | Fine-grained PAT, or GitHub App (`appId` + `privateKey` + optional `installationId`) | Pairs with a tunnel for webhook delivery                              |
+| `kakaotalk`    | Sub-device login (email + password, stored encrypted)                                | LOCO protocol; survives 7-day token expiry via host-side renewal cron |
 
 ## Wire one up
 
@@ -24,11 +24,24 @@ typeclaw channel add slack-bot
 
 The CLI prompts for tokens, writes them into `secrets.json` (under `channels.slack-bot`), and updates `typeclaw.json` so the adapter starts on the next reload.
 
-Rotating credentials:
+## Rotating credentials
+
+Most adapters accept rotation through `set`:
 
 ```sh
 typeclaw channel set slack-bot
+typeclaw channel set discord-bot
+typeclaw channel set telegram-bot
+typeclaw channel set github
 ```
+
+**KakaoTalk is the exception.** It needs a fresh sub-device login (interactive phone-passcode flow), so rotation goes through `reauth`:
+
+```sh
+typeclaw channel reauth kakaotalk
+```
+
+Trying to rotate KakaoTalk via `channel set` is not supported — use `reauth`.
 
 ## How routing works
 
@@ -45,11 +58,11 @@ The router never blocks on a slow adapter. Each adapter owns its own outbound qu
 
 By default `channel.respond` is granted to:
 
-- **owner** — TUI sessions
+- **owner** — TUI sessions, plus any author you've paired via `typeclaw role claim --as owner`
 - **trusted** — must declare a `match[]` rule (e.g. `"slack:T0123 author:U_ME"`)
-- **member** — declares which conversations the agent should answer in at all
+- **member** — must declare which conversations the agent should answer in
 
-If your agent silently ignores all inbound messages, you almost certainly haven't put a non-owner role's `match[]` rule on the chats it should answer in.
+If your agent silently ignores all inbound messages, you almost certainly haven't put a non-owner role's `match[]` rule on the chats it should answer in. See [Permissions](/docs/permissions) for the role model and match-rule DSL.
 
 ## Group-chat awareness
 

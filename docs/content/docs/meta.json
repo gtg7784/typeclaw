@@ -4,11 +4,15 @@
     "quickstart",
     "configuration",
     "---",
-    "plugins",
+    "permissions",
     "channels",
     "memory",
     "secrets",
+    "---",
+    "plugins",
     "cron",
-    "tunnels"
+    "tunnels",
+    "---",
+    "cli"
   ]
 }
