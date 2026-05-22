@@ -83,6 +83,9 @@ export async function checkRolePromotionGuard(options: {
 
   if (isGuardAcknowledged(args, GUARD_ROLE_PROMOTION)) return undefined
 
+  const editRefusal = refuseRiskyEdit(tool, args, targetPath)
+  if (editRefusal) return editRefusal
+
   const newContent = await intendedContent(tool, args, targetPath)
   if (newContent === undefined) return undefined
 
@@ -111,6 +114,41 @@ async function pathIsTypeclawJson(agentDir: string, targetPath: string): Promise
   return path.basename(realTargetPath) === 'typeclaw.json'
 }
 
+// Oracle PR #305 finding #4. Our guard simulates edits as sequential
+// `content.replace(oldText, newText)` calls — the next edit sees the
+// output of the previous one. Pi's actual edit tool (in
+// pi-coding-agent/dist/core/tools/edit-diff.js) applies each oldText
+// against the ORIGINAL file content, requires uniqueness, and checks
+// for overlapping replacements. A multi-edit call where the simulator
+// and pi diverge would let an attacker validate one final file in our
+// guard while pi writes a different final file to disk.
+//
+// We close the gap conservatively: refuse multi-edit AND non-unique-
+// oldText edits on managed files. Tell the agent to use `write` with
+// the full content instead (the typeclaw-cron and typeclaw-permissions
+// skills already document this as the canonical path). Re-implementing
+// pi's edit-diff inside the guard would be a maintenance hazard — any
+// future pi version drift would silently re-open the bypass.
+function refuseRiskyEdit(
+  tool: string,
+  args: Record<string, unknown>,
+  targetPath: string,
+): SecurityBlock | undefined {
+  if (tool !== 'edit') return undefined
+  const edits = args.edits
+  if (!Array.isArray(edits)) return undefined
+  if (edits.length > 1) {
+    return {
+      block: true,
+      reason: [
+        `Guard \`${GUARD_ROLE_PROMOTION}\` refuses multi-edit on ${targetPath}: the security guard's edit simulator cannot match the pi-coding-agent edit tool's original-content semantics for multi-edit calls, so a final file validated here may not match the final file actually written.`,
+        'Use `write` with the full file content instead — this is the canonical workflow for managed config files (see the `typeclaw-cron` and `typeclaw-permissions` skills).',
+      ].join(' '),
+    }
+  }
+  return undefined
+}
+
 async function intendedContent(
   tool: string,
   args: Record<string, unknown>,
@@ -127,13 +165,23 @@ async function intendedContent(
   } catch {
     return undefined
   }
+  // refuseRiskyEdit already enforced edits.length <= 1 for managed
+  // files. The loop here therefore always executes at most one iteration
+  // — we still enforce oldText uniqueness inside it as defense in depth
+  // (and because pi's edit-diff requires uniqueness too, so a non-unique
+  // single-edit is a malformed input that would fail at the real tool).
   for (const edit of edits) {
     if (!edit || typeof edit !== 'object') return undefined
     const { oldText, newText } = edit as Record<string, unknown>
     if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined
     if (oldText.length === 0) return undefined
-    if (!content.includes(oldText)) return undefined
-    content = content.replace(oldText, newText)
+    const firstIdx = content.indexOf(oldText)
+    if (firstIdx === -1) return undefined
+    if (content.indexOf(oldText, firstIdx + 1) !== -1) return undefined
+    // Slice-rebuild to avoid String.replace's $-substitution interpreting
+    // newText as a replacement pattern (a `$&` or `$1` in newText would
+    // otherwise expand against the match).
+    content = content.slice(0, firstIdx) + newText + content.slice(firstIdx + oldText.length)
   }
   return content
 }

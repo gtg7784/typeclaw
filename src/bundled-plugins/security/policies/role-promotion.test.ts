@@ -415,6 +415,64 @@ describe('checkRolePromotionGuard — block reason is operator-safe', () => {
   })
 })
 
+describe('checkRolePromotionGuard — edit safety (Oracle PR #305 finding #4)', () => {
+  test('refuses multi-edit on typeclaw.json (simulator-vs-pi divergence)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeConfig(agentDir, BEFORE_BASELINE)
+
+    const result = await checkRolePromotionGuard({
+      tool: 'edit',
+      args: {
+        path: 'typeclaw.json',
+        edits: [
+          { oldText: '"port": 9000', newText: '"port": 9001' },
+          { oldText: 'tui', newText: 'tui' },
+        ],
+      },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('multi-edit')
+  })
+
+  test('defers to managedConfig when oldText is non-unique (rolePromotion returns no finding; managedConfig blocks with shape error)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeFile(
+      path.join(agentDir, 'typeclaw.json'),
+      JSON.stringify(
+        { port: 9000, roles: { member: { match: ['slack:T000'] }, owner: { match: ['tui'] } } },
+        null,
+        2,
+      ),
+    )
+
+    const result = await checkRolePromotionGuard({
+      tool: 'edit',
+      args: {
+        path: 'typeclaw.json',
+        edits: [{ oldText: '"match": [', newText: '"match": [\n        "discord:* author:U_NEW",' }],
+      },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('newText containing $-substitution patterns is treated literally (not as regex backref)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeConfig(agentDir, BEFORE_BASELINE)
+
+    const result = await checkRolePromotionGuard({
+      tool: 'edit',
+      args: {
+        path: 'typeclaw.json',
+        edits: [{ oldText: '"port": 9000', newText: '"port": 9001 /* $& replaced */' }],
+      },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+})
+
 describe('checkRolePromotionGuard — first-init (no existing file)', () => {
   test('blocks a fresh write that introduces a privileged role', async () => {
     const agentDir = await makeAgentDir()
