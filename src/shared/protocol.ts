@@ -44,6 +44,55 @@ export type TunnelLogsServerMessage =
   | { type: 'error'; message: string }
   | { type: 'end' }
 
+export type InspectClientMessage = {
+  type: 'subscribe'
+  sessionId: string
+  // sinceMs is a wall-clock cutoff for backfilling broadcasts from the
+  // in-process Stream ring buffer. The client uses Date.now() - duration;
+  // omit to skip broadcast backfill. AgentSession events are NEVER
+  // backfilled (the session's pi-coding-agent subscribe API delivers
+  // future events only).
+  sinceMs?: number
+}
+
+export type InspectFramePayload =
+  | { kind: 'text_delta'; sessionId: string; delta: string }
+  | { kind: 'tool_start'; sessionId: string; toolCallId: string; name: string; args: unknown }
+  | {
+      kind: 'tool_end'
+      sessionId: string
+      toolCallId: string
+      name: string
+      result: unknown
+      isError: boolean
+      durationMs: number
+    }
+  | {
+      kind: 'message_end'
+      sessionId: string
+      role: string
+      content: unknown
+      provider?: string
+      model?: string
+      stopReason?: string
+      errorMessage?: string
+      usage?: {
+        input: number
+        output: number
+        cacheRead: number
+        cacheWrite: number
+        totalTokens: number
+        cost: number
+      }
+    }
+  | { kind: 'broadcast'; payload: unknown; meta?: Record<string, string> }
+  | { kind: 'cron-fire'; jobId: string; payload: unknown }
+
+export type InspectServerMessage =
+  | { type: 'subscribed'; sessionId: string; sessionLive: boolean }
+  | { type: 'frame'; ts: number; payload: InspectFramePayload }
+  | { type: 'error'; message: string }
+
 export type ClientMessage =
   | { type: 'prompt'; text: string; delivery?: PromptDelivery }
   | { type: 'reload'; scope?: string }
