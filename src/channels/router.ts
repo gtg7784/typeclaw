@@ -297,9 +297,29 @@ type LiveSession = {
   unsubProviderErrors: (() => void) | null
 }
 
+// `event` is null for command invocations that originated outside the inbound
+// pipeline (e.g. Discord native slash commands fired from listener.on
+// ('interaction_create')). Handlers that need a real inbound — for some
+// future hypothetical command like `/quote` — must guard on event !== null
+// instead of assuming it.
 type ChannelCommandContext = {
   live: LiveSession
-  event: InboundMessage
+  event: InboundMessage | null
+}
+
+export type ExecuteCommandResult =
+  | { kind: 'handled'; name: string }
+  | { kind: 'unknown-command'; name: string }
+  | { kind: 'no-live-session' }
+  | { kind: 'permission-denied' }
+
+// Identifies who invoked an adapter-driven command. Required so the router
+// can run the same channel.respond permission gate the text-prefix command
+// path runs (isChannelRespondDenied in route()). Without it, a guest user
+// in a public Slack channel could /stop an owner-created session that
+// happened to be live, bypassing role gating entirely.
+export type ExecuteCommandOptions = {
+  invokerId: string
 }
 
 export type SendSource = 'tool' | 'system'
@@ -345,6 +365,20 @@ export type ChannelRouter = {
   registerFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   unregisterFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   fetchAttachment: (adapter: ChannelKey['adapter'], args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
+  // Execute a command by name against an existing live session, bypassing
+  // the inbound classifier, engagement gate, debounce, and prompt queue.
+  // Used by adapters that receive commands through a native surface
+  // (Discord application-command interactions) rather than text. Gates
+  // the invoker on channel.respond — same permission gate the text-prefix
+  // command path runs — so a guest user cannot abort an owner's session
+  // by clicking the slash-command picker. Adapters MUST forward the
+  // invoker's platform-specific user id; without it the gate cannot
+  // identify the actor and resolves to 'guest' which denies. Returns:
+  //   - handled: command ran
+  //   - permission-denied: invoker lacks channel.respond
+  //   - no-live-session: channel has no active session
+  //   - unknown-command: name is not registered
+  executeCommand: (key: ChannelKey, name: string, options: ExecuteCommandOptions) => Promise<ExecuteCommandResult>
   // Lowered self-aliases (configured + implicit dir-name). Adapters use
   // this to anchor outbound threading on alias-only inbounds — see
   // slack-bot-classify.ts. Read live so a reload of `alias` propagates
@@ -1733,6 +1767,46 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  const executeCommand = async (
+    key: ChannelKey,
+    name: string,
+    options: ExecuteCommandOptions,
+  ): Promise<ExecuteCommandResult> => {
+    const lowered = name.toLowerCase()
+    if (!commands.has(lowered)) {
+      return { kind: 'unknown-command', name: lowered }
+    }
+    // Permission gate runs BEFORE the live-session lookup so a guest user
+    // invoking /stop on a non-existent session gets 'permission-denied'
+    // (consistent answer regardless of session state) rather than leaking
+    // session presence via the 'no-live-session' vs 'permission-denied'
+    // distinction.
+    const partial: SessionOrigin = {
+      kind: 'channel',
+      adapter: key.adapter,
+      workspace: key.workspace,
+      chat: key.chat,
+      thread: key.thread,
+      lastInboundAuthorId: options.invokerId,
+    }
+    if (!permissions.has(partial, CORE_PERMISSIONS.channelRespond)) {
+      return { kind: 'permission-denied' }
+    }
+    const keyId = channelKeyId(key)
+    const live = liveSessions.get(keyId)
+    if (!live || live.destroyed) {
+      return { kind: 'no-live-session' }
+    }
+    const result = await commands.execute(`/${lowered}`, { live, event: null })
+    if (result.kind === 'handled') {
+      return { kind: 'handled', name: result.name }
+    }
+    // commands.execute can only return not-command (impossible — we pass a
+    // leading slash), unknown-command (impossible — we just checked has()),
+    // or handled. Any other outcome is a bug.
+    return { kind: 'unknown-command', name: lowered }
+  }
+
   return {
     route,
     send,
@@ -1752,6 +1826,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerFetchAttachment,
     unregisterFetchAttachment,
     fetchAttachment,
+    executeCommand,
     getSelfAliases: computeSelfAliases,
     stop,
     liveCount: () => liveSessions.size,
