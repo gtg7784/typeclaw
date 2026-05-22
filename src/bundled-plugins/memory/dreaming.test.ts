@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -28,6 +28,32 @@ function watermarkLine(entry: string): string {
 
 function legacyProseLine(body = 'legacy prose'): string {
   return `${JSON.stringify({ type: 'legacy_prose', id: 'legacy-1', ts: '2026-05-16T12:00:00.000Z', body })}\n`
+}
+
+function topicShard(slug: string): string {
+  return join(agentDir, 'memory', 'topics', `${slug}.md`)
+}
+
+async function writeTopicShard(slug: string, text: string): Promise<void> {
+  await mkdir(join(agentDir, 'memory', 'topics'), { recursive: true })
+  await writeFile(topicShard(slug), text)
+}
+
+function shardText(
+  heading: string,
+  body: string,
+  options: { cites?: number; days?: number; lastReinforced?: string; tags?: string[] } = {},
+): string {
+  return renderShard(
+    {
+      heading,
+      cites: options.cites ?? 0,
+      days: options.days ?? 0,
+      lastReinforced: options.lastReinforced ?? '2026-01-01',
+      ...(options.tags !== undefined ? { tags: options.tags } : {}),
+    },
+    body,
+  )
 }
 
 let agentDir: string
@@ -107,7 +133,7 @@ describe('dreaming subagent declarations', () => {
     const sub = createDreamingSubagent()
     expect(sub.customTools).toBeDefined()
     expect(sub.customTools!.length).toBe(1)
-    expect(sub.customTools![0].description).toContain('Delete a single topic shard')
+    expect(sub.customTools![0]?.description).toContain('Delete a single topic shard')
   })
 
   test('declares a defensive tool-result byte budget on the read tool so a runaway multi-day stream read cannot balloon subagent token cost', () => {
@@ -230,7 +256,7 @@ describe('dreaming subagent declarations', () => {
 })
 
 describe('dreaming subagent (compaction wiring)', () => {
-  test('after a successful run, the touched daily stream is compacted using the MEMORY.md citations', async () => {
+  test('after a successful run, the touched daily stream is compacted using topic shard citations', async () => {
     // Three fragments and three watermarks (two redundant) on the same day.
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
@@ -244,21 +270,21 @@ describe('dreaming subagent (compaction wiring)', () => {
       ].join(''),
     )
 
-    // Stub runSession to simulate what the LLM does: write MEMORY.md citing two
-    // of the three fragments by id. The third (`f-drop-me`) is dreamed-but-uncited.
+    // Stub runSession to simulate what the LLM does: write a topic shard citing
+    // two of the three fragments by id. The third (`f-drop-me`) is dreamed-but-uncited.
     const runSession: RunSession = async () => {
-      await writeFile(
-        join(agentDir, 'MEMORY.md'),
-        [
-          '# Memory',
-          '',
-          '## kept topic',
-          'Conclusion.',
-          '',
-          'fragments:',
-          '- memory/2026-04-27#f-keep-me',
-          '- memory/2026-04-27#f-also-keep-me',
-        ].join('\n'),
+      await writeTopicShard(
+        'kept-topic',
+        shardText(
+          'kept topic',
+          [
+            'Conclusion.',
+            '',
+            'fragments:',
+            '- streams/2026-04-27#f-keep-me',
+            '- streams/2026-04-27#f-also-keep-me',
+          ].join('\n'),
+        ),
       )
     }
 
@@ -316,9 +342,9 @@ describe('dreaming subagent (compaction wiring)', () => {
       [fragmentLine('cited'), fragmentLine('uncited')].join(''),
     )
     const runSession: RunSession = async () => {
-      await writeFile(
-        join(agentDir, 'MEMORY.md'),
-        ['# Memory', '', '## kept', 'Conclusion.', '', 'fragments:', '- memory/2026-04-27#f-cited'].join('\n'),
+      await writeTopicShard(
+        'kept',
+        shardText('kept', ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-cited'].join('\n')),
       )
     }
 
@@ -334,26 +360,28 @@ describe('dreaming subagent (compaction wiring)', () => {
     expect(fragmentIds).toEqual(['f-cited'])
   })
 
-  test('reverts MEMORY.md when the subagent drops a previously-cited fragment id', async () => {
+  test('reverts topic shards when the subagent drops a previously-cited fragment id', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), [fragmentLine('keep'), fragmentLine('also')].join(''))
-    const beforeText = [
-      '# Memory',
-      '',
-      '## Cited topic',
-      'Conclusion.',
-      '',
-      'fragments:',
-      '- memory/2026-04-27#f-keep',
-      '- memory/2026-04-27#f-also',
-    ].join('\n')
-    await writeFile(join(agentDir, 'MEMORY.md'), beforeText)
+    const beforeA = shardText('A', ['A.', '', 'fragments:', '- streams/2026-04-27#f-keep'].join('\n'), {
+      cites: 1,
+      days: 1,
+      lastReinforced: '2026-04-27',
+    })
+    const beforeB = shardText('B', ['B.', '', 'fragments:', '- streams/2026-04-27#f-also'].join('\n'), {
+      cites: 1,
+      days: 1,
+      lastReinforced: '2026-04-27',
+    })
+    await writeTopicShard('a', beforeA)
+    await writeTopicShard('b', beforeB)
 
-    // The subagent rewrites MEMORY.md but forgets to carry f-also forward.
+    // The subagent rewrites shards but forgets to carry f-also forward.
     const runSession: RunSession = async () => {
-      await writeFile(
-        join(agentDir, 'MEMORY.md'),
-        ['# Memory', '', '## Half topic', 'Conclusion.', '', 'fragments:', '- memory/2026-04-27#f-keep'].join('\n'),
+      await writeTopicShard(
+        'c',
+        shardText('Half topic', ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-keep'].join('\n')),
       )
+      await rm(topicShard('b'))
     }
 
     const warnings: string[] = []
@@ -361,34 +389,37 @@ describe('dreaming subagent (compaction wiring)', () => {
 
     await invokeDreaming(agentDir, { runSession, logger })
 
-    const after = await readFile(join(agentDir, 'MEMORY.md'), 'utf8')
-    expect(after).toBe(beforeText)
+    expect(await readFile(topicShard('a'), 'utf8')).toBe(beforeA)
+    expect(await readFile(topicShard('b'), 'utf8')).toBe(beforeB)
+    await expect(readFile(topicShard('c'), 'utf8')).rejects.toThrow()
     expect(warnings.some((m) => m.includes('citation-superset violation') && m.includes('f-also'))).toBe(true)
   })
 
   test('on a superset violation, dreamed-ids still advance (no infinite loop) but compaction does not GC fragments', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), [fragmentLine('keep'), fragmentLine('also')].join(''))
-    await writeFile(
-      join(agentDir, 'MEMORY.md'),
-      [
-        '# Memory',
-        '',
-        '## Both cited',
-        'Conclusion.',
-        '',
-        'fragments:',
-        '- memory/2026-04-27#f-keep',
-        '- memory/2026-04-27#f-also',
-      ].join('\n'),
+    await writeTopicShard(
+      'both',
+      shardText(
+        'Both cited',
+        ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-keep', '- streams/2026-04-27#f-also'].join('\n'),
+        { cites: 2, days: 1, lastReinforced: '2026-04-27' },
+      ),
     )
     const runSession: RunSession = async () => {
-      await writeFile(
-        join(agentDir, 'MEMORY.md'),
-        ['# Memory', '', '## Only one', 'Conclusion.', '', 'fragments:', '- memory/2026-04-27#f-keep'].join('\n'),
+      await writeTopicShard(
+        'only-one',
+        shardText('Only one', ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-keep'].join('\n')),
       )
+      await rm(topicShard('both'))
     }
+    let committed = false
 
-    await invokeDreaming(agentDir, { runSession })
+    await invokeDreaming(agentDir, {
+      runSession,
+      commitMemory: async () => {
+        committed = true
+      },
+    })
 
     const state = await loadDreamingState(agentDir)
     expect(new Set(state.dreamedThrough['2026-04-27']?.dreamedIds ?? [])).toEqual(new Set(['f-keep', 'f-also']))
@@ -402,40 +433,21 @@ describe('dreaming subagent (compaction wiring)', () => {
       .map((e) => e.id)
       .sort()
     expect(fragmentIds).toEqual(['f-also', 'f-keep'])
+    expect(committed).toBe(false)
   })
 
-  test('does NOT revert when the subagent legitimately rewrites with the same citation set (merge case)', async () => {
+  test('does NOT revert when the subagent legitimately merges shards with the same citation set', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), [fragmentLine('a'), fragmentLine('b')].join(''))
-    await writeFile(
-      join(agentDir, 'MEMORY.md'),
-      [
-        '# Memory',
-        '',
-        '## Topic A',
-        'A.',
-        '',
-        'fragments:',
-        '- memory/2026-04-27#f-a',
-        '',
-        '## Topic B',
-        'B.',
-        '',
-        'fragments:',
-        '- memory/2026-04-27#f-b',
-      ].join('\n'),
+    await writeTopicShard('a', shardText('Topic A', ['A.', '', 'fragments:', '- streams/2026-04-27#f-a'].join('\n')))
+    await writeTopicShard('b', shardText('Topic B', ['B.', '', 'fragments:', '- streams/2026-04-27#f-b'].join('\n')))
+    const mergedBody = ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-a', '- streams/2026-04-27#f-b'].join(
+      '\n',
     )
-    const mergedText = [
-      '# Memory',
-      '',
-      '## Merged',
-      'Conclusion.',
-      '',
-      'fragments:',
-      '- memory/2026-04-27#f-a',
-      '- memory/2026-04-27#f-b',
-    ].join('\n')
+    const mergedText = shardText('Merged', mergedBody, { cites: 2, days: 1, lastReinforced: '2026-04-27' })
     const runSession: RunSession = async () => {
-      await writeFile(join(agentDir, 'MEMORY.md'), mergedText)
+      await writeTopicShard('c', shardText('Merged', mergedBody))
+      await rm(topicShard('a'))
+      await rm(topicShard('b'))
     }
 
     const warnings: string[] = []
@@ -443,23 +455,25 @@ describe('dreaming subagent (compaction wiring)', () => {
 
     await invokeDreaming(agentDir, { runSession, logger })
 
-    expect(await readFile(join(agentDir, 'MEMORY.md'), 'utf8')).toBe(mergedText)
+    expect(await readFile(topicShard('c'), 'utf8')).toBe(mergedText)
+    await expect(readFile(topicShard('a'), 'utf8')).rejects.toThrow()
+    await expect(readFile(topicShard('b'), 'utf8')).rejects.toThrow()
     expect(warnings.some((m) => m.includes('citation-superset'))).toBe(false)
   })
 
   test('on revert-write failure, refuses to advance dreamed-ids or run compaction (leaves recovery to the operator)', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('only'))
-    await writeFile(
-      join(agentDir, 'MEMORY.md'),
-      ['# Memory', '', '## Cited', 'C.', '', 'fragments:', '- memory/2026-04-27#f-already-cited'].join('\n'),
+    await writeTopicShard(
+      'cited',
+      shardText('Cited', ['C.', '', 'fragments:', '- streams/2026-04-27#f-already-cited'].join('\n')),
     )
     // The subagent drops the previously-cited id (forcing a superset
-    // violation), AND replaces MEMORY.md with a directory so the revert
-    // writeFile cannot succeed. Both conditions together exercise the
+    // violation), AND makes the overwritten shard read-only so the restore
+    // write cannot succeed. Both conditions together exercise the
     // revert-failure recovery path.
     const runSession: RunSession = async () => {
-      await rm(join(agentDir, 'MEMORY.md'))
-      await mkdir(join(agentDir, 'MEMORY.md'))
+      await writeTopicShard('cited', shardText('New', 'No citations.'))
+      await chmod(topicShard('cited'), 0o444)
     }
 
     const errors: string[] = []
@@ -475,22 +489,23 @@ describe('dreaming subagent (compaction wiring)', () => {
     })
 
     expect(errors.some((m) => m.includes('citation-superset violation AND revert failed'))).toBe(true)
-    expect(errors.some((m) => m.includes('git checkout -- MEMORY.md'))).toBe(true)
+    expect(errors.some((m) => m.includes('git checkout -- memory/topics'))).toBe(true)
     // Dreamed-ids must NOT have advanced — next run gets a second chance.
     const state = await loadDreamingState(agentDir)
     expect(state.dreamedThrough['2026-04-27']).toBeUndefined()
     // commit must not have run on a known-bad on-disk state.
     expect(committed).toBe(false)
+    await chmod(topicShard('cited'), 0o644)
   })
 
   test('on a successful revert, the warning explicitly names the new-fragment-orphaning tradeoff so operators can read the log', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), [fragmentLine('new')].join(''))
-    await writeFile(
-      join(agentDir, 'MEMORY.md'),
-      ['# Memory', '', '## Old', 'C.', '', 'fragments:', '- memory/2026-04-26#f-old-cite'].join('\n'),
+    await writeTopicShard(
+      'old',
+      shardText('Old', ['C.', '', 'fragments:', '- streams/2026-04-26#f-old-cite'].join('\n')),
     )
     const runSession: RunSession = async () => {
-      await writeFile(join(agentDir, 'MEMORY.md'), ['# Memory', '', '## Dropped old citation', 'C.'].join('\n'))
+      await writeTopicShard('old', shardText('Dropped old citation', 'C.'))
     }
 
     const warnings: string[] = []
@@ -505,17 +520,16 @@ describe('dreaming subagent (compaction wiring)', () => {
 
   test('does NOT trigger the safety net on first-ever run (empty prior MEMORY.md is the empty citation set)', async () => {
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('first'))
-    const newText = [
-      '# Memory',
-      '',
-      '## First topic ever',
-      'Conclusion.',
-      '',
-      'fragments:',
-      '- memory/2026-04-27#f-first',
-    ].join('\n')
+    const newText = shardText(
+      'First topic ever',
+      ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-first'].join('\n'),
+      { cites: 1, days: 1, lastReinforced: '2026-04-27' },
+    )
     const runSession: RunSession = async () => {
-      await writeFile(join(agentDir, 'MEMORY.md'), newText)
+      await writeTopicShard(
+        'first',
+        shardText('First topic ever', ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-first'].join('\n')),
+      )
     }
 
     const warnings: string[] = []
@@ -523,8 +537,38 @@ describe('dreaming subagent (compaction wiring)', () => {
 
     await invokeDreaming(agentDir, { runSession, logger })
 
-    expect(await readFile(join(agentDir, 'MEMORY.md'), 'utf8')).toBe(newText)
+    expect(await readFile(topicShard('first'), 'utf8')).toBe(newText)
     expect(warnings.some((m) => m.includes('citation-superset'))).toBe(false)
+  })
+
+  test('revert preserves byte-identical shard content for unchanged shards and deletes net-new shards', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), [fragmentLine('keep'), fragmentLine('drop')].join(''))
+    const stable = shardText('Stable', ['Stable.', '', 'fragments:', '- streams/2026-04-27#f-keep'].join('\n'), {
+      cites: 1,
+      days: 1,
+      lastReinforced: '2026-04-27',
+      tags: ['keep'],
+    })
+    const dropped = shardText('Dropped', ['Dropped.', '', 'fragments:', '- streams/2026-04-27#f-drop'].join('\n'), {
+      cites: 1,
+      days: 1,
+      lastReinforced: '2026-04-27',
+    })
+    await writeTopicShard('stable', stable)
+    await writeTopicShard('dropped', dropped)
+    const runSession: RunSession = async () => {
+      await writeTopicShard(
+        'new',
+        shardText('New', ['New.', '', 'fragments:', '- streams/2026-04-27#f-keep'].join('\n')),
+      )
+      await rm(topicShard('dropped'))
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    expect(await readFile(topicShard('stable'), 'utf8')).toBe(stable)
+    expect(await readFile(topicShard('dropped'), 'utf8')).toBe(dropped)
+    await expect(readFile(topicShard('new'), 'utf8')).rejects.toThrow()
   })
 
   test('emits a [dreaming] compaction log line when files are rewritten', async () => {
@@ -538,6 +582,125 @@ describe('dreaming subagent (compaction wiring)', () => {
     await invokeDreaming(agentDir, { logger })
 
     expect(infos.some((m) => m.startsWith('[dreaming] compaction') && m.includes('files=1'))).toBe(true)
+  })
+})
+
+describe('dreaming subagent (runtime-managed shard frontmatter)', () => {
+  test('corrects stale citation counts, distinct days, and last reinforced date from the shard body', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('new'))
+    const body = [
+      'Conclusion.',
+      '',
+      'fragments:',
+      '- streams/2026-04-25#f-a',
+      '- streams/2026-04-26#f-b',
+      '- streams/2026-04-27#f-c',
+    ].join('\n')
+    const runSession: RunSession = async () => {
+      await writeTopicShard('counts', shardText('Counts', body, { cites: 0, days: 0, lastReinforced: '1970-01-01' }))
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    expect(await readFile(topicShard('counts'), 'utf8')).toBe(
+      shardText('Counts', body, { cites: 3, days: 3, lastReinforced: '2026-04-27' }),
+    )
+  })
+
+  test('synthesizes frontmatter when the subagent writes a raw markdown shard body', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('new'))
+    const rawBody = ['## Synthesized heading', '', 'Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-new'].join(
+      '\n',
+    )
+    const runSession: RunSession = async () => {
+      await writeTopicShard('synth', rawBody)
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    expect(await readFile(topicShard('synth'), 'utf8')).toBe(
+      shardText('Synthesized heading', rawBody, { cites: 1, days: 1, lastReinforced: '2026-04-27' }),
+    )
+  })
+
+  test('leaves already-correct frontmatter byte-identical after recompute', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('new'))
+    const body = ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-new'].join('\n')
+    const exact = shardText('Exact', body, { cites: 1, days: 1, lastReinforced: '2026-04-27', tags: ['valid'] })
+    const runSession: RunSession = async () => {
+      await writeTopicShard('exact', exact)
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    expect(await readFile(topicShard('exact'), 'utf8')).toBe(exact)
+  })
+
+  test('drops malformed tags with a warning while preserving other runtime-managed fields', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('new'))
+    const raw = [
+      '---',
+      'heading: Bad tags',
+      'cites: 0',
+      'days: 0',
+      'lastReinforced: 1970-01-01',
+      'tags: a-string',
+      '---',
+      'Conclusion.',
+      '',
+      'fragments:',
+      '- streams/2026-04-27#f-new',
+    ].join('\n')
+    const warnings: string[] = []
+    const logger: DreamingLogger = { info: () => {}, warn: (m) => warnings.push(m), error: () => {} }
+    const runSession: RunSession = async () => {
+      await writeTopicShard('bad-tags', raw)
+    }
+
+    await invokeDreaming(agentDir, { runSession, logger })
+
+    expect(await readFile(topicShard('bad-tags'), 'utf8')).toBe(
+      shardText('Bad tags', ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-new'].join('\n'), {
+        cites: 1,
+        days: 1,
+        lastReinforced: '2026-04-27',
+      }),
+    )
+    expect(warnings.some((m) => m.includes('dropping malformed tags'))).toBe(true)
+  })
+
+  test('preserves well-formed tags when recomputing runtime-managed fields', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('new'))
+    const body = ['Conclusion.', '', 'fragments:', '- streams/2026-04-27#f-new'].join('\n')
+    const runSession: RunSession = async () => {
+      await writeTopicShard('tags', shardText('Tags', body, { tags: ['valid', 'arr'] }))
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    expect(await readFile(topicShard('tags'), 'utf8')).toBe(
+      shardText('Tags', body, { cites: 1, days: 1, lastReinforced: '2026-04-27', tags: ['valid', 'arr'] }),
+    )
+  })
+
+  test('skips frontmatter recompute on citation-superset failure after restoring the pre-run snapshot', async () => {
+    await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), [fragmentLine('keep'), fragmentLine('drop')].join(''))
+    const before = shardText('Before', ['Before.', '', 'fragments:', '- streams/2026-04-27#f-drop'].join('\n'), {
+      cites: 0,
+      days: 0,
+      lastReinforced: '1970-01-01',
+    })
+    await writeTopicShard('before', before)
+    const runSession: RunSession = async () => {
+      await writeTopicShard(
+        'before',
+        shardText('Before', 'No citations.', { cites: 99, days: 99, lastReinforced: '2026-04-27' }),
+      )
+    }
+
+    await invokeDreaming(agentDir, { runSession })
+
+    expect(await readFile(topicShard('before'), 'utf8')).toBe(before)
   })
 })
 

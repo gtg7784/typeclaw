@@ -7,7 +7,7 @@ import { z } from 'zod'
 import { defineTool, lsTool, readTool, type Subagent, writeTool } from '@/plugin'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
 
-import { checkCitationSuperset, summarizeMissingCitations } from './citation-superset'
+import { checkCitationSupersetAcrossShards, summarizeMissingCitations } from './citation-superset'
 import { parseCitations } from './citations'
 import { deleteTopicShardTool } from './delete-tool'
 import {
@@ -18,8 +18,10 @@ import {
   loadDreamingState,
   saveDreamingState,
 } from './dreaming-state'
-import { loadAllShards } from './load-shards'
-import { topicsDir } from './paths'
+import { parseShard, renderShard, type ShardFrontmatter } from './frontmatter'
+import { listShardSlugs, loadAllShards } from './load-shards'
+import { topicShardPath, topicsDir } from './paths'
+import { captureShardSnapshot, restoreShardSnapshot } from './shard-snapshot'
 import type { StreamEvent } from './stream-events'
 import { readEvents, writeEventsAtomic } from './stream-io'
 
@@ -211,20 +213,169 @@ export async function compactDailyStreams(
 const EMPTY_ID_SET: ReadonlySet<string> = new Set()
 
 async function loadCitedIds(agentDir: string): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
-  try {
-    const raw = await readFile(join(agentDir, 'MEMORY.md'), 'utf8')
-    return parseCitations(raw)
-  } catch {
-    return new Map()
+  const out = new Map<string, Set<string>>()
+  const shards = await loadAllShards(agentDir)
+  for (const shard of shards) {
+    mergeCitationIndex(out, parseCitations(shard.body))
+  }
+  return out
+}
+
+function mergeCitationIndex(target: Map<string, Set<string>>, source: ReadonlyMap<string, ReadonlySet<string>>): void {
+  for (const [date, ids] of source) {
+    let targetIds = target.get(date)
+    if (targetIds === undefined) {
+      targetIds = new Set<string>()
+      target.set(date, targetIds)
+    }
+    for (const id of ids) targetIds.add(id)
   }
 }
 
-async function safeReadText(path: string): Promise<string> {
-  try {
-    return await readFile(path, 'utf8')
-  } catch {
-    return ''
+function snapshotToTextMap(snapshot: ReadonlyMap<string, Buffer>): Map<string, string> {
+  return new Map([...snapshot].map(([path, bytes]) => [path, bytes.toString('utf8')]))
+}
+
+function shardSnapshotsEqual(a: ReadonlyMap<string, Buffer>, b: ReadonlyMap<string, Buffer>): boolean {
+  if (a.size !== b.size) return false
+  for (const [path, bytes] of a) {
+    const other = b.get(path)
+    if (other === undefined || !bytes.equals(other)) return false
   }
+  return true
+}
+
+async function recomputeFrontmatterForAllShards(agentDir: string, logger: DreamingLogger): Promise<void> {
+  const slugs = await listShardSlugs(agentDir)
+  for (const slug of slugs) {
+    await recomputeShardFrontmatter(agentDir, slug, logger)
+  }
+}
+
+async function recomputeShardFrontmatter(agentDir: string, slug: string, logger: DreamingLogger): Promise<void> {
+  const path = topicShardPath(agentDir, slug)
+  let raw: string
+  try {
+    raw = await readFile(path, 'utf8')
+  } catch (err) {
+    if (isEnoent(err)) return
+    throw err
+  }
+
+  const parsed = parseShardTolerantly(raw, slug, logger)
+  const citations = parseCitations(parsed.body)
+  const dates = [...citations.keys()].sort()
+  const cites = [...citations.values()].reduce((sum, ids) => sum + ids.size, 0)
+  const tags = parsed.tagsMalformed ? undefined : parsed.frontmatter.tags
+  const nextFrontmatter: ShardFrontmatter = {
+    heading: parsed.frontmatter.heading || synthesizeHeadingFromBody(parsed.body) || slug,
+    cites,
+    days: dates.length,
+    lastReinforced: dates.at(-1) ?? formatLocalDate(),
+    ...(tags !== undefined ? { tags } : {}),
+  }
+  const nextRaw = renderShard(nextFrontmatter, parsed.body)
+  if (nextRaw !== raw) await writeFile(path, nextRaw)
+}
+
+function parseShardTolerantly(
+  raw: string,
+  slug: string,
+  logger: DreamingLogger,
+): { frontmatter: ShardFrontmatter; body: string; tagsMalformed: boolean } {
+  try {
+    return { ...parseShard(raw), tagsMalformed: false }
+  } catch {
+    const loose = parseLooseShard(raw)
+    if (loose === null) {
+      return {
+        frontmatter: defaultShardFrontmatter(synthesizeHeadingFromBody(raw) || slug),
+        body: raw,
+        tagsMalformed: false,
+      }
+    }
+    if (loose.tagsMalformed) logger.warn(`[dreaming] shard ${slug}: dropping malformed tags`)
+    return {
+      frontmatter: defaultShardFrontmatter(loose.heading || synthesizeHeadingFromBody(loose.body) || slug, loose.tags),
+      body: loose.body,
+      tagsMalformed: loose.tagsMalformed,
+    }
+  }
+}
+
+function parseLooseShard(
+  raw: string,
+): { heading?: string; tags?: string[]; tagsMalformed: boolean; body: string } | null {
+  const normalized = raw.replaceAll('\r\n', '\n')
+  if (!normalized.startsWith('---\n')) return null
+  const closeIndex = normalized.indexOf('\n---', 4)
+  if (closeIndex === -1) return null
+
+  const fmText = normalized.slice(4, closeIndex)
+  const body = normalized.slice(closeIndex + 5)
+  const lines = fmText.split('\n')
+  let heading: string | undefined
+  let tags: string[] | undefined
+  let tagsMalformed = false
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!
+    const colonIndex = line.indexOf(':')
+    if (colonIndex === -1) continue
+    const key = line.slice(0, colonIndex).trim()
+    const rest = line.slice(colonIndex + 1).trim()
+    if (key === 'heading') {
+      heading = rest
+    } else if (key === 'tags') {
+      const parsed = parseLooseTags(rest, lines, i)
+      tags = parsed.tags
+      tagsMalformed = parsed.malformed
+      i = parsed.nextIndex
+    }
+  }
+
+  return { heading, tags, tagsMalformed, body }
+}
+
+function parseLooseTags(
+  rest: string,
+  lines: readonly string[],
+  currentIndex: number,
+): { tags?: string[]; malformed: boolean; nextIndex: number } {
+  if (rest === '[]') return { tags: [], malformed: false, nextIndex: currentIndex }
+  if (rest.startsWith('[') && rest.endsWith(']')) {
+    return {
+      tags: rest
+        .slice(1, -1)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean),
+      malformed: false,
+      nextIndex: currentIndex,
+    }
+  }
+  if (rest === '') {
+    const tags: string[] = []
+    let i = currentIndex + 1
+    while (i < lines.length && lines[i]!.startsWith('  - ')) {
+      tags.push(lines[i]!.slice(4).trim())
+      i++
+    }
+    return { tags, malformed: false, nextIndex: i - 1 }
+  }
+  return { malformed: true, nextIndex: currentIndex }
+}
+
+function defaultShardFrontmatter(heading: string, tags?: string[]): ShardFrontmatter {
+  return { heading, cites: 0, days: 0, lastReinforced: formatLocalDate(), ...(tags !== undefined ? { tags } : {}) }
+}
+
+function synthesizeHeadingFromBody(body: string): string | undefined {
+  return body.match(/^##\s+(.+)$/m)?.[1]?.trim()
+}
+
+function isEnoent(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT'
 }
 
 const SNAPSHOT_PATHS = ['memory/'] as const
@@ -803,8 +954,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         `[dreaming] start days=${snapshots.undreamed.length} undreamed_fragments=${undreamedFragments} agent_dir=${ctx.payload.agentDir}`,
       )
 
-      const memoryFilePath = join(ctx.payload.agentDir, 'MEMORY.md')
-      const memoryTextBefore = await safeReadText(memoryFilePath)
+      const snapshotBefore = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
       const strengths = await loadTopicStrengths(ctx.payload.agentDir)
 
       try {
@@ -815,53 +965,62 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
         throw err
       }
 
-      const memoryTextAfter = await safeReadText(memoryFilePath)
-      let memoryRewrittenThisRun = memoryTextBefore !== memoryTextAfter
+      const snapshotAfter = await captureShardSnapshot(topicsDir(ctx.payload.agentDir))
+      let shardsRewrittenThisRun = !shardSnapshotsEqual(snapshotBefore, snapshotAfter)
+      let revertedCitationViolation = false
 
       // Citation-superset safety net: if the subagent's rewrite dropped any
-      // previously-cited fragment id, restore the pre-run bytes and turn
+      // previously-cited fragment id, restore the pre-run shard set and turn
       // fragment GC off so the next compactDailyStreams call does not
       // permanently delete the underlying fragment. Dreamed-ids still
       // advance on a successful revert: this run's UNDREAMED fragments are
       // orphaned (they survive in the daily JSONL but never make it into
-      // MEMORY.md), which is the conscious tradeoff for avoiding an
-      // infinite loop on the same undreamed input. If the revert WRITE
-      // itself fails — disk full, EACCES, etc. — MEMORY.md is in an
-      // unknown state: we cannot advance dreamed-ids (next run must
-      // re-attempt), cannot run compaction (citations are now ambiguous),
-      // and cannot commit (would snapshot a known-bad state). The user has
-      // to `git checkout MEMORY.md` and re-run.
-      if (memoryRewrittenThisRun) {
-        const verdict = checkCitationSuperset(memoryTextBefore, memoryTextAfter)
+      // shards), which is the conscious tradeoff for avoiding an infinite loop
+      // on the same undreamed input. If the revert itself fails — disk full,
+      // EACCES, etc. — memory/topics is in an unknown state: we cannot advance
+      // dreamed-ids (next run must re-attempt), cannot run compaction
+      // (citations are now ambiguous), and cannot commit (would snapshot a
+      // known-bad state). The user has to `git checkout -- memory/topics &&
+      // typeclaw restart` and re-run.
+      if (shardsRewrittenThisRun) {
+        const verdict = checkCitationSupersetAcrossShards(
+          snapshotToTextMap(snapshotBefore),
+          snapshotToTextMap(snapshotAfter),
+        )
         if (!verdict.ok) {
           try {
-            await writeFile(memoryFilePath, memoryTextBefore)
+            await restoreShardSnapshot(snapshotBefore, topicsDir(ctx.payload.agentDir))
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err)
             logger.error(
-              `[dreaming] citation-superset violation AND revert failed: ${message}. MEMORY.md is in an unknown state; not advancing dreamed-ids or running compaction. Recover with: git checkout -- MEMORY.md && typeclaw restart. missing=${summarizeMissingCitations(verdict.missing)} elapsed_ms=${Date.now() - start}`,
+              `[dreaming] citation-superset violation AND revert failed: ${message}. memory/topics is in an unknown state; not advancing dreamed-ids or running compaction. Recover with: git checkout -- memory/topics && typeclaw restart. missing=${summarizeMissingCitations(verdict.missing)} elapsed_ms=${Date.now() - start}`,
             )
             return
           }
-          memoryRewrittenThisRun = false
+          shardsRewrittenThisRun = false
+          revertedCitationViolation = true
           logger.warn(
-            `[dreaming] citation-superset violation: rewrite dropped ${verdict.missing.length} previously-cited id(s); reverted MEMORY.md. The undreamed fragments from THIS run are orphaned: they advance into the dreamed-id set (survive in the daily JSONL, will not be re-shown to a future dreaming run) — conscious anti-loop tradeoff. missing=${summarizeMissingCitations(verdict.missing)}`,
+            `[dreaming] citation-superset violation: rewrite dropped ${verdict.missing.length} previously-cited id(s); reverted memory/topics. The undreamed fragments from THIS run are orphaned: they advance into the dreamed-id set (survive in the daily JSONL, will not be re-shown to a future dreaming run) — conscious anti-loop tradeoff. missing=${summarizeMissingCitations(verdict.missing)}`,
           )
         }
       }
+
+      if (shardsRewrittenThisRun) await recomputeFrontmatterForAllShards(ctx.payload.agentDir, logger)
 
       const advanced = advanceDreamedIds(state, snapshots.undreamed)
       await saveDreamingState(ctx.payload.agentDir, advanced)
       logger.info(`[dreaming] dreamed-ids advanced days=${snapshots.undreamed.length}`)
 
+      if (revertedCitationViolation) return
+
       const citedIdsByDate = await loadCitedIds(ctx.payload.agentDir)
       const touchedDates = snapshots.undreamed.map((s) => s.date)
       const compaction = await compactDailyStreams(ctx.payload.agentDir, advanced, citedIdsByDate, touchedDates, {
-        applyFragmentGc: memoryRewrittenThisRun,
+        applyFragmentGc: shardsRewrittenThisRun,
       })
       if (compaction.filesCompacted > 0) {
         logger.info(
-          `[dreaming] compaction files=${compaction.filesCompacted} watermarks_dropped=${compaction.watermarksDropped} fragments_dropped=${compaction.fragmentsDropped} fragment_gc=${memoryRewrittenThisRun ? 'on' : 'off'}`,
+          `[dreaming] compaction files=${compaction.filesCompacted} watermarks_dropped=${compaction.watermarksDropped} fragments_dropped=${compaction.fragmentsDropped} fragment_gc=${shardsRewrittenThisRun ? 'on' : 'off'}`,
         )
       }
 
