@@ -223,6 +223,101 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
   })
 })
 
+describe('runInspect — live tail (when liveSource is provided)', () => {
+  test('replays JSONL then prints the live divider, then yields live events', async () => {
+    await seedSession('a_ses_livet.jsonl', [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
+    const sink = captureSink()
+
+    async function* fakeLive(): AsyncGenerator<import('./types').InspectEvent> {
+      yield { cat: 'tool', ts: Date.now(), phase: 'start', toolCallId: 'c1', name: 'read' }
+      yield {
+        cat: 'tool',
+        ts: Date.now(),
+        phase: 'end',
+        toolCallId: 'c1',
+        name: 'read',
+        result: 'ok',
+        isError: false,
+        durationMs: 10,
+      }
+    }
+
+    const result = await runInspect({
+      agentDir,
+      sessionIdOrPrefix: 'ses_livet',
+      color: false,
+      selectSession: neverPick,
+      liveSource: (o) => {
+        o.onSubscribed?.(true)
+        return fakeLive()
+      },
+      ...sink.push,
+    })
+    expect(result.ok).toBe(true)
+    const stripTime = (l: string) => l.replace(/\d{2}:\d{2}:\d{2}/, 'HH:MM:SS')
+    const tags = sink.out.slice(1, -1).map((l) => stripTime(l).split('  ')[1]?.trim())
+    expect(tags).toEqual(['meta', 'user', undefined, 'tool ▸', 'tool ◂'])
+    expect(sink.out.find((l) => l.includes('─── live ───'))).toBeDefined()
+    expect(sink.out.at(-1)!).toContain('end of transcript')
+  })
+
+  test('reports "session not in registry" divider when liveSource onSubscribed says sessionLive=false', async () => {
+    await seedSession('a_ses_dead.jsonl', [metaLine({ kind: 'tui' })], 1000)
+    const sink = captureSink()
+    async function* fakeLive(): AsyncGenerator<import('./types').InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'cron-fired' } }
+    }
+    const result = await runInspect({
+      agentDir,
+      sessionIdOrPrefix: 'ses_dead',
+      color: false,
+      selectSession: neverPick,
+      liveSource: (o) => {
+        o.onSubscribed?.(false)
+        return fakeLive()
+      },
+      ...sink.push,
+    })
+    expect(result.ok).toBe(true)
+    expect(sink.out.some((l) => l.includes('session not in registry'))).toBe(true)
+  })
+
+  test('live source error surfaces as a stderr warning, then end-of-transcript still prints', async () => {
+    await seedSession('a_ses_err.jsonl', [metaLine({ kind: 'tui' })], 1000)
+    const sink = captureSink()
+    async function* failingLive(): AsyncGenerator<import('./types').InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'x' } }
+      throw new Error('upstream blew up')
+    }
+    const result = await runInspect({
+      agentDir,
+      sessionIdOrPrefix: 'ses_err',
+      color: false,
+      selectSession: neverPick,
+      liveSource: () => failingLive(),
+      ...sink.push,
+    })
+    expect(result.ok).toBe(true)
+    expect(sink.err.some((l) => l.includes('upstream blew up'))).toBe(true)
+    expect(sink.out.at(-1)!).toContain('end of transcript')
+  })
+
+  test('without liveSource: same as before (replay-then-exit)', async () => {
+    await seedSession('a_ses_no_live.jsonl', [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
+    const sink = captureSink()
+    const result = await runInspect({
+      agentDir,
+      sessionIdOrPrefix: 'ses_no_live',
+      color: false,
+      selectSession: neverPick,
+      ...sink.push,
+    })
+    expect(result.ok).toBe(true)
+    expect(sink.out.find((l) => l.includes('─── live'))).toBeUndefined()
+    expect(sink.out.at(-1)!).toContain('end of transcript')
+  })
+})
+
 describe('runInspect — picker path', () => {
   test('empty sessions dir returns exit 1 with a remediation hint', async () => {
     const sink = captureSink()

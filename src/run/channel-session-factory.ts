@@ -1,6 +1,7 @@
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
 import { createSession as defaultCreateSession } from '@/agent'
+import type { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { LiveSubagentRegistry } from '@/agent/live-subagents'
 import type { CreateSessionForSubagent, SubagentRegistry } from '@/agent/subagents'
 import { capJsonlFileInPlace } from '@/bundled-plugins/tool-result-cap/cap-jsonl'
@@ -62,6 +63,7 @@ export type BuildChannelSessionFactoryDeps = {
   liveSubagentRegistry?: LiveSubagentRegistry
   subagentRegistry?: SubagentRegistry
   getCreateSessionForSubagent?: () => CreateSessionForSubagent
+  liveSessionRegistry?: LiveSessionRegistry
 }
 
 // Tight basename validation so a tampered or corrupt channels/sessions.json
@@ -129,10 +131,14 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
         : {}),
     })
 
+    const sessionId = sessionManager.getSessionId()
+    deps.liveSessionRegistry?.register({ sessionId, session })
+
     return {
       session,
-      sessionId: sessionManager.getSessionId(),
+      sessionId,
       dispose: async () => {
+        deps.liveSessionRegistry?.unregister(sessionId)
         session.dispose()
       },
       ...(snap.hasAnyPluginContent ? { hooks: snap.hooks } : {}),

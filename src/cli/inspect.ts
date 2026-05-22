@@ -1,7 +1,8 @@
 import { defineCommand } from 'citty'
 
+import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir } from '@/init'
-import { runInspect, type SessionSummary } from '@/inspect'
+import { runInspect, streamLive, type LiveSourceFactory, type SessionSummary } from '@/inspect'
 import { originLabel, shortSessionId } from '@/inspect/label'
 
 import { cancel, c, errorLine, isCancel } from './ui'
@@ -9,7 +10,7 @@ import { cancel, c, errorLine, isCancel } from './ui'
 export const inspectCommand = defineCommand({
   meta: {
     name: 'inspect',
-    description: 'replay a session transcript (host stage)',
+    description: 'replay a session transcript and tail live activity (host stage)',
   },
   args: {
     session: {
@@ -20,7 +21,7 @@ export const inspectCommand = defineCommand({
     filter: {
       type: 'string',
       description:
-        'category filter: comma-separated meta/user/assistant/tool/error/done; prefix with ! to exclude (e.g. tool,!assistant)',
+        'category filter: comma-separated meta/user/assistant/tool/error/done/broadcast/cron-fire; prefix with ! to exclude',
     },
     since: {
       type: 'string',
@@ -31,6 +32,12 @@ export const inspectCommand = defineCommand({
       description: 'emit one JSON event per line; requires an explicit session id',
       default: false,
     },
+    follow: {
+      type: 'boolean',
+      description:
+        'tail live activity after replay (default: true when the container is running); pass --no-follow to replay-then-exit',
+      default: true,
+    },
   },
   async run({ args }) {
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
@@ -38,15 +45,22 @@ export const inspectCommand = defineCommand({
     const sessionArg = typeof args.session === 'string' ? args.session : undefined
     const filterArg = typeof args.filter === 'string' ? args.filter : undefined
     const sinceArg = typeof args.since === 'string' ? args.since : undefined
+    const follow = args.follow !== false
+
+    const isJson = args.json === true
+    const liveSource = !follow || isJson ? undefined : await buildLiveSource(cwd)
+    const signal = installSigintAbort()
 
     const result = await runInspect({
       agentDir: cwd,
       ...(sessionArg !== undefined ? { sessionIdOrPrefix: sessionArg } : {}),
       ...(filterArg !== undefined ? { filter: filterArg } : {}),
       ...(sinceArg !== undefined ? { since: sinceArg } : {}),
-      json: args.json === true,
+      json: isJson,
       color,
       selectSession: clackSelect,
+      ...(liveSource !== undefined ? { liveSource } : {}),
+      signal,
       stdout: (line) => process.stdout.write(`${line}\n`),
       stderr: (line) => process.stderr.write(`${line}\n`),
     })
@@ -58,6 +72,37 @@ export const inspectCommand = defineCommand({
     process.exit(result.exitCode)
   },
 })
+
+async function buildLiveSource(cwd: string): Promise<LiveSourceFactory | undefined> {
+  const precheck = await requireContainerRunning({ cwd })
+  if (!precheck.ok) {
+    process.stderr.write(`${c.yellow('⚠')} ${precheck.reason}; tailing live events disabled\n`)
+    return undefined
+  }
+  const port = await resolveHostPort({ cwd })
+  const token = await resolveTuiToken({ cwd })
+  const baseUrl = new URL(`ws://127.0.0.1:${port}/inspect`)
+  if (token !== null) baseUrl.searchParams.set('token', token)
+  const url = baseUrl.toString()
+  return ({ sessionId, sinceMs, signal, onSubscribed }) =>
+    streamLive({
+      url,
+      sessionId,
+      ...(sinceMs !== undefined ? { sinceMs } : {}),
+      ...(signal !== undefined ? { signal } : {}),
+      ...(onSubscribed !== undefined ? { onSubscribed } : {}),
+    })
+}
+
+function installSigintAbort(): AbortSignal {
+  const ctrl = new AbortController()
+  const onSig = (): void => {
+    ctrl.abort()
+  }
+  process.once('SIGINT', onSig)
+  process.once('SIGTERM', onSig)
+  return ctrl.signal
+}
 
 function useColor(): boolean {
   if (process.env.NO_COLOR !== undefined && process.env.NO_COLOR !== '') return false

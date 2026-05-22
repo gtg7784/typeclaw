@@ -5,14 +5,15 @@ import { renderEvent } from './render'
 import { replayJsonl } from './replay'
 import type { SessionSummary } from './session-list'
 import { listSessions, resolveSession } from './session-list'
+import type { InspectEvent, InspectFilter } from './types'
 import { matchesFilter, parseDuration, parseFilter } from './types'
-import type { InspectFilter } from './types'
 
 export { listSessions, resolveSession } from './session-list'
 export type { SessionSummary } from './session-list'
 export { originLabel, shortSessionId } from './label'
 export { renderEvent } from './render'
 export { replayJsonl } from './replay'
+export { streamLive } from './live'
 export { parseDuration, parseFilter } from './types'
 export type { InspectCategory, InspectEvent, InspectFilter } from './types'
 
@@ -26,9 +27,18 @@ export type RunInspectOptions = {
   selectSession: SelectSession
   stdout: (line: string) => void
   stderr: (line: string) => void
+  liveSource?: LiveSourceFactory
+  signal?: AbortSignal
 }
 
 export type SelectSession = (sessions: SessionSummary[]) => Promise<SessionSummary | null>
+
+export type LiveSourceFactory = (opts: {
+  sessionId: string
+  sinceMs?: number
+  signal?: AbortSignal
+  onSubscribed?: (sessionLive: boolean) => void
+}) => AsyncIterable<InspectEvent>
 
 export type RunInspectResult = { ok: true; exitCode: 0 } | { ok: false; exitCode: number; reason: string }
 
@@ -57,6 +67,8 @@ export async function runInspect(opts: RunInspectOptions): Promise<RunInspectRes
     color: opts.color,
     stdout: opts.stdout,
     stderr: opts.stderr,
+    ...(opts.liveSource !== undefined ? { liveSource: opts.liveSource } : {}),
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
   })
   return { ok: true, exitCode: 0 }
 }
@@ -118,18 +130,59 @@ async function streamSession(opts: {
   color: boolean
   stdout: (line: string) => void
   stderr: (line: string) => void
+  liveSource?: LiveSourceFactory
+  signal?: AbortSignal
 }): Promise<void> {
   if (!opts.json) writeHeader(opts.summary, opts.color, opts.stdout)
-  for await (const event of replayJsonl(opts.summary.sessionFile, { onWarn: opts.stderr })) {
-    if (opts.sinceMs !== undefined && event.ts > 0 && event.ts < opts.sinceMs) continue
-    if (!matchesFilter(event, opts.filter)) continue
+  const emit = (event: InspectEvent): void => {
+    if (opts.sinceMs !== undefined && event.ts > 0 && event.ts < opts.sinceMs) return
+    if (!matchesFilter(event, opts.filter)) return
     if (opts.json) {
       opts.stdout(JSON.stringify({ sessionId: opts.summary.sessionId, ...event }))
     } else {
       opts.stdout(renderEvent(event, { color: opts.color }))
     }
   }
+
+  for await (const event of replayJsonl(opts.summary.sessionFile, { onWarn: opts.stderr })) {
+    emit(event)
+  }
+
+  if (opts.liveSource === undefined) {
+    if (!opts.json) opts.stdout('─── end of transcript ───')
+    return
+  }
+
+  let sessionLive = false
+  const liveIter = opts.liveSource({
+    sessionId: opts.summary.sessionId,
+    ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),
+    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+    onSubscribed: (live) => {
+      sessionLive = live
+    },
+  })
+
+  let liveAnnounced = false
+  try {
+    for await (const event of liveIter) {
+      if (!liveAnnounced && !opts.json) {
+        opts.stdout(
+          divider(opts.color, sessionLive ? '─── live ───' : '─── live (session not in registry; broadcasts only) ───'),
+        )
+        liveAnnounced = true
+      }
+      emit(event)
+    }
+  } catch (err) {
+    opts.stderr(`live tail ended: ${err instanceof Error ? err.message : String(err)}`)
+  }
   if (!opts.json) opts.stdout('─── end of transcript ───')
+}
+
+function divider(color: boolean, text: string): string {
+  if (color) return `\u001b[2m${text}\u001b[0m`
+  return text
 }
 
 function writeHeader(summary: SessionSummary, color: boolean, stdout: (line: string) => void): void {
