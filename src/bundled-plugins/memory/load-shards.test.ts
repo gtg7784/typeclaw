@@ -1,15 +1,20 @@
-import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtemp, mkdir, rm, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { loadAllShards, loadShard, listShardSlugs } from './load-shards'
+import { __resetShardCacheForTests, loadAllShards, loadShard, listShardSlugs } from './load-shards'
 import { topicShardPath, topicsDir } from './paths'
 
 const tmpRoots: string[] = []
 
+beforeEach(() => {
+  __resetShardCacheForTests()
+})
+
 afterEach(async () => {
   await Promise.all(tmpRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
+  __resetShardCacheForTests()
 })
 
 describe('loadAllShards', () => {
@@ -123,6 +128,132 @@ describe('listShardSlugs', () => {
 
     await expect(listShardSlugs(agentDir)).resolves.toEqual(['apple'])
     await expect(loadAllShards(agentDir)).resolves.toHaveLength(1)
+  })
+})
+
+describe('loadAllShards shard cache', () => {
+  test('serves cached shard when mtime + size are unchanged (proves the readFile fast path)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'alpha', 'Alpha', 'v1-body\n')
+    const path = topicShardPath(agentDir, 'alpha')
+
+    // Pin both atime and mtime to an integer-second value before priming the
+    // cache. utimes() on macOS HFS+/APFS truncates the fractional ms portion,
+    // so reading-back-and-restoring is NOT a round-trip — the first stat
+    // returns sub-ms precision but the post-utimes stat returns integer ms.
+    // Pinning to an integer-second value up front makes the round-trip
+    // mtime-stable and lets us actually exercise the cache-hit path.
+    const pinnedTime = new Date(1779000000000)
+    await utimes(path, pinnedTime, pinnedTime)
+
+    const first = await loadAllShards(agentDir)
+    expect(first[0]?.body).toBe('v1-body\n')
+
+    // Overwrite with same-length bytes, then re-pin mtime to the same value.
+    // The cache invalidation key (mtimeMs + size) is now unchanged. If the
+    // cache is honored, the next call returns stale v1 body even though
+    // disk holds v2. Content-vs-cache divergence stands in for "did we
+    // readFile again?" since the production payoff is per-prompt latency,
+    // not disk content.
+    await writeFile(path, shardText('Alpha', 'v2-body\n'), 'utf8')
+    await utimes(path, pinnedTime, pinnedTime)
+    const cached = await loadAllShards(agentDir)
+    expect(cached[0]?.body).toBe('v1-body\n')
+
+    __resetShardCacheForTests()
+    const fresh = await loadAllShards(agentDir)
+    expect(fresh[0]?.body).toBe('v2-body\n')
+  })
+
+  test('invalidates a cached shard when its mtime changes', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'alpha', 'Alpha', 'v1\n')
+
+    const first = await loadAllShards(agentDir)
+    expect(first[0]?.body).toBe('v1\n')
+
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    await writeShard(agentDir, 'alpha', 'Alpha', 'v2-longer\n')
+
+    const refreshed = await loadAllShards(agentDir)
+    expect(refreshed[0]?.body).toBe('v2-longer\n')
+  })
+
+  test('drops cache entries for shards that were deleted', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'alpha', 'Alpha', 'a\n')
+    await writeShard(agentDir, 'bravo', 'Bravo', 'b\n')
+
+    const first = await loadAllShards(agentDir)
+    expect(first.map((s) => s.slug)).toEqual(['alpha', 'bravo'])
+
+    await unlink(topicShardPath(agentDir, 'alpha'))
+    const afterDelete = await loadAllShards(agentDir)
+    expect(afterDelete.map((s) => s.slug)).toEqual(['bravo'])
+
+    // Recreating with same slug must surface fresh content (proves the
+    // cache entry was actually dropped, not just hidden by the directory
+    // listing).
+    await writeShard(agentDir, 'alpha', 'Alpha', 'recreated\n')
+    const afterRecreate = await loadAllShards(agentDir)
+    expect(afterRecreate.find((s) => s.slug === 'alpha')?.body).toBe('recreated\n')
+  })
+
+  test('caches malformed shards so the warn is not spammed across repeat calls', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'alpha', 'Alpha', 'a\n')
+    await mkdir(topicsDir(agentDir), { recursive: true })
+    await writeFile(topicShardPath(agentDir, 'broken'), 'not frontmatter\n', 'utf8')
+    const warnings: string[] = []
+    const logger = { warn: (m: string) => warnings.push(m) }
+
+    await loadAllShards(agentDir, { logger })
+    await loadAllShards(agentDir, { logger })
+    await loadAllShards(agentDir, { logger })
+
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('broken')
+  })
+
+  test('caches are isolated per agent directory', async () => {
+    const dirA = await makeAgentDir()
+    const dirB = await makeAgentDir()
+    await writeShard(dirA, 'shared-slug', 'Heading A', 'body-A\n')
+    await writeShard(dirB, 'shared-slug', 'Heading B', 'body-B\n')
+
+    const a1 = await loadAllShards(dirA)
+    const b1 = await loadAllShards(dirB)
+    expect(a1[0]?.body).toBe('body-A\n')
+    expect(b1[0]?.body).toBe('body-B\n')
+
+    await writeShard(dirA, 'shared-slug', 'Heading A', 'body-A-updated\n')
+    const a2 = await loadAllShards(dirA)
+    const b2 = await loadAllShards(dirB)
+    expect(a2[0]?.body).toBe('body-A-updated\n')
+    expect(b2[0]?.body).toBe('body-B\n')
+  })
+
+  test('loadShard bypasses the cache so callers that want a fresh read get one', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'alpha', 'Alpha', 'v1\n')
+    const path = topicShardPath(agentDir, 'alpha')
+    const pinnedTime = new Date(1779000000000)
+    await utimes(path, pinnedTime, pinnedTime)
+
+    await loadAllShards(agentDir)
+
+    // Mutate with same length + pinned mtime. loadAllShards would serve stale
+    // bytes here (as proved in the cache-hit test above). loadShard must NOT,
+    // because callers like the dreaming subagent's post-write verification
+    // rely on fresh reads bypassing the bulk cache.
+    await writeFile(path, shardText('Alpha', 'v2\n'), 'utf8')
+    await utimes(path, pinnedTime, pinnedTime)
+
+    const direct = await loadShard(agentDir, 'alpha')
+    expect(direct?.body).toBe('v2\n')
+
+    const bulk = await loadAllShards(agentDir)
+    expect(bulk[0]?.body).toBe('v1\n')
   })
 })
 
