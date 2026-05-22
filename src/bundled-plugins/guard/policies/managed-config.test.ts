@@ -361,6 +361,22 @@ describe('managedConfig guard — scope', () => {
     expect(result?.reason).toContain('not valid JSON')
   })
 
+  test('Oracle PR #305 finding #5: catches a write through a typeclaw.json that is itself a symlink into workspace', async () => {
+    const agentDir = await makeAgentDir()
+    await mkdir(path.join(agentDir, 'workspace'), { recursive: true })
+    const realConfigPath = path.join(agentDir, 'workspace', 'tc.json')
+    await writeFile(realConfigPath, JSON.stringify({ port: 9000 }, null, 2))
+    await symlink(realConfigPath, path.join(agentDir, 'typeclaw.json'))
+
+    const result = await checkManagedConfigGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: '{ malformed' },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('not valid JSON')
+  })
+
   test('does NOT trigger on a sibling-agent absolute typeclaw.json', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'typeclaw-managed-config-sibling-'))
     const agentDir = path.join(root, 'agentA')

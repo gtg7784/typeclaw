@@ -39,15 +39,31 @@ export async function checkManagedConfigGuard(options: {
   }
 }
 
+// Oracle PR #305 findings #5 and #6: identity-based managed-file
+// detection. The earlier shape compared `basename(realpath(target))` to
+// the managed-file list, which missed two attacks: (5) a symlink at
+// agent root `typeclaw.json -> workspace/tc.json` realpathed to a name
+// outside the managed list, and (6) on case-insensitive filesystems,
+// `TYPECLAW.JSON` addresses the same file as `typeclaw.json` but
+// basename string-equality missed the casing variant.
+//
+// New shape: for each managed-file name, compute the canonical agent-
+// root path and compare against the target. We accept if EITHER the
+// lexical paths match OR they realpath to the same file. Branch (a)
+// covers symlinks and case-aliased filesystems; branch (b) keeps the
+// canonical lexical name authoritative even before the file exists
+// (first-init writes).
 async function resolveManagedTarget(agentDir: string, targetPath: string): Promise<{ file: ManagedFile } | undefined> {
   const resolvedAgentDir = path.resolve(agentDir)
-  const realAgentDir = await resolveRealIntendedPath(resolvedAgentDir)
-  const realTargetPath = await resolveRealIntendedPath(targetPath)
-
-  if (path.dirname(realTargetPath) !== realAgentDir) return undefined
-
-  const basename = path.basename(realTargetPath)
-  return isManagedFile(basename) ? { file: basename } : undefined
+  const resolvedTarget = path.resolve(targetPath)
+  for (const file of MANAGED_FILES) {
+    const canonical = path.join(resolvedAgentDir, file)
+    if (canonical === resolvedTarget) return { file }
+    const realCanonical = await resolveRealIntendedPath(canonical)
+    const realTarget = await resolveRealIntendedPath(resolvedTarget)
+    if (realCanonical === realTarget) return { file }
+  }
+  return undefined
 }
 
 function isManagedFile(basename: string): basename is ManagedFile {
