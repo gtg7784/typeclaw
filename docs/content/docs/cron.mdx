@@ -8,33 +8,45 @@ Cron jobs live in `cron.json` at your agent folder root:
 
 ```json
 {
+  "$schema": "./node_modules/typeclaw/cron.schema.json",
   "jobs": [
     {
-      "name": "morning-status",
+      "id": "morning-status",
       "schedule": "0 9 * * *",
       "kind": "prompt",
-      "prompt": "Summarize yesterday's commits and post to #standup"
+      "prompt": "Summarize yesterday's commits and post to #standup",
+      "scheduledByRole": "owner"
     },
     {
-      "name": "backup-db",
+      "id": "backup-db",
       "schedule": "0 3 * * *",
       "kind": "exec",
-      "exec": "/agent/scripts/backup.sh"
+      "command": ["/agent/scripts/backup.sh"],
+      "scheduledByRole": "owner"
     }
   ]
 }
 ```
 
-`reload` after editing — no restart needed.
+`typeclaw reload` after editing — no restart needed.
 
 ## Two kinds
 
-- **`prompt`** — fires a prompt into a fresh session. Use this when you want LLM reasoning.
-- **`exec`** — runs a shell command inside the container. Use this for deterministic side-effects.
+- **`prompt`** — fires a prompt into a fresh session. Use this when you want LLM reasoning. Optionally carries a `subagent` field to spawn a specific named subagent instead of a top-level agent session.
+- **`exec`** — runs a shell command inside the container. `command` is an **array of strings** (argv-style, not a shell string).
+
+Each job needs:
+
+- `id` — unique identifier, `[a-zA-Z0-9_-]+`
+- `schedule` — standard 5-field cron expression (no seconds)
+- `kind` — `"prompt"` or `"exec"`
+- `scheduledByRole` — the role the firing session runs as (see [Permissions](/docs/permissions))
+
+`scheduledByRole` is **required**. If you forget it on a hand-edited entry, TypeClaw auto-stamps `"owner"` on first load and commits the rewrite — this prevents the container from crash-looping on legacy files.
 
 ## Per-job coalescing
 
-If a job is still running when its next tick fires, the next tick is **dropped** for that specific job (and logged), not queued. This means a slow daily job can't pile up overnight into 24 backlogged runs.
+If a job is still running when its next tick fires, the next tick is **dropped** for that specific job (and logged), not queued. A slow daily job can't pile up overnight into 24 backlogged runs.
 
 The scheduler itself is a pure clock — it just emits "this job's time has come" events. The consumer (the part that actually runs the prompt or exec) owns the per-jobId in-flight set and decides whether to start a new run or skip.
 
@@ -48,12 +60,13 @@ When the job fires, the resulting session resolves to the **stamped role**, not 
 
 ```sh
 typeclaw cron list
+typeclaw cron list --json
 ```
 
 Shows every cron registered in the running agent — both your `cron.json` and any plugins that contribute jobs at boot.
 
 ## Limits
 
-- Cron triggers `prompt` and `exec` only — there's no third kind, and adding one requires extending the consumer.
-- Scheduling expressions use [`cron-parser`](https://github.com/harrisiirak/cron-parser) syntax (standard 5-field cron, no seconds field).
+- Cron triggers `prompt` and `exec` only — adding a third kind requires extending the consumer.
+- Scheduling expressions use [`cron-parser`](https://github.com/harrisiirak/cron-parser) syntax (standard 5-field cron, no seconds).
 - The scheduler ticks every second; sub-minute precision is not supported.

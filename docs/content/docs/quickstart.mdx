@@ -22,7 +22,17 @@ mkdir my-agent && cd my-agent
 typeclaw init
 ```
 
-`init` writes `typeclaw.json`, `.env`, a `Dockerfile`, a `package.json` with `typeclaw` as a dependency, a managed `.gitignore`, and a few placeholder folders (`workspace/`, `sessions/`, `memory/`).
+`init` is an interactive wizard. It writes `typeclaw.json`, `.env`, a `Dockerfile`, a `package.json` with `typeclaw` as a dependency, a managed `.gitignore`, and a few placeholder folders (`workspace/`, `sessions/`, `memory/`). It can also wire your first LLM provider and first channel adapter during setup.
+
+## Pick a model
+
+```sh
+typeclaw provider add fireworks      # add an API key (or OAuth)
+typeclaw model set default fireworks/kimi-k2
+typeclaw model list --available      # all known provider/model refs
+```
+
+The `default` profile is required — every session that doesn't request a specific profile uses it. See [Configuration → `models`](/docs/configuration#models) for fallback chains and the `fast` / `deep` / `vision` profile conventions.
 
 ## Start the container
 
@@ -35,7 +45,8 @@ The first run builds the per-agent image; subsequent runs start in seconds. `sta
 ## Attach a TUI
 
 ```sh
-typeclaw tui
+typeclaw tui                          # interactive
+typeclaw tui "hello, who are you?"    # one-shot prompt
 ```
 
 You're talking to the agent. Send it a prompt, watch it think.
@@ -48,20 +59,43 @@ typeclaw channel add discord-bot
 typeclaw channel add github
 ```
 
-The agent picks up the new channel on the next reload — no restart needed.
+Channel config is hot-reloadable, so the agent picks it up on the next `typeclaw reload`. If the agent is running, the CLI may prompt you to apply immediately.
+
+KakaoTalk uses a separate re-auth flow (sub-device login + device_uuid; survives 7-day token expiry via host-side renewal):
+
+```sh
+typeclaw channel reauth kakaotalk
+```
+
+Rotating any other channel's credentials:
+
+```sh
+typeclaw channel set slack-bot
+```
+
+## Wire up a role
+
+Before the agent will respond in your Slack/Discord/etc. chats, it needs to know **who** can talk to it. Run the claim flow:
+
+```sh
+typeclaw role claim --as owner --channel slack-bot
+```
+
+The agent prints a one-time code. DM it to your bot from the account you want to pair, and your match rule is added to `roles.owner.match[]` automatically. See [Permissions](/docs/permissions) for the full role model.
 
 ## Add a cron
 
-Edit `cron.json` in your agent folder:
+Edit `cron.json` in your agent folder (see [Cron](/docs/cron) for the full schema):
 
 ```json
 {
   "jobs": [
     {
-      "name": "morning-status",
+      "id": "morning-status",
       "schedule": "0 9 * * *",
       "kind": "prompt",
-      "prompt": "Summarize yesterday's commits and post to #standup"
+      "prompt": "Summarize yesterday's commits and post to #standup",
+      "scheduledByRole": "owner"
     }
   ]
 }
@@ -79,14 +113,21 @@ The job is now live.
 
 ```sh
 typeclaw status          # container + daemon registration state
-typeclaw logs -f         # follow container stdout/stderr
+typeclaw logs            # container stdout/stderr (one-shot)
+typeclaw logs -f         # follow
 typeclaw cron list       # every cron registered in the running agent
+typeclaw role list       # roles declared on this agent
 typeclaw shell           # drop into a shell inside the container
+typeclaw usage           # token spend summary
+typeclaw doctor          # diagnose host, agent folder, and plugins
 ```
 
-## Stop
+See [CLI Reference](/docs/cli) for the full command surface.
+
+## Stop / restart
 
 ```sh
+typeclaw restart         # stop + start with the same flags
 typeclaw stop
 ```
 

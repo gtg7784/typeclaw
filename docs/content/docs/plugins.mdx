@@ -59,22 +59,32 @@ Then `typeclaw start` picks it up.
 
 The `factory(ctx)` callback receives a `PluginContext` with the live `permissions` service, the message stream, the agent's session store, the agent folder path, and a few other capabilities. Everything plugins talk to flows through this object — there are no module-global imports of agent state.
 
+Read the parsed config snapshot for your plugin via `ctx.config` (a frozen object matching your `configSchema`). Boot-only fields are snapshots; fields you declared as reloadable are re-parsed on `typeclaw reload`.
+
 ## Bundled plugins
 
-Three plugins ship with TypeClaw and load automatically:
+Nine plugins ship with TypeClaw and load automatically. You don't list them in `plugins[]`; they're always on.
 
-- **`memory`** — observes work, writes daily memory streams, distills them into `MEMORY.md` and muscle-memory skills on a cron schedule
-- **`security`** — gates `tool.before` events on a two-axis severity policy (audience-leak vs. silent-attack), with per-guard and tier-level bypass permissions
-- **`operator`** — exposes the `do-things` subagent that can write files and edit the workspace
+| Plugin            | What it does                                                                                                                     |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `security`        | Gates `tool.before` events on a two-axis severity policy (audience-leak vs. silent-attack); see [Permissions](/docs/permissions) |
+| `tool-result-cap` | Truncates oversized tool results so a single command can't blow the context window                                               |
+| `guard`           | Managed-file guards — blocks accidental overwrites of `typeclaw.json`, `cron.json`, and `MEMORY.md` outside the right subagent   |
+| `memory`          | Observes work, writes daily memory streams, distills them into `MEMORY.md` and muscle-memory skills on a cron schedule           |
+| `backup`          | Auto-commits `sessions/` and `memory/` on idle so growth is git-auditable                                                        |
+| `agent-browser`   | Headed Chrome under Xvfb for bot-resistant browsing; includes a dashboard proxy                                                  |
+| `explorer`        | Workspace exploration tools — file tree, glob, grep tuned for agent ergonomics                                                   |
+| `scout`           | Web-research subagent that scrapes and summarizes                                                                                |
+| `operator`        | Exposes the `operator` subagent — a focused worker that can write files and edit the workspace                                   |
 
-You don't list these in `plugins[]`; they're always on. Their config blocks (`memory.*`, etc.) live at the top level of `typeclaw.json` and are validated at boot.
+Their config blocks (e.g. `memory.*`, `agent-browser.*`) live at the top level of `typeclaw.json` and are validated at boot.
 
 ## Lifecycle
 
 Plugins are loaded once at container start. They can:
 
 - Mutate behavior at runtime via tool execution and stream subscriptions
-- Read live config via `ctx.config.getConfig()` (boot-only fields are snapshots; reloadable fields are live)
+- Read live config via `ctx.config` (boot-only fields are snapshots; reloadable fields are live)
 - Spawn subagents with provenance (the spawning role is stamped so security gates apply)
 
 Plugins **cannot** change which other plugins are loaded, or rewrite the Dockerfile, or escape the container. The trust boundary is the container, not the plugin.
