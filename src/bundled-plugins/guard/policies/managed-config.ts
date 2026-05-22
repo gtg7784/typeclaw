@@ -66,10 +66,6 @@ async function resolveManagedTarget(agentDir: string, targetPath: string): Promi
   return undefined
 }
 
-function isManagedFile(basename: string): basename is ManagedFile {
-  return MANAGED_FILES.has(basename as ManagedFile)
-}
-
 function validateManagedContent(file: ManagedFile, content: string): { ok: true } | { ok: false; reason: string } {
   if (file === 'typeclaw.json') {
     const result = parseConfigJson(content, { migrate: false })
