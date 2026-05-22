@@ -12,7 +12,7 @@ describe('dumpSystemPrompt', () => {
   const defaultLoaderKinds: Array<'tui' | 'cron' | 'channel'> = ['tui', 'cron', 'channel']
 
   test.each(defaultLoaderKinds)(
-    '%s origin (default-loader path) renders identity, runtime, origin, role, and memory',
+    '%s origin (default-loader path) renders identity, runtime, origin, role, memory, and now',
     (kind) => {
       const out = dumpSystemPrompt(kind)
 
@@ -22,15 +22,18 @@ describe('dumpSystemPrompt', () => {
       expect(out).toContain('## Session origin')
       expect(out).toContain('## Your role in this session')
       expect(out).toContain('# Memory')
+      expect(out).toContain('## Now')
+      expect(out).toContain('Session started at')
     },
   )
 
-  test('subagent origin (override path) renders only override + runtime + origin/role, NOT identity or memory', () => {
+  test('subagent origin (override path) renders only override + runtime + origin/role + now, NOT identity or memory', () => {
     const out = dumpSystemPrompt('subagent')
 
     expect(out).toContain('## Runtime')
     expect(out).toContain('## Session origin')
     expect(out).toContain('## Your role in this session')
+    expect(out).toContain('## Now')
     expect(out).not.toContain('# Identity')
     expect(out).not.toContain('# Memory')
     expect(out).not.toContain('You are a general-purpose AI agent running inside TypeClaw.')
@@ -130,7 +133,7 @@ describe('dumpSystemPrompt', () => {
     (kind) => {
       const result = dumpSystemPromptWithBreakdown(kind)
 
-      const minSections = kind === 'subagent' ? 3 : 6
+      const minSections = kind === 'subagent' ? 4 : 7
       expect(result.sections.length).toBeGreaterThanOrEqual(minSections)
       for (const s of result.sections) {
         expect(s.bytes).toBeGreaterThan(0)
@@ -160,6 +163,7 @@ describe('dumpSystemPrompt', () => {
       'Role context',
       'Git nudge',
       'Memory (MEMORY.md + streams)',
+      'Now (wall clock)',
     ])
   })
 
@@ -172,12 +176,13 @@ describe('dumpSystemPrompt', () => {
       'Session origin',
       'Role context',
       'Memory (MEMORY.md + streams)',
+      'Now (wall clock)',
     ])
   })
 
-  test('subagent breakdown reflects production override path: only override + runtime + origin/role', () => {
+  test('subagent breakdown reflects production override path: override + runtime + origin/role + now', () => {
     const names = dumpSystemPromptWithBreakdown('subagent').sections.map((s) => s.name)
-    expect(names).toEqual(['Subagent override prompt', 'Runtime block', 'Session origin + role'])
+    expect(names).toEqual(['Subagent override prompt', 'Runtime block', 'Session origin + role', 'Now (wall clock)'])
     expect(names).not.toContain('SLIM_SYSTEM_PROMPT (base)')
     expect(names).not.toContain('DEFAULT_SYSTEM_PROMPT (base)')
     expect(names).not.toContain('Identity (IDENTITY.md + SOUL.md)')
@@ -218,6 +223,7 @@ describe('dumpSystemPrompt', () => {
     expect(idx('## Session origin')).toBeLessThan(idx('## Your role in this session'))
     expect(idx('## Your role in this session')).toBeLessThan(idx('git reports 2 uncommitted files'))
     expect(idx('git reports 2 uncommitted files')).toBeLessThan(idx('## MEMORY.md'))
+    expect(idx('## MEMORY.md')).toBeLessThan(idx('## Now'))
   })
 
   test('slim-mode section order is least-volatile to most-volatile (cache-suffix contract)', () => {
@@ -228,5 +234,20 @@ describe('dumpSystemPrompt', () => {
     expect(idx('TypeClaw runtime version:')).toBeLessThan(idx('You are running an unattended cron job.'))
     expect(idx('You are running an unattended cron job.')).toBeLessThan(idx('## Your role in this session'))
     expect(idx('## Your role in this session')).toBeLessThan(idx('## MEMORY.md'))
+    expect(idx('## MEMORY.md')).toBeLessThan(idx('## Now'))
+  })
+
+  test('now block is the trailing section across every origin kind (cache-prefix invariant)', () => {
+    for (const kind of ['tui', 'cron', 'channel', 'subagent'] as const) {
+      const out = dumpSystemPrompt(kind)
+      const nowIdx = out.lastIndexOf('## Now')
+      expect(nowIdx).toBeGreaterThan(-1)
+      const after = out.slice(nowIdx)
+      expect(after.indexOf('# Memory')).toBe(-1)
+      expect(after.indexOf('## MEMORY.md')).toBe(-1)
+      expect(after.indexOf('## Session origin')).toBe(-1)
+      expect(after.indexOf('TypeClaw runtime version:')).toBe(-1)
+      expect(after.indexOf('## Your role in this session')).toBe(-1)
+    }
   })
 })

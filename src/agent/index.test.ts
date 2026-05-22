@@ -238,6 +238,54 @@ describe('createResourceLoader', () => {
     expect(nudgeIdx).toBeLessThan(memoryIdx)
   })
 
+  test('renders a `## Now` wall-clock block stamping a session-creation timestamp the model can read', async () => {
+    const { formatLocalDateTime } = await import('@/shared')
+    const now = new Date('2026-05-22T15:11:00+09:00')
+
+    const loader = await createResourceLoader({ agentDir, now })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('## Now')
+    expect(prompt).toContain(`Session started at \`${formatLocalDateTime(now)}\``)
+  })
+
+  test('now block names the IANA timezone the process is in (so the agent reports "Asia/Seoul" instead of just "+09:00")', async () => {
+    const now = new Date('2026-05-22T15:11:00+09:00')
+
+    const loader = await createResourceLoader({ agentDir, now })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    // The IANA zone name in the block must equal what the process Intl resolves
+    // to. We don't pin a specific zone string because CI and dev machines differ;
+    // we pin the contract: zone-in-prompt == Intl.DateTimeFormat zone.
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    expect(prompt).toContain(`(${zone})`)
+  })
+
+  test('now block is the VERY LAST section: comes after memory so the cache prefix stays stable across resurrections', async () => {
+    await writeFile(join(agentDir, 'MEMORY.md'), 'memory-content-marker')
+    const now = new Date('2026-05-22T15:11:00+09:00')
+
+    const loader = await createResourceLoader({ agentDir, now })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    const memoryIdx = prompt.indexOf('memory-content-marker')
+    const nowIdx = prompt.indexOf('## Now')
+    expect(memoryIdx).toBeGreaterThan(-1)
+    expect(nowIdx).toBeGreaterThan(-1)
+    expect(memoryIdx).toBeLessThan(nowIdx)
+    expect(prompt.indexOf('## Now', nowIdx + 1)).toBe(-1)
+  })
+
+  test('omits the now block when explicit now is undefined AND the loader default is bypassed (composeSystemPrompt level)', () => {
+    const prompt = composeSystemPrompt({
+      self: '# Identity\n\nfoo',
+      gitNudge: '',
+      memorySection: '',
+    })
+    expect(prompt).not.toContain('## Now')
+  })
+
   test('memory section is NOT visible to plugin session.prompt hooks (intentional: memory injection is core-owned and runs after all plugin hooks)', async () => {
     // The security plugin's applyPromptInjectionDefense scans `event.prompt`
     // for attack patterns during the session.prompt hook chain. After this PR
@@ -810,28 +858,35 @@ describe('composeSystemPrompt slim mode', () => {
 })
 
 describe('createOverrideResourceLoader', () => {
-  test('uses the override string verbatim as the system prompt', async () => {
-    // when
+  test('starts with the override string verbatim (now block is appended below)', async () => {
     const loader = await createOverrideResourceLoader('SUBAGENT PROMPT')
 
-    // then
-    expect(loader.getSystemPrompt()).toBe('SUBAGENT PROMPT')
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt.startsWith('SUBAGENT PROMPT')).toBe(true)
+  })
+
+  test('appends a `## Now` wall-clock block as the trailing cache-suffix tail', async () => {
+    const now = new Date('2026-05-22T15:11:00+09:00')
+    const loader = await createOverrideResourceLoader('SUBAGENT PROMPT', undefined, undefined, undefined, now)
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('## Now')
+    expect(prompt).toContain('Session started at')
+    // The block must be the trailing section so the cache prefix stays
+    // stable across session resurrections (only the ~600-byte tail invalidates).
+    expect(prompt.trimEnd().endsWith("the user's local time.")).toBe(true)
   })
 
   test('does not include the typeclaw default system prompt', async () => {
-    // when
     const loader = await createOverrideResourceLoader('SUBAGENT PROMPT')
 
-    // then
     const prompt = loader.getSystemPrompt() ?? ''
     expect(prompt).not.toContain(DEFAULT_SYSTEM_PROMPT)
   })
 
   test('does not append SYSTEM.md files discovered by pi defaults', async () => {
-    // when
     const loader = await createOverrideResourceLoader('SUBAGENT PROMPT')
 
-    // then
     expect(loader.getAppendSystemPrompt()).toEqual([])
   })
 })

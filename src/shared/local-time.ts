@@ -19,3 +19,20 @@ function formatTimezoneOffset(date: Date): string {
   const abs = Math.abs(offsetMinutes)
   return `${sign}${pad2(Math.floor(abs / 60))}:${pad2(abs % 60)}`
 }
+
+// IANA timezone name of the process (e.g. `Asia/Seoul`). Reads the resolved
+// zone from Intl, falling back to `UTC` if the runtime cannot resolve one —
+// this should never happen on Bun + tzdata-equipped containers, but the
+// fallback keeps the prompt renderable rather than throwing during session
+// creation. The returned name is what the agent shows the user when asked
+// "what time is it" — pairing the wall clock with a recognizable zone name
+// is what disambiguates "15:31 +09:00" from "15:31 KST" for a non-technical
+// reader.
+export function resolveLocalTimezoneName(): string {
+  try {
+    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
+    return zone && zone.length > 0 ? zone : 'UTC'
+  } catch {
+    return 'UTC'
+  }
+}

@@ -39,7 +39,7 @@ import { loadSelf } from './self'
 import { SESSION_META_CUSTOM_TYPE, sessionMetaPayload } from './session-meta'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
 import type { CreateSessionForSubagent, SubagentRegistry } from './subagents'
-import { DEFAULT_SYSTEM_PROMPT, renderRuntimeBlock, SLIM_SYSTEM_PROMPT } from './system-prompt'
+import { DEFAULT_SYSTEM_PROMPT, renderNowBlock, renderRuntimeBlock, SLIM_SYSTEM_PROMPT } from './system-prompt'
 import {
   createBudgetState,
   type ToolResultBudget,
@@ -627,10 +627,12 @@ export async function createOverrideResourceLoader(
   origin?: SessionOrigin,
   permissions?: PermissionService,
   runtimeVersion?: string,
+  now: Date = new Date(),
 ): Promise<DefaultResourceLoader> {
   const withRuntime =
     runtimeVersion !== undefined ? `${systemPrompt}\n\n${renderRuntimeBlock(runtimeVersion)}` : systemPrompt
-  const finalPrompt = withOrigin(withRuntime, origin, permissions)
+  const withOriginRendered = withOrigin(withRuntime, origin, permissions)
+  const finalPrompt = `${withOriginRendered}\n\n${renderNowBlock(now)}`
   const loader = new DefaultResourceLoader({
     systemPromptOverride: () => finalPrompt,
     appendSystemPromptOverride: () => [],
@@ -651,6 +653,11 @@ export type CreateResourceLoaderOptions = {
   // 'full' to force the heavy prompt even on an unattended origin (rarely
   // useful; mostly an escape hatch for ad-hoc debugging).
   mode?: SystemPromptMode
+  // Wall-clock anchor stamped into the trailing `## Now` block of the
+  // rendered system prompt. Production callers omit this so each session
+  // gets the current time at creation; tests pass a fixed Date to keep
+  // assertions deterministic. See `renderNowBlock` in system-prompt.ts.
+  now?: Date
 }
 
 // Origins where the operator-facing DEFAULT_SYSTEM_PROMPT, git-nudge, and the
@@ -708,6 +715,7 @@ export type SystemPromptComposition = {
   roleContext?: SessionRoleContext
   gitNudge: string
   memorySection: string
+  now?: Date
 }
 
 // Section-order contract for the system prompt. Kept as a pure string→string
@@ -723,10 +731,15 @@ export type SystemPromptComposition = {
 // 2. gitNudge — rare changes; agent folders force-commit sessions/ and
 //    memory/ after every turn, so the dirty-files list is empty most of
 //    the time.
-// 3. memorySection — most volatile: MEMORY.md grows on every dream cycle
-//    and memory/yyyy-MM-dd.md grows after every channel turn that triggers
-//    memory-logger. Pinning it to the end keeps everything above it
-//    cacheable across session resurrections.
+// 3. memorySection — volatile: MEMORY.md grows on every dream cycle and
+//    memory/yyyy-MM-dd.md grows after every channel turn that triggers
+//    memory-logger.
+// 4. now block — most volatile: changes per second. Pinned to the very
+//    end so every byte UP TO this block stays in the provider's cache
+//    prefix; only the trailing ~60 bytes invalidate on each new session.
+//    `now` is optional — when omitted (debug dumps without a fixed clock,
+//    legacy callers) the block is skipped entirely. See `renderNowBlock`
+//    in system-prompt.ts for why this block exists at all.
 export function composeSystemPrompt(parts: SystemPromptComposition): string {
   const base = parts.mode === 'slim' ? SLIM_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT
   let prompt = `${base}\n\n${parts.self}`
@@ -741,6 +754,9 @@ export function composeSystemPrompt(parts: SystemPromptComposition): string {
   }
   if (parts.memorySection !== '') {
     prompt = `${prompt}\n\n${parts.memorySection}`
+  }
+  if (parts.now !== undefined) {
+    prompt = `${prompt}\n\n${renderNowBlock(parts.now)}`
   }
   return prompt
 }
@@ -786,6 +802,7 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
     ...(roleContext !== undefined ? { roleContext } : {}),
     gitNudge,
     memorySection,
+    now: options.now ?? new Date(),
   })
 
   const additionalSkillPaths = [getBundledSkillsDir()]
