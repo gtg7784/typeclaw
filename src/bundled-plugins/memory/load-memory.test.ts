@@ -493,7 +493,7 @@ describe('loadMemory injection threshold (T13)', () => {
 
     const section = await loadMemory(agentDir)
 
-    expect(section).toContain('Memory is large. Call `memory_search` to fetch specific topics.')
+    expect(section).toContain('Memory is large. Call `memory_search` to fetch specific topics or recent stream events.')
   })
 
   test('index mode renders cites/days/lastReinforced metadata line per shard', async () => {

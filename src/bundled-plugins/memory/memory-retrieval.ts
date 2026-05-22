@@ -28,7 +28,7 @@ export type CreateMemoryRetrievalSubagentOptions = {
   logger?: MemoryRetrievalLogger
 }
 
-export const MEMORY_RETRIEVAL_SYSTEM_PROMPT = `You are the memory-retrieval subagent. Read the user's most recent prompt + list of topic shards in \`memory/topics/\`. Decide which topics are relevant. Read those via \`read\`/\`ls\`/\`memory_search\`. Synthesize a focused ≤8 KB summary of the relevant memory. Save by \`write\`ing it to the exact path provided in your payload as \`cacheFilePath\`. Be ruthlessly concise. Do NOT write anywhere else. Do NOT delete files.`
+export const MEMORY_RETRIEVAL_SYSTEM_PROMPT = `You are the memory-retrieval subagent. Read the user's most recent prompt and decide what's relevant from BOTH topic shards in \`memory/topics/\` (consolidated long-term memory) AND undreamed daily-stream events under \`memory/streams/\` (recent fragments not yet folded into shards). Use \`memory_search\` to query both surfaces; use \`read\`/\`ls\` to pull full shard bodies when needed. Synthesize a focused ≤8 KB summary of the relevant memory. Save by \`write\`ing it to the exact path provided in your payload as \`cacheFilePath\`. Be ruthlessly concise. Do NOT write anywhere else. Do NOT delete files.`
 
 const consoleLogger: MemoryRetrievalLogger = {
   info: (m) => console.warn(m),
@@ -69,9 +69,10 @@ function buildInitialPrompt(payload: MemoryRetrievalPayload): string {
     `Agent folder: ${payload.agentDir}`,
     `Recent user prompt: ${payload.recentPrompt}`,
     `Topic shard directory: memory/topics/`,
+    `Daily-stream directory: memory/streams/`,
     `Cache output path: ${payload.cacheFilePath}`,
     '',
-    'List memory/topics/, search/read only relevant shards, and write one concise retrieval summary to the cache output path exactly as provided. Keep the file ≤8 KB. If no topic is relevant, write a short empty-context note to the cache output path. Do not write any other path.',
+    'Use `memory_search` to find relevant material across BOTH topic shards and undreamed stream events (results are discriminated by `source: "topic" | "stream"`). Read any shard whose body you need in full via `read`. Write one concise retrieval summary to the cache output path exactly as provided. Keep the file ≤8 KB. If nothing is relevant, write a short empty-context note to the cache output path. Do not write any other path.',
   ].join('\n')
 }
 

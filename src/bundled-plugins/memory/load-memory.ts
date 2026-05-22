@@ -214,9 +214,9 @@ function renderSection(plan: InjectionPlan, streams: FileEntry[], options: LoadM
 
 function indexDirective(options: LoadMemoryOptions): string {
   if (options.origin?.kind === 'channel') {
-    return 'Memory shown as index only in channels. Call `memory_search` if you need specific topics.'
+    return 'Memory shown as index only in channels. Call `memory_search` if you need specific topics or recent stream events.'
   }
-  return 'Memory is large. Call `memory_search` to fetch specific topics.'
+  return 'Memory is large. Call `memory_search` to fetch specific topics or recent stream events.'
 }
 
 function renderShardMetadata(shard: TopicShard): string {
