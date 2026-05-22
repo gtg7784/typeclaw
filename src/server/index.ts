@@ -25,6 +25,9 @@ import type {
   ClientMessage,
   CronListEntryPayload,
   CronListSourcePayload,
+  InspectClientMessage,
+  InspectFramePayload,
+  InspectServerMessage,
   PromptDelivery,
   QueueStateItem,
   ReloadResultPayload,
@@ -127,10 +130,17 @@ type TuiWsData = { kind: 'tui'; sessionId: string }
 // TUI token can already do anything the TUI can).
 type CommandWsData = { kind: 'command' }
 type TunnelLogsWsData = { kind: 'tunnel-logs'; unsubscribe: Unsubscribe | null }
-type WsData = TuiWsData | CommandWsData | TunnelLogsWsData | BrokerWsData
+type InspectWsData = {
+  kind: 'inspect'
+  unsubAgent: (() => void) | null
+  unsubBroadcast: Unsubscribe | null
+  unsubCron: Unsubscribe | null
+}
+type WsData = TuiWsData | CommandWsData | TunnelLogsWsData | BrokerWsData | InspectWsData
 type Ws = ServerWebSocket<TuiWsData>
 type CommandWs = ServerWebSocket<CommandWsData>
 type TunnelLogsWs = ServerWebSocket<TunnelLogsWsData>
+type InspectWs = ServerWebSocket<InspectWsData>
 type AnyOwnerWs = Ws | CommandWs
 
 type QueuedPrompt = {
@@ -175,6 +185,15 @@ function send(ws: Ws, msg: ServerMessage): boolean {
 }
 
 function sendTunnelLog(ws: TunnelLogsWs, msg: TunnelLogsServerMessage): boolean {
+  try {
+    ws.send(JSON.stringify(msg))
+    return true
+  } catch {
+    return false
+  }
+}
+
+function sendInspect(ws: InspectWs, msg: InspectServerMessage): boolean {
   try {
     ws.send(JSON.stringify(msg))
     return true
@@ -327,6 +346,14 @@ export function createServer({
           if (server.upgrade(req, { data })) return
           return new Response('upgrade failed', { status: 400 })
         }
+        if (url.pathname === '/inspect') {
+          if (isWebSocketUpgrade(req) && tuiToken !== undefined && url.searchParams.get('token') !== tuiToken) {
+            return new Response('unauthorized', { status: 401 })
+          }
+          const data: InspectWsData = { kind: 'inspect', unsubAgent: null, unsubBroadcast: null, unsubCron: null }
+          if (server.upgrade(req, { data })) return
+          return new Response('upgrade failed', { status: 400 })
+        }
         // `/commands` is the dedicated host-CLI proxy path. It skips TUI
         // session creation (which costs an AgentSession spawn per command
         // invocation) but uses the same tuiToken because both surfaces
@@ -366,6 +393,7 @@ export function createServer({
             return
           }
           if (rawWs.data.kind === 'tunnel-logs') return
+          if (rawWs.data.kind === 'inspect') return
           const ws = rawWs as Ws
           try {
             const sessionManager = sessionFactory?.createPersisted()
@@ -482,6 +510,10 @@ export function createServer({
           }
           if (rawWs.data.kind === 'tunnel-logs') {
             handleTunnelLogsMessage(rawWs as TunnelLogsWs, raw, tunnelManager)
+            return
+          }
+          if (rawWs.data.kind === 'inspect') {
+            handleInspectMessage(rawWs as InspectWs, raw, liveSessionRegistry, stream)
             return
           }
           const ws = rawWs as Ws
@@ -665,6 +697,16 @@ export function createServer({
           if (rawWs.data.kind === 'tunnel-logs') {
             rawWs.data.unsubscribe?.()
             rawWs.data.unsubscribe = null
+            return
+          }
+          if (rawWs.data.kind === 'inspect') {
+            const d = rawWs.data
+            d.unsubAgent?.()
+            d.unsubBroadcast?.()
+            d.unsubCron?.()
+            d.unsubAgent = null
+            d.unsubBroadcast = null
+            d.unsubCron = null
             return
           }
           const ws = rawWs as Ws
@@ -1039,6 +1081,175 @@ function handleTunnelStatus(ws: Ws, requestId: string, name: string, tunnelManag
     return
   }
   send(ws, { type: 'tunnel_status_response', requestId, ok: true, tunnel })
+}
+
+function handleInspectMessage(
+  ws: InspectWs,
+  raw: string | Buffer,
+  liveSessionRegistry: LiveSessionRegistry | undefined,
+  stream: Stream | undefined,
+): void {
+  let msg: InspectClientMessage
+  try {
+    msg = JSON.parse(String(raw)) as InspectClientMessage
+  } catch {
+    sendInspect(ws, { type: 'error', message: 'invalid JSON' })
+    ws.close()
+    return
+  }
+  if (msg.type !== 'subscribe' || typeof msg.sessionId !== 'string' || msg.sessionId === '') {
+    sendInspect(ws, { type: 'error', message: 'invalid inspect subscription' })
+    ws.close()
+    return
+  }
+
+  ws.data.unsubAgent?.()
+  ws.data.unsubBroadcast?.()
+  ws.data.unsubCron?.()
+
+  if (stream !== undefined && typeof msg.sinceMs === 'number') {
+    for (const event of stream.scan({ sinceTs: msg.sinceMs, target: { kind: 'broadcast' } })) {
+      sendInspect(ws, {
+        type: 'frame',
+        ts: event.ts,
+        payload: { kind: 'broadcast', payload: event.payload, ...(event.meta !== undefined ? { meta: event.meta } : {}) },
+      })
+    }
+    for (const event of stream.scan({ sinceTs: msg.sinceMs, target: { kind: 'cron' } })) {
+      sendInspect(ws, {
+        type: 'frame',
+        ts: event.ts,
+        payload: { kind: 'cron-fire', jobId: extractJobId(event.target), payload: event.payload },
+      })
+    }
+  }
+
+  const live = liveSessionRegistry?.get(msg.sessionId)
+  if (live !== undefined) {
+    const sessionId = msg.sessionId
+    const startedAtByCallId = new Map<string, number>()
+    ws.data.unsubAgent = live.session.subscribe((event: unknown) => {
+      forwardAgentEventToInspect(ws, event, sessionId, startedAtByCallId)
+    })
+  }
+
+  if (stream !== undefined) {
+    ws.data.unsubBroadcast = stream.subscribe({ target: { kind: 'broadcast' } }, (event) => {
+      sendInspect(ws, {
+        type: 'frame',
+        ts: event.ts,
+        payload: { kind: 'broadcast', payload: event.payload, ...(event.meta !== undefined ? { meta: event.meta } : {}) },
+      })
+    })
+    ws.data.unsubCron = stream.subscribe({ target: { kind: 'cron' } }, (event) => {
+      sendInspect(ws, {
+        type: 'frame',
+        ts: event.ts,
+        payload: { kind: 'cron-fire', jobId: extractJobId(event.target), payload: event.payload },
+      })
+    })
+  }
+
+  sendInspect(ws, { type: 'subscribed', sessionId: msg.sessionId, sessionLive: live !== undefined })
+}
+
+function extractJobId(target: StreamMessage['target']): string {
+  return target.kind === 'cron' ? target.jobId : ''
+}
+
+function forwardAgentEventToInspect(
+  ws: InspectWs,
+  event: unknown,
+  sessionId: string,
+  startedAtByCallId: Map<string, number>,
+): void {
+  if (typeof event !== 'object' || event === null) return
+  const e = event as { type?: unknown }
+  const now = Date.now()
+  if (e.type === 'message_update') {
+    const ev = event as { assistantMessageEvent?: { type?: unknown; delta?: unknown } }
+    const ame = ev.assistantMessageEvent
+    if (ame?.type === 'text_delta' && typeof ame.delta === 'string') {
+      sendInspect(ws, { type: 'frame', ts: now, payload: { kind: 'text_delta', sessionId, delta: ame.delta } })
+    }
+    return
+  }
+  if (e.type === 'tool_execution_start') {
+    const ev = event as { toolCallId?: unknown; toolName?: unknown; args?: unknown }
+    if (typeof ev.toolCallId !== 'string' || typeof ev.toolName !== 'string') return
+    startedAtByCallId.set(ev.toolCallId, now)
+    sendInspect(ws, {
+      type: 'frame',
+      ts: now,
+      payload: { kind: 'tool_start', sessionId, toolCallId: ev.toolCallId, name: ev.toolName, args: ev.args },
+    })
+    return
+  }
+  if (e.type === 'tool_execution_end') {
+    const ev = event as { toolCallId?: unknown; toolName?: unknown; result?: unknown; isError?: unknown }
+    if (typeof ev.toolCallId !== 'string' || typeof ev.toolName !== 'string') return
+    const startedAt = startedAtByCallId.get(ev.toolCallId)
+    startedAtByCallId.delete(ev.toolCallId)
+    const durationMs = startedAt === undefined ? 0 : now - startedAt
+    sendInspect(ws, {
+      type: 'frame',
+      ts: now,
+      payload: {
+        kind: 'tool_end',
+        sessionId,
+        toolCallId: ev.toolCallId,
+        name: ev.toolName,
+        result: ev.result,
+        isError: ev.isError === true,
+        durationMs,
+      },
+    })
+    return
+  }
+  if (e.type === 'message_end') {
+    const ev = event as { message?: unknown }
+    const payload = buildMessageEndPayload(sessionId, ev.message)
+    if (payload !== null) sendInspect(ws, { type: 'frame', ts: now, payload })
+    return
+  }
+}
+
+function buildMessageEndPayload(sessionId: string, message: unknown): InspectFramePayload | null {
+  if (typeof message !== 'object' || message === null) return null
+  const m = message as Record<string, unknown>
+  if (typeof m.role !== 'string') return null
+  const usage = readMessageUsage(m.usage)
+  const payload: InspectFramePayload = {
+    kind: 'message_end',
+    sessionId,
+    role: m.role,
+    content: m.content,
+    ...(typeof m.provider === 'string' ? { provider: m.provider } : {}),
+    ...(typeof m.model === 'string' ? { model: m.model } : {}),
+    ...(typeof m.stopReason === 'string' ? { stopReason: m.stopReason } : {}),
+    ...(typeof m.errorMessage === 'string' ? { errorMessage: m.errorMessage } : {}),
+    ...(usage !== null ? { usage } : {}),
+  }
+  return payload
+}
+
+function readMessageUsage(
+  value: unknown,
+):
+  | { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: number }
+  | null {
+  if (typeof value !== 'object' || value === null) return null
+  const u = value as Record<string, unknown>
+  const cost = u.cost as Record<string, unknown> | undefined
+  const numberOr = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0)
+  return {
+    input: numberOr(u.input),
+    output: numberOr(u.output),
+    cacheRead: numberOr(u.cacheRead),
+    cacheWrite: numberOr(u.cacheWrite),
+    totalTokens: numberOr(u.totalTokens),
+    cost: numberOr(cost?.total),
+  }
 }
 
 function handleTunnelLogsMessage(
