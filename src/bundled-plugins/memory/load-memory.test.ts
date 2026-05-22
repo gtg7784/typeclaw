@@ -4,7 +4,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { DREAMING_STATE_FILE } from './dreaming-state'
+import { renderShard } from './frontmatter'
 import { loadMemory } from './load-memory'
+import { topicShardPath, topicsDir } from './paths'
 import type { StreamEvent } from './stream-events'
 
 const TS = '2026-05-16T12:00:00.000Z'
@@ -33,6 +35,14 @@ async function writeDreamingState(
   await writeFile(join(dir, DREAMING_STATE_FILE), JSON.stringify({ version: 2, dreamedThrough }))
 }
 
+async function writeTopic(dir: string, slug: string, heading: string, body: string): Promise<void> {
+  await mkdir(topicsDir(dir), { recursive: true })
+  await writeFile(
+    topicShardPath(dir, slug),
+    renderShard({ heading, cites: 1, days: 1, lastReinforced: '2026-05-16' }, body),
+  )
+}
+
 let agentDir: string
 
 beforeEach(async () => {
@@ -49,11 +59,57 @@ describe('loadMemory', () => {
     expect(section).toContain('# Memory')
   })
 
-  test('injects MEMORY.md content under a ## MEMORY.md header', async () => {
-    await writeFile(join(agentDir, 'MEMORY.md'), 'Neo prefers terse replies.\n')
+  test('renders ordered topic shards under heading-derived section headers', async () => {
+    await writeTopic(agentDir, 'zebra', 'Zebra Topic', 'zebra body')
+    await writeTopic(agentDir, 'apple', 'Apple Topic', 'apple body')
+    await writeTopic(agentDir, 'mango', 'Mango Topic', 'mango body')
+
     const section = await loadMemory(agentDir)
-    expect(section).toContain('## MEMORY.md')
+
+    const apple = section.indexOf('## Apple Topic')
+    const mango = section.indexOf('## Mango Topic')
+    const zebra = section.indexOf('## Zebra Topic')
+    expect(apple).toBeGreaterThan(-1)
+    expect(apple).toBeLessThan(mango)
+    expect(mango).toBeLessThan(zebra)
+    expect(section).toContain('apple body')
+    expect(section).toContain('mango body')
+    expect(section).toContain('zebra body')
+  })
+
+  test('renders a placeholder when topics exist but no shards have been written', async () => {
+    await mkdir(topicsDir(agentDir), { recursive: true })
+
+    const section = await loadMemory(agentDir)
+
+    expect(section).toContain('[NO TOPICS YET]')
+    expect(section).not.toContain('[MISSING]')
+  })
+
+  test('renders a placeholder when the topics directory is absent and no pre-migration memory exists', async () => {
+    const section = await loadMemory(agentDir)
+
+    expect(section).toContain('[NO TOPICS YET]')
+  })
+
+  test('falls back to pre-migration MEMORY.md content when topics have not been created yet', async () => {
+    await writeFile(join(agentDir, 'MEMORY.md'), 'Neo prefers terse replies.\n')
+
+    const section = await loadMemory(agentDir)
+
+    expect(section).toContain('## [PRE-MIGRATION CONTENT]')
     expect(section).toContain('Neo prefers terse replies.')
+  })
+
+  test('does not use pre-migration MEMORY.md when the canonical topics directory exists', async () => {
+    await writeFile(join(agentDir, 'MEMORY.md'), 'legacy memory should not render\n')
+    await writeTopic(agentDir, 'canonical', 'Canonical Topic', 'canonical body')
+
+    const section = await loadMemory(agentDir)
+
+    expect(section).toContain('## Canonical Topic')
+    expect(section).toContain('canonical body')
+    expect(section).not.toContain('legacy memory should not render')
   })
 
   test('frames memory as passive context for every session', async () => {
@@ -63,7 +119,7 @@ describe('loadMemory', () => {
   })
 
   test('adds a channel-specific privilege boundary without dropping memory content', async () => {
-    await writeFile(join(agentDir, 'MEMORY.md'), 'PengPeng repeatedly misspelled 뚜욜.\n')
+    await writeTopic(agentDir, 'pengpeng', 'PengPeng notes', 'PengPeng repeatedly misspelled 뚜욜.\n')
 
     const section = await loadMemory(agentDir, {
       origin: {
@@ -88,7 +144,8 @@ describe('loadMemory', () => {
   })
 
   test('injects every memory/yyyy-MM-dd.jsonl stream file under its own header', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(topicsDir(agentDir), { recursive: true })
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-26.jsonl'),
       jsonl([fragment('e1', 'ses_a', 'monday', 'fragment from monday')]),
@@ -107,7 +164,8 @@ describe('loadMemory', () => {
   })
 
   test('orders stream files oldest-first so the newest day is closest to the user prompt', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(topicsDir(agentDir), { recursive: true })
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(join(agentDir, 'memory', '2026-04-25.jsonl'), jsonl([fragment('e1', 'ses_a', 'oldest', 'oldest')]))
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), jsonl([fragment('e2', 'ses_a', 'newest', 'newest')]))
     await writeFile(join(agentDir, 'memory', '2026-04-26.jsonl'), jsonl([fragment('e3', 'ses_a', 'middle', 'middle')]))
@@ -122,22 +180,17 @@ describe('loadMemory', () => {
     expect(middle).toBeLessThan(newest)
   })
 
-  test('places MEMORY.md before stream files so long-term context comes first', async () => {
-    await writeFile(join(agentDir, 'MEMORY.md'), 'long-term')
-    await mkdir(join(agentDir, 'memory'))
+  test('places topic shards before stream files so long-term context comes first', async () => {
+    await writeTopic(agentDir, 'long-term', 'Long-term', 'long-term')
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), jsonl([fragment('e1', 'ses_a', 'stream', 'stream')]))
 
     const section = await loadMemory(agentDir)
 
-    expect(section.indexOf('## MEMORY.md')).toBeLessThan(section.indexOf('## memory/2026-04-27.jsonl'))
+    expect(section.indexOf('## Long-term')).toBeLessThan(section.indexOf('## memory/2026-04-27.jsonl'))
   })
 
-  test('signals [MISSING] when MEMORY.md is absent', async () => {
-    const section = await loadMemory(agentDir)
-    expect(section).toContain(`[MISSING] Expected at: ${join(agentDir, 'MEMORY.md')}`)
-  })
-
-  test('signals [EMPTY] when MEMORY.md exists but has no content', async () => {
+  test('signals [EMPTY] when pre-migration MEMORY.md exists but has no content', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), '   \n\n   ')
     const section = await loadMemory(agentDir)
     expect(section).toContain('[EMPTY]')
@@ -149,13 +202,13 @@ describe('loadMemory', () => {
   })
 
   test('omits the stream subsection when memory/ is empty', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     const section = await loadMemory(agentDir)
     expect(section).not.toContain('## memory/')
   })
 
   test('ignores files in memory/ that do not match yyyy-MM-dd.jsonl', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), jsonl([fragment('e1', 'ses_a', 'valid', 'valid')]))
     await writeFile(join(agentDir, 'memory', 'README.md'), 'should be ignored')
     await writeFile(join(agentDir, 'memory', 'notes.txt'), 'should be ignored')
@@ -168,7 +221,8 @@ describe('loadMemory', () => {
   })
 
   test('truncates a stream file larger than the per-file cap', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(topicsDir(agentDir), { recursive: true })
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     const huge = 'x'.repeat(20 * 1024)
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), jsonl([fragment('e1', 'ses_a', 'huge', huge)]))
 
@@ -177,11 +231,23 @@ describe('loadMemory', () => {
     expect(section).toContain('[truncated]')
     expect(section.length).toBeLessThan(huge.length)
   })
+
+  test('truncates each oversized topic shard independently without dropping other shards', async () => {
+    const huge = 'x'.repeat(20 * 1024)
+    await writeTopic(agentDir, 'huge', 'Huge Topic', huge)
+    await writeTopic(agentDir, 'small', 'Small Topic', 'small body survives')
+
+    const section = await loadMemory(agentDir)
+
+    expect(section).toContain(`${'x'.repeat(12 * 1024)}\n\n[...truncated]`)
+    expect(section).toContain('small body survives')
+    expect(section.length).toBeLessThan(huge.length)
+  })
 })
 
 describe('loadMemory undreamed-tail filtering', () => {
   test('omits a stream entirely when every event id is in the dreamed-id set (fully dreamed)', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([fragment('e1', 'ses_a', 'consolidated', 'consolidated')]),
@@ -194,7 +260,7 @@ describe('loadMemory undreamed-tail filtering', () => {
   })
 
   test('injects only the events whose ids are NOT in the dreamed-id set', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([
@@ -215,7 +281,7 @@ describe('loadMemory undreamed-tail filtering', () => {
   })
 
   test('falls back to injecting all streams when .dreaming-state.json is malformed', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([fragment('e1', 'ses_a', 'fragment', 'fragment')]),
@@ -229,7 +295,7 @@ describe('loadMemory undreamed-tail filtering', () => {
   })
 
   test('treats a hand-edited stream whose only fragment was already dreamed as fully dreamed', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([fragment('e1', 'ses_a', 'just one line', 'just one line')]),
@@ -244,7 +310,7 @@ describe('loadMemory undreamed-tail filtering', () => {
 
 describe('loadMemory self-session fragment filtering', () => {
   test('drops fragments authored by the current session', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([
@@ -260,7 +326,7 @@ describe('loadMemory self-session fragment filtering', () => {
   })
 
   test('keeps fragments from other sessions on the same day intact', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([fragment('e1', 'ses_a', 'session A note', 'body A'), fragment('e2', 'ses_b', 'session B note', 'body B')]),
@@ -273,7 +339,7 @@ describe('loadMemory self-session fragment filtering', () => {
   })
 
   test('omits a stream subsection entirely when every fragment came from the current session', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([fragment('e1', 'ses_self', 'one', 'body'), fragment('e2', 'ses_self', 'two', 'body')]),
@@ -285,7 +351,7 @@ describe('loadMemory self-session fragment filtering', () => {
   })
 
   test('keeps all fragments when currentSessionId is not provided', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), jsonl([fragment('e1', 'ses_a', 'one', 'body')]))
 
     const section = await loadMemory(agentDir)
@@ -294,7 +360,7 @@ describe('loadMemory self-session fragment filtering', () => {
   })
 
   test('preserves a fragment from another session even when sandwiched between self-fragments', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([
@@ -312,7 +378,7 @@ describe('loadMemory self-session fragment filtering', () => {
   })
 
   test('preserves preamble content before the first fragment marker', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([
@@ -329,7 +395,7 @@ describe('loadMemory self-session fragment filtering', () => {
   })
 
   test('a watermark line between self-fragment and other-fragment does not drop the other-fragment', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([
@@ -348,7 +414,7 @@ describe('loadMemory self-session fragment filtering', () => {
 
 describe('loadMemory watermark stripping', () => {
   test('strips bare watermark comments from injected stream content', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([watermark('w1', 'ses_a'), fragment('e2', 'ses_a', 'A real fragment', 'body'), watermark('w3', 'ses_a')]),
@@ -362,7 +428,7 @@ describe('loadMemory watermark stripping', () => {
   })
 
   test('omits a stream subsection when only watermarks remain after stripping', async () => {
-    await mkdir(join(agentDir, 'memory'))
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
     await writeFile(
       join(agentDir, 'memory', '2026-04-27.jsonl'),
       jsonl([watermark('w1', 'ses_a'), watermark('w2', 'ses_a')]),

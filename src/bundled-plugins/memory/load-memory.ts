@@ -1,9 +1,11 @@
-import { readdir, readFile } from 'node:fs/promises'
+import { readdir, readFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import type { SessionOrigin } from '@/agent/session-origin'
 
 import { getDreamedIds, loadDreamingState } from './dreaming-state'
+import { loadAllShards, type TopicShard } from './load-shards'
+import { topicsDir } from './paths'
 import type { StreamEvent } from './stream-events'
 import { readEvents } from './stream-io'
 
@@ -42,6 +44,12 @@ type FileEntry = {
   fullyDreamed?: boolean
 }
 
+type TopicEntry = {
+  name: string
+  path: string
+  content: string | null
+}
+
 type StreamEntry = {
   name: string
   path: string
@@ -50,9 +58,25 @@ type StreamEntry = {
 }
 
 export async function loadMemory(agentDir: string, options: LoadMemoryOptions = {}): Promise<string> {
-  const longTerm = await readEntry(agentDir, 'MEMORY.md')
+  const rootMemory = await readEntry(agentDir, 'MEMORY.md')
+  const hasTopicsDir = await pathExists(topicsDir(agentDir))
+  if (rootMemory.content !== null && !hasTopicsDir) {
+    const streams = await readStreamEntries(agentDir, options.currentSessionId)
+    return renderSection([rootFallbackEntry(rootMemory)], streams, options)
+  }
+
+  const shards = await loadAllShards(agentDir)
   const streams = await readStreamEntries(agentDir, options.currentSessionId)
-  return renderSection(longTerm, streams, options)
+  return renderSection(shards.map(topicEntryFromShard), streams, options)
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function readEntry(agentDir: string, name: string): Promise<FileEntry> {
@@ -150,11 +174,27 @@ function renderEventsAsMarkdown(events: StreamEvent[]): string {
   return parts.join('\n')
 }
 
-function renderSection(longTerm: FileEntry, streams: FileEntry[], options: LoadMemoryOptions): string {
+function rootFallbackEntry(rootMemory: FileEntry): TopicEntry {
+  return { name: '[PRE-MIGRATION CONTENT]', path: rootMemory.path, content: rootMemory.content }
+}
+
+function topicEntryFromShard(shard: TopicShard): TopicEntry {
+  const content =
+    shard.body.length > MAX_FILE_BYTES ? `${shard.body.slice(0, MAX_FILE_BYTES)}\n\n[...truncated]` : shard.body
+  return { name: shard.frontmatter.heading, path: shard.path, content }
+}
+
+function renderSection(topics: TopicEntry[], streams: FileEntry[], options: LoadMemoryOptions): string {
   const lines = ['# Memory', '', MEMORY_FRAMING, '']
   if (options.origin?.kind === 'channel') lines.push(...CHANNEL_MEMORY_BOUNDARY, '')
-  lines.push(`## ${longTerm.name}`, '')
-  lines.push(renderBody(longTerm), '')
+  if (topics.length === 0) {
+    lines.push('[NO TOPICS YET]', '')
+  } else {
+    for (const topic of topics) {
+      lines.push(`## ${topic.name}`, '')
+      lines.push(renderBody(topic), '')
+    }
+  }
   for (const entry of streams) {
     lines.push(`## ${entry.name}`, '', renderBody(entry), '')
   }
