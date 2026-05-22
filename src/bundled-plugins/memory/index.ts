@@ -9,6 +9,7 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { definePlugin } from '@/plugin'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
+import { DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGET_BYTES } from './injection-plan'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
 import { runMigration, runShardingMigration } from './migration'
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
@@ -76,6 +77,7 @@ const memoryConfigSchema = z
         message: `memory.bufferBytes must be 0 (disabled) or >= ${MIN_BUFFER_BYTES}`,
       })
       .default(DEFAULT_BUFFER_BYTES),
+    injectionBudgetBytes: z.number().int().min(MIN_INJECTION_BUDGET_BYTES).default(DEFAULT_INJECTION_BUDGET_BYTES),
     // Test seam: per-spawn ceiling for memory-logger. Operators have no
     // reason to tune this; it exists so the wedge-recovery test can fire
     // the timeout in milliseconds instead of the production 50s. Kept
@@ -83,7 +85,12 @@ const memoryConfigSchema = z
     spawnTimeoutMs: z.number().int().min(1).default(SPAWN_TIMEOUT_MS),
     dreaming: dreamingConfigSchema.optional(),
   })
-  .default({ idleMs: DEFAULT_IDLE_MS, bufferBytes: DEFAULT_BUFFER_BYTES, spawnTimeoutMs: SPAWN_TIMEOUT_MS })
+  .default({
+    idleMs: DEFAULT_IDLE_MS,
+    bufferBytes: DEFAULT_BUFFER_BYTES,
+    injectionBudgetBytes: DEFAULT_INJECTION_BUDGET_BYTES,
+    spawnTimeoutMs: SPAWN_TIMEOUT_MS,
+  })
 
 export default definePlugin({
   configSchema: memoryConfigSchema,

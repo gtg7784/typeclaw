@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import type { SessionOrigin } from '@/agent/session-origin'
 
 import { getDreamedIds, loadDreamingState } from './dreaming-state'
+import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, type InjectionPlan } from './injection-plan'
 import { loadAllShards, type TopicShard } from './load-shards'
 import { topicsDir } from './paths'
 import type { StreamEvent } from './stream-events'
@@ -28,6 +29,7 @@ const CHANNEL_MEMORY_BOUNDARY = [
 
 export type LoadMemoryOptions = {
   origin?: SessionOrigin
+  injectionBudgetBytes?: number
   // Fragments tagged `source=<currentSessionId>` are dropped on injection: the
   // current session already has its raw transcript in conversation history, so
   // re-injecting the memory-logger summary is duplication AND cache-busts every
@@ -62,12 +64,14 @@ export async function loadMemory(agentDir: string, options: LoadMemoryOptions = 
   const hasTopicsDir = await pathExists(topicsDir(agentDir))
   if (rootMemory.content !== null && !hasTopicsDir) {
     const streams = await readStreamEntries(agentDir, options.currentSessionId)
-    return renderSection([rootFallbackEntry(rootMemory)], streams, options)
+    return renderSection({ mode: 'direct', shards: [rootFallbackEntry(rootMemory)] }, streams, options)
   }
 
   const shards = await loadAllShards(agentDir)
+  const plan = buildInjectionPlan(shards, { budgetBytes: options.injectionBudgetBytes })
+  const effectivePlan = forceIndexForChannel(plan, options)
   const streams = await readStreamEntries(agentDir, options.currentSessionId)
-  return renderSection(shards.map(topicEntryFromShard), streams, options)
+  return renderSection(effectivePlan, streams, options)
 }
 
 async function pathExists(path: string): Promise<boolean> {
@@ -174,8 +178,13 @@ function renderEventsAsMarkdown(events: StreamEvent[]): string {
   return parts.join('\n')
 }
 
-function rootFallbackEntry(rootMemory: FileEntry): TopicEntry {
-  return { name: '[PRE-MIGRATION CONTENT]', path: rootMemory.path, content: rootMemory.content }
+function rootFallbackEntry(rootMemory: FileEntry): TopicShard {
+  return {
+    path: rootMemory.path,
+    slug: 'pre-migration-content',
+    frontmatter: { heading: '[PRE-MIGRATION CONTENT]', cites: 0, days: 0, lastReinforced: 'unknown' },
+    body: rootMemory.content ?? '',
+  }
 }
 
 function topicEntryFromShard(shard: TopicShard): TopicEntry {
@@ -184,13 +193,30 @@ function topicEntryFromShard(shard: TopicShard): TopicEntry {
   return { name: shard.frontmatter.heading, path: shard.path, content }
 }
 
-function renderSection(topics: TopicEntry[], streams: FileEntry[], options: LoadMemoryOptions): string {
+function forceIndexForChannel(plan: InjectionPlan, options: LoadMemoryOptions): InjectionPlan {
+  if (options.origin?.kind !== 'channel') return plan
+  if (plan.mode === 'index') return plan
+  return {
+    mode: 'index',
+    shards: plan.shards,
+    budget: options.injectionBudgetBytes ?? DEFAULT_INJECTION_BUDGET_BYTES,
+    totalBytes: plan.shards.reduce((sum, shard) => sum + Buffer.byteLength(shard.body, 'utf8'), 0),
+  }
+}
+
+function renderSection(plan: InjectionPlan, streams: FileEntry[], options: LoadMemoryOptions): string {
   const lines = ['# Memory', '', MEMORY_FRAMING, '']
   if (options.origin?.kind === 'channel') lines.push(...CHANNEL_MEMORY_BOUNDARY, '')
-  if (topics.length === 0) {
+  if (plan.shards.length === 0) {
     lines.push('[NO TOPICS YET]', '')
+  } else if (plan.mode === 'index') {
+    lines.push(indexDirective(options), '')
+    for (const shard of plan.shards) {
+      lines.push(`## ${shard.frontmatter.heading}`, '')
+      lines.push(renderShardMetadata(shard), '')
+    }
   } else {
-    for (const topic of topics) {
+    for (const topic of plan.shards.map(topicEntryFromShard)) {
       lines.push(`## ${topic.name}`, '')
       lines.push(renderBody(topic), '')
     }
@@ -199,6 +225,18 @@ function renderSection(topics: TopicEntry[], streams: FileEntry[], options: Load
     lines.push(`## ${entry.name}`, '', renderBody(entry), '')
   }
   return lines.join('\n').trimEnd()
+}
+
+function indexDirective(options: LoadMemoryOptions): string {
+  if (options.origin?.kind === 'channel') {
+    return 'Memory shown as index only in channels. Call `memory_search` if you need specific topics.'
+  }
+  return 'Memory is large. Call `memory_search` to fetch specific topics.'
+}
+
+function renderShardMetadata(shard: TopicShard): string {
+  const { cites, days, lastReinforced } = shard.frontmatter
+  return `cites=${cites}, days=${days}, lastReinforced=${lastReinforced}`
 }
 
 function renderBody(entry: FileEntry): string {
