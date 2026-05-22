@@ -4,7 +4,7 @@ import { originLabel, shortSessionId } from './label'
 import { renderEvent } from './render'
 import { replayJsonl } from './replay'
 import type { SessionSummary } from './session-list'
-import { listSessions, resolveSession } from './session-list'
+import { isSessionIdShape, listSessions, resolveSession } from './session-list'
 import type { InspectEvent, InspectFilter } from './types'
 import { matchesFilter, parseDuration, parseFilter } from './types'
 
@@ -206,6 +206,8 @@ function formatDate(ms: number): string {
   return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`
 }
 
+const MIN_EXPLICIT_ID_LENGTH = 8
+
 function looksLikeSessionId(value: string): boolean {
-  return value.startsWith('ses_')
+  return value.length >= MIN_EXPLICIT_ID_LENGTH && isSessionIdShape(value)
 }
