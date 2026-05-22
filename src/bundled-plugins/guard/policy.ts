@@ -16,4 +16,5 @@ export {
   checkSkillAuthoringGuard,
   isSkillAuthoringAllowed,
 } from './policies/skill-authoring'
+export { GUARD_MEMORY_TOPICS_DELETE, checkMemoryTopicsDeleteGuard } from './policies/memory-topics-delete'
 export { GUARD_UNCOMMITTED_CHANGES, checkUncommittedChangesAdvice } from './policies/uncommitted-changes'
