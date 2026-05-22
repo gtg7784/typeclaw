@@ -338,6 +338,7 @@ export default definePlugin({
           description: 'Check for legacy .md daily stream files and un-migrated root MEMORY.md',
           run: async (dctx) => {
             const memoryDir = join(dctx.agentDir, 'memory')
+            // kept: pre-migration agents may still have a root MEMORY.md.
             const rootMemoryPath = join(dctx.agentDir, 'MEMORY.md')
             const hasRootMemory = existsSync(rootMemoryPath)
             const hasTopicsDir = existsSync(topicsDir(dctx.agentDir))

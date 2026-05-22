@@ -1,13 +1,13 @@
-// Citation-superset safety net for the dreaming subagent's MEMORY.md
-// rewrite. After every dreaming run that touched MEMORY.md, we check that
-// the union of fragment ids cited in the NEW file is a superset of the
-// union cited in the OLD file. If any previously-cited id is missing from
+// Citation-superset safety net for the dreaming subagent's topic-shard
+// rewrite. After every dreaming run that touched memory/topics/, we check that
+// the union of fragment ids cited in the NEW shard set is a superset of the
+// union cited in the OLD shard set. If any previously-cited id is missing from
 // the rewrite, the rewrite is rejected.
 //
 // Why this exists: the daily-stream GC in compactDailyStreams drops any
-// fragment that is `dreamedIds ∧ ¬citedIds`. Citations in MEMORY.md are
+// fragment that is `dreamedIds ∧ ¬citedIds`. Citations in topic shards are
 // the only thing that keeps a fragment alive past its first dreaming run.
-// If the subagent rewrites MEMORY.md and accidentally omits a citation —
+// If the subagent rewrites a topic shard and accidentally omits a citation —
 // either by garbling a merged topic's fragments: list or by dropping a
 // topic entirely — the next compaction call permanently deletes the
 // underlying fragment from the daily JSONL. There is no recovery beyond
@@ -21,14 +21,14 @@
 // mechanical check is the safety floor.
 //
 // Detection only. The handler decides what to do with the verdict (revert
-// MEMORY.md to its pre-run bytes, skip daily-stream compaction, still
+// memory/topics/ to its pre-run bytes, skip daily-stream compaction, still
 // advance the dreamed-id set so we do not loop on the same fragments).
 
 import { parseCitations } from './citations'
 
 export type CitationSupersetVerdict = { ok: true } | { ok: false; missing: Array<{ date: string; fragmentId: string }> }
 
-// Compare the OLD MEMORY.md to the NEW MEMORY.md and report any
+// Compare the OLD shard content to the NEW shard content and report any
 // fragment id that the OLD cited and the NEW does not. Empty old text
 // (first-ever dreaming run, prior file missing) is treated as the empty
 // citation set — any new file passes by construction.
@@ -92,7 +92,7 @@ function mergeCitationIndex(target: Map<string, Set<string>>, source: Map<string
 
 // Pretty-print the verdict's missing ids for log output. Keeps the line
 // short by reporting count + first N ids; the full list is reconstructable
-// from MEMORY.md's git history if forensics are ever needed.
+// from memory/topics/ git history if forensics are ever needed.
 export function summarizeMissingCitations(missing: ReadonlyArray<{ date: string; fragmentId: string }>): string {
   const total = missing.length
   const sample = missing.slice(0, 3).map((m) => `${m.date}#${m.fragmentId}`)

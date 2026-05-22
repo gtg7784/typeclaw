@@ -6,7 +6,7 @@
 //
 // The format does NOT accept line ranges. The prior `:43-45` shape is gone
 // (see the "drop backward compat" decision in the PR description). Parsing
-// silently ignores any line in MEMORY.md that doesn't match this exact shape,
+// silently ignores any line in a topic shard that doesn't match this exact shape,
 // so legacy citations from before the cutover are dropped — they no longer
 // pin fragments alive against compaction.
 
@@ -34,7 +34,7 @@ export function normalizeCitation(citation: string): string {
 // Parse every citation in `text` and return them grouped by date. The
 // returned Map is empty when no citations appear. Used by:
 //   - dreaming.ts compaction to decide which fragments are still referenced
-//     by MEMORY.md and must survive GC.
+//     by topic shards and must survive GC.
 //   - tests pinning the format.
 export function parseCitations(text: string): Map<string, Set<string>> {
   const out = new Map<string, Set<string>>()

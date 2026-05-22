@@ -8,7 +8,7 @@ const VERSION = 2
 
 // Per-day "dreamed" set: the set of stream-event ids dreaming has already
 // reasoned over for a given day. Anything in this set is either cited from
-// MEMORY.md (must survive compaction) or was consciously discarded by a
+// memory/topics/ (must survive compaction) or was consciously discarded by a
 // dreaming run (safe to GC). The undreamed-tail computation is set
 // difference: events whose id is NOT in this set are the new things to look
 // at on the next run.

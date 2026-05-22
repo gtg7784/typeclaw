@@ -224,7 +224,7 @@ function toCronJob(globalId: string, spec: PluginCronJob): CronJob {
   // Plugin-contributed jobs default to `owner` because they are part of the
   // agent's bundled (or operator-installed) runtime, not user-channel
   // schedules. Without this default they would resolve to `guest` and the
-  // bundled memory dreaming cron (which writes MEMORY.md, runs git, etc.)
+  // bundled memory dreaming cron (which writes memory/topics/, runs git, etc.)
   // would lose every security bypass. Hand-authored cron.json entries take
   // a different path and must declare scheduledByRole explicitly.
   const scheduledByRole: PromptJob['scheduledByRole'] = 'owner'

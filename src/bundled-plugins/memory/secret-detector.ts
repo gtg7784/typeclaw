@@ -1,8 +1,8 @@
 // Defense-in-depth backstop against credential leakage into memory streams.
 // The memory-logger system prompt forbids quoting secret values, but the LLM
 // occasionally violates that rule by quoting `env | grep` output verbatim as
-// "evidence". Once a secret reaches a daily stream file, dreaming promotes it
-// into MEMORY.md and the runtime force-commits both to git — at which point
+// "evidence". Once a secret reaches a daily stream file, dreaming can promote it
+// into memory/topics/ and the runtime force-commits both to git — at which point
 // rotation is the only recourse. We deliberately avoid generic high-entropy
 // heuristics: false positives here would silently lose legitimate fragments.
 

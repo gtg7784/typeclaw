@@ -1,4 +1,4 @@
-// Strength signals for MEMORY.md topics, derived mechanically from citations.
+// Strength signals for topic shards, derived mechanically from citations.
 //
 // What "strength" means here is structural, not semantic — we measure how
 // many times and over how many distinct days a topic has been reinforced by
@@ -12,7 +12,7 @@
 // the dreaming subagent's prompt is gated on distinct-days, not count, for
 // exactly this reason — see the "spacing effect" note in the PR description.
 //
-// All numbers here are deterministic. The same MEMORY.md parsed against the
+// All numbers here are deterministic. The same topic text parsed against the
 // same `today` always yields the same TopicStrength list. There is no LLM
 // involvement at this layer; the subagent receives these numbers as ground
 // truth and uses them to decide what to merge or demote.
@@ -72,7 +72,7 @@ function pickLatestDate(dates: readonly string[]): string | null {
 // date as midnight UTC, so the difference is always an integer count of
 // 86_400_000ms windows regardless of timezone or DST. Returns 0 for invalid
 // inputs (treats the topic as "fresh" rather than throwing — defensive
-// because both inputs are produced by the runtime, but a corrupted MEMORY.md
+// because both inputs are produced by the runtime, but a corrupted topic-shard
 // citation date is the kind of thing we want to fail open on).
 function daysBetween(today: string, earlier: string): number {
   const todayMs = parseIsoDateUtc(today)

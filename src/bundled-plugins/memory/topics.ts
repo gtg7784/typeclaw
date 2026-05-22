@@ -1,10 +1,7 @@
-// Topic-aware parser for MEMORY.md. The dreaming subagent writes MEMORY.md as
-// a flat list of level-2 topic headings (`## <topic>`), each followed by a
-// conclusion paragraph and a `fragments:` bullet list of citations. The
-// citation parser in citations.ts is global (every citation in the file);
-// this module attributes citations to their owning topic so the dreaming
-// subagent can see per-topic strength signals (citation count, distinct
-// reinforcement days, recency) on its next run.
+// Topic-aware parser for the pre-shard root-memory migration and legacy strength
+// tests. Sharded runtime memory stores each topic as its own file under
+// memory/topics/, but the one-shot migrator still needs to split a legacy root
+// file into level-2 topic sections before writing shards.
 //
 // Format assumptions match what dreaming.ts's DREAMING_SYSTEM_PROMPT teaches:
 //   - First line is `# Memory` (an h1). Treated as a non-topic header.
@@ -17,9 +14,9 @@
 //     aggregation. parseCitations from citations.ts still picks them up if
 //     anything downstream needs the global view.
 //
-// The parser is intentionally permissive: it never throws on malformed
-// MEMORY.md. A subagent that writes a header with no body or a topic with no
-// citations still parses cleanly with an empty `citations` array. The
+// The parser is intentionally permissive: it never throws on malformed legacy
+// topic prose. A header with no body or a topic with no citations still parses
+// cleanly with an empty `citations` array. The
 // strength layer then treats those topics as "weak" — which is the right
 // behavior, since they ARE weak.
 
@@ -57,7 +54,7 @@ function collectCitations(bodyText: string): Citation[] {
   return citations
 }
 
-// Split MEMORY.md into ordered topics with their citations attached. Returns
+// Split legacy topic prose into ordered topics with their citations attached. Returns
 // an empty array when no `## ` heading appears.
 export function parseTopics(text: string): Topic[] {
   const lines = text.split('\n')
