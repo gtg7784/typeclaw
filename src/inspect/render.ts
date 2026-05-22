@@ -40,6 +40,10 @@ function renderTag(event: InspectEvent, opts: RenderOptions): string {
       return tint(opts, 'red', padEnd('error', 9))
     case 'done':
       return tint(opts, 'gray', padEnd('done', 9))
+    case 'broadcast':
+      return tint(opts, 'magenta', padEnd('bcast', 9))
+    case 'cron-fire':
+      return tint(opts, 'magenta', padEnd('cron', 9))
   }
 }
 
@@ -64,6 +68,28 @@ function renderBody(event: InspectEvent, opts: RenderOptions): string {
       return tint(opts, 'red', truncate(singleLine(event.message), opts.maxTextLength ?? DEFAULT_MAX_TEXT))
     case 'done':
       return renderDone(event, opts)
+    case 'broadcast':
+      return renderBroadcastBody(event.payload, opts.maxTextLength ?? DEFAULT_MAX_TEXT)
+    case 'cron-fire':
+      return `${event.jobId} fired`
+  }
+}
+
+function renderBroadcastBody(payload: unknown, maxLen: number): string {
+  if (payload !== null && typeof payload === 'object') {
+    const kind = (payload as { kind?: unknown }).kind
+    if (typeof kind === 'string') {
+      const rest = renderArgs(payload)
+      return rest === '' ? kind : `${kind} ${rest}`
+    }
+  }
+  try {
+    const compact = JSON.stringify(payload)
+    if (compact === undefined) return ''
+    if (compact.length <= maxLen) return compact
+    return `${compact.slice(0, maxLen)}…`
+  } catch {
+    return ''
   }
 }
 

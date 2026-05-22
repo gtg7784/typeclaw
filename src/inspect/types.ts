@@ -1,6 +1,15 @@
 import type { MinimalSessionOrigin } from '@/agent/session-meta'
 
-export const INSPECT_CATEGORIES = ['meta', 'user', 'assistant', 'tool', 'error', 'done'] as const
+export const INSPECT_CATEGORIES = [
+  'meta',
+  'user',
+  'assistant',
+  'tool',
+  'error',
+  'done',
+  'broadcast',
+  'cron-fire',
+] as const
 export type InspectCategory = (typeof INSPECT_CATEGORIES)[number]
 
 export type InspectEvent =
@@ -30,6 +39,8 @@ export type InspectEvent =
       totalTokens: number
       cost: number
     }
+  | { cat: 'broadcast'; ts: number; payload: unknown; meta?: Record<string, string> }
+  | { cat: 'cron-fire'; ts: number; jobId: string; payload: unknown }
 
 export type InspectFilter = {
   include?: ReadonlySet<InspectCategory>
