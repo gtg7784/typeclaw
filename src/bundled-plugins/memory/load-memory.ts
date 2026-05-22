@@ -64,14 +64,31 @@ export async function loadMemory(agentDir: string, options: LoadMemoryOptions = 
   const hasTopicsDir = await pathExists(topicsDir(agentDir))
   if (rootMemory.content !== null && !hasTopicsDir) {
     const streams = await readStreamEntries(agentDir, options.currentSessionId)
-    return renderSection({ mode: 'direct', shards: [rootFallbackEntry(rootMemory)] }, streams, options)
+    return appendRetrievalCache(
+      renderSection({ mode: 'direct', shards: [rootFallbackEntry(rootMemory)] }, streams, options),
+      agentDir,
+      options,
+    )
   }
 
   const shards = await loadAllShards(agentDir)
   const plan = buildInjectionPlan(shards, { budgetBytes: options.injectionBudgetBytes })
   const effectivePlan = forceIndexForChannel(plan, options)
   const streams = await readStreamEntries(agentDir, options.currentSessionId)
-  return renderSection(effectivePlan, streams, options)
+  return appendRetrievalCache(renderSection(effectivePlan, streams, options), agentDir, options)
+}
+
+async function appendRetrievalCache(result: string, agentDir: string, options: LoadMemoryOptions): Promise<string> {
+  if (options.currentSessionId === undefined) return result
+  const cachePath = join(agentDir, 'memory', '.retrieval-cache', `${options.currentSessionId}.md`)
+  try {
+    const cacheContent = await readFile(cachePath, 'utf8')
+    const trimmed = cacheContent.trim()
+    if (trimmed.length === 0) return result
+    return `${result}\n\n## Retrieved memory (session ${options.currentSessionId})\n\n${trimmed}`
+  } catch {
+    return result
+  }
 }
 
 async function pathExists(path: string): Promise<boolean> {

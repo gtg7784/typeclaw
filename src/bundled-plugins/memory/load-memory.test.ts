@@ -411,6 +411,24 @@ describe('loadMemory self-session fragment filtering', () => {
     expect(section).not.toContain('## self')
     expect(section).toContain('## other')
   })
+
+  test('appends the filesystem retrieval cache for the current session when present', async () => {
+    await mkdir(join(agentDir, 'memory', '.retrieval-cache'), { recursive: true })
+    await writeFile(join(agentDir, 'memory', '.retrieval-cache', 'ses_self.md'), 'focused retrieved context\n', 'utf8')
+
+    const section = await loadMemory(agentDir, { currentSessionId: 'ses_self' })
+
+    expect(section).toContain('## Retrieved memory (session ses_self)')
+    expect(section).toContain('focused retrieved context')
+  })
+
+  test('leaves output unchanged when the filesystem retrieval cache is absent', async () => {
+    const withoutSession = await loadMemory(agentDir)
+    const withMissingCache = await loadMemory(agentDir, { currentSessionId: 'ses_missing' })
+
+    expect(withMissingCache).toBe(withoutSession)
+    expect(withMissingCache).not.toContain('## Retrieved memory')
+  })
 })
 
 describe('loadMemory watermark stripping', () => {

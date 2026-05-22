@@ -5,12 +5,21 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { noopPermissionService } from '@/permissions'
-import type { PluginContext, PluginExports, PluginLogger, SessionEndEvent, SessionIdleEvent } from '@/plugin'
+import type {
+  PluginContext,
+  PluginExports,
+  PluginLogger,
+  SessionEndEvent,
+  SessionIdleEvent,
+  SessionPromptEvent,
+} from '@/plugin'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
+import { renderShard } from './frontmatter'
 import memoryPlugin from './index'
+import { topicShardPath, topicsDir } from './paths'
 
-type SpawnCall = { name: string; payload: unknown; startedAt: number; finishedAt: number }
+type SpawnCall = { name: string; payload: unknown; options: unknown; startedAt: number; finishedAt: number }
 
 type CapturedLogs = { info: string[]; warn: string[]; error: string[] }
 
@@ -44,11 +53,11 @@ async function bootMemoryPlugin(
     config: parsed.data,
     logger: options.logger ?? createPluginLogger('memory'),
     permissions: noopPermissionService,
-    spawnSubagent: async (name, payload) => {
+    spawnSubagent: async (name, payload, spawnOptions) => {
       const startedAt = Date.now()
       if (spawnDelayMs > 0) await new Promise((r) => setTimeout(r, spawnDelayMs))
       const finishedAt = Date.now()
-      spawned.push({ name, payload, startedAt, finishedAt })
+      spawned.push({ name, payload, options: spawnOptions, startedAt, finishedAt })
     },
     isBooted: () => true,
   })
@@ -57,6 +66,14 @@ async function bootMemoryPlugin(
 }
 
 let agentDir: string
+
+async function writeTopic(dir: string, slug: string, heading: string, body: string): Promise<void> {
+  await mkdir(topicsDir(dir), { recursive: true })
+  await writeFile(
+    topicShardPath(dir, slug),
+    renderShard({ heading, cites: 1, days: 1, lastReinforced: '2026-05-16' }, body),
+  )
+}
 
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), 'memory-plugin-'))
@@ -91,9 +108,12 @@ describe('memory plugin shape', () => {
     await expect(bootMemoryPlugin(agentDir, {})).rejects.toThrow()
   })
 
-  test('exposes both subagents', async () => {
+  test('exposes memory subagents and memory_search tool', async () => {
     const { exports } = await bootMemoryPlugin(agentDir, {})
-    expect(Object.keys(exports.subagents ?? {})).toEqual(expect.arrayContaining(['memory-logger', 'dreaming']))
+    expect(Object.keys(exports.subagents ?? {})).toEqual(
+      expect.arrayContaining(['memory-logger', 'dreaming', 'memory-retrieval']),
+    )
+    expect(exports.tools?.memory_search).toBeDefined()
   })
 
   test('registers a dreaming cron job with the configured schedule', async () => {
@@ -146,10 +166,66 @@ describe('memory plugin shape', () => {
   })
 })
 
-describe('session.prompt hook (removed)', () => {
-  test('does NOT expose a session.prompt hook; memory injection is owned by core createResourceLoader so it can be positioned at the cache-suffix end of the system prompt', async () => {
-    const { exports } = await bootMemoryPlugin(agentDir, {})
-    expect(exports.hooks?.['session.prompt']).toBeUndefined()
+describe('session.prompt hook', () => {
+  test('spawns memory-retrieval when the injection plan is index mode', async () => {
+    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
+    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
+    const origin: SessionPromptEvent['origin'] = { kind: 'tui', sessionId: 'ses_parent' }
+
+    await exports.hooks!['session.prompt']!(
+      { sessionId: 'ses_parent', agentDir, prompt: 'what do I know?', origin },
+      {
+        agentDir,
+        pluginName: 'memory',
+        logger: createPluginLogger('m'),
+      },
+    )
+
+    expect(spawned).toHaveLength(1)
+    expect(spawned[0]!.name).toBe('memory-retrieval')
+    expect(spawned[0]!.payload).toEqual({
+      parentSessionId: 'ses_parent',
+      agentDir,
+      recentPrompt: 'what do I know?',
+      cacheFilePath: join(agentDir, 'memory', '.retrieval-cache', 'ses_parent.md'),
+      origin,
+    })
+    expect(spawned[0]!.options).toEqual({ parentSessionId: 'ses_parent', spawnedByOrigin: origin })
+  })
+
+  test('does not spawn memory-retrieval when the injection plan is direct mode', async () => {
+    await writeTopic(agentDir, 'small-a', 'Small A', 'small body')
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {})
+
+    await exports.hooks!['session.prompt']!(
+      { sessionId: 'ses_direct', agentDir, prompt: 'small?' },
+      {
+        agentDir,
+        pluginName: 'memory',
+        logger: createPluginLogger('m'),
+      },
+    )
+
+    expect(spawned).toHaveLength(0)
+  })
+
+  test('does not recurse for subagent-origin prompt events', async () => {
+    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
+    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
+
+    await exports.hooks!['session.prompt']!(
+      {
+        sessionId: 'ses_subagent',
+        agentDir,
+        prompt: 'subagent prompt',
+        origin: { kind: 'subagent', subagent: 'memory-retrieval', parentSessionId: 'ses_parent' },
+      },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
+    )
+
+    expect(spawned).toHaveLength(0)
   })
 })
 
@@ -285,6 +361,36 @@ describe('session.end hook', () => {
 
     expect(spawned).toHaveLength(1)
     expect(spawned[0]!.name).toBe('memory-logger')
+  })
+
+  test('deletes the retrieval cache file on close', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, { idleMs: 10_000 })
+    const cacheFilePath = join(agentDir, 'memory', '.retrieval-cache', 'ses_cache.md')
+    await mkdir(join(agentDir, 'memory', '.retrieval-cache'), { recursive: true })
+    await writeFile(cacheFilePath, 'retrieved context', 'utf8')
+
+    await exports.hooks!['session.end']!({ sessionId: 'ses_cache' } as SessionEndEvent, {
+      agentDir,
+      pluginName: 'memory',
+      logger: createPluginLogger('m'),
+    })
+
+    expect(existsSync(cacheFilePath)).toBe(false)
+  })
+
+  test('logs a warning when retrieval cache cleanup fails for a non-ENOENT error', async () => {
+    const { logger, logs } = makeCapturingLogger()
+    const { exports } = await bootMemoryPlugin(agentDir, { idleMs: 10_000 }, { logger })
+    const cacheFilePath = join(agentDir, 'memory', '.retrieval-cache', 'ses_cache.md')
+    await mkdir(cacheFilePath, { recursive: true })
+
+    await exports.hooks!['session.end']!({ sessionId: 'ses_cache' } as SessionEndEvent, {
+      agentDir,
+      pluginName: 'memory',
+      logger,
+    })
+
+    expect(logs.warn.some((m) => m.includes('failed to clean retrieval cache'))).toBe(true)
   })
 
   test('on close without a prior idle event, does NOT spawn (no transcript path is known)', async () => {
@@ -556,7 +662,7 @@ describe('per-agent spawn serialization', () => {
           firstCall = false
           throw new Error('first spawn boom')
         }
-        spawned.push({ name, payload, startedAt, finishedAt: Date.now() })
+        spawned.push({ name, payload, options: undefined, startedAt, finishedAt: Date.now() })
       },
       isBooted: () => true,
     })
@@ -610,7 +716,7 @@ describe('per-agent spawn serialization', () => {
           await new Promise<void>(() => {})
           return
         }
-        spawned.push({ name, payload, startedAt, finishedAt: Date.now() })
+        spawned.push({ name, payload, options: undefined, startedAt, finishedAt: Date.now() })
       },
       isBooted: () => true,
     })

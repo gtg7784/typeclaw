@@ -9,10 +9,13 @@ import type { SessionOrigin } from '@/agent/session-origin'
 import { definePlugin } from '@/plugin'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
-import { DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGET_BYTES } from './injection-plan'
+import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGET_BYTES } from './injection-plan'
+import { loadAllShards } from './load-shards'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
+import { createMemoryRetrievalSubagent, type MemoryRetrievalPayload } from './memory-retrieval'
 import { runMigration, runShardingMigration } from './migration'
 import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
+import { memorySearchTool } from './search-tool'
 
 const DEFAULT_IDLE_MS = 60_000
 const DEFAULT_BUFFER_BYTES = 500_000
@@ -185,7 +188,11 @@ export default definePlugin({
     return {
       subagents: {
         'memory-logger': createMemoryLoggerSubagent({ logger: subagentLogger }),
+        'memory-retrieval': createMemoryRetrievalSubagent({ logger: subagentLogger }),
         dreaming: createDreamingSubagent({ logger: subagentLogger }),
+      },
+      tools: {
+        memory_search: memorySearchTool,
       },
       cronJobs: {
         dreaming: {
@@ -238,10 +245,36 @@ export default definePlugin({
             await fireMemoryLogger(sessionId, 'buffer-trip')
           }
         },
+        'session.prompt': async (event) => {
+          if (event.origin?.kind === 'subagent') return
+
+          const shards = await loadAllShards(event.agentDir)
+          const plan = buildInjectionPlan(shards, { budgetBytes: ctx.config.injectionBudgetBytes })
+          if (plan.mode === 'direct') return
+
+          const cacheFilePath = join(ctx.agentDir, 'memory', '.retrieval-cache', `${event.sessionId}.md`)
+          const payload: MemoryRetrievalPayload = {
+            parentSessionId: event.sessionId,
+            agentDir: event.agentDir,
+            recentPrompt: event.prompt,
+            cacheFilePath,
+            ...(event.origin !== undefined ? { origin: event.origin } : {}),
+          }
+          await ctx.spawnSubagent('memory-retrieval', payload, {
+            parentSessionId: event.sessionId,
+            ...(event.origin !== undefined ? { spawnedByOrigin: event.origin } : {}),
+          })
+        },
         'session.end': async (event) => {
           if (event.origin?.kind === 'subagent') return
           cancelTimer(event.sessionId)
           await fireMemoryLogger(event.sessionId, 'session-end')
+          const cacheFilePath = join(ctx.agentDir, 'memory', '.retrieval-cache', `${event.sessionId}.md`)
+          try {
+            await unlink(cacheFilePath)
+          } catch (err) {
+            if (!isEnoent(err)) ctx.logger.warn(`[memory] failed to clean retrieval cache: ${err}`)
+          }
           lastIdleEvent.delete(event.sessionId)
           bytesAtLastRun.delete(event.sessionId)
         },
@@ -472,4 +505,8 @@ async function raceSpawn(work: Promise<void>, ms: number): Promise<void> {
   } finally {
     if (timer !== null) clearTimeout(timer)
   }
+}
+
+function isEnoent(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && err.code === 'ENOENT'
 }
