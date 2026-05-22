@@ -10,6 +10,7 @@ export const SECURITY_PERMISSIONS = {
   bypassOutboundSecret: 'security.bypass.outboundSecret',
   bypassGitRemoteTainted: 'security.bypass.gitRemoteTainted',
   bypassRolePromotion: 'security.bypass.rolePromotion',
+  bypassCronPromotion: 'security.bypass.cronPromotion',
   // Severity-tier bypasses. Tiers classify guards on a two-axis policy:
   //   high   — bypass sends data to a third-party audience outside the
   //            operator's control loop (channel readers, remote git host).
@@ -47,4 +48,5 @@ export const HIGH_TIER_PER_GUARD_PERMISSIONS: readonly string[] = [
   SECURITY_PERMISSIONS.bypassOutboundSecret,
   SECURITY_PERMISSIONS.bypassSystemPromptLeak,
   SECURITY_PERMISSIONS.bypassRolePromotion,
+  SECURITY_PERMISSIONS.bypassCronPromotion,
 ]

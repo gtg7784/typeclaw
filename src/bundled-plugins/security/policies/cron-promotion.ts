@@ -1,0 +1,220 @@
+import { readFile, realpath } from 'node:fs/promises'
+import path from 'node:path'
+
+import { parseCronJson, type ParsedCronJob } from '@/cron'
+
+import type { SecuritySeverity } from '../permissions'
+import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
+
+export const GUARD_CRON_PROMOTION = 'cronPromotion'
+// Classified `high` (audience-leak axis, adapted — same reasoning as
+// `rolePromotion`).
+//
+// Cron is the deferred-execution sibling of `roles`. Every cron job
+// carries a `scheduledByRole` field that the runtime stamps into the
+// firing session's origin; the permission service then trusts that
+// stamp (subject to "named role must exist in the resolved role
+// table"). The `parseCronFile` boot gate rejects entries without
+// `scheduledByRole`, but it accepts any role name the file declares.
+//
+// Concrete breach pattern: a `member`-role agent that can `write`
+// `cron.json` authors a brand-new job with `"scheduledByRole": "owner"`
+// and a prompt that does whatever the agent's tool surface allows when
+// running as owner. The cron consumer fires it on schedule; the firing
+// session resolves to `owner` because that role name exists in the role
+// table. The agent has laundered itself into owner via the schedule.
+//
+// Same two-step shape as `gitRemoteTainted`: "do a privileged write
+// now, run the privileged thing later." This guard blocks the first
+// step.
+//
+// What counts as a cron promotion (any of):
+//   1. A new job (by id) was added. The job's `scheduledByRole` is the
+//      privilege grant being introduced; the audit point is the
+//      addition itself, regardless of the role value.
+//   2. An existing job's `scheduledByRole` changed to a different value.
+//
+// What does NOT count (allowed without ack):
+//   - Removing a job entirely.
+//   - Changing `schedule`, `enabled`, `timezone`, or `payload` on an
+//     existing job (these are scheduling/tuning decisions, not
+//     privilege).
+//   - Changing the `prompt` text on a prompt job or `command` array on
+//     an exec job. Treated as ordinary content edits; out of scope for
+//     this guard. (A prompt that smuggles in attacker text is the
+//     prompt-injection defense's surface, not cron's.)
+//
+// Failure-open is deliberate, same direction as `rolePromotion`: if
+// the existing `cron.json` cannot be read or parsed, every proposed job
+// is treated as new and flagged. The only false positive is "operator
+// authored a fresh `cron.json` with privileged jobs," which they
+// acknowledge in the same call.
+export const GUARD_CRON_PROMOTION_SEVERITY: SecuritySeverity = 'high'
+
+export type CronPromotionFinding =
+  | { kind: 'job-added'; id: string; scheduledByRole: string }
+  | { kind: 'role-changed'; id: string; from: string; to: string }
+
+export async function checkCronPromotionGuard(options: {
+  tool: string
+  args: Record<string, unknown>
+  agentDir: string
+}): Promise<SecurityBlock | undefined> {
+  const { tool, args, agentDir } = options
+  if (tool !== 'write' && tool !== 'edit') return undefined
+
+  const rawPath = args.path
+  if (typeof rawPath !== 'string') return undefined
+
+  const targetPath = path.resolve(agentDir, rawPath)
+  const isCronJson = await pathIsCronJson(agentDir, targetPath)
+  if (!isCronJson) return undefined
+
+  if (isGuardAcknowledged(args, GUARD_CRON_PROMOTION)) return undefined
+
+  const newContent = await intendedContent(tool, args, targetPath)
+  if (newContent === undefined) return undefined
+
+  const newJobs = parseJobsFromContent(newContent)
+  if (newJobs === undefined) return undefined
+
+  const oldJobs = await readExistingJobs(targetPath)
+  const findings = diffJobs(oldJobs, newJobs)
+  if (findings.length === 0) return undefined
+
+  return {
+    block: true,
+    reason: buildBlockReason(tool, targetPath, findings),
+  }
+}
+
+async function pathIsCronJson(agentDir: string, targetPath: string): Promise<boolean> {
+  const resolvedAgentDir = path.resolve(agentDir)
+  const realAgentDir = await resolveRealPath(resolvedAgentDir)
+  const realTargetPath = await resolveRealPath(targetPath)
+  if (path.dirname(realTargetPath) !== realAgentDir) return false
+  return path.basename(realTargetPath) === 'cron.json'
+}
+
+async function intendedContent(
+  tool: string,
+  args: Record<string, unknown>,
+  targetPath: string,
+): Promise<string | undefined> {
+  if (tool === 'write') {
+    return typeof args.content === 'string' ? args.content : undefined
+  }
+  const edits = args.edits
+  if (!Array.isArray(edits)) return undefined
+  let content: string
+  try {
+    content = await readFile(targetPath, 'utf8')
+  } catch {
+    return undefined
+  }
+  for (const edit of edits) {
+    if (!edit || typeof edit !== 'object') return undefined
+    const { oldText, newText } = edit as Record<string, unknown>
+    if (typeof oldText !== 'string' || typeof newText !== 'string') return undefined
+    if (oldText.length === 0) return undefined
+    if (!content.includes(oldText)) return undefined
+    content = content.replace(oldText, newText)
+  }
+  return content
+}
+
+function parseJobsFromContent(content: string): readonly ParsedCronJob[] | undefined {
+  const result = parseCronJson(content, { migrate: false })
+  if (!result.ok) return undefined
+  return result.file.jobs
+}
+
+async function readExistingJobs(targetPath: string): Promise<readonly ParsedCronJob[]> {
+  let raw: string
+  try {
+    raw = await readFile(targetPath, 'utf8')
+  } catch {
+    return []
+  }
+  const result = parseCronJson(raw, { migrate: true })
+  if (!result.ok) return []
+  return result.file.jobs
+}
+
+export function diffJobs(before: readonly ParsedCronJob[], after: readonly ParsedCronJob[]): CronPromotionFinding[] {
+  const findings: CronPromotionFinding[] = []
+  const beforeById = new Map<string, ParsedCronJob>()
+  for (const job of before) beforeById.set(job.id, job)
+
+  for (const job of after) {
+    const prior = beforeById.get(job.id)
+    const newRole = job.scheduledByRole
+    if (prior === undefined) {
+      findings.push({
+        kind: 'job-added',
+        id: job.id,
+        scheduledByRole: newRole ?? '<unset>',
+      })
+      continue
+    }
+    const oldRole = prior.scheduledByRole
+    if (oldRole !== newRole) {
+      findings.push({
+        kind: 'role-changed',
+        id: job.id,
+        from: oldRole ?? '<unset>',
+        to: newRole ?? '<unset>',
+      })
+    }
+  }
+  return findings
+}
+
+function buildBlockReason(tool: string, targetPath: string, findings: readonly CronPromotionFinding[]): string {
+  const lines: string[] = []
+  for (const f of findings) {
+    const id = sanitizeForReason(f.id)
+    if (f.kind === 'job-added') {
+      lines.push(`new job \`${id}\` would run as role \`${sanitizeForReason(f.scheduledByRole)}\``)
+    } else {
+      lines.push(
+        `job \`${id}\` changes scheduledByRole \`${sanitizeForReason(f.from)}\` -> \`${sanitizeForReason(f.to)}\``,
+      )
+    }
+  }
+  return [
+    `Guard \`${GUARD_CRON_PROMOTION}\` blocked ${tool} on ${sanitizeForReason(targetPath)}: this change introduces a deferred privilege grant — ${lines.join('; ')}.`,
+    'Cron jobs carry `scheduledByRole`, which the runtime stamps into the firing session\'s origin. Adding a job (or changing its scheduledByRole) is the same shape as the `rolePromotion` attack but deferred: "schedule a privileged prompt now, the cron consumer runs it as that role later." Even an `owner` operating from TUI must not silently author cron jobs that fire as elevated roles on behalf of a channel message.',
+    `If this is genuinely intentional and the operator explicitly asked for it (not a channel message), retry with \`${ACKNOWLEDGE_GUARDS}.${GUARD_CRON_PROMOTION}: true\` in the tool arguments.`,
+  ].join(' ')
+}
+
+const MAX_REASON_TOKEN_LEN = 200
+
+function sanitizeForReason(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]/g, '').replace(/`/g, "'")
+  if (cleaned.length <= MAX_REASON_TOKEN_LEN) return cleaned
+  return `${cleaned.slice(0, MAX_REASON_TOKEN_LEN)}...`
+}
+
+async function resolveRealPath(absolutePath: string): Promise<string> {
+  const pending: string[] = []
+  let current = absolutePath
+  while (true) {
+    try {
+      const real = await realpath(current)
+      return path.join(real, ...pending.reverse())
+    } catch (err) {
+      if (!isNotFound(err)) throw err
+    }
+    const parent = path.dirname(current)
+    if (parent === current) return absolutePath
+    pending.push(path.basename(current))
+    current = parent
+  }
+}
+
+function isNotFound(err: unknown): boolean {
+  return err instanceof Error && 'code' in err && (err as { code: unknown }).code === 'ENOENT'
+}
