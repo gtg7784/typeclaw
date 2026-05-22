@@ -63,13 +63,13 @@ describe('streamLive — live session events', () => {
     const { url } = await startServer({ registry })
 
     const ctrl = new AbortController()
-    let liveFlag: boolean | null = null
+    const liveFlags: boolean[] = []
     const gen = streamLive({
       url,
       sessionId: 'ses_a',
       signal: ctrl.signal,
       onSubscribed: (live) => {
-        liveFlag = live
+        liveFlags.push(live)
       },
     })
 
@@ -80,7 +80,7 @@ describe('streamLive — live session events', () => {
 
     const events = await collectN(gen, 2)
     ctrl.abort()
-    expect(liveFlag).toBe(true)
+    expect(liveFlags).toEqual([true])
     expect(events).toHaveLength(2)
     const start = events[0]!
     const end = events[1]!
@@ -162,20 +162,20 @@ describe('streamLive — live session events', () => {
   test('subscribed callback reports sessionLive=false when registry is empty', async () => {
     const { url } = await startServer()
     const ctrl = new AbortController()
-    let liveFlag: boolean | null = null
+    const liveFlags: boolean[] = []
     const gen = streamLive({
       url,
       sessionId: 'ses_dead',
       signal: ctrl.signal,
       onSubscribed: (live) => {
-        liveFlag = live
+        liveFlags.push(live)
       },
     })
     setTimeout(() => ctrl.abort(), 100)
     for await (const _ of gen) {
       void _
     }
-    expect(liveFlag).toBe(false)
+    expect(liveFlags).toEqual([false])
   })
 
   test('aborting the signal closes the WS and ends the generator cleanly', async () => {
