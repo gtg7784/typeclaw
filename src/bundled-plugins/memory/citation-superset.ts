@@ -33,10 +33,22 @@ export type CitationSupersetVerdict = { ok: true } | { ok: false; missing: Array
 // (first-ever dreaming run, prior file missing) is treated as the empty
 // citation set — any new file passes by construction.
 export function checkCitationSuperset(oldText: string, newText: string): CitationSupersetVerdict {
-  const oldCitations = parseCitations(oldText)
+  return checkCitationIndexSuperset(buildCitationIndex(oldText), buildCitationIndex(newText))
+}
+
+export function checkCitationSupersetAcrossShards(
+  oldShards: Map<string, string>,
+  newShards: Map<string, string>,
+): CitationSupersetVerdict {
+  return checkCitationIndexSuperset(buildCitationIndexFromShards(oldShards), buildCitationIndexFromShards(newShards))
+}
+
+function checkCitationIndexSuperset(
+  oldCitations: Map<string, Set<string>>,
+  newCitations: Map<string, Set<string>>,
+): CitationSupersetVerdict {
   if (oldCitations.size === 0) return { ok: true }
 
-  const newCitations = parseCitations(newText)
   const missing: Array<{ date: string; fragmentId: string }> = []
 
   const dates = [...oldCitations.keys()].sort()
@@ -50,6 +62,32 @@ export function checkCitationSuperset(oldText: string, newText: string): Citatio
   }
 
   return missing.length === 0 ? { ok: true } : { ok: false, missing }
+}
+
+function buildCitationIndex(text: string): Map<string, Set<string>> {
+  return parseCitations(text)
+}
+
+function buildCitationIndexFromShards(shards: Map<string, string>): Map<string, Set<string>> {
+  const index = new Map<string, Set<string>>()
+
+  for (const text of shards.values()) {
+    mergeCitationIndex(index, buildCitationIndex(text))
+  }
+
+  return index
+}
+
+function mergeCitationIndex(target: Map<string, Set<string>>, source: Map<string, Set<string>>): void {
+  for (const [date, ids] of source) {
+    let targetIds = target.get(date)
+    if (targetIds === undefined) {
+      targetIds = new Set<string>()
+      target.set(date, targetIds)
+    }
+
+    for (const id of ids) targetIds.add(id)
+  }
 }
 
 // Pretty-print the verdict's missing ids for log output. Keeps the line

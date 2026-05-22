@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
-import { checkCitationSuperset, summarizeMissingCitations } from './citation-superset'
+import {
+  checkCitationSuperset,
+  checkCitationSupersetAcrossShards,
+  summarizeMissingCitations,
+} from './citation-superset'
 
 const ID_A = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
 const ID_B = '019e2ecf-f2d5-70ee-83f6-005fb5451c51'
@@ -94,6 +98,78 @@ describe('checkCitationSuperset', () => {
 
     expect(verdict.ok).toBe(false)
     if (!verdict.ok) expect(verdict.missing).toEqual([{ date: '2026-05-16', fragmentId: ID_A }])
+  })
+})
+
+describe('checkCitationSupersetAcrossShards', () => {
+  test('returns ok when duplicate old citations merge into one new shard', () => {
+    const oldShards = new Map([
+      ['memory/topics/a.md', `- memory/2026-05-20#${ID_A}`],
+      ['memory/topics/b.md', `prose memory/2026-05-20#${ID_A}`],
+    ])
+    const newShards = new Map([['memory/topics/c.md', `- memory/2026-05-20#${ID_A}`]])
+
+    expect(checkCitationSupersetAcrossShards(oldShards, newShards)).toEqual({ ok: true })
+  })
+
+  test('returns ok when one old shard splits citations across new shards', () => {
+    const oldShards = new Map([
+      [
+        'memory/topics/a.md',
+        [`- memory/2026-05-20#${ID_A}`, `- memory/2026-05-20#${ID_B}`, `- memory/2026-05-21#${ID_C}`].join('\n'),
+      ],
+    ])
+    const newShards = new Map([
+      ['memory/topics/a.md', `- memory/2026-05-20#${ID_A}`],
+      ['memory/topics/b.md', [`- memory/2026-05-20#${ID_B}`, `- memory/2026-05-21#${ID_C}`].join('\n')],
+    ])
+
+    expect(checkCitationSupersetAcrossShards(oldShards, newShards)).toEqual({ ok: true })
+  })
+
+  test('returns ok when new shards introduce additional citations', () => {
+    const oldShards = new Map([['memory/topics/a.md', `- memory/2026-05-20#${ID_A}`]])
+    const newShards = new Map([
+      ['memory/topics/a.md', `- memory/2026-05-20#${ID_A}`],
+      ['memory/topics/b.md', `- memory/2026-05-21#${ID_B}`],
+    ])
+
+    expect(checkCitationSupersetAcrossShards(oldShards, newShards)).toEqual({ ok: true })
+  })
+
+  test('returns failure when a citation is dropped from all new shards', () => {
+    const oldShards = new Map([
+      ['memory/topics/a.md', `- memory/2026-05-20#${ID_A}`],
+      ['memory/topics/b.md', `- memory/2026-05-21#${ID_B}`],
+    ])
+    const newShards = new Map([['memory/topics/a.md', `- memory/2026-05-21#${ID_B}`]])
+
+    const verdict = checkCitationSupersetAcrossShards(oldShards, newShards)
+
+    expect(verdict.ok).toBe(false)
+    if (!verdict.ok) expect(verdict.missing).toEqual([{ date: '2026-05-20', fragmentId: ID_A }])
+  })
+
+  test('returns ok when a stale shard is deleted after its citations move elsewhere', () => {
+    const oldShards = new Map([
+      ['memory/topics/a.md', `- memory/2026-05-20#${ID_A}`],
+      ['memory/topics/b.md', `- memory/2026-05-21#${ID_B}`],
+    ])
+    const newShards = new Map([
+      ['memory/topics/b.md', [`- memory/2026-05-20#${ID_A}`, `- memory/2026-05-21#${ID_B}`].join('\n')],
+    ])
+
+    expect(checkCitationSupersetAcrossShards(oldShards, newShards)).toEqual({ ok: true })
+  })
+
+  test('returns ok when both shard maps are empty', () => {
+    expect(checkCitationSupersetAcrossShards(new Map(), new Map())).toEqual({ ok: true })
+  })
+
+  test('returns ok when old shards are empty and new shards contain citations', () => {
+    const newShards = new Map([['memory/topics/a.md', `- memory/2026-05-20#${ID_A}`]])
+
+    expect(checkCitationSupersetAcrossShards(new Map(), newShards)).toEqual({ ok: true })
   })
 })
 
