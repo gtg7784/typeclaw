@@ -137,11 +137,7 @@ async function pathIsTypeclawJson(agentDir: string, targetPath: string): Promise
   return identifiesManagedFile(agentDir, targetPath, 'typeclaw.json')
 }
 
-async function identifiesManagedFile(
-  agentDir: string,
-  targetPath: string,
-  managedBasename: string,
-): Promise<boolean> {
+async function identifiesManagedFile(agentDir: string, targetPath: string, managedBasename: string): Promise<boolean> {
   const resolvedAgentDir = path.resolve(agentDir)
   const canonicalManagedPath = path.join(resolvedAgentDir, managedBasename)
   const resolvedTarget = path.resolve(targetPath)
@@ -166,11 +162,7 @@ async function identifiesManagedFile(
 // skills already document this as the canonical path). Re-implementing
 // pi's edit-diff inside the guard would be a maintenance hazard — any
 // future pi version drift would silently re-open the bypass.
-function refuseRiskyEdit(
-  tool: string,
-  args: Record<string, unknown>,
-  targetPath: string,
-): SecurityBlock | undefined {
+function refuseRiskyEdit(tool: string, args: Record<string, unknown>, targetPath: string): SecurityBlock | undefined {
   if (tool !== 'edit') return undefined
   const edits = args.edits
   if (!Array.isArray(edits)) return undefined
@@ -295,11 +287,7 @@ export function diffRoles(before: RolesConfig, after: RolesConfig): RolePromotio
 // we surface it here with a sentinel finding. Custom (non-built-in)
 // roles do not have implicit defaults, so this rule applies only when
 // the role name is built-in.
-function isBuiltinDefaultsRestoration(
-  role: string,
-  before: RoleConfig,
-  after: RoleConfig,
-): boolean {
+function isBuiltinDefaultsRestoration(role: string, before: RoleConfig, after: RoleConfig): boolean {
   if (!isBuiltinRoleName(role)) return false
   return before.permissions !== undefined && after.permissions === undefined
 }

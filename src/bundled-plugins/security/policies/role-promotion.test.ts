@@ -439,11 +439,7 @@ describe('checkRolePromotionGuard — edit safety (Oracle PR #305 finding #4)', 
     const agentDir = await makeAgentDir()
     await writeFile(
       path.join(agentDir, 'typeclaw.json'),
-      JSON.stringify(
-        { port: 9000, roles: { member: { match: ['slack:T000'] }, owner: { match: ['tui'] } } },
-        null,
-        2,
-      ),
+      JSON.stringify({ port: 9000, roles: { member: { match: ['slack:T000'] }, owner: { match: ['tui'] } } }, null, 2),
     )
 
     const result = await checkRolePromotionGuard({

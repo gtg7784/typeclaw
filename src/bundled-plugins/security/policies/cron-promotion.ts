@@ -126,11 +126,7 @@ async function pathIsCronJson(agentDir: string, targetPath: string): Promise<boo
 // non-unique-oldText ambiguity. Conservative refusal keeps the guard
 // honest without re-implementing pi-coding-agent/edit-diff.js inside
 // the security plugin.
-function refuseRiskyEdit(
-  tool: string,
-  args: Record<string, unknown>,
-  targetPath: string,
-): SecurityBlock | undefined {
+function refuseRiskyEdit(tool: string, args: Record<string, unknown>, targetPath: string): SecurityBlock | undefined {
   if (tool !== 'edit') return undefined
   const edits = args.edits
   if (!Array.isArray(edits)) return undefined

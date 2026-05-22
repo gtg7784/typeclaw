@@ -106,7 +106,17 @@ describe('managedConfig guard — typeclaw.json', () => {
     const agentDir = await makeAgentDir()
     await writeFile(
       path.join(agentDir, 'typeclaw.json'),
-      JSON.stringify({ port: 9000, mounts: [{ name: 'a', host: '/a' }, { name: 'b', host: '/b' }] }, null, 2),
+      JSON.stringify(
+        {
+          port: 9000,
+          mounts: [
+            { name: 'a', host: '/a' },
+            { name: 'b', host: '/b' },
+          ],
+        },
+        null,
+        2,
+      ),
     )
 
     const result = await checkManagedConfigGuard({
