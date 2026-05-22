@@ -4,11 +4,12 @@ import { dirname, join } from 'node:path'
 
 import { z } from 'zod'
 
-import { lsTool, readTool, type Subagent, writeTool } from '@/plugin'
+import { defineTool, lsTool, readTool, type Subagent, writeTool } from '@/plugin'
 import { formatLocalDate, formatLocalDateTime } from '@/shared'
 
 import { checkCitationSuperset, summarizeMissingCitations } from './citation-superset'
 import { parseCitations } from './citations'
+import { deleteTopicShardTool } from './delete-tool'
 import {
   addDreamedIds,
   DREAMING_STATE_FILE,
@@ -226,7 +227,7 @@ async function safeReadText(path: string): Promise<string> {
   }
 }
 
-const SNAPSHOT_PATHS = ['MEMORY.md', 'memory/'] as const
+const SNAPSHOT_PATHS = ['memory/'] as const
 
 // MEMORY.md scaffolding is no longer in `typeclaw init`; the dreaming subagent
 // owns its existence. First run of dreaming creates an empty MEMORY.md (and
@@ -760,6 +761,15 @@ function escapeTableCell(value: string): string {
   return value.replace(/\|/g, '\\|')
 }
 
+const dreamingDeleteTopicShardTool = defineTool({
+  description: deleteTopicShardTool.description,
+  parameters: deleteTopicShardTool.inputSchema,
+  async execute(args, ctx) {
+    const result = await deleteTopicShardTool.run(args, { agentDir: ctx.agentDir })
+    return { content: [{ type: 'text', text: JSON.stringify(result) }] }
+  },
+})
+
 export type CreateDreamingSubagentOptions = {
   commitMemory?: (cwd: string) => Promise<void>
   logger?: DreamingLogger
@@ -773,6 +783,7 @@ export function createDreamingSubagent(options: CreateDreamingSubagentOptions = 
     systemPrompt: DREAMING_SYSTEM_PROMPT,
     profile: 'deep',
     tools: [readTool, writeTool, lsTool],
+    customTools: [dreamingDeleteTopicShardTool],
     payloadSchema: dreamingPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,
     toolResultBudget: { maxTotalBytes: 512 * 1024, toolNames: ['read'] },

@@ -103,9 +103,11 @@ describe('dreaming subagent declarations', () => {
     expect(sub.inFlightKey!({ agentDir: '/x' })).toBe('/x')
   })
 
-  test('does not register custom tools — dreaming uses only built-in read/write/ls', () => {
+  test('registers the delete_topic_shard custom tool for shard cleanup', () => {
     const sub = createDreamingSubagent()
-    expect(sub.customTools).toBeUndefined()
+    expect(sub.customTools).toBeDefined()
+    expect(sub.customTools!.length).toBe(1)
+    expect(sub.customTools![0].description).toContain('Delete a single topic shard')
   })
 
   test('declares a defensive tool-result byte budget on the read tool so a runaway multi-day stream read cannot balloon subagent token cost', () => {
@@ -777,17 +779,17 @@ async function initRepo(cwd: string): Promise<void> {
 }
 
 async function trackedFiles(cwd: string): Promise<string[]> {
-  const result = await runGit(cwd, ['ls-files', '--', 'MEMORY.md', 'memory/'])
+  const result = await runGit(cwd, ['ls-files', '--', 'memory/'])
   return result.stdout.length === 0 ? [] : result.stdout.split('\n').sort()
 }
 
 async function porcelainStatus(cwd: string): Promise<string> {
-  const result = await runGit(cwd, ['status', '--porcelain', '--', 'MEMORY.md', 'memory/'])
+  const result = await runGit(cwd, ['status', '--porcelain', '--', 'memory/'])
   return result.stdout
 }
 
 async function skipWorktreeFiles(cwd: string): Promise<string[]> {
-  const result = await runGit(cwd, ['ls-files', '-v', '--', 'MEMORY.md', 'memory/'])
+  const result = await runGit(cwd, ['ls-files', '-v', '--', 'memory/'])
   if (result.stdout.length === 0) return []
   return result.stdout
     .split('\n')
@@ -810,8 +812,8 @@ describe('commitMemorySnapshot', () => {
 
     await commitMemorySnapshot(agentDir)
 
-    expect(await trackedFiles(agentDir)).toEqual(['MEMORY.md', 'memory/2026-04-27.jsonl'])
-    expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md', 'memory/2026-04-27.jsonl'])
+    expect(await trackedFiles(agentDir)).toEqual(['memory/2026-04-27.jsonl'])
+    expect(await skipWorktreeFiles(agentDir)).toEqual(['memory/2026-04-27.jsonl'])
     expect(await porcelainStatus(agentDir)).toBe('')
   })
 
@@ -838,8 +840,8 @@ describe('commitMemorySnapshot', () => {
 
     await commitMemorySnapshot(agentDir)
 
-    expect(await trackedFiles(agentDir)).toEqual(['MEMORY.md', 'memory/skills/release-checklist/SKILL.md'])
-    expect(await skipWorktreeFiles(agentDir)).toEqual(['MEMORY.md', 'memory/skills/release-checklist/SKILL.md'])
+    expect(await trackedFiles(agentDir)).toEqual(['memory/skills/release-checklist/SKILL.md'])
+    expect(await skipWorktreeFiles(agentDir)).toEqual(['memory/skills/release-checklist/SKILL.md'])
     expect(await porcelainStatus(agentDir)).toBe('')
   })
 })
@@ -928,17 +930,16 @@ describe('dream commit message', () => {
     expect(await lastCommitSubject(agentDir)).toMatch(/^dream: 1 fragment \+ 2 new skills /)
   })
 
-  test('reports `MEMORY.md only` when only MEMORY.md changed in this commit', async () => {
-    // First commit establishes baseline so the second snapshot only sees MEMORY.md changes.
+  test('falls back to `watermarks only` when only untracked files change', async () => {
     await initRepo(agentDir)
-    await writeFile(join(agentDir, 'MEMORY.md'), '# v1\n')
     await writeFile(join(agentDir, 'memory', '2026-04-27.jsonl'), fragmentLine('frag'))
     await commitMemorySnapshot(agentDir)
 
     await writeFile(join(agentDir, 'MEMORY.md'), '# v2\n')
+    await writeFile(join(agentDir, DREAMING_STATE_FILE), '{"version":2,"dreamedThrough":{}}')
     await commitMemorySnapshot(agentDir)
 
-    expect(await lastCommitSubject(agentDir)).toMatch(/^dream: MEMORY\.md only /)
+    expect(await lastCommitSubject(agentDir)).toMatch(/^dream: watermarks only /)
   })
 
   test('falls back to `watermarks only` when neither MEMORY.md nor any stream has line additions', async () => {
