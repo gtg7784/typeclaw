@@ -75,7 +75,6 @@ describe('guard plugin', () => {
     const cases: Array<[string, string]> = [
       ['AGENTS.md', 'x'],
       ['IDENTITY.md', 'x'],
-      ['MEMORY.md', 'x'],
       ['SOUL.md', 'x'],
       ['USER.md', 'x'],
       ['package.json', 'x'],
@@ -86,6 +85,39 @@ describe('guard plugin', () => {
       const result = await hook(toolEvent('write', { path: file, content }), hookContext('/agent'))
       expect(result).toBeUndefined()
     }
+  })
+
+  test('blocks MEMORY.md for tui origin now that it is off the root allowlist', async () => {
+    const hook = await toolBeforeHook()
+
+    const result = await hook(toolEvent('write', { path: 'MEMORY.md', content: 'x' }), hookContext('/agent'))
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('nonWorkspaceWrite')
+  })
+
+  test('allows dreaming subagent to write memory/topics/foo.md', async () => {
+    const hook = await toolBeforeHook()
+
+    const result = await hook(
+      toolEvent(
+        'write',
+        { path: 'memory/topics/foo.md', content: 'x' },
+        { kind: 'subagent', subagent: 'dreaming', parentSessionId: 's1' },
+      ),
+      hookContext('/agent'),
+    )
+    expect(result).toBeUndefined()
+  })
+
+  test('blocks tui origin from writing memory/topics/foo.md', async () => {
+    const hook = await toolBeforeHook()
+
+    const result = await hook(
+      toolEvent('write', { path: 'memory/topics/foo.md', content: 'x' }, { kind: 'tui', sessionId: 's1' }),
+      hookContext('/agent'),
+    )
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('nonWorkspaceWrite')
   })
 
   test('rejects write to typeclaw.json with malformed JSON via managedConfig', async () => {
@@ -392,8 +424,8 @@ async function toolBeforeHook(): Promise<
   return hook
 }
 
-function toolEvent(tool: string, args: Record<string, unknown>): ToolBeforeEvent {
-  return { tool, sessionId: 's', callId: 'c', args }
+function toolEvent(tool: string, args: Record<string, unknown>, origin?: ToolBeforeEvent['origin']): ToolBeforeEvent {
+  return { tool, sessionId: 's', callId: 'c', args, origin }
 }
 
 function hookContext(agentDir: string): HookContext {
