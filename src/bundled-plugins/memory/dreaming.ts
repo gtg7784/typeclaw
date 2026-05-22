@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 
 import { z } from 'zod'
 
@@ -20,7 +20,7 @@ import {
 } from './dreaming-state'
 import { parseShard, renderShard, type ShardFrontmatter } from './frontmatter'
 import { listShardSlugs, loadAllShards } from './load-shards'
-import { topicShardPath, topicsDir } from './paths'
+import { streamFilePath, streamsDir, topicShardPath, topicsDir } from './paths'
 import { captureShardSnapshot, restoreShardSnapshot } from './shard-snapshot'
 import type { StreamEvent } from './stream-events'
 import { readEvents, writeEventsAtomic } from './stream-io'
@@ -63,6 +63,7 @@ const consoleLogger: DreamingLogger = {
 type StreamSnapshot = {
   date: string
   filename: string
+  displayPrefix: 'memory' | 'memory/streams'
   undreamedIds: string[]
 }
 
@@ -71,10 +72,10 @@ type StreamSnapshots = {
 }
 
 async function collectStreamSnapshots(agentDir: string, state: DreamingState): Promise<StreamSnapshots> {
-  const memoryDir = join(agentDir, 'memory')
-  if (!existsSync(memoryDir)) return { undreamed: [] }
+  const streamFiles = await listStreamFiles(agentDir)
+  if (streamFiles === null) return { undreamed: [] }
 
-  const names = await readdir(memoryDir)
+  const { dir, displayPrefix, names } = streamFiles
   const dated = names
     .map((name) => ({ name, match: STREAM_FILE_PATTERN.exec(name) }))
     .filter((x): x is { name: string; match: RegExpExecArray } => x.match !== null)
@@ -83,14 +84,33 @@ async function collectStreamSnapshots(agentDir: string, state: DreamingState): P
 
   const snapshots = await Promise.all(
     dated.map(async ({ name, date }): Promise<StreamSnapshot> => {
-      const events = await readEvents(join(memoryDir, name))
+      const events = await readEvents(join(dir, name))
       const dreamedIds = getDreamedIds(state, date)
       const undreamedIds = collectUndreamedFragmentIds(events, dreamedIds)
-      return { date, filename: name, undreamedIds }
+      return { date, filename: name, displayPrefix, undreamedIds }
     }),
   )
 
   return { undreamed: snapshots.filter((s) => s.undreamedIds.length > 0) }
+}
+
+async function listStreamFiles(
+  agentDir: string,
+): Promise<{ dir: string; displayPrefix: 'memory' | 'memory/streams'; names: string[] } | null> {
+  const streamsDirPath = streamsDir(agentDir)
+  try {
+    return { dir: streamsDirPath, displayPrefix: 'memory/streams', names: await readdir(streamsDirPath) }
+  } catch (err) {
+    if (!isEnoent(err)) throw err
+  }
+
+  const memoryDir = join(agentDir, 'memory')
+  try {
+    return { dir: memoryDir, displayPrefix: 'memory', names: await readdir(memoryDir) }
+  } catch (err) {
+    if (!isEnoent(err)) throw err
+    return null
+  }
 }
 
 function collectUndreamedFragmentIds(events: readonly StreamEvent[], dreamedIds: ReadonlySet<string>): string[] {
@@ -120,7 +140,7 @@ export type CompactionStats = {
 
 export type CompactionOptions = {
   // When false, fragment GC is suppressed (watermark GC still runs). The
-  // handler passes false whenever MEMORY.md was NOT rewritten during this
+  // handler passes false whenever memory/topics/ was NOT rewritten during this
   // dreaming pass, because in that case citedIdsByDate reflects the prior
   // run's citations — not a fresh judgment by THIS run's subagent. Dropping
   // fragments based on stale citations is fragment-eating-disease: a subagent
@@ -139,7 +159,7 @@ export type CompactionOptions = {
 //
 // GC rule 2 (fragments, gated by applyFragmentGc): drop fragment events
 // whose id is in dreamedIds but is NOT in citedIds. dreamedIds means the
-// dreaming subagent already saw this fragment; citedIds means MEMORY.md
+// dreaming subagent already saw this fragment; citedIds means memory/topics/
 // still references it. A fragment in dreamedIds-but-not-citedIds has either
 // been folded into a topic's conclusion paragraph in the subagent's own
 // words or was consciously discarded as not worth promoting; either way, it
@@ -159,10 +179,10 @@ export async function compactDailyStreams(
   options: CompactionOptions,
 ): Promise<CompactionStats> {
   const stats: CompactionStats = { filesCompacted: 0, watermarksDropped: 0, fragmentsDropped: 0 }
-  const memoryDir = join(agentDir, 'memory')
+  const useLegacyFlatStreams = !existsSync(streamsDir(agentDir))
 
   for (const date of touchedDates) {
-    const path = join(memoryDir, `${date}.jsonl`)
+    const path = useLegacyFlatStreams ? join(agentDir, 'memory', `${date}.jsonl`) : streamFilePath(agentDir, date)
     if (!existsSync(path)) continue
 
     const events = await readEvents(path)
@@ -380,31 +400,17 @@ function isEnoent(err: unknown): boolean {
 
 const SNAPSHOT_PATHS = ['memory/'] as const
 
-// MEMORY.md scaffolding is no longer in `typeclaw init`; the dreaming subagent
-// owns its existence. First run of dreaming creates an empty MEMORY.md (and
-// the memory/ directory) so the file exists for the subagent to read and for
-// the snapshot commit to track. Subsequent runs see them already present.
 async function ensureMemoryFiles(agentDir: string): Promise<void> {
-  const memoryFile = join(agentDir, 'MEMORY.md')
-  if (!existsSync(memoryFile)) {
-    await mkdir(dirname(memoryFile), { recursive: true })
-    await writeFile(memoryFile, '', { flag: 'wx' }).catch(ignoreExists)
-  }
   const memoryDir = join(agentDir, 'memory')
   if (!existsSync(memoryDir)) {
     await mkdir(memoryDir, { recursive: true })
   }
 }
 
-function ignoreExists(error: NodeJS.ErrnoException): void {
-  if (error.code !== 'EEXIST') throw error
-}
-
-// Force-add gitignored memory artifacts (memory/*.jsonl, memory/.dreaming-state.json)
-// alongside MEMORY.md so the agent folder's git history captures the
-// consolidation as a single recoverable snapshot. Skips silently when the
-// folder is not a git repo or bun is unavailable. Uses the user's global git
-// config for authorship.
+// Force-add gitignored memory artifacts so the agent folder's git history
+// captures consolidation as a single recoverable snapshot. Skips silently when
+// the folder is not a git repo or bun is unavailable. Uses the user's global
+// git config for authorship.
 //
 // After committing, the tracked memory artifacts get the `skip-worktree` index
 // flag set so manual `git status` / `git diff` ignore future runtime edits.
@@ -441,8 +447,7 @@ export async function commitMemorySnapshot(cwd: string): Promise<void> {
   // Enumerate exactly the files staged under our snapshot paths so the commit
   // pathspec only references files git knows about. `git commit -- foo bar/`
   // fails outright when `bar/` matches no tracked file, even if `foo` is
-  // staged. That's the case on early runs where MEMORY.md exists but the
-  // memory/ directory is empty (or vice versa).
+  // staged.
   const stagedNames = bun.spawn({
     cmd: ['git', 'diff', '--cached', '--name-only', '-z', '--', ...SNAPSHOT_PATHS],
     cwd,
@@ -493,10 +498,9 @@ function pickDreamEmoji(): DreamEmoji {
 // reports honestly.
 //
 // Classification:
-//   - `N fragments` when daily-stream files (memory/yyyy-MM-dd.jsonl) contain fragment events
+//   - `N fragments` when daily-stream files contain fragment events
 //   - `+ new skill 'x'` / `+ N new skills` when memory/skills/<name>/SKILL.md
 //     paths are newly added in this commit (status A, not M)
-//   - `MEMORY.md only` when only MEMORY.md changed
 //   - `watermarks only` as the fallback (e.g. only .dreaming-state.json moved)
 export async function buildCommitMessage(
   bun: { spawn: typeof Bun.spawn },
@@ -508,7 +512,7 @@ export async function buildCommitMessage(
   return `dream: ${summary} ${emojiPicker()}`
 }
 
-const STREAM_FILE_RELATIVE = /^memory\/\d{4}-\d{2}-\d{2}\.jsonl$/
+const STREAM_FILE_RELATIVE = /^memory\/(?:streams\/)?\d{4}-\d{2}-\d{2}\.jsonl$/
 const SKILL_FILE_RELATIVE = /^memory\/skills\/([^/]+)\/SKILL\.md$/
 
 async function buildDreamSummary(bun: { spawn: typeof Bun.spawn }, cwd: string, staged: string[]): Promise<string> {
@@ -524,7 +528,6 @@ async function buildDreamSummary(bun: { spawn: typeof Bun.spawn }, cwd: string, 
   if ((await numstat.exited) !== 0) return 'snapshot'
 
   let fragmentLines = 0
-  let touchedMemoryMd = false
   const streamPaths = new Set<string>()
   for (const record of raw.split('\0')) {
     if (record.length === 0) continue
@@ -533,9 +536,7 @@ async function buildDreamSummary(bun: { spawn: typeof Bun.spawn }, cwd: string, 
     const [addedStr = '', , path = ''] = record.split('\t')
     const added = Number.parseInt(addedStr, 10)
     if (!Number.isFinite(added)) continue
-    if (path === 'MEMORY.md') {
-      touchedMemoryMd = true
-    } else if (STREAM_FILE_RELATIVE.test(path)) {
+    if (STREAM_FILE_RELATIVE.test(path)) {
       if (added > 0) streamPaths.add(path)
     }
   }
@@ -548,8 +549,6 @@ async function buildDreamSummary(bun: { spawn: typeof Bun.spawn }, cwd: string, 
   const parts: string[] = []
   if (fragmentLines > 0) {
     parts.push(`${fragmentLines} fragment${fragmentLines === 1 ? '' : 's'}`)
-  } else if (touchedMemoryMd && newSkills.length === 0) {
-    parts.push('MEMORY.md only')
   }
   if (newSkills.length === 1) {
     parts.push(`new skill '${newSkills[0]}'`)
@@ -819,11 +818,11 @@ If the undreamed tails contain only watermarks, AND no procedure clears the musc
 
 function buildInitialPrompt(payload: DreamingPayload, snapshots: StreamSnapshot[], strengths: ShardStrength[]): string {
   const today = formatLocalDate()
-  const memoryDir = join(payload.agentDir, 'memory')
+  const streamDir = join(payload.agentDir, snapshots[0]?.displayPrefix ?? 'memory/streams')
   const lines: string[] = [
     `Agent folder: ${payload.agentDir}`,
     `Topic shard directory (ls, then read/write shards as needed): ${topicsDir(payload.agentDir)}`,
-    `Daily stream directory: ${memoryDir}`,
+    `Daily stream directory: ${streamDir}`,
     `Today's local date: ${today}`,
     `Dreaming state: ${join(payload.agentDir, DREAMING_STATE_FILE)}`,
   ]
@@ -843,7 +842,7 @@ function buildInitialPrompt(payload: DreamingPayload, snapshots: StreamSnapshot[
     'Undreamed fragments to consolidate. Each entry lists the daily JSONL file and the ids of fragments in that file you have not yet consolidated into topic shards. Read the file, locate each id, and decide what (if anything) belongs in a shard. Cite by id (streams/yyyy-MM-dd#<id>), not by line number.',
   )
   for (const snap of snapshots) {
-    lines.push('', `- memory/${snap.filename}:`)
+    lines.push('', `- ${snap.displayPrefix}/${snap.filename}:`)
     for (const id of snap.undreamedIds) lines.push(`    - ${id}`)
   }
   lines.push(
