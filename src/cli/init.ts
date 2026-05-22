@@ -771,12 +771,12 @@ async function pickModelForProvider(
   providerId: KnownProviderId,
   initial: KnownModelRef | undefined,
 ): Promise<StepResult<ModelOption>> {
-  const candidates = options.filter((o) => o.providerId === providerId)
+  const candidates = sortRecommendedFirst(options.filter((o) => o.providerId === providerId))
   const choice = await select<KnownModelRef>({
     message: `Pick a ${KNOWN_PROVIDERS[providerId].name} model`,
     options: candidates.map((o) => ({
       value: o.ref,
-      label: o.modelName,
+      label: formatModelLabel(o),
       hint: formatModelHint(o),
     })),
     initialValue: initial ?? candidates[0]?.ref,
@@ -863,12 +863,12 @@ async function pickVisionModel(
   providerId: KnownProviderId,
   initial: KnownModelRef | undefined,
 ): Promise<StepResult<ModelOption>> {
-  const candidates = options.filter((o) => o.providerId === providerId)
+  const candidates = sortRecommendedFirst(options.filter((o) => o.providerId === providerId))
   const choice = await select<KnownModelRef>({
     message: `Pick a vision-capable ${KNOWN_PROVIDERS[providerId].name} model`,
     options: candidates.map((o) => ({
       value: o.ref,
-      label: o.modelName,
+      label: formatModelLabel(o),
       hint: formatModelHint(o),
     })),
     initialValue: initial ?? candidates[0]?.ref,
@@ -1369,6 +1369,30 @@ function uniqueProviders(options: ModelOption[]): KnownProviderId[] {
     out.push(o.providerId)
   }
   return out
+}
+
+// Per-provider recommended model refs. Surfaces a "(Recommended)" suffix in
+// the picker label and floats the entry to the top of the list (which also
+// makes it the default `initialValue` when the caller has no prior choice).
+// Kept narrow on purpose: one recommendation per provider. gpt-5.4-mini is
+// listed under both `openai` and `openai-codex` because the same model is
+// the right default whether the user authenticates with an API key or with
+// a ChatGPT Plus/Pro subscription. claude-sonnet-4-6 follows Anthropic's
+// own current-tier guidance (see the model lineup notes in providers.ts).
+const RECOMMENDED_MODEL_REFS: ReadonlySet<KnownModelRef> = new Set<KnownModelRef>([
+  'openai/gpt-5.4-mini',
+  'openai-codex/gpt-5.4-mini',
+  'anthropic/claude-sonnet-4-6',
+])
+
+export function formatModelLabel(o: ModelOption): string {
+  return RECOMMENDED_MODEL_REFS.has(o.ref) ? `${o.modelName} (Recommended)` : o.modelName
+}
+
+export function sortRecommendedFirst(options: ModelOption[]): ModelOption[] {
+  const recommended = options.filter((o) => RECOMMENDED_MODEL_REFS.has(o.ref))
+  const rest = options.filter((o) => !RECOMMENDED_MODEL_REFS.has(o.ref))
+  return [...recommended, ...rest]
 }
 
 function formatModelHint(o: ModelOption): string {
