@@ -108,12 +108,17 @@ export async function checkCronPromotionGuard(options: {
   }
 }
 
+// See the parallel `identifiesManagedFile` rationale block in
+// role-promotion.ts — Oracle PR #305 findings #5 and #6 (symlinked
+// managed file + case-insensitive FS).
 async function pathIsCronJson(agentDir: string, targetPath: string): Promise<boolean> {
   const resolvedAgentDir = path.resolve(agentDir)
-  const realAgentDir = await resolveRealPath(resolvedAgentDir)
-  const realTargetPath = await resolveRealPath(targetPath)
-  if (path.dirname(realTargetPath) !== realAgentDir) return false
-  return path.basename(realTargetPath) === 'cron.json'
+  const canonicalManagedPath = path.join(resolvedAgentDir, 'cron.json')
+  const resolvedTarget = path.resolve(targetPath)
+  if (canonicalManagedPath === resolvedTarget) return true
+  const realCanonical = await resolveRealPath(canonicalManagedPath)
+  const realTarget = await resolveRealPath(resolvedTarget)
+  return realCanonical === realTarget
 }
 
 // Symmetric with role-promotion's refuseRiskyEdit. See Oracle PR #305

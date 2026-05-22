@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 
@@ -261,6 +261,30 @@ describe('checkCronPromotionGuard — edit safety (Oracle PR #305 finding #4)', 
     })
     expect(result?.block).toBe(true)
     expect(result?.reason).toContain('multi-edit')
+  })
+})
+
+describe('checkCronPromotionGuard — managed-file identity (Oracle PR #305 findings #5/#6)', () => {
+  test('blocks a write through a symlinked cron.json (target outside agent root)', async () => {
+    const agentDir = await makeAgentDir()
+    const realCronDir = await mkdtemp(path.join(tmpdir(), 'typeclaw-cron-target-'))
+    const realCronPath = path.join(realCronDir, 'jobs.json')
+    await writeFile(realCronPath, JSON.stringify(BASELINE_CRON, null, 2))
+    await symlink(realCronPath, path.join(agentDir, 'cron.json'))
+
+    const after = {
+      jobs: [
+        BASELINE_JOB,
+        { id: 'new', kind: 'prompt', schedule: '*/5 * * * *', prompt: 'x', scheduledByRole: 'owner' },
+      ],
+    }
+    const result = await checkCronPromotionGuard({
+      tool: 'write',
+      args: { path: 'cron.json', content: JSON.stringify(after) },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('new')
   })
 })
 
