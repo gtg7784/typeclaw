@@ -142,6 +142,27 @@ export const SLACK_APP_MANIFEST = {
       messages_tab_enabled: true,
       messages_tab_read_only_enabled: false,
     },
+    // Slash commands listed here appear in Slack's compose-box picker with
+    // their description as a tooltip. `url` is required by Slack's manifest
+    // schema even for Socket Mode bots, but is ignored at runtime when the
+    // app is in Socket Mode — Slack delivers `slash_commands` envelopes
+    // over the same WebSocket as message events. We point it at a
+    // deliberately-invalid placeholder (RFC 6761 reserved .invalid TLD)
+    // so a misconfigured (non-Socket-Mode) deployment fails fast rather
+    // than silently routing real slash invocations to a third-party URL.
+    slash_commands: [
+      {
+        command: '/stop',
+        description: 'Abort the current turn in this channel',
+        // usage_hint is intentionally omitted. Slack's manifest validator
+        // rejects an empty string ("Must be more than 0 characters") but
+        // the field is optional, so the cleanest answer is to leave it out
+        // rather than invent placeholder text for a command that takes no
+        // arguments.
+        url: 'https://example.invalid/typeclaw-uses-socket-mode',
+        should_escape: false,
+      },
+    ],
   },
   oauth_config: {
     scopes: {
@@ -150,13 +171,16 @@ export const SLACK_APP_MANIFEST = {
       // write scopes (chat, files, im/mpim/groups, pins, reactions) let the
       // agent post replies, upload attachments, open DMs, pin messages, and
       // react to messages. `channels:join` lets the bot self-join public
-      // channels it's invited to discuss in.
+      // channels it's invited to discuss in. `commands` is required for
+      // Slack to deliver `slash_commands` envelopes — without it, slash
+      // commands registered in `features` would silently fail to route.
       bot: [
         'app_mentions:read',
         'channels:history',
         'channels:join',
         'channels:read',
         'chat:write',
+        'commands',
         'emoji:read',
         'files:read',
         'files:write',

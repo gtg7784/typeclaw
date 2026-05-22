@@ -445,4 +445,21 @@ describe('printSlackAppManifestSetup', () => {
       messages_tab_read_only_enabled: false,
     })
   })
+
+  test('manifest declares /stop as a slash command with a description', () => {
+    const slashCommands = SLACK_APP_MANIFEST.features.slash_commands
+    const stop = slashCommands.find((c) => c.command === '/stop')
+    expect(stop).toBeDefined()
+    expect(stop!.description).toBeTruthy()
+  })
+
+  test('manifest grants the `commands` scope so slash_commands envelopes can route', () => {
+    expect(SLACK_APP_MANIFEST.oauth_config.scopes.bot).toContain('commands')
+  })
+
+  test('slash command url is an invalid placeholder (Socket Mode ignores it; misconfigured deploys fail fast)', () => {
+    const stop = SLACK_APP_MANIFEST.features.slash_commands.find((c) => c.command === '/stop')
+    expect(stop).toBeDefined()
+    expect(stop!.url).toContain('example.invalid')
+  })
 })

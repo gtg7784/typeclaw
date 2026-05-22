@@ -3,16 +3,19 @@ import { describe, expect, test } from 'bun:test'
 import type { SlackBotClient, SlackFile, SlackMessage } from 'agent-messenger/slackbot'
 
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
-import type { FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
+import type { ChannelKey, FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
+import { SLACK_APP_MANIFEST } from '@/cli/ui'
 
 import {
   createOutboundCallback,
   createSlackHistoryCallback,
   createSlackMembershipResolver,
   createSlackTypingTracker,
+  createSlashCommandHandler,
   createTypingCallback,
   promoteAppMentionToMessage,
   SLACK_HISTORY_LIMIT_MAX,
+  SLACK_SLASH_COMMAND_NAMES,
 } from './slack-bot'
 import { classifyInbound, type SlackInboundAppMentionEvent } from './slack-bot-classify'
 
@@ -1236,5 +1239,233 @@ describe('slack-bot createOutboundCallback', () => {
     const result = await cb(makeMsg({ text: 'hello', thread: '1700.000100' }))
     expect(result.ok).toBe(false)
     expect(clearCalls).toHaveLength(0)
+  })
+})
+
+describe('createSlashCommandHandler', () => {
+  type AckCall = Record<string, unknown> | undefined
+  type RouterCall = { key: ChannelKey; name: string; invokerId: string }
+  type RouterResult =
+    | { kind: 'handled'; name: string }
+    | { kind: 'no-live-session' }
+    | { kind: 'permission-denied' }
+    | { kind: 'ambiguous'; matchCount: number }
+    | { kind: 'unknown-command'; name: string }
+
+  function setup(routerImpl: (key: ChannelKey, name: string, invokerId: string) => Promise<RouterResult>): {
+    handler: ReturnType<typeof createSlashCommandHandler>
+    routerCalls: RouterCall[]
+    logs: { info: string[]; warn: string[]; error: string[] }
+  } {
+    const routerCalls: RouterCall[] = []
+    const logs = { info: [] as string[], warn: [] as string[], error: [] as string[] }
+    const handler = createSlashCommandHandler({
+      router: {
+        executeCommand: async (key, name, options) => {
+          routerCalls.push({ key, name, invokerId: options.invokerId })
+          return routerImpl(key, name, options.invokerId)
+        },
+      },
+      knownCommandNames: SLACK_SLASH_COMMAND_NAMES,
+      logger: {
+        info: (m) => logs.info.push(m),
+        warn: (m) => logs.warn.push(m),
+        error: (m) => logs.error.push(m),
+      },
+      formatChannelTag: async (workspace, chat) => `team=${workspace} channel=${chat}`,
+    })
+    return { handler, routerCalls, logs }
+  }
+
+  function makeArgs(
+    overrideBody: Partial<{
+      command: string
+      text: string
+      user_id: string
+      channel_id: string
+      team_id: string
+    }> = {},
+  ): { args: Parameters<ReturnType<typeof createSlashCommandHandler>>[0]; acks: AckCall[] } {
+    const acks: AckCall[] = []
+    const ack = (payload?: Record<string, unknown>): void => {
+      acks.push(payload)
+    }
+    const args = {
+      ack,
+      envelope_id: 'env-1',
+      body: {
+        command: '/stop',
+        text: '',
+        user_id: 'U-alice',
+        channel_id: 'C-general',
+        team_id: 'T-acme',
+        ...overrideBody,
+      },
+    } as Parameters<ReturnType<typeof createSlashCommandHandler>>[0]
+    return { args, acks }
+  }
+
+  test('/stop routes to executeCommand with invokerId and acks ephemerally with success text', async () => {
+    const { handler, routerCalls } = setup(async () => ({ kind: 'handled', name: 'stop' }))
+    const { args, acks } = makeArgs()
+
+    await handler(args)
+
+    expect(routerCalls).toEqual([
+      {
+        key: { adapter: 'slack-bot', workspace: 'T-acme', chat: 'C-general', thread: null },
+        name: 'stop',
+        invokerId: 'U-alice',
+      },
+    ])
+    expect(acks).toHaveLength(1)
+    expect(acks[0]).toMatchObject({ response_type: 'ephemeral' })
+    expect((acks[0] as { text: string }).text).toContain('Stopped')
+  })
+
+  test('cold-channel /stop acks with "nothing to stop"', async () => {
+    const { handler } = setup(async () => ({ kind: 'no-live-session' }))
+    const { args, acks } = makeArgs()
+
+    await handler(args)
+
+    expect(acks).toHaveLength(1)
+    expect((acks[0] as { text: string }).text).toContain('Nothing to stop')
+  })
+
+  test('permission-denied result acks with the permission-denied message', async () => {
+    const { handler } = setup(async () => ({ kind: 'permission-denied' }))
+    const { args, acks } = makeArgs()
+
+    await handler(args)
+
+    expect(acks).toHaveLength(1)
+    expect((acks[0] as { text: string }).text).toMatch(/permission/i)
+  })
+
+  test('ambiguous result acks with guidance to invoke from inside the thread', async () => {
+    const { handler } = setup(async () => ({ kind: 'ambiguous', matchCount: 2 }))
+    const { args, acks } = makeArgs()
+
+    await handler(args)
+
+    expect(acks).toHaveLength(1)
+    expect((acks[0] as { text: string }).text).toMatch(/multiple|thread/i)
+  })
+
+  test('DM channel ids resolve to workspace=@dm', async () => {
+    const { handler, routerCalls } = setup(async () => ({ kind: 'handled', name: 'stop' }))
+    const { args } = makeArgs({ user_id: 'U-bob', channel_id: 'D-bob' })
+
+    await handler(args)
+
+    expect(routerCalls[0]!.key.workspace).toBe('@dm')
+    expect(routerCalls[0]!.key.chat).toBe('D-bob')
+  })
+
+  test('unknown commands are dropped and acked with the failure message', async () => {
+    const { handler, routerCalls, logs } = setup(async () => ({ kind: 'handled', name: 'stop' }))
+    const { args, acks } = makeArgs({ command: '/totally-not-stop' })
+
+    await handler(args)
+
+    expect(routerCalls).toEqual([])
+    expect(logs.warn.some((m) => m.includes('unknown-command'))).toBe(true)
+    expect(acks).toHaveLength(1)
+  })
+
+  test('executeCommand exception is caught, acked with failure, and logged', async () => {
+    const { handler, logs } = setup(async () => {
+      throw new Error('router exploded')
+    })
+    const { args, acks } = makeArgs()
+
+    await handler(args)
+
+    expect(logs.error.some((m) => m.includes('router exploded'))).toBe(true)
+    expect(acks).toHaveLength(1)
+    expect((acks[0] as { text: string }).text).toMatch(/internal error|Could not stop/i)
+  })
+
+  test('acks exactly once when ack on happy path throws (does NOT cascade into error-path ack)', async () => {
+    // B1 + B2 fix from review: pre-fix, a thrown ack on the success path
+    // entered the outer catch which called ack again. Test asserts the
+    // exactly-once contract.
+    let ackCallCount = 0
+    const handler = createSlashCommandHandler({
+      router: { executeCommand: async () => ({ kind: 'handled', name: 'stop' }) },
+      knownCommandNames: SLACK_SLASH_COMMAND_NAMES,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      formatChannelTag: async () => 'team=T-acme channel=C-general',
+    })
+    const args = {
+      ack: () => {
+        ackCallCount++
+        throw new Error('socket gone')
+      },
+      envelope_id: 'env-1',
+      body: {
+        command: '/stop',
+        text: '',
+        user_id: 'U-alice',
+        channel_id: 'C-general',
+        team_id: 'T-acme',
+      },
+    } as Parameters<ReturnType<typeof createSlashCommandHandler>>[0]
+
+    await handler(args)
+
+    expect(ackCallCount).toBe(1)
+  })
+
+  test('manifest slash_commands list and runtime allow-list stay in sync (B3 drift guard)', () => {
+    const manifestNames = SLACK_APP_MANIFEST.features.slash_commands.map((c) => c.command.replace(/^\//, ''))
+    const allowList = Array.from(SLACK_SLASH_COMMAND_NAMES).sort()
+    expect(manifestNames.slice().sort()).toEqual(allowList)
+  })
+
+  test('ack fires BEFORE the slow formatChannelTag completes (3s budget protection)', async () => {
+    const events: Array<'router-call' | 'ack-sent' | 'channel-tag-resolved'> = []
+    let releaseTag: (() => void) | undefined
+    const tagPromise = new Promise<string>((resolve) => {
+      releaseTag = () => {
+        events.push('channel-tag-resolved')
+        resolve('team=T-acme channel=C-general')
+      }
+    })
+    const handler = createSlashCommandHandler({
+      router: {
+        executeCommand: async () => {
+          events.push('router-call')
+          return { kind: 'handled', name: 'stop' }
+        },
+      },
+      knownCommandNames: SLACK_SLASH_COMMAND_NAMES,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      formatChannelTag: () => tagPromise,
+    })
+    const ack = (): void => {
+      events.push('ack-sent')
+    }
+    const args = {
+      ack,
+      envelope_id: 'env-1',
+      body: {
+        command: '/stop',
+        text: '',
+        user_id: 'U-alice',
+        channel_id: 'C-general',
+        team_id: 'T-acme',
+      },
+    } as Parameters<ReturnType<typeof createSlashCommandHandler>>[0]
+
+    const done = handler(args)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(events).toEqual(['router-call', 'ack-sent'])
+
+    releaseTag!()
+    await done
+
+    expect(events).toEqual(['router-call', 'ack-sent', 'channel-tag-resolved'])
   })
 })
