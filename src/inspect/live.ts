@@ -54,6 +54,7 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
       wake()
       return
     }
+    if (msg.type !== 'frame') return
     const event = frameToEvent(msg.payload, msg.ts, accumulators)
     if (event !== null) {
       buffer.push(event)
@@ -171,6 +172,8 @@ function frameToEvent(
       }
     case 'cron-fire':
       return { cat: 'cron-fire', ts, jobId: payload.jobId, payload: payload.payload }
+    default:
+      return null
   }
 }
 
