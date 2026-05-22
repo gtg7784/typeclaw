@@ -2,7 +2,7 @@ import { readFile, realpath } from 'node:fs/promises'
 import path from 'node:path'
 
 import { parseConfigJson } from '@/config'
-import type { RoleConfig, RolesConfig } from '@/permissions'
+import { isBuiltinRoleName, type RoleConfig, type RolesConfig } from '@/permissions'
 
 import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
@@ -187,12 +187,36 @@ export function diffRoles(before: RolesConfig, after: RolesConfig): RolePromotio
     if (permsAdded.length > 0) {
       findings.push({ role, kind: 'permissions-added', added: permsAdded })
     }
+    if (isBuiltinDefaultsRestoration(role, beforeCfg, afterCfg)) {
+      findings.push({ role, kind: 'permissions-added', added: ['<built-in defaults restored>'] })
+    }
     const matchAdded = setDifference(readMatchRaw(afterCfg), readMatchRaw(beforeCfg))
     if (matchAdded.length > 0) {
       findings.push({ role, kind: 'match-added', added: matchAdded })
     }
   }
   return findings
+}
+
+// Oracle PR #305 finding #3. For built-in roles (owner/trusted/member/
+// guest), the runtime treats `permissions: undefined` as "use built-in
+// defaults" — and the built-in defaults can be substantial (trusted
+// carries channel.respond + cron.schedule + subagent perms +
+// security.bypass.low even though its file representation may have
+// been `permissions: []`). A write that removes an explicit
+// `permissions[]` field on a built-in role therefore re-grants the
+// built-in default set the file had narrowed away. The raw-array diff
+// at readPermissions doesn't see this (both sides flatten to []), so
+// we surface it here with a sentinel finding. Custom (non-built-in)
+// roles do not have implicit defaults, so this rule applies only when
+// the role name is built-in.
+function isBuiltinDefaultsRestoration(
+  role: string,
+  before: RoleConfig,
+  after: RoleConfig,
+): boolean {
+  if (!isBuiltinRoleName(role)) return false
+  return before.permissions !== undefined && after.permissions === undefined
 }
 
 function readPermissions(cfg: RoleConfig | undefined): string[] {

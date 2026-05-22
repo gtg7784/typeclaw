@@ -97,6 +97,39 @@ describe('diffRoles — unit', () => {
     expect(findings).toEqual([])
   })
 
+  test('flags removal of explicit permissions[] on a built-in role (Oracle PR #305 finding #3 — restores built-in defaults)', () => {
+    const findings = diffRoles(
+      { trusted: { match: [{ kind: 'tui' }], permissions: [] } },
+      { trusted: { match: [{ kind: 'tui' }] } },
+    )
+    expect(findings.length).toBe(1)
+    expect(findings[0]?.kind).toBe('permissions-added')
+    expect(findings[0]?.added).toEqual(['<built-in defaults restored>'])
+  })
+
+  test('flags built-in defaults restoration on owner too (any built-in role)', () => {
+    const findings = diffRoles(
+      { owner: { match: [{ kind: 'tui' }], permissions: ['channel.respond'] } },
+      { owner: { match: [{ kind: 'tui' }] } },
+    )
+    expect(findings.length).toBe(1)
+    expect(findings[0]?.kind).toBe('permissions-added')
+    expect(findings[0]?.added).toEqual(['<built-in defaults restored>'])
+  })
+
+  test('does NOT flag removal of explicit permissions[] on a CUSTOM role (no built-in defaults to restore)', () => {
+    const findings = diffRoles(
+      { triage: { match: [{ kind: 'tui' }], permissions: ['channel.respond'] } },
+      { triage: { match: [{ kind: 'tui' }] } },
+    )
+    expect(findings).toEqual([])
+  })
+
+  test('does NOT flag built-in roles when permissions stays undefined on both sides', () => {
+    const findings = diffRoles({ member: { match: [{ kind: 'tui' }] } }, { member: { match: [{ kind: 'tui' }] } })
+    expect(findings).toEqual([])
+  })
+
   test('flags BOTH a permission gain AND a match gain on the same role', () => {
     const findings = diffRoles(
       { trusted: { match: [], permissions: ['channel.respond'] } },
