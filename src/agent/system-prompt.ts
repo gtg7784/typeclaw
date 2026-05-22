@@ -1,3 +1,5 @@
+import { formatLocalDateTime, resolveLocalTimezoneName } from '@/shared'
+
 export const DEFAULT_SYSTEM_PROMPT = `You are a general-purpose AI agent running inside TypeClaw.
 
 TypeClaw is domain-agnostic — your purpose is defined by \`IDENTITY.md\`, your character by \`SOUL.md\`, and your operating manual by \`AGENTS.md\`. This system prompt only describes the runtime around you.
@@ -115,6 +117,36 @@ export function renderRuntimeBlock(version: string): string {
   return `## Runtime
 
 TypeClaw runtime version: ${version}.`
+}
+
+// Wall-clock anchor for the agent. Without this, models hallucinate the
+// current time (typically defaulting to a UTC-shaped guess from training
+// data), which surfaces as confidently-wrong replies like "it's 6am" when
+// the actual wall-clock is 15:11 +09:00. The container's clock is correct
+// — `-e TZ=<host-tz>` propagation makes `new Date()` resolve to host local
+// time — but the model never sees that value unless we put it in the
+// prompt.
+//
+// Positioned as the very last block of the system prompt (after memory)
+// because it changes on every session creation, which is more frequent
+// than any other section: memory changes per dreaming/memory-logger cycle,
+// gitNudge changes per session, but `now` changes per second. Pinning it
+// to the tail means every byte UP TO this block stays in the provider's
+// cache prefix across session resurrections, and only the trailing ~60
+// bytes invalidate.
+//
+// The model still needs to know this is a session-creation snapshot, not
+// a live clock: long-lived channel sessions can outlive the stamp by
+// hours, and the resource loader is not re-rendered per turn (see the
+// CreateSessionOptions doc at the top of src/agent/index.ts). The prose
+// names the snapshot semantics and tells the model how to get a fresh
+// reading when it matters (run `date` via bash).
+export function renderNowBlock(now: Date): string {
+  const iso = formatLocalDateTime(now)
+  const zone = resolveLocalTimezoneName()
+  return `## Now
+
+Session started at \`${iso}\` (${zone}). This is a session-creation snapshot, not a live clock — the value above does not advance during this session. If you need the current wall-clock time precisely (e.g. before scheduling a cron, replying with "it's 3pm", or computing a deadline), run \`date\` via bash instead of trusting this stamp; the container's timezone is set to the host's, so \`date\` returns the user's local time.`
 }
 
 // Compact replacement for DEFAULT_SYSTEM_PROMPT, used by non-interactive
