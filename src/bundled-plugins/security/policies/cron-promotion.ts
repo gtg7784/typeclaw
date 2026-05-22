@@ -41,8 +41,10 @@ export const GUARD_CRON_PROMOTION = 'cronPromotion'
 //      attacker has co-opted the role without changing it. Oracle
 //      review (PR #305) called this out as a critical bypass of the
 //      first design. The fields chosen are exactly those the cron
-//      consumer reads when it fires; metadata-only edits do not
-//      reach this list.
+//      consumer uses to decide what executes when a job fires; the
+//      consumer also reads provenance/identity fields (id,
+//      scheduledByRole, scheduledByOrigin) but those are handled
+//      separately or are audit metadata, not executable body.
 //   4. An existing job had `enabled: false` flipped to true (or
 //      unset, which schema-defaults to true). A previously-disabled
 //      privileged job becoming live is a privilege grant in the
@@ -241,11 +243,13 @@ function isPreviouslyDisabled(job: ParsedCronJob): boolean {
   return job.enabled === false
 }
 
-// Executable-body field set. Anything the cron consumer reads when it
-// fires a job belongs here; metadata/cadence fields (schedule, timezone,
-// id, enabled) are out of scope for body-mutation detection because
-// they are handled separately (role-changed, enabled-flipped) or are
-// not privilege grants at all (schedule, timezone).
+// Executable-body field set. Anything the cron consumer uses to
+// decide what executes when a job fires belongs here. Metadata and
+// cadence fields (schedule, timezone, id, enabled) are out of scope:
+// id/enabled are handled separately (job-added, enabled-flipped),
+// schedule/timezone do not change what runs (only when), and
+// provenance (scheduledByRole, scheduledByOrigin) is handled by
+// role-changed or treated as audit metadata.
 function diffJobBody(before: ParsedCronJob, after: ParsedCronJob): string[] {
   const changed: string[] = []
   if (before.kind !== after.kind) {
