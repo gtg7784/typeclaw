@@ -6,7 +6,15 @@ Full docs: **[typeclaw.dev](https://typeclaw.dev)**.
 
 ## Why?
 
-There are great agents out there. None of them were quite the shape I wanted — most are written in Go, Rust, or Python, which means plugins live outside the runtime (IPC, FFI, or a separate process). The ones in TypeScript are either too heavy or too bare.
+There are great agents out there. None of them were quite the shape I wanted:
+
+- **OpenClaw** — feature-rich, but heavy
+- **NanoClaw** — simple, but no plugin system
+- **PicoClaw** — fast, but Go (so plugins live outside the runtime)
+- **ZeroClaw** — light, but Rust (same problem, different ecosystem)
+- **Hermes Agent** — awesome, but Python
+
+None of that matters to most people. It matters to me. If you're like me, TypeClaw is the right choice.
 
 TypeClaw is the agent I wanted to use:
 
