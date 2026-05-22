@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
-import { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { AgentSession } from '@/agent'
+import { LiveSessionRegistry } from '@/agent/live-sessions'
 import { createServer } from '@/server'
 import { createStream } from '@/stream'
 
@@ -32,10 +32,12 @@ function createFakeAgent(): AgentSession & { emit: (event: unknown) => void } {
   return fake as unknown as AgentSession & { emit: (event: unknown) => void }
 }
 
-async function startServer(opts: {
-  registry?: LiveSessionRegistry
-  stream?: ReturnType<typeof createStream>
-} = {}): Promise<{ url: string }> {
+async function startServer(
+  opts: {
+    registry?: LiveSessionRegistry
+    stream?: ReturnType<typeof createStream>
+  } = {},
+): Promise<{ url: string }> {
   const built = createServer({
     port: 0,
     createSession: async () => createFakeAgent(),

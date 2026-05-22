@@ -35,11 +35,13 @@ function createFakeAgent(): FakeAgent {
   return fake as unknown as FakeAgent
 }
 
-async function startServer(opts: {
-  liveSessionRegistry?: LiveSessionRegistry
-  stream?: ReturnType<typeof createStream>
-  tuiToken?: string
-} = {}): Promise<{ url: string }> {
+async function startServer(
+  opts: {
+    liveSessionRegistry?: LiveSessionRegistry
+    stream?: ReturnType<typeof createStream>
+    tuiToken?: string
+  } = {},
+): Promise<{ url: string }> {
   const built = createServer({
     port: 0,
     createSession: async () => createFakeAgent(),
@@ -237,7 +239,8 @@ describe('/inspect WS handler', () => {
     await waitFor((m) => m.type === 'subscribed')
 
     const backfilled = received.find(
-      (m): m is Extract<InspectServerMessage, { type: 'frame' }> => m.type === 'frame' && m.payload.kind === 'broadcast',
+      (m): m is Extract<InspectServerMessage, { type: 'frame' }> =>
+        m.type === 'frame' && m.payload.kind === 'broadcast',
     )
     expect(backfilled).toBeDefined()
     if (backfilled?.type !== 'frame' || backfilled.payload.kind !== 'broadcast') throw new Error('unreachable')

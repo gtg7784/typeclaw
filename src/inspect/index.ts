@@ -167,7 +167,9 @@ async function streamSession(opts: {
   try {
     for await (const event of liveIter) {
       if (!liveAnnounced && !opts.json) {
-        opts.stdout(divider(opts.color, sessionLive ? '─── live ───' : '─── live (session not in registry; broadcasts only) ───'))
+        opts.stdout(
+          divider(opts.color, sessionLive ? '─── live ───' : '─── live (session not in registry; broadcasts only) ───'),
+        )
         liveAnnounced = true
       }
       emit(event)

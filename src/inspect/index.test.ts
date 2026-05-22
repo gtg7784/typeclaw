@@ -225,11 +225,7 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
 
 describe('runInspect — live tail (when liveSource is provided)', () => {
   test('replays JSONL then prints the live divider, then yields live events', async () => {
-    await seedSession(
-      'a_ses_livet.jsonl',
-      [metaLine({ kind: 'tui' }), userLine('hi')],
-      1000,
-    )
+    await seedSession('a_ses_livet.jsonl', [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
     const sink = captureSink()
 
     async function* fakeLive(): AsyncGenerator<import('./types').InspectEvent> {

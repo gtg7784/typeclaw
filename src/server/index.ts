@@ -1112,7 +1112,11 @@ function handleInspectMessage(
       sendInspect(ws, {
         type: 'frame',
         ts: event.ts,
-        payload: { kind: 'broadcast', payload: event.payload, ...(event.meta !== undefined ? { meta: event.meta } : {}) },
+        payload: {
+          kind: 'broadcast',
+          payload: event.payload,
+          ...(event.meta !== undefined ? { meta: event.meta } : {}),
+        },
       })
     }
     for (const event of stream.scan({ sinceTs: msg.sinceMs, target: { kind: 'cron' } })) {
@@ -1138,7 +1142,11 @@ function handleInspectMessage(
       sendInspect(ws, {
         type: 'frame',
         ts: event.ts,
-        payload: { kind: 'broadcast', payload: event.payload, ...(event.meta !== undefined ? { meta: event.meta } : {}) },
+        payload: {
+          kind: 'broadcast',
+          payload: event.payload,
+          ...(event.meta !== undefined ? { meta: event.meta } : {}),
+        },
       })
     })
     ws.data.unsubCron = stream.subscribe({ target: { kind: 'cron' } }, (event) => {
@@ -1235,9 +1243,7 @@ function buildMessageEndPayload(sessionId: string, message: unknown): InspectFra
 
 function readMessageUsage(
   value: unknown,
-):
-  | { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: number }
-  | null {
+): { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens: number; cost: number } | null {
   if (typeof value !== 'object' || value === null) return null
   const u = value as Record<string, unknown>
   const cost = u.cost as Record<string, unknown> | undefined
