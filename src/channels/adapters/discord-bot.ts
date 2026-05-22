@@ -1,5 +1,9 @@
 import { DiscordBotClient, DiscordBotListener } from 'agent-messenger/discordbot'
-import { DiscordIntent, type DiscordGatewayMessageCreateEvent } from 'agent-messenger/discordbot'
+import {
+  DiscordIntent,
+  type DiscordGatewayInteractionEvent,
+  type DiscordGatewayMessageCreateEvent,
+} from 'agent-messenger/discordbot'
 
 import {
   MEMBERSHIP_ENUMERATION_CAP,
@@ -26,6 +30,26 @@ import type {
 
 import { createDiscordChannelResolver } from './discord-bot-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './discord-bot-classify'
+import {
+  ackInteraction,
+  parseInteractionAsCommand,
+  registerCommands,
+  type DiscordCommandDeclaration,
+} from './discord-bot-slash-commands'
+
+// One declared slash command per logical agent gesture. /stop maps to the
+// existing channel-command of the same name in the router. Adding new
+// commands here is the documented extension point: declare the entry here,
+// then add the matching handler in createChannelRouter's command registry.
+const SLASH_COMMANDS: readonly DiscordCommandDeclaration[] = [
+  { name: 'stop', description: 'Abort the current turn in this channel' },
+]
+const SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set(SLASH_COMMANDS.map((c) => c.name))
+
+const STOP_REPLY_ABORTED = 'Stopped the current turn.'
+const STOP_REPLY_NO_LIVE_SESSION = 'Nothing to stop — no active turn in this channel.'
+const STOP_REPLY_FAILED = 'Could not stop the current turn (internal error).'
+const STOP_REPLY_PERMISSION_DENIED = 'You do not have permission to stop the current turn in this channel.'
 
 const DISCORD_API_BASE = 'https://discord.com/api/v10'
 
@@ -66,6 +90,10 @@ export type DiscordBotAdapterOptions = {
   configRef: () => ChannelAdapterConfig
   token: string
   logger?: DiscordBotAdapterLogger
+  // Injectable for tests so adapter integration tests can assert on the
+  // exact REST calls without monkey-patching globalThis.fetch. Production
+  // callers leave it undefined to use the global fetch.
+  fetchImpl?: typeof fetch
 }
 
 export type DiscordBotAdapter = {
@@ -433,9 +461,91 @@ export function createFetchAttachmentCallback(deps: {
   }
 }
 
+export type InteractionHandlerDeps = {
+  router: Pick<ChannelRouter, 'executeCommand'>
+  knownCommandNames: ReadonlySet<string>
+  logger: DiscordBotAdapterLogger
+  formatChannelTag: (workspace: string, chat: string) => Promise<string>
+  fetchImpl?: typeof fetch
+}
+
+export function createInteractionHandler(
+  deps: InteractionHandlerDeps,
+): (event: DiscordGatewayInteractionEvent) => Promise<void> {
+  const fetchImpl = deps.fetchImpl ?? fetch
+  return async (event) => {
+    try {
+      const parsed = parseInteractionAsCommand(event, deps.knownCommandNames)
+      if (parsed.kind === 'ignore') {
+        // 'not-application-command' is the common case (buttons, modals,
+        // autocomplete); emit at warn only when we dropped something we
+        // ostensibly handle.
+        if (parsed.reason !== 'not-application-command') {
+          deps.logger.warn(`[discord-bot] interaction id=${event.id} dropped reason=${parsed.reason}`)
+        }
+        return
+      }
+      const { command } = parsed
+
+      // Pre-ACK: emit ONE line with bare ids only (no formatChannelTag).
+      // Discord's 3s ack budget covers everything until the callback POST
+      // returns 2xx; name resolution involves two Discord REST calls that
+      // can blow the budget on a slow API minute. Decorative logging with
+      // resolved names happens AFTER the ack.
+      deps.logger.info(
+        `[discord-bot] interaction /${command.name} id=${event.id} invoker=${command.invokerId} guild=${command.key.workspace} channel=${command.key.chat}`,
+      )
+
+      const result = await deps.router.executeCommand(command.key, command.name, {
+        invokerId: command.invokerId,
+      })
+      const replyContent =
+        result.kind === 'handled'
+          ? STOP_REPLY_ABORTED
+          : result.kind === 'no-live-session'
+            ? STOP_REPLY_NO_LIVE_SESSION
+            : result.kind === 'permission-denied'
+              ? STOP_REPLY_PERMISSION_DENIED
+              : STOP_REPLY_FAILED
+
+      const ack = await ackInteraction({
+        interactionId: command.interactionId,
+        interactionToken: command.interactionToken,
+        content: replyContent,
+        fetchImpl,
+      })
+      if (!ack.ok) {
+        // Discord's interaction token is single-use per callback type and
+        // ~15min total; once we miss the 3s ack window the user sees
+        // "This interaction failed" in the UI. The abort still happened
+        // server-side — only the user-visible confirmation is lost.
+        deps.logger.warn(`[discord-bot] interaction /${command.name} ack failed: ${ack.error}`)
+      }
+
+      // Decorative post-ack logging: resolve channel/guild names now that
+      // the 3s budget is no longer a concern. Best-effort — if name
+      // resolution fails we already logged bare ids above.
+      try {
+        const inboundTag = await deps.formatChannelTag(command.key.workspace, command.key.chat)
+        deps.logger.info(`[discord-bot] interaction /${command.name} result=${result.kind} ${inboundTag}`)
+      } catch (err) {
+        deps.logger.info(
+          `[discord-bot] interaction /${command.name} result=${result.kind} (channel-tag resolution failed: ${describe(err)})`,
+        )
+      }
+    } catch (err) {
+      deps.logger.error(`[discord-bot] handleInteraction failed: ${describe(err)}`)
+    }
+  }
+}
+
+export const DISCORD_SLASH_COMMANDS = SLASH_COMMANDS
+export const DISCORD_SLASH_COMMAND_NAMES = SLASH_COMMAND_NAMES
+
 export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): DiscordBotAdapter {
   const logger = options.logger ?? consoleLogger
   const client = new DiscordBotClient()
+  const fetchImpl = options.fetchImpl ?? fetch
   let listener: DiscordBotListener | null = null
   let botUserId: string | null = null
   let started = false
@@ -478,6 +588,28 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
   })
 
   const fetchAttachmentCallback = createFetchAttachmentCallback({ token: options.token, logger })
+
+  const interactionHandler = createInteractionHandler({
+    router: options.router,
+    knownCommandNames: SLASH_COMMAND_NAMES,
+    logger,
+    formatChannelTag,
+    fetchImpl,
+  })
+
+  const handleInteractionCreate = async (event: DiscordGatewayInteractionEvent): Promise<void> => {
+    inflightInbounds++
+    try {
+      await interactionHandler(event)
+    } finally {
+      inflightInbounds--
+      if (inflightInbounds === 0 && stopWaiters.length > 0) {
+        const waiters = stopWaiters
+        stopWaiters = []
+        for (const w of waiters) w()
+      }
+    }
+  }
 
   const handleMessageCreate = async (event: DiscordGatewayMessageCreateEvent): Promise<void> => {
     inflightInbounds++
@@ -530,6 +662,33 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       listener.on('connected', (info) => {
         botUserId = info.user.id
         logger.info(`[discord-bot] connected as ${info.user.username} (${info.user.id})`)
+        // For bots, the gateway's user.id IS the application id — the same
+        // value is required for both /me lookups and /applications/{id}/
+        // commands. Fire-and-forget registration so a slow Discord API
+        // call (or a 403 from missing applications.commands scope) doesn't
+        // block the listener from receiving messages. Text-prefix /stop
+        // keeps working regardless.
+        void registerCommands({
+          token: options.token,
+          applicationId: info.user.id,
+          commands: SLASH_COMMANDS,
+          fetchImpl,
+        }).then((result) => {
+          if (result.ok) {
+            logger.info(
+              `[discord-bot] slash commands registered (${SLASH_COMMANDS.map((c) => `/${c.name}`).join(' ')})`,
+            )
+          } else {
+            // 403 here is almost always missing applications.commands scope
+            // on the OAuth invite URL — operator-fixable, but the listener
+            // continues. Adding the hint inline so an operator doesn't have
+            // to grep docs to recognize the failure mode.
+            logger.warn(
+              `[discord-bot] slash command registration failed: ${result.error}` +
+                ' (if 403, re-invite the bot with the applications.commands scope)',
+            )
+          }
+        })
       })
       listener.on('disconnected', () => {
         logger.warn('[discord-bot] disconnected; SDK will reconnect with backoff')
@@ -539,6 +698,9 @@ export function createDiscordBotAdapter(options: DiscordBotAdapterOptions): Disc
       })
       listener.on('message_create', (event) => {
         void handleMessageCreate(event)
+      })
+      listener.on('interaction_create', (event) => {
+        void handleInteractionCreate(event)
       })
 
       options.router.registerOutbound('discord-bot', outboundCallback)

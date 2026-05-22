@@ -31,6 +31,7 @@ function fakeRouter(
     getSelfAliases: () => [],
     stop: async () => {},
     liveCount: () => 0,
+    executeCommand: async () => ({ kind: 'no-live-session' }),
   }
 }
 

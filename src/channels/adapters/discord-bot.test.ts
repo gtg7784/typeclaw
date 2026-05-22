@@ -5,15 +5,19 @@ import { DiscordIntent } from 'agent-messenger/discordbot'
 
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 import type { FetchHistoryResult, HistoryCallback, OutboundMessage } from '@/channels/types'
+import type { ChannelKey } from '@/channels/types'
 
 import {
   createDiscordHistoryCallback,
   createDiscordMembershipResolver,
+  createInteractionHandler,
   createOutboundCallback,
   createTypingCallback,
   DISCORD_BOT_INTENTS,
   DISCORD_HISTORY_LIMIT_MAX,
+  DISCORD_SLASH_COMMAND_NAMES,
 } from './discord-bot'
+import { DISCORD_SLASH_COMMAND_TYPE_CHAT_INPUT } from './discord-bot-slash-commands'
 
 describe('discord-bot gateway intents', () => {
   test('includes MessageContent (privileged) so inbound messages carry text', () => {
@@ -817,5 +821,228 @@ describe('discord-bot createOutboundCallback', () => {
     })
     await cb(makeMsg({ text: undefined, attachments: [{ path: '/agent/a.png' }] }))
     expect(uploads).toEqual([{ chat: 'c1', path: '/host/mounts/agent/a.png' }])
+  })
+})
+
+describe('createInteractionHandler', () => {
+  type CapturedCall = { url: string; init: RequestInit }
+  type RouterCall = { key: ChannelKey; name: string; invokerId: string }
+  type RouterResult =
+    | { kind: 'handled'; name: string }
+    | { kind: 'no-live-session' }
+    | { kind: 'permission-denied' }
+    | { kind: 'unknown-command'; name: string }
+
+  function setup(
+    routerImpl: (key: ChannelKey, name: string, invokerId: string) => Promise<RouterResult>,
+    formatChannelTagImpl?: (workspace: string, chat: string) => Promise<string>,
+  ): {
+    handler: ReturnType<typeof createInteractionHandler>
+    fetchCalls: CapturedCall[]
+    routerCalls: RouterCall[]
+    logs: { info: string[]; warn: string[]; error: string[] }
+  } {
+    const fetchCalls: CapturedCall[] = []
+    const routerCalls: RouterCall[] = []
+    const logs = { info: [] as string[], warn: [] as string[], error: [] as string[] }
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      fetchCalls.push({ url, init })
+      return new Response('', { status: 204 })
+    }) as unknown as typeof fetch
+    const handler = createInteractionHandler({
+      router: {
+        executeCommand: async (key, name, options) => {
+          routerCalls.push({ key, name, invokerId: options.invokerId })
+          return routerImpl(key, name, options.invokerId)
+        },
+      },
+      knownCommandNames: DISCORD_SLASH_COMMAND_NAMES,
+      logger: {
+        info: (m) => logs.info.push(m),
+        warn: (m) => logs.warn.push(m),
+        error: (m) => logs.error.push(m),
+      },
+      formatChannelTag: formatChannelTagImpl ?? (async (workspace, chat) => `guild=${workspace} channel=${chat}`),
+      fetchImpl,
+    })
+    return { handler, fetchCalls, routerCalls, logs }
+  }
+
+  function interaction(over: Record<string, unknown> = {}): Parameters<ReturnType<typeof createInteractionHandler>>[0] {
+    return {
+      type: 'INTERACTION_CREATE',
+      id: 'i-1',
+      application_id: 'app-1',
+      token: 'tok-abc',
+      channel_id: 'c1',
+      guild_id: 'g1',
+      member: { user: { id: 'u-alice' } },
+      data: { name: 'stop', type: DISCORD_SLASH_COMMAND_TYPE_CHAT_INPUT },
+      ...over,
+    } as Parameters<ReturnType<typeof createInteractionHandler>>[0]
+  }
+
+  test('/stop interaction routes to executeCommand with the correct ChannelKey, forwards the invoker, and acks Discord', async () => {
+    const { handler, fetchCalls, routerCalls } = setup(async () => ({ kind: 'handled', name: 'stop' }))
+
+    await handler(interaction())
+
+    expect(routerCalls).toEqual([
+      {
+        key: { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null },
+        name: 'stop',
+        invokerId: 'u-alice',
+      },
+    ])
+    expect(fetchCalls).toHaveLength(1)
+    expect(fetchCalls[0]!.url).toBe('https://discord.com/api/v10/interactions/i-1/tok-abc/callback')
+    const body = JSON.parse(fetchCalls[0]!.init.body as string)
+    expect(body.data.content).toContain('Stopped')
+    expect(body.data.flags).toBe(64)
+  })
+
+  test('cold-channel /stop acks with "nothing to stop" and does not retry', async () => {
+    const { handler, fetchCalls, routerCalls } = setup(async () => ({ kind: 'no-live-session' }))
+
+    await handler(interaction())
+
+    expect(routerCalls).toHaveLength(1)
+    expect(fetchCalls).toHaveLength(1)
+    const body = JSON.parse(fetchCalls[0]!.init.body as string)
+    expect(body.data.content).toContain('Nothing to stop')
+  })
+
+  test('non-CHAT_INPUT interactions (buttons, modals, autocomplete) are silently dropped', async () => {
+    const { handler, fetchCalls, routerCalls, logs } = setup(async () => ({ kind: 'handled', name: 'stop' }))
+
+    await handler(interaction({ data: { name: 'stop', type: 2 } }))
+
+    expect(routerCalls).toEqual([])
+    expect(fetchCalls).toEqual([])
+    expect(logs.warn).toEqual([])
+  })
+
+  test('unknown registered command name is dropped with a warn log (defensive)', async () => {
+    const { handler, fetchCalls, routerCalls, logs } = setup(async () => ({ kind: 'handled', name: 'stop' }))
+
+    await handler(interaction({ data: { name: 'totally-not-stop', type: DISCORD_SLASH_COMMAND_TYPE_CHAT_INPUT } }))
+
+    expect(routerCalls).toEqual([])
+    expect(fetchCalls).toEqual([])
+    expect(logs.warn.some((m) => m.includes('unknown-command'))).toBe(true)
+  })
+
+  test('DM interaction (no guild) maps workspace to @dm and resolves invoker from user.id', async () => {
+    const { handler, routerCalls } = setup(async () => ({ kind: 'handled', name: 'stop' }))
+
+    await handler(
+      interaction({
+        guild_id: undefined,
+        member: undefined,
+        user: { id: 'u-bob', username: 'bob' },
+      }),
+    )
+
+    expect(routerCalls).toEqual([
+      {
+        key: { adapter: 'discord-bot', workspace: '@dm', chat: 'c1', thread: null },
+        name: 'stop',
+        invokerId: 'u-bob',
+      },
+    ])
+  })
+
+  test('ack failure is logged but does not throw (abort already happened server-side)', async () => {
+    const fetchCalls: CapturedCall[] = []
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      fetchCalls.push({ url, init })
+      return new Response('{"message":"Unknown interaction"}', { status: 404 })
+    }) as unknown as typeof fetch
+    const logs = { info: [] as string[], warn: [] as string[], error: [] as string[] }
+    const handler = createInteractionHandler({
+      router: { executeCommand: async () => ({ kind: 'handled', name: 'stop' }) },
+      knownCommandNames: DISCORD_SLASH_COMMAND_NAMES,
+      logger: {
+        info: (m) => logs.info.push(m),
+        warn: (m) => logs.warn.push(m),
+        error: (m) => logs.error.push(m),
+      },
+      formatChannelTag: async () => 'guild=g1 channel=c1',
+      fetchImpl,
+    })
+
+    await handler(interaction())
+
+    expect(logs.warn.some((m) => m.includes('ack failed'))).toBe(true)
+    expect(logs.error).toEqual([])
+  })
+
+  test('exception inside executeCommand is caught and logged as error', async () => {
+    const { handler, logs } = setup(async () => {
+      throw new Error('router exploded')
+    })
+
+    await handler(interaction())
+
+    expect(logs.error.some((m) => m.includes('router exploded'))).toBe(true)
+  })
+
+  test('permission-denied result acks with the permission-denied message (visible to invoker)', async () => {
+    const { handler, fetchCalls } = setup(async () => ({ kind: 'permission-denied' }))
+
+    await handler(interaction())
+
+    expect(fetchCalls).toHaveLength(1)
+    const body = JSON.parse(fetchCalls[0]!.init.body as string)
+    expect(body.data.content).toMatch(/permission/i)
+    expect(body.data.flags).toBe(64)
+  })
+
+  test('ack is sent BEFORE the slow formatChannelTag completes (3s budget protection)', async () => {
+    // Fixed clock — measure when ack is sent relative to formatChannelTag.
+    const events: Array<{ at: number; kind: 'router-call' | 'ack-sent' | 'channel-tag-resolved' }> = []
+    let clock = 0
+    const tick = (): number => ++clock
+
+    const fetchCalls: CapturedCall[] = []
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      fetchCalls.push({ url, init })
+      events.push({ at: tick(), kind: 'ack-sent' })
+      return new Response('', { status: 204 })
+    }) as unknown as typeof fetch
+
+    let releaseTag: (() => void) | undefined
+    const tagPromise = new Promise<string>((resolve) => {
+      releaseTag = () => {
+        events.push({ at: tick(), kind: 'channel-tag-resolved' })
+        resolve('guild=g1-name channel=c1-name')
+      }
+    })
+
+    const handler = createInteractionHandler({
+      router: {
+        executeCommand: async () => {
+          events.push({ at: tick(), kind: 'router-call' })
+          return { kind: 'handled', name: 'stop' }
+        },
+      },
+      knownCommandNames: DISCORD_SLASH_COMMAND_NAMES,
+      logger: { info: () => {}, warn: () => {}, error: () => {} },
+      formatChannelTag: () => tagPromise,
+      fetchImpl,
+    })
+
+    const handlerDone = handler(interaction())
+    // Wait long enough for router.executeCommand and ack to complete, but
+    // hold formatChannelTag back. If the ack-first ordering is correct, the
+    // ack already fired before we release the tag.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(fetchCalls).toHaveLength(1)
+    expect(events.map((e) => e.kind)).toEqual(['router-call', 'ack-sent'])
+
+    releaseTag!()
+    await handlerDone
+
+    expect(events.map((e) => e.kind)).toEqual(['router-call', 'ack-sent', 'channel-tag-resolved'])
   })
 })

@@ -1848,6 +1848,117 @@ describe('ChannelRouter commands', () => {
   })
 })
 
+describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
+  test('stop on a live session aborts the in-flight turn', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    let releasePrompt: (() => void) | undefined
+
+    await router.route(inbound({ text: 'long task' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length === 1)
+
+    const result = await router.executeCommand(KEY, 'stop', { invokerId: 'alice' })
+    releasePrompt!()
+    await draining
+
+    expect(result).toEqual({ kind: 'handled', name: 'stop' })
+    expect(sessions[0]!.aborted).toBe(1)
+  })
+
+  test('stop on a queued (pre-drain) session clears the queue and aborts', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'queued' }))
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    const result = await router.executeCommand(KEY, 'stop', { invokerId: 'alice' })
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(result).toEqual({ kind: 'handled', name: 'stop' })
+    expect(sessions[0]!.aborted).toBe(1)
+    expect(sessions[0]!.prompts).toEqual([])
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+  })
+
+  test('stop on a cold channel returns no-live-session (no abort, no session created)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    const result = await router.executeCommand(KEY, 'stop', { invokerId: 'alice' })
+
+    expect(result).toEqual({ kind: 'no-live-session' })
+    expect(sessions).toHaveLength(0)
+  })
+
+  test('unknown command returns unknown-command without touching session state', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'hi' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.aborted).toBe(0)
+
+    const result = await router.executeCommand(KEY, 'nuke', { invokerId: 'alice' })
+
+    expect(result).toEqual({ kind: 'unknown-command', name: 'nuke' })
+    expect(sessions[0]!.aborted).toBe(0)
+  })
+
+  test('name lookup is case-insensitive (defensive — slash-command sources may send mixed case)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'hi' }))
+    await router.__testing!.flushDebounce(KEY)
+    const result = await router.executeCommand(KEY, 'STOP', { invokerId: 'alice' })
+
+    expect(result).toEqual({ kind: 'handled', name: 'stop' })
+    expect(sessions[0]!.aborted).toBe(1)
+  })
+
+  test('invoker without channel.respond is permission-denied; session NOT aborted', async () => {
+    const allowAliceOnly: PermissionService = {
+      has: (origin) => origin !== undefined && origin.kind === 'channel' && origin.lastInboundAuthorId === 'alice',
+      resolveRole: () => 'member',
+      describe: () => ({ role: 'member', permissions: ['channel.respond'] }),
+      replaceRoles: () => {},
+    }
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, { permissions: allowAliceOnly })
+
+    await router.route(inbound({ text: 'hi', authorId: 'alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+
+    const result = await router.executeCommand(KEY, 'stop', { invokerId: 'mallory' })
+
+    expect(result).toEqual({ kind: 'permission-denied' })
+    expect(sessions[0]!.aborted).toBe(0)
+  })
+
+  test('permission gate runs before live-session lookup so denied invokers cannot probe session presence', async () => {
+    const denyAll: PermissionService = {
+      has: () => false,
+      resolveRole: () => 'guest',
+      describe: () => ({ role: 'guest', permissions: [] }),
+      replaceRoles: () => {},
+    }
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir, { permissions: denyAll })
+
+    const result = await router.executeCommand(KEY, 'stop', { invokerId: 'mallory' })
+
+    expect(result).toEqual({ kind: 'permission-denied' })
+    expect(sessions).toHaveLength(0)
+  })
+})
+
 describe('ChannelRouter typing indicator', () => {
   test('does not fire typing for an observe-only inbound', async () => {
     const dir = await tempDir()
