@@ -1,11 +1,12 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { RunSession, SubagentContext } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
+import { appendTool } from './append-tool'
 import {
   createMemoryLoggerSubagent,
   isMemoryLoggerPayload,
@@ -29,6 +30,7 @@ function watermark(source: string, entry: string, id = `w-${entry}`): string {
 function makeAgentDir(): string {
   const root = mkdtempSync(join(tmpdir(), 'memory-agent-'))
   mkdirSync(join(root, 'memory'))
+  mkdirSync(join(root, 'memory', 'streams'))
   mkdirSync(join(root, 'sessions'))
   return root
 }
@@ -295,7 +297,7 @@ describe('memoryLoggerSubagent', () => {
     const prompt = runSessionCalls[0]!.userPrompt!
     expect(prompt).toContain(transcript)
     expect(prompt).toContain('ses_abc')
-    expect(prompt).toMatch(/memory\/\d{4}-\d{2}-\d{2}\.jsonl/)
+    expect(prompt).toMatch(/memory\/streams\/\d{4}-\d{2}-\d{2}\.jsonl/)
   })
 
   test('handler includes channel location and participants in the initial prompt', async () => {
@@ -346,7 +348,7 @@ describe('memoryLoggerSubagent', () => {
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
     const today = formatLocalDate()
-    writeFileSync(join(agentDir, 'memory', `${today}.jsonl`), fragment('ses_abc', 'watermrk'))
+    writeFileSync(join(agentDir, 'memory', 'streams', `${today}.jsonl`), fragment('ses_abc', 'watermrk'))
 
     const { runSessionCalls } = await invokeWith(
       { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
@@ -368,7 +370,7 @@ describe('memoryLoggerSubagent', () => {
     const yesterdayName = `${yyyy}-${mm}-${dd}.jsonl`
     expect(yesterdayName).not.toBe(`${today}.jsonl`)
     writeFileSync(
-      join(agentDir, 'memory', yesterdayName),
+      join(agentDir, 'memory', 'streams', yesterdayName),
       [fragment('ses_abc', 'yesterday-morning'), watermark('ses_abc', 'yesterday-evening')].join(''),
     )
 
@@ -481,6 +483,42 @@ describe('memoryLoggerSubagent', () => {
     }
     await expect(subagent.handler!(ctx, runSession)).rejects.toThrow('LLM blew up')
     expect(warnings.some((m) => m.includes('[memory-logger] ses_abc') && m.includes('LLM blew up'))).toBe(true)
+  })
+
+  test('creates memory/streams/ on first write if absent', async () => {
+    const agentDir = mkdtempSync(join(tmpdir(), 'memory-agent-'))
+    mkdirSync(join(agentDir, 'memory'))
+    mkdirSync(join(agentDir, 'sessions'))
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+
+    const runSession: RunSession = async () => {
+      await appendTool.execute(
+        {
+          topic: 'Test',
+          body: 'Test body',
+          source: 'ses_abc',
+          entry: 'entry_1',
+          latestEntryId: 'entry_1',
+        },
+        {
+          signal: undefined,
+          sessionId: 'test',
+          agentDir,
+          logger: { info: () => {}, warn: () => {}, error: () => {} },
+        },
+      )
+    }
+    const ctx: SubagentContext<MemoryLoggerPayload> = {
+      userPrompt: '',
+      agentDir,
+      payload: { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+    }
+    await silentSubagent.handler!(ctx, runSession)
+
+    const today = formatLocalDate()
+    expect(existsSync(join(agentDir, 'memory', 'streams'))).toBe(true)
+    expect(existsSync(join(agentDir, 'memory', 'streams', `${today}.jsonl`))).toBe(true)
   })
 
   test('the default exported memoryLoggerSubagent still has a handler (back-compat)', () => {

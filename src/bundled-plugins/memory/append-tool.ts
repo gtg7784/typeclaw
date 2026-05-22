@@ -1,5 +1,5 @@
 import { mkdir } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { dirname } from 'node:path'
 
 import { z } from 'zod'
 
@@ -7,6 +7,7 @@ import { defineTool } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
 import { fragmentContentHash } from './fragment-parser'
+import { streamFilePath } from './paths'
 import { detectSecrets } from './secret-detector'
 import { newEventId, timestampFromId } from './stream-events'
 import type { FragmentEvent, WatermarkEvent } from './stream-events'
@@ -97,7 +98,7 @@ export const advanceWatermarkTool = defineTool({
 })
 
 function dailyStreamPath(agentDir: string): string {
-  return join(agentDir, 'memory', `${formatLocalDate()}.jsonl`)
+  return streamFilePath(agentDir, formatLocalDate())
 }
 
 function assertNoSecrets(content: string): void {

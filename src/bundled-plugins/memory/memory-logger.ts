@@ -8,6 +8,7 @@ import { formatLocalDate } from '@/shared'
 
 import { appendTool, advanceWatermarkTool } from './append-tool'
 import { findEntryTool } from './find-entry-tool'
+import { streamFilePath, streamsDir } from './paths'
 import { readLatestWatermark } from './watermark'
 
 export const memoryLoggerPayloadSchema = z.object({
@@ -140,7 +141,7 @@ The \`append\` tool will refuse content that contains a recognizable credential 
 
 # Read existing memory first
 
-Before reading the transcript, read \`MEMORY.md\` and the current \`memory/yyyy-MM-dd.jsonl\` stream file. You need that context for three reasons:
+Before reading the transcript, read \`MEMORY.md\` and the current \`memory/streams/yyyy-MM-dd.jsonl\` stream file. You need that context for three reasons:
 
 - **Notice contradictions.** If the transcript supersedes existing memory, write a fragment that names the prior memory and supersedes it.
 - **Notice violations.** If existing memory contains a commitment the agent just broke, that's a high-value fragment.
@@ -295,8 +296,8 @@ export function createMemoryLoggerSubagent(
     },
     handler: async (ctx, runSession) => {
       const today = formatLocalDate()
-      const memoryDir = join(ctx.payload.agentDir, 'memory')
-      const streamFile = join(memoryDir, `${today}.jsonl`)
+      const memoryDir = streamsDir(ctx.payload.agentDir)
+      const streamFile = streamFilePath(ctx.payload.agentDir, today)
       const watermark = await readLatestWatermark(memoryDir, ctx.payload.parentSessionId)
       const start = Date.now()
       logger.info(
