@@ -132,51 +132,65 @@ describe('listShardSlugs', () => {
 })
 
 describe('loadAllShards shard cache', () => {
-  test('serves cached shard when mtime + size are unchanged (proves the readFile fast path)', async () => {
+  test('serves cached shard objects by reference when disk is unchanged (proves the readFile fast path)', async () => {
     const agentDir = await makeAgentDir()
     await writeShard(agentDir, 'alpha', 'Alpha', 'v1-body\n')
-    const path = topicShardPath(agentDir, 'alpha')
-
-    // Pin both atime and mtime to an integer-second value before priming the
-    // cache. utimes() on macOS HFS+/APFS truncates the fractional ms portion,
-    // so reading-back-and-restoring is NOT a round-trip — the first stat
-    // returns sub-ms precision but the post-utimes stat returns integer ms.
-    // Pinning to an integer-second value up front makes the round-trip
-    // mtime-stable and lets us actually exercise the cache-hit path.
-    const pinnedTime = new Date(1779000000000)
-    await utimes(path, pinnedTime, pinnedTime)
 
     const first = await loadAllShards(agentDir)
     expect(first[0]?.body).toBe('v1-body\n')
 
-    // Overwrite with same-length bytes, then re-pin mtime to the same value.
-    // The cache invalidation key (mtimeMs + size) is now unchanged. If the
-    // cache is honored, the next call returns stale v1 body even though
-    // disk holds v2. Content-vs-cache divergence stands in for "did we
-    // readFile again?" since the production payoff is per-prompt latency,
-    // not disk content.
-    await writeFile(path, shardText('Alpha', 'v2-body\n'), 'utf8')
-    await utimes(path, pinnedTime, pinnedTime)
-    const cached = await loadAllShards(agentDir)
-    expect(cached[0]?.body).toBe('v1-body\n')
-
-    __resetShardCacheForTests()
-    const fresh = await loadAllShards(agentDir)
-    expect(fresh[0]?.body).toBe('v2-body\n')
+    // Cache hit returns the SAME object instance (no readFile, no parseShard,
+    // no allocation). Reference equality is the cleanest behavioral proof
+    // that the readFile fast path was taken -- a fresh read would allocate
+    // a new `{ frontmatter, body }` object on every call.
+    const second = await loadAllShards(agentDir)
+    expect(second[0]).toBe(first[0])
   })
 
-  test('invalidates a cached shard when its mtime changes', async () => {
+  test('invalidates the cached shard when its mtime changes (same size)', async () => {
     const agentDir = await makeAgentDir()
-    await writeShard(agentDir, 'alpha', 'Alpha', 'v1\n')
+    const path = topicShardPath(agentDir, 'alpha')
+    await writeShard(agentDir, 'alpha', 'Alpha', 'same-len-v1\n')
+
+    // Pin a known initial timestamp so we can step it forward deterministically.
+    const baseTime = new Date(1779000000000)
+    await utimes(path, baseTime, baseTime)
 
     const first = await loadAllShards(agentDir)
-    expect(first[0]?.body).toBe('v1\n')
+    expect(first[0]?.body).toBe('same-len-v1\n')
 
-    await new Promise((resolve) => setTimeout(resolve, 10))
-    await writeShard(agentDir, 'alpha', 'Alpha', 'v2-longer\n')
+    // Rewrite with SAME length and then bump mtime via utimes. This isolates
+    // mtime as the invalidation signal: size is identical, only mtime moves.
+    // (ctime moves too on the rewrite, but the test pins the contract that
+    // mtime alone is sufficient to invalidate.)
+    await writeFile(path, shardText('Alpha', 'same-len-v2\n'), 'utf8')
+    const laterTime = new Date(1780000000000)
+    await utimes(path, laterTime, laterTime)
 
     const refreshed = await loadAllShards(agentDir)
-    expect(refreshed[0]?.body).toBe('v2-longer\n')
+    expect(refreshed[0]?.body).toBe('same-len-v2\n')
+  })
+
+  test('invalidates the cached shard when ctime changes even if mtime is preserved (rsync -t / touch -r case)', async () => {
+    const agentDir = await makeAgentDir()
+    const path = topicShardPath(agentDir, 'alpha')
+    await writeShard(agentDir, 'alpha', 'Alpha', 'v1-body\n')
+    const pinned = new Date(1779000000000)
+    await utimes(path, pinned, pinned)
+
+    const first = await loadAllShards(agentDir)
+    expect(first[0]?.body).toBe('v1-body\n')
+
+    // Simulate a metadata-preserving external edit: write new bytes, then
+    // restore mtime to the original value. ctime cannot be backdated via
+    // utimes -- the kernel always bumps it on inode content change -- so
+    // ctime is what catches this case. Without ctime in the cache key the
+    // next call would return stale v1 bytes (the bug Oracle flagged).
+    await writeFile(path, shardText('Alpha', 'v2-body\n'), 'utf8')
+    await utimes(path, pinned, pinned)
+
+    const refreshed = await loadAllShards(agentDir)
+    expect(refreshed[0]?.body).toBe('v2-body\n')
   })
 
   test('drops cache entries for shards that were deleted', async () => {
@@ -233,27 +247,23 @@ describe('loadAllShards shard cache', () => {
     expect(b2[0]?.body).toBe('body-B\n')
   })
 
-  test('loadShard bypasses the cache so callers that want a fresh read get one', async () => {
+  test('loadShard never returns the cached object (always allocates a fresh shard)', async () => {
     const agentDir = await makeAgentDir()
     await writeShard(agentDir, 'alpha', 'Alpha', 'v1\n')
-    const path = topicShardPath(agentDir, 'alpha')
-    const pinnedTime = new Date(1779000000000)
-    await utimes(path, pinnedTime, pinnedTime)
 
-    await loadAllShards(agentDir)
-
-    // Mutate with same length + pinned mtime. loadAllShards would serve stale
-    // bytes here (as proved in the cache-hit test above). loadShard must NOT,
-    // because callers like the dreaming subagent's post-write verification
-    // rely on fresh reads bypassing the bulk cache.
-    await writeFile(path, shardText('Alpha', 'v2\n'), 'utf8')
-    await utimes(path, pinnedTime, pinnedTime)
-
-    const direct = await loadShard(agentDir, 'alpha')
-    expect(direct?.body).toBe('v2\n')
-
+    // Prime the bulk cache: loadAllShards stores a TopicShard instance.
     const bulk = await loadAllShards(agentDir)
-    expect(bulk[0]?.body).toBe('v1\n')
+    const bulkShard = bulk[0]
+    expect(bulkShard?.body).toBe('v1\n')
+
+    // loadShard MUST allocate a fresh shard object even when the on-disk
+    // file hasn't moved (and the bulk cache holds a perfectly valid entry).
+    // Reference inequality is the contract that pins "single-slug always
+    // reads fresh." If loadShard ever starts sharing the bulk cache, this
+    // assertion fails and the breaking change is surfaced explicitly.
+    const direct = await loadShard(agentDir, 'alpha')
+    expect(direct?.body).toBe('v1\n')
+    expect(direct).not.toBe(bulkShard)
   })
 })
 

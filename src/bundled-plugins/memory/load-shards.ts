@@ -12,14 +12,19 @@ export type TopicShard = {
 
 type Logger = { warn(message: string): void }
 
-// Per-shard cache entry. `mtimeMs + size` is a sufficient invalidation key for
-// our writers (atomic writes from dreaming.ts, in-place writeFile from the
-// boot migration, post-rename from the migration's atomic finalize) because
-// every successful write produces a fresh mtime on the resulting file.
+// Per-shard cache entry. `(mtimeMs, ctimeMs, size)` is the invalidation key.
+// For TypeClaw's own writers -- atomic writeFile in dreaming.ts and migration
+// staging, plus the migration's directory rename -- mtime alone is sufficient
+// because every write produces a fresh mtime. ctimeMs guards against
+// metadata-preserving external edits (rsync -t, touch -r, restored backups,
+// `git checkout` with timestamps): the kernel always bumps ctime on inode
+// content changes and ctime cannot be backdated via utimes, so these cases
+// invalidate even when mtime and size are unchanged.
 // A `null` shard caches a known-malformed file so a hot session-create loop
 // doesn't re-parse the same bad shard on every prompt.
 type ShardCacheEntry = {
   mtimeMs: number
+  ctimeMs: number
   size: number
   shard: TopicShard | null
 }
@@ -46,13 +51,18 @@ export async function loadAllShards(agentDir: string, options: { logger?: Logger
     }
 
     const cached = cache.get(slug)
-    if (cached !== undefined && cached.mtimeMs === fileStat.mtimeMs && cached.size === fileStat.size) {
+    if (
+      cached !== undefined &&
+      cached.mtimeMs === fileStat.mtimeMs &&
+      cached.ctimeMs === fileStat.ctimeMs &&
+      cached.size === fileStat.size
+    ) {
       if (cached.shard !== null) shards.push(cached.shard)
       continue
     }
 
     const shard = await readAndParseShard(path, slug, options)
-    cache.set(slug, { mtimeMs: fileStat.mtimeMs, size: fileStat.size, shard })
+    cache.set(slug, { mtimeMs: fileStat.mtimeMs, ctimeMs: fileStat.ctimeMs, size: fileStat.size, shard })
     if (shard !== null) shards.push(shard)
   }
 
@@ -70,10 +80,12 @@ export async function loadShard(
   slug: string,
   options: { logger?: Logger } = {},
 ): Promise<TopicShard | null> {
-  // The standalone `loadShard` path is used by callers that want a fresh read
-  // on demand (e.g. dreaming's per-shard post-write verification). Bypass the
-  // cache to keep the contract obvious — the cache is an internal optimization
-  // for the bulk `loadAllShards` hot path.
+  // The single-slug API contract is "read fresh from disk." No production
+  // caller depends on it today (every reader bulk-loads via `loadAllShards`);
+  // this is the escape hatch for any future caller that needs a stale-free
+  // read without going through the bulk cache. Keep the bypass even if it
+  // looks unused -- adding the cache here later is mechanical, removing it
+  // is a breaking change.
   const path = topicShardPath(agentDir, slug)
   return readAndParseShard(path, slug, options)
 }
@@ -120,10 +132,10 @@ async function readAndParseShard(path: string, slug: string, options: { logger?:
   }
 }
 
-async function statShard(path: string): Promise<{ mtimeMs: number; size: number } | null> {
+async function statShard(path: string): Promise<{ mtimeMs: number; ctimeMs: number; size: number } | null> {
   try {
     const s = await stat(path)
-    return { mtimeMs: s.mtimeMs, size: s.size }
+    return { mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs, size: s.size }
   } catch (err) {
     if (isEnoent(err)) return null
     throw err
