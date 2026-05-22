@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 
 import { ACKNOWLEDGE_GUARDS } from '../policy'
-import { GUARD_ROLE_PROMOTION, checkRolePromotionGuard, diffRoles } from './role-promotion'
+import { GUARD_ROLE_PROMOTION, checkRolePromotionGuard, diffRoles, sanitizeForReason } from './role-promotion'
 
 async function makeAgentDir(): Promise<string> {
   return mkdtemp(path.join(tmpdir(), 'typeclaw-role-promotion-'))
@@ -284,6 +284,101 @@ describe('checkRolePromotionGuard — edit (oldText/newText)', () => {
       agentDir,
     })
     expect(result).toBeUndefined()
+  })
+})
+
+describe('checkRolePromotionGuard — legacy-shape on disk (migrate:true regression)', () => {
+  test('legacy channels.<adapter>.allow[] on disk does not flag the migrated equivalent as a new grant', async () => {
+    const agentDir = await makeAgentDir()
+    await writeConfig(agentDir, {
+      port: 9000,
+      channels: { slack: { allow: ['team:T000'] } },
+    })
+
+    const after = {
+      port: 9000,
+      channels: { slack: {} },
+      roles: { member: { match: ['slack:T000'] } },
+    }
+    const result = await checkRolePromotionGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: JSON.stringify(after) },
+      agentDir,
+    })
+    expect(result).toBeUndefined()
+  })
+
+  test('legacy-shape file + a NEW match rule beyond the migrated baseline is still blocked', async () => {
+    const agentDir = await makeAgentDir()
+    await writeConfig(agentDir, {
+      port: 9000,
+      channels: { slack: { allow: ['team:T000'] } },
+    })
+
+    const after = {
+      port: 9000,
+      channels: { slack: {} },
+      roles: {
+        member: { match: ['slack:T000'] },
+        owner: { match: ['tui', 'discord:* author:U_NEW'] },
+      },
+    }
+    const result = await checkRolePromotionGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: JSON.stringify(after) },
+      agentDir,
+    })
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('discord:* author:U_NEW')
+  })
+})
+
+describe('sanitizeForReason — operator-side ANSI injection defense', () => {
+  test('strips C0 control characters (ANSI escape, BEL, etc.)', () => {
+    const dirty = 'normal\u001b[2J\u001b[Hinjected\u0007text'
+    expect(sanitizeForReason(dirty)).toBe('normal[2J[Hinjectedtext')
+  })
+
+  test('strips DEL (\\u007f)', () => {
+    expect(sanitizeForReason('a\u007fb')).toBe('ab')
+  })
+
+  test('replaces backticks so inline-code formatting cannot be broken out of', () => {
+    expect(sanitizeForReason('U_X`</code><script>')).toBe("U_X'</code><script>")
+  })
+
+  test('caps length to MAX_REASON_TOKEN_LEN', () => {
+    const long = 'A'.repeat(500)
+    const out = sanitizeForReason(long)
+    expect(out.length).toBeLessThanOrEqual(203)
+    expect(out.endsWith('...')).toBe(true)
+  })
+
+  test('passes ordinary author ids through unchanged', () => {
+    expect(sanitizeForReason('U_ALICE')).toBe('U_ALICE')
+    expect(sanitizeForReason('slack:T000/C001 author:U_X')).toBe('slack:T000/C001 author:U_X')
+  })
+})
+
+describe('checkRolePromotionGuard — block reason is operator-safe', () => {
+  test('ANSI-escape author ids are stripped before the reason reaches the operator', async () => {
+    const agentDir = await makeAgentDir()
+    await writeConfig(agentDir, BEFORE_BASELINE)
+
+    const after = {
+      ...BEFORE_BASELINE,
+      roles: {
+        ...BEFORE_BASELINE.roles,
+        owner: { match: ['tui', 'discord:* author:U_NORMAL'] },
+      },
+    }
+    const result = await checkRolePromotionGuard({
+      tool: 'write',
+      args: { path: 'typeclaw.json', content: JSON.stringify(after) },
+      agentDir,
+    })
+    // eslint-disable-next-line no-control-regex
+    expect(result?.reason).not.toMatch(/\u001b/)
   })
 })
 
