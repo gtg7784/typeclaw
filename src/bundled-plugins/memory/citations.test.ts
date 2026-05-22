@@ -1,23 +1,41 @@
 import { describe, expect, test } from 'bun:test'
 
-import { formatCitation, isCitationLine, parseCitations } from './citations'
+import {
+  CITATION_FORMAT_CANONICAL,
+  acceptedPrefixes,
+  formatCitation,
+  isCitationLine,
+  normalizeCitation,
+  parseCitations,
+} from './citations'
 
 const ID_A = '019e2eca-6fc5-71ef-add9-67a0955a4b35'
 const ID_B = '019e2ecf-f2d5-70ee-83f6-005fb5451c51'
 const ID_C = '019e2ee8-bcc4-772f-8821-876162c5e601'
 
 describe('formatCitation', () => {
-  test('produces the canonical memory/yyyy-MM-dd#<id> shape', () => {
-    expect(formatCitation('2026-05-16', ID_A)).toBe(`memory/2026-05-16#${ID_A}`)
+  test('produces the canonical streams/yyyy-MM-dd#<id> shape', () => {
+    expect(formatCitation('2026-05-16', ID_A)).toBe(`streams/2026-05-16#${ID_A}`)
+  })
+})
+
+describe('citation format constants', () => {
+  test('names streams as canonical while retaining memory as transitional legacy', () => {
+    expect(CITATION_FORMAT_CANONICAL).toBe('streams')
+    expect(acceptedPrefixes).toEqual(['streams', 'memory'])
   })
 })
 
 describe('isCitationLine', () => {
   test('matches a citation line with a leading dash and space', () => {
-    expect(isCitationLine(`- memory/2026-05-16#${ID_A}`)).toBe(true)
+    expect(isCitationLine(`- streams/2026-05-16#${ID_A}`)).toBe(true)
   })
 
   test('matches a bare citation line', () => {
+    expect(isCitationLine(`streams/2026-05-16#${ID_A}`)).toBe(true)
+  })
+
+  test('matches a transitional legacy citation line', () => {
     expect(isCitationLine(`memory/2026-05-16#${ID_A}`)).toBe(true)
   })
 
@@ -37,9 +55,9 @@ describe('parseCitations', () => {
       'Conclusion paragraph.',
       '',
       'fragments:',
-      `- memory/2026-05-16#${ID_A}`,
-      `- memory/2026-05-16#${ID_B}`,
-      `- memory/2026-05-15#${ID_C}`,
+      `- streams/2026-05-16#${ID_A}`,
+      `- streams/2026-05-16#${ID_B}`,
+      `- streams/2026-05-15#${ID_C}`,
     ].join('\n')
 
     const result = parseCitations(text)
@@ -60,7 +78,7 @@ describe('parseCitations', () => {
       '',
       '## New topic',
       'fragments:',
-      `- memory/2026-05-16#${ID_A}`,
+      `- streams/2026-05-16#${ID_A}`,
     ].join('\n')
 
     const result = parseCitations(text)
@@ -70,7 +88,7 @@ describe('parseCitations', () => {
   })
 
   test('deduplicates repeated citations of the same fragment', () => {
-    const text = [`- memory/2026-05-16#${ID_A}`, `- memory/2026-05-16#${ID_A}`].join('\n')
+    const text = [`- streams/2026-05-16#${ID_A}`, `- streams/2026-05-16#${ID_A}`].join('\n')
 
     const result = parseCitations(text)
 
@@ -78,10 +96,49 @@ describe('parseCitations', () => {
   })
 
   test('citation can appear inline inside prose, not only as a bullet line', () => {
-    const text = `see memory/2026-05-16#${ID_A} for context`
+    const text = `see streams/2026-05-16#${ID_A} for context`
 
     const result = parseCitations(text)
 
     expect(result.get('2026-05-16')).toEqual(new Set([ID_A]))
+  })
+
+  test('new-format citations parse correctly', () => {
+    const result = parseCitations(`see streams/2026-05-20#abc and streams/2026-05-21#def`)
+
+    expect(result.get('2026-05-20')).toEqual(new Set(['abc']))
+    expect(result.get('2026-05-21')).toEqual(new Set(['def']))
+  })
+
+  test('legacy-format citations still parse during migration', () => {
+    const result = parseCitations(`see memory/2026-05-20#abc`)
+
+    expect(result.get('2026-05-20')).toEqual(new Set(['abc']))
+  })
+
+  test('mixed canonical and legacy citations parse together', () => {
+    const result = parseCitations('streams/2026-05-20#a, memory/2026-05-20#b, streams/2026-05-21#c')
+
+    expect(result.get('2026-05-20')).toEqual(new Set(['a', 'b']))
+    expect(result.get('2026-05-21')).toEqual(new Set(['c']))
+  })
+})
+
+describe('normalizeCitation', () => {
+  test('converts legacy citations and is idempotent on canonical citations', () => {
+    expect(normalizeCitation('memory/2026-05-20#abc')).toBe('streams/2026-05-20#abc')
+    expect(normalizeCitation('streams/2026-05-20#abc')).toBe('streams/2026-05-20#abc')
+  })
+
+  test('converts citation substrings in prose', () => {
+    expect(normalizeCitation('something else memory/2026-05-20#abc more text')).toBe(
+      'something else streams/2026-05-20#abc more text',
+    )
+  })
+
+  test('converts multiple legacy citations in one string', () => {
+    expect(normalizeCitation('memory/2026-05-20#abc and memory/2026-05-21#def')).toBe(
+      'streams/2026-05-20#abc and streams/2026-05-21#def',
+    )
   })
 })
