@@ -171,6 +171,13 @@ describe('checkCitationSupersetAcrossShards', () => {
 
     expect(checkCitationSupersetAcrossShards(new Map(), newShards)).toEqual({ ok: true })
   })
+
+  test('matches citations by date and id across accepted citation prefixes', () => {
+    const oldShards = new Map([['memory/topics/a.md', `- memory/2026-05-20#${ID_A}`]])
+    const newShards = new Map([['memory/topics/b.md', `- streams/2026-05-20#${ID_A}`]])
+
+    expect(checkCitationSupersetAcrossShards(oldShards, newShards)).toEqual({ ok: true })
+  })
 })
 
 describe('summarizeMissingCitations', () => {
