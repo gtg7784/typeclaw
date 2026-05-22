@@ -3,7 +3,14 @@ import { describe, expect, mock, test } from 'bun:test'
 import { KNOWN_PROVIDERS, supportsApiKey, supportsOAuth, type KnownProviderId } from '@/config/providers'
 import type { ModelOption } from '@/init/models-dev'
 
-import { collectWizardInputs, decideExistingApiKeyReuse, WizardAbortedError, type WizardPrompts } from './init'
+import {
+  collectWizardInputs,
+  decideExistingApiKeyReuse,
+  formatModelLabel,
+  sortRecommendedFirst,
+  WizardAbortedError,
+  type WizardPrompts,
+} from './init'
 
 describe('decideExistingApiKeyReuse', () => {
   test('reuses an existing API key when the user confirms', async () => {
@@ -1170,5 +1177,72 @@ describe('collectWizardInputs back-aware flow', () => {
 
     expect(apiKeyAvailableSeen).toBe(true)
     expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk-ant-recovered' })
+  })
+})
+
+describe('recommended models', () => {
+  function model(ref: ModelOption['ref'], overrides: Partial<ModelOption> = {}): ModelOption {
+    const slash = ref.indexOf('/')
+    const providerId = ref.slice(0, slash) as ModelOption['providerId']
+    const modelId = ref.slice(slash + 1)
+    return {
+      ref,
+      providerId,
+      providerName: providerId,
+      modelId,
+      modelName: modelId,
+      reasoning: false,
+      contextWindow: null,
+      curated: true,
+      supportsVision: false,
+      ...overrides,
+    }
+  }
+
+  test('formatModelLabel marks gpt-5.4-mini under openai as Recommended', () => {
+    const o = model('openai/gpt-5.4-mini', { modelName: 'GPT-5.4 mini' })
+    expect(formatModelLabel(o)).toBe('GPT-5.4 mini (Recommended)')
+  })
+
+  test('formatModelLabel marks gpt-5.4-mini under openai-codex as Recommended', () => {
+    const o = model('openai-codex/gpt-5.4-mini', { modelName: 'GPT-5.4 mini' })
+    expect(formatModelLabel(o)).toBe('GPT-5.4 mini (Recommended)')
+  })
+
+  test('formatModelLabel marks claude-sonnet-4-6 as Recommended', () => {
+    const o = model('anthropic/claude-sonnet-4-6', { modelName: 'Claude Sonnet 4.6' })
+    expect(formatModelLabel(o)).toBe('Claude Sonnet 4.6 (Recommended)')
+  })
+
+  test('formatModelLabel leaves non-recommended models unchanged', () => {
+    const o = model('openai/gpt-5.4', { modelName: 'GPT-5.4' })
+    expect(formatModelLabel(o)).toBe('GPT-5.4')
+  })
+
+  test('sortRecommendedFirst floats the recommended OpenAI model to the top', () => {
+    const nano = model('openai/gpt-5.4-nano', { modelName: 'GPT-5.4 nano' })
+    const mini = model('openai/gpt-5.4-mini', { modelName: 'GPT-5.4 mini' })
+    const full = model('openai/gpt-5.4', { modelName: 'GPT-5.4' })
+    const sorted = sortRecommendedFirst([nano, mini, full])
+    expect(sorted.map((o) => o.ref)).toEqual(['openai/gpt-5.4-mini', 'openai/gpt-5.4-nano', 'openai/gpt-5.4'])
+  })
+
+  test('sortRecommendedFirst floats the recommended Anthropic model to the top', () => {
+    const haiku = model('anthropic/claude-haiku-4-5', { modelName: 'Claude Haiku 4.5' })
+    const sonnet = model('anthropic/claude-sonnet-4-6', { modelName: 'Claude Sonnet 4.6' })
+    const opus = model('anthropic/claude-opus-4-7', { modelName: 'Claude Opus 4.7' })
+    const sorted = sortRecommendedFirst([haiku, sonnet, opus])
+    expect(sorted.map((o) => o.ref)).toEqual([
+      'anthropic/claude-sonnet-4-6',
+      'anthropic/claude-haiku-4-5',
+      'anthropic/claude-opus-4-7',
+    ])
+  })
+
+  test('sortRecommendedFirst preserves order when no model is recommended', () => {
+    const a = model('openai/gpt-5.4-nano')
+    const b = model('openai/gpt-5.4')
+    const sorted = sortRecommendedFirst([a, b])
+    expect(sorted.map((o) => o.ref)).toEqual(['openai/gpt-5.4-nano', 'openai/gpt-5.4'])
   })
 })
