@@ -111,6 +111,18 @@ export default definePlugin({
       ctx.logger.info(`[memory] migrated ${migrationResult.migrated.length} daily stream(s) to JSONL`)
     }
 
+    const shardingResult = await runShardingMigration({
+      agentDir: ctx.agentDir,
+      logger: ctx.logger,
+    })
+    if (shardingResult.migrated) {
+      ctx.logger.info(
+        `[memory] sharded ${shardingResult.topicCount} topics + ${shardingResult.streamCount} streams (pre-shard backup at memory/MEMORY.md.pre-shard.bak)`,
+      )
+    } else if (shardingResult.error !== undefined) {
+      ctx.logger.warn(`[memory] sharding migration aborted: ${shardingResult.error}`)
+    }
+
     const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
     const bytesAtLastRun = new Map<string, number>()
@@ -208,7 +220,7 @@ export default definePlugin({
         // directly, appended LAST in the system prompt). It does not run from a
         // plugin hook because positioning matters for cache-prefix stability:
         // the daily-stream file grows after every channel turn (memory-logger
-        // appends a fragment + watermark) and MEMORY.md changes on every dream.
+        // appends a fragment + watermark) and memory/topics/ changes on every dream.
         // A volatile region in the middle of the system prompt invalidates the
         // entire cacheable suffix below it on every session resurrection
         // (channel sessions evicted by idle GC, container restarts). Pinning
