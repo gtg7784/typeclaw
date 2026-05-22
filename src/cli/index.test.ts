@@ -75,22 +75,27 @@ describe('BUILTIN_COMMAND_NAMES exposure', () => {
   })
 })
 
+// Each test spawns `bun run src/cli/index.ts` (~300-400ms cold start). The
+// suite is otherwise hermetic — each test mkdtemp's its own agent folder, no
+// shared state between tests — so `.concurrent` runs them on the runner's
+// worker pool instead of serially. The 6 host-stage subprocess tests below
+// drop from ~1.8s sequential to ~0.4s in parallel.
 describe('typeclaw <plugin-command> on host stage', () => {
-  test('QA-5 end-to-end: dispatches a host command via CLI entrypoint', async () => {
+  test.concurrent('QA-5 end-to-end: dispatches a host command via CLI entrypoint', async () => {
     const dir = await mkAgent(ECHO_PLUGIN)
     const { stdout, code } = await runCli(['echo-host', '--msg=hello'], dir)
     expect(code).toBe(0)
     expect(stdout).toContain('got: hello')
   })
 
-  test('exits 2 with stderr message when required arg is missing', async () => {
+  test.concurrent('exits 2 with stderr message when required arg is missing', async () => {
     const dir = await mkAgent(ECHO_PLUGIN)
     const { stderr, code } = await runCli(['echo-host'], dir)
     expect(code).toBe(2)
     expect(stderr).toMatch(/msg/i)
   })
 
-  test('unknown command falls through to citty (no plugin match, no built-in)', async () => {
+  test.concurrent('unknown command falls through to citty (no plugin match, no built-in)', async () => {
     const dir = await mkAgent(ECHO_PLUGIN)
     const { code } = await runCli(['no-such-command'], dir)
     expect(code).not.toBe(0)
@@ -98,7 +103,7 @@ describe('typeclaw <plugin-command> on host stage', () => {
 })
 
 describe('typeclaw --help on host stage', () => {
-  test('QA-16: appends a Plugin commands section listing discovered commands', async () => {
+  test.concurrent('QA-16: appends a Plugin commands section listing discovered commands', async () => {
     const dir = await mkAgent(ECHO_PLUGIN)
     const { stdout, code } = await runCli(['--help'], dir)
     expect(code).toBe(0)
@@ -107,7 +112,7 @@ describe('typeclaw --help on host stage', () => {
     expect(stdout).toContain('echo a message')
   })
 
-  test('QA-17: outside an agent folder, no Plugin commands section is shown', async () => {
+  test.concurrent('QA-17: outside an agent folder, no Plugin commands section is shown', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'tccli-bare-'))
     tmpDirs.push(dir)
     const { stdout, code } = await runCli(['--help'], dir)
@@ -117,7 +122,7 @@ describe('typeclaw --help on host stage', () => {
 })
 
 describe('_hostd preservation', () => {
-  test('_hostd is recognized as a built-in (not routed to plugin dispatcher)', async () => {
+  test.concurrent('_hostd is recognized as a built-in (not routed to plugin dispatcher)', async () => {
     // We can't actually launch _hostd in a test (it would daemonize), but
     // we can verify it appears in `typeclaw --help` (citty subCommand) and
     // is in BUILTIN_COMMAND_NAMES so the intercept skips it.
