@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { formatLocalDate, formatLocalDateTime } from './local-time'
+import { formatLocalDate, formatLocalDateTime, resolveLocalTimezoneName } from './local-time'
 
 describe('formatLocalDate', () => {
   test('formats a date as YYYY-MM-DD using local calendar fields', () => {
@@ -51,5 +51,22 @@ describe('formatLocalDateTime', () => {
     const abs = Math.abs(expectedOffsetMinutes)
     const expected = `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`
     expect(offsetPart).toBe(expected)
+  })
+})
+
+describe('resolveLocalTimezoneName', () => {
+  test('returns the IANA zone name the process is currently in', () => {
+    const result = resolveLocalTimezoneName()
+    expect(result).toMatch(/^[A-Za-z]+(\/[A-Za-z_]+(\/[A-Za-z_]+)?)?$/)
+  })
+
+  test('returns a non-empty string under any environment (falls back to UTC if Intl is unavailable)', () => {
+    const result = resolveLocalTimezoneName()
+    expect(typeof result).toBe('string')
+    expect(result.length).toBeGreaterThan(0)
+  })
+
+  test('the returned zone name matches what Intl.DateTimeFormat reports for the same process', () => {
+    expect(resolveLocalTimezoneName()).toBe(Intl.DateTimeFormat().resolvedOptions().timeZone)
   })
 })
