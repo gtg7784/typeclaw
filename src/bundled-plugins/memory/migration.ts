@@ -6,7 +6,14 @@ import { checkCitationSupersetAcrossShards, summarizeMissingCitations } from './
 import { normalizeCitation, parseCitations } from './citations'
 import { clearDreamedIds, loadDreamingState, saveDreamingState } from './dreaming-state'
 import { renderShard, type ShardFrontmatter } from './frontmatter'
-import { migratingTmpDir, preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
+import {
+  migratingTmpDir,
+  PRE_SHARD_BACKUP_FILENAME,
+  preShardBackupPath,
+  streamFilePath,
+  streamsDir,
+  topicsDir,
+} from './paths'
 import { headingToSlug } from './slug'
 import { newEventId, type StreamEvent, streamEventSchema, timestampFromId } from './stream-events'
 import { writeEventsAtomic as defaultWriteEventsAtomic } from './stream-io'
@@ -91,9 +98,11 @@ export async function runShardingMigration(options: RunShardingMigrationOptions)
   }
 
   const existingSlugs = new Set<string>()
+  const orderedSlugs: string[] = []
   for (const topic of topics) {
     const slug = headingToSlug(topic.heading, existingSlugs)
     existingSlugs.add(slug)
+    orderedSlugs.push(slug)
     const body = normalizeCitation(topic.body)
     const frontmatter = frontmatterForTopic(topic.heading, body)
     await writeFile(join(tmpDir, 'topics', `${slug}.md`), renderShard(frontmatter, body), 'utf8')
@@ -119,6 +128,13 @@ export async function runShardingMigration(options: RunShardingMigrationOptions)
 
   const finalized = await finalizeShardingMigration(options.agentDir, streamDates, options.logger)
   if (!finalized.ok) return empty({ error: finalized.error })
+
+  await commitShardingMigration(
+    options.agentDir,
+    { slugs: orderedSlugs, streamDates, hadRootMemory: true },
+    options.logger,
+    options.git,
+  )
 
   options.logger.info(
     `[memory:migration] sharded MEMORY.md into ${topics.length} topic shard(s) and ${streamDates.length} stream file(s)`,
@@ -468,6 +484,59 @@ async function commitMigration(
   )
   if (commit.exitCode !== 0) {
     logger.warn(`[memory:migration] git commit failed: ${commit.stderr || commit.stdout}`.trim())
+  }
+}
+
+async function commitShardingMigration(
+  agentDir: string,
+  details: { slugs: readonly string[]; streamDates: readonly string[]; hadRootMemory: boolean },
+  logger: MigrationLogger,
+  git: MigrationGit | undefined,
+): Promise<void> {
+  const spawn = git?.spawn ?? spawnGit
+  const inside = await spawn(['rev-parse', '--is-inside-work-tree'], { cwd: agentDir })
+  if (inside.exitCode !== 0) {
+    logger.info('[memory:migration] not in a git repo; skipping git commit')
+    return
+  }
+
+  const newPaths = [
+    ...details.slugs.map((slug) => `memory/topics/${slug}.md`),
+    ...details.streamDates.map((date) => `memory/streams/${date}.jsonl`),
+    `memory/${PRE_SHARD_BACKUP_FILENAME}`,
+  ]
+  const addNew = await spawn(['add', '--', ...newPaths], { cwd: agentDir })
+  if (addNew.exitCode !== 0) {
+    logger.warn(`[memory:migration] git add failed: ${addNew.stderr || addNew.stdout}`.trim())
+    return
+  }
+
+  const candidateDeletions = [...details.streamDates.map((date) => `memory/${date}.jsonl`)]
+  if (details.hadRootMemory) candidateDeletions.push('MEMORY.md')
+  const trackedDeletions: string[] = []
+  for (const path of candidateDeletions) {
+    const tracked = await spawn(['ls-files', '--error-unmatch', '--', path], { cwd: agentDir })
+    if (tracked.exitCode === 0) trackedDeletions.push(path)
+  }
+  if (trackedDeletions.length > 0) {
+    const addDeletions = await spawn(['add', '-u', '--', ...trackedDeletions], { cwd: agentDir })
+    if (addDeletions.exitCode !== 0) {
+      logger.warn(`[memory:migration] git add failed: ${addDeletions.stderr || addDeletions.stdout}`.trim())
+      return
+    }
+  }
+
+  const commitSharding = await spawn(
+    [
+      'commit',
+      '-m',
+      `memory: shard MEMORY.md into ${details.slugs.length} topic(s) and ${details.streamDates.length} daily stream(s)`,
+      '--no-edit',
+    ],
+    { cwd: agentDir },
+  )
+  if (commitSharding.exitCode !== 0) {
+    logger.warn(`[memory:migration] git commit failed: ${commitSharding.stderr || commitSharding.stdout}`.trim())
   }
 }
 
