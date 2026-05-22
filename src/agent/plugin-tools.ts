@@ -31,6 +31,7 @@ import type {
   ToolResult,
 } from '@/plugin'
 
+import { checkImageReadRedirect } from './multimodal/read-redirect'
 import type { SessionOrigin } from './session-origin'
 import { webfetchTool } from './tools/webfetch'
 import { websearchTool } from './tools/websearch'
@@ -232,6 +233,10 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       if (guardResult !== undefined) {
         throw new Error(`blocked: ${guardResult.reason}`)
       }
+      const readGuardResult = runFinalReadGuards({ tool: tool.name, args: mutableArgs })
+      if (readGuardResult !== undefined) {
+        throw new Error(`blocked: ${readGuardResult.reason}`)
+      }
       stripGuardAcknowledgements(mutableArgs)
 
       const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate, ctx)
@@ -280,6 +285,10 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       })
       if (guardResult !== undefined) {
         throw new Error(`blocked: ${guardResult.reason}`)
+      }
+      const readGuardResult = runFinalReadGuards({ tool: tool.name, args: mutableArgs })
+      if (readGuardResult !== undefined) {
+        throw new Error(`blocked: ${readGuardResult.reason}`)
       }
       stripGuardAcknowledgements(mutableArgs)
 
@@ -337,6 +346,10 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       if (guardResult !== undefined) {
         throw new Error(`blocked: ${guardResult.reason}`)
       }
+      const readGuardResult = runFinalReadGuards({ tool: tool.name, args: mutableArgs })
+      if (readGuardResult !== undefined) {
+        throw new Error(`blocked: ${readGuardResult.reason}`)
+      }
       stripGuardAcknowledgements(mutableArgs)
 
       const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate)
@@ -380,6 +393,10 @@ async function runFinalWriteGuards(options: { tool: string; args: Record<string,
     (await checkSkillAuthoringGuard(options)) ??
     checkNonWorkspaceWriteGuard(options)
   )
+}
+
+function runFinalReadGuards(options: { tool: string; args: Record<string, unknown> }) {
+  return checkImageReadRedirect(options)
 }
 
 function withGuardAcknowledgements<TParams extends TSchema>(toolName: string, parameters: TParams): TParams {
