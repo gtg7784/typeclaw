@@ -35,6 +35,11 @@ async function writeSession(basename: string, lines: string[], mtimeSeconds: num
   return path
 }
 
+const UUID_A = '019dda40-4ba8-7472-9b06-e72b2b994be5'
+const UUID_B = '019e2c2e-a32e-7230-9f79-62ffe148fec1'
+const UUID_OLD = '019dda40-0000-7000-9000-000000000000'
+const UUID_NEW = '019e4d7d-bfb4-745b-9990-6b7b364bd1bd'
+
 describe('listSessions', () => {
   test('empty directory yields no sessions', async () => {
     const sessions = await listSessions({ sessionsDir: dir })
@@ -46,58 +51,58 @@ describe('listSessions', () => {
     expect(sessions).toEqual([])
   })
 
-  test('extracts session id from filename, origin from meta line, first prompt from first user', async () => {
-    await writeSession(
-      '2026-05-22T06-08-42-380Z_ses_abc123.jsonl',
-      [metaLine({ kind: 'tui' }), userLine('hello world')],
-      1_000_000,
-    )
+  test('extracts session id from pi-coding-agent filename format (ISO timestamp + UUIDv7)', async () => {
+    const basename = `2026-04-29T17-19-00-008Z_${UUID_A}.jsonl`
+    await writeSession(basename, [metaLine({ kind: 'tui' }), userLine('hello world')], 1_000_000)
     const sessions = await listSessions({ sessionsDir: dir })
     expect(sessions).toHaveLength(1)
     const s = sessions[0]!
-    expect(s.sessionId).toBe('ses_abc123')
-    expect(s.basename).toBe('2026-05-22T06-08-42-380Z_ses_abc123.jsonl')
+    expect(s.sessionId).toBe(UUID_A)
+    expect(s.basename).toBe(basename)
     expect(s.origin).toEqual({ kind: 'tui' })
     expect(s.firstPrompt).toBe('hello world')
   })
 
   test('sorts by mtime desc', async () => {
-    await writeSession('2025-01-01T00-00-00-000Z_ses_old.jsonl', [metaLine({ kind: 'tui' })], 100_000)
-    await writeSession('2026-01-01T00-00-00-000Z_ses_new.jsonl', [metaLine({ kind: 'tui' })], 200_000)
+    await writeSession(`2025-01-01T00-00-00-000Z_${UUID_OLD}.jsonl`, [metaLine({ kind: 'tui' })], 100_000)
+    await writeSession(`2026-01-01T00-00-00-000Z_${UUID_NEW}.jsonl`, [metaLine({ kind: 'tui' })], 200_000)
     const sessions = await listSessions({ sessionsDir: dir })
-    expect(sessions.map((s) => s.sessionId)).toEqual(['ses_new', 'ses_old'])
+    expect(sessions.map((s) => s.sessionId)).toEqual([UUID_NEW, UUID_OLD])
   })
 
   test('respects limit', async () => {
+    const ids: string[] = []
     for (let i = 0; i < 5; i++) {
-      await writeSession(`2026-05-22T0${i}-00-00-000Z_ses_${i}.jsonl`, [metaLine({ kind: 'tui' })], 1000 + i)
+      const id = `019e0000-0000-7000-9000-00000000000${i}`
+      ids.push(id)
+      await writeSession(`2026-05-22T0${i}-00-00-000Z_${id}.jsonl`, [metaLine({ kind: 'tui' })], 1000 + i)
     }
     const sessions = await listSessions({ sessionsDir: dir, limit: 2 })
     expect(sessions).toHaveLength(2)
-    expect(sessions.map((s) => s.sessionId)).toEqual(['ses_4', 'ses_3'])
+    expect(sessions.map((s) => s.sessionId)).toEqual([ids[4]!, ids[3]!])
   })
 
   test('sinceMs filters out older sessions', async () => {
-    await writeSession('a_ses_old.jsonl', [metaLine({ kind: 'tui' })], 1000)
-    await writeSession('b_ses_new.jsonl', [metaLine({ kind: 'tui' })], 2000)
+    await writeSession(`a_${UUID_OLD}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    await writeSession(`b_${UUID_NEW}.jsonl`, [metaLine({ kind: 'tui' })], 2000)
     const sessions = await listSessions({ sessionsDir: dir, sinceMs: 1500 * 1000 })
-    expect(sessions.map((s) => s.sessionId)).toEqual(['ses_new'])
+    expect(sessions.map((s) => s.sessionId)).toEqual([UUID_NEW])
   })
 
   test('skips non-jsonl entries and bad filenames with warnings', async () => {
     await writeFile(join(dir, 'random.txt'), 'not jsonl')
     await writeFile(join(dir, 'broken-name.jsonl'), '{}')
-    await writeSession('2026-05-22T00-00-00-000Z_ses_ok.jsonl', [metaLine({ kind: 'tui' })], 1000)
+    await writeSession(`2026-05-22T00-00-00-000Z_${UUID_A}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
     const warnings: string[] = []
     const sessions = await listSessions({ sessionsDir: dir, onWarn: (m) => warnings.push(m) })
-    expect(sessions.map((s) => s.sessionId)).toEqual(['ses_ok'])
+    expect(sessions.map((s) => s.sessionId)).toEqual([UUID_A])
     expect(warnings.some((w) => w.includes('broken-name.jsonl'))).toBe(true)
   })
 
   test('subagent system spawn with no user message → firstPrompt is null (renders as "system spawn" in selector)', async () => {
     await writeSession(
-      '2026-05-22T00-00-00-000Z_ses_sub.jsonl',
-      [metaLine({ kind: 'subagent', subagent: 'memory-logger', parentSessionId: 'ses_parent' })],
+      `2026-05-22T00-00-00-000Z_${UUID_A}.jsonl`,
+      [metaLine({ kind: 'subagent', subagent: 'memory-logger', parentSessionId: UUID_B })],
       1000,
     )
     const sessions = await listSessions({ sessionsDir: dir })
@@ -106,7 +111,7 @@ describe('listSessions', () => {
 
   test('channel origin with names preserved in summary', async () => {
     await writeSession(
-      '2026-05-22T00-00-00-000Z_ses_chan.jsonl',
+      `2026-05-22T00-00-00-000Z_${UUID_A}.jsonl`,
       [
         metaLine({
           kind: 'channel',
@@ -127,55 +132,76 @@ describe('listSessions', () => {
     expect(s.origin.workspaceName).toBe('Acme')
     expect(s.origin.chatName).toBe('general')
   })
+
+  test('regression: production filename from pi-coding-agent (no ses_ prefix) does not get skipped', async () => {
+    const basename = `2026-04-29T17-19-00-008Z_${UUID_A}.jsonl`
+    await writeSession(basename, [metaLine({ kind: 'tui' })], 1000)
+    const warnings: string[] = []
+    const sessions = await listSessions({ sessionsDir: dir, onWarn: (m) => warnings.push(m) })
+    expect(sessions).toHaveLength(1)
+    expect(warnings.filter((w) => w.includes('unexpected name'))).toEqual([])
+  })
+
+  test('rejects filename with empty session id (a__.jsonl)', async () => {
+    await writeFile(join(dir, 'a__.jsonl'), '{}')
+    const warnings: string[] = []
+    const sessions = await listSessions({ sessionsDir: dir, onWarn: (m) => warnings.push(m) })
+    expect(sessions).toEqual([])
+    expect(warnings.some((w) => w.includes('a__.jsonl'))).toBe(true)
+  })
 })
 
 describe('resolveSession', () => {
   test('exact session id match returns ok', async () => {
-    await writeSession('a_ses_abc123.jsonl', [metaLine({ kind: 'tui' })], 1000)
-    const out = await resolveSession(dir, 'ses_abc123')
+    await writeSession(`a_${UUID_A}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    const out = await resolveSession(dir, UUID_A)
     expect(out.ok).toBe(true)
     if (!out.ok) throw new Error('unreachable')
-    expect(out.summary.sessionId).toBe('ses_abc123')
+    expect(out.summary.sessionId).toBe(UUID_A)
   })
 
   test('unique short prefix resolves', async () => {
-    await writeSession('a_ses_abcdef.jsonl', [metaLine({ kind: 'tui' })], 1000)
-    await writeSession('b_ses_xyzxyz.jsonl', [metaLine({ kind: 'tui' })], 2000)
-    const out = await resolveSession(dir, 'ses_abcd')
+    const idA = '019dda40-4ba8-7472-9b06-e72b2b994be5'
+    const idB = '019e2c2e-a32e-7230-9f79-62ffe148fec1'
+    await writeSession(`a_${idA}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    await writeSession(`b_${idB}.jsonl`, [metaLine({ kind: 'tui' })], 2000)
+    const out = await resolveSession(dir, '019dda40')
     expect(out.ok).toBe(true)
     if (!out.ok) throw new Error('unreachable')
-    expect(out.summary.sessionId).toBe('ses_abcdef')
+    expect(out.summary.sessionId).toBe(idA)
   })
 
   test('ambiguous prefix surfaces all matches', async () => {
-    await writeSession('a_ses_abcd111.jsonl', [metaLine({ kind: 'tui' })], 1000)
-    await writeSession('b_ses_abcd222.jsonl', [metaLine({ kind: 'tui' })], 2000)
-    const out = await resolveSession(dir, 'ses_abcd')
+    const idA = '019dda40-aaaa-7000-9000-000000000001'
+    const idB = '019dda40-bbbb-7000-9000-000000000002'
+    await writeSession(`a_${idA}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    await writeSession(`b_${idB}.jsonl`, [metaLine({ kind: 'tui' })], 2000)
+    const out = await resolveSession(dir, '019dda40')
     expect(out.ok).toBe(false)
     if (out.ok) throw new Error('unreachable')
     expect(out.reason).toBe('ambiguous')
-    expect(out.matches.map((m) => m.sessionId).sort()).toEqual(['ses_abcd111', 'ses_abcd222'])
+    expect(out.matches.map((m) => m.sessionId).sort()).toEqual([idA, idB])
   })
 
   test('not found surfaces empty matches', async () => {
-    await writeSession('a_ses_abc.jsonl', [metaLine({ kind: 'tui' })], 1000)
-    const out = await resolveSession(dir, 'ses_notthere')
+    await writeSession(`a_${UUID_A}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    const out = await resolveSession(dir, 'deadbeef-0000-7000-9000-000000000000')
     expect(out.ok).toBe(false)
     if (out.ok) throw new Error('unreachable')
     expect(out.reason).toBe('not-found')
   })
 
-  test('prefix shorter than 4 chars after ses_ is rejected without scanning', async () => {
-    await writeSession('a_ses_abcdef.jsonl', [metaLine({ kind: 'tui' })], 1000)
-    const out = await resolveSession(dir, 'ses_a')
+  test('prefix shorter than 4 chars is rejected without scanning', async () => {
+    await writeSession(`a_${UUID_A}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    const out = await resolveSession(dir, '019')
     expect(out.ok).toBe(false)
     if (out.ok) throw new Error('unreachable')
     expect(out.reason).toBe('not-found')
   })
 
-  test('non-ses_ prefix is rejected as not-found (no accidental random-substring matches)', async () => {
-    await writeSession('a_ses_abcdef.jsonl', [metaLine({ kind: 'tui' })], 1000)
-    const out = await resolveSession(dir, 'abc')
+  test('prefix containing path separators is rejected (no path traversal)', async () => {
+    await writeSession(`a_${UUID_A}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    const out = await resolveSession(dir, '../etc')
     expect(out.ok).toBe(false)
     if (out.ok) throw new Error('unreachable')
     expect(out.reason).toBe('not-found')

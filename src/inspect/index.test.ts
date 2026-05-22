@@ -70,17 +70,31 @@ function captureSink(): {
 
 const neverPick = async (_: SessionSummary[]): Promise<SessionSummary | null> => null
 
+const ID_ABC = '019dda40-aaaa-7000-9000-00000000aaaa'
+const ID_JSONOUT = '019dda40-bbbb-7000-9000-00000000bbbb'
+const ID_FILT = '019dda40-cccc-7000-9000-00000000cccc'
+const ID_SINCE = '019dda40-dddd-7000-9000-00000000dddd'
+const ID_LIVET = '019dda40-eeee-7000-9000-00000000eeee'
+const ID_DEAD = '019dda40-ffff-7000-9000-00000000ffff'
+const ID_ERR = '019dda40-1111-7000-9000-000000001111'
+const ID_NO_LIVE = '019dda40-2222-7000-9000-000000002222'
+const ID_PICK1 = '019dda40-3333-7000-9000-000000003333'
+const ID_PICK2 = '019dda40-4444-7000-9000-000000004444'
+const ID_AMB_1 = '019dda40-5555-7000-9000-000000000001'
+const ID_AMB_2 = '019dda40-5555-7000-9000-000000000002'
+const AMB_PREFIX = '019dda40-5555'
+
 describe('runInspect — direct session id (replay-then-exit)', () => {
   test('replays meta, user, assistant, done in order; returns ok', async () => {
     await seedSession(
-      '2026-05-22T00-00-00-000Z_ses_abc.jsonl',
+      `2026-05-22T00-00-00-000Z_${ID_ABC}.jsonl`,
       [metaLine({ kind: 'tui' }), userLine('hi'), assistantLine('hello')],
       1000,
     )
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_abc',
+      sessionIdOrPrefix: ID_ABC,
       color: false,
       selectSession: neverPick,
       ...sink.push,
@@ -90,17 +104,17 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
     const stripTime = (l: string) => l.replace(/\d{2}:\d{2}:\d{2}/, 'HH:MM:SS')
     const cats = sink.out.slice(1, -1).map((l) => stripTime(l).split('  ')[1]?.trim())
     expect(cats).toEqual(['meta', 'user', 'assist', 'done'])
-    expect(sink.out[0]!).toContain('ses_abc')
+    expect(sink.out[0]!).toContain(ID_ABC.slice(0, 12))
     expect(sink.out[0]!).toContain('TUI')
     expect(sink.out.at(-1)!).toContain('end of transcript')
   })
 
   test('--json emits one event per line and omits the header/footer', async () => {
-    await seedSession('a_ses_jsonout.jsonl', [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
+    await seedSession(`a_${ID_JSONOUT}.jsonl`, [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_jsonout',
+      sessionIdOrPrefix: ID_JSONOUT,
       json: true,
       color: false,
       selectSession: neverPick,
@@ -110,21 +124,21 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
     expect(sink.out.every((l) => l.startsWith('{'))).toBe(true)
     for (const line of sink.out) {
       const parsed = JSON.parse(line)
-      expect(parsed.sessionId).toBe('ses_jsonout')
+      expect(parsed.sessionId).toBe(ID_JSONOUT)
       expect(typeof parsed.cat).toBe('string')
     }
   })
 
   test('filter narrows which events render', async () => {
     await seedSession(
-      'a_ses_filt.jsonl',
+      `a_${ID_FILT}.jsonl`,
       [metaLine({ kind: 'tui' }), userLine('a'), userLine('b'), assistantLine('hello')],
       1000,
     )
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_filt',
+      sessionIdOrPrefix: ID_FILT,
       filter: 'user',
       color: false,
       selectSession: neverPick,
@@ -138,14 +152,14 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
 
   test('--since filters out older events by their timestamp', async () => {
     await seedSession(
-      'a_ses_since.jsonl',
+      `a_${ID_SINCE}.jsonl`,
       [metaLine({ kind: 'tui' }), userLine('old', Date.now() - 86_400_000), userLine('new', Date.now())],
       1000,
     )
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_since',
+      sessionIdOrPrefix: ID_SINCE,
       since: '1h',
       color: false,
       selectSession: neverPick,
@@ -162,7 +176,7 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_does_not_matter',
+      sessionIdOrPrefix: ID_ABC,
       filter: 'wat',
       color: false,
       selectSession: neverPick,
@@ -178,7 +192,7 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_x',
+      sessionIdOrPrefix: ID_ABC,
       since: 'forever',
       color: false,
       selectSession: neverPick,
@@ -191,9 +205,10 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
 
   test('session not found returns exit 1', async () => {
     const sink = captureSink()
+    const ghostId = '019dda40-dead-7000-9000-000000000000'
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_ghost',
+      sessionIdOrPrefix: ghostId,
       color: false,
       selectSession: neverPick,
       ...sink.push,
@@ -201,16 +216,16 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('unreachable')
     expect(result.exitCode).toBe(1)
-    expect(result.reason).toContain('ses_ghost')
+    expect(result.reason).toContain(ghostId)
   })
 
   test('ambiguous prefix returns exit 2 with all matches listed', async () => {
-    await seedSession('a_ses_abcd111.jsonl', [metaLine({ kind: 'tui' })], 1000)
-    await seedSession('b_ses_abcd222.jsonl', [metaLine({ kind: 'tui' })], 2000)
+    await seedSession(`a_${ID_AMB_1}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    await seedSession(`b_${ID_AMB_2}.jsonl`, [metaLine({ kind: 'tui' })], 2000)
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_abcd',
+      sessionIdOrPrefix: AMB_PREFIX,
       color: false,
       selectSession: neverPick,
       ...sink.push,
@@ -218,14 +233,14 @@ describe('runInspect — direct session id (replay-then-exit)', () => {
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('unreachable')
     expect(result.exitCode).toBe(2)
-    expect(result.reason).toContain('ses_abcd111')
-    expect(result.reason).toContain('ses_abcd222')
+    expect(result.reason).toContain(ID_AMB_1)
+    expect(result.reason).toContain(ID_AMB_2)
   })
 })
 
 describe('runInspect — live tail (when liveSource is provided)', () => {
   test('replays JSONL then prints the live divider, then yields live events', async () => {
-    await seedSession('a_ses_livet.jsonl', [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
+    await seedSession(`a_${ID_LIVET}.jsonl`, [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
     const sink = captureSink()
 
     async function* fakeLive(): AsyncGenerator<import('./types').InspectEvent> {
@@ -244,7 +259,7 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
 
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_livet',
+      sessionIdOrPrefix: ID_LIVET,
       color: false,
       selectSession: neverPick,
       liveSource: (o) => {
@@ -262,14 +277,14 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
   })
 
   test('reports "session not in registry" divider when liveSource onSubscribed says sessionLive=false', async () => {
-    await seedSession('a_ses_dead.jsonl', [metaLine({ kind: 'tui' })], 1000)
+    await seedSession(`a_${ID_DEAD}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
     const sink = captureSink()
     async function* fakeLive(): AsyncGenerator<import('./types').InspectEvent> {
       yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'cron-fired' } }
     }
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_dead',
+      sessionIdOrPrefix: ID_DEAD,
       color: false,
       selectSession: neverPick,
       liveSource: (o) => {
@@ -283,7 +298,7 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
   })
 
   test('live source error surfaces as a stderr warning, then end-of-transcript still prints', async () => {
-    await seedSession('a_ses_err.jsonl', [metaLine({ kind: 'tui' })], 1000)
+    await seedSession(`a_${ID_ERR}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
     const sink = captureSink()
     async function* failingLive(): AsyncGenerator<import('./types').InspectEvent> {
       yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'x' } }
@@ -291,7 +306,7 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
     }
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_err',
+      sessionIdOrPrefix: ID_ERR,
       color: false,
       selectSession: neverPick,
       liveSource: () => failingLive(),
@@ -303,11 +318,11 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
   })
 
   test('without liveSource: same as before (replay-then-exit)', async () => {
-    await seedSession('a_ses_no_live.jsonl', [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
+    await seedSession(`a_${ID_NO_LIVE}.jsonl`, [metaLine({ kind: 'tui' }), userLine('hi')], 1000)
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
-      sessionIdOrPrefix: 'ses_no_live',
+      sessionIdOrPrefix: ID_NO_LIVE,
       color: false,
       selectSession: neverPick,
       ...sink.push,
@@ -335,8 +350,8 @@ describe('runInspect — picker path', () => {
   })
 
   test('passes session summaries to selectSession and replays the picked one', async () => {
-    await seedSession('a_ses_pick1.jsonl', [metaLine({ kind: 'tui' }), userLine('first')], 1000)
-    await seedSession('b_ses_pick2.jsonl', [metaLine({ kind: 'tui' }), userLine('second')], 2000)
+    await seedSession(`a_${ID_PICK1}.jsonl`, [metaLine({ kind: 'tui' }), userLine('first')], 1000)
+    await seedSession(`b_${ID_PICK2}.jsonl`, [metaLine({ kind: 'tui' }), userLine('second')], 2000)
     let offered: SessionSummary[] = []
     const sink = captureSink()
     const result = await runInspect({
@@ -344,17 +359,17 @@ describe('runInspect — picker path', () => {
       color: false,
       selectSession: async (sessions) => {
         offered = sessions
-        return sessions.find((s) => s.sessionId === 'ses_pick1') ?? null
+        return sessions.find((s) => s.sessionId === ID_PICK1) ?? null
       },
       ...sink.push,
     })
     expect(result.ok).toBe(true)
-    expect(offered.map((s) => s.sessionId).sort()).toEqual(['ses_pick1', 'ses_pick2'])
-    expect(sink.out[0]!).toContain('ses_pick1')
+    expect(offered.map((s) => s.sessionId).sort()).toEqual([ID_PICK1, ID_PICK2])
+    expect(sink.out[0]!).toContain(ID_PICK1.slice(0, 12))
   })
 
   test('cancelled picker returns exit 130 (Ctrl-C convention)', async () => {
-    await seedSession('a_ses_x.jsonl', [metaLine({ kind: 'tui' })], 1000)
+    await seedSession(`a_${ID_ABC}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
@@ -371,6 +386,22 @@ describe('runInspect — picker path', () => {
     const sink = captureSink()
     const result = await runInspect({
       agentDir,
+      json: true,
+      color: false,
+      selectSession: neverPick,
+      ...sink.push,
+    })
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.exitCode).toBe(2)
+    expect(result.reason).toContain('--json requires an explicit session id')
+  })
+
+  test('--json with a non-id-shaped argument is rejected (interactive picker not allowed)', async () => {
+    const sink = captureSink()
+    const result = await runInspect({
+      agentDir,
+      sessionIdOrPrefix: 'abc',
       json: true,
       color: false,
       selectSession: neverPick,

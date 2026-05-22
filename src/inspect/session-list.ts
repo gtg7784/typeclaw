@@ -21,7 +21,11 @@ export type ListSessionsOptions = {
   onWarn?: (msg: string) => void
 }
 
-const FILENAME_PATTERN = /^.+_(ses_[A-Za-z0-9_-]+)\.jsonl$/
+// pi-coding-agent writes session files as `${ISO_TIMESTAMP}_${SESSION_ID}.jsonl`,
+// where SESSION_ID is a UUIDv7 by default (overridable via `SessionManager.create({ id })`).
+// The trailing token is the id; require it to be filesystem-safe (no `/`, `\`, or whitespace)
+// and start with a non-`_` character so `a__.jsonl` (empty id) doesn't slip through.
+const FILENAME_PATTERN = /^.+_([^_/\\\s][^/\\\s]*)\.jsonl$/
 
 export async function listSessions(opts: ListSessionsOptions): Promise<SessionSummary[]> {
   const entries = await readSessionFiles(opts.sessionsDir, opts.onWarn)
@@ -59,7 +63,7 @@ export type ResolveResult =
   | { ok: true; summary: SessionSummary }
   | { ok: false; reason: 'not-found' | 'ambiguous'; matches: SessionSummary[] }
 
-const MIN_PREFIX_LENGTH = 'ses_'.length + 4
+const MIN_PREFIX_LENGTH = 4
 
 export async function resolveSession(
   sessionsDir: string,
@@ -70,13 +74,19 @@ export async function resolveSession(
   const exact = all.find((s) => s.sessionId === sessionIdOrPrefix)
   if (exact !== undefined) return { ok: true, summary: exact }
 
-  if (!sessionIdOrPrefix.startsWith('ses_') || sessionIdOrPrefix.length < MIN_PREFIX_LENGTH) {
+  if (sessionIdOrPrefix.length < MIN_PREFIX_LENGTH || !isSessionIdShape(sessionIdOrPrefix)) {
     return { ok: false, reason: 'not-found', matches: [] }
   }
   const prefixMatches = all.filter((s) => s.sessionId.startsWith(sessionIdOrPrefix))
   if (prefixMatches.length === 0) return { ok: false, reason: 'not-found', matches: [] }
   if (prefixMatches.length === 1) return { ok: true, summary: prefixMatches[0]! }
   return { ok: false, reason: 'ambiguous', matches: prefixMatches }
+}
+
+const SESSION_ID_SHAPE = /^[^_/\\\s][^/\\\s]*$/
+
+export function isSessionIdShape(value: string): boolean {
+  return SESSION_ID_SHAPE.test(value)
 }
 
 async function readSessionFiles(
