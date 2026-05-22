@@ -1957,6 +1957,81 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
     expect(result).toEqual({ kind: 'permission-denied' })
     expect(sessions).toHaveLength(0)
   })
+
+  test('falls back to a thread-keyed session when slash command carries thread:null (Slack)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'hi', thread: 'thr-1', isBotMention: true }))
+    await router.__testing!.flushDebounce({ ...KEY, thread: 'thr-1' })
+
+    const result = await router.executeCommand({ ...KEY, thread: null }, 'stop', { invokerId: 'alice' })
+
+    expect(result).toEqual({ kind: 'handled', name: 'stop' })
+    expect(sessions[0]!.aborted).toBe(1)
+  })
+
+  test('exact key match wins over fallback when both apply', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'top-level' }))
+    await router.__testing!.flushDebounce(KEY)
+    await router.route(inbound({ text: 'in thread', thread: 'thr-1', isBotMention: true, externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce({ ...KEY, thread: 'thr-1' })
+
+    const result = await router.executeCommand({ ...KEY, thread: null }, 'stop', { invokerId: 'alice' })
+
+    expect(result).toEqual({ kind: 'handled', name: 'stop' })
+    expect(sessions[0]!.aborted).toBe(1)
+    expect(sessions[1]!.aborted).toBe(0)
+  })
+
+  test('returns ambiguous when multiple thread-keyed sessions match the channel-level key', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'in thread 1', thread: 'thr-1', isBotMention: true, externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce({ ...KEY, thread: 'thr-1' })
+    await router.route(inbound({ text: 'in thread 2', thread: 'thr-2', isBotMention: true, externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce({ ...KEY, thread: 'thr-2' })
+
+    const result = await router.executeCommand({ ...KEY, thread: null }, 'stop', { invokerId: 'alice' })
+
+    expect(result).toEqual({ kind: 'ambiguous', matchCount: 2 })
+    expect(sessions[0]!.aborted).toBe(0)
+    expect(sessions[1]!.aborted).toBe(0)
+  })
+
+  test('fallback ignores sessions in other chats (same workspace)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'hi', thread: 'thr-1', isBotMention: true }))
+    await router.__testing!.flushDebounce({ ...KEY, thread: 'thr-1' })
+
+    const result = await router.executeCommand({ ...KEY, chat: 'other-channel', thread: null }, 'stop', {
+      invokerId: 'alice',
+    })
+
+    expect(result).toEqual({ kind: 'no-live-session' })
+    expect(sessions[0]!.aborted).toBe(0)
+  })
+
+  test('fallback ignores sessions in other workspaces (same chat id)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'hi' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const result = await router.executeCommand({ ...KEY, workspace: 'other-workspace', thread: null }, 'stop', {
+      invokerId: 'alice',
+    })
+
+    expect(result).toEqual({ kind: 'no-live-session' })
+    expect(sessions[0]!.aborted).toBe(0)
+  })
 })
 
 describe('ChannelRouter typing indicator', () => {
