@@ -368,6 +368,38 @@ describe('memorySearchTool — stream events', () => {
 
     expect('matches' in result ? result.matches.map(matchKey) : []).toEqual(['stream:streams/2026-05-20#only-stream'])
   })
+
+  test('finds matches in legacy flat memory/<date>.jsonl layout (pre-shard agents)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeLegacyStream(agentDir, '2026-04-15', [
+      fragment('legacy-frag', 'Pre-shard topic', 'needle in legacy file.\n'),
+    ])
+
+    const result = await call(agentDir, { query: 'needle' })
+
+    expect('matches' in result ? result.matches.map(matchKey) : []).toEqual(['stream:streams/2026-04-15#legacy-frag'])
+  })
+
+  test('exhausts multiple matching events across multiple stream days within maxResults', async () => {
+    const agentDir = await makeAgentDir()
+    await writeStream(agentDir, '2026-05-19', [
+      fragment('d19-a', 'D19 a', 'needle in d19 a.\n'),
+      fragment('d19-b', 'D19 b', 'needle in d19 b.\n'),
+    ])
+    await writeStream(agentDir, '2026-05-20', [
+      fragment('d20-a', 'D20 a', 'needle in d20 a.\n'),
+      fragment('d20-b', 'D20 b', 'needle in d20 b.\n'),
+    ])
+
+    const result = await call(agentDir, { query: 'needle' })
+
+    expect('matches' in result ? result.matches.map(matchKey) : []).toEqual([
+      'stream:streams/2026-05-20#d20-a',
+      'stream:streams/2026-05-20#d20-b',
+      'stream:streams/2026-05-19#d19-a',
+      'stream:streams/2026-05-19#d19-b',
+    ])
+  })
 })
 
 function topicSlug(m: TopicMatch | StreamMatch): string | undefined {
@@ -398,6 +430,16 @@ async function writeStream(
 ): Promise<void> {
   await mkdir(streamsDir(agentDir), { recursive: true })
   await appendEvents(streamFilePath(agentDir, date), events)
+}
+
+async function writeLegacyStream(
+  agentDir: string,
+  date: string,
+  events: Array<FragmentEvent | WatermarkEvent | LegacyProseEvent>,
+): Promise<void> {
+  const legacyDir = join(agentDir, 'memory')
+  await mkdir(legacyDir, { recursive: true })
+  await appendEvents(join(legacyDir, `${date}.jsonl`), events)
 }
 
 async function makeAgentDir(): Promise<string> {
