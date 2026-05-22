@@ -2,8 +2,6 @@
 
 > A TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime.
 
-Full docs: **[typeclaw.dev](https://typeclaw.dev)**.
-
 ## Why?
 
 There are great agents out there. None of them were quite the shape I wanted:
