@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs'
-import { access, constants as fsConstants, mkdir, readdir, stat, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { access, constants as fsConstants, mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
 
 import { CronExpressionParser } from 'cron-parser'
 import { z } from 'zod'
@@ -10,7 +10,8 @@ import { definePlugin } from '@/plugin'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
 import { createMemoryLoggerSubagent, type MemoryLoggerPayload } from './memory-logger'
-import { runMigration } from './migration'
+import { runMigration, runShardingMigration } from './migration'
+import { preShardBackupPath, streamFilePath, streamsDir, topicsDir } from './paths'
 
 const DEFAULT_IDLE_MS = 60_000
 const DEFAULT_BUFFER_BYTES = 500_000
@@ -240,17 +241,22 @@ export default definePlugin({
       },
       doctorChecks: {
         'dir-writable': {
-          description: 'memory/ exists and is writable',
+          description: 'memory/topics/ exists and is writable',
           run: async (dctx) => {
-            const dir = join(dctx.agentDir, 'memory')
+            const dir = topicsDir(dctx.agentDir)
             try {
               await access(dir, fsConstants.W_OK)
               return { status: 'ok', message: `${dir} writable` }
             } catch {
-              return {
-                status: 'error',
-                message: `${dir} is missing or not writable`,
-                fix: { description: 'Create memory/ in the agent folder or fix its permissions on the host.' },
+              try {
+                await mkdir(dir, { recursive: true })
+                return { status: 'ok', message: `created ${dir}` }
+              } catch {
+                return {
+                  status: 'error',
+                  message: `${dir} is missing and could not be created`,
+                  fix: { description: 'Create memory/topics/ in the agent folder or fix its permissions on the host.' },
+                }
               }
             }
           },
@@ -259,8 +265,8 @@ export default definePlugin({
           description: "today's daily stream file exists",
           run: async (dctx) => {
             const today = new Date().toISOString().slice(0, 10)
-            const rel = `memory/${today}.jsonl`
-            const abs = join(dctx.agentDir, rel)
+            const rel = join('memory', 'streams', `${today}.jsonl`)
+            const abs = streamFilePath(dctx.agentDir, today)
             if (existsSync(abs)) return { status: 'ok', message: `${rel} present` }
             return {
               status: 'warning',
@@ -268,7 +274,7 @@ export default definePlugin({
               fix: {
                 description: `Create empty ${rel} so memory-logger has a target.`,
                 apply: async () => {
-                  await mkdir(dirname(abs), { recursive: true })
+                  await mkdir(streamsDir(dctx.agentDir), { recursive: true })
                   await writeFile(abs, '', 'utf8')
                   return { summary: `created ${rel}`, changedPaths: [rel] }
                 },
@@ -277,17 +283,84 @@ export default definePlugin({
           },
         },
         'legacy-md-cleanup': {
-          description: 'Check for legacy .md daily stream files that should have been migrated to .jsonl',
+          description: 'Check for legacy .md daily stream files and un-migrated root MEMORY.md',
           run: async (dctx) => {
             const memoryDir = join(dctx.agentDir, 'memory')
+            const rootMemoryPath = join(dctx.agentDir, 'MEMORY.md')
+            const hasRootMemory = existsSync(rootMemoryPath)
+            const hasTopicsDir = existsSync(topicsDir(dctx.agentDir))
+
             let files: string[]
             try {
               files = await readdir(memoryDir)
             } catch {
-              return { status: 'ok', message: 'memory/ does not exist yet' }
+              if (!hasRootMemory) return { status: 'ok', message: 'memory/ does not exist yet' }
+              return {
+                status: 'warning',
+                message: 'root MEMORY.md present but not sharded',
+                fix: {
+                  description: 'Run sharding migration to convert root MEMORY.md to topic shards',
+                  apply: async (fixCtx) => {
+                    const result = await runShardingMigration({ agentDir: fixCtx.agentDir, logger: fixCtx.logger })
+                    return {
+                      summary: result.migrated
+                        ? `sharded ${result.topicCount} topic(s) and ${result.streamCount} stream(s)`
+                        : `sharding migration did not run${result.error ? `: ${result.error}` : ''}`,
+                      changedPaths: result.migrated
+                        ? [
+                            join('memory', 'topics'),
+                            join('memory', 'streams'),
+                            join('memory', 'MEMORY.md.pre-shard.bak'),
+                          ]
+                        : [],
+                    }
+                  },
+                },
+              }
             }
 
             const mdFiles = files.filter((f) => /^\d{4}-\d{2}-\d{2}\.md$/.test(f))
+
+            if (hasRootMemory) {
+              if (!hasTopicsDir) {
+                const mdMsg = mdFiles.length > 0 ? `; also ${mdFiles.length} legacy .md daily stream(s)` : ''
+                return {
+                  status: 'warning',
+                  message: `root MEMORY.md present but not sharded${mdMsg}`,
+                  fix: {
+                    description: 'Run sharding migration to convert root MEMORY.md to topic shards',
+                    apply: async (fixCtx) => {
+                      const result = await runShardingMigration({ agentDir: fixCtx.agentDir, logger: fixCtx.logger })
+                      return {
+                        summary: result.migrated
+                          ? `sharded ${result.topicCount} topic(s) and ${result.streamCount} stream(s)`
+                          : `sharding migration did not run${result.error ? `: ${result.error}` : ''}`,
+                        changedPaths: result.migrated
+                          ? [
+                              join('memory', 'topics'),
+                              join('memory', 'streams'),
+                              join('memory', 'MEMORY.md.pre-shard.bak'),
+                            ]
+                          : [],
+                      }
+                    },
+                  },
+                }
+              }
+              const mdMsg = mdFiles.length > 0 ? `; also ${mdFiles.length} legacy .md daily stream(s)` : ''
+              return {
+                status: 'warning',
+                message: `orphaned root MEMORY.md after sharding migration${mdMsg}`,
+                fix: {
+                  description: 'Delete the orphaned root MEMORY.md file',
+                  apply: async () => {
+                    await unlink(rootMemoryPath)
+                    return { summary: 'deleted orphaned root MEMORY.md', changedPaths: ['MEMORY.md'] }
+                  },
+                },
+              }
+            }
+
             if (mdFiles.length === 0) return { status: 'ok', message: 'no legacy .md daily streams found' }
 
             const caseA: string[] = []
@@ -333,6 +406,39 @@ export default definePlugin({
             }
 
             return { status: 'ok', message: 'no legacy .md daily streams found' }
+          },
+        },
+        'pre-shard-backup-age': {
+          description: 'Warn when pre-shard backup is older than 30 days',
+          run: async (dctx) => {
+            const backupPath = preShardBackupPath(dctx.agentDir)
+            let s
+            try {
+              s = await stat(backupPath)
+            } catch {
+              return { status: 'ok', message: 'no pre-shard backup present' }
+            }
+            const ageDays = (Date.now() - s.mtimeMs) / 86_400_000
+            if (ageDays > 30) {
+              return {
+                status: 'warning',
+                message: `pre-shard backup is ${Math.round(ageDays)} days old; safe to delete if migration is verified`,
+                fix: {
+                  description: 'Delete the pre-shard backup file',
+                  apply: async () => {
+                    await unlink(backupPath)
+                    return {
+                      summary: 'deleted pre-shard backup',
+                      changedPaths: [join('memory', 'MEMORY.md.pre-shard.bak')],
+                    }
+                  },
+                },
+              }
+            }
+            return {
+              status: 'ok',
+              message: `pre-shard backup is ${Math.round(ageDays)} days old (under 30-day threshold)`,
+            }
           },
         },
       },

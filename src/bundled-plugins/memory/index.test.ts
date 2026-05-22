@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -760,5 +760,157 @@ describe('doctor checks', () => {
     const { logger } = makeCapturingLogger()
     const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
     expect(result.status).toBe('ok')
+  })
+
+  test('legacy-md-cleanup: un-migrated root MEMORY.md with no topics dir → warning with sharding fix', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    await writeFile(join(agentDir, 'MEMORY.md'), '## Old Topic\nSome body\n', 'utf8')
+
+    const check = exports.doctorChecks?.['legacy-md-cleanup']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('warning')
+    expect(result.message).toContain('root MEMORY.md present but not sharded')
+    expect(result.fix).toBeDefined()
+    expect(result.fix!.description).toContain('sharding migration')
+    expect(result.fix!.apply).toBeDefined()
+
+    const fixResult = await result.fix!.apply!({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(fixResult.summary).toContain('sharded')
+  })
+
+  test('legacy-md-cleanup: orphaned root MEMORY.md with topics dir → warning with delete fix', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    await mkdir(join(agentDir, 'memory', 'topics'), { recursive: true })
+    await writeFile(join(agentDir, 'MEMORY.md'), '## Old Topic\nSome body\n', 'utf8')
+
+    const check = exports.doctorChecks?.['legacy-md-cleanup']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('warning')
+    expect(result.message).toContain('orphaned root MEMORY.md')
+    expect(result.fix).toBeDefined()
+    expect(result.fix!.description).toContain('Delete')
+    expect(result.fix!.apply).toBeDefined()
+
+    const fixResult = await result.fix!.apply!({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(fixResult.summary).toContain('deleted')
+    expect(existsSync(join(agentDir, 'MEMORY.md'))).toBe(false)
+  })
+
+  test('dir-writable: memory/topics/ missing → auto-creates and returns ok', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+
+    const check = exports.doctorChecks?.['dir-writable']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('ok')
+    expect(result.message).toContain('created')
+    expect(existsSync(join(agentDir, 'memory', 'topics'))).toBe(true)
+  })
+
+  test('dir-writable: memory/topics/ already exists → ok', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    await mkdir(join(agentDir, 'memory', 'topics'), { recursive: true })
+
+    const check = exports.doctorChecks?.['dir-writable']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('ok')
+    expect(result.message).toContain('writable')
+  })
+
+  test('daily-stream-current: memory/streams/<today>.jsonl present → ok', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    const today = new Date().toISOString().slice(0, 10)
+    await mkdir(join(agentDir, 'memory', 'streams'), { recursive: true })
+    await writeFile(join(agentDir, 'memory', 'streams', `${today}.jsonl`), '', 'utf8')
+
+    const check = exports.doctorChecks?.['daily-stream-current']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('ok')
+    expect(result.message).toContain('present')
+  })
+
+  test('daily-stream-current: missing → warning with fix that creates file', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+
+    const check = exports.doctorChecks?.['daily-stream-current']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('warning')
+    expect(result.message).toContain('missing')
+    expect(result.fix).toBeDefined()
+    expect(result.fix!.apply).toBeDefined()
+
+    const fixResult = await result.fix!.apply!({ pluginName: 'memory', agentDir, config: {}, logger })
+    const today = new Date().toISOString().slice(0, 10)
+    expect(fixResult.changedPaths).toContain(join('memory', 'streams', `${today}.jsonl`))
+    expect(existsSync(join(agentDir, 'memory', 'streams', `${today}.jsonl`))).toBe(true)
+  })
+
+  test('pre-shard-backup-age: no backup → ok', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+
+    const check = exports.doctorChecks?.['pre-shard-backup-age']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('ok')
+    expect(result.message).toContain('no pre-shard backup present')
+  })
+
+  test('pre-shard-backup-age: backup ≤30 days → ok', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    const backupPath = join(agentDir, 'memory', 'MEMORY.md.pre-shard.bak')
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
+    await writeFile(backupPath, 'backup', 'utf8')
+    const now = new Date()
+    await utimes(backupPath, now, now)
+
+    const check = exports.doctorChecks?.['pre-shard-backup-age']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('ok')
+    expect(result.message).toContain('under 30-day threshold')
+  })
+
+  test('pre-shard-backup-age: backup >30 days → warning with fix that deletes', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    const backupPath = join(agentDir, 'memory', 'MEMORY.md.pre-shard.bak')
+    await mkdir(join(agentDir, 'memory'), { recursive: true })
+    await writeFile(backupPath, 'backup', 'utf8')
+    const old = new Date(Date.now() - 31 * 86_400_000)
+    await utimes(backupPath, old, old)
+
+    const check = exports.doctorChecks?.['pre-shard-backup-age']
+    expect(check).toBeDefined()
+
+    const { logger } = makeCapturingLogger()
+    const result = await check!.run({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(result.status).toBe('warning')
+    expect(result.message).toContain('31 days old')
+    expect(result.fix).toBeDefined()
+    expect(result.fix!.apply).toBeDefined()
+
+    const fixResult = await result.fix!.apply!({ pluginName: 'memory', agentDir, config: {}, logger })
+    expect(fixResult.summary).toContain('deleted')
+    expect(existsSync(backupPath)).toBe(false)
   })
 })
