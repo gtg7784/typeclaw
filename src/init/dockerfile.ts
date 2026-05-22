@@ -474,6 +474,257 @@ const CLAUDE_CODE_ONBOARDING_SEED = JSON.stringify({
   numStartups: 1,
 })
 
+// The Stop hook is what powers the typeclaw-claude-code skill's done-signal:
+// the operator subagent spawns claude in a worktree, polls a sentinel file,
+// and decides "turn done" from the file's contents. The hook was originally
+// per-worktree (`<worktree>/.claude/settings.json` + `<worktree>/hook-on-
+// stop.sh`), which meant the operator subagent wrote both files itself at
+// delegation time. That worked when operator wrote the canonical shape —
+// and silently failed when it didn't. Claude Code's settings parser
+// ignores unknown keys, so wrong-shape configs (`{"hooks": {"onStop":
+// "./script.sh"}}`, `{"hooks": {"Stop": "./script.sh"}}`,
+// `{"hooks": {"Stop": [{"command": "./script.sh"}]}}` etc.) surface as
+// "polling timed out at the 10-minute wall-clock budget" rather than as a
+// parse error — the failure is invisible until you've already paid the
+// budget. The skill's "do not simplify this JSON" warning helps but doesn't
+// eliminate the slip: as long as an LLM has to write the JSON, an LLM can
+// invent a shape.
+//
+// Move both pieces to Dockerfile-build time, where the JSON is constructed
+// once via JSON.stringify and the shape can never drift from the operator's
+// reading of the skill:
+//
+//   1. `/usr/local/bin/typeclaw-cc-stop-hook` — the hook script. Stable
+//      absolute path so the global settings.json can name it without
+//      worrying about $PATH. Reads stdin (Claude Code's Stop event JSON)
+//      and atomically writes `$PWD/sentinel.json` + touches `$PWD/.done`.
+//      The temp-file-then-rename keeps the read side from ever seeing a
+//      partial sentinel even if the polling loop races the write — same
+//      atomicity contract as the previous per-worktree script.
+//   2. `~/.claude/settings.json` — the user-level (global) hook config.
+//      User-level hooks fire for every `claude` invocation regardless of
+//      cwd, so the operator's worktree no longer needs its own
+//      `.claude/settings.json`. (Claude Code merges hooks additively
+//      across scopes per docs.claude.com/en/docs/claude-code/settings —
+//      if a future user mounts their own `~/.claude/settings.json` with a
+//      different Stop hook, both fire in parallel rather than ours being
+//      clobbered.)
+//
+// Both files are written via JSON.stringify + heredoc; the JSON shape is
+// validated by JSON.parse in dockerfile.test.ts, so a future edit that
+// corrupts the structure fails the test, not the docker build (let alone
+// the next delegation that runs against the broken hook). The previous
+// per-worktree path is fully removed from the skill body; the only place
+// the hook shape lives is here.
+//
+// IMPORTANT — \`$PWD\` vs \`$CLAUDE_PROJECT_DIR\`: an earlier version of this
+// layer used \`$CLAUDE_PROJECT_DIR\`. Self-review caught this as a critical
+// bug. \`CLAUDE_PROJECT_DIR\` is Claude Code's documented env var for "the
+// project root" — but empirically (see anthropics/claude-code#27343 and
+// #44450), inside a git worktree it resolves to the *main repo's* git
+// root, NOT the worktree's path. The operator's flow is:
+//   git -C /agent worktree add /tmp/cc-<id> HEAD
+//   tmux new-session -d -s cc-<id> -c /tmp/cc-<id> claude
+// So \`/tmp/cc-<id>\` is a registered worktree of \`/agent\`, and Claude
+// Code would resolve \`CLAUDE_PROJECT_DIR=/agent\` — landing the sentinel
+// in the live agent folder while the polling loop watches the worktree.
+//
+// The fix: write to \`$PWD\` instead. \`$PWD\` is set by every POSIX shell
+// on every invocation (POSIX-required since IEEE 1003.1-1988), and it's
+// the literal cwd Claude Code was invoked with — exactly the worktree
+// path \`tmux -c\` set. \`CLAUDE_PROJECT_DIR\` is Anthropic-specific and
+// has shifted semantics across versions per the cited bug reports; we
+// deliberately avoid depending on it.
+//
+// PER-SESSION FILENAMES — concurrent-claude race safety: the Stop hook
+// writes to \`sentinel-<session_id>.json\` and \`.done-<session_id>\`,
+// not a fixed filename. session_id comes from Claude Code's Stop event
+// JSON on stdin (\`BaseHookInputSchema.session_id\`, always present per
+// the upstream schema). The operator learns the UUID by reading a
+// \`.session-id\` file that a SessionStart hook (also baked here) writes
+// at session-start time; see TYPECLAW_CC_SESSION_START_HOOK_SCRIPT
+// below.
+//
+// The earlier shape used fixed \`sentinel.json\` + \`.done\` names, which
+// is safe when each worktree has at most one claude session (today's
+// only caller). But if two callers ever share a cwd — operator A and
+// operator B both delegating in \`/agent\`, a future plugin that runs
+// \`claude\` from a shared dir, or an out-of-band caller violating the
+// "one worktree per delegation" invariant — both write to the same
+// file and corrupt each other's state with no diagnostic. Per-session
+// filenames make the race structurally impossible.
+//
+// WHY NOT \`claude --session-id <pre-generated-uuid>\`: an earlier
+// iteration of this PR had the operator pre-generate a UUID and pass
+// it via \`--session-id\`. Self-review caught that as a critical bug:
+// per anthropics/claude-code#44607, the \`--session-id\` flag only
+// controls the persistence/transcript UUID in \`-p\` (print) mode. In
+// interactive mode (which the typeclaw-claude-code skill uses), the
+// flag sets a separate telemetry/API ID while the CLI generates its
+// own internal UUID for the transcript file and for the \`session_id\`
+// field that hooks see. The pre-generated UUID and the hook's UUID
+// don't match — the polling loop times out forever. The current
+// design sidesteps this entirely: the operator does NOT pass
+// \`--session-id\`; it lets claude generate its own UUID and learns it
+// back via the \`.session-id\` file the SessionStart hook writes.
+//
+// session_id extraction: \`bun -e\` against the JSON payload. We use bun,
+// NOT POSIX sed, because bun is guaranteed in the container (bun:1-slim
+// base) and is a real JSON parser. A previous iteration used
+// \`sed -n 's/.*"session_id":"\\([^"]*\\)".*/\\1/p'\` which is greedy and
+// picks the LAST \`"session_id":"..."\` occurrence in the JSON.
+// Claude Code's Stop event carries \`last_assistant_message\` which
+// contains the assistant's prose — that prose can include the literal
+// text \`"session_id":"<fake-uuid>"\` (the model might have been
+// discussing session IDs!), which sed would extract instead of the
+// top-level field. bun's JSON.parse picks the structural \`session_id\`
+// regardless of what appears in nested string values. UUID-shape
+// validation still applies downstream as defense-in-depth against
+// path-traversal session_id values; malformed JSON or missing field
+// falls back to "malformed" so the polling loop sees SOMETHING and
+// can surface the corruption.
+//
+// FALLBACK FILENAMES — \`sentinel-malformed.json\` / \`.done-malformed\`:
+// if session_id extraction fails or validation rejects the result, the
+// hook writes to these fixed names. The operator's polling loop watches
+// its own \`<sid>\` file (read from \`.session-id\`) and will time out —
+// but the \`-malformed\` file exists on disk so a post-mortem inspector
+// can tell "hook fired but session_id was bad" apart from "hook never
+// fired at all."
+//
+// SECURITY/SCOPE: both hook scripts only touch files inside \`$PWD\`,
+// with filenames validated to UUID shape or the fixed "malformed"
+// fallback. Even with an adversarial \`session_id\` in the stdin
+// payload, the worst case is "hook writes \`$PWD/sentinel-malformed.json\`"
+// or "hook writes \`$PWD/.session-id\` containing 'malformed'" — never
+// path traversal, never writes outside \`$PWD\`. The hooks run as root
+// inside the container like every other in-container process; there is
+// no privilege boundary to cross.
+const TYPECLAW_CC_STOP_HOOK_PATH = '/usr/local/bin/typeclaw-cc-stop-hook'
+const TYPECLAW_CC_SESSION_START_HOOK_PATH = '/usr/local/bin/typeclaw-cc-session-start-hook'
+
+// SessionStart hook script. Fires when a session begins via
+// startup/resume/clear/compact per the upstream lifecycle docs. Writes
+// \`$PWD/.session-id\` containing the validated UUID, atomically.
+//
+// IMPORTANT — \`.session-id\` is a FAST PATH, not a precondition. Per
+// anthropics/claude-code#11519, SessionStart can be SKIPPED entirely
+// when workspace trust hasn't been accepted yet: debug logs show
+// \`Skipping SessionStart:startup hook execution - workspace trust not
+// accepted\`. For the typeclaw-claude-code skill flow, EVERY first
+// invocation in a fresh worktree hits this — the trust dialog fires
+// before any prompt can be sent. So \`.session-id\` may never appear
+// pre-first-prompt. The skill instructs the operator to fall back to
+// reading session_id from the FIRST Stop hook's sentinel instead.
+// \`.session-id\` is still useful for sessions that were already
+// trusted (re-attaching to a running worktree, etc.) — when it
+// appears, the operator can skip the discovery step.
+//
+// IMPORTANT — \`compact\` can ROTATE the session_id. The upstream
+// behavior is documented in anthropics/claude-code#29094: a SessionStart
+// with \`source: "compact"\` is a NEW session linked via
+// \`parent_session_id\`. So \`.session-id\` can change mid-delegation if
+// a long claude session compacts itself. The operator's polling loop
+// must handle session_id rotation: a new \`.done-<different-uuid>\`
+// appearing means \`cc_session_id\` should update to the new value.
+const TYPECLAW_CC_SESSION_START_HOOK_SCRIPT = `#!/bin/sh
+# typeclaw SessionStart-hook for Claude Code. Stdin carries the
+# SessionStart event JSON. Writes \$PWD/.session-id with the session
+# UUID as a fast-path optimization (the operator falls back to
+# discovering session_id from the first Stop sentinel if .session-id
+# never appears — see anthropics/claude-code#11519). Rationale lives
+# in src/init/dockerfile.ts.
+#
+# Both temp filenames are PID-scoped (PID = \$\$) so two SessionStart
+# hooks firing concurrently in the same cwd don't race on the same
+# temp file.
+set -eu
+tmp_out="\${PWD}/.session-id.\$\$.tmp"
+trap 'rm -f "\$tmp_out"' EXIT
+sid=\$(bun -e 'try { const j = await new Response(Bun.stdin.stream()).json(); process.stdout.write(String(j.session_id ?? "")) } catch { process.stdout.write("") }')
+case "\$sid" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) sid=malformed ;;
+esac
+printf '%s\\n' "\$sid" > "\$tmp_out"
+mv "\$tmp_out" "\${PWD}/.session-id"
+trap - EXIT
+`
+
+// Single-quoted heredoc so the body is delivered verbatim — no shell
+// expansion at build time. Runtime expansion of \`$PWD\`, \`$sid\`, etc.
+// is what we want, so the heredoc must NOT expand them during \`docker
+// build\`. POSIX \`<<'EOF'\` (quoted delimiter) is the canonical way to
+// get verbatim heredoc.
+//
+// Script flow:
+//   1. Buffer stdin to a temp file (we need to read it twice: once for
+//      session_id extraction, once for the sentinel write).
+//   2. Extract session_id via POSIX sed. Result is matched against the
+//      RFC-4122-style UUID regex (8-4-4-4-12 hex with dashes). Anything
+//      that doesn't match — empty extraction, embedded escapes, path
+//      traversal, missing field — falls through to "malformed".
+//   3. Atomic write: \`mv\` is POSIX-atomic on the same filesystem (we
+//      stay inside \`$PWD\` so the temp and final paths share an fs).
+//   4. \`touch .done-<sid>\` AFTER the mv so a polling reader never sees
+//      .done existing before sentinel.json — the polling loop watches
+//      .done as the readiness signal.
+const TYPECLAW_CC_STOP_HOOK_SCRIPT = `#!/bin/sh
+# typeclaw Stop-hook for Claude Code. Stdin carries the Stop event JSON.
+# Writes per-session sentinel/.done files into \$PWD. Rationale (including
+# the security model, \$PWD semantics, and why bun-not-sed for JSON
+# extraction) lives in src/init/dockerfile.ts.
+set -eu
+tmp_in="\${PWD}/.cc-stop-hook-in.\$\$"
+trap 'rm -f "\$tmp_in"' EXIT
+cat > "\$tmp_in"
+sid=\$(bun -e 'try { const j = await Bun.file(process.argv[1]).json(); process.stdout.write(String(j.session_id ?? "")) } catch { process.stdout.write("") }' "\$tmp_in")
+case "\$sid" in
+  [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+  *) sid=malformed ;;
+esac
+mv "\$tmp_in" "\${PWD}/sentinel-\${sid}.json"
+trap - EXIT
+touch "\${PWD}/.done-\${sid}"
+`
+
+// User-level Claude Code settings file; applies to every invocation
+// regardless of cwd. Registers BOTH the SessionStart hook (so the
+// operator can learn the session UUID) and the Stop hook (so the
+// operator can poll for turn-completion). Built via JSON.stringify
+// rather than a string literal so any future shape edit fails the
+// JSON.parse regression test, not the docker build (or worse, the
+// first failed delegation).
+//
+// SessionStart matcher \`startup|resume|clear|compact\`: covers all four
+// session-origin types per the upstream matcher reference. Stop has no
+// matcher support (always fires on every occurrence per the docs), so
+// \`matcher: "*"\` is the canonical "fire on every Stop" form.
+//
+// \`args: []\` is the exec-form trigger per docs.claude.com/en/docs/
+// claude-code/hooks: with \`args\` present, Claude Code runs the command
+// directly via execvp (kernel-handled shebang, no shell tokenization).
+// With \`args\` absent, Claude Code falls back to shell form (\`sh -c
+// "<command>"\`), which works for our absolute-path-no-special-chars
+// case but is fragile to any future path change. Exec form is the
+// canonical robust shape.
+const TYPECLAW_CC_GLOBAL_SETTINGS = JSON.stringify({
+  hooks: {
+    SessionStart: [
+      {
+        matcher: 'startup|resume|clear|compact',
+        hooks: [{ type: 'command', command: TYPECLAW_CC_SESSION_START_HOOK_PATH, args: [] }],
+      },
+    ],
+    Stop: [
+      {
+        matcher: '*',
+        hooks: [{ type: 'command', command: TYPECLAW_CC_STOP_HOOK_PATH, args: [] }],
+      },
+    ],
+  },
+})
+
 function renderClaudeCodeInstallLayer(enabled: boolean): string {
   if (!enabled) return ''
   return `# Layer 5.6 (toggle): install Anthropic's Claude Code CLI. Opt-in via
@@ -481,13 +732,26 @@ function renderClaudeCodeInstallLayer(enabled: boolean): string {
 # documents the auth + usage flow. Pre-seed ~/.claude.json so the first
 # launch skips the TTY-only theme picker; see CLAUDE_CODE_ONBOARDING_SEED
 # above for the rationale and what the seed deliberately does NOT cover.
-# The seed write runs LAST in the chain so the final layer state is
-# exactly the seeded config — independent of whether any earlier command
-# (or a future Claude version's \`--version\` smoke test) writes a
-# default \`~/.claude.json\` partway through the layer.
+# Also pre-write the canonical Stop-hook config and helper script at
+# build time (see TYPECLAW_CC_STOP_HOOK_PATH above) so the operator
+# subagent never has to construct that JSON itself — the historically
+# failure-prone step where wrong-shape configs (\`onStop\`, bare-string
+# values, etc.) would silently disable the done-signal and burn the
+# polling loop's wall-clock budget. The seed write runs LAST in the
+# chain so the final layer state is exactly the seeded config —
+# independent of whether any earlier command (or a future Claude
+# version's \`--version\` smoke test) writes a default \`~/.claude.json\`
+# partway through the layer.
 RUN curl -fsSL https://claude.ai/install.sh | bash \\
  && ln -sf "$HOME/.local/bin/claude" /usr/local/bin/claude \\
  && claude --version > /dev/null \\
+ && cat > ${TYPECLAW_CC_SESSION_START_HOOK_PATH} <<'TYPECLAW_CC_SESSION_START_HOOK_EOF'
+${TYPECLAW_CC_SESSION_START_HOOK_SCRIPT}TYPECLAW_CC_SESSION_START_HOOK_EOF
+RUN cat > ${TYPECLAW_CC_STOP_HOOK_PATH} <<'TYPECLAW_CC_STOP_HOOK_EOF'
+${TYPECLAW_CC_STOP_HOOK_SCRIPT}TYPECLAW_CC_STOP_HOOK_EOF
+RUN chmod +x ${TYPECLAW_CC_SESSION_START_HOOK_PATH} ${TYPECLAW_CC_STOP_HOOK_PATH} \\
+ && mkdir -p "$HOME/.claude" \\
+ && printf '%s\\n' '${TYPECLAW_CC_GLOBAL_SETTINGS}' > "$HOME/.claude/settings.json" \\
  && printf '%s\\n' '${CLAUDE_CODE_ONBOARDING_SEED}' > "$HOME/.claude.json"`
 }
 
