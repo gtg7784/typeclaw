@@ -40,11 +40,17 @@ All fields are **restart-required** — the plugin reads them once at boot.
 | Hook     | `session.end`              | Spawns `memory-logger` immediately; also unlinks the retrieval-cache file for this session.                                                                                                                                                                                    |
 | Hook     | `session.prompt`           | When `buildInjectionPlan` returns `mode: 'index'` and origin is not a subagent, spawns `memory-retrieval` to write the cache file used by the next `loadMemory` call.                                                                                                          |
 
-## Memory injection (two-tier)
+## Memory injection (two-tier, topic shards only)
 
 Default budget is 16 KB. Direct mode when shard bytes sum ≤ budget: all shard bodies are injected verbatim. Index mode when sum > budget: only heading + `cites=N, days=N, lastReinforced=YYYY-MM-DD` per shard, plus a directive for the agent to call `memory_search` to fetch specific topics or recent stream events.
 
-**Channel-origin always uses index mode regardless of total size** — defends against memory bleed into channel responses (the agent treats injected memory as instructions when channel users see it).
+**Undreamed daily-stream events are NOT injected into the system prompt.** They are reachable only via `memory_search`, which discriminates results by `source: "topic" | "stream"`. The agent now decides per-query whether recent observations are relevant, instead of carrying every undreamed fragment in the cached prompt prefix. Three reasons this is the right shape:
+
+1. PR #314 made `memory_search` cover the stream surface, so the duplicate copy in the system prompt no longer earns its bytes.
+2. Streams grow unboundedly with usage (~360 KB at 30 days in the typical case, more under heavy use). The previous per-file 12 KB cap silently dropped each day's tail with no signal to the agent; on-demand search returns the relevant slice instead of "the first 12 KB by date".
+3. Streams sat inside the cached system-prompt prefix and appended new fragments on every memory-logger run, breaking cache reuse across prompts. Without injection, the prefix is stable until topic shards change.
+
+**Channel-origin always uses index mode regardless of total shard size** — defends against memory bleed into channel responses (the agent treats injected memory as instructions when channel users see it).
 
 When index mode is active, the `memory-retrieval` subagent fires on `session.prompt`, reads the user's recent prompt, decides what's relevant across BOTH topic shards and undreamed stream events, pulls them via `memory_search`/`read`, and writes a focused ≤8 KB summary to `memory/.retrieval-cache/<sessionId>.md`. The NEXT `loadMemory` call for the same session reads and appends that cache file (lag-by-one-prompt). The cache file is unlinked on `session.end`.
 

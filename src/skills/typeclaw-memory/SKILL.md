@@ -9,7 +9,7 @@ The agent's long-term memory is sharded across files in `memory/topics/<slug>.md
 
 ## Reading
 
-The `# Memory` section of every system prompt comes from these shards plus undreamed daily-stream tails. When total shard bytes are above the 16 KB injection budget (or when speaking in a channel), only the heading + `cites=N, days=N, lastReinforced=YYYY-MM-DD` shows; call `memory_search` to fetch the bodies you need. `memory_search` also covers undreamed stream events directly — useful when looking for something the dreaming subagent hasn't yet consolidated into a shard.
+The `# Memory` section of every system prompt comes from topic shards only. Undreamed daily-stream events are **not** injected — call `memory_search` when you need them. When total shard bytes are above the 16 KB injection budget (or when speaking in a channel), shard bodies are also dropped from the prompt — only the heading + `cites=N, days=N, lastReinforced=YYYY-MM-DD` shows; call `memory_search` to fetch the bodies you need. The same `memory_search` covers both surfaces (topic shards and undreamed stream events), so one tool call reaches everything.
 
 ## Writing
 
