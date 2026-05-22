@@ -840,6 +840,26 @@ describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', (
     expect(ackProps).toHaveProperty('rolePromotion')
     expect(ackProps).toHaveProperty('cronPromotion')
   })
+
+  // given: the acknowledgeGuards schema permits exactly the keys we
+  //   advertise
+  // when: a future refactor relaxes the schema to allow arbitrary keys
+  // then: typos like `acknowledgeGuards: { rolePromotin: true }` would
+  //   silently no-op (the strict schema currently rejects them, so the
+  //   model gets immediate feedback). Pin additionalProperties:false on
+  //   BOTH write and edit since both expose the schema. Oracle PR #305
+  //   finding #7.
+  test('ACKNOWLEDGE_GUARDS_SCHEMA pins additionalProperties:false on write and edit (no silent typo passthrough)', async () => {
+    const hooks = createHookBus()
+    const overrides = buildBuiltinPiToolOverrides({ agentDir: '/agent', sessionId: 's', hooks })
+    for (const toolName of ['write', 'edit'] as const) {
+      const tool = overrides.find((t) => t.name === toolName)
+      const params = (tool as ToolDefinition).parameters as { properties?: Record<string, unknown> }
+      const ack = params.properties?.acknowledgeGuards as { additionalProperties?: boolean } | undefined
+      expect(ack).toBeDefined()
+      expect(ack?.additionalProperties).toBe(false)
+    }
+  })
 })
 
 describe('setupSession integration: builtin pi tools route through customTools when hooks are present', () => {
