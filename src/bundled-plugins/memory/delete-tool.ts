@@ -13,21 +13,20 @@ export const deleteTopicShardTool = {
   async run(input: { path: string }, ctx: { agentDir: string }) {
     const rawPath = input.path.trim()
 
-    if (isAbsolute(rawPath) || rawPath.includes(':')) {
+    if (isAbsolute(rawPath) || rawPath.includes(':') || rawPath.includes('\\')) {
       return { ok: false, reason: 'invalid_path' }
     }
 
-    const segments = rawPath.split(/[/\\]/).filter(Boolean)
+    const segments = rawPath.split('/').filter(Boolean)
     if (segments.includes('..')) {
       return { ok: false, reason: 'invalid_path' }
     }
 
-    const normalized = rawPath.replace(/\\/g, '/')
-    if (!/^memory\/topics\/[^/]+\.md$/.test(normalized)) {
+    if (!/^memory\/topics\/[^/]+\.md$/.test(rawPath)) {
       return { ok: false, reason: 'invalid_path' }
     }
 
-    const slug = normalized.slice('memory/topics/'.length, -'.md'.length)
+    const slug = rawPath.slice('memory/topics/'.length, -'.md'.length)
     if (!SLUG_REGEX.test(slug)) {
       return { ok: false, reason: 'invalid_slug' }
     }

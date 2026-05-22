@@ -29,6 +29,10 @@ export function checkMemoryTopicsDeleteGuard(options: {
     return block(tool, 'only the dreaming subagent may delete topic shards')
   }
 
+  if (rawPath.includes('\\')) {
+    return block(tool, 'path must use POSIX separators under memory/topics/')
+  }
+
   const targetPath = path.resolve(agentDir, rawPath)
   const topicsDir = path.resolve(agentDir, 'memory', 'topics')
   const relative = path.relative(topicsDir, targetPath)

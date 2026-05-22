@@ -94,6 +94,19 @@ describe('memory-topics-delete guard policy', () => {
     })
   })
 
+  test('denies backslash path separators', () => {
+    const result = checkMemoryTopicsDeleteGuard({
+      tool: 'delete_topic_shard',
+      args: { path: 'memory\\topics\\foo.md' },
+      agentDir: AGENT_DIR,
+      origin: { kind: 'subagent', subagent: 'dreaming', parentSessionId: 's1' },
+    })
+    expect(result).toEqual({
+      block: true,
+      reason: expect.stringContaining('memory/topics/'),
+    })
+  })
+
   test('denies bad slug (uppercase)', () => {
     const result = checkMemoryTopicsDeleteGuard({
       tool: 'delete_topic_shard',

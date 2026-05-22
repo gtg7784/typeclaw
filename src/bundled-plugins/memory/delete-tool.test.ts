@@ -60,6 +60,12 @@ describe('deleteTopicShardTool', () => {
     expect(result).toEqual({ ok: false, reason: 'invalid_path' })
   })
 
+  test('rejects backslash path separators', async () => {
+    const root = tmpRoot()
+    const result = await call(root, { path: 'memory\\topics\\foo.md' })
+    expect(result).toEqual({ ok: false, reason: 'invalid_path' })
+  })
+
   test('rejects invalid slug (uppercase)', async () => {
     const root = tmpRoot()
     const result = await call(root, { path: 'memory/topics/UPPER.md' })
