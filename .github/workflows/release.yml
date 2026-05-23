@@ -62,10 +62,13 @@ jobs:
           git config --global user.name "TypeClaw CI"
 
       - name: Test
-        # Bump per-test timeout from the 5s default: a handful of runInit tests
-        # shell out to a real `bun install` and run 4-5s on local hardware,
-        # which crosses 5s on the slower GitHub Actions runners.
-        run: bun test --timeout 30000
+        # --parallel distributes test files across CPU workers (added in Bun
+        # 1.3.13). Cuts wall time ~3-4x on multi-core runners by lifting the
+        # historical "all files in one process" serial bottleneck.
+        # --timeout 30000: a handful of runInit tests shell out to a real
+        # `bun install` and run 4-5s locally; that crosses the 5s default on
+        # the slower GitHub Actions runners.
+        run: bun test --parallel --timeout 30000
 
       - uses: actions/setup-node@v4
         with:
