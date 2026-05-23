@@ -2,6 +2,7 @@ import {
   KakaoCredentialManager,
   KakaoTalkClient as RealKakaoTalkClient,
   KakaoTalkListener as RealKakaoTalkListener,
+  type AttachmentInput,
   type KakaoChat,
   type KakaoMember,
   type KakaoMessage,
@@ -56,6 +57,13 @@ export interface KakaoTalkClient {
   getChats(options?: { all?: boolean; search?: string }): Promise<KakaoChat[]>
   getMessages(chatId: string, options?: { count?: number; from?: string }): Promise<KakaoMessage[]>
   sendMessage(chatId: string, text: string): Promise<KakaoSendResult>
+  sendAttachment(
+    chatId: string,
+    data: Uint8Array | Buffer,
+    filename: string,
+    mimeType?: string,
+  ): Promise<KakaoSendResult>
+  sendAttachment(chatId: string, attachments: ReadonlyArray<AttachmentInput>): Promise<KakaoSendResult>
   markRead(chatId: string, logId: string, opts?: { linkId?: string }): Promise<KakaoMarkReadResult>
   getProfile(): Promise<KakaoProfile>
   getMembers(chatId: string): Promise<KakaoMember[]>
@@ -160,49 +168,77 @@ function formatLabel(name: string | undefined, id: string, prefix = ''): string 
   return `${prefix}${name}(${id})`
 }
 
+async function readAttachmentBuffer(path: string): Promise<Buffer> {
+  const { readFile } = await import('node:fs/promises')
+  return await readFile(path)
+}
+
 export function createOutboundCallback(deps: {
-  client: Pick<KakaoTalkClient, 'sendMessage'>
+  client: Pick<KakaoTalkClient, 'sendMessage' | 'sendAttachment'>
   logger: KakaotalkAdapterLogger
   formatChannelTag: (workspace: string, chat: string) => Promise<string>
+  readFile?: (path: string) => Promise<Buffer>
 }): OutboundCallback {
   const { client, logger, formatChannelTag } = deps
+  const readFile = deps.readFile ?? readAttachmentBuffer
   return async (msg: OutboundMessage): Promise<SendResult> => {
     if (msg.adapter !== 'kakaotalk') {
       return { ok: false, error: `unknown adapter: ${msg.adapter}` }
     }
     const text = msg.text ?? ''
     const attachments = msg.attachments ?? []
-    if (attachments.length > 0) {
-      // Fail loudly rather than partial-send. The agent contract is "ok=true
-      // means the request as a whole succeeded"; sending text while silently
-      // dropping the attachments would let the agent confidently report
-      // "I sent your file" when the file never arrived.
-      logger.error(
-        `[kakaotalk] outbound rejected: ${attachments.length} attachment(s) supplied but KakaoTalk is text-only`,
-      )
-      return {
-        ok: false,
-        error: 'KakaoTalk does not support attachments; send text without files or use a different channel for files',
-      }
-    }
-    if (text === '') {
-      return { ok: false, error: 'message has no text (KakaoTalk does not support attachment-only messages)' }
+    if (text === '' && attachments.length === 0) {
+      return { ok: false, error: 'message has neither text nor attachments' }
     }
     const tag = await formatChannelTag(msg.workspace, msg.chat)
-    logger.info(`[kakaotalk] outbound ${tag} text_len=${text.length}`)
-    try {
-      const result = await client.sendMessage(msg.chat, text)
-      if (!result.success) {
-        logger.error(`[kakaotalk] sendMessage status_code=${result.status_code} ${tag}`)
-        return { ok: false, error: `kakaotalk send failed with status ${result.status_code}` }
+    logger.info(`[kakaotalk] outbound ${tag} text_len=${text.length} attachments=${attachments.length}`)
+
+    // KakaoTalk has no shared text-with-file send (Slack's initial_comment) — files first, then text.
+    if (attachments.length > 0) {
+      let items: AttachmentInput[]
+      try {
+        items = await Promise.all(
+          attachments.map(async (a) => {
+            const filename = a.filename ?? a.path.split('/').pop() ?? 'file'
+            const data = await readFile(a.path)
+            return { data, filename }
+          }),
+        )
+      } catch (err) {
+        const message = describe(err)
+        logger.error(`[kakaotalk] readFile failed: ${message}`)
+        return { ok: false, error: `readFile failed: ${message}` }
       }
-      logger.info(`[kakaotalk] sent log_id=${result.log_id} ${tag}`)
-      return { ok: true }
-    } catch (err) {
-      const message = describe(err)
-      logger.error(`[kakaotalk] sendMessage failed: ${message}`)
-      return { ok: false, error: message }
+      try {
+        const result = await client.sendAttachment(msg.chat, items)
+        if (!result.success) {
+          logger.error(`[kakaotalk] sendAttachment status_code=${result.status_code} ${tag}`)
+          return { ok: false, error: `kakaotalk attachment send failed with status ${result.status_code}` }
+        }
+        logger.info(`[kakaotalk] uploaded log_id=${result.log_id} attachments=${items.length} ${tag}`)
+      } catch (err) {
+        const message = describe(err)
+        logger.error(`[kakaotalk] sendAttachment failed: ${message}`)
+        return { ok: false, error: message }
+      }
     }
+
+    if (text !== '') {
+      try {
+        const result = await client.sendMessage(msg.chat, text)
+        if (!result.success) {
+          logger.error(`[kakaotalk] sendMessage status_code=${result.status_code} ${tag}`)
+          return { ok: false, error: `kakaotalk send failed with status ${result.status_code}` }
+        }
+        logger.info(`[kakaotalk] sent log_id=${result.log_id} ${tag}`)
+      } catch (err) {
+        const message = describe(err)
+        logger.error(`[kakaotalk] sendMessage failed: ${message}`)
+        return { ok: false, error: message }
+      }
+    }
+
+    return { ok: true }
   }
 }
 

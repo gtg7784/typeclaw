@@ -1,6 +1,6 @@
 ---
 name: typeclaw-channel-kakaotalk
-description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `kakaotalk`, AND before calling `channel_fetch_attachment` against a KakaoTalk URL. KakaoTalk renders messages as plain text — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and other markdown all appear literally. There is no `@mention` syntax, no message threads, no replies-with-quote, and no outbound file attachments or stickers. Inbound photos / files / video / audio CAN be downloaded via `channel_fetch_attachment` (the placeholder text includes the URL); inbound stickers are metadata-only and cannot be fetched. URLs expire ~3 days after the message arrives. Read this skill before composing or fetching anything on KakaoTalk.
+description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `kakaotalk`, AND before calling `channel_fetch_attachment` against a KakaoTalk URL. KakaoTalk renders messages as plain text — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and other markdown all appear literally. There is no `@mention` syntax, no message threads, no replies-with-quote, and no outbound stickers. Outbound file attachments (photos, videos, audio, generic files, multi-photo galleries) ARE supported — pass them via `attachments[]` on `channel_send` / `channel_reply` and the adapter routes by MIME. Inbound photos / files / video / audio CAN be downloaded via `channel_fetch_attachment` (the placeholder text includes the URL); inbound stickers are metadata-only and cannot be fetched. URLs expire ~3 days after the message arrives. Read this skill before composing or fetching anything on KakaoTalk.
 ---
 
 # typeclaw-channel-kakaotalk
@@ -21,15 +21,19 @@ If you produce any of the following, KakaoTalk will render it literally and the 
 - **Links with display text** — `[label](url)` becomes the literal string. Send the bare URL on its own; the KakaoTalk client will auto-link it.
 - **Mentions** — there is no `@user` syntax that the protocol surfaces. Address people by name in the message body.
 - **Threads / replies-with-quote** — every message is a top-level chat post. There is no per-message reply UI.
-- **Outbound attachments / stickers** — agent-messenger's KakaoTalk SDK exposes no upload API. The adapter is outbound text-only. If the user asks you to send a file or sticker, say so and offer an alternative (paste a link, summarize the file, ship it via another channel).
-
-The adapter rejects outbound attachments via `ok: false` rather than partially sending the text — the agent contract is "ok=true means the whole request succeeded", so a silent drop would let you confidently report "I sent your file" when the file never arrived.
+- **Outbound stickers / emoticons** — the KakaoTalk sticker store requires desktop-app purchase flows that the SDK does not replicate. Inbound stickers ARE surfaced (see below), but you cannot send one. If the user asks for a sticker, acknowledge the limit and offer text.
 
 ## What KakaoTalk DOES support
 
 - Plain UTF-8 text. Emoji are fine.
 - URLs auto-linkify in the client. Send them bare — `https://example.com/foo`, no markdown wrapping.
 - Newlines render as line breaks. You can use `\n\n` to space paragraphs.
+- **Outbound file attachments** — photos, videos, audio, generic files, and multi-photo galleries. Pass each as an `OutboundAttachment { path, filename? }` on the `attachments[]` field of `channel_send` / `channel_reply`. The adapter sniffs the MIME from the filename and routes to the right KakaoTalk message type, so the caller does not pick photo-vs-file-vs-multiphoto by hand:
+  - Single attachment → single send. `image/*` renders inline with tap-to-zoom; `video/*` as an inline player; `audio/*` as a voice bubble; everything else as a downloadable file.
+  - Multiple attachments, all image MIMEs → multi-photo gallery (one chat bubble containing every image).
+  - Multiple attachments with mixed kinds (e.g. photo + PDF) → individual sends, one bubble each, in array order.
+  - Each send is fail-fast: if any upload fails the adapter returns `ok: false` immediately rather than partial-success.
+- **Text + attachments in one `channel_send`** — files upload first, then the text posts as a separate chat bubble. KakaoTalk has no Slack-style `initial_comment` that lets text and files share a single send.
 
 ## Inbound attachments and stickers
 
@@ -103,8 +107,4 @@ The adapter drops every inbound where `event.author_id` equals the logged-in acc
 
 ## When you cannot answer in KakaoTalk
 
-If the user asks you to do something the adapter cannot do (send a file, render markdown, post in a thread), say so plainly:
-
-> "I can't attach files through this chat. Want me to drop the file in [other channel] instead?"
-
-Better than silently dropping the attachment and pretending you sent it.
+If the user asks you to do something the adapter cannot do (render markdown, post in a thread, send a sticker), say so plainly. Files are fine — those go through `attachments[]` as described above — but markdown rendering, threading, and stickers are real limits. Acknowledge the limit instead of silently dropping the request.
