@@ -11,6 +11,7 @@ import type { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { LiveSubagentRegistry } from '@/agent/live-subagents'
 import { detectProviderError } from '@/agent/provider-error'
 import type { SessionOrigin } from '@/agent/session-origin'
+import { parseSubagentCompletedPayload, renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import type { CreateSessionForSubagent } from '@/agent/subagents'
 import type { ChannelRouter } from '@/channels/router'
 import { aggregateCronList, type CronListEntry, loadCron } from '@/cron'
@@ -804,68 +805,18 @@ function forwardAssistantError(ws: Ws, message: unknown, logger: ServerLogger, s
 }
 
 function routeSubagentCompletionReminder(state: SessionState, msg: StreamMessage, stream: Stream): void {
-  const payload = msg.payload
-  if (payload === null || typeof payload !== 'object') return
-  const p = payload as {
-    kind?: unknown
-    taskId?: unknown
-    subagent?: unknown
-    parentSessionId?: unknown
-    ok?: unknown
-    durationMs?: unknown
-    error?: unknown
-  }
-  if (p.kind !== 'subagent.completed') return
-  if (typeof p.parentSessionId !== 'string' || p.parentSessionId !== state.sessionFileId) return
-
-  const subagent = typeof p.subagent === 'string' ? p.subagent : 'subagent'
-  const taskId = typeof p.taskId === 'string' ? p.taskId : '<unknown>'
-  const ok = p.ok === true
-  const durationMs = typeof p.durationMs === 'number' ? p.durationMs : 0
-  const error = typeof p.error === 'string' ? p.error : undefined
+  const parsed = parseSubagentCompletedPayload(msg.payload)
+  if (parsed === null) return
+  if (parsed.parentSessionId !== state.sessionFileId) return
 
   const idle = state.drainQueue.length === 0 && !state.draining
   const delivery = idle ? 'interrupt' : 'queue'
-  const text = renderCompletionReminder({ subagent, taskId, ok, durationMs, error })
+  const text = renderSubagentCompletionReminder(parsed)
   stream.publish({
     target: { kind: 'session', sessionId: state.sessionFileId },
     payload: { kind: 'prompt', text, delivery },
     meta: { source: 'subagent-completion' },
   })
-}
-
-function renderCompletionReminder(args: {
-  subagent: string
-  taskId: string
-  ok: boolean
-  durationMs: number
-  error?: string
-}): string {
-  const durationStr = formatReminderDuration(args.durationMs)
-  if (args.ok) {
-    return (
-      `<system-reminder>\n` +
-      `Subagent \`${args.subagent}\` (${args.taskId}) completed in ${durationStr}. ` +
-      `Use subagent_output to fetch the result.\n` +
-      `</system-reminder>`
-    )
-  }
-  const err = args.error ?? 'unknown error'
-  return (
-    `<system-reminder>\n` +
-    `Subagent \`${args.subagent}\` (${args.taskId}) FAILED after ${durationStr}: ${err}. ` +
-    `Use subagent_output to inspect.\n` +
-    `</system-reminder>`
-  )
-}
-
-function formatReminderDuration(ms: number): string {
-  if (ms < 1000) return `${ms}ms`
-  const totalSec = Math.floor(ms / 1000)
-  if (totalSec < 60) return `${totalSec}s`
-  const min = Math.floor(totalSec / 60)
-  const sec = totalSec % 60
-  return `${min}m${sec}s`
 }
 
 function enqueuePrompt(
