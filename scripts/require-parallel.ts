@@ -12,7 +12,7 @@
 // the IPC handshake between coordinator and workers). Empirically
 // verified against bun 1.3.14: present under --parallel, absent under
 // serial. If a future Bun version renames this var, the guard fails
-// open (treats every run as serial → always denies), which is the
+// closed (treats every run as serial → always denies), which is the
 // safe direction.
 //
 // Bypass with TYPECLAW_ALLOW_SERIAL_TESTS=1 when debugging a flaky

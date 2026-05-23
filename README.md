@@ -78,7 +78,7 @@ See `typeclaw --help` for the full command surface, or [typeclaw.dev](https://ty
 git clone https://github.com/typeclaw/typeclaw
 cd typeclaw
 bun install
-bun test
+bun run test
 ```
 
 Pre-commit checks (all must pass — no exceptions):
