@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type {
+  AttachmentInput,
   KakaoChat,
   KakaoMember,
   KakaoMessage,
@@ -62,6 +63,12 @@ class FakeListener implements KakaoTalkListener {
   }
 }
 
+function isAttachmentInputArray(
+  x: Uint8Array | Buffer | ReadonlyArray<AttachmentInput>,
+): x is ReadonlyArray<AttachmentInput> {
+  return Array.isArray(x)
+}
+
 class FakeClient implements KakaoTalkClient {
   loginCalls = 0
   sendMessageCalls: Array<{ chatId: string; text: string }> = []
@@ -102,6 +109,39 @@ class FakeClient implements KakaoTalkClient {
   async sendMessage(chatId: string, text: string): Promise<KakaoSendResult> {
     this.sendMessageCalls.push({ chatId, text })
     return this.sendResult
+  }
+
+  sendAttachmentCalls: Array<
+    | { kind: 'single'; chatId: string; data: Uint8Array | Buffer; filename: string; mimeType?: string }
+    | { kind: 'array'; chatId: string; attachments: ReadonlyArray<AttachmentInput> }
+  > = []
+  attachmentResult: KakaoSendResult = { success: true, status_code: 0, chat_id: '111', log_id: 'L-att', sent_at: 0 }
+
+  sendAttachment(
+    chatId: string,
+    data: Uint8Array | Buffer,
+    filename: string,
+    mimeType?: string,
+  ): Promise<KakaoSendResult>
+  sendAttachment(chatId: string, attachments: ReadonlyArray<AttachmentInput>): Promise<KakaoSendResult>
+  async sendAttachment(
+    chatId: string,
+    dataOrAttachments: Uint8Array | Buffer | ReadonlyArray<AttachmentInput>,
+    filename?: string,
+    mimeType?: string,
+  ): Promise<KakaoSendResult> {
+    if (isAttachmentInputArray(dataOrAttachments)) {
+      this.sendAttachmentCalls.push({ kind: 'array', chatId, attachments: dataOrAttachments })
+    } else {
+      this.sendAttachmentCalls.push({
+        kind: 'single',
+        chatId,
+        data: dataOrAttachments,
+        filename: filename!,
+        ...(mimeType !== undefined ? { mimeType } : {}),
+      })
+    }
+    return this.attachmentResult
   }
 
   async markRead(chatId: string, logId: string, opts?: { linkId?: string }): Promise<KakaoMarkReadResult> {
@@ -294,7 +334,80 @@ describe('createKakaotalkAdapter — outbound', () => {
     await router.stop()
   })
 
-  test('returns ok:false (and does NOT send) when attachments are present', async () => {
+  test('uploads attachments via sendAttachment when present (no text)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kakao-att-'))
+    const filepath = join(dir, 'photo.jpg')
+    await writeFile(filepath, Buffer.from('fake-image-bytes'))
+
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+    await adapter.start()
+
+    const result = await router.send({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-dm',
+      chat: '111',
+      attachments: [{ path: filepath }],
+    })
+    expect(result.ok).toBe(true)
+    expect(client.sendMessageCalls).toHaveLength(0)
+    expect(client.sendAttachmentCalls).toHaveLength(1)
+    const call = client.sendAttachmentCalls[0]!
+    expect(call.kind).toBe('array')
+    if (call.kind !== 'array') return
+    expect(call.chatId).toBe('111')
+    expect(call.attachments).toHaveLength(1)
+    expect(call.attachments[0]!.filename).toBe('photo.jpg')
+
+    await adapter.stop()
+    await router.stop()
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  test('uploads files first, then posts text when both are provided', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'kakao-att-'))
+    const filepath = join(dir, 'spec.pdf')
+    await writeFile(filepath, Buffer.from('fake-pdf'))
+
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+    await adapter.start()
+
+    const result = await router.send({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-dm',
+      chat: '222',
+      text: 'see attached',
+      attachments: [{ path: filepath, filename: 'specification.pdf' }],
+    })
+    expect(result.ok).toBe(true)
+    expect(client.sendAttachmentCalls).toHaveLength(1)
+    expect(client.sendMessageCalls).toEqual([{ chatId: '222', text: 'see attached' }])
+    const call = client.sendAttachmentCalls[0]!
+    expect(call.kind).toBe('array')
+    if (call.kind !== 'array') return
+    expect(call.attachments[0]!.filename).toBe('specification.pdf')
+
+    await adapter.stop()
+    await router.stop()
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  test('returns ok:false when the attachment file is missing (does not silently drop)', async () => {
     const client = new FakeClient()
     const listener = new FakeListener()
     const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
@@ -311,15 +424,13 @@ describe('createKakaotalkAdapter — outbound', () => {
       workspace: '@kakao-dm',
       chat: '111',
       text: 'hi',
-      attachments: [{ path: '/tmp/some-file.png' }],
+      attachments: [{ path: '/nonexistent/path/photo.jpg' }],
     })
     expect(result.ok).toBe(false)
     if (result.ok) return
-    expect(result.error).toContain('does not support attachments')
-    // The agent contract violation Oracle flagged: text MUST NOT have been
-    // sent if we report failure. Otherwise the agent would say "I sent your
-    // message" while the file silently disappeared.
+    expect(result.error).toContain('readFile failed')
     expect(client.sendMessageCalls).toHaveLength(0)
+    expect(client.sendAttachmentCalls).toHaveLength(0)
 
     await adapter.stop()
     await router.stop()
