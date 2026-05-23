@@ -1099,12 +1099,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
-  const fireSessionTurnStart = async (live: LiveSession): Promise<void> => {
+  const fireSessionTurnStart = async (live: LiveSession, userPrompt: string): Promise<void> => {
     if (!live.hooks) return
     try {
       await live.hooks.runSessionTurnStart({
         sessionId: live.sessionId,
         agentDir: options.agentDir,
+        userPrompt,
         origin: buildLiveOrigin(live),
       })
     } catch (err) {
@@ -1220,7 +1221,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.info(`[channels] ${live.keyId} prompting batch=${batch.length} text_len=${text.length}`)
         const promptStart = now()
         const successfulSendsBeforePrompt = live.successfulChannelSends
-        await fireSessionTurnStart(live)
+        await fireSessionTurnStart(live, text)
         try {
           await live.session.prompt(text)
           await validateChannelTurn(live, successfulSendsBeforePrompt)

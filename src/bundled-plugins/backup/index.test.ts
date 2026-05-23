@@ -103,7 +103,7 @@ describe('backup plugin', () => {
     const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
     const { turnStart, idle } = await loadHooks(ctx)
 
-    await turnStart({ sessionId: 's1', agentDir: '/agent' }, hookCtx())
+    await turnStart({ sessionId: 's1', agentDir: '/agent', userPrompt: 'hi' }, hookCtx())
     await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
     await sleep(80)
     expect(spawnCalls).toEqual([])
@@ -113,7 +113,7 @@ describe('backup plugin', () => {
     const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
     const { turnStart, turnEnd, idle } = await loadHooks(ctx)
 
-    await turnStart({ sessionId: 's1', agentDir: '/agent' }, hookCtx())
+    await turnStart({ sessionId: 's1', agentDir: '/agent', userPrompt: 'hi' }, hookCtx())
     await idle({ sessionId: 's1', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
     await sleep(40)
     expect(spawnCalls).toEqual([])
@@ -132,6 +132,7 @@ describe('backup plugin', () => {
       {
         sessionId: 'self',
         agentDir: '/agent',
+        userPrompt: 'self-induced',
         origin: { kind: 'subagent', subagent: 'backup-message', parentSessionId: 'p' },
       },
       hookCtx(),
@@ -165,7 +166,7 @@ describe('backup plugin', () => {
     const { ctx, spawnCalls } = makeCtx({ config: tinyConfig })
     const { turnStart, sessionEnd, idle } = await loadHooks(ctx)
 
-    await turnStart({ sessionId: 's1', agentDir: '/agent' }, hookCtx())
+    await turnStart({ sessionId: 's1', agentDir: '/agent', userPrompt: 'hi' }, hookCtx())
     await sessionEnd({ sessionId: 's1' }, hookCtx())
     await idle({ sessionId: 's2', parentTranscriptPath: undefined, idleMs: 0 }, hookCtx())
     await sleep(80)

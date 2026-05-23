@@ -648,6 +648,7 @@ export function createServer({
               await fallbackHooks.runSessionTurnStart({
                 sessionId: state.sessionFileId,
                 agentDir,
+                userPrompt: msg.text,
                 origin: state.origin,
               })
             }
@@ -865,15 +866,16 @@ function makeIdleHookCaller(state: SessionState): () => Promise<void> {
 function makeTurnHookCallers(
   state: SessionState,
   agentDir: string | undefined,
-): { fireTurnStart: () => Promise<void>; fireTurnEnd: () => Promise<void> } {
+): { fireTurnStart: (userPrompt: string) => Promise<void>; fireTurnEnd: () => Promise<void> } {
   const hooks: HookBus | undefined = state.runtimeSnapshot?.hooks
   if (hooks === undefined || agentDir === undefined) {
     return { fireTurnStart: async () => {}, fireTurnEnd: async () => {} }
   }
-  const event = { sessionId: state.sessionFileId, agentDir, origin: state.origin }
+  const turnEndEvent = { sessionId: state.sessionFileId, agentDir, origin: state.origin }
   return {
-    fireTurnStart: () => hooks.runSessionTurnStart(event),
-    fireTurnEnd: () => hooks.runSessionTurnEnd(event),
+    fireTurnStart: (userPrompt) =>
+      hooks.runSessionTurnStart({ sessionId: state.sessionFileId, agentDir, userPrompt, origin: state.origin }),
+    fireTurnEnd: () => hooks.runSessionTurnEnd(turnEndEvent),
   }
 }
 
@@ -889,7 +891,7 @@ async function drain(ws: Ws, state: SessionState, agentDir: string | undefined, 
       pushQueueState(ws, state)
       send(ws, { type: 'prompt_started', messageId: item.streamMessageId, text: item.text })
 
-      await fireTurnStart()
+      await fireTurnStart(item.text)
       try {
         await state.session.prompt(item.text)
         send(ws, { type: 'done' })
