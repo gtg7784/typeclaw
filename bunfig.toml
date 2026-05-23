@@ -1,0 +1,6 @@
+[test]
+# Preload guard refuses `bun test` without --parallel. See
+# scripts/require-parallel.ts for rationale — TL;DR: Bun has no bunfig
+# knob for --parallel yet (verified against bunfig.zig in oven-sh/bun
+# main), and serial runs are ~3.4x slower than the parallel happy path.
+preload = ["./scripts/require-parallel.ts"]
