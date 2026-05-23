@@ -4,6 +4,7 @@ import {
   KakaoTalkListener as RealKakaoTalkListener,
   type AttachmentInput,
   type KakaoChat,
+  type KakaoMarkReadResult,
   type KakaoMember,
   type KakaoMessage,
   type KakaoProfile,
@@ -32,16 +33,6 @@ import { createKakaoAuthorResolver, type KakaoAuthorResolver } from './kakaotalk
 import { createKakaoChannelResolver, type KakaoChannelResolver } from './kakaotalk-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
 import { createFetchAttachmentCallback } from './kakaotalk-fetch-attachment'
-
-// Inlined locally because agent-messenger/kakaotalk's index does not
-// re-export KakaoMarkReadResult even though client.markRead returns it
-// (agent-messenger 2.14.1). Upstream re-export fix is independent.
-export interface KakaoMarkReadResult {
-  success: boolean
-  status_code: number
-  chat_id: string
-  watermark: string
-}
 
 // Structural duck-type of the upstream KakaoTalkClient class. The upstream
 // type is a class with private fields, and TypeScript treats those

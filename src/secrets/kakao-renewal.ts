@@ -1,28 +1,12 @@
-import { createRequire } from 'node:module'
 import { join } from 'node:path'
 
-import type { KakaoDeviceType } from 'agent-messenger/kakaotalk'
+import { attemptLogin as upstreamAttemptLogin, type KakaoDeviceType } from 'agent-messenger/kakaotalk'
 
 import { decrypt, EncryptionError } from './encryption'
 import { SecretsKakaoCredentialStore } from './kakao-store'
 import { type KeyStore, KeyStoreError } from './keys'
 import { type KakaoChannelBlock } from './schema'
 import { SecretsBackend } from './storage'
-
-// Mirrors KakaoLoginResult from agent-messenger/kakaotalk's types.d.ts. The
-// upstream interface is not re-exported from the package root, so we declare
-// the structural shape locally. If a future version adds new fields, this
-// stays forward-compatible because we only read the ones declared here.
-export type KakaoLoginResult = {
-  authenticated: boolean
-  next_action?: string
-  message?: string
-  warning?: string
-  account_id?: string
-  device_type?: KakaoDeviceType
-  user_id?: string
-  error?: string
-}
 
 export const RENEWAL_THRESHOLD_MS = 5 * 24 * 60 * 60 * 1000
 
@@ -50,21 +34,7 @@ export type RenewalAttempt =
   | { kind: 'reauth_required'; account_id: string; reason: string; message: string }
   | { kind: 'transient_failure'; account_id: string; reason: string }
 
-export type AttemptLoginFn = (
-  email: string,
-  password: string,
-  deviceUuid: string,
-  deviceType: KakaoDeviceType,
-  forced: boolean,
-) => Promise<KakaoLoginResult & { credentials?: LoginCredentials }>
-
-export type LoginCredentials = {
-  access_token: string
-  refresh_token: string
-  user_id: string
-  device_uuid: string
-  device_type: KakaoDeviceType
-}
+export type AttemptLoginFn = typeof upstreamAttemptLogin
 
 export type RenewalContext = {
   containerName: string
@@ -151,7 +121,7 @@ export async function renewCurrentAccount(
     }
   }
 
-  const attemptLogin = ctx.attemptLogin ?? (await resolveAttemptLogin())
+  const attemptLogin = ctx.attemptLogin ?? upstreamAttemptLogin
   const result = await attemptLogin(
     decision.account.email,
     decision.password,
@@ -231,18 +201,4 @@ function classifyDecryptFailure(err: unknown, accountId: string): RenewalDecisio
     reason: 'decrypt_failed',
     message: `Could not decrypt stored KakaoTalk password (${err instanceof Error ? err.message : String(err)}).`,
   }
-}
-
-async function resolveAttemptLogin(): Promise<AttemptLoginFn> {
-  // agent-messenger does not export `attemptLogin` from its public exports
-  // map. Resolve the package's installed location and import the auth
-  // implementation file directly — same pattern as runKakaotalkBootstrap's
-  // loginFlow resolution in src/init/kakaotalk-auth.ts.
-  const require = createRequire(import.meta.url)
-  const pkgJson = require.resolve('agent-messenger/package.json')
-  const pkgDir = pkgJson.replace(/\/package\.json$/, '')
-  const mod = (await import(`${pkgDir}/dist/src/platforms/kakaotalk/auth/kakao-login.js`)) as {
-    attemptLogin: AttemptLoginFn
-  }
-  return mod.attemptLogin
 }

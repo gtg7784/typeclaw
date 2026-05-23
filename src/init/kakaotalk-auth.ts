@@ -1,5 +1,6 @@
-import { createRequire } from 'node:module'
 import { join, resolve } from 'node:path'
+
+import { loginFlow as upstreamLoginFlow } from 'agent-messenger/kakaotalk'
 
 import { containerNameFromCwd } from '@/container'
 import { keysDir } from '@/hostd/paths'
@@ -28,34 +29,9 @@ export type KakaotalkLoginInput = {
   containerName?: string
 }
 
-export type LoginFlowOptions = {
-  email: string
-  password: string
-  deviceType?: 'pc' | 'tablet'
-  force?: boolean
-  savedDeviceUuid?: string
-  onPasscodeDisplay?: (code: string) => void
-  debugLog?: (message: string) => void
-}
-
-export type LoginFlowCredentials = {
-  access_token: string
-  refresh_token: string
-  user_id: string
-  device_uuid: string
-  device_type: 'pc' | 'tablet'
-}
-
-export type LoginFlowResult = {
-  authenticated: boolean
-  next_action?: string
-  message?: string
-  warning?: string
-  error?: string
-  credentials?: LoginFlowCredentials
-}
-
-export type LoginFlowFn = (options: LoginFlowOptions) => Promise<LoginFlowResult>
+export type LoginFlowFn = typeof upstreamLoginFlow
+export type LoginFlowOptions = Parameters<LoginFlowFn>[0]
+export type LoginFlowResult = Awaited<ReturnType<LoginFlowFn>>
 
 export function kakaotalkConfigDir(agentDir: string): string {
   return join(agentDir, 'workspace', '.agent-messenger')
@@ -67,7 +43,7 @@ export function kakaotalkSecretsPath(agentDir: string): string {
 
 export async function runKakaotalkBootstrap(input: KakaotalkLoginInput): Promise<KakaotalkBootstrapStatus> {
   try {
-    const loginFlow = input.loginFlow ?? (await resolveLoginFlow())
+    const loginFlow = input.loginFlow ?? upstreamLoginFlow
     const credManager = new SecretsKakaoCredentialStore({
       mode: 'host',
       secretsPath: kakaotalkSecretsPath(input.agentDir),
@@ -117,21 +93,4 @@ export async function runKakaotalkBootstrap(input: KakaotalkLoginInput): Promise
   } catch (err) {
     return { ok: false, reason: err instanceof Error ? err.message : String(err) }
   }
-}
-
-// agent-messenger does not export `loginFlow` from its public `exports` map
-// (only the runtime client + credential manager), so we resolve the package's
-// installed location and import the implementation file directly. This
-// bypasses the exports gate but stays within the same installed copy of the
-// package — no version drift risk. If a future agent-messenger release adds
-// `loginFlow` to its public exports, swap this for a normal import and delete
-// the resolveLoginFlow helper.
-async function resolveLoginFlow(): Promise<LoginFlowFn> {
-  const require = createRequire(import.meta.url)
-  const pkgJson = require.resolve('agent-messenger/package.json')
-  const pkgDir = pkgJson.replace(/\/package\.json$/, '')
-  const mod = (await import(`${pkgDir}/dist/src/platforms/kakaotalk/auth/kakao-login.js`)) as {
-    loginFlow: LoginFlowFn
-  }
-  return mod.loginFlow
 }
