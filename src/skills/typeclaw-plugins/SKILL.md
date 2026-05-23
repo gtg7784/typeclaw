@@ -336,12 +336,14 @@ Each path is added to the resource loader's skill paths verbatim. Discovery walk
 
 ```ts
 hooks: {
-  'session.start':  async (event, ctx) => { /* { sessionId, agentDir } */ },
-  'session.end':    async (event, ctx) => { /* { sessionId } */ },
-  'session.idle':   async (event, ctx) => { /* { sessionId, parentTranscriptPath, idleMs } */ },
-  'session.prompt': async (event, ctx) => {
-    event.prompt += `\n\n${await readToday(ctx.agentDir)}`  // mutate by reassign
+  'session.start':      async (event, ctx) => { /* { sessionId, agentDir } */ },
+  'session.end':        async (event, ctx) => { /* { sessionId } */ },
+  'session.idle':       async (event, ctx) => { /* { sessionId, parentTranscriptPath, idleMs } */ },
+  'session.prompt':     async (event, ctx) => {
+    event.prompt += `\n\n${await readToday(ctx.agentDir)}`  // mutate by reassign — see CRITICAL note below
   },
+  'session.turn.start': async (event, ctx) => { /* { sessionId, agentDir, userPrompt } — user's actual message */ },
+  'session.turn.end':   async (event, ctx) => { /* { sessionId, agentDir } */ },
   'tool.before': async (event, ctx) => {
     // event.args is a MUTABLE BAG — mutate to rewrite, or:
     if (event.args.danger === true) return { block: true, reason: 'unsafe' }
@@ -352,16 +354,24 @@ hooks: {
 }
 ```
 
-| Hook             | Direction           | Payload                                       | Notes                                                                                                                                                                                                                                                                          |
-| ---------------- | ------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `session.start`  | observe             | `{ sessionId, agentDir }`                     | Awaited before TUI gets `connected`.                                                                                                                                                                                                                                           |
-| `session.end`    | observe             | `{ sessionId }`                               | Awaited before close handler resolves.                                                                                                                                                                                                                                         |
-| `session.idle`   | observe             | `{ sessionId, parentTranscriptPath, idleMs }` | Fires **after every prompt completion** (success or error). The agent is "idle" the moment it stops responding. Plugins owning idle-debounced work (e.g. memory-logger spawn) install their own `setTimeout` and reset it on each event. `idleMs` is reserved (currently `0`). |
-| `session.prompt` | intervene           | `{ prompt, sessionId, agentDir }`             | Reassign `event.prompt`. Runs once per session start, in plugin-load order.                                                                                                                                                                                                    |
-| `tool.before`    | intervene           | `{ tool, sessionId, callId, args }`           | Fires for plugin-defined tools and TypeClaw-exposed system tools, including built-in pi tools when plugins are wired. Mutate `event.args`, or return `{ block: true, reason }`. First block short-circuits.                                                                    |
-| `tool.after`     | observe / transform | `{ tool, sessionId, callId, result }`         | Fires after plugin-defined tools and TypeClaw-exposed system tools. Observe `event.result`; tool result mutation is best-effort and tool-specific.                                                                                                                             |
+| Hook                 | Direction           | Payload                                       | Notes                                                                                                                                                                                                                                                                          |
+| -------------------- | ------------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `session.start`      | observe             | `{ sessionId, agentDir }`                     | Awaited before TUI gets `connected`.                                                                                                                                                                                                                                           |
+| `session.end`        | observe             | `{ sessionId }`                               | Awaited before close handler resolves.                                                                                                                                                                                                                                         |
+| `session.idle`       | observe             | `{ sessionId, parentTranscriptPath, idleMs }` | Fires **after every prompt completion** (success or error). The agent is "idle" the moment it stops responding. Plugins owning idle-debounced work (e.g. memory-logger spawn) install their own `setTimeout` and reset it on each event. `idleMs` is reserved (currently `0`). |
+| `session.prompt`     | intervene           | `{ prompt, sessionId, agentDir }`             | Reassign `event.prompt` to mutate the **system prompt** as it's being assembled at session creation. `event.prompt` is `basePrompt + IDENTITY + SOUL` — it is NOT the user's message. Runs once per session start, in plugin-load order. See CRITICAL note below.              |
+| `session.turn.start` | observe             | `{ sessionId, agentDir, userPrompt }`         | Fires **before every `session.prompt(text)` call** with `userPrompt` set to the literal text the session is about to receive. This is the right hook for "react to what the user just asked" (e.g. memory retrieval keyed on the user's question).                             |
+| `session.turn.end`   | observe             | `{ sessionId, agentDir }`                     | Fires after every `session.prompt(text)` returns (success or error). Pair with `session.turn.start` for per-turn bookkeeping.                                                                                                                                                  |
+| `tool.before`        | intervene           | `{ tool, sessionId, callId, args }`           | Fires for plugin-defined tools and TypeClaw-exposed system tools, including built-in pi tools when plugins are wired. Mutate `event.args`, or return `{ block: true, reason }`. First block short-circuits.                                                                    |
+| `tool.after`         | observe / transform | `{ tool, sessionId, callId, result }`         | Fires after plugin-defined tools and TypeClaw-exposed system tools. Observe `event.result`; tool result mutation is best-effort and tool-specific.                                                                                                                             |
 
 **Multiple plugins** for the same hook run **in plugin-load order**. For `session.prompt`, the next plugin sees the previous plugin's mutated string.
+
+#### CRITICAL: `session.prompt`'s `event.prompt` is the SYSTEM prompt, not the user message
+
+The `prompt` field on `SessionPromptEvent` is the system prompt as it's being composed by `createResourceLoader` (`basePrompt + IDENTITY.md + SOUL.md`), NOT the user's most recent message. Reading it as if it were the user's prompt — and feeding it to a retrieval system, classifier, or LLM — will keyword-mine TypeClaw's framing prose (`TypeClaw`, `subagent`, `AGENTS.md`) on every session.
+
+If you want the **user's actual prompt** (their message text), subscribe to `session.turn.start` and read `event.userPrompt`. The bundled memory plugin's `memory-retrieval` subagent learned this the hard way; see `src/bundled-plugins/memory/index.ts`'s `session.turn.start` handler.
 
 #### CRITICAL: `session.prompt` and provider prompt caching
 
@@ -715,7 +725,8 @@ Plugin `ToolContext` is `{ signal, sessionId, agentDir, logger }`. There is no `
 - **Engine bridge**: `src/agent/plugin-tools.ts` (the ONLY file that imports both plugin and engine types)
 - **Plugin wiring at boot**: `src/run/index.ts` (`startAgent` calls `loadPlugins`, merges into registries)
 - **Hook fire sites**:
-  - `session.prompt`: `src/agent/index.ts` `createResourceLoader` (after default prompt assembly)
+  - `session.prompt`: `src/agent/index.ts` `createResourceLoader` (during system-prompt assembly; `event.prompt` is `basePrompt + IDENTITY + SOUL`, NOT the user message)
+  - `session.turn.start` / `session.turn.end`: bracket every `session.prompt(text)` call across all four prompt-driver sites — `src/server/index.ts` (TUI drain + fallback), `src/channels/router.ts` (`fireSessionTurnStart`), `src/cron/consumer.ts` (per-attempt), `src/agent/subagents.ts` (subagent runner). `userPrompt` carries the literal text being passed to `session.prompt(text)`.
   - `session.idle`: `src/server/index.ts` `drain()` — fires immediately after every `session.prompt()` resolves (success or error)
   - `session.start`/`session.end`: `src/server/index.ts` ws open/close
   - `tool.before`/`tool.after`: `src/agent/plugin-tools.ts` `wrapPluginTool`, `wrapSystemTool`, `wrapSystemAgentTool`, and `wrapAgentToolAsCustomToolDefinition`. The last one is the load-bearing path for pi's builtin coding tools (`read`/`bash`/`edit`/`write`/`grep`/`find`/`ls`): pi-coding-agent 0.67.3 treats `createAgentSession({ tools })` as a name filter only, so the wrapping has to ride in `customTools` to actually override the builtin implementations. See the top-of-file contract block in `plugin-tools.ts` for the full reasoning.

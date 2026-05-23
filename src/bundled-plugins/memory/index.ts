@@ -257,20 +257,24 @@ export default definePlugin({
             await fireMemoryLogger(sessionId, 'buffer-trip')
           }
         },
-        // session.prompt fires synchronously inside createResourceLoader during
-        // channel-origin cold start (src/agent/index.ts -> runSessionPrompt),
-        // which is itself inside ensureLive's 30s watchdog
-        // (src/channels/router.ts). awaiting memory-retrieval here makes a
-        // full LLM session (memory_search + read + write of an 8KB synthesis)
-        // a hard prerequisite of replying to the first Discord/Slack message
-        // after a stale rollover; a cold provider connection blows 30s and
-        // ensureLive times out, silently dropping the inbound.
+        // memory-retrieval used to run from `session.prompt`, which fires
+        // during system-prompt assembly (createResourceLoader) and carries
+        // the ASSEMBLING SYSTEM PROMPT as `event.prompt` — not the user's
+        // message. The plugin was feeding that string into the subagent as
+        // `recentPrompt`, so the LLM keyword-mined TypeClaw's framing prose
+        // (`TypeClaw`, `subagent`, `AGENTS.md`, `systemPromptLeak`, etc.)
+        // and burned 15+ memory_search calls per session on terms the user
+        // never said. `session.turn.start` is the correct trigger: it fires
+        // before each `session.prompt(text)` call with the actual text the
+        // session is about to receive.
         //
-        // The retrieval cache is lag-by-one-prompt by design: appendRetrievalCache
-        // (load-memory.ts) reads the cache file written by THIS spawn on the
-        // NEXT prompt for the same session. The current prompt has no cache to
-        // read regardless of whether we await — detaching matches the documented
-        // contract instead of contradicting it.
+        // Per-turn instead of per-session-creation means N spawns over the
+        // session's lifetime, but the subagent's own `inFlightKey` on
+        // `parentSessionId` (memory-retrieval.ts) coalesces overlapping
+        // fires: if turn N's retrieval is still running when turn N+1 fires,
+        // the second spawn is dropped with a warning, and the cache from
+        // turn N is still consumed by turn N+1 via the documented
+        // lag-by-one-prompt contract (load-memory.ts:appendRetrievalCache).
         //
         // ctx.spawnSubagent IS reject-able in production: it wraps
         // dispatchSpawnSubagent (src/run/index.ts) which calls invokeSubagent
@@ -279,9 +283,9 @@ export default definePlugin({
         // direct ctx.spawnSubagent path the hooks use. The .catch() here is
         // load-bearing — without it, every memory-retrieval handler failure
         // (LLM provider error, payload validation throw, etc.) would surface
-        // as an unhandled rejection now that we no longer await the promise
-        // at the call site.
-        'session.prompt': async (event) => {
+        // as an unhandled rejection because we don't await the promise at
+        // the call site.
+        'session.turn.start': async (event) => {
           if (event.origin?.kind === 'subagent') return
 
           const shards = await loadAllShards(event.agentDir)
@@ -292,7 +296,7 @@ export default definePlugin({
           const payload: MemoryRetrievalPayload = {
             parentSessionId: event.sessionId,
             agentDir: event.agentDir,
-            recentPrompt: event.prompt,
+            recentPrompt: event.userPrompt,
             cacheFilePath,
             ...(event.origin !== undefined ? { origin: event.origin } : {}),
           }
