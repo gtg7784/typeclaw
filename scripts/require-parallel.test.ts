@@ -18,7 +18,10 @@ async function makeFixtureProject() {
     join(dir, 'noop.test.ts'),
     `import { test, expect } from 'bun:test'\ntest('noop', () => expect(1).toBe(1))\n`,
   )
-  await writeFile(join(dir, 'bunfig.toml'), `[test]\npreload = ["${scriptPath}"]\n`)
+  // JSON.stringify handles TOML basic-string escaping correctly (the escape
+  // sets overlap for `\` and `"`), which lets the test survive contributor
+  // checkouts under paths with embedded quotes or backslashes.
+  await writeFile(join(dir, 'bunfig.toml'), `[test]\npreload = [${JSON.stringify(scriptPath)}]\n`)
   return dir
 }
 
