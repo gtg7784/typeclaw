@@ -255,6 +255,14 @@ type LiveSession = {
   currentTurnAuthorId: string | null
   currentTurnAuthorIds: Set<string>
   lastTurnAuthorIds: Set<string>
+  // Mirror of currentTurnAuthorId at end-of-turn (the LAST speaker of the
+  // prior batch), preserved across the drain finally-block which resets
+  // currentTurnAuthorId to null. Read by the reminder-only branch in
+  // drain() so a system-reminder wakeup carries the same author the prior
+  // turn's tool.before saw — matching "last speaker" semantics (not "first
+  // inserted into Set"), so a multi-author prior turn like alice→bob
+  // restores `bob`, the same identity normal turns would have used.
+  lastTurnAuthorId: string | null
   consecutiveAborts: number
   // Per-(chat:thread) count of bot messages sent without intervening user
   // input being rendered into the model's context. Reset at the top of each
@@ -421,6 +429,16 @@ export type ChannelRouter = {
     isTypingActive: (key: ChannelKey) => boolean
     stopTyping: (key: ChannelKey) => Promise<void>
     runIdleGc: () => Promise<void>
+    // Returns a SNAPSHOT (structural copy) of `live.originRef.current` for
+    // the live session matching `key`, or undefined when no live session
+    // exists. Exists so tests can assert on the per-turn origin that
+    // tool.before consumers would see — the origin is normally only
+    // observable indirectly via in-flight tool calls, which the fake
+    // session doesn't execute. Snapshot semantics: the returned object is
+    // detached from `originRef`, so a later turn that mutates the ref
+    // doesn't retroactively change a captured assertion. NOT a public
+    // router method.
+    getLiveOriginSnapshot: (key: ChannelKey) => SessionOrigin | undefined
   }
 }
 
@@ -838,6 +856,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnAuthorId: null,
         currentTurnAuthorIds: new Set(),
         lastTurnAuthorIds: new Set(),
+        // Seeded from `triggeringAuthorId` so even a session-cold-start
+        // reminder (subagent spawned before any prior turn completed)
+        // restores the same author the session was admitted on.
+        lastTurnAuthorId: triggeringAuthorId ?? null,
         consecutiveAborts: 0,
         consecutiveSends: new Map(),
         lastSentText: new Map(),
@@ -1142,26 +1164,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.consecutiveSends.clear()
           live.lastSentText.clear()
-        } else {
+        } else if (live.lastTurnAuthorId !== null) {
           // Reminder-only turn (batch.length === 0, reminders.length > 0):
-          // restore the author identity from `lastTurnAuthorIds` so
-          // author-scoped role resolution still works on this turn. The
-          // drain finally-block clears `currentTurnAuthorId` between turns,
-          // so a reminder arriving while the session is idle would
-          // otherwise strip `lastInboundAuthorId` from the tool.before
-          // origin and demote roles like `slack:T0/C0 author:U_OWNER` to
-          // whichever non-author rule matches — silently breaking the
-          // channel_reply that the reminder is asking the agent to send.
-          // Picks any author from the prior turn (Set iteration order is
-          // insertion order for Map/Set, so this is the first speaker of
-          // that turn — stable across runs but not a "most recent"
-          // guarantee). For the common case (one author per turn) it is
-          // exactly correct.
-          const restored = live.lastTurnAuthorIds.values().next().value
-          if (restored !== undefined) {
-            live.currentTurnAuthorId = restored
-            live.currentTurnAuthorIds = new Set(live.lastTurnAuthorIds)
-          }
+          // restore the author identity from the prior turn so author-
+          // scoped role resolution still works on this turn. The drain
+          // finally-block clears `currentTurnAuthorId` between turns, so a
+          // reminder arriving while the session is idle would otherwise
+          // strip `lastInboundAuthorId` from the tool.before origin and
+          // demote roles like `slack:T0/C0 author:U_OWNER` to whichever
+          // non-author rule matches — silently breaking the channel_reply
+          // that the reminder is asking the agent to send. `lastTurnAuthorId`
+          // tracks the LAST speaker of the prior batch (matching normal-
+          // turn `batch[batch.length - 1]!.authorId` semantics) so a multi-
+          // author prior turn like alice→bob restores `bob`, not alice.
+          live.currentTurnAuthorId = live.lastTurnAuthorId
+          live.currentTurnAuthorIds = new Set(live.lastTurnAuthorIds)
         }
 
         // Update the live origin holder so this turn's tool.before events
@@ -1193,6 +1210,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         }
         await fireSessionIdle(live)
         live.lastTurnAuthorIds = new Set(live.currentTurnAuthorIds)
+        if (live.currentTurnAuthorId !== null) {
+          live.lastTurnAuthorId = live.currentTurnAuthorId
+        }
       }
     } finally {
       live.draining = false
@@ -1975,6 +1995,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         await stopTypingHeartbeat(live)
       },
       runIdleGc,
+      getLiveOriginSnapshot: (key: ChannelKey) => {
+        const live = liveSessions.get(channelKeyId(key))
+        const origin = live?.originRef.current
+        if (origin === undefined) return undefined
+        return { ...origin }
+      },
     },
   }
 }
@@ -2004,30 +2030,28 @@ function composeTurnPrompt(
   // turns; the current user-turn suffix is non-cacheable by design, so
   // adding a section here is cache-neutral.
   //
-  // SYSTEM MESSAGE convention: any runtime-injected block in the user turn
-  // that is NOT from a chat participant must use one of two self-fencing
-  // framings so models reliably distinguish it from human content:
-  //
-  //   1. `**[SYSTEM MESSAGE — not from a human]**` fenced by horizontal
-  //      rules (`---`) — used by the loop-guard block below. Mandatory for
-  //      any new free-form prose injected here (rate-limit, schema-mismatch,
-  //      abort signals, etc.).
-  //
-  //   2. `<system-reminder>...</system-reminder>` tags — used by the
-  //      subagent-completion reminder block above. The tags are themselves
-  //      a system-message fencing the TUI path already uses (see
-  //      `renderSubagentCompletionReminder` in
-  //      `src/agent/subagent-completion-reminder.ts`), so the model
-  //      already recognises them as out-of-band-from-the-conversation. New
-  //      runtime notices SHOULD pick framing 1 unless they share the
-  //      "reminder" semantics (system-issued, completion-of-prior-work
-  //      anchored) of the subagent-completion case.
-  //
-  // Both framings are structurally distinct from the H2 sections used for
-  // actual conversation content (`## Recent context`, `## Current
-  // message`). Without one of these framings, models — especially
+  // SYSTEM MESSAGE convention: any runtime-injected block in the user
+  // turn that is NOT from a chat participant MUST use the
+  // `**[SYSTEM MESSAGE — not from a human]**` framing fenced by
+  // horizontal rules (`---`) — the loop-guard block below is the
+  // canonical example. This is structurally distinct from the H2
+  // sections used for actual conversation content (`## Recent context`,
+  // `## Current message`). Without the fencing, models — especially
   // persona-rich ones like Kimi — read the heading as a human-authored
-  // instruction and reply to it ("알겠습니다, 대화 여기까지 할게요").
+  // instruction and reply to it ("알겠습니다, 대화 여기까지 할게요"). The
+  // bracketed marker plus the explicit "Do not acknowledge or reply to
+  // this notice" line is the trust boundary that prevents this. New
+  // runtime notices (rate-limit, schema-mismatch, abort signals, etc.)
+  // MUST follow this convention.
+  //
+  // ONE narrow exception exists: subagent-completion reminders use
+  // `<system-reminder>...</system-reminder>` tags (prepended above) for
+  // parity with the TUI path's identical tagging (see
+  // `renderSubagentCompletionReminder` in
+  // `src/agent/subagent-completion-reminder.ts`) so the model sees the
+  // same shape across origins. The exception is scoped to that single
+  // case: do NOT extend it to new notice types. Anything that is not
+  // a true subagent-style completion ping uses framing 1.
   if (state.loopGuardActive) {
     parts.push(
       '---',

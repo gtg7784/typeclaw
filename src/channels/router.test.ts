@@ -4055,26 +4055,29 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     expect(result).toEqual({ kind: 'no-live-session' })
   })
 
-  test('reminder-only drain preserves prior-turn author so author-scoped role resolution survives the wakeup', async () => {
-    // given an author-gated permission service that grants channel.respond
-    // only when origin.lastInboundAuthorId is alice. If the reminder-only
-    // drain stripped lastInboundAuthorId from origin, the next inbound's
-    // tool.before would see no author and the gate would deny — that is
-    // the bug this test pins.
-    const allowAliceOnly: PermissionService = {
-      has: (origin) => origin !== undefined && origin.kind === 'channel' && origin.lastInboundAuthorId === 'alice',
-      resolveRole: () => 'member',
-      describe: () => ({ role: 'member', permissions: ['channel.respond'] }),
-      replaceRoles: () => {},
-    }
+  test('reminder-only drain restores live origin author (single-speaker prior turn): originRef carries the prior author during prompt()', async () => {
+    // The fix's actual invariant is that during the reminder turn,
+    // `live.originRef.current.lastInboundAuthorId` is the prior speaker
+    // (so tool.before consumers gate on the right author). Asserting on a
+    // downstream follow-up inbound doesn't prove this — route() builds its
+    // permission origin from event.authorId, not from originRef — so we
+    // assert directly on the origin snapshot during prompt().
     const dir = await tempDir()
-    const { router, sessions } = makeRouter(dir, { permissions: allowAliceOnly })
+    const { router, sessions } = makeRouter(dir)
 
     await router.route(inbound({ authorId: 'alice', text: 'do the thing' }))
     await router.__testing!.flushDebounce(KEY)
     expect(sessions[0]!.prompts).toHaveLength(1)
 
-    // when a subagent completes (reminder arrives, no new user inbound)
+    // Capture the origin at the moment FakeSession.prompt() fires for the
+    // reminder turn — drain() sets originRef.current immediately before
+    // calling prompt(), so observing here is observing the value
+    // tool.before would see.
+    let originDuringReminder: SessionOrigin | undefined
+    sessions[0]!.onPrompt = () => {
+      originDuringReminder = router.__testing!.getLiveOriginSnapshot(KEY)
+    }
+
     router.injectSubagentCompletionReminder({
       parentSessionId: 'ses_fake_1',
       subagent: 'explorer',
@@ -4084,28 +4087,98 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     })
     await waitFor(() => sessions[0]!.prompts.length >= 2)
 
-    // then the reminder-only turn's origin still carries alice so
-    // tool.before consumers see the author the subagent was spawned for.
-    // The router exposes this via its `originRef` which buildLiveOrigin
-    // populates from `live.currentTurnAuthorId` (preserved from the prior
-    // turn by the reminder-only branch in drain()).
-    const reminderText = sessions[0]!.prompts[1] ?? ''
-    expect(reminderText).toContain('<system-reminder>')
-    // Author-gated permission still resolves to the role that spawned the
-    // subagent — re-issuing a normal inbound from alice after the reminder
-    // succeeds, confirming the session is still on the same author scope.
-    await router.route(inbound({ authorId: 'alice', externalMessageId: 'm2', text: 'follow up' }))
-    await router.__testing!.flushDebounce(KEY)
-    expect(sessions[0]!.prompts.length).toBe(3)
+    expect(originDuringReminder).toBeDefined()
+    expect(originDuringReminder!.kind).toBe('channel')
+    if (originDuringReminder!.kind !== 'channel') throw new Error('unreachable')
+    expect(originDuringReminder!.lastInboundAuthorId).toBe('alice')
   })
 
-  test('runIdleGc does not evict a session with a pending system reminder (forward-compat guard)', async () => {
-    // Simulates the narrow window where pendingSystemReminders is
-    // populated but drain hasn't fired yet — manually push to the queue
-    // via injectSubagentCompletionReminder, then trigger GC before drain
-    // can clear it. The current implementation calls drain()
-    // synchronously so the queue is usually empty by the time GC ticks,
-    // but the guard exists for future callers that don't fire drain.
+  test('reminder-only drain restores LAST speaker from a multi-author prior turn, not the first inserted', async () => {
+    // Pins Oracle's finding that "first-inserted Set member" semantics
+    // would silently misroute author-scoped roles on multi-author turns.
+    // With alice then bob speaking in the same turn, normal-turn semantics
+    // set currentTurnAuthorId = bob (batch[batch.length - 1]). The
+    // reminder-only restore must match — otherwise a role like
+    // `author:U_BOB` would resolve to alice and deny.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    // Two engaged inbounds debounced into the same batch
+    await router.route(inbound({ authorId: 'alice', externalMessageId: 'm1', text: 'first' }))
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'm2', text: 'second' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+
+    let originDuringReminder: SessionOrigin | undefined
+    sessions[0]!.onPrompt = () => {
+      originDuringReminder = router.__testing!.getLiveOriginSnapshot(KEY)
+    }
+
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 100,
+    })
+    await waitFor(() => sessions[0]!.prompts.length >= 2)
+
+    expect(originDuringReminder).toBeDefined()
+    if (originDuringReminder!.kind !== 'channel') throw new Error('unreachable')
+    expect(originDuringReminder!.lastInboundAuthorId).toBe('bob')
+  })
+
+  test('reminder-only drain on session cold-start (no prior batch) restores the triggering author seeded at ensureLive', async () => {
+    // Edge case: a future caller might spawn a subagent during session
+    // bootstrap, before any user-turn drain has populated lastTurnAuthorId
+    // via the finally-block. The seed at session creation
+    // (live.lastTurnAuthorId = triggeringAuthorId) must cover this.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ authorId: 'alice', text: 'first' }))
+    // Do NOT flush — the route call still ran ensureLive synchronously and
+    // seeded lastTurnAuthorId from triggeringAuthorId, but the first drain
+    // is still pending behind the debounce. The reminder injection should
+    // see lastTurnAuthorId already populated from the seed.
+
+    let originDuringReminder: SessionOrigin | undefined
+    sessions[0]!.onPrompt = () => {
+      if (originDuringReminder === undefined) {
+        originDuringReminder = router.__testing!.getLiveOriginSnapshot(KEY)
+      }
+    }
+
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 100,
+    })
+    await waitFor(() => sessions[0]!.prompts.length >= 1)
+
+    expect(originDuringReminder).toBeDefined()
+    if (originDuringReminder!.kind !== 'channel') throw new Error('unreachable')
+    // The first prompt() to fire may be either the reminder (if the
+    // reminder injection drained first) or the debounced user inbound. In
+    // either case, the originRef should carry an author identity — the
+    // bug we're guarding against is `lastInboundAuthorId === undefined`.
+    expect(originDuringReminder!.lastInboundAuthorId).toBe('alice')
+  })
+
+  test('runIdleGc does not evict a session whose drain was just woken by a reminder injection (in-flight drain protection)', async () => {
+    // Observable invariant: after `injectSubagentCompletionReminder`
+    // returns, a GC tick must not evict the session even if its
+    // `lastInboundAt` is already stale. In practice this passes via the
+    // existing `if (live.draining) continue` guard because
+    // injectSubagentCompletionReminder calls drain() synchronously which
+    // sets draining=true before the GC tick can observe pendingSystemReminders.
+    // The `pendingSystemReminders.length > 0` guard added alongside is a
+    // forward-compat redundancy for any future caller that queues a
+    // reminder without firing drain — not exercised by this test (and
+    // not exercisable through the public API today). The test name
+    // reflects what is actually covered.
     const dir = await tempDir()
     const nowRef = { value: 1_000_000 }
     const { router } = makeRouter(dir, { nowRef })
@@ -4113,8 +4186,6 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     await router.__testing!.flushDebounce(KEY)
     expect(router.liveCount()).toBe(1)
 
-    // Advance the clock past SESSION_IDLE_MS so the session is GC-eligible
-    // by lastInboundAt alone.
     nowRef.value += SESSION_IDLE_MS + 1
     router.injectSubagentCompletionReminder({
       parentSessionId: 'ses_fake_1',
@@ -4125,10 +4196,6 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     })
 
     await router.__testing!.runIdleGc()
-    // The session may have been drained by the synchronous drain() call;
-    // either way it must NOT have been evicted while the reminder was in
-    // flight. liveCount being preserved is the invariant the GC guard
-    // enforces.
     expect(router.liveCount()).toBe(1)
   })
 })
