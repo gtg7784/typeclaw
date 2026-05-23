@@ -241,6 +241,8 @@ describe('session.prompt hook', () => {
       },
     )
 
+    await waitFor(() => spawned.length >= 1, 'memory-retrieval spawn settles')
+
     expect(spawned).toHaveLength(1)
     expect(spawned[0]!.name).toBe('memory-retrieval')
     expect(spawned[0]!.payload).toEqual({
@@ -251,6 +253,71 @@ describe('session.prompt hook', () => {
       origin,
     })
     expect(spawned[0]!.options).toEqual({ parentSessionId: 'ses_parent', spawnedByOrigin: origin })
+  })
+
+  test('does not block on a slow memory-retrieval spawn (cold-start guard)', async () => {
+    // given a memory-retrieval spawn that takes 10s and a session.prompt hook
+    // invoked during cold-start. ensureLive in src/channels/router.ts caps the
+    // whole createForChannel chain at 30s; if the hook awaited the spawn,
+    // memory-retrieval's LLM call would consume the full ensureLive budget
+    // and time out on Discord/Slack first-message-after-stale-rollover.
+    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
+    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
+    const { exports, spawned } = await bootMemoryPlugin(
+      agentDir,
+      { injectionBudgetBytes: 4096 },
+      { spawnDelayMs: 10_000 },
+    )
+
+    // when session.prompt fires
+    const start = Date.now()
+    await exports.hooks!['session.prompt']!(
+      { sessionId: 'ses_cold_start', agentDir, prompt: 'first message after restart', origin: undefined },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
+    )
+    const elapsed = Date.now() - start
+
+    // then the hook returned promptly (well under the slow-spawn duration)
+    // and the spawn was kicked off in the background
+    expect(elapsed).toBeLessThan(500)
+    expect(spawned).toHaveLength(0)
+  })
+
+  test('detached spawn rejection is reported via plugin logger, not unhandled', async () => {
+    // given a spawnSubagent that rejects synchronously
+    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
+    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
+    const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096 })
+    if (!parsed.success) throw new Error(parsed.error.message)
+    const { logger, logs } = makeCapturingLogger()
+    const ctx = createPluginContext({
+      name: 'memory',
+      version: undefined,
+      agentDir,
+      config: parsed.data,
+      logger,
+      permissions: noopPermissionService,
+      spawnSubagent: async () => {
+        throw new Error('spawn rejected for test')
+      },
+      isBooted: () => true,
+    })
+    const exports = await memoryPlugin.plugin(ctx)
+
+    // when session.prompt fires
+    await exports.hooks!['session.prompt']!(
+      { sessionId: 'ses_fail', agentDir, prompt: 'q?', origin: undefined },
+      { agentDir, pluginName: 'memory', logger },
+    )
+
+    await waitFor(
+      () => logs.error.some((m) => m.includes('memory-retrieval spawn failed')),
+      'detached spawn rejection routed to logger',
+    )
+
+    // then the plugin logger received the failure with attribution
+    const errorLine = logs.error.find((m) => m.includes('memory-retrieval spawn failed'))
+    expect(errorLine).toMatch(/spawn rejected for test/)
   })
 
   test('does not spawn memory-retrieval when the injection plan is direct mode', async () => {

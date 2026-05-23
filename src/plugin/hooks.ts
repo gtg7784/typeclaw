@@ -31,6 +31,21 @@ export const IDLE_HANDLER_TIMEOUT_MS = 25_000
 // legitimate transcript flush while still bounding the failure mode.
 export const END_HANDLER_TIMEOUT_MS = 60_000
 
+// Per-handler ceiling for session.prompt. session.prompt fires
+// synchronously inside createResourceLoader (src/agent/index.ts), which on
+// channel-origin cold start is itself inside ensureLive's 30s watchdog
+// (src/channels/router.ts). An unbounded hook there silently consumes the
+// outer budget and times out without naming the offending plugin in the
+// logs. 20s leaves ~10s of headroom for the rest of the cold-start chain
+// (loadSelf, loadMemory shard reads, prefetchChannelContext) before
+// ensureLive fires.
+//
+// The bundled memory plugin's session.prompt fires memory-retrieval
+// detached, so it returns in <1ms in steady state; this ceiling guards
+// third-party hooks that legitimately need to do work inline, AND a
+// regression in the memory plugin that re-introduces an inline await.
+export const PROMPT_HANDLER_TIMEOUT_MS = 20_000
+
 export type RegisteredHook<K extends keyof Hooks> = {
   pluginName: string
   agentDir: string
@@ -59,6 +74,8 @@ export type CreateHookBusOptions = {
   idleHandlerTimeoutMs?: number
   // Test seam: per-handler ceiling for session.end invocations.
   endHandlerTimeoutMs?: number
+  // Test seam: per-handler ceiling for session.prompt invocations.
+  promptHandlerTimeoutMs?: number
 }
 
 type Registries = {
@@ -75,6 +92,7 @@ type Registries = {
 export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
   const idleHandlerTimeoutMs = options.idleHandlerTimeoutMs ?? IDLE_HANDLER_TIMEOUT_MS
   const endHandlerTimeoutMs = options.endHandlerTimeoutMs ?? END_HANDLER_TIMEOUT_MS
+  const promptHandlerTimeoutMs = options.promptHandlerTimeoutMs ?? PROMPT_HANDLER_TIMEOUT_MS
   const r: Registries = {
     'session.start': [],
     'session.end': [],
@@ -155,7 +173,11 @@ export function createHookBus(options: CreateHookBusOptions = {}): HookBus {
     async runSessionPrompt(event) {
       for (const reg of r['session.prompt']) {
         try {
-          await reg.handler(event, ctx(reg))
+          await raceWithTimeout(
+            Promise.resolve(reg.handler(event, ctx(reg))),
+            promptHandlerTimeoutMs,
+            `plugin ${reg.pluginName} session.prompt`,
+          )
         } catch (err) {
           reportHookError(reg, 'session.prompt', err)
         }
