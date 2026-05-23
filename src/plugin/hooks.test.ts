@@ -152,6 +152,50 @@ describe('HookBus session.idle per-handler timeout', () => {
   })
 })
 
+describe('HookBus session.prompt per-handler timeout', () => {
+  test('a hung handler is bounded; the offending plugin is named; later handlers still run', async () => {
+    // given a bus where the first session.prompt handler never resolves and
+    // the second is observable. session.prompt fires during cold-start
+    // session creation inside ensureLive's 30s watchdog
+    // (src/channels/router.ts); without this per-handler timeout, a slow
+    // hook consumes the whole outer budget and the offending plugin is not
+    // named in the logs.
+    const errors: { plugin: string; message: string }[] = []
+    const recordLogger = (pluginName: string) => ({
+      info: () => {},
+      warn: () => {},
+      error: (m: string) => errors.push({ plugin: pluginName, message: m }),
+    })
+    const bus = createHookBus({ promptHandlerTimeoutMs: 30 })
+    bus.registerAll('hung-plugin', '/agent', recordLogger('hung-plugin'), {
+      'session.prompt': () => new Promise(() => {}),
+    })
+    let secondRan = false
+    bus.registerAll('healthy-plugin', '/agent', recordLogger('healthy-plugin'), {
+      'session.prompt': (event) => {
+        event.prompt += '\n[ok]'
+        secondRan = true
+      },
+    })
+
+    // when the chain runs
+    const event = { prompt: 'BASE', sessionId: 's1', agentDir: '/agent' }
+    const start = Date.now()
+    await bus.runSessionPrompt(event)
+    const elapsed = Date.now() - start
+
+    // then the chain returned within the per-handler ceiling, the offending
+    // plugin's logger received the timeout error with attribution, and the
+    // healthy plugin still ran (and got to mutate the prompt)
+    expect(elapsed).toBeLessThan(500)
+    expect(secondRan).toBe(true)
+    expect(event.prompt).toBe('BASE\n[ok]')
+    const hungError = errors.find((e) => e.plugin === 'hung-plugin')
+    expect(hungError?.message).toMatch(/plugin hung-plugin session\.prompt timed out after 30ms/)
+    expect(errors.find((e) => e.plugin === 'healthy-plugin')).toBeUndefined()
+  })
+})
+
 describe('HookBus session.end per-handler timeout', () => {
   test('a hung handler is bounded; the offending plugin is named; later handlers still run', async () => {
     // given a bus where the first session.end handler never resolves and

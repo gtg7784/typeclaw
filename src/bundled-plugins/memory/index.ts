@@ -257,6 +257,30 @@ export default definePlugin({
             await fireMemoryLogger(sessionId, 'buffer-trip')
           }
         },
+        // session.prompt fires synchronously inside createResourceLoader during
+        // channel-origin cold start (src/agent/index.ts -> runSessionPrompt),
+        // which is itself inside ensureLive's 30s watchdog
+        // (src/channels/router.ts). awaiting memory-retrieval here makes a
+        // full LLM session (memory_search + read + write of an 8KB synthesis)
+        // a hard prerequisite of replying to the first Discord/Slack message
+        // after a stale rollover; a cold provider connection blows 30s and
+        // ensureLive times out, silently dropping the inbound.
+        //
+        // The retrieval cache is lag-by-one-prompt by design: appendRetrievalCache
+        // (load-memory.ts) reads the cache file written by THIS spawn on the
+        // NEXT prompt for the same session. The current prompt has no cache to
+        // read regardless of whether we await — detaching matches the documented
+        // contract instead of contradicting it.
+        //
+        // ctx.spawnSubagent IS reject-able in production: it wraps
+        // dispatchSpawnSubagent (src/run/index.ts) which calls invokeSubagent
+        // directly with no try/catch. SubagentConsumer's catch only protects
+        // stream-initiated spawns (target.kind === 'new-session'), not the
+        // direct ctx.spawnSubagent path the hooks use. The .catch() here is
+        // load-bearing — without it, every memory-retrieval handler failure
+        // (LLM provider error, payload validation throw, etc.) would surface
+        // as an unhandled rejection now that we no longer await the promise
+        // at the call site.
         'session.prompt': async (event) => {
           if (event.origin?.kind === 'subagent') return
 
@@ -272,9 +296,12 @@ export default definePlugin({
             cacheFilePath,
             ...(event.origin !== undefined ? { origin: event.origin } : {}),
           }
-          await ctx.spawnSubagent('memory-retrieval', payload, {
+          const spawnPromise = ctx.spawnSubagent('memory-retrieval', payload, {
             parentSessionId: event.sessionId,
             ...(event.origin !== undefined ? { spawnedByOrigin: event.origin } : {}),
+          })
+          void spawnPromise.catch((err) => {
+            ctx.logger.error(`memory-retrieval spawn failed: ${err instanceof Error ? err.message : String(err)}`)
           })
         },
         'session.end': async (event) => {

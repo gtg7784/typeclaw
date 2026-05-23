@@ -225,6 +225,43 @@ describe('loadPlugins — markBooted gates spawnSubagent', () => {
       /before boot completed/,
     )
   })
+
+  test('forwards the SpawnSubagentOptions arg to the wired implementation', async () => {
+    // given a plugin that spawns with parentSessionId + spawnedByOrigin options
+    // (the shape the bundled memory plugin's session.prompt hook passes).
+    // Without forwarding, dispatchSpawnSubagent in src/run/index.ts cannot
+    // resolve the spawned role or stamp provenance, and any future in-process
+    // coalescing keyed on payload would not see the parent's identity either.
+    const captured: { name: string; payload: unknown; options: unknown }[] = []
+    const setup: { spawn?: (name: string, payload: unknown, options: unknown) => Promise<void> } = {}
+    const loadEntry: LoadPluginEntryFn = async () => ({
+      name: 'p1',
+      version: undefined,
+      source: 's',
+      defined: {
+        plugin: async (ctx) => {
+          setup.spawn = (n, p, o) => ctx.spawnSubagent(n, p, o as never)
+          return {}
+        },
+      },
+    })
+
+    const result = await loadPlugins({ entries: ['p1'], agentDir: '/tmp', configsByName: {}, loadEntry })
+    result.setSpawnSubagent(async (name, payload, options) => {
+      captured.push({ name, payload, options })
+    })
+    result.markBooted()
+
+    const origin = { kind: 'channel' as const, adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null }
+    await setup.spawn!('worker', { x: 1 }, { parentSessionId: 'ses_parent', spawnedByOrigin: origin })
+
+    expect(captured).toHaveLength(1)
+    expect(captured[0]).toEqual({
+      name: 'worker',
+      payload: { x: 1 },
+      options: { parentSessionId: 'ses_parent', spawnedByOrigin: origin },
+    })
+  })
 })
 
 describe('loadPlugins — registry shape', () => {
