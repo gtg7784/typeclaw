@@ -322,11 +322,12 @@ export default definePlugin({
         // dispatchSpawnSubagent (src/run/index.ts) which calls invokeSubagent
         // directly with no try/catch. SubagentConsumer's catch only protects
         // stream-initiated spawns (target.kind === 'new-session'), not the
-        // direct ctx.spawnSubagent path the hooks use. The .catch() inside
-        // runMemoryRetrieval is load-bearing — without it, every handler
-        // failure (LLM provider error, payload validation throw) would
-        // surface as an unhandled rejection because nothing awaits the
-        // promise at the call site.
+        // direct ctx.spawnSubagent path the hooks use. Same for
+        // loadAllShards' fs errors. The .catch() on the void-discarded
+        // promise below is load-bearing — without it, every shard-read or
+        // handler failure (LLM provider error, payload validation throw)
+        // would surface as an unhandled rejection because nothing awaits
+        // the promise.
         'session.turn.start': (event) => {
           if (event.origin?.kind === 'subagent') return
           void runMemoryRetrieval(event).catch((err) => {
