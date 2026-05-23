@@ -765,7 +765,40 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   const agentDir = options.agentDir ?? process.cwd()
   const mode: SystemPromptMode = options.mode ?? deriveSystemPromptMode(options.origin)
   const basePrompt = mode === 'slim' ? SLIM_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT
-  let self = await loadSelf(agentDir)
+
+  // Kick off the three independent I/O paths concurrently. Sequential awaits
+  // here used to be the dominant cold-start cost amplifier: loadSelf is 2
+  // file reads, renderGitNudge spawns a subprocess, loadMemory reads N topic
+  // shards. None of them depend on each other, so we run them in parallel.
+  // The plugin hook (runSessionPrompt) only needs `self`, so it can overlap
+  // with the gitNudge subprocess and the shard reads while `self` is in
+  // flight too.
+  //
+  // Plugin-hook contract: `runSessionPrompt` runs AFTER gitNudge/memory I/O
+  // has been kicked off. A hook that mutates `memory/topics/` or git-tracked
+  // files during its body races those in-flight reads -- mutations may or
+  // may not be reflected in the resulting prompt. The bundled hooks only
+  // mutate the prompt string itself; third-party plugins that need to mutate
+  // disk before the suffix sections see it must do so before/outside the
+  // session-prompt hook.
+  //
+  // We wrap gitNudge and memory promises in `settled` shells so any
+  // rejection from them cannot surface as an unhandled rejection during the
+  // window where we're awaiting selfPromise + runSessionPrompt. Production
+  // callers don't reject (renderGitNudge swallows internally, loadMemory
+  // catches ENOENT) but a non-ENOENT fs error (EACCES/EIO) on the agent
+  // folder would otherwise terminate the process before we reach the
+  // gather point.
+  const selfPromise = loadSelf(agentDir)
+  const gitNudgeSettled = mode === 'slim' ? Promise.resolve(ok('')) : settle(renderGitNudge(agentDir))
+  const memorySettled = settle(
+    loadMemory(agentDir, {
+      ...(options.origin !== undefined ? { origin: options.origin } : {}),
+      ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
+    }),
+  )
+
+  let self = await selfPromise
 
   if (options.plugins) {
     // The plugin hook receives the partially-assembled prompt (base + identity)
@@ -788,11 +821,9 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
   // commit guidance the nudge points back to is itself excluded from the slim
   // base prompt. Memory is still included so cron jobs that depend on MEMORY.md
   // context (e.g. "send today's standup summary") keep working.
-  const gitNudge = mode === 'slim' ? '' : await renderGitNudge(agentDir)
-  const memorySection = await loadMemory(agentDir, {
-    ...(options.origin !== undefined ? { origin: options.origin } : {}),
-    ...(options.plugins?.sessionId !== undefined ? { currentSessionId: options.plugins.sessionId } : {}),
-  })
+  const [gitNudgeResult, memoryResult] = await Promise.all([gitNudgeSettled, memorySettled])
+  const gitNudge = unwrapSettled(gitNudgeResult)
+  const memorySection = unwrapSettled(memoryResult)
 
   const systemPrompt = composeSystemPrompt({
     mode,
@@ -871,4 +902,22 @@ function resolveRoleContext(
 
 export function getBundledSkillsDir(): string {
   return join(dirname(fileURLToPath(import.meta.url)), '..', 'skills')
+}
+
+type Settled<T> = { ok: true; value: T } | { ok: false; error: unknown }
+
+function ok<T>(value: T): Settled<T> {
+  return { ok: true, value }
+}
+
+function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
+  return promise.then(
+    (value): Settled<T> => ({ ok: true, value }),
+    (error: unknown): Settled<T> => ({ ok: false, error }),
+  )
+}
+
+function unwrapSettled<T>(result: Settled<T>): T {
+  if (result.ok) return result.value
+  throw result.error
 }

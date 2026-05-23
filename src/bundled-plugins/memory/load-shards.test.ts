@@ -1,15 +1,20 @@
-import { afterEach, describe, expect, test } from 'bun:test'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { mkdtemp, mkdir, rm, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { loadAllShards, loadShard, listShardSlugs } from './load-shards'
+import { __resetShardCacheForTests, loadAllShards, loadShard, listShardSlugs } from './load-shards'
 import { topicShardPath, topicsDir } from './paths'
 
 const tmpRoots: string[] = []
 
+beforeEach(() => {
+  __resetShardCacheForTests()
+})
+
 afterEach(async () => {
   await Promise.all(tmpRoots.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
+  __resetShardCacheForTests()
 })
 
 describe('loadAllShards', () => {
@@ -123,6 +128,142 @@ describe('listShardSlugs', () => {
 
     await expect(listShardSlugs(agentDir)).resolves.toEqual(['apple'])
     await expect(loadAllShards(agentDir)).resolves.toHaveLength(1)
+  })
+})
+
+describe('loadAllShards shard cache', () => {
+  test('serves cached shard objects by reference when disk is unchanged (proves the readFile fast path)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'alpha', 'Alpha', 'v1-body\n')
+
+    const first = await loadAllShards(agentDir)
+    expect(first[0]?.body).toBe('v1-body\n')
+
+    // Cache hit returns the SAME object instance (no readFile, no parseShard,
+    // no allocation). Reference equality is the cleanest behavioral proof
+    // that the readFile fast path was taken -- a fresh read would allocate
+    // a new `{ frontmatter, body }` object on every call.
+    const second = await loadAllShards(agentDir)
+    expect(second[0]).toBe(first[0])
+  })
+
+  test('invalidates the cached shard when its mtime changes (same size)', async () => {
+    const agentDir = await makeAgentDir()
+    const path = topicShardPath(agentDir, 'alpha')
+    await writeShard(agentDir, 'alpha', 'Alpha', 'same-len-v1\n')
+
+    // Pin a known initial timestamp so we can step it forward deterministically.
+    const baseTime = new Date(1779000000000)
+    await utimes(path, baseTime, baseTime)
+
+    const first = await loadAllShards(agentDir)
+    expect(first[0]?.body).toBe('same-len-v1\n')
+
+    // Rewrite with SAME length and then bump mtime via utimes. This isolates
+    // mtime as the invalidation signal: size is identical, only mtime moves.
+    // (ctime moves too on the rewrite, but the test pins the contract that
+    // mtime alone is sufficient to invalidate.)
+    await writeFile(path, shardText('Alpha', 'same-len-v2\n'), 'utf8')
+    const laterTime = new Date(1780000000000)
+    await utimes(path, laterTime, laterTime)
+
+    const refreshed = await loadAllShards(agentDir)
+    expect(refreshed[0]?.body).toBe('same-len-v2\n')
+  })
+
+  test('invalidates the cached shard when ctime changes even if mtime is preserved (rsync -t / touch -r case)', async () => {
+    const agentDir = await makeAgentDir()
+    const path = topicShardPath(agentDir, 'alpha')
+    await writeShard(agentDir, 'alpha', 'Alpha', 'v1-body\n')
+    const pinned = new Date(1779000000000)
+    await utimes(path, pinned, pinned)
+
+    const first = await loadAllShards(agentDir)
+    expect(first[0]?.body).toBe('v1-body\n')
+
+    // Simulate a metadata-preserving external edit: write new bytes, then
+    // restore mtime to the original value. ctime cannot be backdated via
+    // utimes -- the kernel always bumps it on inode content change -- so
+    // ctime is what catches this case. Without ctime in the cache key the
+    // next call would return stale v1 bytes (the bug Oracle flagged).
+    await writeFile(path, shardText('Alpha', 'v2-body\n'), 'utf8')
+    await utimes(path, pinned, pinned)
+
+    const refreshed = await loadAllShards(agentDir)
+    expect(refreshed[0]?.body).toBe('v2-body\n')
+  })
+
+  test('drops cache entries for shards that were deleted', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'alpha', 'Alpha', 'a\n')
+    await writeShard(agentDir, 'bravo', 'Bravo', 'b\n')
+
+    const first = await loadAllShards(agentDir)
+    expect(first.map((s) => s.slug)).toEqual(['alpha', 'bravo'])
+
+    await unlink(topicShardPath(agentDir, 'alpha'))
+    const afterDelete = await loadAllShards(agentDir)
+    expect(afterDelete.map((s) => s.slug)).toEqual(['bravo'])
+
+    // Recreating with same slug must surface fresh content (proves the
+    // cache entry was actually dropped, not just hidden by the directory
+    // listing).
+    await writeShard(agentDir, 'alpha', 'Alpha', 'recreated\n')
+    const afterRecreate = await loadAllShards(agentDir)
+    expect(afterRecreate.find((s) => s.slug === 'alpha')?.body).toBe('recreated\n')
+  })
+
+  test('caches malformed shards so the warn is not spammed across repeat calls', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'alpha', 'Alpha', 'a\n')
+    await mkdir(topicsDir(agentDir), { recursive: true })
+    await writeFile(topicShardPath(agentDir, 'broken'), 'not frontmatter\n', 'utf8')
+    const warnings: string[] = []
+    const logger = { warn: (m: string) => warnings.push(m) }
+
+    await loadAllShards(agentDir, { logger })
+    await loadAllShards(agentDir, { logger })
+    await loadAllShards(agentDir, { logger })
+
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('broken')
+  })
+
+  test('caches are isolated per agent directory', async () => {
+    const dirA = await makeAgentDir()
+    const dirB = await makeAgentDir()
+    await writeShard(dirA, 'shared-slug', 'Heading A', 'body-A\n')
+    await writeShard(dirB, 'shared-slug', 'Heading B', 'body-B\n')
+
+    const a1 = await loadAllShards(dirA)
+    const b1 = await loadAllShards(dirB)
+    expect(a1[0]?.body).toBe('body-A\n')
+    expect(b1[0]?.body).toBe('body-B\n')
+
+    await writeShard(dirA, 'shared-slug', 'Heading A', 'body-A-updated\n')
+    const a2 = await loadAllShards(dirA)
+    const b2 = await loadAllShards(dirB)
+    expect(a2[0]?.body).toBe('body-A-updated\n')
+    expect(b2[0]?.body).toBe('body-B\n')
+  })
+
+  test('loadShard never returns the cached object (always allocates a fresh shard)', async () => {
+    const agentDir = await makeAgentDir()
+    await writeShard(agentDir, 'alpha', 'Alpha', 'v1\n')
+
+    // Prime the bulk cache: loadAllShards stores a TopicShard instance.
+    const bulk = await loadAllShards(agentDir)
+    const bulkShard = bulk[0]
+    expect(bulkShard?.body).toBe('v1\n')
+
+    // loadShard MUST allocate a fresh shard object even when the on-disk
+    // file hasn't moved (and the bulk cache holds a perfectly valid entry).
+    // Reference inequality is the contract that pins "single-slug always
+    // reads fresh." If loadShard ever starts sharing the bulk cache, this
+    // assertion fails and the breaking change is surfaced explicitly.
+    const direct = await loadShard(agentDir, 'alpha')
+    expect(direct?.body).toBe('v1\n')
+    expect(direct).not.toBe(bulkShard)
   })
 })
 

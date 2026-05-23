@@ -330,6 +330,56 @@ describe('createResourceLoader', () => {
     expect(promptSeenByHook).not.toContain('attacker-controlled-marker')
   })
 
+  test('does not surface an unhandled rejection when loadMemory throws non-ENOENT during a slow plugin hook', async () => {
+    // Regression test for the parallelization shape introduced in PR #318.
+    // gitNudge and memory promises are kicked off concurrently with loadSelf
+    // and the plugin hook. Without the settle() wrap, a non-ENOENT rejection
+    // (e.g. EISDIR from a directory masquerading as a shard) on the early-
+    // started memoryPromise would fire as `unhandledRejection` during the
+    // window between selfPromise resolving and the gather Promise.all -- a
+    // slow plugin hook widens that window arbitrarily.
+
+    // EISDIR trigger: place a directory at the path readFile expects to be
+    // a file. loadAllShards iterates memory/topics/*.md slugs, then
+    // readFile(<slug>.md). A directory at that path makes readFile reject
+    // with EISDIR (a non-ENOENT fs error).
+    await mkdir(join(agentDir, 'memory', 'topics', 'malformed.md'), { recursive: true })
+
+    const { createHookBus } = await import('@/plugin')
+    const { emptyRegistry } = await import('@/plugin/registry')
+    const hooks = createHookBus()
+    hooks.registerAll(
+      'slow-hook',
+      agentDir,
+      { info: () => {}, warn: () => {}, error: () => {} },
+      {
+        'session.prompt': async () => {
+          await new Promise((resolve) => setTimeout(resolve, 30))
+        },
+      },
+    )
+
+    const seen: unknown[] = []
+    const onUnhandled = (err: unknown) => seen.push(err)
+    process.on('unhandledRejection', onUnhandled)
+
+    try {
+      await expect(
+        createResourceLoader({
+          agentDir,
+          plugins: { registry: emptyRegistry(), hooks, sessionId: 'ses_test', agentDir },
+        }),
+      ).rejects.toThrow()
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+
+    // The error must propagate through the gather point, not as a detached
+    // unhandled rejection. Allow one microtask tick to settle.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(seen).toEqual([])
+  })
+
   test('exposes the typeclaw-cron bundled skill to the agent', async () => {
     const loader = await createResourceLoader({ agentDir })
 
