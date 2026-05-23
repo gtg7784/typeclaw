@@ -3908,3 +3908,325 @@ describe('ChannelRouter role-claim bypass', () => {
     expect(sessions).toHaveLength(0)
   })
 })
+
+describe('ChannelRouter injectSubagentCompletionReminder', () => {
+  test('matching parentSessionId wakes the channel session with a <system-reminder> turn even when no user inbound is queued', async () => {
+    // given a live channel session whose sessionId is the factory-stamped `ses_fake_1`
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions).toHaveLength(1)
+    const initialPromptCount = sessions[0]!.prompts.length
+
+    // when a subagent completes for that exact sessionId
+    const result = router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 5_000,
+    })
+
+    // then the router reports delivered and the next drain iteration runs
+    expect(result.kind).toBe('delivered')
+    await waitFor(() => sessions[0]!.prompts.length > initialPromptCount)
+    const reminderText = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
+    expect(reminderText).toContain('<system-reminder>')
+    expect(reminderText).toContain('explorer')
+    expect(reminderText).toContain('bg_xyz')
+    expect(reminderText).toContain('subagent_output')
+  })
+
+  test('reminder text carries the channel-aware nudge (channel_reply, invisible, NO_REPLY)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 5_000,
+    })
+    await waitFor(() => sessions[0]!.prompts.length >= 2)
+
+    const reminderText = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
+    expect(reminderText).toContain('channel_reply')
+    expect(reminderText).toContain('invisible')
+    expect(reminderText).toContain('NO_REPLY')
+  })
+
+  test('non-matching parentSessionId returns no-live-session and does not drain', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    const promptsBefore = sessions[0]!.prompts.length
+
+    const result = router.injectSubagentCompletionReminder({
+      parentSessionId: 'someone-else',
+      subagent: 'explorer',
+      taskId: 'bg_other',
+      ok: true,
+      durationMs: 100,
+    })
+
+    expect(result).toEqual({ kind: 'no-live-session' })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(sessions[0]!.prompts.length).toBe(promptsBefore)
+  })
+
+  test('failed subagent reminder reaches the channel session with FAILED marker and error string', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    const initial = sessions[0]!.prompts.length
+
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'scout',
+      taskId: 'bg_err',
+      ok: false,
+      durationMs: 1_500,
+      error: 'provider rate limit',
+    })
+
+    await waitFor(() => sessions[0]!.prompts.length > initial)
+    const text = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
+    expect(text).toContain('FAILED')
+    expect(text).toContain('provider rate limit')
+    expect(text).toContain('channel_reply')
+  })
+
+  test('reminder queued during a same-turn user inbound coalesces into the SAME drain iteration (prepended into the prompt body)', async () => {
+    // The drain loop splices `pendingSystemReminders` alongside the
+    // promptQueue at the top of each iteration, so a reminder pushed
+    // while a user inbound is also pending should appear in the same
+    // composed turn text rather than triggering a second prompt(). This
+    // pins the composition behavior (system reminder leads, then user
+    // inbound) which the channel-router's docstring on
+    // `pendingSystemReminders` calls out as load-bearing.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    const promptsAfterFirstUser = sessions[0]!.prompts.length
+    expect(promptsAfterFirstUser).toBe(1)
+
+    // Queue another user inbound (held by debounce) then inject the reminder
+    // before the debounce fires.
+    await router.route(inbound({ externalMessageId: 'm2', text: 'follow up' }))
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_coalesce',
+      ok: true,
+      durationMs: 100,
+    })
+
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts.length).toBe(2)
+    const combined = sessions[0]!.prompts[1] ?? ''
+    expect(combined).toContain('<system-reminder>')
+    expect(combined).toContain('bg_coalesce')
+    expect(combined).toContain('follow up')
+    expect(combined.indexOf('<system-reminder>')).toBeLessThan(combined.indexOf('follow up'))
+  })
+
+  test("reminder lookup skips destroyed sessions (channels GC'd while subagent was running drops the reminder)", async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.stop()
+
+    const result = router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 100,
+    })
+    expect(result).toEqual({ kind: 'no-live-session' })
+  })
+
+  test('reminder-only drain restores live origin author (single-speaker prior turn): originRef carries the prior author during prompt()', async () => {
+    // The fix's actual invariant is that during the reminder turn,
+    // `live.originRef.current.lastInboundAuthorId` is the prior speaker
+    // (so tool.before consumers gate on the right author). Asserting on a
+    // downstream follow-up inbound doesn't prove this — route() builds its
+    // permission origin from event.authorId, not from originRef — so we
+    // assert directly on the origin snapshot during prompt().
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ authorId: 'alice', text: 'do the thing' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+
+    // Capture the origin at the moment FakeSession.prompt() fires for the
+    // reminder turn — drain() sets originRef.current immediately before
+    // calling prompt(), so observing here is observing the value
+    // tool.before would see.
+    let originDuringReminder: SessionOrigin | undefined
+    sessions[0]!.onPrompt = () => {
+      originDuringReminder = router.__testing!.getLiveOriginSnapshot(KEY)
+    }
+
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 100,
+    })
+    await waitFor(() => sessions[0]!.prompts.length >= 2)
+
+    expect(originDuringReminder).toBeDefined()
+    expect(originDuringReminder!.kind).toBe('channel')
+    if (originDuringReminder!.kind !== 'channel') throw new Error('unreachable')
+    expect(originDuringReminder!.lastInboundAuthorId).toBe('alice')
+  })
+
+  test('reminder-only drain restores LAST speaker from a multi-author prior turn, not the first inserted', async () => {
+    // Pins Oracle's finding that "first-inserted Set member" semantics
+    // would silently misroute author-scoped roles on multi-author turns.
+    // With alice then bob speaking in the same turn, normal-turn semantics
+    // set currentTurnAuthorId = bob (batch[batch.length - 1]). The
+    // reminder-only restore must match — otherwise a role like
+    // `author:U_BOB` would resolve to alice and deny.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    // Two engaged inbounds debounced into the same batch
+    await router.route(inbound({ authorId: 'alice', externalMessageId: 'm1', text: 'first' }))
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'm2', text: 'second' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts).toHaveLength(1)
+
+    let originDuringReminder: SessionOrigin | undefined
+    sessions[0]!.onPrompt = () => {
+      originDuringReminder = router.__testing!.getLiveOriginSnapshot(KEY)
+    }
+
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 100,
+    })
+    await waitFor(() => sessions[0]!.prompts.length >= 2)
+
+    expect(originDuringReminder).toBeDefined()
+    if (originDuringReminder!.kind !== 'channel') throw new Error('unreachable')
+    expect(originDuringReminder!.lastInboundAuthorId).toBe('bob')
+  })
+
+  test('reminder injected before the first user-turn drain coalesces into the first batch and still carries the triggering author', async () => {
+    // Not a true reminder-only drain test (alice's inbound is already in
+    // promptQueue from the unflushed route() call above, so the drain's
+    // batch is non-empty). This pins the SOFTER invariant that matters in
+    // production today: a reminder arriving before the first user-turn
+    // drain doesn't leave the resulting turn without an author identity.
+    // The session's `lastTurnAuthorId`/`lastTurnAuthorIds` seed from
+    // `triggeringAuthorId` is what guarantees this — without the seed, a
+    // hypothetical reminder-only path on a fresh session would observe
+    // empty author state. The cold-start reminder-only path itself is
+    // unreachable through the public API (no caller spawns a subagent
+    // before any inbound has been routed), so this test exercises the
+    // closest reachable proxy and the seed is verified directly by the
+    // sticky-credit test below.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ authorId: 'alice', text: 'first' }))
+
+    let originDuringReminder: SessionOrigin | undefined
+    sessions[0]!.onPrompt = () => {
+      if (originDuringReminder === undefined) {
+        originDuringReminder = router.__testing!.getLiveOriginSnapshot(KEY)
+      }
+    }
+
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 100,
+    })
+    await waitFor(() => sessions[0]!.prompts.length >= 1)
+
+    expect(originDuringReminder).toBeDefined()
+    if (originDuringReminder!.kind !== 'channel') throw new Error('unreachable')
+    expect(originDuringReminder!.lastInboundAuthorId).toBe('alice')
+  })
+
+  test('lastTurnAuthorIds Set stays in sync with lastTurnAuthorId string at session creation (symmetric seeding from triggeringAuthorId)', async () => {
+    // Pins the load-bearing invariant the cold-start reminder-only path
+    // depends on. Asserts directly on the seeded state via __testing
+    // because the bug-trigger condition (a reminder firing before any
+    // user-turn drain) is unreachable through the public API. If only
+    // the string field were seeded, send()'s grantStickyForReplyTargets
+    // fallback (`currentTurnAuthorIds.size > 0 ? currentTurnAuthorIds :
+    // lastTurnAuthorIds`) would compute an empty `targetIds` on a
+    // reminder-only turn and silently drop the grant for the seeded
+    // author — silent because the reply itself succeeds. A direct
+    // assertion on the state is the smallest test that pins the actual
+    // invariant; a regression in the seeding flips this test red
+    // immediately, where an integration-level sticky-credit test could
+    // still pass via the drain finally-block populating lastTurnAuthorIds
+    // before the bug-relevant path runs.
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+
+    // ensureLive runs synchronously inside route() (via the await on the
+    // inbound classifier path) — by the time route() returns, the live
+    // session exists with its seeded author state, even though the first
+    // drain is still pending behind the debounce.
+    await router.route(inbound({ authorId: 'alice', text: 'do the thing' }))
+
+    const state = router.__testing!.getLiveAuthorState(KEY)
+    expect(state).toBeDefined()
+    expect(state!.lastTurnAuthorId).toBe('alice')
+    expect(state!.lastTurnAuthorIds).toEqual(['alice'])
+  })
+
+  test('runIdleGc does not evict a session whose drain was just woken by a reminder injection (in-flight drain protection)', async () => {
+    // Observable invariant: after `injectSubagentCompletionReminder`
+    // returns, a GC tick must not evict the session even if its
+    // `lastInboundAt` is already stale. In practice this passes via the
+    // existing `if (live.draining) continue` guard because
+    // injectSubagentCompletionReminder calls drain() synchronously which
+    // sets draining=true before the GC tick can observe pendingSystemReminders.
+    // The `pendingSystemReminders.length > 0` guard added alongside is a
+    // forward-compat redundancy for any future caller that queues a
+    // reminder without firing drain — not exercised by this test (and
+    // not exercisable through the public API today). The test name
+    // reflects what is actually covered.
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const { router } = makeRouter(dir, { nowRef })
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    expect(router.liveCount()).toBe(1)
+
+    nowRef.value += SESSION_IDLE_MS + 1
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 100,
+    })
+
+    await router.__testing!.runIdleGc()
+    expect(router.liveCount()).toBe(1)
+  })
+})

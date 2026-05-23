@@ -1,0 +1,89 @@
+// Shared renderer for the `<system-reminder>` block injected into a parent
+// session's prompt queue when one of its backgrounded subagents finishes.
+// Used by the TUI route in src/server/index.ts and the channel-router
+// bridge so the model sees identical wording across origins. The
+// `channel` knob is the only per-origin difference: channel sessions
+// need the "end your reply via channel_reply" nudge because plain-text
+// output is invisible there AND the reminder is not a user message —
+// the channel origin block's MUST-call-channel_reply rule is keyed to
+// user messages, so a model that reads the spec literally would
+// otherwise leave the reply un-sent.
+
+export type CompletionReminderArgs = {
+  subagent: string
+  taskId: string
+  ok: boolean
+  durationMs: number
+  error?: string
+  channel?: boolean
+}
+
+const CHANNEL_REPLY_NUDGE =
+  'This reminder is a system message, not a user inbound — but you are in a channel session, ' +
+  'so end your turn via `channel_reply` (or `channel_send`) to surface the result. ' +
+  'Plain-text output is invisible here. If there is genuinely nothing to surface, end with `NO_REPLY`.'
+
+export function renderSubagentCompletionReminder(args: CompletionReminderArgs): string {
+  const durationStr = formatReminderDuration(args.durationMs)
+  const channelTail = args.channel === true ? ` ${CHANNEL_REPLY_NUDGE}` : ''
+  if (args.ok) {
+    return (
+      `<system-reminder>\n` +
+      `Subagent \`${args.subagent}\` (${args.taskId}) completed in ${durationStr}. ` +
+      `Use subagent_output to fetch the result.${channelTail}\n` +
+      `</system-reminder>`
+    )
+  }
+  const err = args.error ?? 'unknown error'
+  return (
+    `<system-reminder>\n` +
+    `Subagent \`${args.subagent}\` (${args.taskId}) FAILED after ${durationStr}: ${err}. ` +
+    `Use subagent_output to inspect.${channelTail}\n` +
+    `</system-reminder>`
+  )
+}
+
+export function formatReminderDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  const totalSec = Math.floor(ms / 1000)
+  if (totalSec < 60) return `${totalSec}s`
+  const min = Math.floor(totalSec / 60)
+  const sec = totalSec % 60
+  return `${min}m${sec}s`
+}
+
+export type SubagentCompletedPayload = {
+  taskId: string
+  subagent: string
+  parentSessionId: string
+  ok: boolean
+  durationMs: number
+  error?: string
+}
+
+// Type guard for the `subagent.completed` broadcast payload. Subscribers
+// to `target: { kind: 'broadcast' }` see every broadcast; this guard
+// filters and narrows in one place so callers don't repeat the
+// typeof-checking dance.
+export function parseSubagentCompletedPayload(payload: unknown): SubagentCompletedPayload | null {
+  if (payload === null || typeof payload !== 'object') return null
+  const p = payload as {
+    kind?: unknown
+    taskId?: unknown
+    subagent?: unknown
+    parentSessionId?: unknown
+    ok?: unknown
+    durationMs?: unknown
+    error?: unknown
+  }
+  if (p.kind !== 'subagent.completed') return null
+  if (typeof p.parentSessionId !== 'string') return null
+  return {
+    taskId: typeof p.taskId === 'string' ? p.taskId : '<unknown>',
+    subagent: typeof p.subagent === 'string' ? p.subagent : 'subagent',
+    parentSessionId: p.parentSessionId,
+    ok: p.ok === true,
+    durationMs: typeof p.durationMs === 'number' ? p.durationMs : 0,
+    ...(typeof p.error === 'string' ? { error: p.error } : {}),
+  }
+}

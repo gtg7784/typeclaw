@@ -6,6 +6,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 import { createSession, type AgentSession } from '@/agent'
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
+import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import { createCommandRegistry } from '@/commands'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
@@ -254,6 +255,14 @@ type LiveSession = {
   currentTurnAuthorId: string | null
   currentTurnAuthorIds: Set<string>
   lastTurnAuthorIds: Set<string>
+  // Mirror of currentTurnAuthorId at end-of-turn (the LAST speaker of the
+  // prior batch), preserved across the drain finally-block which resets
+  // currentTurnAuthorId to null. Read by the reminder-only branch in
+  // drain() so a system-reminder wakeup carries the same author the prior
+  // turn's tool.before saw — matching "last speaker" semantics (not "first
+  // inserted into Set"), so a multi-author prior turn like alice→bob
+  // restores `bob`, the same identity normal turns would have used.
+  lastTurnAuthorId: string | null
   consecutiveAborts: number
   // Per-(chat:thread) count of bot messages sent without intervening user
   // input being rendered into the model's context. Reset at the top of each
@@ -261,6 +270,15 @@ type LiveSession = {
   // about to be shown to the model). channel_send reads this BEFORE calling
   // router.send so the hint reflects the position of the about-to-happen send
   // (n-th in a row), nudging the model to yield without forcing it to.
+  // Queue of `<system-reminder>...</system-reminder>` strings to prepend
+  // into the next turn's user-message body. Populated by
+  // `injectSubagentCompletionReminder` (and any future system-injected
+  // wakeups) so a backgrounded subagent's completion can wake a channel
+  // session that has no pending user inbounds. Drained at the top of
+  // every `drain()` iteration alongside the regular promptQueue batch;
+  // the drain loop's run condition checks BOTH queues so a system
+  // reminder alone is enough to trigger a turn.
+  pendingSystemReminders: string[]
   consecutiveSends: Map<string, number>
   // Per-(chat:thread) text of the last reserved bot send. Set
   // SYNCHRONOUSLY inside router.send before the outbound callback awaits,
@@ -387,6 +405,21 @@ export type ChannelRouter = {
   // slack-bot-classify.ts. Read live so a reload of `alias` propagates
   // to adapters without a restart.
   getSelfAliases: () => readonly string[]
+  // Inject a `<system-reminder>` block addressed to a live channel session
+  // identified by `parentSessionId`. The reminder is rendered into the
+  // next turn's user-message body and triggers a drain even if the
+  // promptQueue is empty. Returns `delivered` when a matching live
+  // session was found and the reminder was queued, `no-live-session`
+  // otherwise. Used by the subagent-completion bridge in
+  // src/run/index.ts; safe for tests to call directly via a fake router.
+  injectSubagentCompletionReminder: (args: {
+    parentSessionId: string
+    subagent: string
+    taskId: string
+    ok: boolean
+    durationMs: number
+    error?: string
+  }) => { kind: 'delivered'; keyId: string } | { kind: 'no-live-session' }
   stop: () => Promise<void>
   liveCount: () => number
   __testing?: {
@@ -396,6 +429,34 @@ export type ChannelRouter = {
     isTypingActive: (key: ChannelKey) => boolean
     stopTyping: (key: ChannelKey) => Promise<void>
     runIdleGc: () => Promise<void>
+    // Returns the seeded author state on the live session matching
+    // `key`, or undefined when no live session exists. Tests use this
+    // to pin the symmetric-seeding invariant between `lastTurnAuthorId`
+    // (string) and `lastTurnAuthorIds` (Set) at session creation —
+    // observable directly here rather than via a downstream sticky-
+    // credit grant test that would need to coordinate with multiple
+    // subsystems.
+    getLiveAuthorState: (key: ChannelKey) =>
+      | {
+          currentTurnAuthorId: string | null
+          currentTurnAuthorIds: readonly string[]
+          lastTurnAuthorId: string | null
+          lastTurnAuthorIds: readonly string[]
+        }
+      | undefined
+    // Returns a shallow copy of `live.originRef.current` for the live
+    // session matching `key`, or undefined when no live session exists.
+    // Exists so tests can assert on the per-turn origin that tool.before
+    // consumers would see — the origin is normally only observable
+    // indirectly via in-flight tool calls, which the fake session doesn't
+    // execute. The shallow copy detaches the top-level fields from
+    // `originRef` so a later turn replacing `originRef.current` doesn't
+    // change a captured assertion. Nested fields (`participants`,
+    // `membership`) are still shared by reference; in practice
+    // `updateParticipants` returns a fresh array rather than mutating in
+    // place, so observed snapshots are stable for the assertions tests
+    // make today. NOT a public router method.
+    getLiveOriginSnapshot: (key: ChannelKey) => SessionOrigin | undefined
   }
 }
 
@@ -800,6 +861,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         resolvedNames,
         originRef,
         promptQueue: [],
+        pendingSystemReminders: [],
         contextBuffer: [],
         draining: false,
         debounceTimer: null,
@@ -811,7 +873,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         firstUnprocessedAt: 0,
         currentTurnAuthorId: null,
         currentTurnAuthorIds: new Set(),
-        lastTurnAuthorIds: new Set(),
+        // `lastTurnAuthorId` (string, used for `lastInboundAuthorId` in
+        // origin) and `lastTurnAuthorIds` (Set, used by
+        // `grantStickyForReplyTargets` as the fallback when
+        // `currentTurnAuthorIds` is empty) are seeded TOGETHER from
+        // `triggeringAuthorId`. Seeding only the string would leave the
+        // Set empty for the cold-start reminder-only path, which is
+        // observable when the agent replies during that turn — `send()`
+        // would compute an empty `targetIds` and silently drop the
+        // sticky-credit grant for the seeded author. The two fields must
+        // stay in sync, so they are written in the same statement.
+        lastTurnAuthorIds: triggeringAuthorId !== undefined ? new Set([triggeringAuthorId]) : new Set(),
+        lastTurnAuthorId: triggeringAuthorId ?? null,
         consecutiveAborts: 0,
         consecutiveSends: new Map(),
         lastSentText: new Map(),
@@ -1082,6 +1155,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.debounceTimer = null
     live.firstUnprocessedAt = 0
     live.promptQueue.length = 0
+    live.pendingSystemReminders.length = 0
     await stopTypingHeartbeat(live)
     try {
       await live.session.abort()
@@ -1095,7 +1169,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (live.draining || live.destroyed) return
     live.draining = true
     try {
-      while (live.promptQueue.length > 0 && !live.destroyed) {
+      while ((live.promptQueue.length > 0 || live.pendingSystemReminders.length > 0) && !live.destroyed) {
         live.typingTimedOut = false
         // Heartbeat must run during generation as well as during debounce.
         // Because new inbounds during a turn just push into promptQueue
@@ -1104,13 +1178,32 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         startTypingHeartbeat(live)
         const batch = live.promptQueue.splice(0, live.promptQueue.length)
         const observed = live.contextBuffer.splice(0, live.contextBuffer.length)
-        const text = composeTurnPrompt(observed, batch, { loopGuardActive: live.loopGuardActive })
+        const reminders = live.pendingSystemReminders.splice(0, live.pendingSystemReminders.length)
+        const text = composeTurnPrompt(observed, batch, {
+          loopGuardActive: live.loopGuardActive,
+          systemReminders: reminders,
+        })
 
-        live.currentTurnAuthorId = batch.length > 0 ? batch[batch.length - 1]!.authorId : null
-        live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
         if (batch.length > 0) {
+          live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
+          live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.consecutiveSends.clear()
           live.lastSentText.clear()
+        } else if (live.lastTurnAuthorId !== null) {
+          // Reminder-only turn (batch.length === 0, reminders.length > 0):
+          // restore the author identity from the prior turn so author-
+          // scoped role resolution still works on this turn. The drain
+          // finally-block clears `currentTurnAuthorId` between turns, so a
+          // reminder arriving while the session is idle would otherwise
+          // strip `lastInboundAuthorId` from the tool.before origin and
+          // demote roles like `slack:T0/C0 author:U_OWNER` to whichever
+          // non-author rule matches — silently breaking the channel_reply
+          // that the reminder is asking the agent to send. `lastTurnAuthorId`
+          // tracks the LAST speaker of the prior batch (matching normal-
+          // turn `batch[batch.length - 1]!.authorId` semantics) so a multi-
+          // author prior turn like alice→bob restores `bob`, not alice.
+          live.currentTurnAuthorId = live.lastTurnAuthorId
+          live.currentTurnAuthorIds = new Set(live.lastTurnAuthorIds)
         }
 
         // Update the live origin holder so this turn's tool.before events
@@ -1142,6 +1235,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         }
         await fireSessionIdle(live)
         live.lastTurnAuthorIds = new Set(live.currentTurnAuthorIds)
+        if (live.currentTurnAuthorId !== null) {
+          live.lastTurnAuthorId = live.currentTurnAuthorId
+        }
       }
     } finally {
       live.draining = false
@@ -1743,6 +1839,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (live.destroyed) continue
       if (live.draining) continue
       if (live.promptQueue.length > 0) continue
+      // pendingSystemReminders is checked alongside promptQueue because both
+      // represent pending work that drain() will process. Today's only
+      // populator (injectSubagentCompletionReminder) also fires drain()
+      // synchronously, which sets draining=true and shadows this guard via
+      // the line above — but the guard exists to keep the invariant honest
+      // for any future caller that queues a reminder without immediately
+      // waking the drain loop.
+      if (live.pendingSystemReminders.length > 0) continue
       if (t - live.lastInboundAt <= SESSION_IDLE_MS) continue
       victims.push(live)
     }
@@ -1812,6 +1916,45 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'unknown-command', name: lowered }
   }
 
+  const injectSubagentCompletionReminder = (args: {
+    parentSessionId: string
+    subagent: string
+    taskId: string
+    ok: boolean
+    durationMs: number
+    error?: string
+  }): { kind: 'delivered'; keyId: string } | { kind: 'no-live-session' } => {
+    for (const live of liveSessions.values()) {
+      if (live.destroyed) continue
+      if (live.sessionId !== args.parentSessionId) continue
+      const text = renderSubagentCompletionReminder({
+        subagent: args.subagent,
+        taskId: args.taskId,
+        ok: args.ok,
+        durationMs: args.durationMs,
+        ...(args.error !== undefined ? { error: args.error } : {}),
+        channel: true,
+      })
+      live.pendingSystemReminders.push(text)
+      logger.info(`[channels] ${live.keyId}: subagent-completion reminder queued task=${args.taskId} ok=${args.ok}`)
+      // Wake the drain loop. If a turn is already in flight, the wakeup is
+      // a no-op because drain() will pick up the reminder on its next
+      // iteration (it now gates on promptQueue OR pendingSystemReminders).
+      // If the session is idle, fire drain() immediately rather than going
+      // through the debounce path — the reminder is not a user inbound,
+      // so the "coalesce nearby inbounds" rationale for debouncing does
+      // not apply. Mirrors the TUI path's `idle ? 'interrupt' : 'queue'`
+      // semantics: the channel router doesn't have a `delivery: interrupt`
+      // mechanism (no in-flight abort during a turn), but firing drain()
+      // immediately is the equivalent for an idle session.
+      if (!live.draining) {
+        void drain(live)
+      }
+      return { kind: 'delivered', keyId: live.keyId }
+    }
+    return { kind: 'no-live-session' }
+  }
+
   return {
     route,
     send,
@@ -1833,6 +1976,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     fetchAttachment,
     executeCommand,
     getSelfAliases: computeSelfAliases,
+    injectSubagentCompletionReminder,
     stop,
     liveCount: () => liveSessions.size,
     __testing: {
@@ -1876,6 +2020,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         await stopTypingHeartbeat(live)
       },
       runIdleGc,
+      getLiveOriginSnapshot: (key: ChannelKey) => {
+        const live = liveSessions.get(channelKeyId(key))
+        const origin = live?.originRef.current
+        if (origin === undefined) return undefined
+        return { ...origin }
+      },
+      getLiveAuthorState: (key: ChannelKey) => {
+        const live = liveSessions.get(channelKeyId(key))
+        if (live === undefined) return undefined
+        return {
+          currentTurnAuthorId: live.currentTurnAuthorId,
+          currentTurnAuthorIds: Array.from(live.currentTurnAuthorIds),
+          lastTurnAuthorId: live.lastTurnAuthorId,
+          lastTurnAuthorIds: Array.from(live.lastTurnAuthorIds),
+        }
+      },
     },
   }
 }
@@ -1883,27 +2043,50 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 function composeTurnPrompt(
   observed: readonly ObservedInbound[],
   batch: readonly QueuedInbound[],
-  state: { loopGuardActive: boolean } = { loopGuardActive: false },
+  state: { loopGuardActive: boolean; systemReminders?: readonly string[] } = { loopGuardActive: false },
 ): string {
   const parts: string[] = []
+  // System reminders (subagent-completion wakeups today) lead the turn body
+  // because they are typically what triggered the drain — when the prompt
+  // queue is empty and the only thing in this iteration is a reminder, the
+  // model needs to see the reminder before any optional context. The
+  // reminder block is self-fenced by its <system-reminder> tags, so no
+  // extra framing is needed and the model already learns this shape from
+  // the TUI path; channel sessions see the same tags.
+  if (state.systemReminders && state.systemReminders.length > 0) {
+    for (const reminder of state.systemReminders) {
+      parts.push(reminder)
+    }
+    parts.push('')
+  }
   // Loop-guard notice lives in the user-turn text (recomposed every drain)
   // rather than in the system prompt so it does not invalidate the
   // prompt-prefix cache. The cached prefix covers system + tools + earlier
   // turns; the current user-turn suffix is non-cacheable by design, so
   // adding a section here is cache-neutral.
   //
-  // SYSTEM MESSAGE convention: any runtime-injected block in the user turn
-  // that is NOT from a chat participant must use the
-  // `**[SYSTEM MESSAGE — not from a human]**` framing fenced by horizontal
-  // rules (`---`). This is structurally distinct from the H2 sections used
-  // for actual conversation content (`## Recent context`,
+  // SYSTEM MESSAGE convention: any runtime-injected block in the user
+  // turn that is NOT from a chat participant MUST use the
+  // `**[SYSTEM MESSAGE — not from a human]**` framing fenced by
+  // horizontal rules (`---`) — the loop-guard block below is the
+  // canonical example. This is structurally distinct from the H2
+  // sections used for actual conversation content (`## Recent context`,
   // `## Current message`). Without the fencing, models — especially
   // persona-rich ones like Kimi — read the heading as a human-authored
   // instruction and reply to it ("알겠습니다, 대화 여기까지 할게요"). The
-  // bracketed marker plus the explicit "Do not acknowledge or reply to this
-  // notice" line is the trust boundary that prevents this. New runtime
-  // notices (rate-limit, schema-mismatch, abort signals, etc.) MUST follow
-  // this same convention so models learn the pattern.
+  // bracketed marker plus the explicit "Do not acknowledge or reply to
+  // this notice" line is the trust boundary that prevents this. New
+  // runtime notices (rate-limit, schema-mismatch, abort signals, etc.)
+  // MUST follow this convention.
+  //
+  // ONE narrow exception exists: subagent-completion reminders use
+  // `<system-reminder>...</system-reminder>` tags (prepended above) for
+  // parity with the TUI path's identical tagging (see
+  // `renderSubagentCompletionReminder` in
+  // `src/agent/subagent-completion-reminder.ts`) so the model sees the
+  // same shape across origins. The exception is scoped to that single
+  // case: do NOT extend it to new notice types. Anything that is not
+  // a true subagent-style completion ping uses framing 1.
   if (state.loopGuardActive) {
     parts.push(
       '---',

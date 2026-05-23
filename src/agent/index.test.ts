@@ -828,6 +828,12 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('never fabricate results')
     expect(prompt).toContain('re-read whenever process is unclear')
     expect(prompt).toContain('You are not pi, not Claude, not ChatGPT')
+    // Mode B channel guidance: subagent completion reminder in a channel
+    // session is not a user message; the model needs explicit instruction
+    // to surface via channel_reply/channel_send rather than emit plain text
+    // that goes nowhere. Guards against the "spawn → silent" regression.
+    expect(prompt).toContain('completion `<system-reminder>`')
+    expect(prompt).toContain('Surface the result via `channel_reply`')
   })
 })
 
