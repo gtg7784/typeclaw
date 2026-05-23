@@ -1,5 +1,6 @@
 import {
   KAKAO_EMOTICON_KIND_BY_TYPE,
+  KAKAO_MESSAGE_TYPE,
   type KakaoEmoticonKind,
   type KakaoMessage,
   type KakaoTalkPushEmoticonEvent,
@@ -20,17 +21,6 @@ import {
 // The synthesized text follows the same `[KakaoTalk message with ...]`
 // convention used by Slack/Discord/Telegram inbound classifiers, so the
 // agent sees a consistent placeholder shape across platforms.
-
-// KakaoTalk LOCO message_type values. Only the ones we explicitly format
-// are listed; anything else falls into the "generic attachment" branch.
-// Reference: src/skills/typeclaw-channel-kakaotalk/SKILL.md and
-// agent-messenger docs/cli/kakaotalk.mdx.
-const MESSAGE_TYPE_TEXT = 1
-const MESSAGE_TYPE_PHOTO = 2
-const MESSAGE_TYPE_VIDEO = 3
-const MESSAGE_TYPE_AUDIO = 5
-const MESSAGE_TYPE_FILE = 18
-const MESSAGE_TYPE_MULTIPHOTO = 27
 
 // Non-text inputs that the adapter accepts. We use a thin shared shape
 // rather than the SDK's union so the same formatter can serve both push
@@ -70,17 +60,17 @@ function summarizeAttachment(event: InboundLike): string | null {
   // agent isn't woken up by phantom `[KakaoTalk message with type=N]`
   // placeholders for noise.
   switch (event.message_type) {
-    case MESSAGE_TYPE_TEXT:
+    case KAKAO_MESSAGE_TYPE.TEXT:
       return null
-    case MESSAGE_TYPE_PHOTO:
+    case KAKAO_MESSAGE_TYPE.PHOTO:
       return summarizePhoto(event.attachment)
-    case MESSAGE_TYPE_VIDEO:
+    case KAKAO_MESSAGE_TYPE.VIDEO:
       return summarizeGeneric('video', event.attachment)
-    case MESSAGE_TYPE_AUDIO:
+    case KAKAO_MESSAGE_TYPE.AUDIO:
       return summarizeGeneric('audio', event.attachment)
-    case MESSAGE_TYPE_FILE:
+    case KAKAO_MESSAGE_TYPE.FILE:
       return summarizeFile(event.attachment)
-    case MESSAGE_TYPE_MULTIPHOTO:
+    case KAKAO_MESSAGE_TYPE.MULTIPHOTO:
       return summarizeGeneric('multiphoto', event.attachment)
     default:
       // Emoticon types route through the dedicated emoticon event before
