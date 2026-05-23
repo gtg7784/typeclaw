@@ -54,6 +54,7 @@ function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
     stop: async () => {},
     liveCount: () => 0,
     executeCommand: async () => ({ kind: 'no-live-session' }),
+    injectSubagentCompletionReminder: () => ({ kind: 'no-live-session' }),
   }
 }
 

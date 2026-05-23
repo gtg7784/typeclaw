@@ -45,6 +45,54 @@ describe('renderSubagentCompletionReminder', () => {
     })
     expect(text).toContain('unknown error')
   })
+
+  test('channel=true appends the channel_reply nudge so a channel-session reminder steers the model to surface via tool, not plain text', () => {
+    const text = renderSubagentCompletionReminder({
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 5_000,
+      channel: true,
+    })
+    expect(text).toContain('channel_reply')
+    expect(text).toContain('channel_send')
+    expect(text).toContain('NO_REPLY')
+    expect(text).toContain('invisible')
+  })
+
+  test('channel=true on a FAILED reminder also appends the nudge (failure still needs surfacing)', () => {
+    const text = renderSubagentCompletionReminder({
+      subagent: 'scout',
+      taskId: 'bg_err',
+      ok: false,
+      durationMs: 1_500,
+      error: 'rate limit',
+      channel: true,
+    })
+    expect(text).toContain('FAILED')
+    expect(text).toContain('rate limit')
+    expect(text).toContain('channel_reply')
+  })
+
+  test('channel undefined / false: no channel_reply nudge (TUI/cron paths keep the existing wording)', () => {
+    const tuiText = renderSubagentCompletionReminder({
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 5_000,
+    })
+    expect(tuiText).not.toContain('channel_reply')
+    expect(tuiText).not.toContain('invisible')
+
+    const explicitFalse = renderSubagentCompletionReminder({
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 5_000,
+      channel: false,
+    })
+    expect(explicitFalse).not.toContain('channel_reply')
+  })
 })
 
 describe('formatReminderDuration', () => {

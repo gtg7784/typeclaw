@@ -6,6 +6,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 import { createSession, type AgentSession } from '@/agent'
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
+import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import { createCommandRegistry } from '@/commands'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
@@ -261,6 +262,15 @@ type LiveSession = {
   // about to be shown to the model). channel_send reads this BEFORE calling
   // router.send so the hint reflects the position of the about-to-happen send
   // (n-th in a row), nudging the model to yield without forcing it to.
+  // Queue of `<system-reminder>...</system-reminder>` strings to prepend
+  // into the next turn's user-message body. Populated by
+  // `injectSubagentCompletionReminder` (and any future system-injected
+  // wakeups) so a backgrounded subagent's completion can wake a channel
+  // session that has no pending user inbounds. Drained at the top of
+  // every `drain()` iteration alongside the regular promptQueue batch;
+  // the drain loop's run condition checks BOTH queues so a system
+  // reminder alone is enough to trigger a turn.
+  pendingSystemReminders: string[]
   consecutiveSends: Map<string, number>
   // Per-(chat:thread) text of the last reserved bot send. Set
   // SYNCHRONOUSLY inside router.send before the outbound callback awaits,
@@ -387,6 +397,21 @@ export type ChannelRouter = {
   // slack-bot-classify.ts. Read live so a reload of `alias` propagates
   // to adapters without a restart.
   getSelfAliases: () => readonly string[]
+  // Inject a `<system-reminder>` block addressed to a live channel session
+  // identified by `parentSessionId`. The reminder is rendered into the
+  // next turn's user-message body and triggers a drain even if the
+  // promptQueue is empty. Returns `delivered` when a matching live
+  // session was found and the reminder was queued, `no-live-session`
+  // otherwise. Used by the subagent-completion bridge in
+  // src/run/index.ts; safe for tests to call directly via a fake router.
+  injectSubagentCompletionReminder: (args: {
+    parentSessionId: string
+    subagent: string
+    taskId: string
+    ok: boolean
+    durationMs: number
+    error?: string
+  }) => { kind: 'delivered'; keyId: string } | { kind: 'no-live-session' }
   stop: () => Promise<void>
   liveCount: () => number
   __testing?: {
@@ -800,6 +825,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         resolvedNames,
         originRef,
         promptQueue: [],
+        pendingSystemReminders: [],
         contextBuffer: [],
         draining: false,
         debounceTimer: null,
@@ -1082,6 +1108,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.debounceTimer = null
     live.firstUnprocessedAt = 0
     live.promptQueue.length = 0
+    live.pendingSystemReminders.length = 0
     await stopTypingHeartbeat(live)
     try {
       await live.session.abort()
@@ -1095,7 +1122,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (live.draining || live.destroyed) return
     live.draining = true
     try {
-      while (live.promptQueue.length > 0 && !live.destroyed) {
+      while ((live.promptQueue.length > 0 || live.pendingSystemReminders.length > 0) && !live.destroyed) {
         live.typingTimedOut = false
         // Heartbeat must run during generation as well as during debounce.
         // Because new inbounds during a turn just push into promptQueue
@@ -1104,7 +1131,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         startTypingHeartbeat(live)
         const batch = live.promptQueue.splice(0, live.promptQueue.length)
         const observed = live.contextBuffer.splice(0, live.contextBuffer.length)
-        const text = composeTurnPrompt(observed, batch, { loopGuardActive: live.loopGuardActive })
+        const reminders = live.pendingSystemReminders.splice(0, live.pendingSystemReminders.length)
+        const text = composeTurnPrompt(observed, batch, {
+          loopGuardActive: live.loopGuardActive,
+          systemReminders: reminders,
+        })
 
         live.currentTurnAuthorId = batch.length > 0 ? batch[batch.length - 1]!.authorId : null
         live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
@@ -1812,6 +1843,45 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'unknown-command', name: lowered }
   }
 
+  const injectSubagentCompletionReminder = (args: {
+    parentSessionId: string
+    subagent: string
+    taskId: string
+    ok: boolean
+    durationMs: number
+    error?: string
+  }): { kind: 'delivered'; keyId: string } | { kind: 'no-live-session' } => {
+    for (const live of liveSessions.values()) {
+      if (live.destroyed) continue
+      if (live.sessionId !== args.parentSessionId) continue
+      const text = renderSubagentCompletionReminder({
+        subagent: args.subagent,
+        taskId: args.taskId,
+        ok: args.ok,
+        durationMs: args.durationMs,
+        ...(args.error !== undefined ? { error: args.error } : {}),
+        channel: true,
+      })
+      live.pendingSystemReminders.push(text)
+      logger.info(`[channels] ${live.keyId}: subagent-completion reminder queued task=${args.taskId} ok=${args.ok}`)
+      // Wake the drain loop. If a turn is already in flight, the wakeup is
+      // a no-op because drain() will pick up the reminder on its next
+      // iteration (it now gates on promptQueue OR pendingSystemReminders).
+      // If the session is idle, fire drain() immediately rather than going
+      // through the debounce path — the reminder is not a user inbound,
+      // so the "coalesce nearby inbounds" rationale for debouncing does
+      // not apply. Mirrors the TUI path's `idle ? 'interrupt' : 'queue'`
+      // semantics: the channel router doesn't have a `delivery: interrupt`
+      // mechanism (no in-flight abort during a turn), but firing drain()
+      // immediately is the equivalent for an idle session.
+      if (!live.draining) {
+        void drain(live)
+      }
+      return { kind: 'delivered', keyId: live.keyId }
+    }
+    return { kind: 'no-live-session' }
+  }
+
   return {
     route,
     send,
@@ -1833,6 +1903,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     fetchAttachment,
     executeCommand,
     getSelfAliases: computeSelfAliases,
+    injectSubagentCompletionReminder,
     stop,
     liveCount: () => liveSessions.size,
     __testing: {
@@ -1883,9 +1954,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 function composeTurnPrompt(
   observed: readonly ObservedInbound[],
   batch: readonly QueuedInbound[],
-  state: { loopGuardActive: boolean } = { loopGuardActive: false },
+  state: { loopGuardActive: boolean; systemReminders?: readonly string[] } = { loopGuardActive: false },
 ): string {
   const parts: string[] = []
+  // System reminders (subagent-completion wakeups today) lead the turn body
+  // because they are typically what triggered the drain — when the prompt
+  // queue is empty and the only thing in this iteration is a reminder, the
+  // model needs to see the reminder before any optional context. The
+  // reminder block is self-fenced by its <system-reminder> tags, so no
+  // extra framing is needed and the model already learns this shape from
+  // the TUI path; channel sessions see the same tags.
+  if (state.systemReminders && state.systemReminders.length > 0) {
+    for (const reminder of state.systemReminders) {
+      parts.push(reminder)
+    }
+    parts.push('')
+  }
   // Loop-guard notice lives in the user-turn text (recomposed every drain)
   // rather than in the system prompt so it does not invalidate the
   // prompt-prefix cache. The cached prefix covers system + tools + earlier

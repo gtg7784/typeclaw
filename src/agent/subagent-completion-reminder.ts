@@ -1,8 +1,13 @@
 // Shared renderer for the `<system-reminder>` block injected into a parent
 // session's prompt queue when one of its backgrounded subagents finishes.
-// Used today by the TUI route in src/server/index.ts; future surfaces
-// (channel sessions) can call the same renderer so the model sees
-// identical wording across origins.
+// Used by the TUI route in src/server/index.ts and the channel-router
+// bridge so the model sees identical wording across origins. The
+// `channel` knob is the only per-origin difference: channel sessions
+// need the "end your reply via channel_reply" nudge because plain-text
+// output is invisible there AND the reminder is not a user message —
+// the channel origin block's MUST-call-channel_reply rule is keyed to
+// user messages, so a model that reads the spec literally would
+// otherwise leave the reply un-sent.
 
 export type CompletionReminderArgs = {
   subagent: string
@@ -10,15 +15,22 @@ export type CompletionReminderArgs = {
   ok: boolean
   durationMs: number
   error?: string
+  channel?: boolean
 }
+
+const CHANNEL_REPLY_NUDGE =
+  'This reminder is a system message, not a user inbound — but you are in a channel session, ' +
+  'so end your turn via `channel_reply` (or `channel_send`) to surface the result. ' +
+  'Plain-text output is invisible here. If there is genuinely nothing to surface, end with `NO_REPLY`.'
 
 export function renderSubagentCompletionReminder(args: CompletionReminderArgs): string {
   const durationStr = formatReminderDuration(args.durationMs)
+  const channelTail = args.channel === true ? ` ${CHANNEL_REPLY_NUDGE}` : ''
   if (args.ok) {
     return (
       `<system-reminder>\n` +
       `Subagent \`${args.subagent}\` (${args.taskId}) completed in ${durationStr}. ` +
-      `Use subagent_output to fetch the result.\n` +
+      `Use subagent_output to fetch the result.${channelTail}\n` +
       `</system-reminder>`
     )
   }
@@ -26,7 +38,7 @@ export function renderSubagentCompletionReminder(args: CompletionReminderArgs): 
   return (
     `<system-reminder>\n` +
     `Subagent \`${args.subagent}\` (${args.taskId}) FAILED after ${durationStr}: ${err}. ` +
-    `Use subagent_output to inspect.\n` +
+    `Use subagent_output to inspect.${channelTail}\n` +
     `</system-reminder>`
   )
 }

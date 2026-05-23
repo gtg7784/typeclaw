@@ -3908,3 +3908,150 @@ describe('ChannelRouter role-claim bypass', () => {
     expect(sessions).toHaveLength(0)
   })
 })
+
+describe('ChannelRouter injectSubagentCompletionReminder', () => {
+  test('matching parentSessionId wakes the channel session with a <system-reminder> turn even when no user inbound is queued', async () => {
+    // given a live channel session whose sessionId is the factory-stamped `ses_fake_1`
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions).toHaveLength(1)
+    const initialPromptCount = sessions[0]!.prompts.length
+
+    // when a subagent completes for that exact sessionId
+    const result = router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 5_000,
+    })
+
+    // then the router reports delivered and the next drain iteration runs
+    expect(result.kind).toBe('delivered')
+    await waitFor(() => sessions[0]!.prompts.length > initialPromptCount)
+    const reminderText = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
+    expect(reminderText).toContain('<system-reminder>')
+    expect(reminderText).toContain('explorer')
+    expect(reminderText).toContain('bg_xyz')
+    expect(reminderText).toContain('subagent_output')
+  })
+
+  test('reminder text carries the channel-aware nudge (channel_reply, invisible, NO_REPLY)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 5_000,
+    })
+    await waitFor(() => sessions[0]!.prompts.length >= 2)
+
+    const reminderText = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
+    expect(reminderText).toContain('channel_reply')
+    expect(reminderText).toContain('invisible')
+    expect(reminderText).toContain('NO_REPLY')
+  })
+
+  test('non-matching parentSessionId returns no-live-session and does not drain', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    const promptsBefore = sessions[0]!.prompts.length
+
+    const result = router.injectSubagentCompletionReminder({
+      parentSessionId: 'someone-else',
+      subagent: 'explorer',
+      taskId: 'bg_other',
+      ok: true,
+      durationMs: 100,
+    })
+
+    expect(result).toEqual({ kind: 'no-live-session' })
+    await new Promise((r) => setTimeout(r, 10))
+    expect(sessions[0]!.prompts.length).toBe(promptsBefore)
+  })
+
+  test('failed subagent reminder reaches the channel session with FAILED marker and error string', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    const initial = sessions[0]!.prompts.length
+
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'scout',
+      taskId: 'bg_err',
+      ok: false,
+      durationMs: 1_500,
+      error: 'provider rate limit',
+    })
+
+    await waitFor(() => sessions[0]!.prompts.length > initial)
+    const text = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
+    expect(text).toContain('FAILED')
+    expect(text).toContain('provider rate limit')
+    expect(text).toContain('channel_reply')
+  })
+
+  test('reminder queued during a same-turn user inbound coalesces into the SAME drain iteration (prepended into the prompt body)', async () => {
+    // The drain loop splices `pendingSystemReminders` alongside the
+    // promptQueue at the top of each iteration, so a reminder pushed
+    // while a user inbound is also pending should appear in the same
+    // composed turn text rather than triggering a second prompt(). This
+    // pins the composition behavior (system reminder leads, then user
+    // inbound) which the channel-router's docstring on
+    // `pendingSystemReminders` calls out as load-bearing.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    const promptsAfterFirstUser = sessions[0]!.prompts.length
+    expect(promptsAfterFirstUser).toBe(1)
+
+    // Queue another user inbound (held by debounce) then inject the reminder
+    // before the debounce fires.
+    await router.route(inbound({ externalMessageId: 'm2', text: 'follow up' }))
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_coalesce',
+      ok: true,
+      durationMs: 100,
+    })
+
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions[0]!.prompts.length).toBe(2)
+    const combined = sessions[0]!.prompts[1] ?? ''
+    expect(combined).toContain('<system-reminder>')
+    expect(combined).toContain('bg_coalesce')
+    expect(combined).toContain('follow up')
+    expect(combined.indexOf('<system-reminder>')).toBeLessThan(combined.indexOf('follow up'))
+  })
+
+  test("reminder lookup skips destroyed sessions (channels GC'd while subagent was running drops the reminder)", async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await router.stop()
+
+    const result = router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 100,
+    })
+    expect(result).toEqual({ kind: 'no-live-session' })
+  })
+})
