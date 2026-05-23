@@ -428,26 +428,61 @@ export async function startAgent({
   // Captured separately from setSpawnSubagent so both the plugin context and
   // the plugin-command runner can dispatch through the same path. The setter
   // returns void, so without this local binding we couldn't reuse the fn.
+  //
+  // In-flight coalescing for direct ctx.spawnSubagent calls mirrors the
+  // SubagentConsumer's stream-path gate (subagents.ts:441). Two queued
+  // `new-session` messages for the same (name, inFlightKey) drop the second
+  // on the consumer side; without the same gate here, two consecutive
+  // session.prompt fires (cold-start prompt N immediately followed by prompt
+  // N+1 on the same channel session) could both fire memory-retrieval spawns
+  // racing to write `memory/.retrieval-cache/<sessionId>.md`. Awaiting the
+  // spawn in the hook used to mask this; now that the hook is fire-and-forget,
+  // the race is exposed and the gate is mandatory.
+  //
+  // Same key shape as the consumer: `${name}:${inFlightKey(payload)}` when the
+  // subagent declares one, else just `${name}`. Collisions resolve cleanly
+  // (logged + return) instead of rejecting, because callers from
+  // session.prompt are detached and a colliding spawn is a noop, not an error.
+  const directSpawnInFlight = new Set<string>()
   const dispatchSpawnSubagent: CommandSpawnSubagent = async (name, payload, options) => {
-    // Resolve the spawning session's role from its origin so the subagent
-    // inherits it. Callers (hooks like session.idle) pass the parent origin
-    // verbatim; we look up the role rather than letting the caller forge it,
-    // closing the laundering vector the design doc calls out for cron.
-    const spawnedByRole =
-      options?.spawnedByOrigin !== undefined
-        ? pluginsLoaded.permissions.resolveRole(options.spawnedByOrigin)
-        : undefined
-    await invokeSubagent(name, {
-      registry: pluginRuntime.get().subagents,
-      createSessionForSubagent,
-      agentDir: cwd,
-      userPrompt: '',
-      payload,
-      onProviderError: (message) => console.error(`[subagent] ${name}: LLM call failed: ${message}`),
-      ...(options?.parentSessionId !== undefined ? { parentSessionId: options.parentSessionId } : {}),
-      ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
-      ...(options?.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
-    })
+    const entry = pluginSubagentByName.get(name)
+    const keyFn = entry?.pluginSubagent.inFlightKey
+    let coalesceKey = name
+    if (keyFn !== undefined) {
+      try {
+        coalesceKey = `${name}:${keyFn(payload)}`
+      } catch {
+        coalesceKey = name
+      }
+    }
+    if (directSpawnInFlight.has(coalesceKey)) {
+      console.warn(`[subagent] ${coalesceKey}: previous direct spawn still in progress, skipping`)
+      return
+    }
+    directSpawnInFlight.add(coalesceKey)
+    try {
+      // Resolve the spawning session's role from its origin so the subagent
+      // inherits it. Callers (hooks like session.idle) pass the parent origin
+      // verbatim; we look up the role rather than letting the caller forge it,
+      // closing the laundering vector the design doc calls out for cron.
+      const spawnedByRole =
+        options?.spawnedByOrigin !== undefined
+          ? pluginsLoaded.permissions.resolveRole(options.spawnedByOrigin)
+          : undefined
+      await invokeSubagent(name, {
+        registry: pluginRuntime.get().subagents,
+        createSessionForSubagent,
+        agentDir: cwd,
+        userPrompt: '',
+        payload,
+        onProviderError: (message) => console.error(`[subagent] ${name}: LLM call failed: ${message}`),
+        ...(options?.parentSessionId !== undefined ? { parentSessionId: options.parentSessionId } : {}),
+        ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
+        ...(options?.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
+      })
+    } finally {
+      directSpawnInFlight.delete(coalesceKey)
+    }
   }
   pluginsLoaded.setSpawnSubagent(dispatchSpawnSubagent)
   pluginsLoaded.markBooted()

@@ -99,9 +99,14 @@ async function bootMemoryPlugin(
 ): Promise<{
   exports: PluginExports
   spawned: SpawnCall[]
+  started: { name: string; payload: unknown; options: unknown }[]
   ctx: PluginContext<unknown>
 }> {
   const spawned: SpawnCall[] = []
+  // `started` captures the spawn invocation BEFORE the artificial delay, so
+  // tests that detach the spawn can distinguish "spawn was kicked off" from
+  // "spawn completed". `spawned` records the post-delay completion.
+  const started: { name: string; payload: unknown; options: unknown }[] = []
   const parsed = memoryPlugin.configSchema!.safeParse(rawConfig)
   if (!parsed.success) throw new Error(`config invalid: ${parsed.error.message}`)
   const spawnDelayMs = options.spawnDelayMs ?? 0
@@ -113,6 +118,7 @@ async function bootMemoryPlugin(
     logger: options.logger ?? createPluginLogger('memory'),
     permissions: noopPermissionService,
     spawnSubagent: async (name, payload, spawnOptions) => {
+      started.push({ name, payload, options: spawnOptions })
       const startedAt = Date.now()
       if (spawnDelayMs > 0) await new Promise((r) => setTimeout(r, spawnDelayMs))
       const finishedAt = Date.now()
@@ -121,7 +127,7 @@ async function bootMemoryPlugin(
     isBooted: () => true,
   })
   const exports = await memoryPlugin.plugin(ctx)
-  return { exports, spawned, ctx }
+  return { exports, spawned, started, ctx }
 }
 
 let agentDir: string
@@ -263,7 +269,7 @@ describe('session.prompt hook', () => {
     // and time out on Discord/Slack first-message-after-stale-rollover.
     await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
     await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
-    const { exports, spawned } = await bootMemoryPlugin(
+    const { exports, spawned, started } = await bootMemoryPlugin(
       agentDir,
       { injectionBudgetBytes: 4096 },
       { spawnDelayMs: 10_000 },
@@ -277,9 +283,13 @@ describe('session.prompt hook', () => {
     )
     const elapsed = Date.now() - start
 
-    // then the hook returned promptly (well under the slow-spawn duration)
-    // and the spawn was kicked off in the background
+    // then the hook returned promptly (well under the slow-spawn duration),
+    // the spawn was actually initiated (not just dropped on the floor), and
+    // the spawn has NOT yet completed (proves the await was detached, not
+    // collapsed to a fast no-op by some test seam)
     expect(elapsed).toBeLessThan(500)
+    expect(started).toHaveLength(1)
+    expect(started[0]!.name).toBe('memory-retrieval')
     expect(spawned).toHaveLength(0)
   })
 

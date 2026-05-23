@@ -101,7 +101,7 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
       config: validatedConfig as never,
       logger,
       permissions,
-      spawnSubagent: (name, payload) => spawnSubagentImpl(name, payload),
+      spawnSubagent: (name, payload, options) => spawnSubagentImpl(name, payload, options),
       isBooted: () => booted,
     })
 

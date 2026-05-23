@@ -272,9 +272,15 @@ export default definePlugin({
         // read regardless of whether we await — detaching matches the documented
         // contract instead of contradicting it.
         //
-        // ctx.spawnSubagent does not reject in production (SubagentConsumer
-        // catches handler errors), but the catch() handler keeps third-party
-        // spawnSubagent implementations from surfacing as unhandled rejections.
+        // ctx.spawnSubagent IS reject-able in production: it wraps
+        // dispatchSpawnSubagent (src/run/index.ts) which calls invokeSubagent
+        // directly with no try/catch. SubagentConsumer's catch only protects
+        // stream-initiated spawns (target.kind === 'new-session'), not the
+        // direct ctx.spawnSubagent path the hooks use. The .catch() here is
+        // load-bearing — without it, every memory-retrieval handler failure
+        // (LLM provider error, payload validation throw, etc.) would surface
+        // as an unhandled rejection now that we no longer await the promise
+        // at the call site.
         'session.prompt': async (event) => {
           if (event.origin?.kind === 'subagent') return
 
