@@ -28,10 +28,10 @@ import {
   type KakaotalkAuthResult,
   type LLMAuth,
 } from '@/init'
-import { API_KEY_DASHBOARD_URL, validateApiKey, type KeyValidationResult } from '@/init/auth/validate'
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
 import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
+import { API_KEY_DASHBOARD_URL, validateApiKey, type KeyValidationResult } from '@/init/validate-api-key'
 
 import { buildOAuthCallbacks } from './oauth-callbacks'
 import { c, done, errorLine, printSlackAppManifestSetup } from './ui'
@@ -258,7 +258,7 @@ export const init = defineCommand({
             `This prevents strangers from talking to it.`,
             `Run \`typeclaw role claim\` to finish setup.`,
           ].join('\n'),
-          'One more step',
+          'Claim ownership before chatting',
         )
       }
       done({ title: c.green('Hatched. Your agent is ready.'), hints })
@@ -918,7 +918,13 @@ async function runApiKeyValidation(
   const provider = KNOWN_PROVIDERS[providerId]
   const s = spinner()
   s.start(`Checking your ${provider.name} key...`)
-  const result = await prompts.validateApiKey(providerId, key)
+  let result: KeyValidationResult
+  try {
+    result = await prompts.validateApiKey(providerId, key)
+  } catch {
+    s.stop(`Couldn't reach ${provider.name} to verify the key. Saving it anyway.`)
+    return 'accepted'
+  }
   if (result.kind === 'ok') {
     s.stop(`${provider.name} key looks good.`)
     return 'accepted'
