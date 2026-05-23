@@ -187,6 +187,30 @@ export default definePlugin({
       return currentSize - baseline >= bufferBytes
     }
 
+    const runMemoryRetrieval = async (event: {
+      sessionId: string
+      agentDir: string
+      userPrompt: string
+      origin?: SessionOrigin
+    }): Promise<void> => {
+      const shards = await loadAllShards(event.agentDir)
+      const plan = buildInjectionPlan(shards, { budgetBytes: ctx.config.injectionBudgetBytes })
+      if (plan.mode === 'direct') return
+
+      const cacheFilePath = join(event.agentDir, 'memory', '.retrieval-cache', `${event.sessionId}.md`)
+      const payload: MemoryRetrievalPayload = {
+        parentSessionId: event.sessionId,
+        agentDir: event.agentDir,
+        recentPrompt: event.userPrompt,
+        cacheFilePath,
+        ...(event.origin !== undefined ? { origin: event.origin } : {}),
+      }
+      await ctx.spawnSubagent('memory-retrieval', payload, {
+        parentSessionId: event.sessionId,
+        ...(event.origin !== undefined ? { spawnedByOrigin: event.origin } : {}),
+      })
+    }
+
     // Subagents are constructed at boot here (rather than imported as constants)
     // so their lifecycle logs route through the plugin logger and pick up the
     // `[plugin:memory]` prefix. Without this, they would write directly to
@@ -268,6 +292,14 @@ export default definePlugin({
         // before each `session.prompt(text)` call with the actual text the
         // session is about to receive.
         //
+        // The hook body is fully detached. `runSessionTurnStart` has no
+        // per-handler timeout (unlike session.prompt/idle/end), and the
+        // caller awaits it before `session.prompt(text)` runs — so an
+        // inline `await loadAllShards(...)` would gate every channel turn
+        // on N shard reads. Detaching mirrors PR #337's "fire-and-forget
+        // the slow work" pattern, pushed one level earlier to cover both
+        // the shard read AND the LLM spawn.
+        //
         // Per-turn instead of per-session-creation means N spawns over the
         // session's lifetime, but the subagent's own `inFlightKey` on
         // `parentSessionId` (memory-retrieval.ts) coalesces overlapping
@@ -276,35 +308,28 @@ export default definePlugin({
         // turn N is still consumed by turn N+1 via the documented
         // lag-by-one-prompt contract (load-memory.ts:appendRetrievalCache).
         //
+        // Known limitation: a detached spawn can theoretically settle after
+        // `session.end` has unlinked the cache file, leaving a single ~5 KB
+        // file in memory/.retrieval-cache/ that never gets read. The next
+        // session.end that matches this sessionId would clean it up, but
+        // sessionIds are UUIDv7 so reuse is effectively never. Fix would
+        // serialize session.end behind the in-flight spawn, which
+        // re-introduces the cold-start blocking shape PR #337 fixed. The
+        // leaked file is bounded (one per disconnected session) and lives
+        // in a dir already marked transient.
+        //
         // ctx.spawnSubagent IS reject-able in production: it wraps
         // dispatchSpawnSubagent (src/run/index.ts) which calls invokeSubagent
         // directly with no try/catch. SubagentConsumer's catch only protects
         // stream-initiated spawns (target.kind === 'new-session'), not the
-        // direct ctx.spawnSubagent path the hooks use. The .catch() here is
-        // load-bearing — without it, every memory-retrieval handler failure
-        // (LLM provider error, payload validation throw, etc.) would surface
-        // as an unhandled rejection because we don't await the promise at
-        // the call site.
-        'session.turn.start': async (event) => {
+        // direct ctx.spawnSubagent path the hooks use. The .catch() inside
+        // runMemoryRetrieval is load-bearing — without it, every handler
+        // failure (LLM provider error, payload validation throw) would
+        // surface as an unhandled rejection because nothing awaits the
+        // promise at the call site.
+        'session.turn.start': (event) => {
           if (event.origin?.kind === 'subagent') return
-
-          const shards = await loadAllShards(event.agentDir)
-          const plan = buildInjectionPlan(shards, { budgetBytes: ctx.config.injectionBudgetBytes })
-          if (plan.mode === 'direct') return
-
-          const cacheFilePath = join(ctx.agentDir, 'memory', '.retrieval-cache', `${event.sessionId}.md`)
-          const payload: MemoryRetrievalPayload = {
-            parentSessionId: event.sessionId,
-            agentDir: event.agentDir,
-            recentPrompt: event.userPrompt,
-            cacheFilePath,
-            ...(event.origin !== undefined ? { origin: event.origin } : {}),
-          }
-          const spawnPromise = ctx.spawnSubagent('memory-retrieval', payload, {
-            parentSessionId: event.sessionId,
-            ...(event.origin !== undefined ? { spawnedByOrigin: event.origin } : {}),
-          })
-          void spawnPromise.catch((err) => {
+          void runMemoryRetrieval(event).catch((err) => {
             ctx.logger.error(`memory-retrieval spawn failed: ${err instanceof Error ? err.message : String(err)}`)
           })
         },

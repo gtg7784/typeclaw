@@ -314,9 +314,40 @@ describe('session.turn.start hook', () => {
     const elapsed = Date.now() - start
 
     expect(elapsed).toBeLessThan(500)
-    expect(started).toHaveLength(1)
+    await waitFor(() => started.length >= 1, 'memory-retrieval spawn settles')
     expect(started[0]!.name).toBe('memory-retrieval')
     expect(spawned).toHaveLength(0)
+  })
+
+  test('hook returns synchronously without awaiting the shard load (channel turn gating)', async () => {
+    // session.turn.start has NO per-handler timeout (unlike session.prompt,
+    // session.idle, session.end), and the channel router awaits it before
+    // calling `live.session.prompt(text)`. An inline `await loadAllShards`
+    // would gate every channel turn on N shard reads. The hook body must
+    // be fully detached. This test fires the hook against a tmpdir with no
+    // memory directory at all — `loadAllShards` rejects/returns empty after
+    // an fs round-trip — and asserts the hook returns within a single
+    // event-loop tick. Pre-fix, the await would yield to libuv for the
+    // readdir ENOENT and the hook would resolve only after that round-trip.
+    const { exports } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
+
+    // Promise.resolve() wraps the return so we can observe whether the
+    // hook returned synchronously (sync function → resolves on the next
+    // microtask) vs after yielding to libuv (async function with an
+    // inline await → resolves only after the libuv round-trip).
+    let resolved = false
+    const hookPromise = Promise.resolve(
+      exports.hooks!['session.turn.start']!(
+        { sessionId: 'ses_sync', agentDir, userPrompt: 'q', origin: undefined },
+        { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
+      ),
+    )
+    void hookPromise.then(() => {
+      resolved = true
+    })
+    for (let i = 0; i < 3; i++) await Promise.resolve()
+    await hookPromise
+    expect(resolved).toBe(true)
   })
 
   test('detached spawn rejection is reported via plugin logger, not unhandled', async () => {

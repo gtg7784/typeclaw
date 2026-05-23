@@ -54,7 +54,7 @@ Default budget is 16 KB. Direct mode when shard bytes sum ≤ budget: all shard 
 
 When index mode is active, the `memory-retrieval` subagent fires on `session.turn.start` — the hook that brackets every actual `session.prompt(text)` call with the user's literal text — reads that user prompt, decides what's relevant across BOTH topic shards and undreamed stream events, pulls them via `memory_search`/`read`, and writes a focused ≤8 KB summary to `memory/.retrieval-cache/<sessionId>.md`. The NEXT `loadMemory` call for the same session reads and appends that cache file (lag-by-one-prompt). The cache file is unlinked on `session.end`.
 
-The hook trigger matters: `SessionPromptEvent.prompt` (`session.prompt`) carries the assembling system prompt (`basePrompt + IDENTITY + SOUL`) at session-creation time, NOT the user's message. Reading that field as if it were the user's prompt — which this plugin did before PR #XXX — caused the retrieval subagent to keyword-mine TypeClaw's own framing prose (`TypeClaw`, `subagent`, `AGENTS.md`, `systemPromptLeak`, etc.) on every session. `session.turn.start` is the correct hook for "what is the user asking right now."
+The hook trigger matters: `SessionPromptEvent.prompt` (`session.prompt`) carries the assembling system prompt (`basePrompt + IDENTITY + SOUL`) at session-creation time, NOT the user's message. Reading that field as if it were the user's prompt — which this plugin did before PR #340 — caused the retrieval subagent to keyword-mine TypeClaw's own framing prose (`TypeClaw`, `subagent`, `AGENTS.md`, `systemPromptLeak`, etc.) on every session. `session.turn.start` is the correct hook for "what is the user asking right now."
 
 ## Memory saturation
 
