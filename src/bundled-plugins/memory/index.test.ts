@@ -70,7 +70,13 @@ async function tickMs(ms: number): Promise<void> {
 // since libuv-and-faked-setTimeout interleavings can leave the final chain
 // link's microtasks pending past the last drain cycle. The poll uses real
 // setImmediate (libuv) not the fake clock.
-async function waitFor(predicate: () => boolean, label: string, attempts = 200): Promise<void> {
+// `attempts` is the count of real `setImmediate` cycles we poll for. Under
+// `bun test --parallel`, 18+ workers contend on the event loop and a chain
+// of `fs.stat` → fake-setTimeout → real-microtask-drain can need well over
+// 200 cycles to settle. 2000 is roomy enough for worker contention and still
+// finishes in <50ms on the happy path (each setImmediate is microsecond-scale
+// when nothing is starving it).
+async function waitFor(predicate: () => boolean, label: string, attempts = 2000): Promise<void> {
   for (let i = 0; i < attempts; i++) {
     if (predicate()) return
     await new Promise((r) => setImmediate(r))

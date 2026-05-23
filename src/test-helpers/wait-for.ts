@@ -4,7 +4,13 @@ export type WaitForOptions = {
   description?: string
 }
 
-const DEFAULT_TIMEOUT_MS = 1_000
+// 5s, not 1s. 1s was tight enough to be the dominant cause of `bun test --parallel`
+// flakes on macOS: under 18-worker concurrent shell-spawn load, the kernel can
+// take >1s to drain a child process's stderr pipe past the libuv → JS boundary,
+// so a `waitFor` for "fake-cloudflared printed a URL" loses the race. 5s costs
+// nothing on the happy path (the polled predicate returns truthy as soon as it
+// can; this is just the timeout, not the wait), and absorbs realistic load.
+const DEFAULT_TIMEOUT_MS = 5_000
 const DEFAULT_INTERVAL_MS = 1
 
 export async function waitFor<T>(
