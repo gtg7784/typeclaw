@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import type {
   AttachmentInput,
   KakaoChat,
+  KakaoMarkReadResult,
   KakaoMember,
   KakaoMessage,
   KakaoProfile,
@@ -17,12 +18,7 @@ import type {
 import { createChannelRouter, type ChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 
-import {
-  createKakaotalkAdapter,
-  type KakaoMarkReadResult,
-  type KakaoTalkClient,
-  type KakaoTalkListener,
-} from './kakaotalk'
+import { createKakaotalkAdapter, type KakaoTalkClient, type KakaoTalkListener } from './kakaotalk'
 
 type EventKey = keyof KakaoTalkListenerEventMap
 
