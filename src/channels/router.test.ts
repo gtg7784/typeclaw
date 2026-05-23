@@ -4128,19 +4128,24 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     expect(originDuringReminder!.lastInboundAuthorId).toBe('bob')
   })
 
-  test('reminder-only drain on session cold-start (no prior batch) restores the triggering author seeded at ensureLive', async () => {
-    // Edge case: a future caller might spawn a subagent during session
-    // bootstrap, before any user-turn drain has populated lastTurnAuthorId
-    // via the finally-block. The seed at session creation
-    // (live.lastTurnAuthorId = triggeringAuthorId) must cover this.
+  test('reminder injected before the first user-turn drain coalesces into the first batch and still carries the triggering author', async () => {
+    // Not a true reminder-only drain test (alice's inbound is already in
+    // promptQueue from the unflushed route() call above, so the drain's
+    // batch is non-empty). This pins the SOFTER invariant that matters in
+    // production today: a reminder arriving before the first user-turn
+    // drain doesn't leave the resulting turn without an author identity.
+    // The session's `lastTurnAuthorId`/`lastTurnAuthorIds` seed from
+    // `triggeringAuthorId` is what guarantees this — without the seed, a
+    // hypothetical reminder-only path on a fresh session would observe
+    // empty author state. The cold-start reminder-only path itself is
+    // unreachable through the public API (no caller spawns a subagent
+    // before any inbound has been routed), so this test exercises the
+    // closest reachable proxy and the seed is verified directly by the
+    // sticky-credit test below.
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
 
     await router.route(inbound({ authorId: 'alice', text: 'first' }))
-    // Do NOT flush — the route call still ran ensureLive synchronously and
-    // seeded lastTurnAuthorId from triggeringAuthorId, but the first drain
-    // is still pending behind the debounce. The reminder injection should
-    // see lastTurnAuthorId already populated from the seed.
 
     let originDuringReminder: SessionOrigin | undefined
     sessions[0]!.onPrompt = () => {
@@ -4160,11 +4165,37 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
 
     expect(originDuringReminder).toBeDefined()
     if (originDuringReminder!.kind !== 'channel') throw new Error('unreachable')
-    // The first prompt() to fire may be either the reminder (if the
-    // reminder injection drained first) or the debounced user inbound. In
-    // either case, the originRef should carry an author identity — the
-    // bug we're guarding against is `lastInboundAuthorId === undefined`.
     expect(originDuringReminder!.lastInboundAuthorId).toBe('alice')
+  })
+
+  test('lastTurnAuthorIds Set stays in sync with lastTurnAuthorId string at session creation (symmetric seeding from triggeringAuthorId)', async () => {
+    // Pins the load-bearing invariant the cold-start reminder-only path
+    // depends on. Asserts directly on the seeded state via __testing
+    // because the bug-trigger condition (a reminder firing before any
+    // user-turn drain) is unreachable through the public API. If only
+    // the string field were seeded, send()'s grantStickyForReplyTargets
+    // fallback (`currentTurnAuthorIds.size > 0 ? currentTurnAuthorIds :
+    // lastTurnAuthorIds`) would compute an empty `targetIds` on a
+    // reminder-only turn and silently drop the grant for the seeded
+    // author — silent because the reply itself succeeds. A direct
+    // assertion on the state is the smallest test that pins the actual
+    // invariant; a regression in the seeding flips this test red
+    // immediately, where an integration-level sticky-credit test could
+    // still pass via the drain finally-block populating lastTurnAuthorIds
+    // before the bug-relevant path runs.
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+
+    // ensureLive runs synchronously inside route() (via the await on the
+    // inbound classifier path) — by the time route() returns, the live
+    // session exists with its seeded author state, even though the first
+    // drain is still pending behind the debounce.
+    await router.route(inbound({ authorId: 'alice', text: 'do the thing' }))
+
+    const state = router.__testing!.getLiveAuthorState(KEY)
+    expect(state).toBeDefined()
+    expect(state!.lastTurnAuthorId).toBe('alice')
+    expect(state!.lastTurnAuthorIds).toEqual(['alice'])
   })
 
   test('runIdleGc does not evict a session whose drain was just woken by a reminder injection (in-flight drain protection)', async () => {

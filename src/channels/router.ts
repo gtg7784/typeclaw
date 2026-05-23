@@ -429,15 +429,33 @@ export type ChannelRouter = {
     isTypingActive: (key: ChannelKey) => boolean
     stopTyping: (key: ChannelKey) => Promise<void>
     runIdleGc: () => Promise<void>
-    // Returns a SNAPSHOT (structural copy) of `live.originRef.current` for
-    // the live session matching `key`, or undefined when no live session
-    // exists. Exists so tests can assert on the per-turn origin that
-    // tool.before consumers would see — the origin is normally only
-    // observable indirectly via in-flight tool calls, which the fake
-    // session doesn't execute. Snapshot semantics: the returned object is
-    // detached from `originRef`, so a later turn that mutates the ref
-    // doesn't retroactively change a captured assertion. NOT a public
-    // router method.
+    // Returns the seeded author state on the live session matching
+    // `key`, or undefined when no live session exists. Tests use this
+    // to pin the symmetric-seeding invariant between `lastTurnAuthorId`
+    // (string) and `lastTurnAuthorIds` (Set) at session creation —
+    // observable directly here rather than via a downstream sticky-
+    // credit grant test that would need to coordinate with multiple
+    // subsystems.
+    getLiveAuthorState: (key: ChannelKey) =>
+      | {
+          currentTurnAuthorId: string | null
+          currentTurnAuthorIds: readonly string[]
+          lastTurnAuthorId: string | null
+          lastTurnAuthorIds: readonly string[]
+        }
+      | undefined
+    // Returns a shallow copy of `live.originRef.current` for the live
+    // session matching `key`, or undefined when no live session exists.
+    // Exists so tests can assert on the per-turn origin that tool.before
+    // consumers would see — the origin is normally only observable
+    // indirectly via in-flight tool calls, which the fake session doesn't
+    // execute. The shallow copy detaches the top-level fields from
+    // `originRef` so a later turn replacing `originRef.current` doesn't
+    // change a captured assertion. Nested fields (`participants`,
+    // `membership`) are still shared by reference; in practice
+    // `updateParticipants` returns a fresh array rather than mutating in
+    // place, so observed snapshots are stable for the assertions tests
+    // make today. NOT a public router method.
     getLiveOriginSnapshot: (key: ChannelKey) => SessionOrigin | undefined
   }
 }
@@ -855,10 +873,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         firstUnprocessedAt: 0,
         currentTurnAuthorId: null,
         currentTurnAuthorIds: new Set(),
-        lastTurnAuthorIds: new Set(),
-        // Seeded from `triggeringAuthorId` so even a session-cold-start
-        // reminder (subagent spawned before any prior turn completed)
-        // restores the same author the session was admitted on.
+        // `lastTurnAuthorId` (string, used for `lastInboundAuthorId` in
+        // origin) and `lastTurnAuthorIds` (Set, used by
+        // `grantStickyForReplyTargets` as the fallback when
+        // `currentTurnAuthorIds` is empty) are seeded TOGETHER from
+        // `triggeringAuthorId`. Seeding only the string would leave the
+        // Set empty for the cold-start reminder-only path, which is
+        // observable when the agent replies during that turn — `send()`
+        // would compute an empty `targetIds` and silently drop the
+        // sticky-credit grant for the seeded author. The two fields must
+        // stay in sync, so they are written in the same statement.
+        lastTurnAuthorIds: triggeringAuthorId !== undefined ? new Set([triggeringAuthorId]) : new Set(),
         lastTurnAuthorId: triggeringAuthorId ?? null,
         consecutiveAborts: 0,
         consecutiveSends: new Map(),
@@ -2000,6 +2025,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const origin = live?.originRef.current
         if (origin === undefined) return undefined
         return { ...origin }
+      },
+      getLiveAuthorState: (key: ChannelKey) => {
+        const live = liveSessions.get(channelKeyId(key))
+        if (live === undefined) return undefined
+        return {
+          currentTurnAuthorId: live.currentTurnAuthorId,
+          currentTurnAuthorIds: Array.from(live.currentTurnAuthorIds),
+          lastTurnAuthorId: live.lastTurnAuthorId,
+          lastTurnAuthorIds: Array.from(live.lastTurnAuthorIds),
+        }
       },
     },
   }
