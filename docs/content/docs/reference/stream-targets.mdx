@@ -1,0 +1,56 @@
+---
+title: Stream targets
+description: The four typed targets on the in-process message stream
+icon: Radio
+---
+
+TypeClaw's in-process message stream is a typed pub/sub keyed by discriminated `target`. In-memory only; nothing persists across container restarts. Used by the WS server, cron, subagents, and plugins to coordinate.
+
+| Target kind   | Shape                                       | Used for                                                         |
+| ------------- | ------------------------------------------- | ---------------------------------------------------------------- |
+| `broadcast`   | `{ kind: 'broadcast' }`                     | fan-out notifications (mood, status, tunnel URL changes)         |
+| `session`     | `{ kind: 'session'; sessionId: string }`    | addressed to a specific live `AgentSession` (TUI input queueing) |
+| `new-session` | `{ kind: 'new-session'; subagent: string }` | spawn a fresh subagent session                                   |
+| `cron`        | `{ kind: 'cron'; jobId: string }`           | emitted by the scheduler when a job fires                        |
+
+## `broadcast`
+
+Fan-out to every matching subscriber. Filter by payload kind on the consumer side.
+
+Subscribers in the runtime today:
+
+- WS server forwards `broadcast` events to connected TUIs as `notification` messages
+- Channel router subscribes to `tunnel-url-changed` payloads for `for: { kind: 'channel', name: '<adapter>' }` to restart the adapter on URL rotation
+
+## `session`
+
+Exactly one logical consumer per session — the per-session drain loop owned by the WS server. The drain loop is what serializes concurrent prompts and renders queued prompts in execution order (the TUI doesn't append the `> text` history line at submit time; the server emits `prompt_started` from the drain loop and the TUI appends on receipt).
+
+`delivery: 'interrupt'` payloads call `session.abort()` from the publish path so the in-flight `prompt()` resolves immediately, then the drain loop dequeues the new prompt as usual.
+
+## `new-session`
+
+Spawn a subagent. Consumed by `SubagentConsumer` (`src/agent/subagents.ts`), which:
+
+1. looks up `subagent` in the in-process registry
+2. validates the payload against the registered `payloadSchema`
+3. checks per-payload coalescing via `inFlightKey(payload)` — concurrent invocations with the same key serialize
+4. invokes the `Subagent.handler`
+
+Two production publishers today: the cron consumer (when a `prompt` job carries a `subagent` field) and the WS server (when a session goes idle and `memory-logger` should run).
+
+Plugin code with a `ctx` should use `ctx.spawnSubagent(name, payload, options)` directly; the stream path exists so the scheduler doesn't need to import the subagent registry.
+
+## `cron`
+
+Emitted by the cron scheduler when a job's time has come. Consumed by `CronConsumer` (`src/cron/consumer.ts`), which dispatches to the prompt or exec runner and handles per-`jobId` coalescing.
+
+The scheduler is a pure clock — it doesn't coalesce, it doesn't dispatch. The consumer owns the in-flight set. This split means a long-running job no longer blocks subsequent ticks at the scheduler layer; the scheduler fires N times for N ticks, and the consumer drops overlapping fires for the same job with a warning.
+
+## `stream_snapshot` agent tool
+
+A read-only tool exposes a bounded ring buffer (default 1000 events) so the agent can ask "what cron jobs fired in the last minute?" or "did any broadcasts arrive while I was thinking?" without a wire round-trip. Read-only by design — the agent cannot publish via this tool.
+
+## Adding a new target kind
+
+Each new target kind is a deliberate addition. The four current kinds each pay for themselves with a concrete consumer. Prefer extending an existing target's payload shape over adding a fifth kind unless the consumer story is genuinely different.

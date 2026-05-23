@@ -1,0 +1,67 @@
+---
+title: Schedule a job
+description: Cron the agent — prompts or shell commands, with per-job coalescing
+icon: Clock
+---
+
+The agent doesn't need a human in the loop to do work. Cron jobs live in `cron.json` and fire on a schedule. Two kinds: `prompt` (a fresh agent session with a starter prompt) and `exec` (a shell command inside the container).
+
+## Write a job
+
+Create `cron.json` in your agent folder if it doesn't exist:
+
+```json
+{
+  "$schema": "./node_modules/typeclaw/cron.schema.json",
+  "jobs": [
+    {
+      "id": "morning-status",
+      "schedule": "0 9 * * *",
+      "kind": "prompt",
+      "prompt": "Summarize yesterday's commits across the repos in workspace/ and post to #standup",
+      "scheduledByRole": "owner"
+    }
+  ]
+}
+```
+
+Every job needs an `id`, a 5-field cron `schedule` (no seconds), a `kind`, and a `scheduledByRole`. The role decides what the firing session is allowed to do — see [/concepts/permissions-model](/docs/concepts/permissions-model) for why provenance matters.
+
+```sh
+typeclaw reload
+typeclaw cron list
+```
+
+The job is now live. `cron list` shows every job registered in the running agent, including any plugins that contribute their own jobs.
+
+## A shell command instead
+
+```json
+{
+  "id": "backup-db",
+  "schedule": "0 3 * * *",
+  "kind": "exec",
+  "command": ["/agent/scripts/backup.sh"],
+  "scheduledByRole": "owner"
+}
+```
+
+`command` is an argv array, not a shell string. If you want shell features (pipes, redirections), use `["sh", "-c", "your | command"]` — but be deliberate about it, because the agent's shell guards run on whatever you put in there.
+
+## What happens when a slow job overlaps
+
+If a job is still running when its next tick fires, the next tick is **dropped** for that specific job — not queued. A 25-minute job that runs every 15 minutes will run, skip, run, skip, run; it won't pile up into 96 backlogged runs overnight.
+
+This is per-job. Other jobs keep firing on their own schedules.
+
+## What "scheduledByRole" actually does
+
+When a `prompt` job fires, a session is created with the role stamped in `scheduledByRole`. The agent runs as that role. So a job stamped `scheduledByRole: "owner"` can post to channels, run git commands, and edit files inside the agent's permissioned surface; a job stamped `scheduledByRole: "guest"` can't even reply in a channel.
+
+This closes a class of laundering attacks where a low-privilege session would otherwise schedule itself a high-privilege future run. The role is stamped at scheduling time and enforced at firing time, end of story.
+
+If you hand-author a `cron.json` entry and forget `scheduledByRole`, TypeClaw auto-stamps `"owner"` on first load and commits the rewrite. This is a migration path for legacy files — don't rely on it for new jobs.
+
+---
+
+Next: [Expose a port](/docs/guides/first-tunnel) — make the agent reachable from the public internet (or just from your other machine).

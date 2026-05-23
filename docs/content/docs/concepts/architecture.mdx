@@ -1,0 +1,38 @@
+---
+title: Architecture
+description: The three stages, the host daemon, the trust boundary
+icon: Layers
+---
+
+TypeClaw runs code in three stages. Each stage has a different filesystem, a different process owner, and a different invocation path. Most of the runtime's design decisions come from keeping these stages separated.
+
+## The three stages
+
+**Dev stage** is the TypeClaw source tree itself — where contributors run `bun test`. There's no agent folder, no container, just the code that becomes the CLI. Most readers of these docs never touch this stage.
+
+**Host stage** is your machine, once you run `typeclaw init`. Your cwd is the agent folder: `typeclaw.json`, `.env`, `secrets.json`, a Dockerfile, a managed `.gitignore`, and a few placeholder directories. Commands you run here — `start`, `stop`, `restart`, `logs`, `tui`, `compose` — are launchers. They invoke Docker, they talk to a host-side daemon, but they don't load any plugin code or hold any agent state.
+
+**Container stage** is where the agent actually runs. The host stage bind-mounts the agent folder into the container at `/agent`, and the container's entrypoint runs `typeclaw run` — a foreground process that starts the websocket server, owns the agent session, and speaks to the TUI and channels. The container has no Docker access, no `docker.sock` mount. The trust boundary is the container.
+
+This split is what makes deployments boring. Nothing on the host changes when an agent restarts. Nothing in the container has authority over the host. The two communicate over narrow, typed channels.
+
+## The host daemon
+
+There are two problems that both want a long-lived host-side process:
+
+- **Auto port-forward.** When a dev server inside the container binds to `127.0.0.1:5173`, the user wants `http://localhost:5173` on the host to work. Docker's `-p` mapping can't reach loopback inside a container's netns. A userland proxy can — if the upstream side runs inside the container and the downstream side runs on the host.
+- **Container self-restart.** Sometimes the agent updates itself and wants to bounce its container. The container has no Docker access; some other process on the host has to call `docker stop` / `docker start`.
+
+Both reduce to "a host process the container can talk to." That's `hostd`. It's a singleton per host (not per agent), spawned automatically on first `typeclaw start`, survives container restarts, and serves every agent on the box.
+
+The CLI never sends signals based on PID — `typeclaw stop` deregisters via the Unix socket. The pidfile is a discovery hint, never a kill target, so PID reuse is safe.
+
+## Why this matters
+
+Two design corollaries fall out of the stage split.
+
+First, **CLI command names encode stage**. `init` creates the host stage (the agent folder). `start`/`stop`/`restart`/`logs`/`tui` are host-stage launchers. `run` is the container-stage entrypoint Docker executes. You almost never run `typeclaw run` directly — Docker does.
+
+Second, **paths are stage-scoped**. `./typeclaw.json` in a host-stage context means the agent folder on disk. `/agent/typeclaw.json` in a container-stage context means the same file mounted inside the container. The string `typeclaw.json` is ambiguous without naming the stage. The docs try to be explicit; the source tree always is.
+
+For the full long-form on the daemon, the message stream, and how the agent restarts itself, [AGENTS.md](https://github.com/typeclaw/typeclaw/blob/main/AGENTS.md) is the canonical reference.

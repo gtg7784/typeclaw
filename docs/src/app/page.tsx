@@ -36,12 +36,16 @@ interface DocLink {
 }
 
 const DOC_LINKS: DocLink[] = [
-  { href: '/docs/quickstart', title: 'Quickstart', blurb: 'install through first cron in under a minute' },
-  { href: '/docs/configuration', title: 'Configuration', blurb: 'every field in typeclaw.json' },
-  { href: '/docs/plugins', title: 'Plugins', blurb: 'write your first plugin' },
-  { href: '/docs/channels', title: 'Channels', blurb: 'wire Slack, Discord, Telegram, GitHub' },
-  { href: '/docs/memory', title: 'Memory', blurb: 'how the agent learns over time' },
-  { href: '/docs/secrets', title: 'Secrets', blurb: '.env vs secrets.json, env-wins policy' },
+  { href: '/docs/guides/getting-started', title: 'Getting started', blurb: 'install through first reply' },
+  { href: '/docs/guides/first-channel', title: 'Add a channel', blurb: 'wire Slack, Discord, Telegram, GitHub' },
+  { href: '/docs/guides/teach-the-agent', title: 'Teach the agent', blurb: 'the self-improving memory loop' },
+  { href: '/docs/guides/write-a-plugin', title: 'Write a plugin', blurb: 'tools, skills, and channels in TypeScript' },
+  {
+    href: '/docs/concepts/architecture',
+    title: 'Architecture',
+    blurb: 'three stages, the host daemon, the trust boundary',
+  },
+  { href: '/docs/reference/typeclaw-json', title: 'Reference', blurb: 'every field, every flag, every grammar' },
 ]
 
 function CopyButton({ text }: { text: string }) {
@@ -266,10 +270,10 @@ export default function Home() {
             </a>{' '}
             and Docker or OrbStack. Then{' '}
             <Link
-              href="/docs/quickstart"
+              href="/docs/guides/getting-started"
               className="text-cyan-700 underline-offset-2 hover:underline dark:text-cyan-400"
             >
-              the quickstart
+              the getting-started guide
             </Link>{' '}
             walks you through the first run.
           </p>

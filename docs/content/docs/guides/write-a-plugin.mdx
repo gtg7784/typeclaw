@@ -1,0 +1,119 @@
+---
+title: Write a plugin
+description: Tools, skills, subagents, channels — all from a plain TypeScript module
+icon: Plug
+---
+
+A TypeClaw plugin is a TypeScript module. No IPC. No FFI. No subprocess. It runs in the same Bun process as the agent loop, gets a `PluginContext` with the live permission service and message stream, and can contribute tools, skills, subagents, channel adapters, cron jobs, and typed config.
+
+This guide walks through a minimal plugin — one tool, one config block — end to end. The full API surface is at [/reference/plugin-api](/docs/reference/plugin-api).
+
+## Scaffold
+
+Plugins are TypeScript files in your agent folder. By convention they live under `plugins/`:
+
+```sh
+mkdir plugins
+touch plugins/notify.ts
+```
+
+## Write the plugin
+
+```ts
+import { definePlugin } from 'typeclaw/plugin'
+import { z } from 'zod'
+
+export default definePlugin({
+  name: 'notify',
+  permissions: ['notify.send.notification'],
+  configSchema: z.object({
+    webhook: z.string().url(),
+  }),
+  factory(ctx) {
+    const { webhook } = ctx.config
+
+    return {
+      tools: {
+        send_notification: {
+          description: 'Post a short notification to the configured webhook',
+          inputSchema: z.object({
+            text: z.string().describe('the message body'),
+          }),
+          async execute({ text }) {
+            const res = await fetch(webhook, {
+              method: 'POST',
+              headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ text }),
+            })
+            return { ok: res.ok, status: res.status }
+          },
+        },
+      },
+    }
+  },
+})
+```
+
+Four things going on:
+
+- `name` — unique identifier, used to scope the config block and the permission strings
+- `permissions` — every permission this plugin both declares and consumes. Listing them here lets the runtime expand the `owner` wildcard correctly and catch typos in `typeclaw.json#roles.<name>.permissions[]`
+- `configSchema` — Zod schema for the plugin's config block, which lives at `typeclaw.json#notify`
+- `factory(ctx)` — returns the plugin's contributions. `ctx.config` is your parsed, frozen config block
+
+## Wire it up
+
+In `typeclaw.json`:
+
+```json
+{
+  "plugins": ["./plugins/notify.ts"],
+  "notify": {
+    "webhook": "https://hooks.slack.com/services/…"
+  }
+}
+```
+
+```sh
+typeclaw restart
+```
+
+`plugins[]` is restart-required (plugins are loaded once at container start). After restart, the agent can call `send_notification` like any other tool.
+
+## What plugins can contribute
+
+The example above contributes one tool. The full set:
+
+- **Tools** — Zod-typed functions the agent can call
+- **Skills** — markdown procedures the agent loads on demand via the `skill` tool
+- **Subagents** — focused worker sessions with their own system prompt and payload schema; spawned via `ctx.spawnSubagent` or from cron with a `subagent` field
+- **Channel adapters** — new inbound/outbound message platforms
+- **Cron jobs** — scheduled prompts or exec commands contributed at boot
+- **Typed config blocks** — namespaced under `typeclaw.json#<plugin-name>`, validated by your Zod schema
+
+See [/reference/plugin-api](/docs/reference/plugin-api) for the full contracts.
+
+## What plugins can't do
+
+Plugins can't change which other plugins are loaded, rewrite the Dockerfile, or escape the container. The trust boundary is the container, not the plugin — see [/concepts/plugins-and-stages](/docs/concepts/plugins-and-stages) for the why.
+
+Plugins also can't issue tool calls themselves. They define tools the agent can call; they don't drive the agent. If you need scheduled work, contribute a cron job. If you need reactive work, subscribe to the message stream.
+
+## Reading config and reloads
+
+`ctx.config` is a snapshot at factory time for fields you declared as restart-required. For fields you mark reloadable in your `configSchema` (via `.describe()` annotations the loader honors), the snapshot updates on `typeclaw reload`. Default is restart-required, which is the right choice for most fields — explicit opt-in to live reload is safer than implicit.
+
+## Bundled plugins as examples
+
+Nine plugins ship with TypeClaw and load automatically. Their source is the best reference for non-trivial contributions:
+
+- `memory` — three subagents, cron contribution, typed config block
+- `agent-browser` — channel-adapter-shaped tooling, host port broker integration
+- `security` — large `tool.before` hook surface, dynamic permission expansion
+- `guard`, `backup`, `tool-result-cap`, `scout`, `explorer`, `operator`
+
+See the bundled catalog at [/reference/bundled-plugins](/docs/reference/bundled-plugins).
+
+---
+
+Next: [Lock down a public channel](/docs/guides/lock-down-a-public-channel) — when the bot is in #general and you don't trust every author equally.

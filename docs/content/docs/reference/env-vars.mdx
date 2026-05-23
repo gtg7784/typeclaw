@@ -1,0 +1,58 @@
+---
+title: Environment variables
+description: Every TYPECLAW_* env var the runtime reads
+icon: Variable
+---
+
+## Host stage
+
+| Variable             | Read by    | Default       | Effect                                                        |
+| -------------------- | ---------- | ------------- | ------------------------------------------------------------- |
+| `TYPECLAW_HOME`      | hostd, CLI | `~/.typeclaw` | Override the host daemon state directory; primarily for tests |
+| `TYPECLAW_LOG_LEVEL` | CLI        | `info`        | `debug` / `info` / `warn` / `error`                           |
+| `TYPECLAW_DEBUG`     | CLI        | unset         | Anything truthy enables verbose tracing                       |
+
+## Container stage (set by `typeclaw start`)
+
+| Variable                          | Set on `docker run`                | Effect                                                                    |
+| --------------------------------- | ---------------------------------- | ------------------------------------------------------------------------- |
+| `TYPECLAW_CONTAINER_NAME`         | always                             | The container's name; container code uses it to identify itself to hostd  |
+| `TYPECLAW_HOSTD_URL`              | when hostd HTTP control is enabled | `http://host.docker.internal:<port>` — used by the agent's `restart` tool |
+| `TYPECLAW_HOSTD_TOKEN`            | per-container, generated at start  | Bearer token for the HTTP control surface; per-container restart RPC      |
+| `TYPECLAW_HOSTD_BROKER_TOKEN`     | per-container, generated at start  | Auth token for the portbroker WebSocket connection                        |
+| `TYPECLAW_NETWORK_BLOCK_INTERNAL` | when `network.blockInternal: true` | `1` — entrypoint shim installs the iptables egress filter                 |
+| `DISPLAY`                         | when `docker.file.xvfb` is enabled | `:99` — points at the in-container Xvfb server                            |
+
+## Provider credentials (env-wins)
+
+Set in the host stage; injected into the container via `--env-file .env`.
+
+| Variable            | Provider    | Notes                                                                                                    |
+| ------------------- | ----------- | -------------------------------------------------------------------------------------------------------- |
+| `FIREWORKS_API_KEY` | `fireworks` |                                                                                                          |
+| `OPENAI_API_KEY`    | `openai`    |                                                                                                          |
+| `ANTHROPIC_API_KEY` | `anthropic` |                                                                                                          |
+| `GOOGLE_API_KEY`    | `google`    |                                                                                                          |
+| (others)            |             | Each known provider has a canonical env var; see [/reference/secrets-json](/docs/reference/secrets-json) |
+
+Custom env-var names are supported via the `Secret`'s `env` field — `{ "key": { "env": "MY_OPENAI" } }`. See [/concepts/secrets-policy](/docs/concepts/secrets-policy) for resolution order.
+
+## Channel credentials (env-wins)
+
+| Variable             | Adapter        | Field      |
+| -------------------- | -------------- | ---------- |
+| `SLACK_BOT_TOKEN`    | `slack-bot`    | `botToken` |
+| `SLACK_APP_TOKEN`    | `slack-bot`    | `appToken` |
+| `DISCORD_BOT_TOKEN`  | `discord-bot`  | `token`    |
+| `TELEGRAM_BOT_TOKEN` | `telegram-bot` | `token`    |
+| `GITHUB_TOKEN`       | `github`       | PAT path   |
+
+KakaoTalk does not have an env-wins path — credentials live exclusively in `secrets.json#channels.kakaotalk` because the renewal cron needs the structured per-account record.
+
+## Container-side standard variables
+
+| Variable | Set by                                                            | Effect                                        |
+| -------- | ----------------------------------------------------------------- | --------------------------------------------- |
+| `TZ`     | passed through from host or `typeclaw.json#docker.runArgs.append` | cron schedule timezone if no per-job override |
+| `HOME`   | container default                                                 | `/root`                                       |
+| `SHELL`  | container default                                                 | `/bin/bash` if installed, else `/bin/sh`      |

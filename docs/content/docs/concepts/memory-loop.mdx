@@ -1,0 +1,31 @@
+---
+title: The memory loop
+description: Observe, dream, apply — why TypeClaw turns its own work into memory
+icon: BrainCircuit
+---
+
+The naive approach to "make the agent better over time" is to hand-write better prompts. That doesn't scale, it doesn't transfer, and it doesn't survive contact with the actual work — once you start using an agent for real tasks, you discover that the things that would make it sharper are too specific to write into the system prompt. They're situational: this team's review conventions, that repo's deploy quirks, the way one specific person likes their PR descriptions.
+
+TypeClaw's bundled `memory` plugin takes a different shape. Three subagents, three cadences, no human in the loop:
+
+**Observe** runs after every idle turn. The `memory-logger` subagent reads the session transcript and appends notable fragments to `memory/yyyy-MM-dd.md`. Cheap, lossy, frequent. The goal isn't a literal log; it's the day's texture.
+
+**Dream** runs on a cron schedule (default 4am local). The `dreaming` subagent reads the day's fragments and consolidates them — into `MEMORY.md` (the long-term memory loaded into every prompt) and, when it spots a repeatable procedure, into a new skill at `memory/skills/<name>/SKILL.md`. Every consolidation is git-committed with a one-line summary.
+
+**Apply** is automatic. The next prompt sees the updated `MEMORY.md`. Muscle-memory skills sit alongside bundled and user-installed ones, loaded on demand by the `skill` tool. The agent doesn't have to remember to use them — they're just there, with names and descriptions tuned for retrieval.
+
+## Why "dreaming"
+
+It's not a metaphor for occasional weird outputs. It's modeled on how mammalian sleep consolidates episodic memory — short-term fragments compress into long-term form during downtime. The 4am default is just so the agent isn't doing it while you're trying to work with it.
+
+The shape is biologically suggestive but operationally specific: the dreaming subagent has its own system prompt, its own context budget, and runs as a subagent (not as the main session) so it can take its time without blocking interactive work. The dreaming session's role is inherited from the cron job's `scheduledByRole`, so the same permission gates apply.
+
+## Why this is auditable
+
+Two things make the loop trustworthy.
+
+The first is that everything memory-related is git-committed by TypeClaw itself. The auto-backup plugin commits session logs on idle. The dreaming subagent commits its own output. `git log memory/` shows exactly what the agent learned and when, with one-line commit messages summarizing each consolidation.
+
+The second is that nothing in the loop runs without provenance. The memory-logger runs as a subagent of the session it's observing, inheriting that session's role. The dreaming subagent runs from a cron job whose `scheduledByRole` defaults to `owner`. The `MEMORY.md` write is guarded by the bundled `guard` plugin so non-dreaming sessions can't accidentally clobber it.
+
+For the operational walkthrough see [Teach the agent](/docs/guides/teach-the-agent). For the deeper architecture (subagent payload schemas, in-flight coalescing, the `MEMORY.md` write guard) see [`src/bundled-plugins/memory/README.md`](https://github.com/typeclaw/typeclaw/blob/main/src/bundled-plugins/memory/README.md).

@@ -1,0 +1,40 @@
+---
+title: Managed files
+description: What TypeClaw owns in your agent folder, what you own, and what the guards protect
+icon: FileLock
+---
+
+Your agent folder has files you write, files TypeClaw writes, and files where the ownership is shared. The split is deliberate, and the rules are different for each.
+
+## Truly owned by you
+
+`typeclaw.json`, `cron.json`, `.env`, `secrets.json`, anything under `workspace/`, anything you create yourself. TypeClaw reads these; it doesn't rewrite them unsolicited. The exceptions are auto-migrations (legacy `dockerfile` → `docker.file`, legacy `allow[]` → `roles.member.match[]`) which run on first load after a schema change and commit the rewrite with a descriptive subject — and even those preserve every byte that doesn't need to change.
+
+`workspace/` is the agent's free-write zone. It's gitignored. It's where the agent stages experiments, scratch files, intermediate output. If the agent loses it, nothing important is gone.
+
+## Truly owned by TypeClaw
+
+`Dockerfile`, the managed `.gitignore`, `package.json`'s typeclaw dependency line. These get rewritten on every `typeclaw start` from the CLI's current source — the source of truth is the installed `typeclaw` version, not the on-disk file. If you edit them by hand, your edits survive until the next `start`, which is to say: don't.
+
+The `Dockerfile` is gitignored for this reason. Tracking it would produce noisy "update Dockerfile" commits whenever the CLI's Dockerfile template changes, with zero new information. A cloned agent folder on a fresh machine reproduces the image correctly because `start` writes the Dockerfile before `docker build` ever reads it.
+
+## Shared, with conventions
+
+`sessions/` and `memory/` are gitignored but **force-committed by TypeClaw itself**.
+
+- `sessions/` is JSONL logs of every agent session. The bundled `backup` plugin commits them on idle with an LLM-generated commit subject. The reason they're gitignored is so the agent doesn't accidentally stage them via `git add .` — but their history is preserved.
+- `memory/` is the long-term memory (`MEMORY.md`) and muscle-memory skills, force-committed by the `dreaming` subagent. Same reason: gitignored so the agent doesn't stage them by hand, but committed by TypeClaw on its own schedule.
+
+The visual cue in the managed `.gitignore` template is two sections — "truly ignored" and "system-managed." Don't merge them; they're different.
+
+## The guards
+
+The bundled `guard` plugin protects managed files from accidental tool-call rewrites. Three guards stand out:
+
+- **`nonWorkspaceWrite`** — most `write`/`edit` calls outside `workspace/` are blocked by default. There's an explicit allowlist (the files TypeClaw genuinely expects the agent to edit: `typeclaw.json`, `cron.json`, `MEMORY.md`).
+- **`rolePromotion`** — diffs a proposed `typeclaw.json` write against the on-disk version and blocks any change that widens a role's permissions, adds a new role with grants, or extends a role's `match[]`. Classified `high` (audience-leak); even owner from TUI must explicitly ack.
+- **`cronPromotion`** — same shape for `cron.json`. New jobs and `scheduledByRole` changes on existing jobs are high-tier blocked. Schedule changes, prompt-text changes, and enabled-flag flips are allowed (they're tuning, not privilege grants).
+
+The asymmetry matters: legitimate edits (renaming a job, changing its schedule) pass through. Privilege-grant edits (a stranger asking the agent to add their author ID to `owner.match[]`) are blocked at the tool boundary regardless of who asked.
+
+For the full guard inventory and their tier classifications, [/reference/permissions](/docs/reference/permissions). For the operational view, [Lock down a public channel](/docs/guides/lock-down-a-public-channel).

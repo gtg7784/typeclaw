@@ -1,0 +1,68 @@
+---
+title: cron.json
+description: Scheduled job schema
+icon: Clock
+---
+
+Lives at the agent folder root. Reloads live via `typeclaw reload`.
+
+```json
+{
+  "$schema": "./node_modules/typeclaw/cron.schema.json",
+  "jobs": [
+    {
+      "id": "morning-status",
+      "schedule": "0 9 * * *",
+      "kind": "prompt",
+      "prompt": "Summarize yesterday's commits and post to #standup",
+      "scheduledByRole": "owner"
+    },
+    {
+      "id": "backup-db",
+      "schedule": "0 3 * * *",
+      "kind": "exec",
+      "command": ["/agent/scripts/backup.sh"],
+      "scheduledByRole": "owner"
+    }
+  ]
+}
+```
+
+## Common fields
+
+| Field             | Type                  | Required | Notes                                                                  |
+| ----------------- | --------------------- | -------- | ---------------------------------------------------------------------- |
+| `id`              | `string`              | yes      | `[a-zA-Z0-9_-]+`, unique within the file                               |
+| `schedule`        | `string`              | yes      | standard 5-field cron expression (no seconds)                          |
+| `kind`            | `"prompt" \| "exec"`  | yes      | dispatcher selector                                                    |
+| `scheduledByRole` | role name (string)    | yes      | role the firing session resolves as; auto-stamped `"owner"` if missing |
+| `enabled`         | `boolean`             | no       | defaults to `true`; set `false` to keep the entry but skip firing      |
+| `timezone`        | IANA tz name (string) | no       | defaults to container `TZ` env (UTC if unset)                          |
+
+## `kind: "prompt"`
+
+| Field      | Type            | Notes                                                                                                                                                        |
+| ---------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `prompt`   | `string`        | required; the prompt text fed into the new session                                                                                                           |
+| `subagent` | `string` (name) | optional; if set, spawns the named subagent instead of a top-level session, with payload `{ prompt }` (or however the subagent's `payloadSchema` accepts it) |
+
+## `kind: "exec"`
+
+| Field     | Type       | Notes                                                                              |
+| --------- | ---------- | ---------------------------------------------------------------------------------- |
+| `command` | `string[]` | argv array; not a shell string. Use `["sh", "-c", "…"]` if you need shell features |
+
+## Per-job coalescing
+
+If a job is still running when its next tick fires, the next tick is dropped for that specific job (and logged), not queued. Other jobs are unaffected.
+
+The scheduler is a pure clock — it just emits "this job's time has come" events. The consumer owns the per-`id` in-flight set.
+
+## Limits
+
+- `kind` is limited to `"prompt"` and `"exec"`. Adding a third requires extending the consumer.
+- Scheduling expressions use [`cron-parser`](https://github.com/harrisiirak/cron-parser) syntax (standard 5-field cron). Sub-minute precision is not supported.
+
+## Auto-migration
+
+A job missing `scheduledByRole` is auto-stamped `"owner"` on first load, and the file is rewritten with a descriptive commit. Idempotent — running twice is a no-op.

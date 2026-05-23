@@ -1,0 +1,44 @@
+---
+title: Permissions model
+description: Roles, actors, provenance — why a stranger in Slack can't tell the agent to push to main
+icon: ShieldCheck
+---
+
+TypeClaw gates every privileged action through a per-actor permission service. The shape:
+
+- **Actors** are derived at runtime from the session origin. Nothing about an actor is stored on disk.
+- **Roles** bundle permissions and match rules. Defined in `typeclaw.json#roles`.
+- **Permissions** are namespaced strings (`channel.respond`, `cron.schedule`, `security.bypass.gitExfil`).
+
+The first role whose `match[]` rules match the incoming session wins. The fallback is the built-in `guest` role, which has no permissions. There's no "default user" — unknown authors get `guest`, and `guest` can't even talk.
+
+## Why match rules instead of stored user records
+
+The naive design has a user table — an admin adds people, the agent recognizes them, an entry can be deleted. TypeClaw doesn't have that.
+
+Match rules are declarative. You say "anyone in this Slack workspace acting as this author ID is owner" once, in `typeclaw.json`, and the rule applies forever. No user record to forget to delete when someone leaves the team. No drift between "who the admin thinks is allowed" and "who the agent actually responds to."
+
+The trade is upfront: writing match rules by hand is annoying. TypeClaw's claim flow (`typeclaw role claim`) makes the common case painless — the agent prints a one-time code, you DM it from the account you want to pair, and the resulting rule is appended to `typeclaw.json` automatically.
+
+## Why provenance for cron and subagents
+
+A `cron` or `subagent` session doesn't have a match rule to walk — it isn't an incoming author, it's a derived session. Both carry **stamped provenance**:
+
+- A cron job carries `scheduledByRole`. The firing session resolves as that role.
+- A subagent carries `spawnedByRole` (snapshotted from the parent at spawn time).
+
+This closes a laundering attack: a `guest`-resolving channel session that asks the agent to schedule a cron gets `scheduledByRole: 'guest'` stamped in `cron.json`. When the job fires, it runs as `guest`. The privilege ceiling at scheduling time is the privilege ceiling at firing time. There's no laundering through scheduling.
+
+## Why two-axis severity for security guards
+
+The bundled `security` plugin guards every privileged tool call. Each guard has a severity tier:
+
+- **`high` — audience-leak.** Bypass sends data to a third-party audience outside the operator's control loop. Examples: outbound channel message with secrets, `git push` to an unfamiliar remote, role/cron promotion. **No role auto-bypasses high.** Every actor — including owner — must explicitly ack a high-tier bypass per call.
+- **`medium` — silent-attack.** Bypass produces attacker-favorable state in model context without immediate operator visibility. Examples: `bash env`, `read .env`, IMDS SSRF, `session_search` returning secret-shaped hits. `owner` bypasses (operator has equivalent host access anyway); `trusted` does not.
+- **`low` — noisy, immediately recoverable.** Reserved tier with no current inhabitants. Exists so the `trusted` role's `bypass.low` grant has a forward-compatible home.
+
+`tool.before` accepts EITHER the tier permission (`security.bypass.low|medium|high`) OR the per-guard permission (`security.bypass.gitExfil`). The tier route is for casting wide nets ("trusted bypasses everything noisy"); the per-guard route is for narrow opt-ins ("trusted bypasses `git push` specifically").
+
+The motivating case is owner-in-public-channel. An operator with full owner privileges might ask the agent to "post deploy status to #general" — and even with full permissions, the agent must not silently include a stack-trace `Bearer ghp_…` line. The high tier exists exactly so the operator gets a chance to say "yes, include it" before the leak.
+
+For the operational walkthrough see [Lock down a public channel](/docs/guides/lock-down-a-public-channel). For the full tier inventory and per-guard list see [/reference/permissions](/docs/reference/permissions).
