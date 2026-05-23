@@ -1137,11 +1137,31 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           systemReminders: reminders,
         })
 
-        live.currentTurnAuthorId = batch.length > 0 ? batch[batch.length - 1]!.authorId : null
-        live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
         if (batch.length > 0) {
+          live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
+          live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.consecutiveSends.clear()
           live.lastSentText.clear()
+        } else {
+          // Reminder-only turn (batch.length === 0, reminders.length > 0):
+          // restore the author identity from `lastTurnAuthorIds` so
+          // author-scoped role resolution still works on this turn. The
+          // drain finally-block clears `currentTurnAuthorId` between turns,
+          // so a reminder arriving while the session is idle would
+          // otherwise strip `lastInboundAuthorId` from the tool.before
+          // origin and demote roles like `slack:T0/C0 author:U_OWNER` to
+          // whichever non-author rule matches — silently breaking the
+          // channel_reply that the reminder is asking the agent to send.
+          // Picks any author from the prior turn (Set iteration order is
+          // insertion order for Map/Set, so this is the first speaker of
+          // that turn — stable across runs but not a "most recent"
+          // guarantee). For the common case (one author per turn) it is
+          // exactly correct.
+          const restored = live.lastTurnAuthorIds.values().next().value
+          if (restored !== undefined) {
+            live.currentTurnAuthorId = restored
+            live.currentTurnAuthorIds = new Set(live.lastTurnAuthorIds)
+          }
         }
 
         // Update the live origin holder so this turn's tool.before events
@@ -1774,6 +1794,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (live.destroyed) continue
       if (live.draining) continue
       if (live.promptQueue.length > 0) continue
+      // pendingSystemReminders is checked alongside promptQueue because both
+      // represent pending work that drain() will process. Today's only
+      // populator (injectSubagentCompletionReminder) also fires drain()
+      // synchronously, which sets draining=true and shadows this guard via
+      // the line above — but the guard exists to keep the invariant honest
+      // for any future caller that queues a reminder without immediately
+      // waking the drain loop.
+      if (live.pendingSystemReminders.length > 0) continue
       if (t - live.lastInboundAt <= SESSION_IDLE_MS) continue
       victims.push(live)
     }
@@ -1977,17 +2005,29 @@ function composeTurnPrompt(
   // adding a section here is cache-neutral.
   //
   // SYSTEM MESSAGE convention: any runtime-injected block in the user turn
-  // that is NOT from a chat participant must use the
-  // `**[SYSTEM MESSAGE — not from a human]**` framing fenced by horizontal
-  // rules (`---`). This is structurally distinct from the H2 sections used
-  // for actual conversation content (`## Recent context`,
-  // `## Current message`). Without the fencing, models — especially
+  // that is NOT from a chat participant must use one of two self-fencing
+  // framings so models reliably distinguish it from human content:
+  //
+  //   1. `**[SYSTEM MESSAGE — not from a human]**` fenced by horizontal
+  //      rules (`---`) — used by the loop-guard block below. Mandatory for
+  //      any new free-form prose injected here (rate-limit, schema-mismatch,
+  //      abort signals, etc.).
+  //
+  //   2. `<system-reminder>...</system-reminder>` tags — used by the
+  //      subagent-completion reminder block above. The tags are themselves
+  //      a system-message fencing the TUI path already uses (see
+  //      `renderSubagentCompletionReminder` in
+  //      `src/agent/subagent-completion-reminder.ts`), so the model
+  //      already recognises them as out-of-band-from-the-conversation. New
+  //      runtime notices SHOULD pick framing 1 unless they share the
+  //      "reminder" semantics (system-issued, completion-of-prior-work
+  //      anchored) of the subagent-completion case.
+  //
+  // Both framings are structurally distinct from the H2 sections used for
+  // actual conversation content (`## Recent context`, `## Current
+  // message`). Without one of these framings, models — especially
   // persona-rich ones like Kimi — read the heading as a human-authored
-  // instruction and reply to it ("알겠습니다, 대화 여기까지 할게요"). The
-  // bracketed marker plus the explicit "Do not acknowledge or reply to this
-  // notice" line is the trust boundary that prevents this. New runtime
-  // notices (rate-limit, schema-mismatch, abort signals, etc.) MUST follow
-  // this same convention so models learn the pattern.
+  // instruction and reply to it ("알겠습니다, 대화 여기까지 할게요").
   if (state.loopGuardActive) {
     parts.push(
       '---',

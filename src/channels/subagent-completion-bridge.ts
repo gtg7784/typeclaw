@@ -47,13 +47,27 @@ const consoleLogger: SubagentCompletionBridgeLogger = {
 // `LiveSession`, so the lookup is O(N) over live sessions with N small
 // (one per active conversation).
 //
-// On `no-live-session`, we silently drop. The session may have rolled
-// over due to SESSION_FRESHNESS_TTL_MS or been GC'd while the subagent
-// was running, in which case the reminder has nowhere to land. A
-// follow-up could persist the reminder for rehydration, but that
-// requires storing it next to channels/sessions.json and gating the
-// next inbound on it — deferred until we see this drop pattern in
-// practice.
+// On `no-live-session`, we silently drop. Three observable paths reach
+// this branch in production:
+//
+//   - The parent session was GC'd by the idle-eviction tick
+//     (SESSION_IDLE_MS) while the subagent was running.
+//   - The parent session rolled over (SESSION_FRESHNESS_TTL_MS) when a
+//     new inbound arrived during a long-running subagent — the channel
+//     conversation continues on the new sessionId, but the broadcast
+//     still carries the old one.
+//   - The parent was a TUI session (the TUI bridge in
+//     src/server/index.ts handles it).
+//
+// The right fix for the first two paths is for the broadcast to carry
+// the channel-key coordinate `{ adapter, workspace, chat, thread }` so
+// the bridge can fall back to "any live session for the same channel
+// key" when the exact sessionId no longer matches. That requires
+// extending the broadcast payload (consumed by TUI and channel paths)
+// and gating spawn_subagent to capture the origin coordinates — both
+// non-trivial. Deferred until we see this drop pattern in production
+// logs; the info log line below makes the case diagnosable from logs
+// alone.
 export function createSubagentCompletionBridge(options: SubagentCompletionBridgeOptions): SubagentCompletionBridge {
   const logger = options.logger ?? consoleLogger
   const unsubscribe = options.stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => {
