@@ -1,0 +1,78 @@
+---
+title: Add a channel
+description: Wire the agent into Slack (or Discord, Telegram, GitHub) and have it answer
+icon: MessagesSquare
+---
+
+A **channel** is any platform the agent talks through. Slack, Discord, Telegram, GitHub webhooks, KakaoTalk, plus the websocket TUI you're already using. Same agent, many inboxes.
+
+This guide walks through Slack because it's the most common case. The same shape applies to the others — the auth bits change, the rest doesn't.
+
+## Add the channel
+
+```sh
+typeclaw channel add slack-bot
+```
+
+The CLI prompts for the bot token (`xoxb-…`) and app token (`xapp-…`). It writes them into `secrets.json` under `channels.slack-bot` and updates `typeclaw.json` to enable the adapter. `secrets.json` is gitignored — nothing leaks into your repo.
+
+The adapter uses Slack's Socket Mode, so you don't need a public URL. Skip ngrok.
+
+```sh
+typeclaw reload
+```
+
+The agent picks up the new adapter without a container restart. Channel config is hot-reloadable.
+
+## Claim a role
+
+If you talk to the bot in Slack right now, nothing happens. That's not a bug — TypeClaw doesn't answer authors it doesn't recognize. Every inbound message resolves to a role, and unknown authors resolve to `guest`, which has no `channel.respond` permission. The router drops the message before a session is ever created.
+
+To pair your Slack account with the `owner` role:
+
+```sh
+typeclaw role claim --as owner --channel slack-bot
+```
+
+The CLI prints a one-time code. DM that code to your bot from the Slack account you want to pair. The agent matches the code, appends a `slack:<team> author:<user>` rule to `roles.owner.match[]` in `typeclaw.json`, and commits the change. Now you're recognized.
+
+The same flow works without `--channel` — the agent will listen on every wired adapter at once, useful if you want to pair the same human across Slack and Discord in one shot.
+
+## Talk to it
+
+Mention the bot in any channel it's been invited to, or DM it. The agent answers. Behind the scenes the adapter publishes the message to the in-process stream with a `(slack, team, channel, thread, author)` coordinate, the router checks `channel.respond`, a session is created keyed to that coordinate, and the reply goes back out the same adapter.
+
+Threads stay sticky — replies in the same thread route to the same session, so the agent has context. New top-level messages get fresh sessions.
+
+## Other adapters
+
+The wiring shape is identical; only the auth changes.
+
+```sh
+typeclaw channel add discord-bot     # bot token, intents-based
+typeclaw channel add telegram-bot    # bot token, long polling
+typeclaw channel add github          # PAT or GitHub App; pairs with a tunnel
+typeclaw channel add kakaotalk       # email + password, encrypted at rest
+```
+
+GitHub needs a public URL for webhook delivery. The CLI offers to create a Cloudflare Quick tunnel during `channel add` — that path is covered in [Expose a port](/docs/guides/first-tunnel).
+
+KakaoTalk is the only adapter where the credentials need to survive a ~7-day token expiry; TypeClaw handles the renewal automatically using the email and password you provide (stored encrypted, key outside the agent folder). See [/concepts/secrets-policy](/docs/concepts/secrets-policy) for the threat model.
+
+## Rotating credentials
+
+Most adapters:
+
+```sh
+typeclaw channel set slack-bot
+```
+
+KakaoTalk needs an interactive re-login (phone passcode), so it uses a different verb:
+
+```sh
+typeclaw channel reauth kakaotalk
+```
+
+---
+
+Next: [Schedule something](/docs/guides/first-cron) — make the agent do work on its own clock.

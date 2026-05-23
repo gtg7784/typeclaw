@@ -1,0 +1,82 @@
+---
+title: Match-rule DSL
+description: Grammar and examples for roles.&lt;name&gt;.match[]
+icon: Hash
+---
+
+Compact strings parsed at config load. AND within a rule (whitespace-separated tokens), OR across rules. The parser rejects redundant or impossible forms and gives precise typo errors (`autor:` → "Did you mean 'author:'?").
+
+## Origin-kind prefixes
+
+| Form              | Matches                                               |
+| ----------------- | ----------------------------------------------------- |
+| `tui`             | any TUI session                                       |
+| `cron`            | any cron-fired session                                |
+| `subagent`        | any subagent                                          |
+| `subagent:<name>` | one specific subagent (e.g. `subagent:memory-logger`) |
+
+## Channel prefixes
+
+| Form                        | Matches                           |
+| --------------------------- | --------------------------------- |
+| `*`                         | any channel session, any platform |
+| `slack:*`                   | any Slack chat, any workspace     |
+| `slack:T0123`               | one Slack workspace               |
+| `slack:T0123/C0ABCDE`       | one specific Slack chat           |
+| `slack:dm/*`                | any Slack DM                      |
+| `discord:9999`              | one Discord guild                 |
+| `discord:9999/<channel-id>` | one specific Discord channel      |
+| `telegram:<chat-id>`        | one Telegram chat                 |
+| `kakao:dm/*`                | any KakaoTalk DM                  |
+| `kakao:group/*`             | any KakaoTalk group chat          |
+| `kakao:group/<chat-id>`     | one specific group chat           |
+
+## Author qualifier
+
+Appended to a channel rule, AND-combined:
+
+```
+slack:T0123 author:U_ME
+discord:9999 author:U_MOD
+```
+
+The qualifier matches the specific author within the named scope. Authors and chats are AND'd; multiple authors require multiple rules.
+
+## Composition
+
+Multiple rules within one role's `match[]` are OR'd:
+
+```json
+{
+  "roles": {
+    "owner": {
+      "match": ["tui", "slack:T0123 author:U_ME", "discord:9999 author:U_MOD"]
+    }
+  }
+}
+```
+
+This role matches any TUI session OR the named Slack author OR the named Discord author.
+
+## Rejected forms
+
+| Form              | Why rejected                                                                                                                                                                     |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `slack:*/*`       | redundant (matches everything `slack:*` already matches)                                                                                                                         |
+| `slack:*/C0ABCDE` | impossible (wildcard workspace with specific chat)                                                                                                                               |
+| `slack:T0123/*`   | redundant (matches everything `slack:T0123` already matches)                                                                                                                     |
+| `team:T0123`      | legacy prefix; auto-rewritten to `slack:T0123` on load                                                                                                                           |
+| `guild:9999`      | legacy prefix; auto-rewritten to `discord:9999`                                                                                                                                  |
+| `tg:42`           | legacy prefix; auto-rewritten to `telegram:42`                                                                                                                                   |
+| `channel:<id>`    | workspace-less channel id; canonical DSL requires `<adapter>:<workspace>/<chat>`. Dropped with a warning during legacy migration; operator re-adds with the workspace coordinate |
+
+## Built-in role match additions
+
+User-declared `match[]` **appends** to the built-in match list. User-declared `permissions[]` **replaces** the built-in list entirely (no merge — `"permissions": []` means none).
+
+| Role      | Built-in match               |
+| --------- | ---------------------------- |
+| `owner`   | `[{ kind: 'tui' }]` (always) |
+| `trusted` | `[]`                         |
+| `member`  | `[]`                         |
+| `guest`   | `[]` (fallback)              |

@@ -1,0 +1,138 @@
+---
+title: Plugin API
+description: definePlugin, PluginContext, contribution types
+icon: Plug
+---
+
+The walkthrough is at [Write a plugin](/docs/guides/write-a-plugin). The shape is at [/concepts/plugins-and-stages](/docs/concepts/plugins-and-stages). This page is the contract.
+
+## `definePlugin`
+
+```ts
+import { definePlugin } from 'typeclaw/plugin'
+
+export default definePlugin<TConfig = unknown>({
+  name: string,
+  permissions: string[],
+  configSchema?: z.ZodType<TConfig>,
+  factory: (ctx: PluginContext<TConfig>) => PluginContributions,
+})
+```
+
+| Field          | Required | Notes                                                                                 |
+| -------------- | -------- | ------------------------------------------------------------------------------------- |
+| `name`         | yes      | unique, used to scope config block (`typeclaw.json#<name>`) and namespace permissions |
+| `permissions`  | yes      | every permission this plugin both declares and consumes; read before `factory` runs   |
+| `configSchema` | no       | Zod schema for the plugin's config block; defaults to `unknown` if omitted            |
+| `factory`      | yes      | returns the plugin's contributions; receives the live `PluginContext`                 |
+
+## `PluginContext`
+
+```ts
+type PluginContext<TConfig> = {
+  config: TConfig // parsed, frozen
+  permissions: PermissionService // .has(origin, perm) etc.
+  stream: MessageStream // .subscribe / .publish
+  spawnSubagent: (name: string, payload?: unknown, options?: SpawnOptions) => Promise<SubagentResult>
+  agentDir: string // absolute path, '/agent' in container
+  pluginDir: string // where the plugin's bundled assets live
+  containerName: string
+  logger: Logger
+}
+```
+
+## `PluginContributions`
+
+Returned from `factory(ctx)`. All fields optional.
+
+```ts
+type PluginContributions = {
+  tools?: Record<string, Tool>
+  skills?: PluginSkill[]
+  subagents?: Record<string, Subagent>
+  channels?: Record<string, ChannelAdapter>
+  crons?: CronJob[]
+  hooks?: {
+    'session.idle'?: (event: SessionIdleEvent) => void | Promise<void>
+    'tool.before'?: (event: ToolBeforeEvent) => ToolBeforeResult | Promise<ToolBeforeResult>
+    'tool.after'?: (event: ToolAfterEvent) => void | Promise<void>
+  }
+}
+```
+
+### Tool
+
+```ts
+type Tool<TIn = unknown, TOut = unknown> = {
+  description: string
+  inputSchema: z.ZodType<TIn>
+  execute: (input: TIn, ctx: ToolExecuteContext) => Promise<TOut>
+}
+```
+
+`ToolExecuteContext` carries the live `SessionOrigin`, the agent's working directory inside the container, and a `signal` (`AbortSignal`) that fires when the agent cancels the call.
+
+### Subagent
+
+```ts
+type Subagent<TPayload = unknown> = {
+  systemPrompt: string
+  payloadSchema?: z.ZodType<TPayload>
+  inFlightKey?: (payload: TPayload) => string // for per-payload coalescing
+  handler: (payload: TPayload, ctx: SubagentContext) => Promise<SubagentResult>
+}
+```
+
+`inFlightKey` is what makes two concurrent invocations with the same payload serialize instead of race. Memory's `memory-logger` and `dreaming` both key by `agentDir`.
+
+### ChannelAdapter
+
+Plugin-contributed channels follow the same contract as built-ins. See `src/channels/adapters/` for examples.
+
+### Cron
+
+```ts
+type CronJob = {
+  id: string
+  schedule: string
+  kind: 'prompt' | 'exec'
+  prompt?: string // when kind === 'prompt'
+  subagent?: string // when kind === 'prompt', invokes a subagent instead
+  command?: string[] // when kind === 'exec'
+  scheduledByRole: string // defaults to 'owner' for plugin-contributed jobs
+}
+```
+
+Plugin-contributed cron jobs default to `scheduledByRole: 'owner'` (they're bundled or operator-installed runtime, not user channel schedules).
+
+### Hooks
+
+`tool.before` is the gate. Return:
+
+```ts
+type ToolBeforeResult =
+  | { ok: true } // allow
+  | { ok: false; reason: string } // block
+  | { ok: 'ack'; severity: 'low' | 'medium' | 'high'; guard: string; message: string }
+// require operator acknowledgement
+```
+
+The `ack` variant is what the bundled `security` plugin uses for its tier-based bypasses.
+
+`tool.after` is read-only; use it for logging, metrics, and side-channel cleanup.
+
+`session.idle` fires synchronously after `session.prompt()` resolves. Plugins that want delayed reactions (e.g. memory-logger's idleMs window) install their own `setTimeout`.
+
+## Lifecycle
+
+Plugins load once at container start. They can:
+
+- Mutate behavior at runtime via tool execution and stream subscriptions
+- Read live config via `ctx.config` (boot-only fields are snapshots; reloadable fields are live)
+- Spawn subagents with provenance (`spawnedByRole` is stamped from the parent origin)
+
+Plugins cannot:
+
+- Change which other plugins are loaded
+- Rewrite the Dockerfile or escape the container
+- Issue tool calls themselves (they expose tools; the agent decides when to call them)

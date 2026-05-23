@@ -1,0 +1,57 @@
+---
+title: Tunnel providers
+description: Provider shapes, URL sources, and ownership
+icon: Globe
+---
+
+`tunnels[]` is restart-required ([/reference/typeclaw-json](/docs/reference/typeclaw-json)). The full schema:
+
+```ts
+type Tunnel = {
+  name: string
+  provider: 'cloudflare-quick' | 'external'
+  for: { kind: 'channel'; name: string } | { kind: 'manual' }
+  upstreamPort?: number // required when `for.kind === 'manual'`
+  externalUrl?: string // required when `provider === 'external'`
+}
+```
+
+## Providers
+
+| Provider           | URL source                                | Subprocess                   | Stability                         |
+| ------------------ | ----------------------------------------- | ---------------------------- | --------------------------------- |
+| `cloudflare-quick` | parsed from cloudflared stderr at runtime | `cloudflared tunnel --url …` | rotates every cloudflared restart |
+| `external`         | static, from `externalUrl` in config      | none                         | as stable as the URL you provided |
+
+`cloudflare-named` is reserved but not yet implemented. The schema rejects provider names with no runtime implementation so `typeclaw start` fails fast before tearing down a working container.
+
+## `for` discriminator
+
+| `for`                                    | Owned by                      | Lifecycle                                                                |
+| ---------------------------------------- | ----------------------------- | ------------------------------------------------------------------------ |
+| `{ kind: 'channel', name: '<adapter>' }` | `typeclaw channel add/remove` | adapter subscribes to URL changes; re-registers its webhook on rotation  |
+| `{ kind: 'manual' }`                     | `typeclaw tunnel add/remove`  | adapter-agnostic; you point `--upstream-port` at the in-container server |
+
+`typeclaw tunnel remove` refuses to delete a channel-owned tunnel and points the user at `channel remove <name>` instead.
+
+## URL change notifications
+
+Tunnel URL changes propagate over the in-process message stream as a `broadcast` event with payload:
+
+```ts
+type TunnelUrlChangedPayload = {
+  kind: 'tunnel-url-changed'
+  tunnelName: string
+  url: string
+  for: TunnelFor
+  rotatedAt: string // ISO timestamp
+}
+```
+
+Channel adapters subscribe via this broadcast, NOT by polling the tunnel manager. Plugin-contributed adapters with webhook needs should subscribe via the same broadcast filter.
+
+## Upstream-port pitfall
+
+Some services pair a host-facing compatibility proxy with a separate in-container server (the bundled `agent-browser` plugin is the canonical example: `/tmp/typeclaw-agent-browser-proxy-port` is the proxy, `/tmp/typeclaw-agent-browser-upstream-port` is the actual dashboard server). The tunnel's `upstreamPort` must name the **in-container server**, not the proxy. Tunneling the proxy port silently double-hops.
+
+The rule generalizes: any service that pairs a host-side proxy/forwarder with a container-side server publishes both ports separately, and `upstreamPort` always names the container-side one.

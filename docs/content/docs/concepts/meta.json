@@ -1,0 +1,5 @@
+{
+  "title": "Concepts",
+  "icon": "Lightbulb",
+  "pages": ["architecture", "permissions-model", "memory-loop", "secrets-policy", "plugins-and-stages", "managed-files"]
+}

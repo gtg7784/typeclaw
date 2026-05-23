@@ -1,18 +1,3 @@
 {
-  "pages": [
-    "index",
-    "quickstart",
-    "configuration",
-    "---",
-    "permissions",
-    "channels",
-    "memory",
-    "secrets",
-    "---",
-    "plugins",
-    "cron",
-    "tunnels",
-    "---",
-    "cli"
-  ]
+  "pages": ["index", "---", "guides", "concepts", "reference"]
 }

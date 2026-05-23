@@ -25,16 +25,40 @@ bun run start
 ```
 docs/
 ├── content/docs/         # MDX pages (auto-routed under /docs)
-│   ├── meta.json         # sidebar order
+│   ├── meta.json         # top-level sidebar order
 │   ├── index.mdx
-│   ├── quickstart.mdx
-│   ├── configuration.mdx
-│   ├── plugins.mdx
-│   ├── channels.mdx
-│   ├── memory.mdx
-│   ├── secrets.mdx
-│   ├── cron.mdx
-│   └── tunnels.mdx
+│   ├── guides/           # narrative, follow-along, has an ending
+│   │   ├── meta.json
+│   │   ├── getting-started.mdx
+│   │   ├── first-channel.mdx
+│   │   ├── first-cron.mdx
+│   │   ├── first-tunnel.mdx
+│   │   ├── teach-the-agent.mdx
+│   │   ├── write-a-plugin.mdx
+│   │   ├── lock-down-a-public-channel.mdx
+│   │   └── deploy.mdx
+│   ├── concepts/         # mental models; ~300-600 words each, no commands
+│   │   ├── meta.json
+│   │   ├── architecture.mdx
+│   │   ├── permissions-model.mdx
+│   │   ├── memory-loop.mdx
+│   │   ├── secrets-policy.mdx
+│   │   ├── plugins-and-stages.mdx
+│   │   └── managed-files.mdx
+│   └── reference/        # schemas, flags, grammars, random-access
+│       ├── meta.json
+│       ├── typeclaw-json.mdx
+│       ├── cron-json.mdx
+│       ├── secrets-json.mdx
+│       ├── cli.mdx
+│       ├── match-rule-dsl.mdx
+│       ├── permissions.mdx
+│       ├── channel-adapters.mdx
+│       ├── tunnel-providers.mdx
+│       ├── plugin-api.mdx
+│       ├── bundled-plugins.mdx
+│       ├── stream-targets.mdx
+│       └── env-vars.mdx
 ├── src/
 │   ├── app/
 │   │   ├── layout.tsx        # root layout with Geist fonts + Fumadocs provider
@@ -57,7 +81,9 @@ docs/
 
 ## Adding a docs page
 
-1. Drop an MDX file in `content/docs/`, with a frontmatter block:
+1. Pick the section. **Guides** for narrative walk-throughs with a finish line; **Concepts** for ~300-600 word mental-model pages with no commands; **Reference** for tables, schemas, and grammars.
+
+2. Drop an MDX file in `content/docs/<section>/`, with a frontmatter block:
 
    ```mdx
    ---
@@ -69,9 +95,15 @@ docs/
 
    The `icon` is any [Lucide](https://lucide.dev/) icon name.
 
-2. Add the slug to `content/docs/meta.json` to control sidebar order (use `"---"` to insert a separator).
+3. Add the slug to `content/docs/<section>/meta.json` to control sidebar order.
 
-3. `bun run dev` picks it up automatically.
+4. `bun run dev` picks it up automatically.
+
+### Section conventions
+
+- **Guides** end with a forward-link to the next guide. Voice: senior engineer walking through it once. No checklists, no "you should now be able to."
+- **Concepts** open with "why this exists / what it solves," then describe the model. No commands, no schemas. Link out to guides and reference.
+- **Reference** pages have minimal prose. Tables, schemas, grammars. One-line cross-links to concepts where the "why" lives.
 
 ## Pre-commit
 

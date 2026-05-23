@@ -1,0 +1,68 @@
+---
+title: Channel adapters
+description: Built-in adapters, auth shapes, capabilities
+icon: Inbox
+---
+
+| Adapter        | Auth                                                                                 | Transport        | Public URL? | Notes                                                  |
+| -------------- | ------------------------------------------------------------------------------------ | ---------------- | ----------- | ------------------------------------------------------ |
+| `slack-bot`    | bot token + app token                                                                | Socket Mode      | no          | standard intent-shaped wiring                          |
+| `discord-bot`  | bot token                                                                            | gateway intents  | no          |                                                        |
+| `telegram-bot` | bot token                                                                            | long polling     | no          |                                                        |
+| `github`       | fine-grained PAT, or GitHub App (`appId` + `privateKey` + optional `installationId`) | webhook delivery | yes         | pairs with a tunnel for inbound webhooks               |
+| `kakaotalk`    | sub-device login (email + password, stored encrypted)                                | LOCO protocol    | no          | survives 7-day token expiry via host-side renewal cron |
+
+## `channels.<adapter>` shape
+
+```json
+{
+  "channels": {
+    "slack-bot": { "enabled": true },
+    "discord-bot": { "enabled": true },
+    "telegram-bot": { "enabled": true },
+    "github": {
+      "enabled": true,
+      "webhookPort": 8975,
+      "webhookUrl": "https://hooks.example.com/github"
+    },
+    "kakaotalk": { "enabled": true }
+  }
+}
+```
+
+| Field         | Adapters | Notes                                                                      |
+| ------------- | -------- | -------------------------------------------------------------------------- |
+| `enabled`     | all      | live-reloadable                                                            |
+| `webhookPort` | `github` | container-side port the webhook server listens on; default `8975`          |
+| `webhookUrl`  | `github` | optional override; when omitted, the URL comes from a channel-owned tunnel |
+
+Credentials live in `secrets.json#channels.<adapter>` ([/reference/secrets-json](/docs/reference/secrets-json)).
+
+## CLI verbs
+
+```sh
+typeclaw channel add <adapter>      # interactive
+typeclaw channel set <adapter>      # rotate credentials (not KakaoTalk)
+typeclaw channel reauth kakaotalk   # KakaoTalk-specific re-login flow
+```
+
+## Routing model
+
+When a message arrives:
+
+1. The adapter publishes it to the in-process message stream with a `(adapter, workspace, chat, thread, authorId)` coordinate.
+2. The channel router gates the message on `channel.respond` permission ([/concepts/permissions-model](/docs/concepts/permissions-model)). No permission → silent drop.
+3. A session is created (or resumed) for that coordinate.
+4. Outgoing tool calls (`channel_send`, `channel_reply`) flow back through the adapter.
+
+The router never blocks on a slow adapter. Each adapter owns its own outbound queue.
+
+## Per-adapter quirks
+
+| Adapter        | Quirk                                                                                                            |
+| -------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `slack-bot`    | threads stay sticky — replies in the same thread route to the same session                                       |
+| `discord-bot`  | requires `MESSAGE_CONTENT` intent enabled in the Discord developer portal for the bot to read message bodies     |
+| `telegram-bot` | long polling means no public URL, but only one process can poll a given bot token at a time                      |
+| `github`       | adapter restarts on tunnel URL change and re-registers the webhook automatically                                 |
+| `kakaotalk`    | LOCO clients hold the current token in a closure; token renewal triggers a container restart via the host daemon |

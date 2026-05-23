@@ -1,0 +1,14 @@
+{
+  "title": "Guides",
+  "icon": "BookOpen",
+  "pages": [
+    "getting-started",
+    "first-channel",
+    "first-cron",
+    "first-tunnel",
+    "teach-the-agent",
+    "write-a-plugin",
+    "lock-down-a-public-channel",
+    "deploy"
+  ]
+}

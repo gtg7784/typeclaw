@@ -1,0 +1,69 @@
+---
+title: Permissions and security guards
+description: Every built-in permission string and every guard's tier
+icon: Lock
+---
+
+The mental model is at [/concepts/permissions-model](/docs/concepts/permissions-model). This page lists the strings.
+
+## Built-in roles
+
+| Role      | Default `match[]`   | Default `permissions[]`                                                                                                                                                                                                                     |
+| --------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`   | `[{ kind: 'tui' }]` | `channel.respond`, `cron.schedule`, `cron.modify`, `subagent.*`, `security.bypass.low`, `security.bypass.medium`, plus every plugin-contributed `security.bypass.<guard>` **except** high-tier per-guard strings and `security.bypass.high` |
+| `trusted` | `[]`                | `channel.respond`, `cron.schedule`, `subagent.*`, `security.bypass.low`                                                                                                                                                                     |
+| `member`  | `[]`                | `channel.respond`, `subagent.spawn`, `subagent.cancel`                                                                                                                                                                                      |
+| `guest`   | `[]` (fallback)     | (none)                                                                                                                                                                                                                                      |
+
+User-declared `permissions[]` **replaces** the built-in list. `"permissions": []` means no permissions, including no `channel.respond`.
+
+## Core permissions
+
+| Permission                | Granted by default to      | Effect                                                                                       |
+| ------------------------- | -------------------------- | -------------------------------------------------------------------------------------------- |
+| `channel.respond`         | `owner`/`trusted`/`member` | gate on the channel router; without it, inbound messages are dropped before session creation |
+| `cron.schedule`           | `owner`/`trusted`          | allow scheduling new cron jobs at runtime                                                    |
+| `cron.modify`             | `owner`                    | allow editing existing cron jobs                                                             |
+| `subagent.spawn`          | `owner`/`trusted`/`member` | allow spawning subagents                                                                     |
+| `subagent.cancel`         | `owner`/`trusted`/`member` | allow cancelling in-flight subagents                                                         |
+| `subagent.*`              | `owner`/`trusted`          | covers all `subagent.*` permissions (wildcard expansion)                                     |
+| `security.bypass.low`     | `owner`/`trusted`          | tier-wide bypass for low-severity guards                                                     |
+| `security.bypass.medium`  | `owner`                    | tier-wide bypass for medium-severity guards                                                  |
+| `security.bypass.high`    | (no auto-grants)           | tier-wide bypass for high-severity guards (declare explicitly per role to opt in)            |
+| `security.bypass.<guard>` | varies                     | per-guard bypass; see tier tables below                                                      |
+
+Plugin-contributed permissions live under the plugin's namespace (`<plugin>.<verb>.<noun>`). They're declared on `definePlugin({ permissions: [...] })` and surface in `roles.<name>.permissions[]` once the plugin is loaded.
+
+## Security guards — `high` tier
+
+Audience-leak severity. Bypass sends data to a third-party audience outside the operator's control loop. **No role auto-bypasses high.** Per-call ack required from every role, including `owner`. To pre-authorize one role, list the per-guard string in `roles.<name>.permissions[]`.
+
+| Guard              | Per-guard permission               | Blocks                                                                                  |
+| ------------------ | ---------------------------------- | --------------------------------------------------------------------------------------- |
+| `outboundSecret`   | `security.bypass.outboundSecret`   | outbound channel message containing a secret-shaped string                              |
+| `systemPromptLeak` | `security.bypass.systemPromptLeak` | outbound message echoing the system prompt                                              |
+| `gitExfil`         | `security.bypass.gitExfil`         | `git push` to an unfamiliar remote                                                      |
+| `gitRemoteTainted` | `security.bypass.gitRemoteTainted` | push after a same-session `git remote set-url`                                          |
+| `rolePromotion`    | `security.bypass.rolePromotion`    | `write`/`edit` to `typeclaw.json` that widens role privileges or adds a privileged role |
+| `cronPromotion`    | `security.bypass.cronPromotion`    | `write`/`edit` to `cron.json` adding new jobs or changing `scheduledByRole`             |
+
+## Security guards — `medium` tier
+
+Silent-attack severity. Bypass produces attacker-favorable state in model context without immediate operator visibility. `owner` bypasses (operator has equivalent host access); `trusted` does NOT.
+
+| Guard                  | Per-guard permission                   | Blocks                                                          |
+| ---------------------- | -------------------------------------- | --------------------------------------------------------------- |
+| `secretExfilBash`      | `security.bypass.secretExfilBash`      | `bash env`, `bash printenv`, etc.                               |
+| `secretExfilRead`      | `security.bypass.secretExfilRead`      | `read .env`, `read secrets.json`, etc.                          |
+| `ssrf`                 | `security.bypass.ssrf`                 | `curl http://169.254.169.254/...` and other IMDS / SSRF targets |
+| `sessionSearchSecrets` | `security.bypass.sessionSearchSecrets` | `session_search` query returning secret-shaped hits             |
+
+## Security guards — `low` tier
+
+Reserved tier. No inhabitants today. Exists so `trusted`'s `bypass.low` grant has a forward-compatible home when a future guard ships at low.
+
+## Acceptance logic
+
+`tool.before` accepts EITHER the tier permission (`security.bypass.low|medium|high`) OR the per-guard permission. The two axes work forever; adding a per-guard permission to a role doesn't remove the role's tier-wide grants.
+
+The bundled `security` plugin reads each guard's exported `GUARD_*_SEVERITY` constant at boot. Adding a new guard without an exported severity is a TypeScript error, not a silent permissive fallback.

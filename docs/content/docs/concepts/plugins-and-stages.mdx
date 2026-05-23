@@ -1,0 +1,53 @@
+---
+title: Plugins and stages
+description: Where plugins live, what they can touch, and why the container is the trust boundary
+icon: Plug
+---
+
+A TypeClaw plugin is a TypeScript module loaded into the container-stage Bun process. Not a subprocess. Not an IPC peer. Not a sandboxed worker. The same process that runs the agent loop also runs your plugin's code, calls your plugin's tools, and reads your plugin's config block.
+
+This is unusual enough that it's worth saying why.
+
+## Why plugins are in-process
+
+The alternative — plugins as subprocesses, plugins as WASM modules, plugins as plugin-server RPC clients — buys isolation at the cost of speed and ergonomics. Every tool call becomes a serialization boundary. Every shared piece of state (the message stream, the permission service, the session store) needs a wire protocol. Every plugin needs its own deployment surface.
+
+TypeClaw already has an isolation boundary: the container. Plugins can't escape it. They can't reach the host filesystem (no `docker.sock` mount). They can't change which other plugins are loaded. They can't rewrite the Dockerfile. The trust boundary is the container, and the container is already sandboxed.
+
+Pulling the boundary down to the plugin level would buy almost no extra security — a malicious plugin in-process can already do everything a malicious plugin via RPC could do, because they're both running with the same container's capabilities. The RPC version would just be slower, harder to debug, and impossible to hot-reload.
+
+## What plugins receive
+
+The `factory(ctx)` callback gets a `PluginContext` carrying:
+
+- **`ctx.config`** — the parsed, frozen config block for this plugin (validated by your `configSchema`). Boot-only fields are snapshots; reloadable fields update on `typeclaw reload`.
+- **`ctx.permissions`** — the live permission service. Plugins query it (`ctx.permissions.has(origin, perm)`) rather than implementing their own checks.
+- **`ctx.stream`** — the in-process message stream. Plugins subscribe to broadcasts, publish to typed targets.
+- **`ctx.spawnSubagent(name, payload, options)`** — for plugins that contribute subagents and want to invoke them.
+- **`ctx.agentDir`** — absolute path to the agent folder (mounted at `/agent` in the container).
+
+Everything plugins talk to flows through this object. There are no module-global imports of agent state, no singletons reaching into the runtime — the surface is the `ctx`.
+
+## What plugins can contribute
+
+A plugin's `factory` returns an object with optional fields:
+
+- **`tools`** — Zod-typed functions the agent can call
+- **`skills`** — markdown procedures the agent loads on demand
+- **`subagents`** — focused worker sessions with their own system prompt and payload schema
+- **`channels`** — new inbound/outbound message platforms
+- **`crons`** — scheduled prompts or exec commands contributed at boot
+
+Plus, declared on the `definePlugin` envelope itself (not inside `factory`):
+
+- **`permissions`** — every permission this plugin both checks and contributes. Lifted out of the factory because the runtime reads it before invoking the factory, to expand the owner wildcard and validate user-declared `permissions[]` against the union of all plugin permissions.
+
+The full signatures are at [/reference/plugin-api](/docs/reference/plugin-api).
+
+## What plugins cannot do
+
+Plugins can't drive the agent. They contribute tools the agent might call; they don't issue tool calls themselves. If you need scheduled work, contribute a cron. If you need reactive work, subscribe to the message stream. The agent's autonomy is the agent's; plugins are how you give it more capabilities, not how you put it on rails.
+
+Plugins also can't change other plugins' contributions, mutate the Dockerfile, or open new mounts. These are container-stage facts captured at boot, owned by the host-stage launcher, and not exposed to plugin code.
+
+For the practical "write your first plugin" walkthrough see [Write a plugin](/docs/guides/write-a-plugin).

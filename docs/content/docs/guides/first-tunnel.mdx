@@ -1,0 +1,107 @@
+---
+title: Expose a port
+description: Public URLs for inbound webhooks and ad-hoc browser exposure
+icon: Globe
+---
+
+Two things people mean when they say "expose a port":
+
+- **localhost access** — your dev server running inside the container should appear on `http://localhost:5173` on your laptop. TypeClaw does this automatically; no setup needed. Skip to the bottom of this page if that's all you want.
+- **public URL** — a `https://something.trycloudflare.com` URL that GitHub or your friend can hit. That's what tunnels are for.
+
+Both come from the same primitive: proxy `127.0.0.1:<port>` inside the container out to something. Different "something" depending on which one you want.
+
+## Public tunnel for a webhook
+
+The GitHub adapter is the canonical case. GitHub's webhook delivery needs a URL it can POST to; your container is behind NAT.
+
+```sh
+typeclaw channel add github
+```
+
+The wizard offers to create a Cloudflare Quick tunnel automatically. Accept, and `typeclaw.json` ends up with:
+
+```json
+{
+  "tunnels": [
+    {
+      "name": "github-webhook",
+      "provider": "cloudflare-quick",
+      "for": { "kind": "channel", "name": "github" }
+    }
+  ]
+}
+```
+
+The `for: { kind: 'channel', name: 'github' }` link means the GitHub adapter subscribes to URL changes for this tunnel. Cloudflare Quick rotates the URL every time cloudflared restarts; the adapter notices and re-registers the webhook with GitHub. No config edits, no stale URLs.
+
+`tunnels[]` is restart-required (the tunnel manager reads it once at boot), so the first time you add a tunnel you need:
+
+```sh
+typeclaw restart
+```
+
+URL rotations from a running tunnel are live — those don't need a restart.
+
+## Ad-hoc exposure
+
+You built a dashboard and you want to show someone:
+
+```sh
+typeclaw tunnel add demo \
+  --provider cloudflare-quick \
+  --for-manual \
+  --upstream-port 5173
+
+typeclaw tunnel list
+typeclaw tunnel status demo
+typeclaw tunnel logs demo
+typeclaw tunnel remove demo
+```
+
+`--for-manual` flags the tunnel as user-owned (vs `--for-channel` which scopes it to an adapter's webhook). `--upstream-port` is the container-side port the tunnel proxies to.
+
+Trap to be aware of: some services pair a host-facing compatibility proxy with a separate in-container server (the bundled `agent-browser` plugin is the canonical example). The tunnel's `upstreamPort` must name the **in-container server**, not the proxy. Tunneling the proxy port silently double-hops and looks fine until something downstream times out.
+
+## Your own URL
+
+If you already run a reverse proxy:
+
+```json
+{
+  "name": "github-webhook",
+  "provider": "external",
+  "for": { "kind": "channel", "name": "github" },
+  "externalUrl": "https://hooks.example.com/github"
+}
+```
+
+No subprocess, no signup, no extra binary. TypeClaw uses the URL as-is; you handle the actual proxying upstream.
+
+## Localhost access (auto port-forward)
+
+Different beast. When a process inside the container binds to `127.0.0.1:5173`, TypeClaw's hostd notices, opens a `Bun.listen` on the host's `127.0.0.1:5173`, and proxies bytes between them. You open `http://localhost:5173` in your browser; the agent's dev server answers.
+
+This works for loopback-bound servers too (Vite without `--host`, Next.js dev) — which `docker run -p` cannot reach because the bridge IP doesn't route to the container's loopback. The relay runs inside the container's netns, so it does.
+
+It's on by default. To restrict:
+
+```json
+{
+  "portForward": { "allow": [5173, 3000] }
+}
+```
+
+Or turn it off entirely:
+
+```json
+{
+  "portForward": { "allow": [] }
+}
+```
+
+`portForward` is restart-required (the broker is wired at container start).
+
+---
+
+Next: [Teach the agent](/docs/guides/teach-the-agent) — let it learn from its own work over time.
