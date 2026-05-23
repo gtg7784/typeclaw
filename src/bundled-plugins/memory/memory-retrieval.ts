@@ -28,7 +28,21 @@ export type CreateMemoryRetrievalSubagentOptions = {
   logger?: MemoryRetrievalLogger
 }
 
-export const MEMORY_RETRIEVAL_SYSTEM_PROMPT = `You are the memory-retrieval subagent. Read the user's most recent prompt and decide what's relevant from BOTH topic shards in \`memory/topics/\` (consolidated long-term memory) AND undreamed daily-stream events under \`memory/streams/\` (recent fragments not yet folded into shards). Use \`memory_search\` to query both surfaces; use \`read\`/\`ls\` to pull full shard bodies when needed. Synthesize a focused ≤8 KB summary of the relevant memory. Save by \`write\`ing it to the exact path provided in your payload as \`cacheFilePath\`. Be ruthlessly concise. Do NOT write anywhere else. Do NOT delete files.`
+export const MEMORY_RETRIEVAL_SYSTEM_PROMPT = `You are the memory-retrieval subagent. Read the user's most recent prompt and decide what's relevant from BOTH topic shards in \`memory/topics/\` (consolidated long-term memory) AND undreamed daily-stream events under \`memory/streams/\` (recent fragments not yet folded into shards). Use \`memory_search\` to query both surfaces; use \`read\`/\`ls\` to pull full shard bodies when needed. Synthesize a focused ≤8 KB summary of the relevant memory. Save by \`write\`ing it to the exact path provided in your payload as \`cacheFilePath\`. Be ruthlessly concise. Do NOT write anywhere else. Do NOT delete files.
+
+Search discipline: make AT MOST 3 \`memory_search\` calls before writing the cache. Pick queries that match the user's literal phrasing — not framing vocabulary, not metadata (session ids, dates), not words from your own system prompt. If 3 well-chosen searches turn up nothing relevant, write the empty-context note and stop.`
+
+export function memoryRetrievalExhaustedMessage(used: number, max: number): string {
+  const usedKb = Math.round(used / 1024)
+  const maxKb = Math.round(max / 1024)
+  return [
+    `[memory-retrieval budget exhausted: used ${usedKb}KB of ${maxKb}KB across memory_search and read]`,
+    '',
+    'Stop searching. Stop reading. Every subsequent memory_search or read call will return this same notice.',
+    'Write the cache file at the provided cacheFilePath with whatever relevant memory you have already gathered.',
+    'If nothing was relevant, write a short empty-context note to the cache file and stop.',
+  ].join('\n')
+}
 
 const consoleLogger: MemoryRetrievalLogger = {
   info: (m) => console.warn(m),
@@ -46,6 +60,18 @@ export function createMemoryRetrievalSubagent(
     customTools: [memorySearchTool],
     payloadSchema: memoryRetrievalPayloadSchema,
     inFlightKey: (payload) => payload.parentSessionId,
+    // 256 KB read + memory_search budget. Sized for one retrieval pass:
+    // ~16 KB of memory_search hits (3 queries × ~5 KB excerpts) plus a few
+    // shard reads (~5 KB each). A smaller budget would systematically
+    // exhaust on any agent with rich memory; a larger budget invites the
+    // pre-fix failure mode where the LLM kept iterating searches until it
+    // gave up. The exhausted-message tells the subagent to write the
+    // cache file with what it has rather than retrying forever.
+    toolResultBudget: {
+      maxTotalBytes: 256 * 1024,
+      toolNames: ['read', 'memory_search'],
+      exhaustedMessage: memoryRetrievalExhaustedMessage,
+    },
     handler: async (ctx, runSession) => {
       const start = Date.now()
       logger.info(`[memory-retrieval] ${ctx.payload.parentSessionId} start cache=${ctx.payload.cacheFilePath}`)
