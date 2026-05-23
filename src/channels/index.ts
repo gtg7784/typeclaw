@@ -10,6 +10,11 @@ export {
 } from './router'
 export { createChannelsReloadable } from './reloadable'
 export {
+  createSubagentCompletionBridge,
+  type SubagentCompletionBridge,
+  type SubagentCompletionBridgeOptions,
+} from './subagent-completion-bridge'
+export {
   channelsSchema,
   ADAPTER_IDS,
   STICKY_DEFAULT_WINDOW_MS,

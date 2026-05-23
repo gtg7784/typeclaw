@@ -14,7 +14,13 @@ import {
   type SubagentShared,
 } from '@/agent/subagents'
 import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
-import { createChannelManager, createChannelsReloadable, type ChannelManager } from '@/channels'
+import {
+  createChannelManager,
+  createChannelsReloadable,
+  createSubagentCompletionBridge,
+  type ChannelManager,
+  type SubagentCompletionBridge,
+} from '@/channels'
 import { createTunnelBridge, type TunnelBridge } from '@/channels/tunnel-bridge'
 import { createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync } from '@/config'
 import {
@@ -406,6 +412,16 @@ export async function startAgent({
 
   const tunnelBridge: TunnelBridge = createTunnelBridge({ stream, channelManager })
 
+  // Bridge `subagent.completed` broadcasts into the channel router so a
+  // backgrounded subagent finishing wakes up its parent channel session
+  // with a `<system-reminder>` — symmetric to the TUI bridge in
+  // src/server/index.ts. Must be created BEFORE channelManager.start()
+  // so an initial broadcast can never race past the subscription gap.
+  const subagentCompletionBridge: SubagentCompletionBridge = createSubagentCompletionBridge({
+    stream,
+    router: channelManager.router,
+  })
+
   reloadRegistry.register(createChannelsReloadable({ manager: channelManager }))
   await channelManager.start()
 
@@ -514,6 +530,7 @@ export async function startAgent({
     server.stop(true)
     void disposeMaterializedSkills(pluginRuntime)
     tunnelBridge.stop()
+    subagentCompletionBridge.stop()
     await tunnelManager.stop()
     await channelManager.stop()
   }
