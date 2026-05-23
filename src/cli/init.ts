@@ -6,6 +6,7 @@ import { defineCommand } from 'citty'
 
 import {
   KNOWN_PROVIDERS,
+  providerForModelRef,
   supportsApiKey as providerSupportsApiKey,
   supportsOAuth as providerSupportsOAuth,
   type KnownModelRef,
@@ -30,6 +31,7 @@ import {
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { fetchModelOptions, type ModelOption } from '@/init/models-dev'
 import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
+import { API_KEY_DASHBOARD_URL, validateApiKey, type KeyValidationResult } from '@/init/validate-api-key'
 
 import { buildOAuthCallbacks } from './oauth-callbacks'
 import { c, done, errorLine, printSlackAppManifestSetup } from './ui'
@@ -237,14 +239,29 @@ export const init = defineCommand({
     }
 
     if (hatchingOk) {
-      done({
-        title: c.green('Hatched. Your agent is ready.'),
-        hints: [
-          { label: 'Attach TUI:', command: 'typeclaw tui' },
-          { label: 'Follow logs:', command: 'typeclaw logs -f' },
-          { label: 'Stop:', command: 'typeclaw stop' },
-        ],
-      })
+      const claimableChannel =
+        channelChoice !== 'none' && channelChoice !== 'github' ? channelDisplayName(channelChoice) : null
+      const hints: Array<{ label: string; command: string }> = []
+      if (claimableChannel !== null) {
+        hints.push({ label: 'Claim your agent:', command: 'typeclaw role claim' })
+      }
+      hints.push(
+        { label: 'Attach TUI:', command: 'typeclaw tui' },
+        { label: 'Follow logs:', command: 'typeclaw logs -f' },
+        { label: 'Stop:', command: 'typeclaw stop' },
+        { label: 'Diagnose issues:', command: 'typeclaw doctor' },
+      )
+      if (claimableChannel !== null) {
+        note(
+          [
+            `Your agent will not respond on ${claimableChannel} until you claim ownership.`,
+            `This prevents strangers from talking to it.`,
+            `Run \`typeclaw role claim\` to finish setup.`,
+          ].join('\n'),
+          'Claim ownership before chatting',
+        )
+      }
+      done({ title: c.green('Hatched. Your agent is ready.'), hints })
     }
   },
 })
@@ -329,6 +346,7 @@ export interface WizardPrompts {
     initial: 'api-key' | 'oauth' | undefined,
   ) => Promise<StepResult<'api-key' | 'oauth'>>
   askApiKey: (provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]) => Promise<StepResult<string>>
+  validateApiKey: (providerId: KnownProviderId, key: string) => Promise<KeyValidationResult>
   pickVisionProvider: (
     options: ModelOption[],
     initial: KnownProviderId | undefined,
@@ -368,6 +386,7 @@ export const defaultWizardPrompts: WizardPrompts = {
   askReuseExistingKey,
   pickAuthMethod,
   askApiKey,
+  validateApiKey,
   pickVisionProvider,
   pickVisionModel,
   pickChannel,
@@ -502,10 +521,16 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
       }
 
       case 'enter-api-key': {
-        const provider = KNOWN_PROVIDERS[state.providerId!]
+        const providerId = state.providerId!
+        const provider = KNOWN_PROVIDERS[providerId]
         const result = onResult(step, await prompts.askApiKey(provider))
         if (result.kind === 'back') {
           step = 'pick-auth-method'
+          break
+        }
+        const verdict = await runApiKeyValidation(prompts, providerId, result.value)
+        if (verdict === 'retry') {
+          step = 'enter-api-key'
           break
         }
         state.llmAuth = { kind: 'api-key', apiKey: result.value }
@@ -608,10 +633,16 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
       }
 
       case 'enter-vision-api-key': {
-        const provider = KNOWN_PROVIDERS[state.visionProviderId!]
+        const providerId = state.visionProviderId!
+        const provider = KNOWN_PROVIDERS[providerId]
         const result = onResult(step, await prompts.askApiKey(provider))
         if (result.kind === 'back') {
           step = 'pick-vision-auth-method'
+          break
+        }
+        const verdict = await runApiKeyValidation(prompts, providerId, result.value)
+        if (verdict === 'retry') {
+          step = 'enter-vision-api-key'
           break
         }
         state.visionLlmAuth = { kind: 'api-key', apiKey: result.value }
@@ -879,7 +910,60 @@ async function pickVisionModel(
   return value(picked)
 }
 
+async function runApiKeyValidation(
+  prompts: WizardPrompts,
+  providerId: KnownProviderId,
+  key: string,
+): Promise<'accepted' | 'retry'> {
+  const provider = KNOWN_PROVIDERS[providerId]
+  const s = spinner()
+  s.start(`Checking your ${provider.name} key...`)
+  let result: KeyValidationResult
+  try {
+    result = await prompts.validateApiKey(providerId, key)
+  } catch {
+    s.stop(`Couldn't reach ${provider.name} to verify the key. Saving it anyway.`)
+    return 'accepted'
+  }
+  if (result.kind === 'ok') {
+    s.stop(`${provider.name} key looks good.`)
+    return 'accepted'
+  }
+  if (result.kind === 'skipped') {
+    s.stop(`Couldn't reach ${provider.name} to verify the key. Saving it anyway.`)
+    return 'accepted'
+  }
+  s.error(`${provider.name} rejected the key (HTTP ${result.status}).`)
+  const dashboardUrl = API_KEY_DASHBOARD_URL[providerId]
+  const lines = [
+    'The provider says this key is not valid.',
+    'Common causes: typo, expired key, wrong account, or pasting a project-scoped key.',
+  ]
+  if (dashboardUrl) {
+    lines.push('', `Get a fresh one at ${dashboardUrl}`)
+  }
+  note(lines.join('\n'), `${provider.name} key rejected`)
+  const choice = await select<'retry' | 'accept'>({
+    message: 'What do you want to do?',
+    options: [
+      { value: 'retry', label: 'Try a different key' },
+      { value: 'accept', label: 'Save this key anyway', hint: 'init continues, but the agent may fail to start' },
+    ],
+    initialValue: 'retry',
+  })
+  if (isCancel(choice) || choice === 'retry') return 'retry'
+  return 'accepted'
+}
+
 async function askApiKey(provider: (typeof KNOWN_PROVIDERS)[KnownProviderId]): Promise<StepResult<string>> {
+  const providerId = provider.id as KnownProviderId
+  const dashboardUrl = API_KEY_DASHBOARD_URL[providerId]
+  if (dashboardUrl) {
+    note(
+      [`Don't have a key yet?`, `Get one at ${dashboardUrl}`, `Then come back and paste it below.`].join('\n'),
+      `Get a ${provider.name} API key`,
+    )
+  }
   const apiKey = await password({
     message: `Put your ${provider.name} API key (will be saved to secrets.json)`,
     validate: (v) => (v && v.length > 0 ? undefined : 'API key is required'),

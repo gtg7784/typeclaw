@@ -1,0 +1,139 @@
+import { describe, expect, test } from 'bun:test'
+
+import { supportsApiKey } from '@/config/providers'
+import { KNOWN_PROVIDERS, type KnownProviderId } from '@/config/providers'
+
+import { API_KEY_DASHBOARD_URL, providersWithApiKeyProbe, validateApiKey, type FetchFn } from './validate-api-key'
+
+function fakeFetch(responder: (url: string, init: RequestInit) => Response | Promise<Response>): FetchFn {
+  return async (url, init) => responder(url, init)
+}
+
+const okBody = '{"data":[{"id":"m"}]}'
+
+describe('validateApiKey', () => {
+  test('returns ok when the provider accepts the key and returns the expected JSON shape', async () => {
+    const result = await validateApiKey(
+      'openai',
+      'sk-test',
+      fakeFetch((url, init) => {
+        expect(url).toBe('https://api.openai.com/v1/models')
+        expect((init.headers as Record<string, string>).Authorization).toBe('Bearer sk-test')
+        expect(init.redirect).toBe('manual')
+        return new Response(okBody, { status: 200 })
+      }),
+    )
+    expect(result).toEqual({ kind: 'ok' })
+  })
+
+  test('returns rejected on 401 without leaking the response body', async () => {
+    const result = await validateApiKey(
+      'openai',
+      'bad-key',
+      fakeFetch(() => new Response('{"error":"invalid"}', { status: 401 })),
+    )
+    expect(result).toEqual({ kind: 'rejected', status: 401 })
+  })
+
+  test('uses x-api-key + anthropic-version for Anthropic', async () => {
+    let seenHeaders: Record<string, string> | null = null
+    await validateApiKey(
+      'anthropic',
+      'sk-ant-test',
+      fakeFetch((_url, init) => {
+        seenHeaders = init.headers as Record<string, string>
+        return new Response(okBody, { status: 200 })
+      }),
+    )
+    expect(seenHeaders!['x-api-key']).toBe('sk-ant-test')
+    expect(seenHeaders!['anthropic-version']).toBe('2023-06-01')
+    expect(seenHeaders!.Authorization).toBeUndefined()
+  })
+
+  test('skips OAuth-only providers without contacting the network', async () => {
+    let called = false
+    const result = await validateApiKey('openai-codex', 'whatever', async () => {
+      called = true
+      return new Response()
+    })
+    expect(result).toEqual({ kind: 'skipped', reason: 'no-probe' })
+    expect(called).toBe(false)
+  })
+
+  test('skips on fetch rejection so flaky networks do not block init', async () => {
+    const result = await validateApiKey('openai', 'sk-test', async () => {
+      throw new Error('ENOTFOUND')
+    })
+    expect(result.kind).toBe('skipped')
+    if (result.kind === 'skipped') {
+      expect(result.reason).toBe('network-error')
+      expect(result.detail).toContain('ENOTFOUND')
+    }
+  })
+
+  test('skips on non-auth 4xx/5xx so provider hiccups do not look like a rejected key', async () => {
+    const result = await validateApiKey(
+      'openai',
+      'sk-test',
+      fakeFetch(() => new Response('', { status: 503 })),
+    )
+    expect(result).toEqual({ kind: 'skipped', reason: 'network-error', detail: 'HTTP 503' })
+  })
+
+  test('treats 3xx as skipped so the credential is never sent to a redirected host', async () => {
+    const result = await validateApiKey(
+      'openai',
+      'sk-test',
+      fakeFetch(() => new Response('', { status: 302, headers: { location: 'https://attacker.example/models' } })),
+    )
+    expect(result).toEqual({ kind: 'skipped', reason: 'network-error', detail: 'HTTP 302' })
+  })
+
+  test('treats HTTP 200 with non-JSON body (captive portal / WAF page) as skipped, not ok', async () => {
+    const result = await validateApiKey(
+      'openai',
+      'sk-test',
+      fakeFetch(() => new Response('<html><body>Login required</body></html>', { status: 200 })),
+    )
+    expect(result).toEqual({ kind: 'skipped', reason: 'network-error', detail: 'unexpected response shape' })
+  })
+
+  test('treats HTTP 200 with JSON of the wrong shape as skipped', async () => {
+    const result = await validateApiKey(
+      'openai',
+      'sk-test',
+      fakeFetch(() => new Response('{"object":"list","data":"not-an-array"}', { status: 200 })),
+    )
+    expect(result.kind).toBe('skipped')
+  })
+
+  test('caps the response body when checking the shape so a malicious provider cannot exhaust memory', async () => {
+    const huge = `{"data":[${'0,'.repeat(10_000)}0]}`
+    const result = await validateApiKey(
+      'openai',
+      'sk-test',
+      fakeFetch(() => new Response(huge, { status: 200 })),
+    )
+    expect(result.kind).toBe('skipped')
+    if (result.kind === 'skipped') expect(result.detail).toBe('unexpected response shape')
+  })
+})
+
+describe('drift guard', () => {
+  test('every api-key-supporting provider either has a probe or is an explicit OAuth-only exception', () => {
+    const probes = new Set(providersWithApiKeyProbe())
+    const apiKeyProviders = (Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]).filter((id) =>
+      supportsApiKey(KNOWN_PROVIDERS[id]),
+    )
+    for (const id of apiKeyProviders) {
+      expect(probes.has(id), `provider "${id}" supports api-key but has no entry in PROVIDER_PROBE`).toBe(true)
+    }
+  })
+
+  test('every api-key-supporting provider has a dashboard URL for the deeplink note', () => {
+    for (const id of Object.keys(KNOWN_PROVIDERS) as KnownProviderId[]) {
+      if (!supportsApiKey(KNOWN_PROVIDERS[id])) continue
+      expect(API_KEY_DASHBOARD_URL[id], `provider "${id}" supports api-key but has no dashboard URL`).toBeDefined()
+    }
+  })
+})

@@ -127,6 +127,7 @@ describe('collectWizardInputs back-aware flow', () => {
       askReuseExistingKey: async () => ({ kind: 'value', value: 'prompt' }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'api-key' }),
       askApiKey: async () => ({ kind: 'value', value: 'sk_test' }),
+      validateApiKey: async () => ({ kind: 'ok' as const }),
       pickVisionProvider: async () => ({ kind: 'value', value: 'skip' }),
       pickVisionModel: async () => ({ kind: 'value', value: openaiModel }),
       pickChannel: async () => ({ kind: 'value', value: 'none' }),
