@@ -77,7 +77,7 @@ export async function runShardingMigration(options: RunShardingMigrationOptions)
     ...extra,
   })
 
-  await recoverShardingOrphans(options.agentDir, options.logger)
+  await recoverShardingOrphans(options.agentDir, options.logger, options.git)
 
   if (existsSync(topicsDir(options.agentDir)) || !existsSync(rootMemoryPath(options.agentDir))) {
     return empty()
@@ -241,7 +241,11 @@ async function recoverShardingMigration(agentDir: string, logger: MigrationLogge
   )
 }
 
-async function recoverShardingOrphans(agentDir: string, logger: MigrationLogger): Promise<void> {
+async function recoverShardingOrphans(
+  agentDir: string,
+  logger: MigrationLogger,
+  git: MigrationGit | undefined,
+): Promise<void> {
   if (!existsSync(topicsDir(agentDir))) return
 
   let cleaned = false
@@ -260,6 +264,11 @@ async function recoverShardingOrphans(agentDir: string, logger: MigrationLogger)
   }
 
   if (cleaned) logger.info('[memory:migration] cleaned orphaned pre-shard memory files')
+
+  // Always called, even when nothing was cleaned this boot: pre-#315 migrations
+  // and earlier runs of this function unlinked without committing, leaving
+  // staged deletions that survive across reboots until cleared explicitly.
+  await commitPendingLegacyDeletions(agentDir, logger, git)
 }
 
 async function collectFlatJsonlDates(memoryDir: string): Promise<string[]> {
@@ -538,6 +547,68 @@ async function commitShardingMigration(
   if (commitSharding.exitCode !== 0) {
     logger.warn(`[memory:migration] git commit failed: ${commitSharding.stderr || commitSharding.stdout}`.trim())
   }
+}
+
+async function commitPendingLegacyDeletions(
+  agentDir: string,
+  logger: MigrationLogger,
+  git: MigrationGit | undefined,
+): Promise<void> {
+  const spawn = git?.spawn ?? spawnGit
+  const inside = await spawn(['rev-parse', '--is-inside-work-tree'], { cwd: agentDir })
+  if (inside.exitCode !== 0) return
+
+  const pending = await collectLegacyDeletions(agentDir, spawn)
+  if (pending.all.length === 0) return
+
+  // `git add -u` errors with "pathspec did not match" on paths whose deletion
+  // is already in the index, so stage only the working-tree-only deletions.
+  // The already-staged set is picked up by the commit directly.
+  if (pending.workingTreeOnly.length > 0) {
+    const addDeletions = await spawn(['add', '-u', '--', ...pending.workingTreeOnly], { cwd: agentDir })
+    if (addDeletions.exitCode !== 0) {
+      logger.warn(`[memory:migration] git add failed: ${addDeletions.stderr || addDeletions.stdout}`.trim())
+      return
+    }
+  }
+
+  const commit = await spawn(
+    [
+      'commit',
+      '-m',
+      `memory: clean up ${pending.all.length} pre-shard file(s) orphaned by earlier migration`,
+      '--no-edit',
+    ],
+    { cwd: agentDir },
+  )
+  if (commit.exitCode !== 0) {
+    logger.warn(`[memory:migration] git commit failed: ${commit.stderr || commit.stdout}`.trim())
+  }
+}
+
+async function collectLegacyDeletions(
+  agentDir: string,
+  spawn: NonNullable<MigrationGit['spawn']>,
+): Promise<{ all: string[]; workingTreeOnly: string[] }> {
+  const isLegacy = (line: string): boolean => line === 'MEMORY.md' || /^memory\/\d{4}-\d{2}-\d{2}\.jsonl$/.test(line)
+  const parse = (out: string): string[] =>
+    out
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(isLegacy)
+
+  const allDiff = await spawn(['diff', 'HEAD', '--name-only', '--diff-filter=D', '--', 'memory/', 'MEMORY.md'], {
+    cwd: agentDir,
+  })
+  if (allDiff.exitCode !== 0) return { all: [], workingTreeOnly: [] }
+  const all = parse(allDiff.stdout)
+  if (all.length === 0) return { all: [], workingTreeOnly: [] }
+
+  const wtDiff = await spawn(['diff', '--name-only', '--diff-filter=D', '--', 'memory/', 'MEMORY.md'], {
+    cwd: agentDir,
+  })
+  const workingTreeOnly = wtDiff.exitCode === 0 ? parse(wtDiff.stdout) : []
+  return { all, workingTreeOnly }
 }
 
 async function spawnGit(
