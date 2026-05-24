@@ -374,6 +374,7 @@ describe('docker.file schema', () => {
     cloudflared: true,
     xvfb: true,
     claudeCode: false,
+    codexCli: false,
     append: [],
   }
 
@@ -416,6 +417,7 @@ describe('docker.file schema', () => {
       cloudflared: true,
       xvfb: true,
       claudeCode: false,
+      codexCli: false,
       append: [],
     })
   })
@@ -501,6 +503,20 @@ describe('docker.file schema', () => {
 
   test('claudeCode rejects string version pins (the upstream installer manages versions via env, not apt pins)', () => {
     expect(() => configSchema.parse({ model: VALID_MODEL, docker: { file: { claudeCode: '1.2.3' } } })).toThrow()
+  })
+
+  test('codexCli is boolean-only (no version-string variant); defaults to false', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL })
+    expect(parsed.docker.file.codexCli).toBe(false)
+  })
+
+  test('codexCli: true is preserved when explicitly enabled', () => {
+    const parsed = configSchema.parse({ model: VALID_MODEL, docker: { file: { codexCli: true } } })
+    expect(parsed.docker.file.codexCli).toBe(true)
+  })
+
+  test('codexCli rejects string version pins (the @openai/codex npm package is pinned in the install layer, not via apt-style pins here)', () => {
+    expect(() => configSchema.parse({ model: VALID_MODEL, docker: { file: { codexCli: '1.2.3' } } })).toThrow()
   })
 
   test('empty docker object resolves to defaulted docker.file', () => {
