@@ -1754,6 +1754,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
+    if (isLikelyKimiChannelToolLeak(assistantText)) {
+      logger.warn(`[channels] ${live.keyId}: suppressed kimi_tool_call_leak text_len=${assistantText.length}`)
+      return
+    }
+
     logger.warn(
       `[channels] ${live.keyId}: recovering assistant_text_without_channel_tool text_len=${assistantText.length}`,
     )
@@ -2340,6 +2345,62 @@ export function isUpstreamEmptyResponseSentinel(text: string): boolean {
   const trimmed = text.trim()
   if (!trimmed.startsWith('(Empty response:')) return false
   return trimmed.includes("'stop_reason'")
+}
+
+// Detects any Kimi-family tool-call delimiter token. Kimi-family deployments
+// emit tool calls inline in their native chat template using these tokens:
+//
+//   <|tool_calls_section_begin|>
+//     <|tool_call_begin|>functions.<name>:<idx><|tool_call_argument_begin|>{...}<|tool_call_end|>
+//   <|tool_calls_section_end|>
+//
+// (Source: https://github.com/MoonshotAI/Kimi-K2/blob/1b4022b/docs/tool_call_guidance.md;
+// the documented set is exactly five tokens — the section begin/end markers,
+// the per-call begin/end markers, and the argument-begin separator. There is
+// no `<|tool_call_argument_end|>`: arguments terminate at `<|tool_call_end|>`.)
+//
+// Production inference servers are expected to parse this format server-side
+// and translate it into OpenAI-shaped `choice.delta.tool_calls`. When the
+// translation breaks (observed against Fireworks' `kimi-k2p6-turbo` router on
+// 2026-05-24; vLLM had a similar class of leak fixed in
+// https://github.com/vllm-project/vllm/pull/38579), the raw tokens flow
+// through `choice.delta.content` instead. pi-ai's `openai-completions`
+// provider is vendor-neutral and has no Kimi-specific parser, so they land
+// verbatim in the assistant message's text content with `stopReason: 'stop'`.
+//
+// Used as a defense-in-depth check at the `channel_send` / `channel_reply`
+// tool boundary so a model that somehow passes raw delimiter text as the
+// message body is denied. NOT used directly by the recovery path in
+// `validateChannelTurn` — see `isLikelyKimiChannelToolLeak` below.
+const KIMI_TOOL_DELIMITER_RE = /<\|tool_calls_section_(?:begin|end)\|>|<\|tool_call_(?:begin|end|argument_begin)\|>/
+
+export function containsKimiToolDelimiter(text: string): boolean {
+  return KIMI_TOOL_DELIMITER_RE.test(text)
+}
+
+// Narrower predicate used by `validateChannelTurn` to decide whether to
+// suppress recovery of assistant text. Requires BOTH:
+//   (1) at least one Kimi tool-call delimiter token, AND
+//   (2) a recognizable channel-tool-call identifier (`channel_reply:N` or
+//       `channel_send:N`, with or without the `functions.` prefix).
+//
+// The two-signal rule narrows the false-positive surface to "the model was
+// trying to call a channel tool and the upstream parser failed". Bare-text
+// discussion of the Kimi protocol — e.g. the agent answering "explain Kimi's
+// tool-call format" with documentation-style prose containing `<|tool_call_begin|>`
+// — does NOT trigger suppression and reaches the user normally. The leak shape
+// observed in production (`channel_reply:0<|tool_call_argument_begin|>{...}<|tool_calls_section_end|>`)
+// satisfies both conditions trivially.
+//
+// The tool-name regex deliberately stays loose on the index suffix
+// (`channel_reply:0` / `channel_reply:1` / `channel_send:0` / ...): every
+// observed leak uses the canonical `functions.<name>:<idx>` shape, but partial
+// parsers may strip the `functions.` prefix before the leak surfaces.
+const KIMI_CHANNEL_TOOL_ID_RE = /(?:functions\.)?channel_(?:reply|send):\d+/
+
+export function isLikelyKimiChannelToolLeak(text: string): boolean {
+  if (!containsKimiToolDelimiter(text)) return false
+  return KIMI_CHANNEL_TOOL_ID_RE.test(text)
 }
 
 function describe(err: unknown): string {

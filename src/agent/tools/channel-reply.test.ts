@@ -393,6 +393,60 @@ describe('createChannelReplyTool', () => {
     })
   })
 
+  describe('Kimi tool-call delimiter leak guard', () => {
+    test('blocks raw `<|tool_call_argument_begin|>...<|tool_calls_section_end|>` tokens from reaching the channel', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, {
+        text: 'channel_reply:0<|tool_call_argument_begin|>{"text": "hi"}<|tool_calls_section_end|>',
+      })
+      expect(calls).toHaveLength(0)
+      expect(result.details).toMatchObject({ ok: false })
+      expect((result.details as { error: string }).error).toContain('provider tool-call control tokens')
+      const text = (result.content[0] as { text: string }).text
+      expect(text).toContain('channel_reply denied')
+      expect(text).not.toContain('posted to')
+    })
+
+    test('blocks the per-call begin marker even when section markers are absent (partial parser leak)', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, {
+        text: '<|tool_call_begin|>functions.channel_reply:0<|tool_call_argument_begin|>{"text": "hi"}<|tool_call_end|>',
+      })
+      expect(calls).toHaveLength(0)
+      expect(result.details).toMatchObject({ ok: false })
+    })
+
+    test('does NOT block legit prose mentioning tool names without Kimi delimiter tokens', async () => {
+      const calls: OutboundMessage[] = []
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async (msg) => {
+          calls.push(msg)
+          return { ok: true }
+        }),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, {
+        text: 'I called channel_reply:0 in the earlier turn, here are the results.',
+      })
+      expect(calls).toHaveLength(1)
+      expect(result.details).toEqual({ ok: true })
+    })
+  })
+
   describe('structured router failures surface as denials', () => {
     test('duplicate code from router renders as channel_reply denied with router error text', async () => {
       const tool = createChannelReplyTool({

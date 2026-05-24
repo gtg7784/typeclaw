@@ -1,7 +1,12 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
-import { isNoReplySignal, isUpstreamEmptyResponseSentinel, type ChannelRouter } from '@/channels/router'
+import {
+  containsKimiToolDelimiter,
+  isNoReplySignal,
+  isUpstreamEmptyResponseSentinel,
+  type ChannelRouter,
+} from '@/channels/router'
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
@@ -121,6 +126,15 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
         }
       }
 
+      const kimiLeakError = kimiToolCallLeakError(bodyText)
+      if (kimiLeakError) {
+        logger.warn(formatChannelToolFailure('channel_send', kimiLeakError))
+        return {
+          content: [{ type: 'text' as const, text: `channel_send denied: ${kimiLeakError}` }],
+          details: { ok: false, error: kimiLeakError },
+        }
+      }
+
       const result = await router.send({
         adapter,
         workspace: params.workspace,
@@ -230,6 +244,16 @@ function upstreamEmptyResponseSentinelError(text: string | undefined): string {
     'refusing to forward an upstream `(Empty response: ...)` sentinel; ' +
     "that string is a provider-SDK debug dump containing the model's thinking content and signature, " +
     'not a message body. End your turn silently (visible text empty or `NO_REPLY`) instead.'
+  )
+}
+
+function kimiToolCallLeakError(text: string | undefined): string {
+  if (text === undefined) return ''
+  if (!containsKimiToolDelimiter(text)) return ''
+  return (
+    'refusing to forward raw provider tool-call control tokens; these are chat-template ' +
+    'delimiters that should have been parsed into a real tool call upstream. ' +
+    'Re-issue the intended channel send as plain user-visible text only.'
   )
 }
 

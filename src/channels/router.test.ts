@@ -1211,6 +1211,101 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('suppressed upstream_empty_response_sentinel'))).toBe(false)
   })
 
+  test('suppresses leaked Kimi tool-call delimiter tokens instead of posting them to the channel', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText(
+        'channel_reply:0<|tool_call_argument_begin|>{"text": "hi there"}<|tool_calls_section_end|>',
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed kimi_tool_call_leak'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('suppresses the canonical full-shape leak (two consecutive channel_reply calls in one section)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText(
+        '<|tool_calls_section_begin|>' +
+          '<|tool_call_begin|>functions.channel_reply:0<|tool_call_argument_begin|>{"text": "first"}<|tool_call_end|>' +
+          '<|tool_call_begin|>functions.channel_reply:1<|tool_call_argument_begin|>{"text": "second"}<|tool_call_end|>' +
+          '<|tool_calls_section_end|>',
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed kimi_tool_call_leak'))).toBe(true)
+  })
+
+  test('still recovers legit prose that happens to mention "channel_reply" without Kimi delimiter tokens', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('I would normally call channel_reply:0 here but I want to ask you first.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('channel_reply:0')
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
+    expect(logs.some((m) => m.includes('suppressed kimi_tool_call_leak'))).toBe(false)
+  })
+
+  test('still recovers documentation-style prose explaining Kimi delimiters without a channel-tool identifier', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'how does Kimi format tool calls?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText(
+        'Kimi wraps tool calls with `<|tool_calls_section_begin|>` and `<|tool_calls_section_end|>`, ' +
+          'with each call delimited by `<|tool_call_begin|>` and `<|tool_call_end|>`.',
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('Kimi wraps tool calls')
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
+    expect(logs.some((m) => m.includes('suppressed kimi_tool_call_leak'))).toBe(false)
+  })
+
   test('recovers visible assistant text when no channel tool sent a message', async () => {
     const dir = await tempDir()
     const logs: string[] = []
