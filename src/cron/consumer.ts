@@ -195,7 +195,7 @@ async function runPromptOnce(
             }
           : undefined
       if (created.hooks && turnEvent !== undefined) {
-        await created.hooks.runSessionTurnStart(turnEvent)
+        await created.hooks.runSessionTurnStart({ ...turnEvent, userPrompt: job.prompt })
       }
       // Bridge the CronSession wrapper into the AgentSession surface the
       // fallback helper expects:

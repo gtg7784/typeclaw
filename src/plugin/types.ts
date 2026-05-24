@@ -167,9 +167,19 @@ export type SessionIdleEvent = {
 // don't wedge a turn-counter forever. `origin` carries the session's origin
 // so observers can exclude their own induced turns when counting (e.g. the
 // backup plugin excludes `subagent: 'backup'` to avoid self-gating).
+//
+// `userPrompt` is the EXACT text being passed to `session.prompt(text)` —
+// the user's message for TUI/channel turns, the cron job's prompt for cron
+// turns, or the rendered initial prompt for subagent turns. Distinct from
+// `SessionPromptEvent.prompt` (the assembling system prompt for cache-safe
+// suffix mutation at session creation time). Channel adapters that prefix
+// inbound text with attribution headers (`[Alice in #general]:`) pass the
+// prefixed string here, matching what `session.prompt(text)` receives;
+// observers that need the unattributed text would need a separate hook.
 export type SessionTurnStartEvent = {
   sessionId: string
   agentDir: string
+  userPrompt: string
   origin?: SessionOrigin
 }
 

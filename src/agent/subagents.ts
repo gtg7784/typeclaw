@@ -206,12 +206,13 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
       hooks && sessionId !== undefined && agentDir !== undefined
         ? { sessionId, agentDir, ...(origin !== undefined ? { origin } : {}) }
         : undefined
+    const userPromptForTurn = override?.userPrompt ?? options.userPrompt
     try {
       if (hooks && turnEvent !== undefined) {
-        await hooks.runSessionTurnStart(turnEvent)
+        await hooks.runSessionTurnStart({ ...turnEvent, userPrompt: userPromptForTurn })
       }
       try {
-        await session.prompt(override?.userPrompt ?? options.userPrompt)
+        await session.prompt(userPromptForTurn)
       } finally {
         if (hooks && turnEvent !== undefined) {
           await hooks.runSessionTurnEnd(turnEvent)

@@ -15,7 +15,7 @@ import type {
   PluginLogger,
   SessionEndEvent,
   SessionIdleEvent,
-  SessionPromptEvent,
+  SessionTurnStartEvent,
 } from '@/plugin'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
 
@@ -237,15 +237,15 @@ describe('memory plugin shape', () => {
   })
 })
 
-describe('session.prompt hook', () => {
-  test('spawns memory-retrieval when the injection plan is index mode', async () => {
+describe('session.turn.start hook', () => {
+  test('spawns memory-retrieval with the user prompt when injection plan is index mode', async () => {
     await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
     await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
     const { exports, spawned } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
-    const origin: SessionPromptEvent['origin'] = { kind: 'tui', sessionId: 'ses_parent' }
+    const origin: SessionTurnStartEvent['origin'] = { kind: 'tui', sessionId: 'ses_parent' }
 
-    await exports.hooks!['session.prompt']!(
-      { sessionId: 'ses_parent', agentDir, prompt: 'what do I know?', origin },
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_parent', agentDir, userPrompt: 'what do I know about deploys?', origin },
       {
         agentDir,
         pluginName: 'memory',
@@ -260,19 +260,44 @@ describe('session.prompt hook', () => {
     expect(spawned[0]!.payload).toEqual({
       parentSessionId: 'ses_parent',
       agentDir,
-      recentPrompt: 'what do I know?',
+      recentPrompt: 'what do I know about deploys?',
       cacheFilePath: join(agentDir, 'memory', '.retrieval-cache', 'ses_parent.md'),
       origin,
     })
     expect(spawned[0]!.options).toEqual({ parentSessionId: 'ses_parent', spawnedByOrigin: origin })
   })
 
-  test('does not block on a slow memory-retrieval spawn (cold-start guard)', async () => {
-    // given a memory-retrieval spawn that takes 10s and a session.prompt hook
-    // invoked during cold-start. ensureLive in src/channels/router.ts caps the
-    // whole createForChannel chain at 30s; if the hook awaited the spawn,
-    // memory-retrieval's LLM call would consume the full ensureLive budget
-    // and time out on Discord/Slack first-message-after-stale-rollover.
+  test('passes the actual user text, not the assembling system prompt (the bug session.prompt produced)', async () => {
+    // Regression guard. Pre-fix, memory-retrieval ran from `session.prompt`
+    // whose `event.prompt` is `basePrompt + IDENTITY.md + SOUL.md` (the
+    // assembling system prompt). The plugin shipped that string as
+    // `recentPrompt`, so the retrieval subagent keyword-mined TypeClaw's
+    // framing prose instead of the user's question. Moving to
+    // `session.turn.start` plumbs `event.userPrompt` (the literal text
+    // headed to `session.prompt(text)`) into `recentPrompt`. This test
+    // pins that wiring so a future refactor that "simplifies" the field
+    // back to event.prompt or `event.text` is caught.
+    await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
+    await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
+
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_user', agentDir, userPrompt: 'Did Alice merge the deploy PR?', origin: undefined },
+      { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
+    )
+    await waitFor(() => spawned.length >= 1, 'memory-retrieval spawn settles')
+
+    const payload = spawned[0]!.payload as { recentPrompt: string }
+    expect(payload.recentPrompt).toBe('Did Alice merge the deploy PR?')
+    expect(payload.recentPrompt).not.toContain('You are a general-purpose AI agent')
+    expect(payload.recentPrompt).not.toContain('TypeClaw')
+  })
+
+  test('does not block on a slow memory-retrieval spawn', async () => {
+    // PR #337 made the spawn fire-and-forget under session.prompt to keep
+    // channel cold-start under ensureLive's 30s watchdog. Moving to
+    // session.turn.start preserves that detached shape so a slow retrieval
+    // never gates the user's reply.
     await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
     await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
     const { exports, spawned, started } = await bootMemoryPlugin(
@@ -281,26 +306,51 @@ describe('session.prompt hook', () => {
       { spawnDelayMs: 10_000 },
     )
 
-    // when session.prompt fires
     const start = Date.now()
-    await exports.hooks!['session.prompt']!(
-      { sessionId: 'ses_cold_start', agentDir, prompt: 'first message after restart', origin: undefined },
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_turn', agentDir, userPrompt: 'first turn', origin: undefined },
       { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
     )
     const elapsed = Date.now() - start
 
-    // then the hook returned promptly (well under the slow-spawn duration),
-    // the spawn was actually initiated (not just dropped on the floor), and
-    // the spawn has NOT yet completed (proves the await was detached, not
-    // collapsed to a fast no-op by some test seam)
     expect(elapsed).toBeLessThan(500)
-    expect(started).toHaveLength(1)
+    await waitFor(() => started.length >= 1, 'memory-retrieval spawn settles')
     expect(started[0]!.name).toBe('memory-retrieval')
     expect(spawned).toHaveLength(0)
   })
 
+  test('hook returns synchronously without awaiting the shard load (channel turn gating)', async () => {
+    // session.turn.start has NO per-handler timeout (unlike session.prompt,
+    // session.idle, session.end), and the channel router awaits it before
+    // calling `live.session.prompt(text)`. An inline `await loadAllShards`
+    // would gate every channel turn on N shard reads. The hook body must
+    // be fully detached. This test fires the hook against a tmpdir with no
+    // memory directory at all — `loadAllShards` rejects/returns empty after
+    // an fs round-trip — and asserts the hook returns within a single
+    // event-loop tick. Pre-fix, the await would yield to libuv for the
+    // readdir ENOENT and the hook would resolve only after that round-trip.
+    const { exports } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
+
+    // Promise.resolve() wraps the return so we can observe whether the
+    // hook returned synchronously (sync function → resolves on the next
+    // microtask) vs after yielding to libuv (async function with an
+    // inline await → resolves only after the libuv round-trip).
+    let resolved = false
+    const hookPromise = Promise.resolve(
+      exports.hooks!['session.turn.start']!(
+        { sessionId: 'ses_sync', agentDir, userPrompt: 'q', origin: undefined },
+        { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
+      ),
+    )
+    void hookPromise.then(() => {
+      resolved = true
+    })
+    for (let i = 0; i < 3; i++) await Promise.resolve()
+    await hookPromise
+    expect(resolved).toBe(true)
+  })
+
   test('detached spawn rejection is reported via plugin logger, not unhandled', async () => {
-    // given a spawnSubagent that rejects synchronously
     await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
     await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
     const parsed = memoryPlugin.configSchema!.safeParse({ injectionBudgetBytes: 4096 })
@@ -320,9 +370,8 @@ describe('session.prompt hook', () => {
     })
     const exports = await memoryPlugin.plugin(ctx)
 
-    // when session.prompt fires
-    await exports.hooks!['session.prompt']!(
-      { sessionId: 'ses_fail', agentDir, prompt: 'q?', origin: undefined },
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_fail', agentDir, userPrompt: 'q?', origin: undefined },
       { agentDir, pluginName: 'memory', logger },
     )
 
@@ -331,7 +380,6 @@ describe('session.prompt hook', () => {
       'detached spawn rejection routed to logger',
     )
 
-    // then the plugin logger received the failure with attribution
     const errorLine = logs.error.find((m) => m.includes('memory-retrieval spawn failed'))
     expect(errorLine).toMatch(/spawn rejected for test/)
   })
@@ -340,8 +388,8 @@ describe('session.prompt hook', () => {
     await writeTopic(agentDir, 'small-a', 'Small A', 'small body')
     const { exports, spawned } = await bootMemoryPlugin(agentDir, {})
 
-    await exports.hooks!['session.prompt']!(
-      { sessionId: 'ses_direct', agentDir, prompt: 'small?' },
+    await exports.hooks!['session.turn.start']!(
+      { sessionId: 'ses_direct', agentDir, userPrompt: 'small?' },
       {
         agentDir,
         pluginName: 'memory',
@@ -352,16 +400,16 @@ describe('session.prompt hook', () => {
     expect(spawned).toHaveLength(0)
   })
 
-  test('does not recurse for subagent-origin prompt events', async () => {
+  test('does not recurse for subagent-origin turn events', async () => {
     await writeTopic(agentDir, 'large-a', 'Large A', 'a'.repeat(3000))
     await writeTopic(agentDir, 'large-b', 'Large B', 'b'.repeat(3000))
     const { exports, spawned } = await bootMemoryPlugin(agentDir, { injectionBudgetBytes: 4096 })
 
-    await exports.hooks!['session.prompt']!(
+    await exports.hooks!['session.turn.start']!(
       {
         sessionId: 'ses_subagent',
         agentDir,
-        prompt: 'subagent prompt',
+        userPrompt: 'subagent prompt',
         origin: { kind: 'subagent', subagent: 'memory-retrieval', parentSessionId: 'ses_parent' },
       },
       { agentDir, pluginName: 'memory', logger: createPluginLogger('m') },
