@@ -543,6 +543,127 @@ describe('runShardingMigration', () => {
     expect(files.has('memory/MEMORY.md.pre-shard.bak')).toBe(true)
   })
 
+  test('orphan cleanup commits the deletions it performs (issue #315 path 2)', async () => {
+    await initGitRepo(agentDir)
+    await writePreMigratedTree()
+    await writeRootMemory('# Memory\n\n## Orphan\nold\n')
+    await writeFlatStream('2026-05-18', 'orphan\n')
+    await git(agentDir, [
+      'add',
+      '--',
+      'MEMORY.md',
+      'memory/2026-05-18.jsonl',
+      'memory/topics/existing.md',
+      'memory/streams/2026-05-18.jsonl',
+      'memory/MEMORY.md.pre-shard.bak',
+    ])
+    await git(agentDir, ['commit', '-m', 'pre-shard state with orphans'])
+
+    await runShardingMigration({ agentDir, logger })
+
+    const porcelain = await git(agentDir, ['status', '--porcelain', '--untracked-files=no'])
+    expect(porcelain.stdout).toBe('')
+    const latest = await git(agentDir, ['log', '--oneline', '-1'])
+    expect(latest.stdout).toContain('memory: clean up 2 pre-shard file(s) orphaned by earlier migration')
+    const tracked = await git(agentDir, ['ls-tree', '-r', '--name-only', 'HEAD'])
+    const files = new Set(tracked.stdout.split('\n').filter((line) => line !== ''))
+    expect(files.has('MEMORY.md')).toBe(false)
+    expect(files.has('memory/2026-05-18.jsonl')).toBe(false)
+    expect(files.has('memory/topics/existing.md')).toBe(true)
+    expect(files.has('memory/streams/2026-05-18.jsonl')).toBe(true)
+  })
+
+  test('recovers already-affected agents by committing pre-existing staged deletions', async () => {
+    await initGitRepo(agentDir)
+    await writePreMigratedTree()
+    await writeRootMemory('# Memory\n\n## Stale\nold\n')
+    await writeFlatStream('2026-05-19', 'stale\n')
+    await git(agentDir, [
+      'add',
+      '--',
+      'MEMORY.md',
+      'memory/2026-05-19.jsonl',
+      'memory/topics/existing.md',
+      'memory/streams/2026-05-18.jsonl',
+      'memory/MEMORY.md.pre-shard.bak',
+    ])
+    await git(agentDir, ['commit', '-m', 'pre-shard state'])
+    await rm(join(agentDir, 'MEMORY.md'))
+    await rm(join(memoryDir, '2026-05-19.jsonl'))
+    await git(agentDir, ['add', '-u', '--', 'MEMORY.md', 'memory/2026-05-19.jsonl'])
+    const beforePorcelain = await git(agentDir, ['status', '--porcelain', '--untracked-files=no'])
+    expect(beforePorcelain.stdout).toContain('D  MEMORY.md')
+    expect(beforePorcelain.stdout).toContain('D  memory/2026-05-19.jsonl')
+
+    await runShardingMigration({ agentDir, logger })
+
+    expect(messages.warn).toEqual([])
+    expect(messages.error).toEqual([])
+    const porcelain = await git(agentDir, ['status', '--porcelain', '--untracked-files=no'])
+    expect(porcelain.stdout).toBe('')
+    const latest = await git(agentDir, ['log', '--oneline', '-1'])
+    expect(latest.stdout).toContain('memory: clean up 2 pre-shard file(s) orphaned by earlier migration')
+  })
+
+  test('recovers already-affected agents whose deletions were never staged', async () => {
+    await initGitRepo(agentDir)
+    await writePreMigratedTree()
+    await writeRootMemory('# Memory\n\n## Stale\nold\n')
+    await writeFlatStream('2026-05-19', 'stale\n')
+    await git(agentDir, [
+      'add',
+      '--',
+      'MEMORY.md',
+      'memory/2026-05-19.jsonl',
+      'memory/topics/existing.md',
+      'memory/streams/2026-05-18.jsonl',
+      'memory/MEMORY.md.pre-shard.bak',
+    ])
+    await git(agentDir, ['commit', '-m', 'pre-shard state'])
+    await rm(join(agentDir, 'MEMORY.md'))
+    await rm(join(memoryDir, '2026-05-19.jsonl'))
+
+    await runShardingMigration({ agentDir, logger })
+
+    const porcelain = await git(agentDir, ['status', '--porcelain', '--untracked-files=no'])
+    expect(porcelain.stdout).toBe('')
+    const latest = await git(agentDir, ['log', '--oneline', '-1'])
+    expect(latest.stdout).toContain('memory: clean up 2 pre-shard file(s) orphaned by earlier migration')
+  })
+
+  test('no-op when post-shard tree is clean and no pending deletions exist', async () => {
+    await initGitRepo(agentDir)
+    await writePreMigratedTree()
+    await git(agentDir, [
+      'add',
+      '--',
+      'memory/topics/existing.md',
+      'memory/streams/2026-05-18.jsonl',
+      'memory/MEMORY.md.pre-shard.bak',
+    ])
+    await git(agentDir, ['commit', '-m', 'post-shard state'])
+    const headBefore = await git(agentDir, ['rev-parse', 'HEAD'])
+
+    await runShardingMigration({ agentDir, logger })
+
+    const headAfter = await git(agentDir, ['rev-parse', 'HEAD'])
+    expect(headAfter.stdout).toBe(headBefore.stdout)
+    const porcelain = await git(agentDir, ['status', '--porcelain', '--untracked-files=no'])
+    expect(porcelain.stdout).toBe('')
+  })
+
+  test('recovery is silent and harmless outside a git repo', async () => {
+    await writePreMigratedTree()
+    await writeRootMemory('# Memory\n\n## Orphan\nold\n')
+    await writeFlatStream('2026-05-18', 'orphan\n')
+
+    const result = await runShardingMigration({ agentDir, logger })
+
+    expect(result.migrated).toBe(false)
+    expect(existsSync(join(agentDir, 'MEMORY.md'))).toBe(false)
+    expect(existsSync(join(memoryDir, '2026-05-18.jsonl'))).toBe(false)
+  })
+
   async function writeRepresentativeFixture(): Promise<{ dreaming: string; skill: string }> {
     await writeRootMemory(representativeMemory())
     await writeFlatStream('2026-05-18', '{"type":"fragment","id":"id-1"}\n')
