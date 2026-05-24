@@ -76,6 +76,36 @@ function* eventsFromEntry(
     yield* assistantEvents(message as AssistantMessage, ts, pending)
     return
   }
+  if (role === 'toolResult') {
+    const ev = toolResultMessageEvent(message, ts, pending)
+    if (ev !== null) yield ev
+    return
+  }
+}
+
+function toolResultMessageEvent(
+  message: { role: string; [k: string]: unknown },
+  ts: number,
+  pending: Map<string, { name: string; startTs: number }>,
+): InspectEvent | null {
+  const toolCallId = typeof message.toolCallId === 'string' ? message.toolCallId : null
+  if (toolCallId === null) return null
+  const entry = pending.get(toolCallId)
+  pending.delete(toolCallId)
+  const name = entry?.name ?? (typeof message.toolName === 'string' ? message.toolName : 'unknown')
+  const durationMs = entry !== undefined ? Math.max(0, ts - entry.startTs) : 0
+  const isError = message.isError === true
+  const text = readTextContent(message.content)
+  return {
+    cat: 'tool',
+    ts,
+    phase: 'end',
+    toolCallId,
+    name,
+    ...(text !== null && text !== '' ? { result: text } : {}),
+    isError,
+    durationMs,
+  }
 }
 
 function* assistantEvents(
