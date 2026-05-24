@@ -247,6 +247,163 @@ describe('replayLines', () => {
     )
     expect(events).toEqual([])
   })
+
+  test('top-level role:toolResult message (real pi-coding-agent format) yields a tool end event with text joined from content parts', async () => {
+    // Real pi-coding-agent emits toolResult as its own top-level message, not as a block inside the prior assistant message.
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'assistant',
+              content: [{ type: 'toolCall', id: 'functions.read:0', name: 'read', arguments: { path: '/agent/x.md' } }],
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+              stopReason: 'toolUse',
+              timestamp: 1_000,
+            },
+          }),
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'toolResult',
+              toolCallId: 'functions.read:0',
+              toolName: 'read',
+              content: [{ type: 'text', text: 'Successfully read /agent/x.md' }],
+              isError: false,
+              timestamp: 1_250,
+            },
+          }),
+        ]),
+      ),
+    )
+    const ends = events.filter((e) => e.cat === 'tool' && e.phase === 'end')
+    expect(ends).toHaveLength(1)
+    const end = ends[0]!
+    if (end.cat !== 'tool' || end.phase !== 'end') throw new Error('unreachable')
+    expect(end.name).toBe('read')
+    expect(end.toolCallId).toBe('functions.read:0')
+    expect(end.isError).toBe(false)
+    expect(end.result).toBe('Successfully read /agent/x.md')
+    expect(end.durationMs).toBe(250)
+  })
+
+  test('top-level role:toolResult with isError surfaces error status', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'assistant',
+              content: [{ type: 'toolCall', id: 'bash:0', name: 'bash', arguments: { command: 'false' } }],
+              timestamp: 1_000,
+            },
+          }),
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'toolResult',
+              toolCallId: 'bash:0',
+              toolName: 'bash',
+              content: [{ type: 'text', text: 'exit code 1' }],
+              isError: true,
+              timestamp: 1_100,
+            },
+          }),
+        ]),
+      ),
+    )
+    const end = events.find((e) => e.cat === 'tool' && e.phase === 'end')
+    if (end === undefined || end.cat !== 'tool' || end.phase !== 'end') throw new Error('expected tool end')
+    expect(end.isError).toBe(true)
+    expect(end.result).toBe('exit code 1')
+  })
+
+  test('top-level role:toolResult joins multiple text parts and surfaces tool-result-cap markers verbatim', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'assistant',
+              content: [{ type: 'toolCall', id: 'read:0', name: 'read', arguments: { path: 'big.txt' } }],
+              timestamp: 1_000,
+            },
+          }),
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'toolResult',
+              toolCallId: 'read:0',
+              toolName: 'read',
+              content: [
+                { type: 'text', text: 'first chunk' },
+                {
+                  type: 'text',
+                  text: '\n\n[tool-result-cap: 5000 bytes truncated from text part; original was 65536 bytes, textMaxBytes=65536]',
+                },
+              ],
+              isError: false,
+              timestamp: 1_100,
+            },
+          }),
+        ]),
+      ),
+    )
+    const end = events.find((e) => e.cat === 'tool' && e.phase === 'end')
+    if (end === undefined || end.cat !== 'tool' || end.phase !== 'end') throw new Error('expected tool end')
+    expect(end.result).toContain('first chunk')
+    expect(end.result).toContain('[tool-result-cap:')
+  })
+
+  test('top-level role:toolResult without a matching prior toolCall still emits a tool end (defensive: name from toolName)', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'toolResult',
+              toolCallId: 'orphan:0',
+              toolName: 'read',
+              content: [{ type: 'text', text: 'orphan result' }],
+              isError: false,
+              timestamp: 5_000,
+            },
+          }),
+        ]),
+      ),
+    )
+    expect(events).toHaveLength(1)
+    const end = events[0]!
+    if (end.cat !== 'tool' || end.phase !== 'end') throw new Error('expected tool end')
+    expect(end.name).toBe('read')
+    expect(end.durationMs).toBe(0)
+    expect(end.result).toBe('orphan result')
+  })
+
+  test('top-level role:toolResult message does NOT emit a spurious done event', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'toolResult',
+              toolCallId: 'read:0',
+              toolName: 'read',
+              content: [{ type: 'text', text: 'x' }],
+              isError: false,
+              timestamp: 1_000,
+            },
+          }),
+        ]),
+      ),
+    )
+    expect(events.find((e) => e.cat === 'done')).toBeUndefined()
+  })
 })
 
 describe('replayJsonl (real file in tmpdir)', () => {
