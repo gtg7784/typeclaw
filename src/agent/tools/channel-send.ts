@@ -11,6 +11,7 @@ import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
 import { renderOutboundEcho, TOOL_RESULT_PREFIX } from './channel-reply'
+import { fenceRuntimeNotice } from './runtime-notice'
 
 export type ChannelSendOrigin = {
   adapter: AdapterId
@@ -177,7 +178,7 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
         })
         if (threadMismatch) hints.push(threadMismatch)
       }
-      const body = hints.length > 0 ? `${baseText} — ${hints.join(' ')}` : baseText
+      const body = hints.length > 0 ? `${baseText}${hints.join('')}` : baseText
       return {
         content: [{ type: 'text' as const, text: `${TOOL_RESULT_PREFIX}${body}` }],
         details,
@@ -195,6 +196,11 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
 //
 // Only fires when the origin had a thread to begin with — channel-root
 // sessions can't have a "missing thread" problem.
+//
+// Body is fenced via `fenceRuntimeNotice` for the same reason the
+// consecutive-send hint is — see that helper's comment for the failure
+// mode (Kimi-K2.x reading trailing tool-result prose as a chat instruction
+// and replying to it in-character).
 function threadMismatchHint(
   origin: ChannelSendOrigin | undefined,
   sent: { adapter: AdapterId; workspace: string; chat: string; thread: string | undefined },
@@ -205,10 +211,10 @@ function threadMismatchHint(
   if (origin.adapter !== sent.adapter) return ''
   if (origin.workspace !== sent.workspace) return ''
   if (origin.chat !== sent.chat) return ''
-  return (
+  return fenceRuntimeNotice(
     `note: this session's origin thread is ${JSON.stringify(origin.thread)} but you posted to channel root. ` +
-    `if breaking out of the thread was intentional, ignore this; otherwise prefer \`channel_reply\` ` +
-    `or pass \`thread: ${JSON.stringify(origin.thread)}\` on your next channel_send.`
+      `if breaking out of the thread was intentional, ignore this; otherwise prefer \`channel_reply\` ` +
+      `or pass \`thread: ${JSON.stringify(origin.thread)}\` on your next channel_send.`,
   )
 }
 
@@ -263,10 +269,12 @@ function kimiToolCallLeakError(text: string | undefined): string {
 // "this is the second consecutive bot message in this chat:thread" — which
 // is the first count where a hint is warranted. Empty string at count <= 1
 // preserves the original tool-result text for the common single-reply case.
+// Mirror of channel-reply.ts; body wrapped via `fenceRuntimeNotice`.
 function consecutiveSendHint(countAfterSend: number): string {
   if (countAfterSend <= 1) return ''
-  if (countAfterSend === 2) {
-    return 'this is your 2nd consecutive message in this conversation; continue only if the reply genuinely needs splitting.'
-  }
-  return `${countAfterSend}th consecutive message with no user reply; end your turn now unless the user explicitly asked for a multi-step response.`
+  const body =
+    countAfterSend === 2
+      ? 'this is your 2nd consecutive message in this conversation; continue only if the reply genuinely needs splitting.'
+      : `${countAfterSend}th consecutive message with no user reply; end your turn now unless the user explicitly asked for a multi-step response.`
+  return fenceRuntimeNotice(body)
 }
