@@ -187,6 +187,22 @@ describe('memory plugin shape', () => {
     expect(exports.tools?.memory_search).toBeDefined()
   })
 
+  test('memory-retrieval declares profile=fast', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    expect(exports.subagents?.['memory-retrieval']?.profile).toBe('fast')
+  })
+
+  test('plumbs retrievalSpawnTimeoutMs onto the memory-retrieval subagent declaration', async () => {
+    // given a non-default retrieval timeout
+    const { exports } = await bootMemoryPlugin(agentDir, { retrievalSpawnTimeoutMs: 7777 })
+
+    // when reading the subagent the plugin contributed
+    const retrieval = exports.subagents?.['memory-retrieval']
+
+    // then the timeout flows to the field the orchestration layer reads
+    expect(retrieval?.timeoutMs).toBe(7777)
+  })
+
   test('registers a dreaming cron job with the configured schedule', async () => {
     const { exports } = await bootMemoryPlugin(agentDir, { dreaming: { schedule: '*/5 * * * *' } })
     const cron = exports.cronJobs?.dreaming

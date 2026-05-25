@@ -48,6 +48,20 @@ export type SubagentShared<P = unknown> = {
   toolResultBudget?: ToolResultBudget
   visibility?: 'public' | 'internal'
   requiresSpecificPermission?: boolean
+  // Wall-clock ceiling on a single spawn, enforced at the orchestration
+  // layer (both `dispatchSpawnSubagent` and the stream-driven
+  // `SubagentConsumer`). When exceeded, the orchestrator's `await` settles
+  // with a timeout error and releases the coalescing key for `inFlightKey`,
+  // so the next spawn of the same (name, inFlightKey) can proceed instead
+  // of being skip-coalesced. The underlying `invokeSubagent` call may keep
+  // running — pi-coding-agent's `session.prompt` does not accept an
+  // AbortSignal today, so a half-open LLM stream stays alive until the OS
+  // reaps it. The trade-off is honest: cancellation is upstream's job;
+  // releasing the coalescing key is ours, and that is what unblocks the
+  // user-visible "every subsequent turn skipped while the first spawn
+  // hangs" symptom. Omit for no ceiling (legacy behavior; the spawn waits
+  // as long as the provider takes).
+  timeoutMs?: number
 }
 
 export type Subagent<P = unknown> = SubagentShared<P> & {
@@ -245,6 +259,42 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
     await subagent.handler(ctx, runSession)
   } else {
     await runSession()
+  }
+}
+
+export class SubagentTimeoutError extends Error {
+  override readonly name = 'SubagentTimeoutError'
+  constructor(
+    readonly subagentName: string,
+    readonly coalesceKey: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`subagent ${subagentName} (key=${coalesceKey}) spawn timed out after ${timeoutMs}ms`)
+  }
+}
+
+export function isSubagentTimeoutError(err: unknown): err is SubagentTimeoutError {
+  return err instanceof SubagentTimeoutError
+}
+
+export async function awaitWithSubagentTimeout(
+  work: Promise<void>,
+  subagentName: string,
+  coalesceKey: string,
+  timeoutMs: number | undefined,
+): Promise<void> {
+  if (timeoutMs === undefined) {
+    await work
+    return
+  }
+  let timer: ReturnType<typeof setTimeout> | null = null
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SubagentTimeoutError(subagentName, coalesceKey, timeoutMs)), timeoutMs)
+  })
+  try {
+    await Promise.race([work, timeout])
+  } finally {
+    if (timer !== null) clearTimeout(timer)
   }
 }
 
@@ -447,20 +497,29 @@ export function createSubagentConsumer({
         inFlight.add(key)
         try {
           const spawnedByOrigin = parseSpawnedByOriginJson(target.spawnedByOriginJson, logger, name)
-          await invokeSubagent(name, {
-            registry,
-            ...(createSessionForSubagent !== undefined ? { createSessionForSubagent } : {}),
-            agentDir,
-            userPrompt: '',
-            payload: msg.payload,
-            onProviderError: (message) => logger.error(`[subagent] ${key}: LLM call failed: ${message}`),
-            ...(target.parentSessionId !== undefined ? { parentSessionId: target.parentSessionId } : {}),
-            ...(target.spawnedByRole !== undefined ? { spawnedByRole: target.spawnedByRole } : {}),
-            ...(spawnedByOrigin !== undefined ? { spawnedByOrigin } : {}),
-          })
+          await awaitWithSubagentTimeout(
+            invokeSubagent(name, {
+              registry,
+              ...(createSessionForSubagent !== undefined ? { createSessionForSubagent } : {}),
+              agentDir,
+              userPrompt: '',
+              payload: msg.payload,
+              onProviderError: (message) => logger.error(`[subagent] ${key}: LLM call failed: ${message}`),
+              ...(target.parentSessionId !== undefined ? { parentSessionId: target.parentSessionId } : {}),
+              ...(target.spawnedByRole !== undefined ? { spawnedByRole: target.spawnedByRole } : {}),
+              ...(spawnedByOrigin !== undefined ? { spawnedByOrigin } : {}),
+            }),
+            name,
+            key,
+            registry[name]?.timeoutMs,
+          )
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err)
-          logger.error(`[subagent] ${key} failed: ${message}`)
+          if (isSubagentTimeoutError(err)) {
+            logger.warn(`[subagent] ${key} timed out after ${err.timeoutMs}ms; releasing coalesce key`)
+          } else {
+            const message = err instanceof Error ? err.message : String(err)
+            logger.error(`[subagent] ${key} failed: ${message}`)
+          }
         } finally {
           inFlight.delete(key)
         }
