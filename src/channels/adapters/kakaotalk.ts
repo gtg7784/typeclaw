@@ -257,7 +257,7 @@ export function createKakaoHistoryCallback(deps: {
             authorId,
             authorName,
             text: formatHistoryText(m),
-            ts: m.sent_at,
+            ts: m.sent_at * 1000,
             isBot: selfId !== null && authorId === selfId,
             replyToBotMessageId: null,
           }

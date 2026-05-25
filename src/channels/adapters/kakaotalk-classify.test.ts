@@ -33,7 +33,7 @@ const event = (overrides: Partial<KakaoTalkPushMessageEvent> = {}): KakaoTalkPus
   message: 'hello',
   message_type: 1,
   attachment: null,
-  sent_at: 1_730_000_000_000,
+  sent_at: 1_730_000_000,
   ...overrides,
 })
 
@@ -86,6 +86,7 @@ describe('classifyInbound', () => {
     expect(verdict.payload.externalMessageId).toBe('L1')
     expect(verdict.payload.authorId).toBe('222')
     expect(verdict.payload.ts).toBe(1_730_000_000_000)
+    expect(new Date(verdict.payload.ts).getUTCFullYear()).toBe(2024)
     expect(verdict.payload.authorIsBot).toBe(false)
     expect(verdict.payload.replyToBotMessageId).toBeNull()
     expect(verdict.payload.replyToOtherMessageId).toBeNull()

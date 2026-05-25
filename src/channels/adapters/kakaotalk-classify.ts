@@ -67,7 +67,10 @@ export function classifyInbound(
       mentionsOthers: false,
       replyToOtherMessageId: null,
       isDm: chatInfo.isDm,
-      ts: event.sent_at,
+      // SDK delivers `sent_at` in Unix seconds (LOCO `sendAt`); contract
+      // wants ms (see `src/channels/types.ts`). Without `* 1000`, ms-based
+      // renderers (inspect -f, etc.) produce 1970-01-21-shaped dates.
+      ts: event.sent_at * 1000,
     },
   }
 }
