@@ -498,6 +498,106 @@ describe('createSubagentConsumer', () => {
     consumer.stop()
   })
 
+  test('timeoutMs releases the inFlight coalesce key when a spawn exceeds its ceiling', async () => {
+    // given: a subagent whose handler never settles (mirrors a wedged
+    // provider call) and a 30ms timeoutMs. Without the ceiling, the second
+    // spawn would stay coalesce-skipped forever; with it, the timeout fires,
+    // the key releases, and the second spawn proceeds.
+    const stream = createStream()
+    const warnings: string[] = []
+    const completions: string[] = []
+    let firstStarted = false
+    const registry = {
+      wedge: {
+        systemPrompt: 'X',
+        timeoutMs: 30,
+        handler: async () => {
+          if (!firstStarted) {
+            firstStarted = true
+            await new Promise<void>(() => {})
+            return
+          }
+          completions.push('second')
+        },
+      } satisfies Subagent,
+    }
+    const consumer = createSubagentConsumer({
+      stream,
+      getRegistry: () => registry,
+      agentDir: '/agent',
+      createSessionForSubagent: async () => fakeAgentSession([]),
+      logger: { ...silent, warn: (m) => warnings.push(m) },
+    })
+    consumer.start()
+
+    // when: first spawn wedges, then a second spawn fires after the timeout
+    stream.publish({ target: { kind: 'new-session', subagent: 'wedge' }, payload: undefined })
+    await new Promise((r) => setTimeout(r, 50))
+    stream.publish({ target: { kind: 'new-session', subagent: 'wedge' }, payload: undefined })
+    await new Promise((r) => setTimeout(r, 30))
+
+    // then: the timeout was logged with attribution, the coalesce key was
+    // released, and the second spawn ran to completion.
+    expect(warnings.some((w) => /timed out after 30ms/.test(w) && /releasing coalesce key/.test(w))).toBe(true)
+    expect(completions).toEqual(['second'])
+    expect(consumer.inFlightCount()).toBe(0)
+
+    consumer.stop()
+  })
+
+  test('undefined timeoutMs preserves legacy behavior (waits for the spawn to settle)', async () => {
+    // given: a slow subagent with no timeoutMs. The first spawn must
+    // complete before the second runs — same coalescing semantics as before
+    // this surface existed.
+    const stream = createStream()
+    const completions: string[] = []
+    let releaseFirst: () => void = () => {}
+    const registry = {
+      slow: {
+        systemPrompt: 'X',
+        handler: async (ctx) => {
+          const id = (ctx.payload as { id: string }).id
+          if (id === 'first') {
+            await new Promise<void>((r) => {
+              releaseFirst = r
+            })
+          }
+          completions.push(id)
+        },
+        payloadSchema: z.object({ id: z.string() }),
+      } satisfies Subagent<{ id: string }>,
+    }
+    const consumer = createSubagentConsumer({
+      stream,
+      getRegistry: () => registry,
+      agentDir: '/agent',
+      createSessionForSubagent: async () => fakeAgentSession([]),
+      inFlightKey: (name) => name,
+      logger: silent,
+    })
+    consumer.start()
+
+    // when: two spawns fire while the first is gated
+    stream.publish({ target: { kind: 'new-session', subagent: 'slow' }, payload: { id: 'first' } })
+    await new Promise((r) => setImmediate(r))
+    stream.publish({ target: { kind: 'new-session', subagent: 'slow' }, payload: { id: 'second' } })
+    await new Promise((r) => setImmediate(r))
+
+    // then: only the first started; the second was coalesce-skipped
+    expect(completions).toEqual([])
+
+    // when: release the first
+    releaseFirst()
+    await new Promise((r) => setImmediate(r))
+
+    // then: only the first completed; the coalesce-skipped second was dropped
+    // by the consumer (not re-queued) — same as today's behavior.
+    expect(completions).toEqual(['first'])
+    expect(consumer.inFlightCount()).toBe(0)
+
+    consumer.stop()
+  })
+
   test('logs LLM soft errors emitted via message_end during prompt() so `typeclaw logs` surfaces them', async () => {
     // given: a subagent whose underlying session emits a message_end with
     // stopReason=error during prompt(), mirroring how pi-coding-agent

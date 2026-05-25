@@ -5,9 +5,11 @@ import { LiveSessionRegistry } from '@/agent/live-sessions'
 import { LiveSubagentRegistry } from '@/agent/live-subagents'
 import type { SessionOrigin } from '@/agent/session-origin'
 import {
+  awaitWithSubagentTimeout,
   createSubagentConsumer,
   defaultCreateSessionForSubagent,
   invokeSubagent,
+  isSubagentTimeoutError,
   type Subagent as InternalSubagent,
   type SubagentConsumer,
   type SubagentRegistry,
@@ -469,17 +471,31 @@ export async function startAgent({
         options?.spawnedByOrigin !== undefined
           ? pluginsLoaded.permissions.resolveRole(options.spawnedByOrigin)
           : undefined
-      await invokeSubagent(name, {
-        registry: pluginRuntime.get().subagents,
-        createSessionForSubagent,
-        agentDir: cwd,
-        userPrompt: '',
-        payload,
-        onProviderError: (message) => console.error(`[subagent] ${name}: LLM call failed: ${message}`),
-        ...(options?.parentSessionId !== undefined ? { parentSessionId: options.parentSessionId } : {}),
-        ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
-        ...(options?.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
-      })
+      const registry = pluginRuntime.get().subagents
+      try {
+        await awaitWithSubagentTimeout(
+          invokeSubagent(name, {
+            registry,
+            createSessionForSubagent,
+            agentDir: cwd,
+            userPrompt: '',
+            payload,
+            onProviderError: (message) => console.error(`[subagent] ${name}: LLM call failed: ${message}`),
+            ...(options?.parentSessionId !== undefined ? { parentSessionId: options.parentSessionId } : {}),
+            ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
+            ...(options?.spawnedByOrigin !== undefined ? { spawnedByOrigin: options.spawnedByOrigin } : {}),
+          }),
+          name,
+          coalesceKey,
+          registry[name]?.timeoutMs,
+        )
+      } catch (err) {
+        if (isSubagentTimeoutError(err)) {
+          console.warn(`[subagent] ${coalesceKey} timed out after ${err.timeoutMs}ms; releasing coalesce key`)
+          return
+        }
+        throw err
+      }
     } finally {
       directSpawnInFlight.delete(coalesceKey)
     }
