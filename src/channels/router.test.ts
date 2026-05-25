@@ -4132,6 +4132,45 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     expect(combined.indexOf('<system-reminder>')).toBeLessThan(combined.indexOf('follow up'))
   })
 
+  test('reminder-only drain with non-empty contextBuffer never emits an EMPTY `## Current message` header', async () => {
+    // Regression: when a reminder woke drain() with an empty promptQueue
+    // and a non-empty contextBuffer, composeTurnPrompt used to print
+    // `## Current message (addressed to you)` with zero lines under it.
+    // Persona-rich models read the dangling header as proof there was a
+    // new user message they were failing to see and hallucinated content
+    // to reply to. The header is now batch-gated.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    // given: an engaged inbound creates the live session, then an observed
+    // inbound from a different author lands in the contextBuffer (engagement
+    // 'observe' branch — the contextBuffer is what flushes on the next drain)
+    await router.route(inbound({ isBotMention: true, authorId: 'carol', authorName: 'carol', text: 'hi bot' }))
+    await router.__testing!.flushDebounce(KEY)
+    await router.route(inbound({ isBotMention: false, authorId: 'bob', authorName: 'bob', text: 'side chatter' }))
+    const promptsBeforeReminder = sessions[0]!.prompts.length
+
+    // when: a subagent completion fires while the promptQueue is empty
+    router.injectSubagentCompletionReminder({
+      parentSessionId: 'ses_fake_1',
+      subagent: 'explorer',
+      taskId: 'bg_empty_current',
+      ok: true,
+      durationMs: 100,
+    })
+    await waitFor(() => sessions[0]!.prompts.length > promptsBeforeReminder)
+
+    // then: the reminder prompt carries the reminder + observed context,
+    // but the `## Current message` header is absent because there is no
+    // queued inbound to live under it
+    const reminderPrompt = sessions[0]!.prompts[sessions[0]!.prompts.length - 1] ?? ''
+    expect(reminderPrompt).toContain('<system-reminder>')
+    expect(reminderPrompt).toContain('bg_empty_current')
+    expect(reminderPrompt).toContain('## Recent context')
+    expect(reminderPrompt).toContain('side chatter')
+    expect(reminderPrompt).not.toContain('## Current message')
+  })
+
   test("reminder lookup skips destroyed sessions (channels GC'd while subagent was running drops the reminder)", async () => {
     const dir = await tempDir()
     const { router } = makeRouter(dir)
