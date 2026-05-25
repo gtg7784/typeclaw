@@ -56,6 +56,10 @@ export function createMemoryRetrievalSubagent(
   const logger = options.logger ?? consoleLogger
   return {
     systemPrompt: MEMORY_RETRIEVAL_SYSTEM_PROMPT,
+    // Retrieval is "4 keyword searches + 1 write" — no reasoning required.
+    // `fast` falls back to `default` (with a one-time warning) when the
+    // operator hasn't configured it, so this is safe by construction.
+    profile: 'fast',
     tools: [readTool, writeTool, lsTool],
     customTools: [memorySearchTool],
     payloadSchema: memoryRetrievalPayloadSchema,

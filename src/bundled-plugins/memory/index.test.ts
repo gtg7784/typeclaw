@@ -187,6 +187,11 @@ describe('memory plugin shape', () => {
     expect(exports.tools?.memory_search).toBeDefined()
   })
 
+  test('memory-retrieval declares profile=fast', async () => {
+    const { exports } = await bootMemoryPlugin(agentDir, {})
+    expect(exports.subagents?.['memory-retrieval']?.profile).toBe('fast')
+  })
+
   test('registers a dreaming cron job with the configured schedule', async () => {
     const { exports } = await bootMemoryPlugin(agentDir, { dreaming: { schedule: '*/5 * * * *' } })
     const cron = exports.cronJobs?.dreaming

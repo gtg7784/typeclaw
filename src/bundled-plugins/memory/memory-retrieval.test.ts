@@ -50,6 +50,10 @@ describe('memoryRetrievalSubagent', () => {
     )
   })
 
+  test('declares profile=fast so retrieval runs on a non-reasoning model', () => {
+    expect(memoryRetrievalSubagent.profile).toBe('fast')
+  })
+
   test('inFlightKey keys on parentSessionId', () => {
     expect(
       memoryRetrievalSubagent.inFlightKey!({
