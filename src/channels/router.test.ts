@@ -1162,6 +1162,114 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sent).toHaveLength(0)
   })
 
+  test('suppresses recovery when assistant ends with NO_REPLY after leaked reasoning', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'haha' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText(
+        'The user is laughing. This is just a reaction, not a direct request. I can choose to not reply. ' +
+          "However, given the recent engagement, a brief no-op is fine. But since the user didn't ask anything, " +
+          "I'll end with NO_REPLY.NO_REPLY",
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('no_reply (with_leaked_reasoning)'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('suppresses recovery when assistant ends with bare NO_REPLY after prose', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'just FYI' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText("Nothing to add here. I'll end with NO_REPLY")
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('no_reply (with_leaked_reasoning)'))).toBe(true)
+  })
+
+  test('suppresses recovery when assistant ends with parenthesized (NO_REPLY) after prose', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'just FYI' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('Nothing actionable in this message. (NO_REPLY)')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('no_reply (with_leaked_reasoning)'))).toBe(true)
+  })
+
+  test('still recovers prose that mentions NO_REPLY mid-sentence (not at end)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'what does NO_REPLY do?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText(
+        'NO_REPLY is the silent-turn signal — the agent ends its turn with it to stay quiet.',
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('silent-turn signal')
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
+  })
+
+  test('still recovers prose where NO_REPLY appears as a substring of another token', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'which env var?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('The env var is named NO_REPLY_MODE')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('NO_REPLY_MODE')
+  })
+
   test('suppresses upstream `(Empty response: ...)` sentinel instead of leaking thinking/signature', async () => {
     const dir = await tempDir()
     const logs: string[] = []

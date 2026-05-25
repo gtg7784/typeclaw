@@ -1742,8 +1742,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const assistantText = latestAssistantText(live.session)
     if (assistantText === null) return
 
-    if (isNoReplySignal(assistantText)) {
-      logger.info(`[channels] ${live.keyId} no_reply`)
+    if (endsWithNoReplySignal(assistantText)) {
+      const leakedReasoning = !isNoReplySignal(assistantText)
+      logger.info(`[channels] ${live.keyId} no_reply${leakedReasoning ? ' (with_leaked_reasoning)' : ''}`)
       return
     }
 
@@ -2320,6 +2321,45 @@ export function isNoReplySignal(text: string): boolean {
   if (trimmed === 'NO_REPLY') return true
   if (trimmed === '(NO_REPLY)') return true
   return false
+}
+
+// Looser sibling of isNoReplySignal, used ONLY by validateChannelTurn's
+// recovery path. Catches leaked-reasoning turns where the model produced
+// prose and then ended with the silent-turn token, e.g.
+//   "The user is laughing. ... I'll end with NO_REPLY.NO_REPLY"
+// Today those fall through to recovery and the entire reasoning paragraph
+// gets posted to the channel — the worst-possible outcome, since the leaked
+// prose is itself an admission that the model intended to stay silent.
+//
+// NOT shared with channel_send / channel_reply misuse guards: those need
+// strict literal match so a legitimate message like "set NO_REPLY=true in
+// the env" isn't rejected as a misuse of the silent-turn signal. Recovery
+// is a different question — by the time we get here the model already
+// failed to call the tool, and "ends in NO_REPLY" is strong evidence of
+// intent to stay silent, not of intent to send those bytes.
+//
+// Matches (returns true):
+//   "NO_REPLY"                        (strict)
+//   "(NO_REPLY)"                      (strict, parenthesized)
+//   "... I'll end with NO_REPLY"      (trailing token after whitespace)
+//   "... end with NO_REPLY."          (+ sentence punctuation)
+//   "... end with NO_REPLY.NO_REPLY"  (model-doubled terminator, glued)
+//   "... and stop. (NO_REPLY)"        (parenthesized at end)
+// Does not match (returns false):
+//   "NO_REPLY means do nothing"       (token at start, prose after)
+//   "the env var is NO_REPLY_MODE"    (substring, not whole token)
+//   "no reply needed"                 (case-sensitive on purpose)
+export function endsWithNoReplySignal(text: string): boolean {
+  if (isNoReplySignal(text)) return true
+  const trimmed = text.trim()
+  if (trimmed === '') return false
+  // Strip trailing sentence punctuation / closing brackets / whitespace, then
+  // check the last whitespace-or-punctuation-separated token. The leading
+  // boundary in the regex (`[\s.!?([]`) treats `.NO_REPLY` as a separate
+  // token from the preceding sentence, which covers the model-doubled
+  // `...NO_REPLY.NO_REPLY` shape.
+  const tail = trimmed.replace(/[.!?)\]\s]+$/, '')
+  return /(?:^|[\s.!?([])\(?NO_REPLY\)?$/.test(tail)
 }
 
 // Detects the upstream "empty response" debug sentinel: when the LLM ends a
