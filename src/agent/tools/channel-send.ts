@@ -10,7 +10,7 @@ import {
 import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
-import { renderOutboundEcho } from './channel-reply'
+import { renderOutboundEcho, TOOL_RESULT_PREFIX } from './channel-reply'
 
 export type ChannelSendOrigin = {
   adapter: AdapterId
@@ -177,9 +177,9 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
         })
         if (threadMismatch) hints.push(threadMismatch)
       }
-      const responseText = hints.length > 0 ? `${baseText} — ${hints.join(' ')}` : baseText
+      const body = hints.length > 0 ? `${baseText} — ${hints.join(' ')}` : baseText
       return {
-        content: [{ type: 'text' as const, text: responseText }],
+        content: [{ type: 'text' as const, text: `${TOOL_RESULT_PREFIX}${body}` }],
         details,
       }
     },

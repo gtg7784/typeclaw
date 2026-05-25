@@ -162,13 +162,23 @@ export function createChannelReplyTool({
             }),
           )
         : ''
+      const body = hint ? `${baseText} — ${hint}` : baseText
       return {
-        content: [{ type: 'text' as const, text: hint ? `${baseText} — ${hint}` : baseText }],
+        content: [{ type: 'text' as const, text: `${TOOL_RESULT_PREFIX}${body}` }],
         details,
       }
     },
   })
 }
+
+// Tool results reach the model as USER-role messages (OpenAI / Anthropic
+// tool-API contract — the engine cannot tag them as system). Without this
+// marker a persona-rich model reads its own echo as a fresh user inbound
+// and replies to itself. Observed in production: Kimi K2 on KakaoTalk
+// re-invoked after a successful send saw only the echo as new context
+// and hallucinated a goodbye trigger from it. Mirrored verbatim in
+// channel-send.ts so both tools share one greppable marker.
+export const TOOL_RESULT_PREFIX = '[system: tool result, not a user message] '
 
 export const ECHO_MAX_CHARS = 500
 

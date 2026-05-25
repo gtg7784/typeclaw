@@ -8,6 +8,7 @@ import {
   ECHO_MAX_CHARS,
   renderEcho,
   renderOutboundEcho,
+  TOOL_RESULT_PREFIX,
   type ChannelReplyOrigin,
 } from './channel-reply'
 
@@ -107,7 +108,7 @@ describe('createChannelReplyTool', () => {
     })
     const result = await runTool(tool, { text: 'hi' })
     const text = (result.content[0] as { text: string }).text
-    expect(text).toBe('posted to slack-bot:T0/C0: "hi"')
+    expect(text).toBe(`${TOOL_RESULT_PREFIX}posted to slack-bot:T0/C0: "hi"`)
   })
 
   test('echoes JSON-quoted text so the model can detect duplicates across iterations', async () => {
@@ -143,6 +144,41 @@ describe('createChannelReplyTool', () => {
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('channel_reply denied')
     expect(text).toContain('denied by allow rules')
+  })
+
+  describe('tool-result marker', () => {
+    test('success branch is prefixed with the marker so the model cannot read the echo as a user message', async () => {
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async () => ({ ok: true })),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, { text: 'hi' })
+      const text = (result.content[0] as { text: string }).text
+      expect(text.startsWith(TOOL_RESULT_PREFIX)).toBe(true)
+      expect(text).toContain('not a user message')
+    })
+
+    test('denial branch is also prefixed with the marker (same framing for both outcomes)', async () => {
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async () => ({ ok: false, error: 'denied by allow rules' })),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, { text: 'nope' })
+      const text = (result.content[0] as { text: string }).text
+      expect(text.startsWith(TOOL_RESULT_PREFIX)).toBe(true)
+      expect(text).toContain('channel_reply denied')
+    })
+
+    test('marker survives the consecutive-send hint (prefix stays at the very start)', async () => {
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 2 }),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, { text: 'continuing' })
+      const text = (result.content[0] as { text: string }).text
+      expect(text.startsWith(TOOL_RESULT_PREFIX)).toBe(true)
+      expect(text).toContain('2nd consecutive message')
+    })
   })
 
   test('second consecutive reply appends a soft yield hint', async () => {

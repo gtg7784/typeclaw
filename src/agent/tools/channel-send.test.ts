@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ChannelRouter } from '@/channels/router'
 import type { OutboundMessage, SendResult } from '@/channels/types'
 
+import { TOOL_RESULT_PREFIX } from './channel-reply'
 import { createChannelSendTool } from './channel-send'
 
 function fakeRouter(
@@ -114,7 +115,7 @@ describe('createChannelSendTool', () => {
       text: 'first reply',
     })
     const text = (result.content[0] as { text: string }).text
-    expect(text).toBe('posted to slack-bot:T0/C0: "first reply"')
+    expect(text).toBe(`${TOOL_RESULT_PREFIX}posted to slack-bot:T0/C0: "first reply"`)
   })
 
   test('second consecutive send appends a soft yield hint', async () => {
@@ -193,7 +194,7 @@ describe('createChannelSendTool', () => {
         text: 'in thread',
       })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toBe('posted to slack-bot:T0/C0: "in thread"')
+      expect(text).toBe(`${TOOL_RESULT_PREFIX}posted to slack-bot:T0/C0: "in thread"`)
     })
 
     test('does NOT warn when the model deliberately posts to a DIFFERENT chat', async () => {
@@ -208,7 +209,7 @@ describe('createChannelSendTool', () => {
         text: 'cross-channel post',
       })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toBe('posted to slack-bot:T0/C-other: "cross-channel post"')
+      expect(text).toBe(`${TOOL_RESULT_PREFIX}posted to slack-bot:T0/C-other: "cross-channel post"`)
     })
 
     test('does NOT warn when the origin had no thread to begin with (channel-root origin)', async () => {
@@ -223,7 +224,7 @@ describe('createChannelSendTool', () => {
         text: 'channel-root reply',
       })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toBe('posted to slack-bot:T0/C0: "channel-root reply"')
+      expect(text).toBe(`${TOOL_RESULT_PREFIX}posted to slack-bot:T0/C0: "channel-root reply"`)
     })
 
     test('does NOT warn when no origin is supplied (cron / non-channel session)', async () => {
@@ -232,7 +233,7 @@ describe('createChannelSendTool', () => {
       })
       const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'cron post' })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toBe('posted to slack-bot:T0/C0: "cron post"')
+      expect(text).toBe(`${TOOL_RESULT_PREFIX}posted to slack-bot:T0/C0: "cron post"`)
     })
 
     test('does NOT warn on adapter mismatch (cross-platform post)', async () => {
@@ -247,7 +248,7 @@ describe('createChannelSendTool', () => {
         text: 'cross-platform',
       })
       const text = (result.content[0] as { text: string }).text
-      expect(text).toBe('posted to discord-bot:g1/d1: "cross-platform"')
+      expect(text).toBe(`${TOOL_RESULT_PREFIX}posted to discord-bot:g1/d1: "cross-platform"`)
     })
 
     test('combines with the consecutive-send hint when both fire', async () => {

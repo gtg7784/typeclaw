@@ -2119,10 +2119,23 @@ function composeTurnPrompt(
       parts.push(formatAuthorLine(o.ts, o.authorId, o.authorName, o.authorIsBot, o.text))
     }
     parts.push('')
-    parts.push(batch.length === 1 ? '## Current message (addressed to you)' : '## Current messages (addressed to you)')
   }
-  for (const b of batch) {
-    parts.push(formatAuthorLine(b.ts, b.authorId, b.authorName, b.authorIsBot, b.text))
+  // Only emit the `## Current message(s)` header when there is at least one
+  // queued inbound to live under it. A reminder-only wakeup (subagent
+  // completion firing while the prompt queue is empty) used to print the
+  // header with zero lines underneath; persona-rich models read the empty
+  // header as "there must be a current message addressed to me" and
+  // hallucinated content to reply to. The header is now batch-gated; the
+  // reminder block above and any observed context still render normally.
+  if (batch.length > 0) {
+    if (observed.length > 0) {
+      parts.push(
+        batch.length === 1 ? '## Current message (addressed to you)' : '## Current messages (addressed to you)',
+      )
+    }
+    for (const b of batch) {
+      parts.push(formatAuthorLine(b.ts, b.authorId, b.authorName, b.authorIsBot, b.text))
+    }
   }
   return parts.join('\n')
 }
