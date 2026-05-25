@@ -150,6 +150,35 @@ describe('createChannelSendTool', () => {
     expect(text).toContain('"still going"')
   })
 
+  test('consecutive-send hint is fenced as a SYSTEM MESSAGE so persona-rich models cannot read it as chat', async () => {
+    const tool = createChannelSendTool({
+      router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 4 }),
+    })
+    const result = await runTool(tool, {
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      text: 'still going',
+    })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('**[SYSTEM MESSAGE — not from a human]**')
+    expect(text).toContain('Do not acknowledge or reply to this notice')
+    expect(text).toMatch(/---\s*\n\*\*\[SYSTEM MESSAGE/)
+    expect(text).toMatch(/Do not acknowledge or reply to this notice\.\*\*\s*\n---/)
+  })
+
+  test('thread-mismatch hint is also fenced as a SYSTEM MESSAGE', async () => {
+    const tool = createChannelSendTool({
+      router: fakeRouter(async () => ({ ok: true })),
+      origin: { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: '1700000000.000100' },
+    })
+    const result = await runTool(tool, { adapter: 'slack-bot', workspace: 'T0', chat: 'C0', text: 'oops' })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('**[SYSTEM MESSAGE — not from a human]**')
+    expect(text).toContain('Do not acknowledge or reply to this notice')
+    expect(text).toContain('origin thread is "1700000000.000100"')
+  })
+
   test('denied sends never carry the hint suffix', async () => {
     const tool = createChannelSendTool({
       router: fakeRouter(async () => ({ ok: false, error: 'denied by allow rules' }), {

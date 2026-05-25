@@ -192,6 +192,19 @@ describe('createChannelReplyTool', () => {
     expect(text).toContain('2nd consecutive message')
   })
 
+  test('consecutive-send hint is fenced as a SYSTEM MESSAGE so persona-rich models cannot read it as chat', async () => {
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 2 }),
+      origin: slackThreadOrigin,
+    })
+    const result = await runTool(tool, { text: 'continuing' })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('**[SYSTEM MESSAGE — not from a human]**')
+    expect(text).toContain('Do not acknowledge or reply to this notice')
+    expect(text).toMatch(/---\s*\n\*\*\[SYSTEM MESSAGE/)
+    expect(text).toMatch(/Do not acknowledge or reply to this notice\.\*\*\s*\n---/)
+  })
+
   describe('renderEcho', () => {
     test('JSON-quotes short text', () => {
       expect(renderEcho('hi')).toBe('"hi"')

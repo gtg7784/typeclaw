@@ -10,6 +10,7 @@ import {
 import type { AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
+import { fenceRuntimeNotice } from './runtime-notice'
 
 export type ChannelReplyOrigin = {
   adapter: AdapterId
@@ -162,7 +163,7 @@ export function createChannelReplyTool({
             }),
           )
         : ''
-      const body = hint ? `${baseText} — ${hint}` : baseText
+      const body = hint ? `${baseText}${hint}` : baseText
       return {
         content: [{ type: 'text' as const, text: `${TOOL_RESULT_PREFIX}${body}` }],
         details,
@@ -246,11 +247,16 @@ function kimiToolCallLeakError(text: string | undefined): string {
 }
 
 // Mirror of the same hint used by channel_send. Kept identical so the model
-// sees the same yield signal regardless of which tool it picked.
+// sees the same yield signal regardless of which tool it picked. The body
+// is wrapped via `fenceRuntimeNotice` (in `./runtime-notice`) so persona-rich
+// models cannot read the trailing prose as a chat instruction and reply to
+// it in-character. See that helper's comment for the failure mode that
+// motivated the framing.
 function consecutiveSendHint(countAfterSend: number): string {
   if (countAfterSend <= 1) return ''
-  if (countAfterSend === 2) {
-    return 'this is your 2nd consecutive message in this conversation; continue only if the reply genuinely needs splitting.'
-  }
-  return `${countAfterSend}th consecutive message with no user reply; end your turn now unless the user explicitly asked for a multi-step response.`
+  const body =
+    countAfterSend === 2
+      ? 'this is your 2nd consecutive message in this conversation; continue only if the reply genuinely needs splitting.'
+      : `${countAfterSend}th consecutive message with no user reply; end your turn now unless the user explicitly asked for a multi-step response.`
+  return fenceRuntimeNotice(body)
 }
