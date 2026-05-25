@@ -27,6 +27,17 @@ const MIN_BUFFER_BYTES = 10_000
 // sporadic agents entirely. Operators can override via `memory.dreaming.schedule`.
 const DEFAULT_DREAMING_SCHEDULE = '*/30 * * * *'
 
+// memory-retrieval's ceiling, enforced by the orchestration layer (see
+// `awaitWithSubagentTimeout` in @/agent/subagents). 30s is sized for the
+// declared workload — up to 3 `memory_search` calls + 1 `write` against a
+// `fast`-profile model. The 5+ minute outliers observed in the wild
+// (reasoning-model cold-start on the default profile) require either a
+// genuinely wedged provider, a misconfigured profile that routes retrieval
+// to a reasoning model anyway, or both. In all three cases, releasing the
+// coalescing key after 30s lets the next channel turn spawn a fresh
+// retrieval instead of staying skip-coalesced behind the stuck one.
+const RETRIEVAL_SPAWN_TIMEOUT_MS = 30_000
+
 // Hard ceiling on a single memory-logger spawn. The chain serializes spawns
 // per agent, so a non-settling spawn would otherwise wedge every subsequent
 // fire — including the session.end hook path that gates cron consumer's
@@ -86,6 +97,11 @@ const memoryConfigSchema = z
     // the timeout in milliseconds instead of the production 50s. Kept
     // undocumented for users.
     spawnTimeoutMs: z.number().int().min(1).default(SPAWN_TIMEOUT_MS),
+    // Test seam: per-spawn ceiling for memory-retrieval. Same rationale as
+    // `spawnTimeoutMs` — operators have no reason to tune this; it exists
+    // so the wedge-recovery test for memory-retrieval can fire the timeout
+    // in milliseconds instead of the production 30s.
+    retrievalSpawnTimeoutMs: z.number().int().min(1).default(RETRIEVAL_SPAWN_TIMEOUT_MS),
     dreaming: dreamingConfigSchema.optional(),
   })
   .default({
@@ -93,6 +109,7 @@ const memoryConfigSchema = z
     bufferBytes: DEFAULT_BUFFER_BYTES,
     injectionBudgetBytes: DEFAULT_INJECTION_BUDGET_BYTES,
     spawnTimeoutMs: SPAWN_TIMEOUT_MS,
+    retrievalSpawnTimeoutMs: RETRIEVAL_SPAWN_TIMEOUT_MS,
   })
 
 export default definePlugin({
@@ -101,6 +118,7 @@ export default definePlugin({
     const idleMs = ctx.config.idleMs
     const bufferBytes = ctx.config.bufferBytes
     const spawnTimeoutMs = ctx.config.spawnTimeoutMs
+    const retrievalSpawnTimeoutMs = ctx.config.retrievalSpawnTimeoutMs
     const dreamingSchedule = ctx.config.dreaming?.schedule ?? DEFAULT_DREAMING_SCHEDULE
 
     const migrationResult = await runMigration({
@@ -224,7 +242,10 @@ export default definePlugin({
     return {
       subagents: {
         'memory-logger': createMemoryLoggerSubagent({ logger: subagentLogger }),
-        'memory-retrieval': createMemoryRetrievalSubagent({ logger: subagentLogger }),
+        'memory-retrieval': createMemoryRetrievalSubagent({
+          logger: subagentLogger,
+          timeoutMs: retrievalSpawnTimeoutMs,
+        }),
         dreaming: createDreamingSubagent({ logger: subagentLogger }),
       },
       tools: {

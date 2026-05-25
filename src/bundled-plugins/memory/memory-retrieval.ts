@@ -26,6 +26,7 @@ export type MemoryRetrievalLogger = {
 
 export type CreateMemoryRetrievalSubagentOptions = {
   logger?: MemoryRetrievalLogger
+  timeoutMs?: number
 }
 
 export const MEMORY_RETRIEVAL_SYSTEM_PROMPT = `You are the memory-retrieval subagent. Read the user's most recent prompt and decide what's relevant from BOTH topic shards in \`memory/topics/\` (consolidated long-term memory) AND undreamed daily-stream events under \`memory/streams/\` (recent fragments not yet folded into shards). Use \`memory_search\` to query both surfaces; use \`read\`/\`ls\` to pull full shard bodies when needed. Synthesize a focused ≤8 KB summary of the relevant memory. Save by \`write\`ing it to the exact path provided in your payload as \`cacheFilePath\`. Be ruthlessly concise. Do NOT write anywhere else. Do NOT delete files.
@@ -64,6 +65,7 @@ export function createMemoryRetrievalSubagent(
     customTools: [memorySearchTool],
     payloadSchema: memoryRetrievalPayloadSchema,
     inFlightKey: (payload) => payload.parentSessionId,
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     // 256 KB read + memory_search budget. Sized for one retrieval pass:
     // ~16 KB of memory_search hits (3 queries × ~5 KB excerpts) plus a few
     // shard reads (~5 KB each). A smaller budget would systematically

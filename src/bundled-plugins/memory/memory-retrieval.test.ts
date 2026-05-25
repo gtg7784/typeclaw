@@ -54,6 +54,12 @@ describe('memoryRetrievalSubagent', () => {
     expect(memoryRetrievalSubagent.profile).toBe('fast')
   })
 
+  test('timeoutMs flows from the factory option onto the Subagent declaration', () => {
+    expect(memoryRetrievalSubagent.timeoutMs).toBeUndefined()
+    const withTimeout = createMemoryRetrievalSubagent({ logger: silentLogger, timeoutMs: 1234 })
+    expect(withTimeout.timeoutMs).toBe(1234)
+  })
+
   test('inFlightKey keys on parentSessionId', () => {
     expect(
       memoryRetrievalSubagent.inFlightKey!({
