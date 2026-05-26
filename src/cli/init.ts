@@ -1171,6 +1171,10 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
         value: 'cloudflare-quick',
         label: 'Cloudflare Quick Tunnel — no signup, URL rotates on restart (recommended)',
       },
+      {
+        value: 'cloudflare-named',
+        label: 'Cloudflare Named Tunnel — stable URL, needs Cloudflare account + domain',
+      },
       { value: 'external', label: 'External URL — I have my own reverse proxy / tunnel' },
       { value: 'none', label: 'None — configure later by hand-editing typeclaw.json' },
     ],
@@ -1185,6 +1189,8 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
         })
       : undefined
   if (isCancel(webhookUrl)) return back()
+  const namedCreds = tunnelProvider === 'cloudflare-named' ? await promptGithubCloudflareNamedTunnel() : undefined
+  if (namedCreds === null) return back()
   const port = await text({
     message: 'Local webhook port inside the agent container',
     initialValue: '8975',
@@ -1214,10 +1220,43 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
       tunnelProvider,
       ...(webhookUrl !== undefined ? { webhookUrl } : {}),
       webhookPort: Number(port),
+      ...(namedCreds !== undefined ? namedCreds : {}),
       repos: parseGithubRepos(reposRaw),
       auth,
     },
   })
+}
+
+async function promptGithubCloudflareNamedTunnel(): Promise<{ hostname: string; tokenEnv: string } | null> {
+  note(
+    [
+      'Cloudflare Named Tunnel needs a tunnel you created in the Zero Trust dashboard:',
+      '  1. Networks → Tunnels → Create a tunnel → Cloudflared. Copy the token shown on the install screen.',
+      '  2. Public Hostname tab → Add: subdomain + your-domain, service type HTTP, URL localhost:<webhook port>.',
+      '  3. Put the token in .env under the env var name you supply below.',
+      'A tunnel without a Public Hostname registers but routes nothing.',
+    ].join('\n'),
+    'Cloudflare named tunnel',
+  )
+  const hostname = await text({
+    message: 'Public hostname configured in the dashboard (https://...)',
+    validate: (v) => validateGithubUrl(v ?? '', 'Hostname is required'),
+  })
+  if (isCancel(hostname)) return null
+  const tokenEnv = await text({
+    message: 'Env var name holding the tunnel token',
+    initialValue: 'CLOUDFLARE_TUNNEL_TOKEN',
+    validate: (v) => {
+      const raw = v ?? ''
+      if (raw.trim().length === 0) return 'Env var name is required'
+      if (!/^[A-Z_][A-Z0-9_]*$/.test(raw)) {
+        return 'Must be an env var name like CLOUDFLARE_TUNNEL_TOKEN (uppercase, digits, underscore)'
+      }
+      return undefined
+    },
+  })
+  if (isCancel(tokenEnv)) return null
+  return { hostname, tokenEnv }
 }
 
 async function promptGithubPatAuth(): Promise<{ type: 'pat'; pat: string } | null> {
