@@ -104,6 +104,33 @@ describe('renderSessionOrigin', () => {
     expect(out).toMatch(/rephrase, restate/i)
   })
 
+  // Regression for the Huxley Slack channel incident on 2026-05-26
+  // (session 019e62c2-179b-734a-9340-b9dd28254636): the model sent an ack
+  // via channel_reply ("I'll check and share results"), spawned an
+  // `explorer` subagent with run_in_background=true, then ended the turn
+  // with `stopReason=stop` and visible text `NO_REPLY`. The user never
+  // got the answer because the subagent-completion reminder arrived in a
+  // later turn that the model also failed to surface. The fix anchors
+  // the channel-session reply contract for the background-subagent case
+  // explicitly: backgrounding a worker is a deferred promise, not an
+  // exit. NO_REPLY is only legal on the post-result turn when the result
+  // is genuinely empty.
+  test('channel origin forbids NO_REPLY after spawning a background subagent for the current inbound', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: '1700000000.000100',
+    })
+    expect(out).toMatch(/Backgrounded work does not end the obligation/i)
+    expect(out).toMatch(/run_in_background:\s*true/i)
+    expect(out).toMatch(/promised a reply you have not delivered/i)
+    expect(out).toMatch(/subagent-completion .*system-reminder.* arrives/i)
+    expect(out).toMatch(/subagent_output/)
+    expect(out).toMatch(/`NO_REPLY` is only legal on the post-result turn/i)
+  })
+
   test('channel origin teaches channel_reply as the default and channel_send as the escape hatch', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
