@@ -35,10 +35,15 @@ class FakeSession {
   public aborted = 0
   public disposed = 0
   public leafEntry: SessionEntry | undefined
+  // Additional entries indexed by id for `getEntry` lookups. Walked by
+  // `recoverableAssistantText` when the leaf is a toolResult and we need to
+  // find the assistant message that called the tool.
+  public entriesById = new Map<string, SessionEntry>()
   public onPrompt: ((text: string) => void | Promise<void>) | undefined
 
   public sessionManager = {
     getLeafEntry: (): SessionEntry | undefined => this.leafEntry,
+    getEntry: (id: string): SessionEntry | undefined => this.entriesById.get(id),
   }
 
   private subscribers = new Set<(event: { type: string; message?: unknown }) => void>()
@@ -1465,6 +1470,192 @@ describe('ChannelRouter channel-turn protocol', () => {
     await router.__testing!.flushDebounce(KEY)
 
     expect(logs.some((m) => m.includes('blocked assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  // Regression for the Kimi-on-Fireworks `kimi-k2p6-turbo` channel-silence
+  // bug observed on 2026-05-26: the model emitted text + a tool call
+  // (stopReason='toolUse'), the tool ran successfully, but the upstream
+  // pi-agent-core loop never produced a follow-up assistant message after
+  // the toolResult. The session JSONL ended with the toolResult as the leaf,
+  // `prompt()` resolved cleanly, and the channel router silently dropped the
+  // pre-tool commentary. User saw nothing in Discord.
+  test('pre-tool recovery: recovers assistant text when leaf is toolResult with no follow-up', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'why is cron not working' }))
+    sessions[0]!.onPrompt = () => {
+      // given: an assistant message with text + a tool call. The model never
+      // produced a follow-up assistant message after the tool result, so the
+      // leaf is the toolResult, NOT the assistant message.
+      const assistantMsg: AssistantMessage = {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: '죄송해요. 크론 이슈는 지금 바로 확인해볼게요.' },
+          { type: 'toolCall', id: 'functions.stream_snapshot:0', name: 'stream_snapshot', arguments: { limit: 20 } },
+        ],
+        api: 'openai-completions',
+        provider: 'fireworks',
+        model: 'accounts/fireworks/routers/kimi-k2p6-turbo',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'toolUse',
+        timestamp: 1000,
+      }
+      const assistantEntry: SessionEntry = {
+        type: 'message',
+        id: 'assistant-pre-tool',
+        parentId: null,
+        timestamp: '2026-05-26T04:13:13.000Z',
+        message: assistantMsg,
+      }
+      const toolResultEntry: SessionEntry = {
+        type: 'message',
+        id: 'tool-result',
+        parentId: 'assistant-pre-tool',
+        timestamp: '2026-05-26T04:13:16.000Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 'functions.stream_snapshot:0',
+          toolName: 'stream_snapshot',
+          content: [{ type: 'text', text: 'stream events here' }],
+          isError: false,
+          timestamp: 1000,
+        },
+      }
+      sessions[0]!.entriesById.set(assistantEntry.id, assistantEntry)
+      sessions[0]!.entriesById.set(toolResultEntry.id, toolResultEntry)
+      sessions[0]!.leafEntry = toolResultEntry
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(
+      logs.some((m) => m.includes('recovering assistant_text_without_channel_tool') && m.includes('source=pre-tool')),
+    ).toBe(true)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('죄송해요. 크론 이슈는 지금 바로 확인해볼게요.')
+  })
+
+  test('pre-tool recovery: still applies NO_REPLY / Kimi-leak / empty-sentinel guards', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'check something' }))
+    sessions[0]!.onPrompt = () => {
+      // given: an assistant message with NO_REPLY text + a tool call. The
+      // pre-tool recovery should NOT send this, because the assistant
+      // explicitly opted out of replying. The downstream guards must still
+      // run on the recovered text.
+      const assistantMsg: AssistantMessage = {
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'NO_REPLY' },
+          { type: 'toolCall', id: 't0', name: 'stream_snapshot', arguments: {} },
+        ],
+        api: 'openai-completions',
+        provider: 'fireworks',
+        model: 'test',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'toolUse',
+        timestamp: 1000,
+      }
+      const assistantEntry: SessionEntry = {
+        type: 'message',
+        id: 'a',
+        parentId: null,
+        timestamp: '2026-05-26T04:13:13.000Z',
+        message: assistantMsg,
+      }
+      const toolResultEntry: SessionEntry = {
+        type: 'message',
+        id: 'tr',
+        parentId: 'a',
+        timestamp: '2026-05-26T04:13:16.000Z',
+        message: {
+          role: 'toolResult',
+          toolCallId: 't0',
+          toolName: 'stream_snapshot',
+          content: [{ type: 'text', text: 'x' }],
+          isError: false,
+          timestamp: 1000,
+        },
+      }
+      sessions[0]!.entriesById.set(assistantEntry.id, assistantEntry)
+      sessions[0]!.entriesById.set(toolResultEntry.id, toolResultEntry)
+      sessions[0]!.leafEntry = toolResultEntry
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+    expect(sent).toHaveLength(0)
+  })
+
+  test('pre-tool recovery: does NOT fire when the model successfully replied (channel send happened)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'reply please' }))
+    sessions[0]!.onPrompt = async () => {
+      // Successful channel send during the turn — guard #1
+      // (successfulChannelSends > before) must short-circuit recovery before
+      // the leaf is even inspected. We do NOT need to set leafEntry; the
+      // first guard returns before it's consulted.
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'real reply' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('real reply')
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('silent-leaf observability: logs explicit reason instead of bailing silently', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      // No leaf entry at all — the previous behavior silently returned with
+      // zero log output, making the silent-channel bug undiagnosable from
+      // logs. Now there's an explicit info log naming the reason.
+      sessions[0]!.leafEntry = undefined
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((m) => m.includes('no recoverable assistant text in branch'))).toBe(true)
   })
 })
 

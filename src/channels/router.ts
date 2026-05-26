@@ -1781,8 +1781,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const validateChannelTurn = async (live: LiveSession, successfulSendsBeforePrompt: number): Promise<void> => {
     if (live.successfulChannelSends > successfulSendsBeforePrompt) return
 
-    const assistantText = latestAssistantText(live.session)
-    if (assistantText === null) return
+    const candidate = recoverableAssistantText(live.session)
+    if (candidate === null) {
+      // Observability: previously a silent bail-out. The most common cause is a
+      // turn that ends mid-loop with NO assistant message at all (leaf is a
+      // session header / model_change / similar non-message entry, or a session
+      // that just started). Logged at debug-level info so operators can grep for
+      // unexpected silent turns; not warn-level because legitimate empty-state
+      // sessions hit this on every TUI-only check before the first user prompt.
+      logger.info(`[channels] ${live.keyId}: no recoverable assistant text in branch`)
+      return
+    }
+
+    const { text: assistantText, source } = candidate
 
     if (endsWithNoReplySignal(assistantText)) {
       const leakedReasoning = !isNoReplySignal(assistantText)
@@ -1802,8 +1813,18 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
+    // `source` distinguishes the two recovery shapes for log triage:
+    //   - 'leaf': the assistant message IS the leaf (existing behavior; model
+    //     ended its turn with text but forgot to call channel_reply).
+    //   - 'pre-tool': the leaf is a toolResult (or other non-assistant entry)
+    //     and the assistant message lives upstream in the branch. This is the
+    //     Kimi-on-Fireworks `kimi-k2p6-turbo` failure mode where the post-tool
+    //     follow-up LLM call never produced a persisted assistant message, so
+    //     the model's pre-tool commentary is the only user-facing text we have.
+    //     Recovering it means the user gets *something* — strictly better than
+    //     the historical silent drop.
     logger.warn(
-      `[channels] ${live.keyId}: recovering assistant_text_without_channel_tool text_len=${assistantText.length}`,
+      `[channels] ${live.keyId}: recovering assistant_text_without_channel_tool source=${source} text_len=${assistantText.length}`,
     )
     const result = await send(
       {
@@ -2348,12 +2369,67 @@ async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): 
   }
 }
 
-function latestAssistantText(session: AgentSession): string | null {
-  const entry = session.sessionManager.getLeafEntry()
-  if (entry?.type !== 'message') return null
-  if (entry.message.role !== 'assistant') return null
-  if (entry.message.stopReason !== 'stop') return null
-  return visibleAssistantText(entry.message)
+// Walks the session branch backward from the leaf to find a recoverable
+// assistant message — i.e., text the user should see but didn't, because the
+// model failed to call `channel_reply`/`channel_send` before its turn ended.
+//
+// Two recovery shapes:
+//
+//   - source: 'leaf'
+//     The leaf entry IS an assistant message with `stopReason === 'stop'`.
+//     The model finished its turn with visible text but never called a channel
+//     tool. Pre-existing behavior; this is what the historical
+//     `latestAssistantText` covered.
+//
+//   - source: 'pre-tool'
+//     The leaf is a `toolResult` and the immediately-prior assistant message
+//     has `stopReason === 'toolUse'` (it called the tool that produced this
+//     toolResult). The upstream pi-agent-core loop SHOULD have made a
+//     follow-up LLM call after the tool returned, but that call either never
+//     happened or produced no persisted message. Recovers the assistant's
+//     pre-tool commentary so the user gets *something* — observed against
+//     Fireworks' `accounts/fireworks/routers/kimi-k2p6-turbo` on 2026-05-26.
+//
+// Returns null when no recovery is appropriate:
+//   - No leaf, no messages in branch, branch is malformed
+//   - Leaf is an assistant with non-'stop' stopReason (e.g. mid-stream error)
+//     and is NOT preceded by a toolResult pattern — we don't recover partial
+//     errored output because it's typically a truncation, not a deliberate
+//     reply
+//   - Leaf is a user/system message (model hasn't responded yet)
+//
+// `visibleAssistantText` returning '' (empty string) is a valid recovery
+// target — the caller's downstream guards (`endsWithNoReplySignal('')` returns
+// true) handle the no-content case explicitly via the `no_reply` log.
+function recoverableAssistantText(session: AgentSession): { text: string; source: 'leaf' | 'pre-tool' } | null {
+  const leaf = session.sessionManager.getLeafEntry()
+  if (!leaf) return null
+
+  if (leaf.type === 'message' && leaf.message.role === 'assistant') {
+    if (leaf.message.stopReason !== 'stop') return null
+    return { text: visibleAssistantText(leaf.message), source: 'leaf' }
+  }
+
+  // Pre-tool recovery: the leaf must be a toolResult message, and walking
+  // back through parentId chain must land on an assistant message before any
+  // user message (otherwise we'd be recovering text from a turn the user
+  // already saw a reply to). Bounded walk with a depth guard so a malformed
+  // session can't infinite-loop.
+  if (!(leaf.type === 'message' && leaf.message.role === 'toolResult')) return null
+
+  let cursor: { parentId: string | null } | undefined = leaf
+  for (let depth = 0; depth < 32 && cursor?.parentId; depth++) {
+    const parent = session.sessionManager.getEntry(cursor.parentId)
+    if (!parent) return null
+    if (parent.type === 'message') {
+      if (parent.message.role === 'assistant') {
+        return { text: visibleAssistantText(parent.message), source: 'pre-tool' }
+      }
+      if (parent.message.role === 'user') return null
+    }
+    cursor = parent
+  }
+  return null
 }
 
 function visibleAssistantText(message: AssistantMessage): string {
