@@ -32,6 +32,7 @@ import {
 import {
   DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS,
   QUOTED_REPLY_EXCERPT_MAX_CHARS,
+  type AdapterId,
   type ChannelAdapterConfig,
 } from './schema'
 import type {
@@ -234,6 +235,19 @@ type ObservedInbound = {
   authorIsBot: boolean
   receivedAt: number
   ts: number
+  // Distinguishes scrollback that was bulk-loaded at session cold-start
+  // (`prefetch`) from messages that actually arrived in the channel after
+  // the session went live (`observed`). Both share the same in-memory
+  // shape because the model sees them identically in the prompt's
+  // "Recent context" block, but the quote-anchor decision must treat them
+  // differently: prefetched scrollback is HISTORICAL context, not new
+  // chatter that happened between the primary inbound and the agent's
+  // reply. Counting prefetch entries as "intervening" would fire the
+  // anchor on every fresh-thread first turn (the prefetch stamps
+  // `receivedAt = now()` AFTER the inbound was received during ensureLive,
+  // so by primary-vs-observed timestamp comparison they always look
+  // "later"). See captureQuoteCandidate.
+  source: 'prefetch' | 'observed'
 }
 
 type LiveSession = {
@@ -1019,6 +1033,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           authorIsBot: item.message.isBot,
           receivedAt: now(),
           ts: item.message.ts,
+          source: 'prefetch',
         })
       } else {
         observed.push({
@@ -1028,6 +1043,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           authorIsBot: true,
           receivedAt: now(),
           ts: 0,
+          source: 'prefetch',
         })
       }
     }
@@ -1227,7 +1243,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.consecutiveSends.clear()
           live.lastSentText.clear()
-          live.pendingQuoteCandidate = captureQuoteCandidate(batch, observed)
+          live.pendingQuoteCandidate = captureQuoteCandidate(live.key.adapter, batch, observed)
         } else if (live.lastTurnAuthorId !== null) {
           // Reminder-only turn (batch.length === 0, reminders.length > 0):
           // restore the author identity from the prior turn so author-
@@ -1538,6 +1554,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       authorIsBot: event.authorIsBot,
       receivedAt: now(),
       ts: event.ts,
+      source: 'observed',
     })
     if (live.contextBuffer.length > CONTEXT_BUFFER_SIZE) {
       live.contextBuffer.splice(0, live.contextBuffer.length - CONTEXT_BUFFER_SIZE)
@@ -2263,11 +2280,45 @@ function formatAuthorLine(
 }
 
 export type QuoteAnchorSource = {
+  adapter: AdapterId
+  authorId: string
   authorName: string
   text: string
 }
 
-// Renders the single-line `> @name: excerpt` blockquote prepended to
+// Picks the right author syntax for the platform so the rendered anchor
+// shows a real, clickable mention link (Slack/Discord) instead of literal
+// `@name` text. The literal-text form was the original bug report on
+// PR #374: a plain `@username` string inside the quote looks like (but
+// isn't) a Slack mention; users read that as "wrong-shape mention"
+// because the platform-native form would have been `<@U…>`. Adapters
+// without a stable id-only mention syntax (Telegram dot-form
+// `[name](tg://user?id=)`
+// requires MarkdownV2 escaping; KakaoTalk has no mention syntax at all;
+// GitHub uses `@handle` but the inbound `authorId` is a numeric user id,
+// not the handle) fall back to plain `authorName` so a malformed mention
+// never ships to the platform.
+//
+// Notification semantics: Slack and Discord both render `<@…>` as a
+// styled mention link inside blockquotes; whether the mentioned user is
+// PINGED is a separate platform-level UX (Slack pings on first appearance
+// in the message regardless of position, Discord respects the
+// `allowed_mentions` field which defaults to "ping everyone parsed").
+// This matches PR #374's intent — the user IS being notified that the
+// agent replied to them, which is the whole point of a quote anchor.
+function formatAuthorMention(adapter: AdapterId, authorId: string, authorName: string): string {
+  switch (adapter) {
+    case 'slack-bot':
+    case 'discord-bot':
+      return `<@${authorId}>`
+    case 'telegram-bot':
+    case 'kakaotalk':
+    case 'github':
+      return authorName
+  }
+}
+
+// Renders the single-line `> @mention: excerpt` blockquote prepended to
 // outbound replies when the router decides the reply needs an anchor.
 // Collapses newlines to spaces so a multi-line user message renders on
 // one quoted line (markdown blockquote semantics: a blank line ends the
@@ -2286,17 +2337,27 @@ export function renderQuoteAnchor(source: QuoteAnchorSource): string {
       : collapsed.length > QUOTED_REPLY_EXCERPT_MAX_CHARS
         ? `${collapsed.slice(0, QUOTED_REPLY_EXCERPT_MAX_CHARS - 1)}…`
         : collapsed
-  return `> @${source.authorName}: ${excerpt}`
+  const mention = formatAuthorMention(source.adapter, source.authorId, source.authorName)
+  return `> ${mention}: ${excerpt}`
 }
 
+// Separates the anchor from the reply with a blank line (`\n\n`), not a
+// single `\n`. In standard GFM and Slack's `markdown` block, a single
+// `\n` inside a paragraph is a soft break rendered as whitespace, which
+// keeps the `>` blockquote styling running visually through the next
+// line — i.e. the agent's reply text gets swallowed into the quote. The
+// blank line forces a paragraph boundary that unambiguously ends the
+// blockquote on every renderer (CommonMark, GFM, Slack mrkdwn, Discord
+// markdown).
 export function prependQuoteAnchor(replyText: string, source: QuoteAnchorSource): string {
   const anchor = renderQuoteAnchor(source)
   if (replyText === '') return anchor
-  return `${anchor}\n${replyText}`
+  return `${anchor}\n\n${replyText}`
 }
 
 type QuoteAnchorBatchEntry = {
   text: string
+  authorId: string
   authorName: string
   authorIsBot: boolean
   receivedAt: number
@@ -2304,6 +2365,7 @@ type QuoteAnchorBatchEntry = {
 
 type QuoteAnchorObservedEntry = {
   receivedAt: number
+  source: 'prefetch' | 'observed'
 }
 
 export type QuoteAnchorCandidate = {
@@ -2316,16 +2378,27 @@ export type QuoteAnchorCandidate = {
 // the send-side decision has the data it needs without holding a
 // reference to the batch arrays. Returns null when there's nothing
 // anchorable (empty batch, primary is a bot).
+//
+// `hadInterveningObserved` counts ONLY live observations (`source ===
+// 'observed'`), not prefetched scrollback. Prefetch stamps `receivedAt =
+// now()` inside ensureLive — wall-clock-later than the primary inbound
+// that triggered ensureLive — so without this gate, every cold-start
+// first turn would see "intervening observed" entries and fire the
+// quote anchor even when the reply lands within milliseconds. The
+// signal we actually want is "did real new chatter arrive between the
+// user's inbound and the agent's reply", which only live observations
+// represent.
 export function captureQuoteCandidate(
+  adapter: AdapterId,
   batch: readonly QuoteAnchorBatchEntry[],
   observed: readonly QuoteAnchorObservedEntry[],
 ): QuoteAnchorCandidate | null {
   if (batch.length === 0) return null
   const primary = batch[batch.length - 1]!
   if (primary.authorIsBot) return null
-  const hadInterveningObserved = observed.some((o) => o.receivedAt >= primary.receivedAt)
+  const hadInterveningObserved = observed.some((o) => o.source === 'observed' && o.receivedAt >= primary.receivedAt)
   return {
-    source: { authorName: primary.authorName, text: primary.text },
+    source: { adapter, authorId: primary.authorId, authorName: primary.authorName, text: primary.text },
     primaryReceivedAt: primary.receivedAt,
     hadInterveningObserved,
   }
