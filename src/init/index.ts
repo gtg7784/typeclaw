@@ -33,6 +33,8 @@ export { formatEagerGithubWebhookInstallResult, installGithubWebhooksEagerly } f
 
 export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 
+export { appendOrReplaceEnvKey, hasEnvKey, readEnvFile } from './env-file'
+
 const CONFIG_FILE = 'typeclaw.json'
 const CRON_FILE = 'cron.json'
 const PACKAGE_FILE = 'package.json'

@@ -14,8 +14,10 @@ import {
 } from '@/config/providers'
 import { checkDockerAvailable, type DockerAvailability } from '@/container'
 import {
+  appendOrReplaceEnvKey,
   findAgentDir,
   formatEagerGithubWebhookInstallResult,
+  hasEnvKey,
   hasExistingChannelSecrets,
   isDirectoryNonEmpty,
   isHatched,
@@ -359,7 +361,7 @@ export interface WizardPrompts {
   pickChannel: (initial: ChannelChoice | undefined) => Promise<StepResult<ChannelChoice>>
   hasExistingChannelSecrets: (cwd: string, channel: Exclude<ChannelChoice, 'none'>) => Promise<boolean>
   askReuseExistingChannel: (channel: Exclude<ChannelChoice, 'none'>) => Promise<StepResult<'reuse' | 'prompt'>>
-  runChannelFlow: (choice: ChannelChoice) => Promise<StepResult<CollectedInputs['channelSecrets']>>
+  runChannelFlow: (choice: ChannelChoice, cwd: string) => Promise<StepResult<CollectedInputs['channelSecrets']>>
   runOAuthLogin: (
     provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
     cwd: string,
@@ -691,7 +693,7 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
       }
 
       case 'channel-flow': {
-        const result = onResult(step, await prompts.runChannelFlow(state.channelChoice!))
+        const result = onResult(step, await prompts.runChannelFlow(state.channelChoice!, cwd))
         if (result.kind === 'back') {
           step = state.channelReuseOffered === true ? 'reuse-existing-channel' : 'pick-channel'
           break
@@ -1011,7 +1013,10 @@ async function pickChannel(initial: ChannelChoice | undefined): Promise<StepResu
   return value(choice)
 }
 
-async function runChannelFlow(choice: ChannelChoice): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+async function runChannelFlow(
+  choice: ChannelChoice,
+  cwd: string,
+): Promise<StepResult<CollectedInputs['channelSecrets']>> {
   switch (choice) {
     case 'none':
       return value({})
@@ -1024,7 +1029,7 @@ async function runChannelFlow(choice: ChannelChoice): Promise<StepResult<Collect
     case 'telegram':
       return runTelegramFlow()
     case 'github':
-      return runGithubFlow()
+      return runGithubFlow(cwd)
   }
 }
 
@@ -1144,7 +1149,7 @@ async function runSlackFlow(): Promise<StepResult<CollectedInputs['channelSecret
   }
 }
 
-async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecrets']>> {
+async function runGithubFlow(cwd: string): Promise<StepResult<CollectedInputs['channelSecrets']>> {
   note(
     [
       'Choose PAT auth for a quick setup, or GitHub App auth for expiring installation tokens.',
@@ -1189,7 +1194,7 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
         })
       : undefined
   if (isCancel(webhookUrl)) return back()
-  const namedCreds = tunnelProvider === 'cloudflare-named' ? await promptGithubCloudflareNamedTunnel() : undefined
+  const namedCreds = tunnelProvider === 'cloudflare-named' ? await promptGithubCloudflareNamedTunnel(cwd) : undefined
   if (namedCreds === null) return back()
   const port = await text({
     message: 'Local webhook port inside the agent container',
@@ -1227,13 +1232,14 @@ async function runGithubFlow(): Promise<StepResult<CollectedInputs['channelSecre
   })
 }
 
-async function promptGithubCloudflareNamedTunnel(): Promise<{ hostname: string; tokenEnv: string } | null> {
+async function promptGithubCloudflareNamedTunnel(cwd: string): Promise<{ hostname: string; tokenEnv: string } | null> {
+  const tokenEnv = 'CLOUDFLARE_TUNNEL_TOKEN'
   note(
     [
       'Cloudflare Named Tunnel needs a tunnel you created in the Zero Trust dashboard:',
       '  1. Networks → Tunnels → Create a tunnel → Cloudflared. Copy the token shown on the install screen.',
       '  2. Public Hostname tab → Add: subdomain + your-domain, service type HTTP, URL localhost:<webhook port>.',
-      '  3. Put the token in .env under the env var name you supply below.',
+      `  3. Paste the token below when prompted — TypeClaw will write it to .env as ${tokenEnv}.`,
       'A tunnel without a Public Hostname registers but routes nothing.',
     ].join('\n'),
     'Cloudflare named tunnel',
@@ -1243,19 +1249,14 @@ async function promptGithubCloudflareNamedTunnel(): Promise<{ hostname: string; 
     validate: (v) => validateGithubUrl(v ?? '', 'Hostname is required'),
   })
   if (isCancel(hostname)) return null
-  const tokenEnv = await text({
-    message: 'Env var name holding the tunnel token',
-    initialValue: 'CLOUDFLARE_TUNNEL_TOKEN',
-    validate: (v) => {
-      const raw = v ?? ''
-      if (raw.trim().length === 0) return 'Env var name is required'
-      if (!/^[A-Z_][A-Z0-9_]*$/.test(raw)) {
-        return 'Must be an env var name like CLOUDFLARE_TUNNEL_TOKEN (uppercase, digits, underscore)'
-      }
-      return undefined
-    },
-  })
-  if (isCancel(tokenEnv)) return null
+  if (!hasEnvKey(cwd, tokenEnv)) {
+    const token = await password({
+      message: `Cloudflare tunnel token (will be written to .env as ${tokenEnv})`,
+      validate: (v) => (v && v.length > 0 ? undefined : 'Token is required'),
+    })
+    if (isCancel(token)) return null
+    appendOrReplaceEnvKey(cwd, tokenEnv, token)
+  }
   return { hostname, tokenEnv }
 }
 

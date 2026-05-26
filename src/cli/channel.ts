@@ -8,8 +8,10 @@ import { config } from '@/config'
 import { start, status, stop } from '@/container'
 import {
   CHANNEL_KINDS,
+  appendOrReplaceEnvKey,
   findAgentDir,
   formatEagerGithubWebhookInstallResult,
+  hasEnvKey,
   isInitialized,
   readConfiguredChannels,
   readGithubAuthType,
@@ -61,7 +63,7 @@ const addSub = defineCommand({
 
     intro(`Adding channel: ${CHANNEL_LABELS[channel]}`)
 
-    const credentials = await collectCredentials(channel)
+    const credentials = await collectCredentials(channel, cwd)
 
     const events: AddChannelStepEvent[] = []
     try {
@@ -575,7 +577,7 @@ type CollectedCredentials =
       auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
     }
 
-async function collectCredentials(channel: ChannelKind): Promise<CollectedCredentials> {
+async function collectCredentials(channel: ChannelKind, cwd: string): Promise<CollectedCredentials> {
   switch (channel) {
     case 'discord-bot':
       return { channel, discordBotToken: await promptDiscordToken() }
@@ -599,13 +601,13 @@ async function collectCredentials(channel: ChannelKind): Promise<CollectedCreden
       }
     }
     case 'github': {
-      const creds = await promptGithubCredentials()
+      const creds = await promptGithubCredentials(cwd)
       return { channel, ...creds }
     }
   }
 }
 
-async function promptGithubCredentials(): Promise<{
+async function promptGithubCredentials(cwd: string): Promise<{
   webhookSecret: string
   tunnelProvider: GithubTunnelProvider
   webhookUrl?: string
@@ -667,7 +669,7 @@ async function promptGithubCredentials(): Promise<{
     cancel('Aborted.')
     process.exit(0)
   }
-  const namedCreds = tunnelProvider === 'cloudflare-named' ? await promptCloudflareNamedTunnel() : undefined
+  const namedCreds = tunnelProvider === 'cloudflare-named' ? await promptCloudflareNamedTunnel(cwd) : undefined
   const port = await text({
     message: 'Local webhook port inside the agent container',
     initialValue: '8975',
@@ -711,13 +713,14 @@ async function promptGithubCredentials(): Promise<{
   }
 }
 
-async function promptCloudflareNamedTunnel(): Promise<{ hostname: string; tokenEnv: string }> {
+async function promptCloudflareNamedTunnel(cwd: string): Promise<{ hostname: string; tokenEnv: string }> {
+  const tokenEnv = 'CLOUDFLARE_TUNNEL_TOKEN'
   note(
     [
       'Cloudflare Named Tunnel needs a tunnel you created in the Zero Trust dashboard:',
       '  1. Networks → Tunnels → Create a tunnel → Cloudflared. Copy the token shown on the install screen.',
       '  2. Public Hostname tab → Add: subdomain + your-domain, service type HTTP, URL localhost:<webhook port>.',
-      '  3. Put the token in .env under the env var name you supply below.',
+      `  3. Paste the token below when prompted — TypeClaw will write it to .env as ${tokenEnv}.`,
       'A tunnel without a Public Hostname registers but routes nothing.',
     ].join('\n'),
     'Cloudflare named tunnel',
@@ -730,21 +733,16 @@ async function promptCloudflareNamedTunnel(): Promise<{ hostname: string; tokenE
     cancel('Aborted.')
     process.exit(0)
   }
-  const tokenEnv = await text({
-    message: 'Env var name holding the tunnel token',
-    initialValue: 'CLOUDFLARE_TUNNEL_TOKEN',
-    validate: (value) => {
-      const v = value ?? ''
-      if (v.trim().length === 0) return 'Env var name is required'
-      if (!/^[A-Z_][A-Z0-9_]*$/.test(v)) {
-        return 'Must be an env var name like CLOUDFLARE_TUNNEL_TOKEN (uppercase, digits, underscore)'
-      }
-      return undefined
-    },
-  })
-  if (isCancel(tokenEnv)) {
-    cancel('Aborted.')
-    process.exit(0)
+  if (!hasEnvKey(cwd, tokenEnv)) {
+    const token = await password({
+      message: `Cloudflare tunnel token (will be written to .env as ${tokenEnv})`,
+      validate: (value) => (value && value.length > 0 ? undefined : 'Token is required'),
+    })
+    if (isCancel(token)) {
+      cancel('Aborted.')
+      process.exit(0)
+    }
+    appendOrReplaceEnvKey(cwd, tokenEnv, token)
   }
   return { hostname, tokenEnv }
 }

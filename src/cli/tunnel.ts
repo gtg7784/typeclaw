@@ -1,12 +1,12 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
-import { select, text, isCancel, cancel, log } from '@clack/prompts'
+import { select, text, password, isCancel, cancel, log } from '@clack/prompts'
 import { defineCommand } from 'citty'
 
 import { loadConfigSync, validateConfig } from '@/config'
 import { resolveHostPort, resolveTuiToken } from '@/container'
-import { findAgentDir, isInitialized } from '@/init'
+import { appendOrReplaceEnvKey, findAgentDir, hasEnvKey, isInitialized } from '@/init'
 import type { ClientMessage, ServerMessage, TunnelLogsServerMessage, TunnelSnapshot } from '@/shared'
 import type { TunnelConfig, TunnelFor, TunnelProvider } from '@/tunnels'
 
@@ -58,7 +58,15 @@ export type TunnelPrompts = {
     choices: readonly { value: string; label: string; hint?: string }[],
   ) => Promise<string | symbol>
   text: (message: string, validate?: TextValidator) => Promise<string | symbol>
+  // Only fires when the user picks `cloudflare-named` AND the resolved
+  // `tokenEnv` is missing from the agent's `.env`. Optional so existing
+  // callers/tests don't have to stub it; flows that need it but don't get
+  // one fall back to skipping the token write (the user can still set
+  // `.env` by hand). Same compat pattern as `selectSetField`.
+  password?: (message: string, validate?: TextValidator) => Promise<string | symbol>
 }
+
+const DEFAULT_TUNNEL_TOKEN_ENV = 'CLOUDFLARE_TUNNEL_TOKEN'
 
 const DEFAULT_TIMEOUT_MS = 15_000
 
@@ -104,6 +112,8 @@ const defaultPrompts: TunnelPrompts = {
     }),
   text: (message, validate) =>
     text({ message, ...(validate !== undefined ? { validate: (v) => validate(v ?? '') } : {}) }),
+  password: (message, validate) =>
+    password({ message, ...(validate !== undefined ? { validate: (v) => validate(v ?? '') } : {}) }),
 }
 
 const addSub = defineCommand({
@@ -307,9 +317,16 @@ export async function runTunnelAddFlow(
       ))
     const hostnameError = validateHttpsUrl(hostname)
     if (hostnameError !== undefined) return { ok: false, reason: `hostname: ${hostnameError}` }
-    tokenEnv = args.tokenEnv ?? (await promptText('Env var name holding the tunnel token', prompts, validateTokenEnv))
+    tokenEnv = args.tokenEnv ?? DEFAULT_TUNNEL_TOKEN_ENV
     const tokenError = validateTokenEnv(tokenEnv)
     if (tokenError !== undefined) return { ok: false, reason: `token-env: ${tokenError}` }
+    // Only prompt for the token VALUE in interactive mode. `--provider` on
+    // the CLI signals scripted invocation; bombarding a script with a
+    // password prompt it can't satisfy would deadlock CI runs.
+    if (args.provider === undefined) {
+      const tokenPromptResult = await maybePromptTunnelTokenValue(cwd, tokenEnv, prompts)
+      if (!tokenPromptResult.ok) return tokenPromptResult
+    }
   }
 
   const tunnel: TunnelConfig = {
@@ -468,12 +485,7 @@ export async function runTunnelSetFlow(
         nextHostname = raw
       }
       if (nextTokenEnv === undefined) {
-        const raw =
-          args.tokenEnv ??
-          (interactive
-            ? await promptText('Env var name holding the tunnel token', prompts, validateTokenEnv)
-            : undefined)
-        if (raw === undefined) return { ok: false, reason: "provider 'cloudflare-named' requires --token-env" }
+        const raw = args.tokenEnv ?? DEFAULT_TUNNEL_TOKEN_ENV
         const err = validateTokenEnv(raw)
         if (err !== undefined) return { ok: false, reason: `token-env: ${err}` }
         nextTokenEnv = raw
@@ -497,6 +509,11 @@ export async function runTunnelSetFlow(
     ...(nextUpstreamPort !== undefined ? { upstreamPort: nextUpstreamPort } : {}),
     ...(nextHostname !== undefined ? { hostname: nextHostname } : {}),
     ...(nextTokenEnv !== undefined ? { tokenEnv: nextTokenEnv } : {}),
+  }
+
+  if (interactive && next.provider === 'cloudflare-named' && next.tokenEnv !== undefined) {
+    const tokenPromptResult = await maybePromptTunnelTokenValue(cwd, next.tokenEnv, prompts)
+    if (!tokenPromptResult.ok) return tokenPromptResult
   }
 
   const raw = readRawConfig(cwd)
@@ -754,6 +771,24 @@ async function resolveExistingTunnelName(
     process.exit(0)
   }
   return { ok: true, value: choice }
+}
+
+async function maybePromptTunnelTokenValue(
+  cwd: string,
+  tokenEnv: string,
+  prompts: TunnelPrompts,
+): Promise<LiveResult<void>> {
+  if (hasEnvKey(cwd, tokenEnv)) return { ok: true, value: undefined }
+  if (prompts.password === undefined) return { ok: true, value: undefined }
+  const value = await prompts.password(`Cloudflare tunnel token (will be written to .env as ${tokenEnv})`, (v) =>
+    v.length > 0 ? undefined : 'Token is required',
+  )
+  if (isCancel(value)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  appendOrReplaceEnvKey(cwd, tokenEnv, value)
+  return { ok: true, value: undefined }
 }
 
 async function resolveProvider(input: string | undefined, prompts: TunnelPrompts): Promise<TunnelProvider> {
