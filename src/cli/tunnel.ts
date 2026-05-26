@@ -13,7 +13,7 @@ import type { TunnelConfig, TunnelFor, TunnelProvider } from '@/tunnels'
 import { c, errorLine } from './ui'
 
 type AddArgs = {
-  name: string
+  name?: string
   provider?: string
   forChannel?: string
   forManual?: boolean
@@ -24,7 +24,7 @@ type AddArgs = {
 }
 
 type SetArgs = {
-  name: string
+  name?: string
   provider?: string
   upstreamPort?: string
   externalUrl?: string
@@ -51,6 +51,12 @@ export type TunnelPrompts = {
   selectSetField?: (
     choices: readonly { value: TunnelSetField; label: string; hint?: string }[],
   ) => Promise<TunnelSetField | symbol>
+  // Only `runTunnelSetFlow` uses this when the positional `name` is omitted
+  // and more than one tunnel is configured. Optional so existing callers
+  // (especially `runTunnelAddFlow` tests) don't have to stub it.
+  selectExistingTunnel?: (
+    choices: readonly { value: string; label: string; hint?: string }[],
+  ) => Promise<string | symbol>
   text: (message: string, validate?: TextValidator) => Promise<string | symbol>
 }
 
@@ -87,6 +93,15 @@ const defaultPrompts: TunnelPrompts = {
         ...(choice.hint !== undefined ? { hint: choice.hint } : {}),
       })),
     }),
+  selectExistingTunnel: (choices) =>
+    select<string>({
+      message: 'Pick a tunnel to edit',
+      options: choices.map((choice) => ({
+        value: choice.value,
+        label: choice.label,
+        ...(choice.hint !== undefined ? { hint: choice.hint } : {}),
+      })),
+    }),
   text: (message, validate) =>
     text({ message, ...(validate !== undefined ? { validate: (v) => validate(v ?? '') } : {}) }),
 }
@@ -94,7 +109,7 @@ const defaultPrompts: TunnelPrompts = {
 const addSub = defineCommand({
   meta: { name: 'add', description: 'add a public tunnel entry to typeclaw.json' },
   args: {
-    name: { type: 'positional', required: true, description: 'tunnel name' },
+    name: { type: 'positional', required: false, description: 'tunnel name (omit to prompt interactively)' },
     provider: { type: 'string', description: 'external | cloudflare-quick | cloudflare-named' },
     'for-channel': { type: 'string', description: 'own this tunnel from a channel adapter' },
     'for-manual': { type: 'boolean', description: 'create a manually-owned tunnel' },
@@ -108,7 +123,7 @@ const addSub = defineCommand({
   },
   async run({ args }) {
     const result = await runTunnelAddFlow(ensureAgentDir(), {
-      name: String(args.name),
+      ...(args.name !== undefined ? { name: String(args.name) } : {}),
       ...(args.provider !== undefined ? { provider: String(args.provider) } : {}),
       ...(args['for-channel'] !== undefined ? { forChannel: String(args['for-channel']) } : {}),
       ...(args['for-manual'] === true ? { forManual: true } : {}),
@@ -175,7 +190,7 @@ const setSub = defineCommand({
     description: 'edit an existing tunnel entry in typeclaw.json (symmetric with `typeclaw channel set`)',
   },
   args: {
-    name: { type: 'positional', required: true, description: 'tunnel name' },
+    name: { type: 'positional', required: false, description: 'tunnel name (omit to pick interactively)' },
     provider: { type: 'string', description: 'external | cloudflare-quick | cloudflare-named' },
     'upstream-port': { type: 'string', description: 'container-local upstream port (manual non-named tunnels)' },
     'external-url': { type: 'string', description: 'https URL for provider=external' },
@@ -187,7 +202,7 @@ const setSub = defineCommand({
   },
   async run({ args }) {
     const result = await runTunnelSetFlow(ensureAgentDir(), {
-      name: String(args.name),
+      ...(args.name !== undefined ? { name: String(args.name) } : {}),
       ...(args.provider !== undefined ? { provider: String(args.provider) } : {}),
       ...(args['upstream-port'] !== undefined ? { upstreamPort: String(args['upstream-port']) } : {}),
       ...(args['external-url'] !== undefined ? { externalUrl: String(args['external-url']) } : {}),
@@ -260,8 +275,10 @@ export async function runTunnelAddFlow(
   const validation = validateConfig(cwd)
   if (!validation.ok) return { ok: false, reason: validation.reason }
   const config = loadConfigSync(cwd)
-  if (config.tunnels.some((entry) => entry.name === args.name))
-    return { ok: false, reason: `tunnel "${args.name}" already exists` }
+  const existingNames = new Set(config.tunnels.map((entry) => entry.name))
+  const name = args.name ?? (await promptText('Tunnel name', prompts, makeTunnelNameValidator(existingNames)))
+  const nameError = validateTunnelName(name, existingNames)
+  if (nameError !== undefined) return { ok: false, reason: nameError }
 
   const provider = await resolveProvider(args.provider, prompts)
   const tunnelFor = await resolveFor(args, prompts)
@@ -296,7 +313,7 @@ export async function runTunnelAddFlow(
   }
 
   const tunnel: TunnelConfig = {
-    name: args.name,
+    name,
     provider,
     for: tunnelFor,
     ...(externalUrl !== undefined ? { externalUrl } : {}),
@@ -342,8 +359,16 @@ export async function runTunnelSetFlow(
   const validation = validateConfig(cwd)
   if (!validation.ok) return { ok: false, reason: validation.reason }
   const config = loadConfigSync(cwd)
-  const existing = config.tunnels.find((entry) => entry.name === args.name)
-  if (existing === undefined) return { ok: false, reason: `unknown tunnel: ${args.name}` }
+  if (config.tunnels.length === 0) {
+    return { ok: false, reason: 'no tunnels configured. Run `typeclaw tunnel add` first.' }
+  }
+  const nameResult =
+    args.name !== undefined
+      ? { ok: true as const, value: args.name }
+      : await resolveExistingTunnelName(config.tunnels, prompts)
+  if (!nameResult.ok) return nameResult
+  const existing = config.tunnels.find((entry) => entry.name === nameResult.value)
+  if (existing === undefined) return { ok: false, reason: `unknown tunnel: ${nameResult.value}` }
 
   const flagFields = collectSetFlagFields(args)
   const interactive = flagFields.length === 0
@@ -360,7 +385,10 @@ export async function runTunnelSetFlow(
   } else if (interactive) {
     const choices = buildSetFieldChoices(existing)
     if (choices.length === 0) {
-      return { ok: false, reason: `tunnel "${args.name}" has no editable fields for provider "${existing.provider}"` }
+      return {
+        ok: false,
+        reason: `tunnel "${existing.name}" has no editable fields for provider "${existing.provider}"`,
+      }
     }
     if (prompts.selectSetField === undefined) {
       return { ok: false, reason: 'interactive set requires selectSetField prompt (pass a flag, e.g. --provider)' }
@@ -704,6 +732,30 @@ function parseLiveArgs(args: LiveArgs): { url?: string; timeoutMs: number } {
   return { ...(args.url !== undefined ? { url: args.url } : {}), timeoutMs }
 }
 
+async function resolveExistingTunnelName(
+  tunnels: readonly TunnelConfig[],
+  prompts: TunnelPrompts,
+): Promise<LiveResult<string>> {
+  if (tunnels.length === 1) return { ok: true, value: tunnels[0]!.name }
+  if (prompts.selectExistingTunnel === undefined) {
+    return {
+      ok: false,
+      reason: 'interactive set requires selectExistingTunnel prompt (pass the tunnel name positionally)',
+    }
+  }
+  const choices = tunnels.map((entry) => ({
+    value: entry.name,
+    label: entry.name,
+    hint: `${entry.provider} · ${entry.for.kind === 'channel' ? `channel:${entry.for.name}` : 'manual'}`,
+  }))
+  const choice = await prompts.selectExistingTunnel(choices)
+  if (isCancel(choice)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+  return { ok: true, value: choice }
+}
+
 async function resolveProvider(input: string | undefined, prompts: TunnelPrompts): Promise<TunnelProvider> {
   if (input === 'external' || input === 'cloudflare-quick' || input === 'cloudflare-named') return input
   if (input !== undefined) throw new Error(`unknown tunnel provider: ${input}`)
@@ -743,6 +795,24 @@ async function promptText(message: string, prompts: TunnelPrompts, validate?: Te
 
 function validateNonEmpty(requiredMessage: string): TextValidator {
   return (value) => (value.trim().length > 0 ? undefined : requiredMessage)
+}
+
+// Mirrors the regex on `tunnelEntrySchema.name` in src/config/config.ts so
+// the interactive prompt rejects shapes the post-write schema validation
+// would reject anyway, but with a clear inline error instead of a Zod dump.
+const TUNNEL_NAME_REGEX = /^[a-z0-9][a-z0-9-_]*$/
+
+function validateTunnelName(value: string, existing: ReadonlySet<string>): string | undefined {
+  if (value.trim().length === 0) return 'Tunnel name is required'
+  if (!TUNNEL_NAME_REGEX.test(value)) {
+    return 'Tunnel name must match /^[a-z0-9][a-z0-9-_]*$/ (lowercase, digits, dashes, underscores)'
+  }
+  if (existing.has(value)) return `tunnel "${value}" already exists`
+  return undefined
+}
+
+function makeTunnelNameValidator(existing: ReadonlySet<string>): TextValidator {
+  return (value) => validateTunnelName(value, existing)
 }
 
 function validateUpstreamPort(value: string): string | undefined {
