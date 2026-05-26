@@ -21,6 +21,30 @@ function startOkServer(): ReturnType<typeof Bun.serve> {
   })
 }
 
+// Polls until `predicate()` returns truthy, bounded by `timeoutMs`. Used to
+// observe restart.ts's internal `setTimeout(EXIT_DELAY_MS)` firing without
+// a fixed-sleep race. The prior pattern (`await sleep(600)` after a 500ms
+// EXIT_DELAY_MS) left only 100ms of slack — under 18-worker libuv
+// contention, setTimeout callbacks can be deferred well past their
+// scheduled fire time, so the 100ms margin occasionally collapses and the
+// `exitCode` assertion fails because the timer hasn't run yet.
+async function waitForCondition(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = performance.now() + timeoutMs
+  while (performance.now() < deadline) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+}
+
+// Production callers run against a real hostd on the same host where 5s is
+// generous. These tests run against an in-process `Bun.serve` under the
+// same 18-worker parallel-test contention as the rest of the suite, where
+// a 127.0.0.1 HTTP roundtrip can occasionally exceed 5s and flip the
+// happy-path expectation `ok: true` to `ok: false, reason: 'daemon ack
+// timeout'`. Passing a 30s budget here is the test-only seam documented
+// at CreateRestartToolOptions.ackTimeoutMs.
+const TEST_ACK_TIMEOUT_MS = 30_000
+
 describe('createRestartTool', () => {
   test('uses HTTP hostd transport when URL and token are configured', async () => {
     const requests: Array<{ auth: string | null; body: unknown }> = []
@@ -35,6 +59,7 @@ describe('createRestartTool', () => {
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
       hostdToken: 'secret',
       originatingSessionId: 'ses-test-origin',
       exit: (code) => {
@@ -51,7 +76,7 @@ describe('createRestartTool', () => {
         body: { kind: 'restart', containerName: 'coder', build: false },
       },
     ])
-    await new Promise((resolve) => setTimeout(resolve, 600))
+    await waitForCondition(() => exitCode !== undefined)
     expect(exitCode).toBe(0)
   })
 
@@ -67,6 +92,7 @@ describe('createRestartTool', () => {
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
       hostdToken: 'secret',
       originatingSessionId: 'ses-test-origin',
       exit: () => {},
@@ -91,6 +117,7 @@ describe('createRestartTool', () => {
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
       hostdToken: 'secret',
       originatingSessionId: 'ses-test-origin',
       exit: () => {},
@@ -112,6 +139,7 @@ describe('createRestartTool', () => {
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
       hostdToken: 'bad',
       originatingSessionId: 'ses-test-origin',
       exit: () => {
@@ -135,6 +163,7 @@ describe('createRestartTool', () => {
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
       hostdToken: 'secret',
       originatingSessionId: 'ses-test-origin',
       exit: () => {
@@ -145,7 +174,11 @@ describe('createRestartTool', () => {
     const result = await tool.execute('id', { build: true }, undefined, undefined, fakeCtx)
 
     expect(result.details).toEqual({ ok: false, containerName: 'coder', reason: 'host daemon source has drifted' })
-    await new Promise((resolve) => setTimeout(resolve, 600))
+    // Wait the full prod-side EXIT_DELAY_MS plus margin. exitCalled should
+    // stay false because the denial path skips the exit timer entirely;
+    // the wait observes the absence of an event, so it has to pay the full
+    // budget rather than poll.
+    await new Promise((resolve) => setTimeout(resolve, 1_500))
     expect(exitCalled).toBe(false)
   })
 
@@ -160,6 +193,7 @@ describe('createRestartTool', () => {
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
       hostdToken: 'secret',
       originatingSessionId: 'ses-test-origin',
       exit: () => {},
@@ -189,6 +223,7 @@ describe('createRestartTool', () => {
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
       hostdToken: 'secret',
       originatingSessionId: 'ses-the-one-that-asked',
       exit: () => {},
@@ -220,6 +255,7 @@ describe('createRestartTool', () => {
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
       hostdToken: 'bad',
       originatingSessionId: 'ses-test-origin',
       exit: () => {
@@ -242,6 +278,7 @@ describe('createRestartTool', () => {
     const tool = createRestartTool({
       containerName: 'coder',
       hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
       hostdToken: 'secret',
       originatingSessionId: 'ses-test-origin',
       exit: (code) => {
@@ -254,7 +291,7 @@ describe('createRestartTool', () => {
 
     // then
     expect(result.details).toEqual({ ok: true, containerName: 'coder' })
-    await new Promise((resolve) => setTimeout(resolve, 600))
+    await waitForCondition(() => exitCode !== undefined)
     expect(exitCode).toBe(0)
   })
 })
