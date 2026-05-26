@@ -145,39 +145,46 @@ export default definePlugin({
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
     const bytesAtLastRun = new Map<string, number>()
 
-    // memory-logger is now coalesced per agentDir (not per parentSessionId) so that
+    // memory-logger is coalesced per agentDir (not per parentSessionId) so that
     // two concurrent channel sessions for the same agent never write to the same
     // daily stream file at the same time. The subagent consumer would silently drop
     // a colliding fire, so we serialize spawn calls *here* (chaining each onto the
     // previous one's settlement) instead of letting the consumer choose between
     // dropping or queueing. The chain holds at most one in-flight promise plus one
-    // queued; older queued fires for the same session are superseded by newer ones
-    // through the lastIdleEvent map (each fire reads the latest snapshot).
+    // queued.
+    //
+    // The `lastIdleEvent` lookup happens SYNCHRONOUSLY at call time and the
+    // snapshot is captured in `payload` before any await. This is load-bearing
+    // for `session.end`'s fire-and-forget path (see hook below): the hook
+    // synchronously cleans up `lastIdleEvent.delete(sessionId)` immediately
+    // after calling fireMemoryLogger, so if the snapshot were read lazily
+    // inside the chained `.then`, it would race with cleanup and the spawn
+    // would silently no-op. Capturing the payload up front decouples the
+    // session-end snapshot from the cleanup that follows.
     let spawnChain: Promise<void> = Promise.resolve()
 
     const fireMemoryLogger = (sessionId: string, reason: 'idle' | 'buffer-trip' | 'session-end'): Promise<void> => {
+      const last = lastIdleEvent.get(sessionId)
+      if (!last || last.parentTranscriptPath === undefined) return Promise.resolve()
+      const parentTranscriptPath = last.parentTranscriptPath
+      const payload: MemoryLoggerPayload = {
+        parentSessionId: sessionId,
+        parentTranscriptPath,
+        agentDir: ctx.agentDir,
+        ...(last.origin !== undefined ? { origin: last.origin } : {}),
+      }
+      const spawnOptions = {
+        parentSessionId: sessionId,
+        ...(last.origin !== undefined ? { spawnedByOrigin: last.origin } : {}),
+      }
       const next = spawnChain
         .catch(() => undefined)
         .then(async () => {
-          const last = lastIdleEvent.get(sessionId)
-          if (!last || last.parentTranscriptPath === undefined) return
-          const payload: MemoryLoggerPayload = {
-            parentSessionId: sessionId,
-            parentTranscriptPath: last.parentTranscriptPath,
-            agentDir: ctx.agentDir,
-            ...(last.origin !== undefined ? { origin: last.origin } : {}),
-          }
-          const currentSize = await readSize(last.parentTranscriptPath)
+          const currentSize = await readSize(parentTranscriptPath)
           bytesAtLastRun.set(sessionId, currentSize)
           ctx.logger.info(`memory-logger spawn ${sessionId} reason=${reason} transcript_bytes=${currentSize}`)
           try {
-            await raceSpawn(
-              ctx.spawnSubagent('memory-logger', payload, {
-                parentSessionId: sessionId,
-                ...(last.origin !== undefined ? { spawnedByOrigin: last.origin } : {}),
-              }),
-              spawnTimeoutMs,
-            )
+            await raceSpawn(ctx.spawnSubagent('memory-logger', payload, spawnOptions), spawnTimeoutMs)
           } catch (err) {
             ctx.logger.error(`memory-logger spawn failed: ${err instanceof Error ? err.message : String(err)}`)
           }
@@ -355,16 +362,39 @@ export default definePlugin({
             ctx.logger.error(`memory-retrieval spawn failed: ${err instanceof Error ? err.message : String(err)}`)
           })
         },
-        'session.end': async (event) => {
+        // The memory-logger spawn is intentionally detached (`void`) instead
+        // of awaited. The channel router calls `tearDownLive` synchronously
+        // inside `ensureLive`'s stale-rollover path (router.ts:718), and
+        // `tearDownLive` awaits `fireSessionEnd` which awaits this hook. An
+        // awaited memory-logger spawn here would block new-session creation
+        // for the full subagent runtime — observed as 22+ seconds of channel
+        // silence on a 22 KB transcript before the new session even starts
+        // its cold-start chain.
+        //
+        // Safety: `fireMemoryLogger` captures the payload synchronously from
+        // `lastIdleEvent` (see comment above), so the `delete` calls below
+        // cannot race with the chained spawn. `spawnChain` still serializes
+        // memory-logger fires per agentDir — the detached promise is queued
+        // onto the chain before this hook returns, so a subsequent fire from
+        // the new session (idle, buffer-trip, or session-end) waits for the
+        // session-end spawn to settle before running.
+        //
+        // The only durability tradeoff: if the agent process dies between
+        // this hook returning and `spawnChain` settling, the session-end
+        // memory-logger fire is lost (its transcript fragments don't make
+        // it into today's daily stream). This is already true for the idle
+        // and buffer-trip paths, which are timer-driven and fire-and-forget
+        // by design. Session JSONLs are force-committed elsewhere, so no
+        // user-visible transcript is lost — only the LLM-distilled stream
+        // fragments for the final batch.
+        'session.end': (event) => {
           if (event.origin?.kind === 'subagent') return
           cancelTimer(event.sessionId)
-          await fireMemoryLogger(event.sessionId, 'session-end')
+          void fireMemoryLogger(event.sessionId, 'session-end')
           const cacheFilePath = join(ctx.agentDir, 'memory', '.retrieval-cache', `${event.sessionId}.md`)
-          try {
-            await unlink(cacheFilePath)
-          } catch (err) {
+          unlink(cacheFilePath).catch((err) => {
             if (!isEnoent(err)) ctx.logger.warn(`[memory] failed to clean retrieval cache: ${err}`)
-          }
+          })
           lastIdleEvent.delete(event.sessionId)
           bytesAtLastRun.delete(event.sessionId)
         },
