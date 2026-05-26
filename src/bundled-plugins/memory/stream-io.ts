@@ -1,4 +1,4 @@
-import { readFile, appendFile, readdir, writeFile, rename } from 'node:fs/promises'
+import { readFile, appendFile, readdir, stat, writeFile, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { getDreamedIds, loadDreamingState } from './dreaming-state'
@@ -8,7 +8,59 @@ import { parseEventLine, type StreamEvent } from './stream-events'
 const STREAM_FILE_PATTERN = /^\d{4}-\d{2}-\d{2}\.jsonl$/
 const STREAM_DATE_FROM_FILENAME = /^(\d{4}-\d{2}-\d{2})\.jsonl$/
 
+// Per-file event cache. `(mtimeMs, ctimeMs, size)` is the invalidation key,
+// mirroring `load-shards.ts`'s shard cache. The three writers in this module
+// — `appendEvents` (memory-logger appends), `writeEventsAtomic` (dreaming
+// compaction + migration), and any external `writeFile` — all bump mtime
+// and/or ctime, so stat-based invalidation is sufficient without explicit
+// hooks. ctimeMs guards metadata-preserving external edits (rsync -t,
+// `touch -r`, restored backups, `git checkout` with timestamps): the kernel
+// always bumps ctime on inode content changes and ctime cannot be backdated
+// via utimes.
+//
+// Module-level keyed by absolute file path. One Bun process owns one agent
+// dir in production (the container stage), so cardinality is small. Multi-
+// path support exists because dreaming compacts multiple files per run and
+// memory_search reads every dated stream.
+type StreamFileCacheEntry = {
+  mtimeMs: number
+  ctimeMs: number
+  size: number
+  events: StreamEvent[]
+}
+const streamFileCache = new Map<string, StreamFileCacheEntry>()
+
 export async function readEvents(path: string): Promise<StreamEvent[]> {
+  const fileStat = await statFile(path)
+  if (fileStat === null) {
+    // File disappeared since last cache populate (e.g. dreaming dropped a
+    // fully-GC'd day). Drop the entry so a future recreate gets fresh
+    // content.
+    streamFileCache.delete(path)
+    return []
+  }
+
+  const cached = streamFileCache.get(path)
+  if (
+    cached !== undefined &&
+    cached.mtimeMs === fileStat.mtimeMs &&
+    cached.ctimeMs === fileStat.ctimeMs &&
+    cached.size === fileStat.size
+  ) {
+    return cached.events
+  }
+
+  const events = await readEventsFromDisk(path)
+  streamFileCache.set(path, {
+    mtimeMs: fileStat.mtimeMs,
+    ctimeMs: fileStat.ctimeMs,
+    size: fileStat.size,
+    events,
+  })
+  return events
+}
+
+async function readEventsFromDisk(path: string): Promise<StreamEvent[]> {
   let raw: string
   try {
     raw = await readFile(path, 'utf-8')
@@ -32,6 +84,24 @@ export async function readEvents(path: string): Promise<StreamEvent[]> {
   }
 
   return events
+}
+
+async function statFile(path: string): Promise<{ mtimeMs: number; ctimeMs: number; size: number } | null> {
+  try {
+    const s = await stat(path)
+    return { mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs, size: s.size }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
+    throw err
+  }
+}
+
+// Test-only helper. Clears the in-memory stream-file cache so tests that
+// exercise the cache invalidation path can simulate a cold start without
+// spinning up a fresh process. Mirrors `__resetShardCacheForTests` in
+// `load-shards.ts`.
+export function __resetStreamFileCacheForTests(): void {
+  streamFileCache.clear()
 }
 
 export async function appendEvents(path: string, events: readonly StreamEvent[]): Promise<void> {

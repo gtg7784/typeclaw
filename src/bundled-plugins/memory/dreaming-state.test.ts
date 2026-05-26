@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  __resetDreamingStateCacheForTests,
   addDreamedIds,
   clearDreamedIds,
   DREAMING_STATE_FILE,
@@ -17,10 +18,12 @@ let agentDir: string
 
 beforeEach(async () => {
   agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-dream-state-'))
+  __resetDreamingStateCacheForTests()
 })
 
 afterEach(async () => {
   await rm(agentDir, { recursive: true, force: true })
+  __resetDreamingStateCacheForTests()
 })
 
 describe('loadDreamingState', () => {
@@ -148,5 +151,44 @@ describe('clearDreamedIds', () => {
     const cleared = clearDreamedIds(state, '2026-04-27', 't2')
     expect(cleared.dreamedThrough['2026-04-26']?.dreamedIds).toEqual(['keep'])
     expect(cleared.dreamedThrough['2026-04-27']?.dreamedIds).toEqual([])
+  })
+})
+
+describe('loadDreamingState cache', () => {
+  test('second load returns the same state reference (cache hit) when file is untouched', async () => {
+    const state = addDreamedIds(emptyState(), '2026-04-27', ['a'], 'now')
+    await saveDreamingState(agentDir, state)
+
+    const first = await loadDreamingState(agentDir)
+    const second = await loadDreamingState(agentDir)
+
+    expect(second).toBe(first)
+  })
+
+  test('saveDreamingState invalidates the cache (mtime bumps)', async () => {
+    await saveDreamingState(agentDir, addDreamedIds(emptyState(), '2026-04-27', ['a'], 't1'))
+    const first = await loadDreamingState(agentDir)
+    expect(first.dreamedThrough['2026-04-27']?.dreamedIds).toEqual(['a'])
+
+    await saveDreamingState(agentDir, addDreamedIds(emptyState(), '2026-04-27', ['a', 'b'], 't2'))
+    const second = await loadDreamingState(agentDir)
+
+    expect(second).not.toBe(first)
+    expect(second.dreamedThrough['2026-04-27']?.dreamedIds).toEqual(['a', 'b'])
+  })
+
+  test('cache drops entry when file disappears so a recreate returns fresh state', async () => {
+    await saveDreamingState(agentDir, addDreamedIds(emptyState(), '2026-04-27', ['a'], 'now'))
+    const first = await loadDreamingState(agentDir)
+    expect(first.dreamedThrough['2026-04-27']?.dreamedIds).toEqual(['a'])
+
+    await rm(join(agentDir, DREAMING_STATE_FILE))
+    const empty = await loadDreamingState(agentDir)
+    expect(empty).toEqual(emptyState())
+
+    await saveDreamingState(agentDir, addDreamedIds(emptyState(), '2026-04-28', ['z'], 'later'))
+    const recreated = await loadDreamingState(agentDir)
+    expect(recreated.dreamedThrough['2026-04-28']?.dreamedIds).toEqual(['z'])
+    expect(recreated.dreamedThrough['2026-04-27']).toBeUndefined()
   })
 })
