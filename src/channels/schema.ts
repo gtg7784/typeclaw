@@ -19,7 +19,7 @@ const stickinessSchema = z.union([
   }),
 ])
 
-export const STICKY_DEFAULT_WINDOW_MS = 5 * 60 * 1000
+export const STICKY_DEFAULT_WINDOW_MS = 15 * 60 * 1000
 
 const engagementSchema = z
   .object({

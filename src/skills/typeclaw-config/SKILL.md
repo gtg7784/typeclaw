@@ -138,7 +138,7 @@ Each entry in `channels` is keyed by adapter id and has this shape:
 
 | Field        | Required | Type    | Notes                                                                                                                                                                                    |
 | ------------ | -------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `engagement` | no       | object  | When the agent should auto-reply vs. stay silent. Defaults to mention/reply/dm with 5-minute reply stickiness. See **Engagement** below.                                                 |
+| `engagement` | no       | object  | When the agent should auto-reply vs. stay silent. Defaults to mention/reply/dm with 15-minute reply stickiness. See **Engagement** below.                                                |
 | `history`    | no       | object  | Cold-start prefetch windows for `(thread.head, thread.tail, channel.tail)`. Set any to `0` to disable that side. Defaults to `{ thread: { head: 3, tail: 10 }, channel: { tail: 10 } }`. |
 | `enabled`    | no       | boolean | Defaults to `true`. Set `false` to disable the adapter entirely without removing its config.                                                                                             |
 
@@ -151,7 +151,7 @@ To stop the agent answering in a specific channel, narrow the `roles` block so t
 ```json
 "engagement": {
   "trigger": ["mention", "reply", "dm"],
-  "stickiness": { "perReply": { "window": 300000 } }
+  "stickiness": { "perReply": { "window": 900000 } }
 }
 ```
 
@@ -159,7 +159,7 @@ To stop the agent answering in a specific channel, narrow the `roles` block so t
   - `mention` — explicit `@bot` mentions.
   - `reply` — message is a Discord reply pointed at the agent's own message.
   - `dm` — any message in a DM channel.
-- **`stickiness`** — either the literal string `"off"`, or `{ perReply: { window: <ms> } }`. Default: 5-minute reply stickiness (`window: 300000`).
+- **`stickiness`** — either the literal string `"off"`, or `{ perReply: { window: <ms> } }`. Default: 15-minute reply stickiness (`window: 900000`).
   - `perReply` means: after the agent replies to a user, follow-up messages from that same user in that same channel within the window also wake the loop, even without a mention. The window is bounded server-side (`1` to `86_400_000` ms — 1 ms to 24 hours).
   - `"off"` disables stickiness — the agent only wakes on explicit triggers.
 
@@ -174,7 +174,7 @@ There is also a **solo-human fallback** built into the runtime that is **not con
   "discord-bot": {
     "engagement": {
       "trigger": ["mention", "reply", "dm"],
-      "stickiness": { "perReply": { "window": 300000 } }
+      "stickiness": { "perReply": { "window": 900000 } }
     },
     "enabled": true
   }
