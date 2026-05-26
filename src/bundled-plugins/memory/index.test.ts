@@ -70,18 +70,31 @@ async function tickMs(ms: number): Promise<void> {
 // since libuv-and-faked-setTimeout interleavings can leave the final chain
 // link's microtasks pending past the last drain cycle. The poll uses real
 // setImmediate (libuv) not the fake clock.
-// `attempts` is the count of real `setImmediate` cycles we poll for. Under
-// `bun test --parallel`, 18+ workers contend on the event loop and a chain
-// of `fs.stat` → fake-setTimeout → real-microtask-drain can need well over
-// 200 cycles to settle. 2000 is roomy enough for worker contention and still
-// finishes in <50ms on the happy path (each setImmediate is microsecond-scale
-// when nothing is starving it).
-async function waitFor(predicate: () => boolean, label: string, attempts = 2000): Promise<void> {
-  for (let i = 0; i < attempts; i++) {
+//
+// `timeoutMs` bounds the wall-clock budget rather than counting `setImmediate`
+// iterations. Under `bun test --parallel` (18 workers on a typical dev box),
+// libuv's threadpool can saturate to the point where a worker's `fs.readdir`
+// callback sits queued for hundreds of ms while this worker's event loop
+// keeps firing `setImmediate` callbacks. An iteration-count cap exhausts in
+// <50ms under contention, well before the fs chain — `loadAllShards` ->
+// `fs.readdir` -> N x `fs.stat` -> `fs.readFile` -> faked-setTimeout ->
+// spawn.push — actually settles. 10s is roomy enough for any plausibly
+// correct chain and matches Bun's default per-test timeout.
+//
+// Uses `performance.now()` rather than `Date.now()` because several describe
+// blocks (`session.idle hook (debouncer)`, `session.end hook`, etc.) install
+// sinon fake timers with `Date` in `toFake`. Under a faked `Date`,
+// `Date.now()` does not advance between `setImmediate` ticks, so a
+// `Date.now()`-based deadline never expires and a failure path becomes a
+// permanent hang. `performance.now()` is NOT in any test's `toFake` list,
+// so it tracks wall clock under both real and faked Date.
+async function waitFor(predicate: () => boolean, label: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = performance.now() + timeoutMs
+  while (performance.now() < deadline) {
     if (predicate()) return
     await new Promise((r) => setImmediate(r))
   }
-  throw new Error(`waitFor(${label}) exhausted ${attempts} attempts without predicate becoming true`)
+  throw new Error(`waitFor(${label}) exhausted ${timeoutMs}ms without predicate becoming true`)
 }
 
 type SpawnCall = { name: string; payload: unknown; options: unknown; startedAt: number; finishedAt: number }
@@ -575,6 +588,7 @@ describe('session.end hook', () => {
     await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }, ctx)
     await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
 
+    await waitFor(() => spawned.length >= 1, 'memory-logger spawn on session.end')
     expect(spawned).toHaveLength(1)
     expect(spawned[0]!.name).toBe('memory-logger')
   })
@@ -591,6 +605,7 @@ describe('session.end hook', () => {
       logger: createPluginLogger('m'),
     })
 
+    await waitFor(() => !existsSync(cacheFilePath), 'retrieval cache unlinked')
     expect(existsSync(cacheFilePath)).toBe(false)
   })
 
@@ -606,6 +621,10 @@ describe('session.end hook', () => {
       logger,
     })
 
+    await waitFor(
+      () => logs.warn.some((m) => m.includes('failed to clean retrieval cache')),
+      'retrieval cache cleanup warning',
+    )
     expect(logs.warn.some((m) => m.includes('failed to clean retrieval cache'))).toBe(true)
   })
 
@@ -641,8 +660,45 @@ describe('session.end hook', () => {
     await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }, ctx)
     await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
 
+    await waitFor(() => spawned.length >= 1, 'session-end spawn settles')
     await tickMs(1200)
 
+    expect(spawned).toHaveLength(1)
+  })
+})
+
+// Regression guard for the user-visible Discord channel-silence bug: when the
+// router's stale-rollover path calls `tearDownLive(existing)`, it awaits
+// `fireSessionEnd` which awaits this hook. If the hook awaited the
+// memory-logger spawn (which takes 20+ seconds on a real transcript), the
+// new session's cold-start would block for the full subagent runtime — observed
+// as ~28s of channel silence between inbound message and any reply. The
+// detached `void fireMemoryLogger(...)` keeps the hook fast while
+// `spawnChain` preserves the agentDir-keyed serialization invariant.
+describe('session.end channel-silence regression guard', () => {
+  test('session.end returns synchronously even when memory-logger spawn is slow', async () => {
+    const SLOW_SPAWN_MS = 1000
+    const { exports, spawned } = await bootMemoryPlugin(
+      agentDir,
+      { idleMs: 60_000, bufferBytes: 0 },
+      { spawnDelayMs: SLOW_SPAWN_MS },
+    )
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }, ctx)
+
+    const start = performance.now()
+    await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
+    const elapsed = performance.now() - start
+
+    // The hook must return well under SLOW_SPAWN_MS — it's detached from
+    // the spawn. 100ms is a generous ceiling for synchronous bookkeeping
+    // under worker contention; the production user-visible bug had this
+    // path blocking for 22 seconds.
+    expect(elapsed).toBeLessThan(100)
+    expect(spawned).toHaveLength(0)
+
+    await waitFor(() => spawned.length >= 1, 'spawn eventually completes via chain')
     expect(spawned).toHaveLength(1)
   })
 })
@@ -835,6 +891,7 @@ describe('per-agent spawn serialization', () => {
     ])
 
     // then: both spawned, but the second started AFTER the first finished (no overlap)
+    await waitFor(() => spawned.length >= 2, 'both spawns complete')
     expect(spawned).toHaveLength(2)
     const [first, second] = [...spawned].sort((a, b) => a.startedAt - b.startedAt)
     expect(second!.startedAt).toBeGreaterThanOrEqual(first!.finishedAt)
@@ -858,6 +915,7 @@ describe('per-agent spawn serialization', () => {
       exports.hooks!['session.end']!({ sessionId: 'ses_c' } as SessionEndEvent, ctx),
     ])
 
+    await waitFor(() => spawned.length >= 3, 'all three spawns complete')
     expect(spawned).toHaveLength(3)
     expect(spawned.map((s) => (s.payload as { parentSessionId: string }).parentSessionId)).toEqual([
       'ses_a',
@@ -905,6 +963,7 @@ describe('per-agent spawn serialization', () => {
       exports.hooks!['session.end']!({ sessionId: 'ses_b' } as SessionEndEvent, hookCtx),
     ])
 
+    await waitFor(() => spawned.length >= 1, 'second spawn after failing first')
     expect(spawned).toHaveLength(1)
     expect((spawned[0]!.payload as { parentSessionId: string }).parentSessionId).toBe('ses_b')
   })
@@ -960,9 +1019,15 @@ describe('per-agent spawn serialization', () => {
     await exports.hooks!['session.end']!({ sessionId: 'ses_b' } as SessionEndEvent, hookCtx)
     const elapsed = Date.now() - start
 
-    // then the hung spawn timed out within the configured ceiling, the
-    // failure was logged with attribution, and the next spawn ran to
-    // completion
+    // The hook calls themselves return immediately (session.end is now
+    // detached from the spawn chain), so the hung spawn must time out and
+    // the second spawn must complete via the chain settling.
+    await waitFor(() => spawned.length >= 1, 'second spawn after timeout')
+    await waitFor(
+      () => logs.error.some((m) => m.includes('memory-logger spawn failed') && m.includes('timed out after 30ms')),
+      'timeout error log',
+    )
+
     expect(elapsed).toBeLessThan(2000)
     expect(spawned).toHaveLength(1)
     expect((spawned[0]!.payload as { parentSessionId: string }).parentSessionId).toBe('ses_b')
@@ -999,6 +1064,10 @@ describe('lifecycle logging', () => {
     await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: '/tmp/t.jsonl', idleMs: 0 }, ctx)
     await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
 
+    await waitFor(
+      () => logs.info.some((m) => m.includes('memory-logger spawn ses_a') && m.includes('reason=session-end')),
+      'memory-logger spawn ses_a reason=session-end',
+    )
     expect(logs.info.some((m) => m.includes('memory-logger spawn ses_a') && m.includes('reason=session-end'))).toBe(
       true,
     )
