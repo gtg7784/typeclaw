@@ -5,6 +5,7 @@ import { findAgentDir } from '@/init'
 import { runInspectLoop, streamLive, type LiveSourceFactory, type SessionSummary } from '@/inspect'
 import { originLabel, shortSessionId } from '@/inspect/label'
 
+import { createEscController } from './inspect-controller'
 import { cancel, c, errorLine, isCancel } from './ui'
 
 const ESC_LISTEN_DELAY_MS = 50
@@ -124,29 +125,12 @@ function createEscListener(): EscListener | null {
   const stdin = process.stdin
   if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') return null
 
-  let currentCtrl: AbortController | null = null
-  let pendingEsc: ReturnType<typeof setTimeout> | null = null
+  const ctrl = createEscController({ debounceMs: ESC_LISTEN_DELAY_MS })
   let active = false
 
   const onData = (chunk: Buffer): void => {
-    if (chunk.length === 0) return
-    const first = chunk[0]
-    if (first === 0x03) {
-      process.kill(process.pid, 'SIGINT')
-      return
-    }
-    if (chunk.length === 1 && first === 0x1b) {
-      if (pendingEsc !== null) clearTimeout(pendingEsc)
-      pendingEsc = setTimeout(() => {
-        pendingEsc = null
-        currentCtrl?.abort()
-      }, ESC_LISTEN_DELAY_MS)
-      return
-    }
-    if (pendingEsc !== null) {
-      clearTimeout(pendingEsc)
-      pendingEsc = null
-    }
+    const { sigint } = ctrl.onChunk(chunk)
+    if (sigint) process.kill(process.pid, 'SIGINT')
   }
 
   const start = (): void => {
@@ -166,27 +150,28 @@ function createEscListener(): EscListener | null {
       /* terminal already torn down */
     }
     stdin.pause()
-    if (pendingEsc !== null) {
-      clearTimeout(pendingEsc)
-      pendingEsc = null
-    }
+    ctrl.clearPending()
   }
 
   return {
     armForStream: () => {
-      currentCtrl = new AbortController()
+      const signal = ctrl.armForStream()
       start()
-      return currentCtrl.signal
+      return signal
     },
     pause: () => {
       stop()
     },
     resume: () => {
-      currentCtrl = new AbortController()
+      // Resume the listener WITHOUT replacing the AbortController.
+      // The signal returned by armForStream() is held by the live source
+      // through streamSession's combinedSignal; replacing the controller
+      // here would orphan that signal so a subsequent ESC press could
+      // not abort the live tail.
       start()
     },
     stop: () => {
-      currentCtrl = null
+      ctrl.dispose()
       stop()
     },
   }
