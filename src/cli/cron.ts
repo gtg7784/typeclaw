@@ -38,7 +38,7 @@ const listSub = defineCommand({
     }
 
     let url: string | undefined = args.url
-    if (url === undefined) {
+    if (url === undefined && process.env.TYPECLAW_CONTAINER_NAME === undefined) {
       const precheck = await requireContainerRunning({ cwd })
       if (!precheck.ok) {
         console.error(errorLine(precheck.reason))

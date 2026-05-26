@@ -1,10 +1,14 @@
-import { resolveHostPort, resolveTuiToken } from '@/container'
+import { CONTAINER_PORT, resolveHostPort, resolveTuiToken } from '@/container'
 import type { ClientMessage, CronListEntryPayload, ServerMessage } from '@/shared'
 
 export type CronListBridgeOptions = {
   cwd: string
   url?: string
   timeoutMs?: number
+  // Injected for tests so the in-container short-circuit can be exercised
+  // without polluting process.env. Production callers omit this and the
+  // bridge reads from process.env directly.
+  env?: NodeJS.ProcessEnv
 }
 
 export type CronListBridgeResult =
@@ -34,9 +38,7 @@ async function dial(opts: CronListBridgeOptions): Promise<DialResult> {
   let url = opts.url
   if (url === undefined) {
     try {
-      const port = await resolveHostPort({ cwd: opts.cwd })
-      const token = await resolveTuiToken({ cwd: opts.cwd })
-      url = buildBridgeUrl(port, token)
+      url = resolveInContainerUrl(opts.env ?? process.env) ?? (await resolveHostUrl(opts.cwd))
     } catch (err) {
       return { kind: 'unreachable', reason: err instanceof Error ? err.message : String(err) }
     }
@@ -113,6 +115,25 @@ async function awaitReply(ws: WebSocket, timeoutMs: number, requestId: string): 
     }
     ws.addEventListener('message', onMessage)
   })
+}
+
+// In-container short-circuit: when typeclaw runs `docker run`, it sets
+// TYPECLAW_CONTAINER_NAME (always) and TYPECLAW_TUI_TOKEN (when configured).
+// Inside the container, docker is not on $PATH, so the host-side discovery
+// path (resolveHostPort/resolveTuiToken — both shell out to `docker`) fails
+// with "docker: command not found". We don't need docker here: the agent's
+// WS server is listening on CONTAINER_PORT on the container's loopback, and
+// the token is already in our env. Skip docker entirely and dial directly.
+export function resolveInContainerUrl(env: NodeJS.ProcessEnv): string | null {
+  if (env.TYPECLAW_CONTAINER_NAME === undefined) return null
+  const token = env.TYPECLAW_TUI_TOKEN ?? ''
+  return buildBridgeUrl(CONTAINER_PORT, token !== '' ? token : null)
+}
+
+async function resolveHostUrl(cwd: string): Promise<string> {
+  const port = await resolveHostPort({ cwd })
+  const token = await resolveTuiToken({ cwd })
+  return buildBridgeUrl(port, token)
 }
 
 function buildBridgeUrl(port: number, token: string | null): string {
