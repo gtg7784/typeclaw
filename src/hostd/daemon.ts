@@ -69,7 +69,7 @@ export type RestartPreflight = (input: {
 }) => Promise<RpcResponse | null>
 
 export type PortbrokerCallbacks = {
-  start: (input: PortbrokerStartInput) => void
+  start: (input: PortbrokerStartInput) => Promise<void>
   stop: (containerName: string, reason: 'deregistered' | 'broker-stopped') => Promise<void>
   // Returns ports the broker is currently exposing on the host for this
   // container. Empty array when the container is unregistered, when the broker
@@ -157,8 +157,10 @@ function isValidRestoredPayload(value: unknown, expectedName: string): value is 
 }
 
 async function restorePersistedRegistrations(
-  apply: (payload: RestoredPayload) => void,
+  apply: (payload: RestoredPayload) => Promise<void>,
   log: (event: DaemonLogEvent | SupervisorLogEvent) => void,
+  probe: (name: string) => Promise<'alive' | 'gone' | 'unknown'>,
+  removeFile: (name: string) => Promise<void>,
 ): Promise<void> {
   let entries: string[]
   try {
@@ -181,7 +183,23 @@ async function restorePersistedRegistrations(
       log({ kind: 'registration-skipped', containerName: expectedName, reason: 'schema mismatch' })
       continue
     }
-    apply(parsed)
+    // Probe before reviving. A registration file for a container that no
+    // longer exists is a leftover from a daemon that died ungracefully
+    // (crash, `kill -9`, OS reboot) before deregister could clean up.
+    // Reviving its broker would create a stale T_old broker that races a
+    // subsequent `register` call's T_new broker — see portbroker-manager.ts
+    // start() for the swap-race description. `unknown` (docker probe call
+    // failed) errs toward restore: the existing GC tick will tear down the
+    // registration if the container is genuinely gone, and we'd rather pay
+    // one swap-race attempt than tear down a live registration on a flaky
+    // `docker ps`.
+    const status = await probe(expectedName)
+    if (status === 'gone') {
+      await removeFile(expectedName)
+      log({ kind: 'registration-skipped', containerName: expectedName, reason: 'container not running' })
+      continue
+    }
+    await apply(parsed)
   }
 }
 
@@ -267,7 +285,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
     } catch {}
   }
 
-  const applyRegistration = (payload: RegisterPayload): void => {
+  const applyRegistration = async (payload: RegisterPayload): Promise<void> => {
     const alreadyRegistered = cwds.has(payload.containerName)
     cwds.set(payload.containerName, payload.cwd)
     if (payload.restartToken) restartTokens.set(payload.containerName, payload.restartToken)
@@ -281,7 +299,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
       payload.portForward !== undefined &&
       payload.brokerToken !== undefined
     ) {
-      opts.portbroker.start({
+      await opts.portbroker.start({
         containerName: payload.containerName,
         cwd: payload.cwd,
         policy: payload.portForward,
@@ -308,7 +326,7 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
           reason: `failed to persist registration: ${error instanceof Error ? error.message : String(error)}`,
         }
       }
-      applyRegistration(req)
+      await applyRegistration(req)
       return { ok: true }
     })
   }
@@ -528,12 +546,31 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   httpPort = httpServer.port ?? 0
   log({ kind: 'daemon-http-listening', host: httpHostname, port: httpPort })
 
+  // GC tick distinguishes "container confirmed gone" from "docker call failed":
+  // a `docker ps` blip should not deregister a live container registration, so
+  // we require gcMissesToDeregister consecutive confirmed absences. Boot-time
+  // restore reuses the same probe but with a stricter policy — see
+  // restorePersistedRegistrations.
+  const probeContainerAlive = async (name: string): Promise<'alive' | 'gone' | 'unknown'> => {
+    try {
+      const result = await exec(['ps', '-a', '--filter', `name=^${name}$`, '--format', '{{.Names}}'])
+      if (result.exitCode !== 0) return 'unknown'
+      const names = result.stdout
+        .trim()
+        .split('\n')
+        .filter((s) => s.length > 0)
+      return names.includes(name) ? 'alive' : 'gone'
+    } catch {
+      return 'unknown'
+    }
+  }
+
   // Boot-time restore: replay every persisted registration into the in-memory
   // maps and revive portbroker for it. Runs before Bun.listen so the socket
   // is never accepting RPCs against a half-restored registry. A bad file
   // (parse error, schema mismatch) is logged-and-skipped — one corrupt
   // registration must not gate every other container's recovery.
-  await restorePersistedRegistrations(applyRegistration, log)
+  await restorePersistedRegistrations(applyRegistration, log, probeContainerAlive, removeRegistrationFile)
 
   const listener: UnixSocketListener<ServerState> = Bun.listen<ServerState>({
     unix: path,
@@ -549,23 +586,6 @@ export async function startDaemon(opts: DaemonOptions = {}): Promise<Daemon> {
   // Restrict socket to the owning user; ~/.typeclaw/run is also 0700.
   await chmod(path, 0o600).catch(() => {})
   log({ kind: 'daemon-listening', socket: path })
-
-  // GC tick distinguishes "container confirmed gone" from "docker call failed":
-  // a `docker ps` blip should not deregister a live container registration, so
-  // we require gcMissesToDeregister consecutive confirmed absences.
-  const probeContainerAlive = async (name: string): Promise<'alive' | 'gone' | 'unknown'> => {
-    try {
-      const result = await exec(['ps', '-a', '--filter', `name=^${name}$`, '--format', '{{.Names}}'])
-      if (result.exitCode !== 0) return 'unknown'
-      const names = result.stdout
-        .trim()
-        .split('\n')
-        .filter((s) => s.length > 0)
-      return names.includes(name) ? 'alive' : 'gone'
-    } catch {
-      return 'unknown'
-    }
-  }
 
   const runGc = async (): Promise<void> => {
     for (const name of Array.from(cwds.keys())) {

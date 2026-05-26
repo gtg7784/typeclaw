@@ -26,15 +26,31 @@ export function createPortbrokerManager(opts: PortbrokerManagerOptions = {}): Po
   const brokerFactory = opts.createBrokerFor ?? createBroker
 
   return {
-    start(input: PortbrokerStartInput) {
+    // start() awaits the previous broker's stop before constructing the new
+    // one. The fire-and-forget shape this replaced let a stale T_old broker
+    // win the race to send broker-hello against a brand-new container that
+    // expects T_new, producing a one-shot `auth-failed: token mismatch`
+    // broadcast at every re-register that arrived while the old broker was
+    // still mid-stop. The race window was narrow but reproducible across
+    // hostd-respawn-after-ungraceful-death + typeclaw restart, because the
+    // restored T_old broker is alive for the duration of the register RPC.
+    // Awaiting collapses the window to zero — by the time the T_new broker's
+    // first connect() fires, the T_old broker has set stopped=true, cleared
+    // its reconnect timer, and closed its WS.
+    async start(input: PortbrokerStartInput) {
       const existing = brokers.get(input.containerName)
       if (existing) {
-        void existing.stop().catch(() => {})
+        brokers.delete(input.containerName)
+        try {
+          await existing.stop()
+        } catch {}
       }
       const existingTailscale = tailscaleManagers.get(input.containerName)
       if (existingTailscale) {
         tailscaleManagers.delete(input.containerName)
-        void existingTailscale.stopAll().catch(() => {})
+        try {
+          await existingTailscale.stopAll()
+        } catch {}
       }
       const tailscale = createTailscaleServeManager({
         containerName: input.containerName,
