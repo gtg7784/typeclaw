@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { makeLogTimestampReformatter } from './log-timestamps'
-import { planLogs, pumpWithTimestamps } from './logs'
+import { buildDockerLogsCmd, parseTailValue, planLogs, pumpWithTimestamps } from './logs'
 
 let root: string
 
@@ -23,6 +23,97 @@ describe('planLogs', () => {
 
     expect(planLogs(folder, { follow: false })).toEqual({ containerName: 'coder', follow: false })
     expect(planLogs(folder, { follow: true })).toEqual({ containerName: 'coder', follow: true })
+  })
+
+  test('carries tail through when supplied; omits the field when undefined', async () => {
+    const folder = join(root, 'coder')
+    await mkdir(folder)
+
+    expect(planLogs(folder, { follow: false, tail: '50' })).toEqual({
+      containerName: 'coder',
+      follow: false,
+      tail: '50',
+    })
+    expect(planLogs(folder, { follow: true, tail: 'all' })).toEqual({
+      containerName: 'coder',
+      follow: true,
+      tail: 'all',
+    })
+    expect(planLogs(folder, { follow: false })).toEqual({ containerName: 'coder', follow: false })
+  })
+})
+
+describe('parseTailValue', () => {
+  test('accepts non-negative integers and returns them verbatim', () => {
+    expect(parseTailValue('0')).toEqual({ ok: true, value: '0' })
+    expect(parseTailValue('1')).toEqual({ ok: true, value: '1' })
+    expect(parseTailValue('100')).toEqual({ ok: true, value: '100' })
+    expect(parseTailValue('  42  ')).toEqual({ ok: true, value: '42' })
+  })
+
+  test('accepts the "all" sentinel case-insensitively', () => {
+    expect(parseTailValue('all')).toEqual({ ok: true, value: 'all' })
+    expect(parseTailValue('ALL')).toEqual({ ok: true, value: 'all' })
+    expect(parseTailValue(' All ')).toEqual({ ok: true, value: 'all' })
+  })
+
+  test('rejects empty, negative, fractional, signed, and garbage inputs', () => {
+    expect(parseTailValue('').ok).toBe(false)
+    expect(parseTailValue('   ').ok).toBe(false)
+    expect(parseTailValue('-5').ok).toBe(false)
+    expect(parseTailValue('+5').ok).toBe(false)
+    expect(parseTailValue('3.5').ok).toBe(false)
+    expect(parseTailValue('1e2').ok).toBe(false)
+    expect(parseTailValue('007').ok).toBe(false)
+    expect(parseTailValue('ten').ok).toBe(false)
+  })
+})
+
+describe('buildDockerLogsCmd', () => {
+  test('builds the base argv when follow is false', () => {
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false })).toEqual([
+      'docker',
+      'logs',
+      '--timestamps',
+      'coder',
+    ])
+  })
+
+  test('appends -f before the container name when follow is true', () => {
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: true })).toEqual([
+      'docker',
+      'logs',
+      '--timestamps',
+      '-f',
+      'coder',
+    ])
+  })
+
+  test('omits --tail when the field is absent so docker uses its default ("all")', () => {
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false })).not.toContain('--tail')
+  })
+
+  test('inserts --tail <value> before -f when both are set', () => {
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: true, tail: '50' })).toEqual([
+      'docker',
+      'logs',
+      '--timestamps',
+      '--tail',
+      '50',
+      '-f',
+      'coder',
+    ])
+  })
+
+  test('passes the "all" sentinel through unchanged', () => {
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false, tail: 'all' })).toEqual([
+      'docker',
+      'logs',
+      '--timestamps',
+      '--tail',
+      'all',
+      'coder',
+    ])
   })
 })
 

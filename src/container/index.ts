@@ -1,4 +1,4 @@
-export { logs, planLogs, type LogsPlan, type LogsResult } from './logs'
+export { buildDockerLogsCmd, logs, parseTailValue, planLogs, type LogsPlan, type LogsResult } from './logs'
 export { CONTAINER_PORT, TUI_TOKEN_LABEL, findFreePort, resolveHostPort, resolveTuiToken } from './port'
 export {
   requireContainerRunning,

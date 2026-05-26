@@ -5,6 +5,7 @@ import { containerExists, containerNameFromCwd, getBun } from './shared'
 export type LogsPlan = {
   containerName: string
   follow: boolean
+  tail?: string
 }
 
 export type LogsResult = { ok: true; containerName: string; exitCode: number } | { ok: false; reason: string }
@@ -12,6 +13,10 @@ export type LogsResult = { ok: true; containerName: string; exitCode: number } |
 export type LogsOptions = {
   cwd: string
   follow: boolean
+  // Forwarded to `docker logs --tail <value>`. Accepts a non-negative
+  // integer string or the sentinel `"all"`. When undefined, no `--tail`
+  // arg is added and docker's default ("all") applies.
+  tail?: string
   out?: NodeJS.WritableStream
   err?: NodeJS.WritableStream
   signal?: AbortSignal
@@ -23,6 +28,7 @@ export type LogsOptions = {
 export async function logs({
   cwd,
   follow,
+  tail,
   out = process.stdout,
   err = process.stderr,
   signal,
@@ -31,18 +37,14 @@ export async function logs({
   const bun = getBun()
   if (!bun) return { ok: false, reason: 'bun runtime not available' }
 
-  const { containerName } = planLogs(cwd, { follow })
+  const plan = planLogs(cwd, { follow, tail })
 
   try {
-    if (!(await containerExists(containerName))) {
-      return { ok: false, reason: `Container ${containerName} not found. Run \`typeclaw start\` first.` }
+    if (!(await containerExists(plan.containerName))) {
+      return { ok: false, reason: `Container ${plan.containerName} not found. Run \`typeclaw start\` first.` }
     }
 
-    const cmd = ['docker', 'logs', '--timestamps']
-    if (follow) cmd.push('-f')
-    cmd.push(containerName)
-
-    const proc = bun.spawn({ cmd, cwd, stdout: 'pipe', stderr: 'pipe' })
+    const proc = bun.spawn({ cmd: buildDockerLogsCmd(plan), cwd, stdout: 'pipe', stderr: 'pipe' })
 
     const onAbort = (): void => {
       try {
@@ -62,14 +64,39 @@ export async function logs({
     const exitCode = await proc.exited
     signal?.removeEventListener('abort', onAbort)
 
-    return { ok: true, containerName, exitCode }
+    return { ok: true, containerName: plan.containerName, exitCode }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
 }
 
-export function planLogs(cwd: string, { follow }: { follow: boolean }): LogsPlan {
-  return { containerName: containerNameFromCwd(cwd), follow }
+export function planLogs(cwd: string, { follow, tail }: { follow: boolean; tail?: string }): LogsPlan {
+  return { containerName: containerNameFromCwd(cwd), follow, ...(tail !== undefined ? { tail } : {}) }
+}
+
+// Validate user-supplied `--tail` value. Mirrors `docker logs --tail`'s
+// accepted shape: either the sentinel `"all"` (case-insensitive) or a
+// non-negative integer.
+export function parseTailValue(raw: string): { ok: true; value: string } | { ok: false; reason: string } {
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) return { ok: false, reason: '--tail requires a value (a non-negative integer or "all")' }
+  if (trimmed.toLowerCase() === 'all') return { ok: true, value: 'all' }
+  // Reject leading +, leading zeros (other than "0"), signs, decimals, and
+  // scientific notation up front so the user gets a clear error instead of
+  // docker's terse "invalid value" later.
+  if (!/^(?:0|[1-9]\d*)$/.test(trimmed)) {
+    return { ok: false, reason: `--tail expects a non-negative integer or "all", got ${JSON.stringify(raw)}` }
+  }
+  return { ok: true, value: trimmed }
+}
+
+// Exported so `compose/logs.ts` builds the exact same `docker logs` argv shape.
+export function buildDockerLogsCmd(plan: LogsPlan): string[] {
+  const cmd = ['docker', 'logs', '--timestamps']
+  if (plan.tail !== undefined) cmd.push('--tail', plan.tail)
+  if (plan.follow) cmd.push('-f')
+  cmd.push(plan.containerName)
+  return cmd
 }
 
 // Exported for `compose/logs.ts` so the multi-agent path reuses the same
