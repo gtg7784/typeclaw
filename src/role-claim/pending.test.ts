@@ -41,7 +41,7 @@ describe('PendingClaimRegistry', () => {
       kind: 'consumed',
       code: 'claim-AAAA-BBBB',
       role: 'owner',
-      matchRule: 'slack:T0123 author:U_ALICE',
+      matchRule: 'slack:* author:U_ALICE',
       origin: aliceOnSlack,
     })
     expect(reg.size()).toBe(0)
@@ -146,27 +146,27 @@ describe('PendingClaimRegistry', () => {
 })
 
 describe('formatClaimMatchRule', () => {
-  test('slack uses workspace + author', () => {
-    expect(formatClaimMatchRule(aliceOnSlack)).toBe('slack:T0123 author:U_ALICE')
+  test('slack: platform-wide wildcard + author', () => {
+    expect(formatClaimMatchRule(aliceOnSlack)).toBe('slack:* author:U_ALICE')
   })
 
-  test('discord uses guild + author', () => {
-    expect(formatClaimMatchRule(bobOnDiscord)).toBe('discord:9999 author:U_BOB')
+  test('discord: platform-wide wildcard + author', () => {
+    expect(formatClaimMatchRule(bobOnDiscord)).toBe('discord:* author:U_BOB')
   })
 
-  test('kakao uses dm/<chat> bucket form', () => {
+  test('kakao: platform-wide wildcard + author (works for DM, group, and open chats alike)', () => {
     expect(
       formatClaimMatchRule({
         adapter: 'kakaotalk',
         workspace: '',
         chat: '42',
-        isDm: true,
+        isDm: false,
         authorId: 'kakao_user_x',
       }),
-    ).toBe('kakao:dm/42 author:kakao_user_x')
+    ).toBe('kakao:* author:kakao_user_x')
   })
 
-  test('telegram uses chat workspace + author', () => {
+  test('telegram: platform-wide wildcard + author', () => {
     expect(
       formatClaimMatchRule({
         adapter: 'telegram-bot',
@@ -175,6 +175,18 @@ describe('formatClaimMatchRule', () => {
         isDm: true,
         authorId: 'tg_user',
       }),
-    ).toBe('telegram:42 author:tg_user')
+    ).toBe('telegram:* author:tg_user')
+  })
+
+  test('claim from a non-DM context produces the same platform-wide rule', () => {
+    expect(
+      formatClaimMatchRule({
+        adapter: 'slack-bot',
+        workspace: 'T0123',
+        chat: 'C0GENERAL',
+        isDm: false,
+        authorId: 'U_ALICE',
+      }),
+    ).toBe('slack:* author:U_ALICE')
   })
 })

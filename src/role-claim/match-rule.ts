@@ -1,15 +1,19 @@
 // Builds a canonical match-rule DSL string from an inbound channel origin,
-// for the role table. Output shapes:
+// for the role table. Output shape is always platform-wide + author:
 //
-//   slack:T0123 author:U_ALICE
-//   discord:9999 author:U_ALICE
-//   telegram:42 author:U_ALICE
-//   kakao:dm/<chatId> author:<authorId>
+//   slack:* author:<authorId>
+//   discord:* author:<authorId>
+//   telegram:* author:<authorId>
+//   kakao:* author:<authorId>
 //
-// The author qualifier is always emitted so a claim grants the specific
-// human, not the whole workspace. To grant the whole workspace, the
-// operator edits typeclaw.json by hand or runs a future `typeclaw role grant`
-// without --claim.
+// "Platform-wide" means every chat the adapter sees on that platform —
+// DMs, group chats, and threads alike — gated by the author qualifier so
+// only this specific human is matched. The intent is: once an operator
+// proves they control a channel identity (by sending a code to the bot),
+// they keep their role wherever they speak from on the same platform. To
+// scope tighter (e.g. one workspace, one chat), the operator edits
+// typeclaw.json by hand; the claim flow is deliberately broad because
+// re-claiming on every new chat would be tedious for the common case.
 
 import type { ChannelKey } from '@/channels/types'
 
@@ -31,14 +35,5 @@ const ADAPTER_TO_PLATFORM: Record<ChannelKey['adapter'], 'slack' | 'discord' | '
 
 export function formatClaimMatchRule(origin: PartialChannelOrigin): string {
   const platform = ADAPTER_TO_PLATFORM[origin.adapter]
-  const authorQual = ` author:${origin.authorId}`
-  if (origin.adapter === 'kakaotalk') {
-    // Kakao has no workspace; routes use dm/group/open buckets. We can't
-    // know which bucket from a partial origin alone (adapter-side classifies
-    // it), so claim flows are restricted to DM and we emit the specific
-    // chat-id form so the rule grants only this 1:1 conversation, not every
-    // DM the agent is in.
-    return `${platform}:dm/${origin.chat}${authorQual}`
-  }
-  return `${platform}:${origin.workspace}${authorQual}`
+  return `${platform}:* author:${origin.authorId}`
 }
