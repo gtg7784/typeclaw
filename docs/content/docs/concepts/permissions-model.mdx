@@ -29,16 +29,16 @@ A `cron` or `subagent` session doesn't have a match rule to walk — it isn't an
 
 This closes a laundering attack: a `guest`-resolving channel session that asks the agent to schedule a cron gets `scheduledByRole: 'guest'` stamped in `cron.json`. When the job fires, it runs as `guest`. The privilege ceiling at scheduling time is the privilege ceiling at firing time. There's no laundering through scheduling.
 
-## Why two-axis severity for security guards
+## Role tower: low / medium / high
 
-The bundled `security` plugin guards every privileged tool call. Each guard has a severity tier:
+The bundled `security` plugin guards every privileged tool call. Each guard has a severity tier, and roles bypass tiers in a strict tower:
 
-- **`high` — audience-leak.** Bypass sends data to a third-party audience outside the operator's control loop. Examples: outbound channel message with secrets, `git push` to an unfamiliar remote, role/cron promotion. **No role auto-bypasses high.** Every actor — including owner — must explicitly ack a high-tier bypass per call.
-- **`medium` — silent-attack.** Bypass produces attacker-favorable state in model context without immediate operator visibility. Examples: `bash env`, `read .env`, IMDS SSRF, `session_search` returning secret-shaped hits. `owner` bypasses (operator has equivalent host access anyway); `trusted` does not.
-- **`low` — noisy, immediately recoverable.** Reserved tier with no current inhabitants. Exists so the `trusted` role's `bypass.low` grant has a forward-compatible home.
+- **`high` — audience-leak.** Bypass sends data to a third-party audience outside the operator's control loop. Examples: outbound channel message with secrets, `git push` to an unfamiliar remote, role/cron promotion. **`owner` bypasses.** `trusted`, `member`, `guest` do not.
+- **`medium` — silent-attack.** Bypass produces attacker-favorable state in model context without immediate operator visibility. Examples: `bash env`, `read .env`, IMDS SSRF, `session_search` returning secret-shaped hits. **`owner` and `trusted` bypass.** `member`, `guest` do not.
+- **`low` — noisy, immediately recoverable.** Reserved tier with no current inhabitants today. **`owner`, `trusted`, and `member` bypass.**
 
-`tool.before` accepts EITHER the tier permission (`security.bypass.low|medium|high`) OR the per-guard permission (`security.bypass.gitExfil`). The tier route is for casting wide nets ("trusted bypasses everything noisy"); the per-guard route is for narrow opt-ins ("trusted bypasses `git push` specifically").
+`tool.before` accepts EITHER the tier permission (`security.bypass.low|medium|high`) OR the per-guard permission (`security.bypass.gitExfil`). The tier route is the default ("owner bypasses everything high-and-below"); the per-guard route is for narrow opt-ins or opt-outs.
 
-The motivating case is owner-in-public-channel. An operator with full owner privileges might ask the agent to "post deploy status to #general" — and even with full permissions, the agent must not silently include a stack-trace `Bearer ghp_…` line. The high tier exists exactly so the operator gets a chance to say "yes, include it" before the leak.
+The motivating case is owner-in-public-channel. An operator with full owner privileges might run the agent from a Slack channel that also matches their owner role, and ask the agent to "post deploy status to #general" — the agent might then silently include a stack-trace `Bearer ghp_…` line. The defense is **operator scoping**: keep `roles.owner.match[]` narrow (the default is `{ kind: 'tui' }`, TUI-only, where a human is present). Configs that widen owner to a channel author re-open audience-leak for that author and should strip `security.bypass.high` from `roles.owner.permissions[]` for those origins.
 
 For the operational walkthrough see [Lock down a public channel](/docs/guides/lock-down-a-public-channel). For the full tier inventory and per-guard list see [/reference/permissions](/docs/reference/permissions).

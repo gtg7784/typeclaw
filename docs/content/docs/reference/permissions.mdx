@@ -8,14 +8,18 @@ The mental model is at [/concepts/permissions-model](/docs/concepts/permissions-
 
 ## Built-in roles
 
-| Role      | Default `match[]`   | Default `permissions[]`                                                                                                                                                                                                                     |
-| --------- | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `owner`   | `[{ kind: 'tui' }]` | `channel.respond`, `cron.schedule`, `cron.modify`, `subagent.*`, `security.bypass.low`, `security.bypass.medium`, plus every plugin-contributed `security.bypass.<guard>` **except** high-tier per-guard strings and `security.bypass.high` |
-| `trusted` | `[]`                | `channel.respond`, `cron.schedule`, `subagent.*`, `security.bypass.low`                                                                                                                                                                     |
-| `member`  | `[]`                | `channel.respond`, `subagent.spawn`, `subagent.cancel`                                                                                                                                                                                      |
-| `guest`   | `[]` (fallback)     | (none)                                                                                                                                                                                                                                      |
+Roles form a strict tower: each role bypasses every guard at its tier and below.
+
+| Role      | Default `match[]`   | Tier bypass cap | Default `permissions[]`                                                                                                                                                                                                |
+| --------- | ------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`   | `[{ kind: 'tui' }]` | `high`          | `channel.respond`, `cron.schedule`, `cron.modify`, `subagent.*`, `security.bypass.low`, `security.bypass.medium`, `security.bypass.high`, plus every plugin-contributed `security.bypass.<guard>` (wildcard expansion) |
+| `trusted` | `[]`                | `medium`        | `channel.respond`, `cron.schedule`, `subagent.*`, `security.bypass.low`, `security.bypass.medium`                                                                                                                      |
+| `member`  | `[]`                | `low`           | `channel.respond`, `subagent.spawn`, `subagent.cancel`, `subagent.output`, `security.bypass.low`                                                                                                                       |
+| `guest`   | `[]` (fallback)     | (none)          | (none)                                                                                                                                                                                                                 |
 
 User-declared `permissions[]` **replaces** the built-in list. `"permissions": []` means no permissions, including no `channel.respond`.
+
+The audience-leak defense (owner-in-public-channel) moved from the language default to operator config: scope `roles.owner.match[]` tightly. Default match is TUI-only, where a human is present. Configs that widen owner to a channel author re-open audience-leak for that author and should remove `security.bypass.high` (and the wildcard sentinel) from `roles.owner.permissions[]` for those origins.
 
 ## Core permissions
 
@@ -27,16 +31,16 @@ User-declared `permissions[]` **replaces** the built-in list. `"permissions": []
 | `subagent.spawn`          | `owner`/`trusted`/`member` | allow spawning subagents                                                                     |
 | `subagent.cancel`         | `owner`/`trusted`/`member` | allow cancelling in-flight subagents                                                         |
 | `subagent.*`              | `owner`/`trusted`          | covers all `subagent.*` permissions (wildcard expansion)                                     |
-| `security.bypass.low`     | `owner`/`trusted`          | tier-wide bypass for low-severity guards                                                     |
-| `security.bypass.medium`  | `owner`                    | tier-wide bypass for medium-severity guards                                                  |
-| `security.bypass.high`    | (no auto-grants)           | tier-wide bypass for high-severity guards (declare explicitly per role to opt in)            |
+| `security.bypass.low`     | `owner`/`trusted`/`member` | tier-wide bypass for low-severity guards                                                     |
+| `security.bypass.medium`  | `owner`/`trusted`          | tier-wide bypass for medium-severity guards                                                  |
+| `security.bypass.high`    | `owner`                    | tier-wide bypass for high-severity guards                                                    |
 | `security.bypass.<guard>` | varies                     | per-guard bypass; see tier tables below                                                      |
 
 Plugin-contributed permissions live under the plugin's namespace (`<plugin>.<verb>.<noun>`). They're declared on `definePlugin({ permissions: [...] })` and surface in `roles.<name>.permissions[]` once the plugin is loaded.
 
 ## Security guards — `high` tier
 
-Audience-leak severity. Bypass sends data to a third-party audience outside the operator's control loop. **No role auto-bypasses high.** Per-call ack required from every role, including `owner`. To pre-authorize one role, list the per-guard string in `roles.<name>.permissions[]`.
+Audience-leak severity. Bypass sends data to a third-party audience outside the operator's control loop. **`owner` bypasses high** by default under the role-tower model; `trusted` and `member` do not. The owner-in-public-channel defense lives in `roles.owner.match[]` discipline (default: TUI-only).
 
 | Guard              | Per-guard permission               | Blocks                                                                                  |
 | ------------------ | ---------------------------------- | --------------------------------------------------------------------------------------- |
@@ -49,7 +53,7 @@ Audience-leak severity. Bypass sends data to a third-party audience outside the 
 
 ## Security guards — `medium` tier
 
-Silent-attack severity. Bypass produces attacker-favorable state in model context without immediate operator visibility. `owner` bypasses (operator has equivalent host access); `trusted` does NOT.
+Silent-attack severity. Bypass produces attacker-favorable state in model context without immediate operator visibility. `owner` and `trusted` bypass by default; `member` does not.
 
 | Guard                  | Per-guard permission                   | Blocks                                                          |
 | ---------------------- | -------------------------------------- | --------------------------------------------------------------- |
@@ -60,7 +64,7 @@ Silent-attack severity. Bypass produces attacker-favorable state in model contex
 
 ## Security guards — `low` tier
 
-Reserved tier. No inhabitants today. Exists so `trusted`'s `bypass.low` grant has a forward-compatible home when a future guard ships at low.
+Reserved tier. No inhabitants today. Exists so `member`'s `bypass.low` grant has a forward-compatible home when a future guard ships at low. `owner`, `trusted`, and `member` all carry `bypass.low` by default.
 
 ## Acceptance logic
 

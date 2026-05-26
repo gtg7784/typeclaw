@@ -283,7 +283,7 @@ describe('security plugin wiring', () => {
     expect(result).toBeUndefined()
   })
 
-  test('permissions: TUI owner is BLOCKED on `git push` (high tier, audience-leak, requires ack)', async () => {
+  test('permissions: TUI owner BYPASSES `git push` (high tier; owner carries bypass.high by default under the role-tower model)', async () => {
     const svc = prodPermissionService()
     const hook = await toolBeforeHookWith(svc)
     const tui: SessionOrigin = { kind: 'tui', sessionId: 's_owner_push' }
@@ -291,8 +291,7 @@ describe('security plugin wiring', () => {
       { ...toolEvent('bash', { command: 'git push origin main' }), origin: tui },
       hookContext('/agent'),
     )
-    expect(result?.block).toBe(true)
-    expect(result?.reason).toContain('gitExfil')
+    expect(result).toBeUndefined()
   })
 
   test('permissions: Slack guest (no role configured) is blocked by secretExfilBash', async () => {
@@ -314,7 +313,7 @@ describe('security plugin wiring', () => {
     expect(result?.reason).toContain('secretExfilBash')
   })
 
-  test('permissions: trusted Slack author is BLOCKED by secretExfilBash (medium tier, trusted has only low by default)', async () => {
+  test('permissions: trusted Slack author BYPASSES secretExfilBash (medium tier; trusted carries bypass.medium by default)', async () => {
     const svc = prodPermissionService({
       trusted: { match: [{ kind: 'channel', platform: 'slack', workspace: 'T0123', author: 'U_ME' }] },
     })
@@ -331,8 +330,7 @@ describe('security plugin wiring', () => {
       { ...toolEvent('bash', { command: 'env' }), origin: channelOrigin },
       hookContext('/agent'),
     )
-    expect(result?.block).toBe(true)
-    expect(result?.reason).toContain('secretExfilBash')
+    expect(result).toBeUndefined()
   })
 
   test('permissions: trusted Slack author bypasses secretExfilBash when operator explicitly grants the per-guard permission', async () => {
@@ -442,27 +440,25 @@ describe('security plugin wiring', () => {
     expect(result?.reason).toContain('security.bypass.secretExfilBash')
     expect(result?.reason).toContain('security.bypass.medium')
     expect(result?.reason).toContain('typeclaw-permissions')
-    // Hint must clarify that trusted does NOT carry this by default (medium tier);
-    // older copy implied trusted had it, which was the pre-PR behavior.
-    expect(result?.reason).toMatch(/only owner has it by default/i)
+    expect(result?.reason).toMatch(/owner and trusted have it by default/i)
   })
 
-  test('owner-only permission block reason mentions owner without claiming any narrower role carries it', async () => {
+  test('medium-tier block reason mentions both owner and trusted (both bypass medium by default)', async () => {
     const hook = await toolBeforeHook()
     const result = await hook(toolEvent('webfetch', { url: 'http://127.0.0.1:8080/admin' }), hookContext('/agent'))
     expect(result?.block).toBe(true)
     expect(result?.reason).toContain('security.bypass.ssrf')
     expect(result?.reason).toMatch(/owner/i)
-    expect(result?.reason).not.toMatch(/trusted/i)
+    expect(result?.reason).toMatch(/trusted/i)
   })
 
-  test('high-tier block reason names NOBODY-by-default and points at the ack-or-explicit-grant escape hatches', async () => {
+  test('high-tier block reason names owner-by-default and points at the ack-or-explicit-grant escape hatches', async () => {
     const hook = await toolBeforeHook()
     const result = await hook(toolEvent('bash', { command: 'git push origin main' }), hookContext('/agent'))
     expect(result?.block).toBe(true)
     expect(result?.reason).toContain('security.bypass.gitExfil')
     expect(result?.reason).toContain('security.bypass.high')
-    expect(result?.reason).toMatch(/NOBODY has it by default/)
+    expect(result?.reason).toMatch(/only owner has it by default/i)
   })
 
   test('a permission-bypassed actor sees no block and therefore no permission hint', async () => {
@@ -501,31 +497,27 @@ describe('security plugin wiring', () => {
     ).toBeUndefined()
   })
 
-  test('tier bypass: TUI owner is BLOCKED on every high-tier guard (audience-leak rule)', async () => {
+  test('tier bypass: TUI owner BYPASSES every high-tier guard (gitExfil, outboundSecret) under the role-tower model', async () => {
     const svc = prodPermissionService()
     const hook = await toolBeforeHookWith(svc)
     const tui: SessionOrigin = { kind: 'tui', sessionId: 's_owner_high' }
 
-    // gitExfil (push)
+    // gitExfil (push) — owner has bypass.high
     expect(
-      (await hook({ ...toolEvent('bash', { command: 'git push origin main' }), origin: tui }, hookContext('/agent')))
-        ?.block,
-    ).toBe(true)
+      await hook({ ...toolEvent('bash', { command: 'git push origin main' }), origin: tui }, hookContext('/agent')),
+    ).toBeUndefined()
 
-    // outboundSecret — owner posting a credential-shaped string to a channel
+    // outboundSecret — owner has bypass.high; the audience-leak defense moved
+    // from the language default to operator config (narrow owner.match to TUI
+    // or strip bypass.high from owner.permissions to restore the ack-required
+    // behavior for this origin).
     const ghPat = 'gh' + 'p' + '_' + 'X'.repeat(36)
     expect(
-      (await hook({ ...toolEvent('channel_send', { text: `use ${ghPat}` }), origin: tui }, hookContext('/agent')))
-        ?.block,
-    ).toBe(true)
+      await hook({ ...toolEvent('channel_send', { text: `use ${ghPat}` }), origin: tui }, hookContext('/agent')),
+    ).toBeUndefined()
   })
 
-  test('tier bypass: trusted via Slack is blocked on a low-tier...no inhabitants today, so trusted only bypasses what bypass.low covers (none yet)', async () => {
-    // This is a forward-compat assertion: trusted carries `security.bypass.low`
-    // by default but the low tier has no inhabitants today. So no current
-    // guard is bypassed for trusted via the tier route alone. When a future
-    // guard ships at low, this test should grow an assertion that trusted
-    // bypasses it.
+  test('tier bypass: trusted via Slack BYPASSES medium-tier guards (ssrf, secretExfilBash) under the role-tower model', async () => {
     const svc = prodPermissionService({
       trusted: { match: [{ kind: 'channel', platform: 'slack', workspace: 'T0', chat: 'C0' }] },
     })
@@ -537,44 +529,19 @@ describe('security plugin wiring', () => {
       chat: 'C0',
       thread: null,
     }
-    // outboundSecret is HIGH now, not low — trusted must be blocked
-    const ghPat = 'gh' + 'p' + '_' + 'X'.repeat(36)
-    const result = await hook(
-      { ...toolEvent('channel_send', { text: `use ${ghPat}` }), origin: slackOrigin },
-      hookContext('/agent'),
-    )
-    expect(result?.block).toBe(true)
-    expect(result?.reason).toContain('outboundSecret')
+    expect(
+      await hook(
+        { ...toolEvent('webfetch', { url: 'http://169.254.169.254/latest/meta-data/' }), origin: slackOrigin },
+        hookContext('/agent'),
+      ),
+    ).toBeUndefined()
+
+    expect(
+      await hook({ ...toolEvent('bash', { command: 'env' }), origin: slackOrigin }, hookContext('/agent')),
+    ).toBeUndefined()
   })
 
-  test('tier bypass: trusted via Slack is blocked on medium-tier guards (ssrf, secretExfilBash) — no bypass.medium', async () => {
-    const svc = prodPermissionService({
-      trusted: { match: [{ kind: 'channel', platform: 'slack', workspace: 'T0', chat: 'C0' }] },
-    })
-    const hook = await toolBeforeHookWith(svc)
-    const slackOrigin: SessionOrigin = {
-      kind: 'channel',
-      adapter: 'slack-bot',
-      workspace: 'T0',
-      chat: 'C0',
-      thread: null,
-    }
-    const ssrfResult = await hook(
-      { ...toolEvent('webfetch', { url: 'http://169.254.169.254/latest/meta-data/' }), origin: slackOrigin },
-      hookContext('/agent'),
-    )
-    expect(ssrfResult?.block).toBe(true)
-    expect(ssrfResult?.reason).toContain('ssrf')
-
-    const bashResult = await hook(
-      { ...toolEvent('bash', { command: 'env' }), origin: slackOrigin },
-      hookContext('/agent'),
-    )
-    expect(bashResult?.block).toBe(true)
-    expect(bashResult?.reason).toContain('secretExfilBash')
-  })
-
-  test('tier bypass: trusted via Slack is BLOCKED on high-tier guards (gitExfil, outboundSecret, systemPromptLeak)', async () => {
+  test('tier bypass: trusted via Slack is BLOCKED on high-tier guards (gitExfil, outboundSecret) — bypass.high stays owner-only', async () => {
     const svc = prodPermissionService({
       trusted: { match: [{ kind: 'channel', platform: 'slack', workspace: 'T0', chat: 'C0' }] },
     })
@@ -592,6 +559,14 @@ describe('security plugin wiring', () => {
     )
     expect(pushResult?.block).toBe(true)
     expect(pushResult?.reason).toContain('gitExfil')
+
+    const ghPat = 'gh' + 'p' + '_' + 'X'.repeat(36)
+    const sendResult = await hook(
+      { ...toolEvent('channel_send', { text: `use ${ghPat}` }), origin: slackOrigin },
+      hookContext('/agent'),
+    )
+    expect(sendResult?.block).toBe(true)
+    expect(sendResult?.reason).toContain('outboundSecret')
   })
 
   test('tier bypass: member via Slack has no bypass of any tier', async () => {

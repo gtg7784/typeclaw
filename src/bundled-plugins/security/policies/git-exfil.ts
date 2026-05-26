@@ -7,10 +7,11 @@ export const GUARD_GIT_EXFIL = 'gitExfil'
 // file to a remote git host. The host (GitHub/GitLab/attacker-controlled
 // box) is a third-party audience outside the operator's control loop.
 // Even a private remote owned by an attacker is now outside the
-// perimeter. No role auto-bypasses high — owner pushing from TUI must ack
-// each push. The historical per-guard string `security.bypass.gitExfil`
-// remains valid as an explicit grant for operators who knowingly want to
-// re-open the auto-bypass (see SKILL.md must-not-do guidance).
+// perimeter. Under the role-tower model, `owner` bypasses high by
+// default; the audience-leak defense for non-TUI owner origins (e.g. an
+// owner-matched channel author) depends on `roles.owner.match[]` being
+// scoped tightly. Lower roles must ack the push or carry an explicit
+// `security.bypass.gitExfil` grant in `roles.<role>.permissions[]`.
 export const GUARD_GIT_EXFIL_SEVERITY: SecuritySeverity = 'high'
 export const GUARD_GIT_REMOTE_TAINTED = 'gitRemoteTainted'
 // Classified `high` (audience-leak axis): same path as gitExfil, second

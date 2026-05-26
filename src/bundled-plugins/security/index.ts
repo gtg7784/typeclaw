@@ -49,22 +49,23 @@ type PerGuardSecurityPermission = Exclude<
 // not a silent fallback.
 const BYPASS_ROLE_HINT = {
   [SECURITY_PERMISSIONS.bypassSecretExfilBash]:
-    'only owner has it by default (medium tier; trusted does NOT carry this — operators can grant `security.bypass.secretExfilBash` explicitly in roles.trusted.permissions[] if they want the pre-PR ergonomics back)',
+    'owner and trusted have it by default (medium tier); member and guest do not. Operators can grant `security.bypass.secretExfilBash` explicitly in roles.<role>.permissions[] to widen.',
   [SECURITY_PERMISSIONS.bypassGitExfil]:
-    'NOBODY has it by default — high tier requires per-call ack from every role, including owner. Operators can grant `security.bypass.gitExfil` explicitly in roles.<role>.permissions[] to re-open the auto-bypass for one role.',
+    'only owner has it by default (high tier). Operators can grant `security.bypass.gitExfil` explicitly in roles.<role>.permissions[] to widen.',
   [SECURITY_PERMISSIONS.bypassGitRemoteTainted]:
-    'NOBODY has it by default — high tier requires per-call ack from every role. Even an operator-granted `security.bypass.gitExfil` does NOT bypass this second-step taint check (the recorder still fires for the first step, so the push is still gated).',
-  [SECURITY_PERMISSIONS.bypassSecretExfilRead]: 'only owner has it by default (medium tier)',
-  [SECURITY_PERMISSIONS.bypassSsrf]: 'only owner has it by default (medium tier)',
-  [SECURITY_PERMISSIONS.bypassSessionSearchSecrets]: 'only owner has it by default (medium tier)',
-  [SECURITY_PERMISSIONS.bypassSystemPromptLeak]:
-    'NOBODY has it by default — high tier requires per-call ack from every role, including owner.',
+    'only owner has it by default (high tier). The two-step taint defense (recorder + checker) still fires whenever the actor lacks `security.bypass.gitRemoteTainted`, including across owner-granted gitExfil bypasses.',
+  [SECURITY_PERMISSIONS.bypassSecretExfilRead]:
+    'owner and trusted have it by default (medium tier); member and guest do not.',
+  [SECURITY_PERMISSIONS.bypassSsrf]: 'owner and trusted have it by default (medium tier); member and guest do not.',
+  [SECURITY_PERMISSIONS.bypassSessionSearchSecrets]:
+    'owner and trusted have it by default (medium tier); member and guest do not.',
+  [SECURITY_PERMISSIONS.bypassSystemPromptLeak]: 'only owner has it by default (high tier).',
   [SECURITY_PERMISSIONS.bypassOutboundSecret]:
-    'NOBODY has it by default — high tier requires per-call ack from every role, including owner. The audience-leak rule: even owner posting to a public channel must not silently include credentials.',
+    'only owner has it by default (high tier). The audience-leak risk: an owner-permissioned channel author can silently include credentials in outbound messages. Operators who match owner to a channel author should narrow that match or remove owner from `roles.owner.permissions[]` for those origins.',
   [SECURITY_PERMISSIONS.bypassRolePromotion]:
-    'NOBODY has it by default — high tier requires per-call ack from every role, including owner. The audience-leak rule generalizes to privilege escalation: even owner running from TUI must not silently rewrite the access-control table on behalf of a channel message.',
+    'only owner has it by default (high tier). The privilege-escalation risk: an owner-permissioned actor can rewrite the access-control table. Default owner match is TUI-only, where a human is present.',
   [SECURITY_PERMISSIONS.bypassCronPromotion]:
-    'NOBODY has it by default — high tier requires per-call ack from every role, including owner. Same shape as rolePromotion but deferred: a new cron job (or a changed scheduledByRole) is a privilege grant that fires at schedule-time, and the operator must not silently author one on behalf of a channel message.',
+    'only owner has it by default (high tier). Same shape as rolePromotion but deferred: a new cron job (or a changed scheduledByRole) fires at schedule-time as the stamped role.',
 } as const satisfies Record<PerGuardSecurityPermission, string>
 
 function withPermissionHint(
@@ -83,12 +84,13 @@ function withPermissionHint(
 
 export default definePlugin({
   permissions: Object.values(SECURITY_PERMISSIONS),
-  // High-tier per-guard strings AND the `security.bypass.high` tier
-  // string itself are excluded from the owner-wildcard expansion. Owner
-  // still has the wildcard sentinel (so future low/medium plugin-
-  // contributed bypasses keep auto-flowing to owner), but audience-leak
-  // guards require either per-call ack or an explicit operator grant.
-  ownerWildcardExclusions: [...HIGH_TIER_PER_GUARD_PERMISSIONS, SECURITY_PERMISSIONS.bypassHigh],
+  // No wildcard exclusions: owner bypasses every security tier by default
+  // under the role-tower model. `BUILTIN_ROLES.owner.permissions` carries
+  // `security.bypass.{low,medium,high}` explicitly; the wildcard sentinel
+  // additionally fans out to every per-guard string (including high-tier
+  // ones). The owner-in-public-channel defense now lives in
+  // `roles.owner.match[]` discipline, not in the language defaults.
+  ownerWildcardExclusions: [],
   plugin: async (ctx) => ({
     hooks: {
       'session.prompt': async (event) => {

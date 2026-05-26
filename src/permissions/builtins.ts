@@ -29,21 +29,27 @@ export type BuiltinRoleSpec = {
   readonly permissions: readonly string[]
 }
 
-// Owner carries low + medium tier strings explicitly AND the wildcard
-// sentinel. The sentinel expands to plugin-contributed `security.bypass.*`
-// strings minus the security plugin's `ownerWildcardExclusions` (today:
-// `security.bypass.high` plus high-tier per-guard strings). Net effect:
-// owner auto-bypasses every low- and medium-tier guard, and high-tier
-// guards require per-call ack from owner too (the audience-leak rule —
-// owner-in-public-channel must not silently post credentials).
+// Role-to-tier defaults form a strict tower:
+//   owner   → bypass.low + bypass.medium + bypass.high
+//   trusted → bypass.low + bypass.medium
+//   member  → bypass.low
+//   guest   → no bypass
 //
-// Trusted carries only `security.bypass.low`. Trusted does NOT carry the
-// pre-PR per-guard grants (`bypassSecretExfilBash`, `bypassGitExfil`):
-// those guards are medium/high under the audience-leak axis and per-guard
-// grants would re-introduce exactly the bypass holes the tier system
-// exists to prevent. Operators who want the pre-PR ergonomics can add the
-// per-guard strings explicitly to `roles.trusted.permissions[]` in
-// typeclaw.json — that path stays alive forever.
+// `canBypass` in the bundled security plugin checks the specific tier
+// string for the guard's severity, so each role must carry every tier
+// string at or below its cap (tiers do not cascade implicitly).
+//
+// Owner also carries the wildcard sentinel: the sentinel expands to every
+// plugin-contributed `security.bypass.*` string minus
+// `ownerWildcardExclusions`. The bundled security plugin no longer excludes
+// high-tier strings (owner is meant to bypass them by default under this
+// model), so the sentinel covers per-guard high-tier strings too.
+//
+// Tradeoff: this gives owner audience-leak bypass without per-call ack.
+// The owner-in-public-channel risk is now load-bearing on the operator
+// scoping `roles.owner.match[]` tightly. Default match is TUI-only, where
+// a human is present; configs that widen owner to a channel author should
+// understand they have re-opened audience-leak for that author.
 export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> = {
   owner: {
     match: [{ kind: 'tui' }],
@@ -57,6 +63,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentSpawnOperator,
       'security.bypass.low',
       'security.bypass.medium',
+      'security.bypass.high',
       OWNER_SECURITY_WILDCARD,
     ],
   },
@@ -70,6 +77,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentOutput,
       CORE_PERMISSIONS.subagentSpawnOperator,
       'security.bypass.low',
+      'security.bypass.medium',
     ],
   },
   member: {
@@ -79,6 +87,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentSpawn,
       CORE_PERMISSIONS.subagentCancel,
       CORE_PERMISSIONS.subagentOutput,
+      'security.bypass.low',
     ],
   },
   guest: {
@@ -88,13 +97,12 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
 }
 
 // Expands the owner wildcard sentinel against plugin-contributed
-// `security.bypass.*` strings. `wildcardExclusions` is an optional set of
-// permission strings the sentinel must NOT expand to — used by the
-// bundled security plugin to exclude `security.bypass.high` AND the
-// per-guard strings for high-tier guards, so the wildcard does not
-// auto-grant audience-leak bypass to owner. Explicit operator grants of
-// those strings in `roles.owner.permissions[]` still take effect (they
-// flow through the non-sentinel branch).
+// `security.bypass.*` strings. `wildcardExclusions` lets plugins opt
+// specific strings OUT of the wildcard expansion. The bundled security
+// plugin no longer excludes any high-tier strings — owner bypasses every
+// security tier by default under the current role-tower model. The
+// parameter is preserved for third-party plugins that want a different
+// shape (e.g. a future audit-only plugin that never auto-flows to owner).
 export function expandOwnerWildcard(
   ownerPermissions: readonly string[],
   pluginContributed: readonly string[],
