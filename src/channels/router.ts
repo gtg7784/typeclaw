@@ -723,7 +723,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const existing = liveSessions.get(keyId)
     if (existing && !existing.destroyed) {
       const idleMs = now() - existing.lastInboundAt
-      if (idleMs > SESSION_FRESHNESS_TTL_MS) {
+      // `lastInboundAt` is only bumped on engaged inbounds (see route()),
+      // so a session whose drain loop has been compiling a slow reply for
+      // 5+ minutes off a single inbound looks "idle" by this clock even
+      // though `session.prompt()` is mid-flight. Aborting that prompt to
+      // re-cold-start on the next user message wipes the in-flight work
+      // (observed against `openai-codex/gpt-5.5` in PR #359's incident:
+      // a 285s + 227s turn pair lost the second turn entirely to
+      // `tearDownLive` → `session.abort()` triggered by the user's
+      // follow-up at 5min idle). The `runIdleGc` path already skips
+      // draining sessions for the same reason; rollover must match.
+      // The skip is bounded: when the in-flight prompt completes or its
+      // own provider/transport timeout fires, `draining` clears and the
+      // next inbound's idle check picks up rollover normally.
+      if (idleMs > SESSION_FRESHNESS_TTL_MS && !existing.draining) {
         logger.info(`[channels] ${keyId}: stale-rollover (live: ${idleMs}ms idle)`)
         await tearDownLive(existing)
         liveSessions.delete(keyId)

@@ -577,6 +577,76 @@ describe('ChannelRouter session lifecycle', () => {
     expect(loaded[0]?.lastInboundAt).toBe(SESSION_FRESHNESS_TTL_MS + 1)
   })
 
+  // Regression for the Huxley Slack channel incident on 2026-05-26
+  // (session 019e62c2-179b-734a-9340-b9dd28254636, addressed at the
+  // contract layer by PR #359). The model's second turn was running
+  // longer than SESSION_FRESHNESS_TTL_MS (5 min) because it was
+  // composing a reply off a backgrounded subagent's result. The user
+  // sent a "why is it stopping mid-answer" follow-up at minute 8, which
+  // triggered ensureLive's stale-rollover branch and called
+  // tearDownLive → session.abort() on the in-flight prompt. The reply
+  // was lost. The runIdleGc path already skipped draining sessions; the
+  // ensureLive rollover path was missing the matching guard.
+  test('stale rollover is suppressed while draining; in-flight prompt is not aborted', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { nowRef, logs })
+    let releaseFirstPrompt: () => void = () => {}
+    const firstPromptHeld = new Promise<void>((resolve) => {
+      releaseFirstPrompt = resolve
+    })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    sessions[0]!.onPrompt = async () => {
+      await firstPromptHeld
+    }
+    // Fire drain WITHOUT awaiting — the held onPrompt would otherwise
+    // block flushDebounce forever. The drain runs in the background and
+    // we observe its mid-flight state via live.draining (which the
+    // production rollover branch checks).
+    const drainPromise = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => sessions[0]!.prompts.length > 0)
+    // First prompt is now mid-flight: drain() has set live.draining=true
+    // and is blocked at session.prompt(). Bump the clock past the
+    // freshness TTL and route a follow-up inbound — pre-fix, this fired
+    // tearDownLive on the in-flight session and aborted the prompt.
+    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS + 1
+    await router.route(inbound({ externalMessageId: 'm2', text: 'why is it stopping mid-answer' }))
+
+    expect(logs.some((l) => l.includes('stale-rollover'))).toBe(false)
+    expect(sessions).toHaveLength(1)
+    expect(sessions[0]!.aborted).toBe(0)
+    expect(sessions[0]!.disposed).toBe(0)
+
+    // Release the held prompt so the drain loop can finish. The
+    // follow-up that arrived during the in-flight turn was enqueued via
+    // the live.draining branch in route() and is picked up on the next
+    // iteration of drain's while-loop.
+    releaseFirstPrompt()
+    await drainPromise
+    expect(sessions[0]!.prompts.length).toBeGreaterThanOrEqual(2)
+  })
+
+  test('rollover STILL fires when idle exceeds TTL and the session is NOT draining', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { nowRef, logs })
+    await router.route(inbound({ externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+    // First prompt resolved (default FakeSession.prompt is a no-op),
+    // so live.draining is back to false. Bump the clock and route a
+    // follow-up — the draining-guard does not apply, and the original
+    // rollover behavior must still fire.
+    nowRef.value = 1000 + SESSION_FRESHNESS_TTL_MS + 1
+    await router.route(inbound({ externalMessageId: 'm2', text: 'follow up after a long quiet stretch' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(logs.some((l) => l.includes('stale-rollover'))).toBe(true)
+    expect(sessions).toHaveLength(2)
+    expect(sessions[0]!.disposed).toBe(1)
+  })
+
   test('command path does NOT trigger rollover', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1000 }
