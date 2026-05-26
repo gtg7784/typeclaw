@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { mkdir, writeFile } from 'node:fs/promises'
+import { lstatSync, mkdtempSync, readlinkSync, rmSync, statSync } from 'node:fs'
+import { mkdir, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -1218,10 +1218,10 @@ describe('versioned per-agent Dockerfile (base-image-pinning)', () => {
 })
 
 describe('network egress entrypoint shim', () => {
-  test('off-switch path (network.blockInternal=false) installs no iptables rules and execs the agent directly (after start_xvfb runs to set DISPLAY)', () => {
+  test('off-switch path (network.blockInternal=false) installs no iptables rules and execs the agent directly (after link_persistent_home_files seeds the credential symlink and start_xvfb sets DISPLAY)', () => {
     const shim = buildEntrypointShim()
     expect(shim).toContain('"${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1"')
-    expect(shim).toMatch(/!= "1" \];? then\s+start_xvfb\s+exec bun run typeclaw "\$@"/)
+    expect(shim).toMatch(/!= "1" \];? then\s+link_persistent_home_files\s+start_xvfb\s+exec bun run typeclaw "\$@"/)
   })
 
   test('shim self-heals on Xvfb presence: spawns Xvfb directly (not xvfb-run, which hangs as PID 1) and exports DISPLAY', () => {
@@ -1442,6 +1442,69 @@ describe('network egress entrypoint shim', () => {
     const shim = buildEntrypointShim()
     expect(shim).toContain('unset IFS')
   })
+
+  test('defines link_persistent_home_files that symlinks ~/.codex/auth.json into /agent/.typeclaw/home/ so OAuth credentials survive container restarts', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toContain('link_persistent_home_files() {')
+    // Default root is /agent/.typeclaw/home in production; the env var
+    // override exists only so the shim's executable tests can rebind
+    // the root to a tmpdir without touching /agent on the test host.
+    expect(shim).toContain('persist_root="${TYPECLAW_PERSIST_HOME_ROOT:-/agent/.typeclaw/home}"')
+    expect(shim).toContain('mkdir -p "$persist_root/.codex" "$HOME/.codex"')
+    expect(shim).toContain('ln -sfn "$persist_root/.codex/auth.json" "$HOME/.codex/auth.json"')
+  })
+
+  test('uses ln -sfn (idempotent + non-dereferencing) so re-runs across container lives never fail and never recurse into a pre-existing ~/.codex directory', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toMatch(/ln -sfn "\$persist_root\/\.codex\/auth\.json" "\$HOME\/\.codex\/auth\.json"/)
+    expect(shim).not.toMatch(/ln -s "\$persist_root\/\.codex\/auth\.json"/)
+    expect(shim).not.toMatch(/ln -sf "\$persist_root\/\.codex\/auth\.json"/)
+  })
+
+  test('link_persistent_home_files is called before each exec on both network-policy paths (off-path before exec bun; on-path after iptables, before exec setpriv) so the symlink is in place before the agent first reads ~/.codex', () => {
+    const shim = buildEntrypointShim()
+
+    const offBranchEnd = shim.indexOf('fi\n', shim.indexOf('!= "1"'))
+    expect(offBranchEnd).toBeGreaterThan(-1)
+    const offBranch = shim.slice(0, offBranchEnd)
+    const offLinkIdx = offBranch.lastIndexOf('link_persistent_home_files\n')
+    const offExecIdx = offBranch.search(/exec bun run typeclaw "\$@"/)
+    expect(offLinkIdx).toBeGreaterThan(-1)
+    expect(offExecIdx).toBeGreaterThan(offLinkIdx)
+
+    const onBranch = shim.slice(offBranchEnd)
+    const lastIptablesIdx = onBranch.lastIndexOf('iptables -A OUTPUT')
+    const onLinkIdx = onBranch.lastIndexOf('link_persistent_home_files\n')
+    const onExecIdx = onBranch.indexOf('exec setpriv')
+    expect(lastIptablesIdx).toBeGreaterThan(-1)
+    expect(onLinkIdx).toBeGreaterThan(lastIptablesIdx)
+    expect(onExecIdx).toBeGreaterThan(onLinkIdx)
+  })
+
+  test('on-path: link_persistent_home_files runs AFTER iptables OUTPUT rules so a failure in the helper cannot prevent the egress lockdown from taking effect (security invariant pinned by AGENTS.md)', () => {
+    const shim = buildEntrypointShim()
+    const offBranchEnd = shim.indexOf('fi\n', shim.indexOf('!= "1"'))
+    const onBranch = shim.slice(offBranchEnd)
+    const lastIptablesIdx = onBranch.lastIndexOf('iptables -A OUTPUT')
+    const lastIp6tablesIdx = onBranch.lastIndexOf('ip6tables -A OUTPUT')
+    const linkIdx = onBranch.lastIndexOf('link_persistent_home_files\n')
+    expect(lastIptablesIdx).toBeGreaterThan(-1)
+    expect(lastIp6tablesIdx).toBeGreaterThan(-1)
+    expect(linkIdx).toBeGreaterThan(lastIptablesIdx)
+    expect(linkIdx).toBeGreaterThan(lastIp6tablesIdx)
+  })
+
+  test('symlink target is unconditional — never gated on auth.json existing — so first-time codex login writes through the link to the persistent location', () => {
+    const shim = buildEntrypointShim()
+    const fnStart = shim.indexOf('link_persistent_home_files() {')
+    const fnEnd = shim.indexOf('\n}\n', fnStart)
+    expect(fnStart).toBeGreaterThan(-1)
+    expect(fnEnd).toBeGreaterThan(fnStart)
+    const fnBody = shim.slice(fnStart, fnEnd)
+    expect(fnBody).not.toMatch(/if .* -f .*auth\.json/)
+    expect(fnBody).not.toMatch(/test -e .*auth\.json/)
+    expect(fnBody).not.toMatch(/\[ -e .*auth\.json \]/)
+  })
 })
 
 describe('entrypoint shim — executable behavior (Xvfb startup, fail-fast)', () => {
@@ -1507,8 +1570,14 @@ exit 1
     const failShimPath = join(workdir, 'shim-fail.sh')
     await writeShellScript(failShimPath, shim)
 
+    const fakeHome = join(workdir, 'home-xvfb-fail')
+    await mkdir(fakeHome, { recursive: true })
     const proc = Bun.spawn(['/bin/sh', failShimPath, 'run'], {
-      env: { PATH: `${bindir}:${process.env['PATH'] ?? ''}` },
+      env: {
+        PATH: `${bindir}:${process.env['PATH'] ?? ''}`,
+        HOME: fakeHome,
+        TYPECLAW_PERSIST_HOME_ROOT: join(workdir, 'persist-xvfb-fail'),
+      },
       stdout: 'pipe',
       stderr: 'pipe',
     })
@@ -1519,13 +1588,97 @@ exit 1
     expect(stderr).toContain('typeclaw-entrypoint: Xvfb exited immediately')
   })
 
+  test('off-path: link_persistent_home_files creates a dangling symlink (~/.codex/auth.json → persist root) even when no credential exists yet, so the first codex login write lands at the persistent location', async () => {
+    const persistRoot = join(workdir, 'persist')
+    const fakeHome = join(workdir, 'home')
+    await mkdir(fakeHome, { recursive: true })
+
+    const noXvfbBin = join(workdir, 'bin-link-test')
+    await mkdir(noXvfbBin, { recursive: true })
+    await symlinkHostBinaries(noXvfbBin, ['mkdir', 'ln'])
+    await writeShellScript(join(noXvfbBin, 'bun'), `#!/bin/sh\nexit 0\n`)
+    await writeShellScript(
+      join(noXvfbBin, 'setpriv'),
+      `#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in --) shift; break;; *) shift;; esac; done
+exec "$@"
+`,
+    )
+
+    const shim = buildEntrypointShim()
+    const shimPath = join(workdir, 'shim-link.sh')
+    await writeShellScript(shimPath, shim)
+
+    const proc = Bun.spawn(['/bin/sh', shimPath, 'run'], {
+      env: {
+        PATH: noXvfbBin,
+        HOME: fakeHome,
+        TYPECLAW_PERSIST_HOME_ROOT: persistRoot,
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    const exitCode = await proc.exited
+    expect(exitCode).toBe(0)
+
+    const linkPath = join(fakeHome, '.codex', 'auth.json')
+    const linkStat = lstatSync(linkPath)
+    expect(linkStat.isSymbolicLink()).toBe(true)
+    expect(readlinkSync(linkPath)).toBe(join(persistRoot, '.codex', 'auth.json'))
+    expect(statSync(join(persistRoot, '.codex')).isDirectory()).toBe(true)
+  })
+
+  test('off-path: link_persistent_home_files is idempotent — running the shim twice does not error and leaves the same symlink in place (ln -sfn replaces atomically)', async () => {
+    const persistRoot = join(workdir, 'persist-idem')
+    const fakeHome = join(workdir, 'home-idem')
+    await mkdir(fakeHome, { recursive: true })
+
+    const noXvfbBin = join(workdir, 'bin-idem-test')
+    await mkdir(noXvfbBin, { recursive: true })
+    await symlinkHostBinaries(noXvfbBin, ['mkdir', 'ln'])
+    await writeShellScript(join(noXvfbBin, 'bun'), `#!/bin/sh\nexit 0\n`)
+    await writeShellScript(
+      join(noXvfbBin, 'setpriv'),
+      `#!/bin/sh
+while [ $# -gt 0 ]; do case "$1" in --) shift; break;; *) shift;; esac; done
+exec "$@"
+`,
+    )
+
+    const shim = buildEntrypointShim()
+    const shimPath = join(workdir, 'shim-idem.sh')
+    await writeShellScript(shimPath, shim)
+
+    const env = {
+      PATH: noXvfbBin,
+      HOME: fakeHome,
+      TYPECLAW_PERSIST_HOME_ROOT: persistRoot,
+    }
+    const first = Bun.spawn(['/bin/sh', shimPath, 'run'], { env, stdout: 'pipe', stderr: 'pipe' })
+    expect(await first.exited).toBe(0)
+    const second = Bun.spawn(['/bin/sh', shimPath, 'run'], { env, stdout: 'pipe', stderr: 'pipe' })
+    expect(await second.exited).toBe(0)
+
+    const linkPath = join(fakeHome, '.codex', 'auth.json')
+    expect(lstatSync(linkPath).isSymbolicLink()).toBe(true)
+    expect(readlinkSync(linkPath)).toBe(join(persistRoot, '.codex', 'auth.json'))
+  })
+
   test('off-path: when Xvfb is not on PATH (docker.file.xvfb=false equivalent), the shim execs the agent directly without spawning anything or exporting DISPLAY', async () => {
-    // Make Xvfb unfindable by pointing PATH at a directory that lacks it.
-    // Keep the rest of the fakes (bun, setpriv) reachable via the same
-    // bindir but rename the Xvfb fake aside.
+    // Make Xvfb unfindable by pointing PATH at a directory that contains
+    // the bun + setpriv fakes plus the specific coreutils the shim's
+    // link_persistent_home_files helper needs (mkdir, ln) — symlinked
+    // from the host so they work on Linux CI and macOS dev boxes alike.
+    // Crucially we do NOT add /usr/bin or /bin to PATH, because Linux
+    // CI runners (GitHub Actions ubuntu-latest in particular) ship a
+    // real Xvfb in /usr/bin, which would let `command -v Xvfb` succeed
+    // and break the off-switch test premise. Symlinking only the
+    // utilities we actually need keeps Xvfb unreachable on every
+    // platform. Production containers ship coreutils in the baseline
+    // image so the helper's mkdir+ln calls work for the same reason.
     const isolatedBin = join(workdir, 'bin-no-xvfb')
     await mkdir(isolatedBin, { recursive: true })
-    // Symlink in the bun + setpriv fakes only; leave Xvfb out.
+    await symlinkHostBinaries(isolatedBin, ['mkdir', 'ln'])
     await writeShellScript(
       join(isolatedBin, 'bun'),
       `#!/bin/sh\necho "DISPLAY: \${DISPLAY:-<unset>}" > "${logfile}"\nexit 0\n`,
@@ -1542,8 +1695,14 @@ exec "$@"
     const noXvfbShimPath = join(workdir, 'shim-no-xvfb.sh')
     await writeShellScript(noXvfbShimPath, shim)
 
+    const fakeHome = join(workdir, 'home-no-xvfb')
+    await mkdir(fakeHome, { recursive: true })
     const proc = Bun.spawn(['/bin/sh', noXvfbShimPath, 'run'], {
-      env: { PATH: isolatedBin },
+      env: {
+        PATH: isolatedBin,
+        HOME: fakeHome,
+        TYPECLAW_PERSIST_HOME_ROOT: join(workdir, 'persist-no-xvfb'),
+      },
       stdout: 'pipe',
       stderr: 'pipe',
     })
@@ -1556,6 +1715,22 @@ exec "$@"
 
 async function writeShellScript(path: string, contents: string): Promise<void> {
   await writeFile(path, contents, { mode: 0o755 })
+}
+
+// Symlinks specific host binaries into a test's isolated bin directory so
+// the shim's helpers (link_persistent_home_files calls mkdir + ln) can
+// run without widening PATH to /usr/bin or /bin. Widening PATH would
+// drag in real Xvfb on Linux CI (it's preinstalled at /usr/bin/Xvfb on
+// GitHub Actions ubuntu-latest), which breaks any test whose premise is
+// "Xvfb is unreachable". Resolves each name via Bun.which against the
+// host PATH so the test works whether ln is at /bin/ln (Linux) or
+// /usr/bin/ln (some BSD/macOS layouts).
+async function symlinkHostBinaries(targetDir: string, names: string[]): Promise<void> {
+  for (const name of names) {
+    const hostPath = Bun.which(name)
+    if (!hostPath) throw new Error(`symlinkHostBinaries: ${name} not found on host PATH`)
+    await symlink(hostPath, join(targetDir, name))
+  }
 }
 
 // vercel-labs/agent-browser issue #1083 ("headed silently ignored on

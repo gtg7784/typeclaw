@@ -17,10 +17,18 @@ export function buildGitignore(config: GitignoreConfig = { append: [] }): string
 # as a safety net so an agent folder cloned from a pre-rename machine never
 # stages credentials by accident, even if its agent boot hasn't yet run the
 # auth.json -> secrets.json migration.
+#
+# .typeclaw/home/ is the persistent-$HOME overlay populated by the
+# entrypoint shim's \`link_persistent_home_files\` (see
+# src/init/dockerfile.ts). It mirrors selected files from the container's
+# $HOME (e.g. ~/.codex/auth.json) into the bind-mounted agent folder so
+# tool credentials survive container restarts. Always credentials; never
+# commit.
 .env
 .env.local
 secrets.json
 auth.json
+.typeclaw/home/
 node_modules/
 packages/*/node_modules/
 workspace/

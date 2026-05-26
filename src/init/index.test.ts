@@ -920,6 +920,18 @@ describe('scaffold', () => {
     expect(gitignore).toMatch(/^packages\/\*\/node_modules\/$/m)
   })
 
+  test('gitignores the persistent-$HOME overlay (.typeclaw/home/) so symlinked credentials like ~/.codex/auth.json never enter git history', () => {
+    const gitignore = buildGitignore({ append: [] })
+    expect(gitignore).toMatch(/^\.typeclaw\/home\/$/m)
+    const trulyIgnoredHeader = gitignore.indexOf('# Truly ignored:')
+    const persistHomeIdx = gitignore.indexOf('.typeclaw/home/')
+    const systemManagedHeader = gitignore.indexOf('# System-managed:')
+    expect(trulyIgnoredHeader).toBeGreaterThan(-1)
+    expect(systemManagedHeader).toBeGreaterThan(-1)
+    expect(persistHomeIdx).toBeGreaterThan(trulyIgnoredHeader)
+    expect(persistHomeIdx).toBeLessThan(systemManagedHeader)
+  })
+
   test('buildGitignore includes custom entries from git.ignore.append before managed entries', () => {
     const gitignore = buildGitignore({ append: ['scratch/', '*.local.log'] })
 

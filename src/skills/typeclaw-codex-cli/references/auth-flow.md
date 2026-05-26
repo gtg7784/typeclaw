@@ -99,6 +99,17 @@ There's also a `codex login --device-auth` flag for headless / cross-machine cas
 
 11. **Done.** There is no auth scratch directory, no tmux session to tear down, no worktree. The OAuth path has the same on-disk footprint as the API-key path: one credential file under `$HOME`.
 
+### Persistence across container restarts
+
+`~/.codex/auth.json` inside the container is a symlink — installed by `typeclaw`'s entrypoint shim on every boot — pointing at `/agent/.typeclaw/home/.codex/auth.json`, which lives in the bind-mounted agent folder on the host. Two consequences:
+
+1. **You only paste auth.json once.** After the first successful write, `typeclaw restart` (or `typeclaw stop && typeclaw start`) preserves the credential without any further user action. Re-pasting is only needed when the refresh token itself is revoked (the user `/logout`s from their ChatGPT account, or the token expires after ~one year of inactivity).
+2. **Codex's in-place refresh "just works."** When codex rotates tokens (it rewrites `auth.json` with a refreshed access token plus the updated refresh-token state), the write goes through the symlink and lands on the persistent host-side path. On the next container start the symlink resolves back to the same file, so refreshes compound across runs the same way they do on a persistent CI runner — this is the pattern OpenAI's own [Codex CI/CD auth guide](https://developers.openai.com/codex/auth/ci-cd-auth) prescribes.
+
+You do not need to do anything to enable this — the symlink is unconditional and idempotent, installed before the agent process ever starts. The persistent directory is gitignored (`.typeclaw/home/` in the generated `.gitignore`) so the credential never enters version control even though it sits inside the agent folder.
+
+If the user asks "won't I lose auth.json on restart?" the answer is "no — it's symlinked to a host-side path; only `workspace/` and the container's regular `$HOME` are ephemeral."
+
 ## Failure modes on the user's side
 
 These all surface as the user's reply being an error message instead of a JSON object. Recognize them, do not validate them as credentials, and respond with the matching guidance.
@@ -126,6 +137,8 @@ These all surface as the user's reply being an error message instead of a JSON o
 - **Do not advise the user to `typeclaw shell` and run `codex login` inside the container as a "fallback".** It does not work — the container has no browser. Use the user-machine flow.
 - **Do not assume the `auth.json` schema.** OpenAI may change the shape — today's keys are `OPENAI_API_KEY` and `tokens.{access_token, refresh_token, id_token}`, but future versions may add or rename fields. Validate by presence of at least ONE known key, not by exhaustive shape match.
 - **Do not write to `~/.codex/auth.json` without `acknowledgeGuards: { nonWorkspaceWrite: true }`.** Same guard contract as `.env` writes.
-- **Do not patch-edit `~/.codex/auth.json`.** Read-modify-write the whole file (or just write the new contents wholesale — there's nothing to preserve from a stale `auth.json` on a fresh delegation).
+- **Do not patch-edit `~/.codex/auth.json`.** Read-modify-write the whole file (or just write the new contents wholesale — there's nothing to preserve from a stale `auth.json` on a fresh delegation). Note that `~/.codex/auth.json` is a symlink into `/agent/.typeclaw/home/.codex/auth.json` — your write follows the link automatically and lands at the persistent host-side path, which is exactly what you want.
+- **Do not move, delete, or replace the `~/.codex/auth.json` symlink with a real file.** The entrypoint shim re-establishes it on every container start, so any in-container `mv`/`cp`/`rm -f && touch` against the link is at best wasted work and at worst loses the credential on the next restart. Write THROUGH the symlink instead.
+- **Do not write directly to `/agent/.typeclaw/home/`.** That path is a system-owned directory managed by the entrypoint shim. Use the `$HOME`-side path (`~/.codex/auth.json`) and let the symlink do its job. The persistent root may move or be renamed across typeclaw versions; the `$HOME` path is the stable contract.
 - **Do not store `OPENAI_API_KEY` in `~/.codex/auth.json`'s `OPENAI_API_KEY` field as a workaround for env-var precedence.** If the user wants the API-key path, the canonical location is `.env`. Mixing the two creates ambiguity for the next person debugging an auth failure.
 - **Do not branch on local-vs-remote container topology.** The user-machine flow is the same whether the container is on the user's laptop or on a remote host — the user runs `codex login` on whatever local machine they're at, the credential works in either container.
