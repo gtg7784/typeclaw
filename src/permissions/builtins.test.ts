@@ -2,12 +2,12 @@ import { describe, expect, test } from 'bun:test'
 
 import { BUILTIN_ROLE_NAMES, BUILTIN_ROLES, OWNER_SECURITY_WILDCARD, expandOwnerWildcard } from './builtins'
 
-describe('built-in role contract', () => {
+describe('built-in role contract (role-tower model: owner=high, trusted=medium, member=low, guest=none)', () => {
   test('has exactly the four documented names in declaration order', () => {
     expect(BUILTIN_ROLE_NAMES).toEqual(['owner', 'trusted', 'member', 'guest'])
   })
 
-  test('owner pre-expansion: tui match, core perms, bypass.low + bypass.medium tier strings, wildcard sentinel', () => {
+  test('owner pre-expansion: tui match, core perms, all three tier strings (low/medium/high), wildcard sentinel', () => {
     expect(BUILTIN_ROLES.owner.match).toEqual([{ kind: 'tui' }])
     expect(BUILTIN_ROLES.owner.permissions).toContain(OWNER_SECURITY_WILDCARD)
     expect(BUILTIN_ROLES.owner.permissions).toContain('channel.respond')
@@ -15,10 +15,7 @@ describe('built-in role contract', () => {
     expect(BUILTIN_ROLES.owner.permissions).toContain('cron.modify')
     expect(BUILTIN_ROLES.owner.permissions).toContain('security.bypass.low')
     expect(BUILTIN_ROLES.owner.permissions).toContain('security.bypass.medium')
-  })
-
-  test('owner pre-expansion does NOT carry security.bypass.high (high-tier requires per-call ack from every role)', () => {
-    expect([...BUILTIN_ROLES.owner.permissions]).not.toContain('security.bypass.high')
+    expect(BUILTIN_ROLES.owner.permissions).toContain('security.bypass.high')
   })
 
   test('owner carries all three subagent permissions (spawn / cancel / output) AND the operator-specific spawn permission', () => {
@@ -28,12 +25,13 @@ describe('built-in role contract', () => {
     expect(BUILTIN_ROLES.owner.permissions).toContain('subagent.spawn.operator')
   })
 
-  test('trusted has empty default match and core perms + bypass.low + subagent perms + operator-specific spawn (no per-guard medium/high grants)', () => {
+  test('trusted has empty default match and core perms + bypass.low + bypass.medium + subagent perms + operator-specific spawn', () => {
     expect(BUILTIN_ROLES.trusted.match).toEqual([])
     expect([...BUILTIN_ROLES.trusted.permissions].sort()).toEqual([
       'channel.respond',
       'cron.schedule',
       'security.bypass.low',
+      'security.bypass.medium',
       'subagent.cancel',
       'subagent.output',
       'subagent.spawn',
@@ -41,20 +39,15 @@ describe('built-in role contract', () => {
     ])
   })
 
-  test('trusted does NOT carry bypass.medium or bypass.high (only low tier by default)', () => {
-    expect([...BUILTIN_ROLES.trusted.permissions]).not.toContain('security.bypass.medium')
+  test('trusted does NOT carry bypass.high (high tier remains owner-only)', () => {
     expect([...BUILTIN_ROLES.trusted.permissions]).not.toContain('security.bypass.high')
   })
 
-  test('trusted does NOT carry per-guard bypassGitExfil / bypassSecretExfilBash (use explicit grant in typeclaw.json to re-open)', () => {
-    expect([...BUILTIN_ROLES.trusted.permissions]).not.toContain('security.bypass.gitExfil')
-    expect([...BUILTIN_ROLES.trusted.permissions]).not.toContain('security.bypass.secretExfilBash')
-  })
-
-  test('member has empty default match and channel.respond + subagent perms (agent-side proactive fan-out)', () => {
+  test('member has empty default match and channel.respond + bypass.low + subagent perms (no operator-specific spawn)', () => {
     expect(BUILTIN_ROLES.member.match).toEqual([])
     expect([...BUILTIN_ROLES.member.permissions].sort()).toEqual([
       'channel.respond',
+      'security.bypass.low',
       'subagent.cancel',
       'subagent.output',
       'subagent.spawn',
@@ -65,9 +58,9 @@ describe('built-in role contract', () => {
     expect([...BUILTIN_ROLES.member.permissions]).not.toContain('subagent.spawn.operator')
   })
 
-  test('member does NOT carry security bypass (subagent.spawn does not imply write capability — explorer is read-only, operator is gated separately via subagent.spawn.operator)', () => {
-    expect([...BUILTIN_ROLES.member.permissions]).not.toContain('security.bypass.low')
+  test('member does NOT carry bypass.medium or bypass.high (low tier only)', () => {
     expect([...BUILTIN_ROLES.member.permissions]).not.toContain('security.bypass.medium')
+    expect([...BUILTIN_ROLES.member.permissions]).not.toContain('security.bypass.high')
   })
 
   test('guest has no match and no permissions', () => {
@@ -76,12 +69,10 @@ describe('built-in role contract', () => {
   })
 })
 
-describe('owner-wildcard runtime expansion (audience-leak guards stay off)', () => {
-  // Mirror the production security plugin's contribution. If the security
-  // plugin's HIGH_TIER_PER_GUARD_PERMISSIONS list grows, the corresponding
-  // assertion in src/bundled-plugins/security/permissions.test.ts catches
-  // the drift; this test asserts the wildcard expander honors whatever
-  // list it's given.
+describe('owner-wildcard runtime expansion (owner bypasses every tier including high)', () => {
+  // The bundled security plugin's production wiring is `ownerWildcardExclusions: []`
+  // under the role-tower model. This block asserts the wildcard expander does
+  // the right thing with that production input.
   const PLUGIN_BYPASS_PERMS = [
     'security.bypass.secretExfilBash',
     'security.bypass.gitExfil',
@@ -91,43 +82,50 @@ describe('owner-wildcard runtime expansion (audience-leak guards stay off)', () 
     'security.bypass.systemPromptLeak',
     'security.bypass.outboundSecret',
     'security.bypass.gitRemoteTainted',
+    'security.bypass.rolePromotion',
+    'security.bypass.cronPromotion',
     'security.bypass.low',
     'security.bypass.medium',
     'security.bypass.high',
   ]
-  const HIGH_TIER_EXCLUSIONS = [
-    'security.bypass.gitExfil',
-    'security.bypass.gitRemoteTainted',
-    'security.bypass.outboundSecret',
-    'security.bypass.systemPromptLeak',
-    'security.bypass.high',
-  ]
+  const NO_EXCLUSIONS: readonly string[] = []
 
-  test('owner runtime perms: every plugin-contributed security.bypass.* EXCEPT the high-tier exclusions', () => {
-    const expanded = expandOwnerWildcard(BUILTIN_ROLES.owner.permissions, PLUGIN_BYPASS_PERMS, HIGH_TIER_EXCLUSIONS)
+  test('owner runtime perms include every plugin-contributed security.bypass.* (no exclusions in production)', () => {
+    const expanded = expandOwnerWildcard(BUILTIN_ROLES.owner.permissions, PLUGIN_BYPASS_PERMS, NO_EXCLUSIONS)
 
-    // Medium-tier per-guard strings: present (wildcard expanded to them)
+    // Every per-guard string is present
     expect(expanded).toContain('security.bypass.secretExfilBash')
     expect(expanded).toContain('security.bypass.secretExfilRead')
     expect(expanded).toContain('security.bypass.ssrf')
     expect(expanded).toContain('security.bypass.sessionSearchSecrets')
+    expect(expanded).toContain('security.bypass.gitExfil')
+    expect(expanded).toContain('security.bypass.gitRemoteTainted')
+    expect(expanded).toContain('security.bypass.outboundSecret')
+    expect(expanded).toContain('security.bypass.systemPromptLeak')
+    expect(expanded).toContain('security.bypass.rolePromotion')
+    expect(expanded).toContain('security.bypass.cronPromotion')
 
-    // High-tier per-guard strings: absent (audience-leak rule — owner must ack)
-    expect(expanded).not.toContain('security.bypass.gitExfil')
-    expect(expanded).not.toContain('security.bypass.gitRemoteTainted')
-    expect(expanded).not.toContain('security.bypass.outboundSecret')
-    expect(expanded).not.toContain('security.bypass.systemPromptLeak')
-
-    // Tier strings: low + medium present (explicit in BUILTIN_ROLES.owner),
-    // high absent (excluded AND not explicit).
+    // Every tier string is present
     expect(expanded).toContain('security.bypass.low')
     expect(expanded).toContain('security.bypass.medium')
-    expect(expanded).not.toContain('security.bypass.high')
+    expect(expanded).toContain('security.bypass.high')
   })
 
-  test('operator override: explicit security.bypass.gitExfil in owner.permissions still takes effect (flows through non-sentinel branch)', () => {
+  test('third-party plugin opt-out: wildcardExclusions still excludes the named strings (parameter preserved for non-bundled plugins)', () => {
+    const expanded = expandOwnerWildcard(BUILTIN_ROLES.owner.permissions, PLUGIN_BYPASS_PERMS, [
+      'security.bypass.gitExfil',
+    ])
+    // The excluded string is dropped from the wildcard expansion. The
+    // explicit tier strings on BUILTIN_ROLES.owner remain.
+    expect(expanded).not.toContain('security.bypass.gitExfil')
+    expect(expanded).toContain('security.bypass.high')
+    expect(expanded).toContain('security.bypass.gitRemoteTainted')
+  })
+
+  test('operator override: explicit per-guard string in owner.permissions still flows through the non-sentinel branch', () => {
+    // Even with exclusions, an explicit grant survives.
     const overridden = [...BUILTIN_ROLES.owner.permissions, 'security.bypass.gitExfil']
-    const expanded = expandOwnerWildcard(overridden, PLUGIN_BYPASS_PERMS, HIGH_TIER_EXCLUSIONS)
+    const expanded = expandOwnerWildcard(overridden, PLUGIN_BYPASS_PERMS, ['security.bypass.gitExfil'])
     expect(expanded).toContain('security.bypass.gitExfil')
   })
 })
