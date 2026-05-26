@@ -28,7 +28,7 @@ export type TunnelRequestId = string
 
 export type TunnelSnapshot = {
   name: string
-  provider: 'external' | 'cloudflare-quick'
+  provider: 'external' | 'cloudflare-quick' | 'cloudflare-named'
   for: { kind: 'channel'; name: string } | { kind: 'manual' }
   url: string | null
   status: 'stopped' | 'starting' | 'healthy' | 'unhealthy' | 'permanently-failed'

@@ -30,6 +30,27 @@ Choose Cloudflare Quick when the user wants the easiest path:
 
 For GitHub channel setup, `typeclaw channel add github` can write a channel-owned Cloudflare Quick tunnel named `github-webhook` and set `docker.file.cloudflared: true`. The first `typeclaw start` or `restart` after that rebuilds the image with `cloudflared` installed.
 
+### Cloudflare Named Tunnel
+
+Choose Cloudflare Named when the user has a domain on Cloudflare and wants a stable URL:
+
+- Cloudflare account required (free), plus a domain already in their account's `Websites` list.
+- The user creates the tunnel in the Zero Trust dashboard (`Networks → Tunnels → Create`), copies the token, and configures a Public Hostname pointing at `localhost:<port>` (where `<port>` is the in-container upstream).
+- The URL is whatever subdomain on their domain they configured (e.g. `https://agent.example.com`).
+- The URL never rotates. It's bound to the tunnel in the dashboard, not the process.
+- `cloudflared` runs inside the container with `cloudflared tunnel run --token <jwt>`. The token comes from `.env`.
+
+Use `provider: "cloudflare-named"` with `hostname: "https://..."` and `tokenEnv: "CLOUDFLARE_TUNNEL_TOKEN"` (or another env var name set in `.env`). The user must:
+
+1. Create the tunnel in the Cloudflare dashboard.
+2. Add at least one Public Hostname mapping `<sub>.<their-domain>` → `localhost:<port>`. A tunnel without a Public Hostname is a no-op — `cloudflared` registers but has nothing to route.
+3. Put the dashboard-printed token in `.env` under the env var named in `tokenEnv`.
+4. `typeclaw restart` to pick up the new tunnel and the cloudflared layer.
+
+The `hostname` field in `typeclaw.json` is informational — typeclaw uses it for `tunnel-url-changed` events and CLI display, but `cloudflared` reads the actual hostname→upstream mapping from the dashboard. If the user changes the hostname in the dashboard, they must also update `tunnels[].hostname` in `typeclaw.json` or downstream consumers (GitHub webhook registration) will keep using the stale URL.
+
+`upstreamPort` is not used for `cloudflare-named` — the dashboard's Public Hostname mapping captures it. The schema rejects `upstreamPort` on named tunnels to surface drift early.
+
 ### External URL
 
 Choose External when the user already has their own reverse proxy or tunnel:
@@ -90,7 +111,18 @@ Use `typeclaw tunnel logs <name> -f` while restarting the agent if you need to w
 
 ### `cloudflared` is not installed
 
-The Cloudflare Quick provider requires `docker.file.cloudflared: true`. If it is missing, add it to `typeclaw.json` or re-run the GitHub channel setup choosing Cloudflare Quick, then run `typeclaw restart` so the Dockerfile is regenerated and the image rebuilds.
+Both Cloudflare providers (`cloudflare-quick` and `cloudflare-named`) require `docker.file.cloudflared: true`. If it is missing, `typeclaw tunnel add` writes it automatically; otherwise add it to `typeclaw.json` by hand and run `typeclaw restart` so the Dockerfile is regenerated and the image rebuilds.
+
+### Named tunnel says "permanently-failed" with `tokenEnv` in the detail
+
+The env var named in `tunnels[].tokenEnv` is not set or is empty in the agent's `.env`. The provider intentionally does not retry this case — fix `.env`, then `typeclaw restart`. `cloudflared` is never spawned with a missing token.
+
+### Named tunnel is healthy but no traffic flows
+
+Two likely causes:
+
+1. The Cloudflare dashboard's Public Hostname tab for this tunnel is empty. A tunnel with no public hostname is a no-op — `cloudflared` registers and waits, but Cloudflare has nothing to route to it. `curl https://<hostname>` returns Cloudflare error 530 or 1033.
+2. The Public Hostname's upstream `localhost:<port>` does not match the in-container service port. typeclaw cannot detect this drift; the user must align the dashboard and the container.
 
 ### Quick tunnel URL changed
 

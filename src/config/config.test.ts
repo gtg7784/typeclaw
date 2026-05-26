@@ -1606,7 +1606,7 @@ describe('configSchema tunnels field', () => {
     const parsed = configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'cloudflare-quick' }] })
     expect(parsed.tunnels[0]?.provider).toBe('cloudflare-quick')
     expect(() =>
-      configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'cloudflare-named' }] }),
+      configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, provider: 'wireguard' }] }),
     ).toThrow()
   })
 
@@ -1614,5 +1614,61 @@ describe('configSchema tunnels field', () => {
     expect(() =>
       configSchema.parse({ ...baseInput, tunnels: [{ ...externalChannel, for: { kind: 'channel', name: '   ' } }] }),
     ).toThrow()
+  })
+
+  describe('cloudflare-named provider', () => {
+    const namedChannel = {
+      name: 'github-webhook',
+      provider: 'cloudflare-named',
+      for: { kind: 'channel', name: 'github' },
+      hostname: 'https://agent.example.com',
+      tokenEnv: 'CLOUDFLARE_TUNNEL_TOKEN',
+    }
+
+    test('accepts a channel-linked named tunnel with hostname and tokenEnv', () => {
+      const parsed = configSchema.parse({ ...baseInput, tunnels: [namedChannel] })
+      expect(parsed.tunnels[0]?.provider).toBe('cloudflare-named')
+      expect(parsed.tunnels[0]?.hostname).toBe('https://agent.example.com')
+      expect(parsed.tunnels[0]?.tokenEnv).toBe('CLOUDFLARE_TUNNEL_TOKEN')
+    })
+
+    test('accepts a manual named tunnel without upstreamPort', () => {
+      const parsed = configSchema.parse({
+        ...baseInput,
+        tunnels: [{ ...namedChannel, for: { kind: 'manual' } }],
+      })
+      expect(parsed.tunnels[0]?.for).toEqual({ kind: 'manual' })
+      expect(parsed.tunnels[0]?.upstreamPort).toBeUndefined()
+    })
+
+    test('rejects named tunnel without hostname', () => {
+      expect(() => configSchema.parse({ ...baseInput, tunnels: [{ ...namedChannel, hostname: undefined }] })).toThrow(
+        /hostname is required/,
+      )
+    })
+
+    test('rejects named tunnel with non-https hostname', () => {
+      expect(() =>
+        configSchema.parse({ ...baseInput, tunnels: [{ ...namedChannel, hostname: 'http://agent.example.com' }] }),
+      ).toThrow(/https:\/\//)
+    })
+
+    test('rejects named tunnel without tokenEnv', () => {
+      expect(() => configSchema.parse({ ...baseInput, tunnels: [{ ...namedChannel, tokenEnv: undefined }] })).toThrow(
+        /tokenEnv is required/,
+      )
+    })
+
+    test('rejects named tunnel with lowercase tokenEnv', () => {
+      expect(() => configSchema.parse({ ...baseInput, tunnels: [{ ...namedChannel, tokenEnv: 'my_token' }] })).toThrow(
+        /env var name/,
+      )
+    })
+
+    test('rejects named tunnel with upstreamPort set', () => {
+      expect(() => configSchema.parse({ ...baseInput, tunnels: [{ ...namedChannel, upstreamPort: 8080 }] })).toThrow(
+        /upstreamPort must not be set/,
+      )
+    })
   })
 })

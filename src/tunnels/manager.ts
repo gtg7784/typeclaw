@@ -1,5 +1,6 @@
 import type { Stream } from '@/stream'
 
+import { createCloudflareNamedProvider } from './providers/cloudflare-named'
 import { createCloudflareQuickProvider } from './providers/cloudflare-quick'
 import { createExternalProvider } from './providers/external'
 import type { TunnelConfig, TunnelProviderHandle, TunnelState, TunnelUrlChangedPayload } from './types'
@@ -15,6 +16,11 @@ export type TunnelManagerOptions = {
   stream: Stream
   resolveChannelUpstreamPort?: (channelName: string) => number | null
   cloudflareQuickBinary?: string
+  cloudflareNamedBinary?: string
+  // Reads an env var by name. Defaults to `process.env[name]` in production.
+  // Parameterized so tests can drive the named-provider token path without
+  // poking global env and so the manager stays a pure function of its inputs.
+  resolveEnv?: (name: string) => string | undefined
   logger?: TunnelManagerLogger
 }
 
@@ -36,6 +42,7 @@ const consoleLogger: TunnelManagerLogger = {
 export function createTunnelManager(options: TunnelManagerOptions): TunnelManager {
   const logger = options.logger ?? consoleLogger
   const handles = new Map<string, TunnelProviderHandle>()
+  const resolveEnv = options.resolveEnv ?? ((name: string) => process.env[name])
 
   for (const config of options.tunnels) {
     const handle = buildProvider(
@@ -43,6 +50,8 @@ export function createTunnelManager(options: TunnelManagerOptions): TunnelManage
       options.resolveChannelUpstreamPort,
       (url) => publishUrlChange(options.stream, config, url, logger),
       options.cloudflareQuickBinary,
+      options.cloudflareNamedBinary,
+      resolveEnv,
     )
     handles.set(config.name, handle)
   }
@@ -92,6 +101,8 @@ function buildProvider(
   resolveChannelUpstreamPort: TunnelManagerOptions['resolveChannelUpstreamPort'],
   onUrlChange: (url: string) => void,
   cloudflareQuickBinary: string | undefined,
+  cloudflareNamedBinary: string | undefined,
+  resolveEnv: (name: string) => string | undefined,
 ): TunnelProviderHandle {
   switch (config.provider) {
     case 'external':
@@ -102,6 +113,13 @@ function buildProvider(
         upstreamPort: resolveUpstreamPort(config, resolveChannelUpstreamPort),
         onUrlChange,
         binary: cloudflareQuickBinary,
+      })
+    case 'cloudflare-named':
+      return createCloudflareNamedProvider({
+        config,
+        onUrlChange,
+        resolveToken: () => (config.tokenEnv !== undefined ? resolveEnv(config.tokenEnv) : undefined),
+        binary: cloudflareNamedBinary,
       })
   }
 }

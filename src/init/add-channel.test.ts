@@ -517,6 +517,104 @@ describe('runAddChannel', () => {
     ])
   })
 
+  test('adds github channel with a cloudflare-named tunnel and cloudflared Dockerfile toggle', async () => {
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret',
+      tunnelProvider: 'cloudflare-named',
+      hostname: 'https://agent.example.com',
+      tokenEnv: 'CLOUDFLARE_TUNNEL_TOKEN',
+      webhookPort: 8975,
+      repos: ['acme/widgets'],
+    })
+
+    const cfg = (await readConfig()) as {
+      channels?: { github?: { webhookUrl?: string; repos?: string[] } }
+      docker?: { file?: { cloudflared?: boolean } }
+      tunnels?: Array<{
+        name?: string
+        provider?: string
+        hostname?: string
+        tokenEnv?: string
+        for?: { kind?: string; name?: string }
+      }>
+    }
+
+    expect(cfg.channels?.github?.webhookUrl).toBeUndefined()
+    expect(cfg.channels?.github?.repos).toEqual(['acme/widgets'])
+    expect(cfg.docker?.file?.cloudflared).toBe(true)
+    expect(cfg.tunnels).toEqual([
+      {
+        name: 'github-webhook',
+        provider: 'cloudflare-named',
+        for: { kind: 'channel', name: 'github' },
+        hostname: 'https://agent.example.com',
+        tokenEnv: 'CLOUDFLARE_TUNNEL_TOKEN',
+      },
+    ])
+  })
+
+  test('adds github channel (cloudflare-named): eagerly registers webhook using hostname as the public URL', async () => {
+    const fetchImpl = recordingGithubFetch()
+
+    await runAddChannel({
+      cwd: root,
+      channel: 'github',
+      auth: { type: 'pat', pat: 'ghp_test' },
+      webhookSecret: 'wh-secret-named',
+      tunnelProvider: 'cloudflare-named',
+      hostname: 'https://agent.example.com',
+      tokenEnv: 'CLOUDFLARE_TUNNEL_TOKEN',
+      webhookPort: 8975,
+      repos: ['acme/widgets'],
+      fetchImpl: fetchImpl.fn,
+    })
+
+    const posts = fetchImpl.calls.filter((c) => c.method === 'POST' && c.url.endsWith('/hooks'))
+    expect(posts).toHaveLength(1)
+    const body = JSON.parse(posts[0]!.body ?? '{}') as {
+      config?: { url?: string; secret?: string }
+    }
+    // Hostname has no path, so applyManagedPath appends the
+    // /typeclaw/v1/github/<agentId> marker (same path-marker contract that
+    // makes cloudflare-quick hooks recognizable across URL rotations). The
+    // user types the bare hostname; typeclaw owns the path.
+    expect(body.config?.url).toMatch(/^https:\/\/agent\.example\.com\/typeclaw\/v1\/github\/[a-z0-9_.-]+$/)
+    expect(body.config?.secret).toBe('wh-secret-named')
+  })
+
+  test('adds github channel (cloudflare-named): rejects missing hostname', async () => {
+    await expect(
+      runAddChannel({
+        cwd: root,
+        channel: 'github',
+        auth: { type: 'pat', pat: 'ghp_test' },
+        webhookSecret: 'wh-secret',
+        tunnelProvider: 'cloudflare-named',
+        tokenEnv: 'CLOUDFLARE_TUNNEL_TOKEN',
+        webhookPort: 8975,
+        repos: ['acme/widgets'],
+      }),
+    ).rejects.toThrow(/hostname/)
+  })
+
+  test('adds github channel (cloudflare-named): rejects missing tokenEnv', async () => {
+    await expect(
+      runAddChannel({
+        cwd: root,
+        channel: 'github',
+        auth: { type: 'pat', pat: 'ghp_test' },
+        webhookSecret: 'wh-secret',
+        tunnelProvider: 'cloudflare-named',
+        hostname: 'https://agent.example.com',
+        webhookPort: 8975,
+        repos: ['acme/widgets'],
+      }),
+    ).rejects.toThrow(/tokenEnv/)
+  })
+
   test('adds github channel with no tunnel and no webhookUrl', async () => {
     await runAddChannel({
       cwd: root,

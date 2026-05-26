@@ -46,6 +46,91 @@ describe('tunnel add/remove config flows', () => {
     expect(config.docker.file.cloudflared).toBe(true)
   })
 
+  test('interactive add writes a cloudflare-named channel tunnel and enables cloudflared', async () => {
+    const cwd = await makeAgentDir({})
+    const prompts = sequencedPrompts(['https://agent.example.com', 'CLOUDFLARE_TUNNEL_TOKEN'])
+
+    const result = await tunnel.runTunnelAddFlow(
+      cwd,
+      { name: 'github-webhook', forChannel: 'github' },
+      {
+        selectProvider: async () => 'cloudflare-named',
+        selectOwner: async () => 'channel',
+        text: prompts.text,
+      },
+    )
+
+    expect(result.ok).toBe(true)
+    const config = await readConfig(cwd)
+    expect(config.tunnels).toEqual([
+      {
+        name: 'github-webhook',
+        provider: 'cloudflare-named',
+        for: { kind: 'channel', name: 'github' },
+        hostname: 'https://agent.example.com',
+        tokenEnv: 'CLOUDFLARE_TUNNEL_TOKEN',
+      },
+    ])
+    expect(config.docker.file.cloudflared).toBe(true)
+  })
+
+  test('non-interactive add writes a cloudflare-named manual tunnel without upstreamPort', async () => {
+    const cwd = await makeAgentDir({})
+
+    const result = await tunnel.runTunnelAddFlow(cwd, {
+      name: 'public-demo',
+      provider: 'cloudflare-named',
+      forManual: true,
+      hostname: 'https://demo.example.com',
+      tokenEnv: 'CLOUDFLARE_TUNNEL_TOKEN',
+    })
+
+    expect(result.ok).toBe(true)
+    const config = await readConfig(cwd)
+    expect(config.tunnels).toEqual([
+      {
+        name: 'public-demo',
+        provider: 'cloudflare-named',
+        for: { kind: 'manual' },
+        hostname: 'https://demo.example.com',
+        tokenEnv: 'CLOUDFLARE_TUNNEL_TOKEN',
+      },
+    ])
+    expect(config.tunnels[0].upstreamPort).toBeUndefined()
+  })
+
+  test('add rejects cloudflare-named with non-https hostname', async () => {
+    const cwd = await makeAgentDir({})
+
+    const result = await tunnel.runTunnelAddFlow(cwd, {
+      name: 'demo',
+      provider: 'cloudflare-named',
+      forManual: true,
+      hostname: 'http://agent.example.com',
+      tokenEnv: 'CLOUDFLARE_TUNNEL_TOKEN',
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/https:\/\//)
+  })
+
+  test('add rejects cloudflare-named with lowercase tokenEnv', async () => {
+    const cwd = await makeAgentDir({})
+
+    const result = await tunnel.runTunnelAddFlow(cwd, {
+      name: 'demo',
+      provider: 'cloudflare-named',
+      forManual: true,
+      hostname: 'https://agent.example.com',
+      tokenEnv: 'my_token',
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/env var name/)
+  })
+
   test('non-interactive add writes an external manual tunnel', async () => {
     const cwd = await makeAgentDir({})
 
@@ -256,6 +341,16 @@ function makeTunnelManager(): TunnelManager & { appendLog: (name: string, line: 
     appendLog: (_name, line) => {
       logs.push(line)
       for (const cb of subscribers) cb(line)
+    },
+  }
+}
+
+function sequencedPrompts(answers: string[]): { text: (message: string) => Promise<string> } {
+  let idx = 0
+  return {
+    text: async () => {
+      if (idx >= answers.length) throw new Error(`sequencedPrompts: no answer at index ${idx}`)
+      return answers[idx++]!
     },
   }
 }

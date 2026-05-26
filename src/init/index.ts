@@ -78,13 +78,24 @@ export type KakaotalkAuthResult = { ok: true } | { ok: false; reason: string }
 export type GithubInitCredentials = {
   webhookSecret: string
   tunnelProvider: GithubTunnelProvider
+  // Set when `tunnelProvider === 'external'`. The user-supplied https URL
+  // that GitHub POSTs to and that lands in `channels.github.webhookUrl`.
   webhookUrl?: string
   webhookPort?: number
+  // Set when `tunnelProvider === 'cloudflare-named'`. The Public Hostname
+  // configured in the Cloudflare dashboard; also used as the webhook URL for
+  // eager registration (GitHub POSTs through the named tunnel to the in-
+  // container webhook server). Kept distinct from `webhookUrl` so the
+  // wizard's branching stays readable and the resulting `tunnels[].hostname`
+  // ends up in the right field rather than being smuggled through
+  // `externalUrl`.
+  hostname?: string
+  tokenEnv?: string
   repos: string[]
   auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
 }
 
-export type GithubTunnelProvider = 'cloudflare-quick' | 'external' | 'none'
+export type GithubTunnelProvider = 'cloudflare-quick' | 'cloudflare-named' | 'external' | 'none'
 
 export type InitStepEvent =
   | { step: 'preflight'; phase: 'start' }
@@ -937,6 +948,8 @@ export type AddChannelOptions = {
       tunnelProvider: GithubTunnelProvider
       webhookUrl?: string
       webhookPort?: number
+      hostname?: string
+      tokenEnv?: string
       repos: string[]
       auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
       fetchImpl?: typeof fetch
@@ -1000,11 +1013,18 @@ async function maybeInstallGithubWebhooks(
   options: Extract<AddChannelOptions, { channel: 'github' }>,
   emit: (event: AddChannelStepEvent) => void,
 ): Promise<void> {
-  if (options.webhookUrl === undefined) return
+  // For `external` and `cloudflare-named` we know the public URL up front
+  // (user-supplied `webhookUrl` or dashboard-configured `hostname`), so we
+  // can register the webhook on GitHub's side eagerly. For `cloudflare-quick`
+  // the URL only exists once cloudflared has emitted it on stderr inside the
+  // container, which hasn't happened yet at host-stage init/channel-add
+  // time — registration is deferred to the adapter's first `start()`.
+  const eagerUrl = resolveEagerWebhookUrl(options)
+  if (eagerUrl === undefined) return
   if (options.repos.length === 0) return
   emit({ step: 'github-webhooks', phase: 'start' })
   const result = await installGithubWebhooksEagerly({
-    webhookUrl: options.webhookUrl,
+    webhookUrl: eagerUrl,
     webhookSecret: options.webhookSecret,
     repos: options.repos,
     auth: options.auth,
@@ -1012,6 +1032,12 @@ async function maybeInstallGithubWebhooks(
     ...(options.fetchImpl !== undefined ? { fetchImpl: options.fetchImpl } : {}),
   })
   emit({ step: 'github-webhooks', phase: 'done', result })
+}
+
+function resolveEagerWebhookUrl(options: Extract<AddChannelOptions, { channel: 'github' }>): string | undefined {
+  if (options.tunnelProvider === 'external') return options.webhookUrl
+  if (options.tunnelProvider === 'cloudflare-named') return options.hostname
+  return undefined
 }
 
 function channelSecretsFromOptions(options: AddChannelOptions): ChannelSecrets {
@@ -1112,29 +1138,53 @@ function mergeGithubTunnelConfig(
   if (options.tunnelProvider === 'external' && options.webhookUrl === undefined) {
     throw new Error('GitHub external tunnel requires webhookUrl')
   }
+  if (options.tunnelProvider === 'cloudflare-named') {
+    if (options.hostname === undefined || options.hostname.trim() === '') {
+      throw new Error('GitHub cloudflare-named tunnel requires hostname')
+    }
+    if (options.tokenEnv === undefined || options.tokenEnv.trim() === '') {
+      throw new Error('GitHub cloudflare-named tunnel requires tokenEnv')
+    }
+  }
 
   const existingTunnels = Array.isArray(parsed.tunnels) ? parsed.tunnels : []
-  const tunnel =
-    options.tunnelProvider === 'external'
-      ? {
-          name: 'github-webhook',
-          provider: 'external',
-          externalUrl: options.webhookUrl,
-          for: { kind: 'channel', name: 'github' },
-        }
-      : {
-          name: 'github-webhook',
-          provider: 'cloudflare-quick',
-          for: { kind: 'channel', name: 'github' },
-        }
+  const tunnel = buildGithubTunnelEntry(options)
   parsed.tunnels = [...existingTunnels, tunnel]
 
-  if (options.tunnelProvider === 'cloudflare-quick') {
+  if (options.tunnelProvider === 'cloudflare-quick' || options.tunnelProvider === 'cloudflare-named') {
     const docker = isObjectRecord(parsed.docker) ? { ...parsed.docker } : {}
     const file = isObjectRecord(docker.file) ? { ...docker.file } : {}
     file.cloudflared = true
     docker.file = file
     parsed.docker = docker
+  }
+}
+
+function buildGithubTunnelEntry(options: Extract<AddChannelOptions, { channel: 'github' }>): Record<string, unknown> {
+  switch (options.tunnelProvider) {
+    case 'external':
+      return {
+        name: 'github-webhook',
+        provider: 'external',
+        externalUrl: options.webhookUrl,
+        for: { kind: 'channel', name: 'github' },
+      }
+    case 'cloudflare-quick':
+      return {
+        name: 'github-webhook',
+        provider: 'cloudflare-quick',
+        for: { kind: 'channel', name: 'github' },
+      }
+    case 'cloudflare-named':
+      return {
+        name: 'github-webhook',
+        provider: 'cloudflare-named',
+        for: { kind: 'channel', name: 'github' },
+        hostname: options.hostname,
+        tokenEnv: options.tokenEnv,
+      }
+    case 'none':
+      throw new Error('buildGithubTunnelEntry called with tunnelProvider=none')
   }
 }
 

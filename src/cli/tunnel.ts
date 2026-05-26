@@ -19,6 +19,8 @@ type AddArgs = {
   forManual?: boolean
   upstreamPort?: string
   externalUrl?: string
+  hostname?: string
+  tokenEnv?: string
 }
 
 type RemoveArgs = { name: string }
@@ -45,6 +47,11 @@ const defaultPrompts: TunnelPrompts = {
       message: 'Tunnel provider',
       options: [
         { value: 'cloudflare-quick', label: 'Cloudflare Quick Tunnel', hint: 'no signup, URL rotates on restart' },
+        {
+          value: 'cloudflare-named',
+          label: 'Cloudflare Named Tunnel',
+          hint: 'stable URL, needs Cloudflare account + domain',
+        },
         { value: 'external', label: 'External URL', hint: 'bring your own reverse proxy' },
       ],
     }),
@@ -64,11 +71,16 @@ const addSub = defineCommand({
   meta: { name: 'add', description: 'add a public tunnel entry to typeclaw.json' },
   args: {
     name: { type: 'positional', required: true, description: 'tunnel name' },
-    provider: { type: 'string', description: 'external | cloudflare-quick' },
+    provider: { type: 'string', description: 'external | cloudflare-quick | cloudflare-named' },
     'for-channel': { type: 'string', description: 'own this tunnel from a channel adapter' },
     'for-manual': { type: 'boolean', description: 'create a manually-owned tunnel' },
     'upstream-port': { type: 'string', description: 'container-local upstream port for manual tunnels' },
     'external-url': { type: 'string', description: 'https URL for provider=external' },
+    hostname: { type: 'string', description: 'https URL for provider=cloudflare-named (dashboard Public Hostname)' },
+    'token-env': {
+      type: 'string',
+      description: 'env var name holding the cloudflared token (provider=cloudflare-named)',
+    },
   },
   async run({ args }) {
     const result = await runTunnelAddFlow(ensureAgentDir(), {
@@ -78,6 +90,8 @@ const addSub = defineCommand({
       ...(args['for-manual'] === true ? { forManual: true } : {}),
       ...(args['upstream-port'] !== undefined ? { upstreamPort: String(args['upstream-port']) } : {}),
       ...(args['external-url'] !== undefined ? { externalUrl: String(args['external-url']) } : {}),
+      ...(args.hostname !== undefined ? { hostname: String(args.hostname) } : {}),
+      ...(args['token-env'] !== undefined ? { tokenEnv: String(args['token-env']) } : {}),
     })
     if (!result.ok) {
       console.error(errorLine(result.reason))
@@ -184,7 +198,7 @@ export async function runTunnelAddFlow(
   const provider = await resolveProvider(args.provider, prompts)
   const tunnelFor = await resolveFor(args, prompts)
   let upstreamPort: number | undefined
-  if (tunnelFor.kind === 'manual') {
+  if (tunnelFor.kind === 'manual' && provider !== 'cloudflare-named') {
     const raw = args.upstreamPort ?? (await promptText('Upstream port', prompts, validateUpstreamPort))
     const portError = validateUpstreamPort(raw)
     if (portError !== undefined) return { ok: false, reason: `upstream port: ${portError}` }
@@ -196,6 +210,22 @@ export async function runTunnelAddFlow(
     const urlError = validateHttpsUrl(externalUrl)
     if (urlError !== undefined) return { ok: false, reason: `external URL: ${urlError}` }
   }
+  let hostname: string | undefined
+  let tokenEnv: string | undefined
+  if (provider === 'cloudflare-named') {
+    hostname =
+      args.hostname ??
+      (await promptText(
+        'Public hostname configured in the Cloudflare dashboard (https://...)',
+        prompts,
+        validateHttpsUrl,
+      ))
+    const hostnameError = validateHttpsUrl(hostname)
+    if (hostnameError !== undefined) return { ok: false, reason: `hostname: ${hostnameError}` }
+    tokenEnv = args.tokenEnv ?? (await promptText('Env var name holding the tunnel token', prompts, validateTokenEnv))
+    const tokenError = validateTokenEnv(tokenEnv)
+    if (tokenError !== undefined) return { ok: false, reason: `token-env: ${tokenError}` }
+  }
 
   const tunnel: TunnelConfig = {
     name: args.name,
@@ -203,10 +233,12 @@ export async function runTunnelAddFlow(
     for: tunnelFor,
     ...(externalUrl !== undefined ? { externalUrl } : {}),
     ...(upstreamPort !== undefined ? { upstreamPort } : {}),
+    ...(hostname !== undefined ? { hostname } : {}),
+    ...(tokenEnv !== undefined ? { tokenEnv } : {}),
   }
   const raw = readRawConfig(cwd)
   raw.tunnels = [...config.tunnels, tunnel]
-  if (provider === 'cloudflare-quick') {
+  if (provider === 'cloudflare-quick' || provider === 'cloudflare-named') {
     raw.docker = { ...asRecord(raw.docker), file: { ...asRecord(asRecord(raw.docker).file), cloudflared: true } }
   }
   writeRawConfig(cwd, raw)
@@ -379,7 +411,7 @@ function parseLiveArgs(args: LiveArgs): { url?: string; timeoutMs: number } {
 }
 
 async function resolveProvider(input: string | undefined, prompts: TunnelPrompts): Promise<TunnelProvider> {
-  if (input === 'external' || input === 'cloudflare-quick') return input
+  if (input === 'external' || input === 'cloudflare-quick' || input === 'cloudflare-named') return input
   if (input !== undefined) throw new Error(`unknown tunnel provider: ${input}`)
   const choice = await prompts.selectProvider()
   if (isCancel(choice)) {
@@ -435,6 +467,14 @@ function validateHttpsUrl(value: string): string | undefined {
   } catch {
     return 'Must be a valid URL'
   }
+}
+
+function validateTokenEnv(value: string): string | undefined {
+  if (value.trim().length === 0) return 'Env var name is required'
+  if (!/^[A-Z_][A-Z0-9_]*$/.test(value)) {
+    return 'Must be an env var name like CLOUDFLARE_TUNNEL_TOKEN (uppercase, digits, underscore)'
+  }
+  return undefined
 }
 
 function ensureAgentDir(): string {
