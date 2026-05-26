@@ -108,6 +108,70 @@ export const KNOWN_PROVIDERS = {
       },
     },
   },
+  // ChatGPT Plus/Pro subscription via the OAuth Codex backend. No API key
+  // path here on purpose — the Codex backend is OAuth-only upstream.
+  //
+  // pi-ai 0.73.1's `openai-codex` bucket carries gpt-5.5 (and 5.4) against
+  // chatgpt.com/backend-api. We pin pi-coding-agent ^0.67.3 today, which
+  // ships pi-ai 0.67.3 and lacks those entries — but we hand pi-ai a
+  // freshly-constructed `Model<>` literal via resolveModel(), bypassing its
+  // built-in catalog entirely (same trick we use for kimi-k2p6-turbo). So
+  // these ids work end-to-end as long as the Codex backend itself accepts
+  // them, which it does for ChatGPT Plus/Pro accounts as of 2026-05-10.
+  //
+  // Position-load-bearing: must stay adjacent to `openai`. The init wizard's
+  // provider picker, `provider --help`'s `id | id | ...` listing, and the
+  // generated JSON schema's model-ref enum all derive their ordering from
+  // Object.keys() iteration on this literal. Alphabetizing the registry
+  // would scatter `openai-codex` after `fireworks` and re-introduce the
+  // "OpenAI ... Anthropic ... OpenAI" picker order this comment exists to
+  // prevent.
+  'openai-codex': {
+    id: 'openai-codex',
+    name: 'OpenAI Codex (ChatGPT Plus/Pro)',
+    baseUrl: 'https://chatgpt.com/backend-api',
+    auth: ['oauth'],
+    apiKeyEnv: null,
+    oauthProviderId: 'openai-codex',
+    models: {
+      'gpt-5.4-mini': {
+        id: 'gpt-5.4-mini',
+        name: 'GPT-5.4 mini',
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+      },
+      'gpt-5.4': {
+        id: 'gpt-5.4',
+        name: 'GPT-5.4',
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+      },
+      'gpt-5.5': {
+        id: 'gpt-5.5',
+        name: 'GPT-5.5',
+        api: 'openai-codex-responses',
+        provider: 'openai-codex',
+        baseUrl: 'https://chatgpt.com/backend-api',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
+        contextWindow: 272000,
+        maxTokens: 128000,
+      },
+    },
+  },
   // Anthropic Claude — both the Anthropic Console API (ANTHROPIC_API_KEY)
   // and Claude Pro/Max/Team/Enterprise subscriptions (OAuth) reach the same
   // /v1/messages endpoint and share one provider id. Auth path determines
@@ -210,62 +274,6 @@ export const KNOWN_PROVIDERS = {
         input: ['text', 'image'],
         cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
         contextWindow: 1000000,
-        maxTokens: 128000,
-      },
-    },
-  },
-  // ChatGPT Plus/Pro subscription via the OAuth Codex backend. No API key
-  // path here on purpose — the Codex backend is OAuth-only upstream.
-  //
-  // pi-ai 0.73.1's `openai-codex` bucket carries gpt-5.5 (and 5.4) against
-  // chatgpt.com/backend-api. We pin pi-coding-agent ^0.67.3 today, which
-  // ships pi-ai 0.67.3 and lacks those entries — but we hand pi-ai a
-  // freshly-constructed `Model<>` literal via resolveModel(), bypassing its
-  // built-in catalog entirely (same trick we use for kimi-k2p6-turbo). So
-  // these ids work end-to-end as long as the Codex backend itself accepts
-  // them, which it does for ChatGPT Plus/Pro accounts as of 2026-05-10.
-  'openai-codex': {
-    id: 'openai-codex',
-    name: 'OpenAI Codex (ChatGPT Plus/Pro)',
-    baseUrl: 'https://chatgpt.com/backend-api',
-    auth: ['oauth'],
-    apiKeyEnv: null,
-    oauthProviderId: 'openai-codex',
-    models: {
-      'gpt-5.4-mini': {
-        id: 'gpt-5.4-mini',
-        name: 'GPT-5.4 mini',
-        api: 'openai-codex-responses',
-        provider: 'openai-codex',
-        baseUrl: 'https://chatgpt.com/backend-api',
-        reasoning: true,
-        input: ['text', 'image'],
-        cost: { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
-        contextWindow: 272000,
-        maxTokens: 128000,
-      },
-      'gpt-5.4': {
-        id: 'gpt-5.4',
-        name: 'GPT-5.4',
-        api: 'openai-codex-responses',
-        provider: 'openai-codex',
-        baseUrl: 'https://chatgpt.com/backend-api',
-        reasoning: true,
-        input: ['text', 'image'],
-        cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
-        contextWindow: 272000,
-        maxTokens: 128000,
-      },
-      'gpt-5.5': {
-        id: 'gpt-5.5',
-        name: 'GPT-5.5',
-        api: 'openai-codex-responses',
-        provider: 'openai-codex',
-        baseUrl: 'https://chatgpt.com/backend-api',
-        reasoning: true,
-        input: ['text', 'image'],
-        cost: { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 },
-        contextWindow: 272000,
         maxTokens: 128000,
       },
     },
