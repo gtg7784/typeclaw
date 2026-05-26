@@ -6,9 +6,6 @@ import type { PermissionService } from '@/permissions'
 import type { LiveSubagentRegistry, StatusSnapshot, SubagentProgressEvent } from '../live-subagents'
 import type { SessionOrigin } from '../session-origin'
 
-const DEFAULT_TIMEOUT_MS = 60_000
-const MAX_TIMEOUT_MS = 300_000
-
 export type SubagentOutputToolDetails =
   | {
       ok: true
@@ -57,70 +54,25 @@ export function createSubagentOutputTool(options: CreateSubagentOutputToolOption
       'Fetch the current state of a subagent you previously spawned. Returns one of three statuses: ' +
       "'running' (with a human-readable status_summary and a tail of recent progress events), " +
       "'completed' (with the final message), or 'failed' (with the error). " +
-      'Use this when the user asks how a long-running subagent is going, or when you need to retrieve the result of a backgrounded spawn. ' +
-      'When block=true (default false), the tool waits up to timeout_ms for completion before returning. ' +
-      'Prefer block=false and rely on the system-reminder for completion notification; reserve block=true for tight workflows.',
+      'Returns immediately with a snapshot — never blocks. ' +
+      'For backgrounded spawns, end your turn after spawning and wait for the completion <system-reminder>; ' +
+      'then call this once to fetch the result. Use it for ad-hoc status checks too — never in a polling loop.',
     parameters: Type.Object({
       task_id: Type.String({
         description: 'The task_id returned by a previous spawn_subagent call.',
       }),
-      block: Type.Optional(
-        Type.Boolean({
-          description:
-            'If true, wait for the subagent to complete (or time out) before returning. Default false: return immediately with the current state.',
-        }),
-      ),
-      timeout_ms: Type.Optional(
-        Type.Integer({
-          description: `When block=true, max milliseconds to wait (default ${DEFAULT_TIMEOUT_MS}, max ${MAX_TIMEOUT_MS}).`,
-          minimum: 1,
-          maximum: MAX_TIMEOUT_MS,
-        }),
-      ),
     }),
 
     async execute(_toolCallId, params) {
       if (permissions !== undefined && !permissions.has(getOrigin(), 'subagent.output')) {
         return errorResult('subagent.output denied: insufficient permissions')
       }
-      const live = liveRegistry.get(params.task_id)
-      if (live === undefined) {
-        return errorResult(`Unknown task_id: ${params.task_id}.`)
-      }
-
-      const wantsBlock = params.block === true && live.status === 'running'
-      if (wantsBlock) {
-        const timeoutMs = clampTimeout(params.timeout_ms)
-        await raceWithTimeout(live.awaitCompletion(), timeoutMs)
-      }
-
       const snap = liveRegistry.snapshot(params.task_id, now())
       if (snap === undefined) {
         return errorResult(`Unknown task_id: ${params.task_id}.`)
       }
       return renderSnapshot(snap)
     },
-  })
-}
-
-function clampTimeout(value: number | undefined): number {
-  if (value === undefined) return DEFAULT_TIMEOUT_MS
-  return Math.min(Math.max(1, Math.floor(value)), MAX_TIMEOUT_MS)
-}
-
-async function raceWithTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {
-  return new Promise<T | undefined>((resolve) => {
-    const timer = setTimeout(() => resolve(undefined), timeoutMs)
-    promise.then(
-      (value) => {
-        clearTimeout(timer)
-        resolve(value)
-      },
-      () => {
-        clearTimeout(timer)
-        resolve(undefined)
-      },
-    )
   })
 }
 

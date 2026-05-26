@@ -23,7 +23,6 @@ export type LiveSubagent = {
   status: SubagentStatus
   completion?: SubagentCompletion
   abort: () => Promise<void>
-  awaitCompletion: () => Promise<SubagentCompletion>
 }
 
 export const MAX_EVENTS_PER_SUBAGENT = 100

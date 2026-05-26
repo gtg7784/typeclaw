@@ -130,7 +130,6 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         startedAt,
         status: 'running' as const,
         abort: resolvedHandle.abort,
-        awaitCompletion: () => completion.then((c) => completionToFinalShape(c, now() - startedAt)),
       }
       liveRegistry.register(live)
 

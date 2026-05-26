@@ -14,7 +14,6 @@ function makeLive(overrides: Partial<LiveSubagent> = {}): LiveSubagent {
     startedAt: 1_000,
     status: 'running',
     abort: async () => {},
-    awaitCompletion: async () => ({ ok: true, durationMs: 0 }),
     ...overrides,
   }
 }
@@ -144,50 +143,10 @@ describe('createSubagentOutputTool — failed status', () => {
   })
 })
 
-describe('createSubagentOutputTool — block:true', () => {
-  test('waits for completion when block=true on a running task', async () => {
+describe('createSubagentOutputTool — never blocks', () => {
+  test('returns immediately even when the subagent is still running', async () => {
     const liveRegistry = new LiveSubagentRegistry()
-    let resolveCompletion: (c: { ok: true; durationMs: number; finalMessage?: string }) => void = () => {}
-    const completionPromise = new Promise<{ ok: true; durationMs: number; finalMessage?: string }>((r) => {
-      resolveCompletion = r
-    })
-    liveRegistry.register(
-      makeLive({
-        awaitCompletion: () => completionPromise,
-      }),
-    )
-
-    const tool = createSubagentOutputTool({
-      liveRegistry,
-      getOrigin: () => undefined,
-      now: () => 5_000,
-    })
-
-    const executePromise = tool.execute(
-      'call_1',
-      { task_id: 'bg_o1', block: true, timeout_ms: 5_000 },
-      undefined,
-      undefined,
-      ctx,
-    )
-    setTimeout(() => {
-      liveRegistry.recordCompletion('bg_o1', { ok: true, finalMessage: 'done', durationMs: 1_000 })
-      resolveCompletion({ ok: true, durationMs: 1_000, finalMessage: 'done' })
-    }, 10)
-
-    const result = await executePromise
-    const details = result.details as { status?: string; finalMessage?: string }
-    expect(details.status).toBe('completed')
-    expect(details.finalMessage).toBe('done')
-  })
-
-  test('returns current state on timeout (does NOT error)', async () => {
-    const liveRegistry = new LiveSubagentRegistry()
-    liveRegistry.register(
-      makeLive({
-        awaitCompletion: () => new Promise(() => {}),
-      }),
-    )
+    liveRegistry.register(makeLive())
 
     const tool = createSubagentOutputTool({
       liveRegistry,
@@ -195,42 +154,14 @@ describe('createSubagentOutputTool — block:true', () => {
       now: () => 2_000,
     })
 
-    const result = await tool.execute(
-      'call_1',
-      { task_id: 'bg_o1', block: true, timeout_ms: 20 },
-      undefined,
-      undefined,
-      ctx,
-    )
-    const details = result.details as { ok: boolean; status?: string }
-    expect(details.ok).toBe(true)
-    expect(details.status).toBe('running')
-  })
-
-  test('block=true on already-completed task short-circuits (no wait)', async () => {
-    const liveRegistry = new LiveSubagentRegistry()
-    liveRegistry.register(makeLive())
-    liveRegistry.recordCompletion('bg_o1', { ok: true, finalMessage: 'fast', durationMs: 100 })
-
-    const tool = createSubagentOutputTool({
-      liveRegistry,
-      getOrigin: () => undefined,
-      now: () => 1_000,
-    })
-
     const start = Date.now()
-    const result = await tool.execute(
-      'call_1',
-      { task_id: 'bg_o1', block: true, timeout_ms: 60_000 },
-      undefined,
-      undefined,
-      ctx,
-    )
+    const result = await tool.execute('call_1', { task_id: 'bg_o1' }, undefined, undefined, ctx)
     const elapsed = Date.now() - start
 
     expect(elapsed).toBeLessThan(50)
-    const details = result.details as { status?: string }
-    expect(details.status).toBe('completed')
+    const details = result.details as { ok: boolean; status?: string }
+    expect(details.ok).toBe(true)
+    expect(details.status).toBe('running')
   })
 })
 
