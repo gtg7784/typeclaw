@@ -3,25 +3,32 @@ import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../
 import { getRemoteTaint, recordRemoteTaint } from './remote-taint-state'
 
 export const GUARD_GIT_EXFIL = 'gitExfil'
-// Classified `high` (audience-leak axis): `git push` sends every tracked
-// file to a remote git host. The host (GitHub/GitLab/attacker-controlled
-// box) is a third-party audience outside the operator's control loop.
-// Even a private remote owned by an attacker is now outside the
-// perimeter. Under the role-tower model, `owner` bypasses high by
-// default; the audience-leak defense for non-TUI owner origins (e.g. an
-// owner-matched channel author) depends on `roles.owner.match[]` being
-// scoped tightly. Lower roles must ack the push or carry an explicit
-// `security.bypass.gitExfil` grant in `roles.<role>.permissions[]`.
-export const GUARD_GIT_EXFIL_SEVERITY: SecuritySeverity = 'high'
+// Classified `medium` (silent-attack axis). Originally `high`; reclassified
+// because the actual audience-leak surface for `git push` lives in
+// `gitRemoteTainted`, not here. A `git push` to a CLEAN, operator-configured
+// remote is not audience-leak — the audience (the remote git host) was
+// chosen by the operator and is inside their perimeter. The breach pattern
+// PR #134 was written for (re-point origin to attacker URL, then push) is
+// gated by `gitRemoteTainted` (still high). The recorder-vs-checker split
+// is what makes this reclassification safe: the recorder fires for any
+// actor who can run a `git remote set-url` (per-guard bypass OR the
+// medium-tier permission via the OR check), so trusted's first-step
+// set-url still records taint and the second-step push still gets caught
+// by `gitRemoteTainted` even though trusted no longer needs to ack the
+// push itself. Net effect: trusted users can push to remotes the operator
+// configured without per-call acks, but cannot retarget-and-push.
+export const GUARD_GIT_EXFIL_SEVERITY: SecuritySeverity = 'medium'
 export const GUARD_GIT_REMOTE_TAINTED = 'gitRemoteTainted'
-// Classified `high` (audience-leak axis): same path as gitExfil, second
-// step. A push after a mid-session `git remote set-url` to an
+// Classified `high` (audience-leak axis): the actual audience-leak gate
+// for git. A push after a mid-session `git remote set-url` to an
 // attacker-controlled URL is exactly the breach pattern that motivated
-// the entire security plugin per PR #134. The recorder-vs-checker split
+// the entire security plugin per PR #134. Stays high regardless of how
+// `gitExfil` is classified — the two are independent per-guard strings
+// AND independent tier classifications. The recorder-vs-checker split
 // (see comment on recordGitRemoteTaintIfAny below) is still load-bearing:
-// the recorder fires for anyone who can run the underlying command (ack
-// or the per-guard `bypassGitExfil` grant), so even if an operator
-// explicitly grants `bypassGitExfil` to a role, the second-step taint
+// the recorder fires for anyone who can run the underlying `set-url`
+// command (ack, per-guard `bypassGitExfil`, OR the medium-tier permission
+// — which now includes trusted by default), so the second-step taint
 // check still fires on the eventual push.
 export const GUARD_GIT_REMOTE_TAINTED_SEVERITY: SecuritySeverity = 'high'
 

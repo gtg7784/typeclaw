@@ -51,7 +51,7 @@ const BYPASS_ROLE_HINT = {
   [SECURITY_PERMISSIONS.bypassSecretExfilBash]:
     'owner and trusted have it by default (medium tier); member and guest do not. Operators can grant `security.bypass.secretExfilBash` explicitly in roles.<role>.permissions[] to widen.',
   [SECURITY_PERMISSIONS.bypassGitExfil]:
-    'only owner has it by default (high tier). Operators can grant `security.bypass.gitExfil` explicitly in roles.<role>.permissions[] to widen.',
+    'owner and trusted have it by default (medium tier); member and guest do not. The audience-leak surface for git lives in `gitRemoteTainted` (high tier, owner-only) — pushing to an attacker-retargeted remote is still blocked for trusted by the two-step taint defense.',
   [SECURITY_PERMISSIONS.bypassGitRemoteTainted]:
     'only owner has it by default (high tier). The two-step taint defense (recorder + checker) still fires whenever the actor lacks `security.bypass.gitRemoteTainted`, including across owner-granted gitExfil bypasses.',
   [SECURITY_PERMISSIONS.bypassSecretExfilRead]:
@@ -63,9 +63,9 @@ const BYPASS_ROLE_HINT = {
   [SECURITY_PERMISSIONS.bypassOutboundSecret]:
     'only owner has it by default (high tier). The audience-leak risk: an owner-permissioned channel author can silently include credentials in outbound messages. Operators who match owner to a channel author should narrow that match or remove owner from `roles.owner.permissions[]` for those origins.',
   [SECURITY_PERMISSIONS.bypassRolePromotion]:
-    'only owner has it by default (high tier). The privilege-escalation risk: an owner-permissioned actor can rewrite the access-control table. Default owner match is TUI-only, where a human is present.',
+    'owner and trusted have it by default (medium tier); member and guest do not. The privilege-escalation defense for trusted now depends on operator review of `typeclaw.json` backup commits — `roles` is restart-required, so the operator has wall-clock time to revert before the new role table takes effect. Operators who do not review can re-tighten by replacing `roles.trusted.permissions[]` with an explicit list that omits `security.bypass.medium`.',
   [SECURITY_PERMISSIONS.bypassCronPromotion]:
-    'only owner has it by default (high tier). Same shape as rolePromotion but deferred: a new cron job (or a changed scheduledByRole) fires at schedule-time as the stamped role.',
+    'owner and trusted have it by default (medium tier); member and guest do not. Same shape as rolePromotion but deferred: a new cron job (or a changed scheduledByRole) fires at schedule-time as the stamped role. The operator-review window between write and execution is the trusted-tier defense.',
 } as const satisfies Record<PerGuardSecurityPermission, string>
 
 function withPermissionHint(

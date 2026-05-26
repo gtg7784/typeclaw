@@ -30,32 +30,29 @@ describe('security tier surface', () => {
   test('HIGH_TIER_PER_GUARD_PERMISSIONS lists exactly the high-tier per-guard strings', () => {
     expect([...HIGH_TIER_PER_GUARD_PERMISSIONS].sort()).toEqual(
       [
-        SECURITY_PERMISSIONS.bypassGitExfil,
         SECURITY_PERMISSIONS.bypassGitRemoteTainted,
         SECURITY_PERMISSIONS.bypassOutboundSecret,
         SECURITY_PERMISSIONS.bypassSystemPromptLeak,
-        SECURITY_PERMISSIONS.bypassRolePromotion,
-        SECURITY_PERMISSIONS.bypassCronPromotion,
       ].sort(),
     )
   })
 })
 
 describe('per-guard severity classification', () => {
-  test('high-tier guards (audience-leak axis): outboundSecret, systemPromptLeak, gitExfil, gitRemoteTainted, rolePromotion, cronPromotion', () => {
+  test('high-tier guards (audience-leak axis): outboundSecret, systemPromptLeak, gitRemoteTainted', () => {
     expect(GUARD_OUTBOUND_SECRET_SEVERITY).toBe('high')
     expect(GUARD_SYSTEM_PROMPT_LEAK_SEVERITY).toBe('high')
-    expect(GUARD_GIT_EXFIL_SEVERITY).toBe('high')
     expect(GUARD_GIT_REMOTE_TAINTED_SEVERITY).toBe('high')
-    expect(GUARD_ROLE_PROMOTION_SEVERITY).toBe('high')
-    expect(GUARD_CRON_PROMOTION_SEVERITY).toBe('high')
   })
 
-  test('medium-tier guards (silent-attack axis): secretExfilBash, secretExfilRead, ssrf, sessionSearchSecrets', () => {
+  test('medium-tier guards (silent-attack + operator-reviewable-state axes): secretExfilBash, secretExfilRead, ssrf, sessionSearchSecrets, gitExfil, rolePromotion, cronPromotion', () => {
     expect(GUARD_SECRET_EXFIL_BASH_SEVERITY).toBe('medium')
     expect(GUARD_SECRET_EXFIL_READ_SEVERITY).toBe('medium')
     expect(GUARD_SSRF_SEVERITY).toBe('medium')
     expect(GUARD_SESSION_SEARCH_SECRETS_SEVERITY).toBe('medium')
+    expect(GUARD_GIT_EXFIL_SEVERITY).toBe('medium')
+    expect(GUARD_ROLE_PROMOTION_SEVERITY).toBe('medium')
+    expect(GUARD_CRON_PROMOTION_SEVERITY).toBe('medium')
   })
 
   test('no guards are classified low today (tier reserved for noisy, immediately-recoverable side effects)', () => {
@@ -76,12 +73,9 @@ describe('per-guard severity classification', () => {
 
   test('high-tier per-guard exports are exactly the entries in HIGH_TIER_PER_GUARD_PERMISSIONS (drift guard)', () => {
     const highTierGuardSeverities = [
-      { perm: SECURITY_PERMISSIONS.bypassGitExfil, sev: GUARD_GIT_EXFIL_SEVERITY },
       { perm: SECURITY_PERMISSIONS.bypassGitRemoteTainted, sev: GUARD_GIT_REMOTE_TAINTED_SEVERITY },
       { perm: SECURITY_PERMISSIONS.bypassOutboundSecret, sev: GUARD_OUTBOUND_SECRET_SEVERITY },
       { perm: SECURITY_PERMISSIONS.bypassSystemPromptLeak, sev: GUARD_SYSTEM_PROMPT_LEAK_SEVERITY },
-      { perm: SECURITY_PERMISSIONS.bypassRolePromotion, sev: GUARD_ROLE_PROMOTION_SEVERITY },
-      { perm: SECURITY_PERMISSIONS.bypassCronPromotion, sev: GUARD_CRON_PROMOTION_SEVERITY },
     ]
     const declared = new Set(HIGH_TIER_PER_GUARD_PERMISSIONS)
     for (const { perm, sev } of highTierGuardSeverities) {

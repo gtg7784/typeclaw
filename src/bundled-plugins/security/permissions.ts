@@ -37,16 +37,17 @@ export const SEVERITY_PERMISSION: Record<SecuritySeverity, string> = {
   high: SECURITY_PERMISSIONS.bypassHigh,
 }
 
-// Per-guard permission strings whose guards are classified `high`. The
-// owner-wildcard expander excludes these so the wildcard sentinel does
-// not auto-grant high-tier bypass to owner. Operators who explicitly
-// want to re-open a high-tier bypass for owner (or any role) can still
-// add the per-guard string to that role's `permissions[]` by hand.
+// Per-guard permission strings whose guards are classified `high`.
+// Plumbed through to the owner-wildcard expander's `ownerWildcardExclusions`
+// parameter at boot; the bundled security plugin currently passes `[]` so
+// owner DOES auto-bypass every high-tier per-guard string, but third-party
+// plugins (or a future tightening of the bundled defaults) can use this
+// constant to exclude high-tier strings from the wildcard expansion.
+// Keep this list in sync with the `'high'` classifications in
+// `policies/*.ts` — the drift-guard test in `permissions.test.ts` will
+// fail if a guard's severity constant disagrees with its membership here.
 export const HIGH_TIER_PER_GUARD_PERMISSIONS: readonly string[] = [
-  SECURITY_PERMISSIONS.bypassGitExfil,
   SECURITY_PERMISSIONS.bypassGitRemoteTainted,
   SECURITY_PERMISSIONS.bypassOutboundSecret,
   SECURITY_PERMISSIONS.bypassSystemPromptLeak,
-  SECURITY_PERMISSIONS.bypassRolePromotion,
-  SECURITY_PERMISSIONS.bypassCronPromotion,
 ]

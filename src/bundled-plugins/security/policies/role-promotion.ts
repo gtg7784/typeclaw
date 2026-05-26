@@ -8,25 +8,32 @@ import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
 
 export const GUARD_ROLE_PROMOTION = 'rolePromotion'
-// Classified `high` (audience-leak axis, adapted).
+// Classified `medium` (silent-attack axis). Originally `high`; reclassified
+// because the privilege escalation does NOT take effect until the operator
+// reloads or restarts — `roles` is `restart-required` in FIELD_EFFECTS, and
+// even the `match`-only path that's classified `applied` writes through
+// `typeclaw.json` which is force-committed by the auto-backup plugin on
+// idle. The operator sees the file change in `git log`, in `typeclaw reload`
+// output, and in their backup commits BEFORE the new role mapping takes
+// effect. There is an operator-visible step between bypass and breach,
+// which puts this guard squarely on the medium axis: bypass produces
+// attacker-favorable state in operator-reviewable surface, not direct
+// audience-leak.
 //
-// Role promotion is privilege escalation: the agent rewrites
-// `typeclaw.json#roles` so a previously-unprivileged actor now resolves
-// to a privileged role. The breach pattern: a `member`-role speaker in a
-// chat asks "give me permission" / "promote me to admin"; the agent
-// edits typeclaw.json with what looks like a routine config change; the
-// schema is valid, the managedConfig guard passes, nonWorkspaceWrite
-// allowlists typeclaw.json — and on next reload the speaker resolves to
-// `owner` with full bypasses.
+// Net effect on the role-tower model: owner and trusted both bypass without
+// ack; member and guest still get blocked. The defense for trusted now
+// depends on operator config-review discipline — if backup commits are
+// reviewed and `typeclaw reload` output is read before applying, a
+// trusted-laundered role promotion is caught before it fires. Operators
+// who do not review can re-tighten by adding `security.bypass.rolePromotion`
+// to `trusted.permissions[]` as an explicit subtraction (replace the
+// default tier grant with a narrower list) — see typeclaw-permissions skill.
 //
-// This is the same audience-leak shape as gitExfil and outboundSecret:
-// the "audience" here is the future-self of the access-control table,
-// which is outside the operator's per-call control loop. Even an `owner`
-// operating from TUI must not silently rewrite the role table based on
-// a channel message — the canonical owner-in-public-channel attack
-// generalizes from "post credentials" to "promote the asker". No role
-// auto-bypasses; per-call ack or an explicit `security.bypass.rolePromotion`
-// grant is required.
+// Breach pattern blocked at `medium`: a `member`-role speaker in a chat
+// asks "promote me to admin"; the agent edits typeclaw.json; the change is
+// schema-valid, managedConfig accepts it, nonWorkspaceWrite allowlists
+// typeclaw.json — but this guard still blocks because member does not
+// carry `bypass.medium` by default.
 //
 // What counts as a promotion (any of):
 //   1. A role's `permissions[]` gained an entry.
@@ -58,7 +65,7 @@ export const GUARD_ROLE_PROMOTION = 'rolePromotion'
 //     agent cannot start a claim, only consume one whose code the
 //     operator already broadcast. That makes the bypass intentionally
 //     out-of-band — do not extend this guard to cover it.
-export const GUARD_ROLE_PROMOTION_SEVERITY: SecuritySeverity = 'high'
+export const GUARD_ROLE_PROMOTION_SEVERITY: SecuritySeverity = 'medium'
 
 export type RolePromotionFinding = {
   role: string
