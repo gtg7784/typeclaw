@@ -56,9 +56,9 @@ export const inspectCommand = defineCommand({
       ...(sinceArg !== undefined ? { since: sinceArg } : {}),
       json: isJson,
       color,
-      selectSession: (sessions) => {
+      selectSession: (sessions, selectOpts) => {
         escListener?.pause()
-        return clackSelect(sessions).finally(() => {
+        return clackSelect(sessions, selectOpts?.initialSessionId).finally(() => {
           escListener?.resume()
         })
       },
@@ -189,8 +189,15 @@ function useColor(): boolean {
   return Boolean(process.stdout.isTTY)
 }
 
-async function clackSelect(sessions: SessionSummary[]): Promise<SessionSummary | null> {
+async function clackSelect(
+  sessions: SessionSummary[],
+  initialSessionId: string | undefined,
+): Promise<SessionSummary | null> {
   const { select } = await import('@clack/prompts')
+  const preferred =
+    initialSessionId !== undefined && sessions.some((s) => s.sessionId === initialSessionId)
+      ? initialSessionId
+      : sessions[0]?.sessionId
   const picked = await select<string>({
     message: `Pick a session to inspect (showing ${sessions.length})`,
     options: sessions.map((s) => ({
@@ -198,7 +205,7 @@ async function clackSelect(sessions: SessionSummary[]): Promise<SessionSummary |
       label: formatRowLabel(s),
       ...(s.firstPrompt !== null ? { hint: truncate(s.firstPrompt, 60) } : { hint: '(no prompt)' }),
     })),
-    initialValue: sessions[0]?.sessionId,
+    initialValue: preferred,
   })
   if (isCancel(picked)) {
     cancel('Cancelled.')

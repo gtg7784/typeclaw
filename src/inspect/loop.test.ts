@@ -189,4 +189,58 @@ describe('runInspectLoop', () => {
     expect(dividerIdx).toBeGreaterThanOrEqual(0)
     expect(hintIdx).toBe(dividerIdx + 1)
   })
+
+  test('picker re-opened via esc receives previously-selected sessionId as initialSessionId', async () => {
+    await seedSession(`a_${ID_LOOP_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine('first')], 1000)
+    await seedSession(`b_${ID_LOOP_B}.jsonl`, [metaLine({ kind: 'tui' }), userLine('second')], 2000)
+    await seedSession(`c_${ID_LOOP_C}.jsonl`, [metaLine({ kind: 'tui' }), userLine('third')], 3000)
+    const sink = captureSink()
+
+    let escController: AbortController | null = null
+    let liveCallCount = 0
+    const pickerHints: (string | undefined)[] = []
+
+    async function* awaitableLive(signal: AbortSignal | undefined): AsyncGenerator<InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'hello' } }
+      await new Promise<void>((resolve) => {
+        if (signal === undefined || signal.aborted) return resolve()
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    }
+    async function* finiteLive(): AsyncGenerator<InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'final' } }
+    }
+
+    let pickerCalls = 0
+    const result = await runInspectLoop({
+      agentDir,
+      color: false,
+      selectSession: async (sessions, selectOpts) => {
+        pickerCalls++
+        pickerHints.push(selectOpts?.initialSessionId)
+        if (pickerCalls === 1) {
+          return sessions.find((s) => s.sessionId === ID_LOOP_A) ?? null
+        }
+        return sessions.find((s) => s.sessionId === ID_LOOP_C) ?? null
+      },
+      liveSource: (o) => {
+        liveCallCount++
+        if (liveCallCount === 1) {
+          queueMicrotask(() => escController?.abort())
+          return awaitableLive(o.signal)
+        }
+        return finiteLive()
+      },
+      newEscSignal: () => {
+        escController = new AbortController()
+        return escController.signal
+      },
+      ...sink.push,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(pickerCalls).toBe(2)
+    expect(pickerHints[0]).toBeUndefined()
+    expect(pickerHints[1]).toBe(ID_LOOP_A)
+  })
 })
