@@ -71,9 +71,10 @@ Plugin-owned config blocks live at the top level under their plugin name and are
 | `cloudflared` | `true`  | install cloudflared for `cloudflare-quick` tunnels      |
 | `xvfb`        | `true`  | install Xvfb for headed Chrome                          |
 | `claudeCode`  | `false` | install Anthropic's Claude Code CLI                     |
+| `codexCli`    | `false` | install OpenAI's Codex CLI (`@openai/codex` via npm)    |
 | `append`      | `[]`    | extra Dockerfile lines appended verbatim                |
 
-Boolean toggles can also take a version string (`"gh": "2.40.0"`) to pin via `apt-get install pkg=<version>`. `claudeCode` is boolean-only.
+Boolean toggles can also take a version string (`"gh": "2.40.0"`) to pin via `apt-get install pkg=<version>`. `claudeCode` and `codexCli` are boolean-only.
 
 ## Hot reload
 

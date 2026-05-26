@@ -121,6 +121,14 @@ const dockerfileObjectSchema = z.object({
   // time, not via version pins like apt. Default `false`; the bundled
   // `typeclaw-claude-code` skill prompts the user to opt in.
   claudeCode: z.boolean().default(false),
+  // `codexCli` is boolean-only (not an apt feature toggle): the upstream
+  // installer is the npm package `@openai/codex` which we install globally
+  // via `bun install -g`. Default `false`; the bundled `typeclaw-codex-cli`
+  // skill prompts the user to opt in. Mirrors the `claudeCode` toggle for
+  // OpenAI's Codex CLI (https://github.com/openai/codex) — same shape, same
+  // restart-required semantics, separate hook scripts (Codex uses
+  // hooks.json with a different event matcher than Claude Code).
+  codexCli: z.boolean().default(false),
   append: z.array(dockerfileLineSchema).default([]),
 })
 

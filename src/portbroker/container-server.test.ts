@@ -86,6 +86,19 @@ describe('createContainerBroker port watcher', () => {
     return out
   }
 
+  async function waitFor(
+    condition: () => boolean,
+    label: string,
+    { timeoutMs = 2000, intervalMs = 10 }: { timeoutMs?: number; intervalMs?: number } = {},
+  ): Promise<void> {
+    const deadline = performance.now() + timeoutMs
+    while (performance.now() < deadline) {
+      if (condition()) return
+      await new Promise((resolve) => setTimeout(resolve, intervalMs))
+    }
+    throw new Error(`Timed out waiting for ${label}`)
+  }
+
   beforeEach(() => {
     snapshots = []
     cursor = 0
@@ -113,10 +126,11 @@ describe('createContainerBroker port watcher', () => {
     broker.open(ws)
     await dispatch(broker, ws, { type: 'broker-hello', token: 't' })
     await dispatch(broker, ws, { type: 'port-watch-subscribe' })
-    await new Promise((r) => setTimeout(r, 30))
+    const deltaEvents = (): ContainerToHostd[] =>
+      ws.outbox.filter((m) => m.type === 'port-listen-opened' || m.type === 'port-listen-closed')
+    await waitFor(() => deltaEvents().length >= 2, 'opened and closed port-listen delta events')
     broker.close(ws)
-    const events = ws.outbox.filter((m) => m.type === 'port-listen-opened' || m.type === 'port-listen-closed')
-    expect(events.length).toBeGreaterThanOrEqual(2)
+    const events = deltaEvents()
     expect(events[0]).toEqual({ type: 'port-listen-opened', port: 5173, bindAddr: '0.0.0.0' })
     expect(events.at(-1)).toEqual({ type: 'port-listen-closed', port: 5173 })
   })
@@ -128,10 +142,16 @@ describe('createContainerBroker port watcher', () => {
     broker.open(ws)
     await dispatch(broker, ws, { type: 'broker-hello', token: 't' })
     await dispatch(broker, ws, { type: 'port-watch-subscribe' })
+    // Wait until startWatcher's initial snapshot has been emitted so we know
+    // setInterval has actually been scheduled before we call unsubscribe.
+    // Without this anchor, a CI runner that starves setInterval would let the
+    // outbox grow after the assertion window — but only because polling never
+    // got a chance to run, not because unsubscribe failed.
+    await waitFor(() => ws.outbox.some((m) => m.type === 'port-listen-snapshot'), 'initial port-listen-snapshot')
     await dispatch(broker, ws, { type: 'port-watch-unsubscribe' })
-    const before = ws.outbox.length
-    await new Promise((r) => setTimeout(r, 25))
-    expect(ws.outbox.length).toBe(before)
+    const outboxLengthAfterUnsubscribe = ws.outbox.length
+    await new Promise((r) => setTimeout(r, 50))
+    expect(ws.outbox.length).toBe(outboxLengthAfterUnsubscribe)
     broker.close(ws)
   })
 })
