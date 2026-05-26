@@ -250,15 +250,23 @@ export type NetworkConfig = z.infer<typeof networkSchema>
 
 // Reverse-proxy tunnels expose a container-private port to the public internet
 // via a managed subprocess (cloudflared) or a user-supplied external URL.
-// See AGENTS.md `## Tunnels`. PR 2 ships `cloudflare-quick`; `cloudflare-named`
-// remains deferred to PR 3. Keeping the enum scoped to what's implemented means
-// validateConfig() rejects unsupported providers at `typeclaw start` time,
-// before the container is torn down and rebuilt. `restart-required` because
-// the tunnel manager reads this list once at boot.
+// See AGENTS.md `## Tunnels`. Keeping the enum scoped to what's implemented
+// means validateConfig() rejects unsupported providers at `typeclaw start`
+// time, before the container is torn down and rebuilt. `restart-required`
+// because the tunnel manager reads this list once at boot.
 const tunnelForSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('channel'), name: z.string().trim().min(1) }),
   z.object({ kind: z.literal('manual') }),
 ])
+
+// `tokenEnv` is the NAME of an env var, not the token itself. Restrict to the
+// shell-portable identifier shape (uppercase + digits + underscore, leading
+// non-digit) so a value typed here can't break `--env-file` parsing or shell
+// expansion inside the container. Matches the convention every other env var
+// in the codebase already follows (TYPECLAW_*, OPENAI_*, etc.).
+const tokenEnvNameSchema = z.string().regex(/^[A-Z_][A-Z0-9_]*$/, {
+  message: 'tokenEnv must be an env var name like CLOUDFLARE_TUNNEL_TOKEN (uppercase, digits, underscore)',
+})
 
 const tunnelEntrySchema = z
   .object({
@@ -268,7 +276,7 @@ const tunnelEntrySchema = z
       .regex(/^[a-z0-9][a-z0-9-_]*$/, {
         message: 'tunnel name must match /^[a-z0-9][a-z0-9-_]*$/ (lowercase, digits, dashes, underscores)',
       }),
-    provider: z.enum(['external', 'cloudflare-quick']),
+    provider: z.enum(['external', 'cloudflare-quick', 'cloudflare-named']),
     for: tunnelForSchema,
     externalUrl: z
       .string()
@@ -276,11 +284,31 @@ const tunnelEntrySchema = z
       .refine((u) => u.startsWith('https://'), { message: 'externalUrl must use https://' })
       .optional(),
     upstreamPort: z.number().int().min(1).max(65535).optional(),
+    hostname: z
+      .string()
+      .url()
+      .refine((u) => u.startsWith('https://'), { message: 'hostname must use https://' })
+      .optional(),
+    tokenEnv: tokenEnvNameSchema.optional(),
   })
   .refine((v) => v.provider !== 'external' || (v.externalUrl !== undefined && v.externalUrl.trim() !== ''), {
     message: "tunnels[].externalUrl is required when provider is 'external'",
   })
-  .refine((v) => v.for.kind !== 'manual' || v.upstreamPort !== undefined, {
+  .refine((v) => v.provider !== 'cloudflare-named' || (v.hostname !== undefined && v.hostname.trim() !== ''), {
+    message: "tunnels[].hostname is required when provider is 'cloudflare-named'",
+  })
+  .refine((v) => v.provider !== 'cloudflare-named' || (v.tokenEnv !== undefined && v.tokenEnv.trim() !== ''), {
+    message: "tunnels[].tokenEnv is required when provider is 'cloudflare-named'",
+  })
+  // cloudflared learns the upstream from the Cloudflare dashboard's Public
+  // Hostname mapping, not from typeclaw. An `upstreamPort` here would be
+  // silently ignored; reject at parse time so the contradiction surfaces in
+  // the config file rather than as a debugging surprise.
+  .refine((v) => v.provider !== 'cloudflare-named' || v.upstreamPort === undefined, {
+    message:
+      "tunnels[].upstreamPort must not be set when provider is 'cloudflare-named' (cloudflared reads the upstream from the Cloudflare dashboard)",
+  })
+  .refine((v) => v.for.kind !== 'manual' || v.provider === 'cloudflare-named' || v.upstreamPort !== undefined, {
     message: "tunnels[].upstreamPort is required when for.kind is 'manual'",
   })
 
