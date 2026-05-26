@@ -4,13 +4,21 @@ export type WaitForOptions = {
   description?: string
 }
 
-// 5s, not 1s. 1s was tight enough to be the dominant cause of `bun test --parallel`
-// flakes on macOS: under 18-worker concurrent shell-spawn load, the kernel can
-// take >1s to drain a child process's stderr pipe past the libuv → JS boundary,
-// so a `waitFor` for "fake-cloudflared printed a URL" loses the race. 5s costs
-// nothing on the happy path (the polled predicate returns truthy as soon as it
-// can; this is just the timeout, not the wait), and absorbs realistic load.
-const DEFAULT_TIMEOUT_MS = 5_000
+// 30s, not 5s. 5s was tight enough to flake on heavy-load callers (the WS
+// pipeline assembly in src/portbroker/broker.test.ts is the canonical case:
+// host-side `Bun.listen` accept → broker connect → port discovery → snapshot
+// fanout → data round-trip is a 5-hop chain across two event loops, and the
+// 5s deadline was reached when libuv contention queued one of those hops).
+// The original 1s → 5s bump (commit b6a3ef9-era) acknowledged the same
+// failure mode for fake-cloudflared stderr drain; the WS pipeline pushed
+// the bound one tier higher. 30s costs nothing on the happy path (the
+// polled predicate returns truthy as soon as it can; this is just the
+// timeout, not the wait), absorbs realistic 18-worker contention, and
+// matches the global `setDefaultTimeout(30_000)` in
+// scripts/require-parallel.ts so a wedged waitFor surfaces as a clear
+// "waitFor: ... did not become truthy within 30000ms" message before the
+// outer test-level timeout fires with no context.
+const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_INTERVAL_MS = 1
 
 export async function waitFor<T>(
