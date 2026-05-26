@@ -144,6 +144,100 @@ describe('streamLive — live session events', () => {
     expect(ev.payload).toEqual({ kind: 'subagent.completed', ok: true })
   })
 
+  test('channel-inbound broadcasts surface as InspectEvent.inbound with channel coords', async () => {
+    const stream = createStream()
+    const { url } = await startServer({ stream })
+    const ctrl = new AbortController()
+    const gen = streamLive({ url, sessionId: 'ses_anything', signal: ctrl.signal })
+
+    setTimeout(() => {
+      stream.publish({
+        target: { kind: 'broadcast' },
+        payload: {
+          kind: 'channel-inbound',
+          adapter: 'slack',
+          workspace: 'acme',
+          chat: 'C12345',
+          thread: null,
+          authorId: 'U_alice',
+          authorName: 'alice',
+          authorIsBot: false,
+          isDm: false,
+          isBotMention: true,
+          text: 'hey bot',
+          externalMessageId: 'm1',
+          ts: 1_700_000_000_000,
+          decision: 'engage',
+        },
+      })
+    }, 50)
+
+    const events = await collectN(gen, 1)
+    ctrl.abort()
+    const ev = events[0]!
+    if (ev.cat !== 'inbound') throw new Error('expected inbound')
+    expect(ev.adapter).toBe('slack')
+    expect(ev.workspace).toBe('acme')
+    expect(ev.chat).toBe('C12345')
+    expect(ev.authorName).toBe('alice')
+    expect(ev.text).toBe('hey bot')
+    expect(ev.decision).toBe('engage')
+    expect(ev.isBotMention).toBe(true)
+    expect(ev.ts).toBe(1_700_000_000_000)
+  })
+
+  test('channel-inbound broadcast with malformed payload falls through as generic broadcast', async () => {
+    const stream = createStream()
+    const { url } = await startServer({ stream })
+    const ctrl = new AbortController()
+    const gen = streamLive({ url, sessionId: 'ses_anything', signal: ctrl.signal })
+
+    setTimeout(() => {
+      stream.publish({
+        target: { kind: 'broadcast' },
+        payload: { kind: 'channel-inbound', adapter: 'slack' },
+      })
+    }, 50)
+
+    const events = await collectN(gen, 1)
+    ctrl.abort()
+    const ev = events[0]!
+    if (ev.cat !== 'broadcast') throw new Error('expected broadcast (malformed inbound falls back)')
+  })
+
+  test('inbound published before subscribe is backfilled via sinceMs', async () => {
+    const stream = createStream()
+    stream.publish({
+      target: { kind: 'broadcast' },
+      payload: {
+        kind: 'channel-inbound',
+        adapter: 'discord',
+        workspace: '9999',
+        chat: '8888',
+        thread: null,
+        authorId: 'U1',
+        authorName: 'bob',
+        authorIsBot: false,
+        isDm: false,
+        isBotMention: true,
+        text: 'historical',
+        externalMessageId: 'm0',
+        ts: 0,
+        decision: 'engage',
+      },
+    })
+
+    const { url } = await startServer({ stream })
+    const ctrl = new AbortController()
+    const gen = streamLive({ url, sessionId: 'ses_anything', sinceMs: 0, signal: ctrl.signal })
+
+    const events = await collectN(gen, 1)
+    ctrl.abort()
+    const ev = events[0]!
+    if (ev.cat !== 'inbound') throw new Error('expected inbound from backfill')
+    expect(ev.text).toBe('historical')
+  })
+
   test('cron-fire events surface as InspectEvent.cron-fire with the jobId', async () => {
     const stream = createStream()
     const { url } = await startServer({ stream })

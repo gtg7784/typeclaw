@@ -1062,15 +1062,7 @@ function handleInspectMessage(
 
   if (stream !== undefined && typeof msg.sinceMs === 'number') {
     for (const event of stream.scan({ sinceTs: msg.sinceMs, target: { kind: 'broadcast' } })) {
-      sendInspect(ws, {
-        type: 'frame',
-        ts: event.ts,
-        payload: {
-          kind: 'broadcast',
-          payload: event.payload,
-          ...(event.meta !== undefined ? { meta: event.meta } : {}),
-        },
-      })
+      sendInspect(ws, { type: 'frame', ts: event.ts, payload: broadcastEventToFrame(event) })
     }
     for (const event of stream.scan({ sinceTs: msg.sinceMs, target: { kind: 'cron' } })) {
       sendInspect(ws, {
@@ -1092,15 +1084,7 @@ function handleInspectMessage(
 
   if (stream !== undefined) {
     ws.data.unsubBroadcast = stream.subscribe({ target: { kind: 'broadcast' } }, (event) => {
-      sendInspect(ws, {
-        type: 'frame',
-        ts: event.ts,
-        payload: {
-          kind: 'broadcast',
-          payload: event.payload,
-          ...(event.meta !== undefined ? { meta: event.meta } : {}),
-        },
-      })
+      sendInspect(ws, { type: 'frame', ts: event.ts, payload: broadcastEventToFrame(event) })
     })
     ws.data.unsubCron = stream.subscribe({ target: { kind: 'cron' } }, (event) => {
       sendInspect(ws, {
@@ -1116,6 +1100,52 @@ function handleInspectMessage(
 
 function extractJobId(target: StreamMessage['target']): string {
   return target.kind === 'cron' ? target.jobId : ''
+}
+
+function broadcastEventToFrame(event: StreamMessage): InspectFramePayload {
+  const inbound = readChannelInboundBroadcast(event.payload)
+  if (inbound !== null) return inbound
+  return {
+    kind: 'broadcast',
+    payload: event.payload,
+    ...(event.meta !== undefined ? { meta: event.meta } : {}),
+  }
+}
+
+function readChannelInboundBroadcast(payload: unknown): InspectFramePayload | null {
+  if (typeof payload !== 'object' || payload === null) return null
+  const p = payload as Record<string, unknown>
+  if (p.kind !== 'channel-inbound') return null
+  if (typeof p.adapter !== 'string') return null
+  if (typeof p.workspace !== 'string') return null
+  if (typeof p.chat !== 'string') return null
+  if (!(p.thread === null || typeof p.thread === 'string')) return null
+  if (typeof p.authorId !== 'string') return null
+  if (typeof p.authorName !== 'string') return null
+  if (typeof p.authorIsBot !== 'boolean') return null
+  if (typeof p.isDm !== 'boolean') return null
+  if (typeof p.isBotMention !== 'boolean') return null
+  if (typeof p.text !== 'string') return null
+  if (typeof p.externalMessageId !== 'string') return null
+  if (typeof p.ts !== 'number') return null
+  const decision = p.decision
+  if (decision !== 'engage' && decision !== 'observe' && decision !== 'denied' && decision !== 'claim') return null
+  return {
+    kind: 'channel_inbound',
+    adapter: p.adapter,
+    workspace: p.workspace,
+    chat: p.chat,
+    thread: p.thread,
+    authorId: p.authorId,
+    authorName: p.authorName,
+    authorIsBot: p.authorIsBot,
+    isDm: p.isDm,
+    isBotMention: p.isBotMention,
+    text: p.text,
+    externalMessageId: p.externalMessageId,
+    ts: p.ts,
+    decision,
+  }
 }
 
 function forwardAgentEventToInspect(

@@ -5,6 +5,7 @@ import type { PermissionService } from '@/permissions'
 import type { GithubSecretsBlock } from '@/secrets'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 import { SecretsBackend } from '@/secrets/storage'
+import type { Stream } from '@/stream'
 
 import { createDiscordBotAdapter, type DiscordBotAdapter } from './adapters/discord-bot'
 import { createGithubAdapter, type GithubAdapter } from './adapters/github'
@@ -78,6 +79,11 @@ export type ChannelManagerOptions = {
   // a URL" so error logs can be precise. Same shape as
   // `tunnelUrlForChannel` for consistency. Optional for tests.
   tunnelConfiguredForChannel?: (channelName: string) => boolean
+  // Forwarded to the router as `stream`. When set, every inbound the
+  // router sees is published as a tagged broadcast for inspect surfacing.
+  // Production wiring (`src/run/index.ts`) always passes the agent's
+  // Stream; tests typically omit it.
+  stream?: Stream
 }
 
 export type ChannelManager = {
@@ -113,6 +119,7 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     ...(options.createSessionForChannel ? { createSessionForChannel: options.createSessionForChannel } : {}),
     ...(options.permissions ? { permissions: options.permissions } : {}),
     ...(options.claimHandler ? { claimHandler: options.claimHandler } : {}),
+    ...(options.stream ? { stream: options.stream } : {}),
   })
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createGithub = options.createGithubAdapter ?? createGithubAdapter

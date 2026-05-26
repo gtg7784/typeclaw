@@ -214,6 +214,7 @@ export async function startAgent({
     }),
     permissions: pluginsLoaded.permissions,
     claimHandler: claimController.claimHandler,
+    stream,
   })
 
   const createSessionForSubagent: import('@/agent/subagents').CreateSessionForSubagent = async (

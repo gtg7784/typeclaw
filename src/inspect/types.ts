@@ -9,8 +9,11 @@ export const INSPECT_CATEGORIES = [
   'done',
   'broadcast',
   'cron-fire',
+  'inbound',
 ] as const
 export type InspectCategory = (typeof INSPECT_CATEGORIES)[number]
+
+export type InboundDecision = 'engage' | 'observe' | 'denied' | 'claim'
 
 export type InspectEvent =
   | { cat: 'meta'; ts: number; origin: MinimalSessionOrigin }
@@ -41,6 +44,22 @@ export type InspectEvent =
     }
   | { cat: 'broadcast'; ts: number; payload: unknown; meta?: Record<string, string> }
   | { cat: 'cron-fire'; ts: number; jobId: string; payload: unknown }
+  | {
+      cat: 'inbound'
+      ts: number
+      adapter: string
+      workspace: string
+      chat: string
+      thread: string | null
+      authorId: string
+      authorName: string
+      authorIsBot: boolean
+      isDm: boolean
+      isBotMention: boolean
+      text: string
+      externalMessageId: string
+      decision: InboundDecision
+    }
 
 export type InspectFilter = {
   include?: ReadonlySet<InspectCategory>

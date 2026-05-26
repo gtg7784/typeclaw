@@ -94,6 +94,92 @@ describe('renderEvent (plain, no color)', () => {
     const ev: InspectEvent = { cat: 'meta', ts: 0, origin: { kind: 'tui' } }
     expect(renderEvent(ev, PLAIN).startsWith('--:--:--')).toBe(true)
   })
+
+  test('inbound engage event prints decision, channel coords, author and text', () => {
+    const ev: InspectEvent = {
+      cat: 'inbound',
+      ts: dateMs('15:08:42'),
+      adapter: 'slack',
+      workspace: 'acme',
+      chat: 'C12345',
+      thread: null,
+      authorId: 'U999',
+      authorName: 'alice',
+      authorIsBot: false,
+      isDm: false,
+      isBotMention: true,
+      text: 'hey bot can you help',
+      externalMessageId: 'm1',
+      decision: 'engage',
+    }
+    expect(stripTime(renderEvent(ev, PLAIN))).toBe(
+      'HH:MM:SS  inbound    [engage] slack:acme/C12345 alice: hey bot can you help',
+    )
+  })
+
+  test('inbound observe shows [observe] tag', () => {
+    const ev: InspectEvent = {
+      cat: 'inbound',
+      ts: dateMs('15:08:42'),
+      adapter: 'discord',
+      workspace: '9999',
+      chat: '8888',
+      thread: '7777',
+      authorId: 'U1',
+      authorName: 'bob',
+      authorIsBot: false,
+      isDm: false,
+      isBotMention: false,
+      text: 'just chatting',
+      externalMessageId: 'm2',
+      decision: 'observe',
+    }
+    expect(stripTime(renderEvent(ev, PLAIN))).toBe(
+      'HH:MM:SS  inbound    [observe] discord:9999/8888#7777 bob: just chatting',
+    )
+  })
+
+  test('inbound denied shows [denied] tag (visible silent drops)', () => {
+    const ev: InspectEvent = {
+      cat: 'inbound',
+      ts: dateMs('15:08:42'),
+      adapter: 'slack',
+      workspace: 'acme',
+      chat: 'C12345',
+      thread: null,
+      authorId: 'U_stranger',
+      authorName: 'stranger',
+      authorIsBot: false,
+      isDm: false,
+      isBotMention: true,
+      text: 'who are you',
+      externalMessageId: 'm3',
+      decision: 'denied',
+    }
+    expect(stripTime(renderEvent(ev, PLAIN))).toBe(
+      'HH:MM:SS  inbound    [denied] slack:acme/C12345 stranger: who are you',
+    )
+  })
+
+  test('inbound falls back to authorId when authorName is empty', () => {
+    const ev: InspectEvent = {
+      cat: 'inbound',
+      ts: dateMs('15:08:42'),
+      adapter: 'kakaotalk',
+      workspace: 'kk',
+      chat: 'g1',
+      thread: null,
+      authorId: 'k_user_123',
+      authorName: '',
+      authorIsBot: false,
+      isDm: false,
+      isBotMention: false,
+      text: 'hi',
+      externalMessageId: 'm4',
+      decision: 'observe',
+    }
+    expect(stripTime(renderEvent(ev, PLAIN))).toBe('HH:MM:SS  inbound    [observe] kakaotalk:kk/g1 k_user_123: hi')
+  })
 })
 
 describe('renderEvent (with color)', () => {

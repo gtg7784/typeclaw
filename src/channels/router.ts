@@ -11,6 +11,7 @@ import { createCommandRegistry } from '@/commands'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import { extractClaimCode } from '@/role-claim'
+import type { Stream } from '@/stream'
 
 import { decideEngagement, grantStickyForReplyTargets, StickyLedger, type EngagementDecision } from './engagement'
 import {
@@ -505,6 +506,14 @@ export type CreateChannelRouterOptions = {
   // back over the same chat, or null to fall through to normal routing
   // when no pending claim window matches.
   claimHandler?: ClaimHandler
+  // Optional in-process Stream. When set, every inbound the router sees
+  // is published as a tagged broadcast (`kind: 'channel-inbound'`) so the
+  // `/inspect` WS endpoint can surface it live and `stream.scan()` can
+  // backfill it on subscribe. Decoupled from the routing decision: even
+  // permission-denied and role-claim inbounds publish, so the operator
+  // can diagnose silent drops from `typeclaw inspect` alone. Omitted in
+  // tests that don't care about inspect surfacing.
+  stream?: Stream
 }
 
 export type ClaimHandlerInput = {
@@ -539,6 +548,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const sessionIdleTimeoutMs = options.sessionIdleTimeoutMs ?? SESSION_IDLE_TIMEOUT_MS
   const permissions = options.permissions ?? GRANT_ALL_PERMISSIONS
   const claimHandler = options.claimHandler
+  const stream = options.stream
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
@@ -1277,6 +1287,33 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }, wait)
   }
 
+  const publishInbound = (event: InboundMessage, decision: 'engage' | 'observe' | 'denied' | 'claim'): void => {
+    if (stream === undefined) return
+    try {
+      stream.publish({
+        target: { kind: 'broadcast' },
+        payload: {
+          kind: 'channel-inbound',
+          adapter: event.adapter,
+          workspace: event.workspace,
+          chat: event.chat,
+          thread: event.thread,
+          authorId: event.authorId,
+          authorName: event.authorName,
+          authorIsBot: event.authorIsBot,
+          isDm: event.isDm,
+          isBotMention: event.isBotMention,
+          text: event.text,
+          externalMessageId: event.externalMessageId,
+          ts: event.ts,
+          decision,
+        },
+      })
+    } catch (err) {
+      logger.warn(`[channels] inbound stream publish failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
   const route = async (event: InboundMessage): Promise<void> => {
     const adapterConfig = options.configForAdapter(event.adapter)
     if (!adapterConfig) return
@@ -1303,6 +1340,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         text: event.text,
       })
       if (outcome.kind !== 'fallthrough') {
+        publishInbound(event, 'claim')
         logger.info(
           `[channels] ${channelKeyId(key)}: claim ${outcome.kind} author=${event.authorId} id=${event.externalMessageId}`,
         )
@@ -1321,6 +1359,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
 
     if (isChannelRespondDenied(event)) {
+      publishInbound(event, 'denied')
       logger.info(
         `[channels] ${channelKeyId(key)}: denied by permissions (channel.respond) author=${event.authorId} id=${event.externalMessageId}`,
       )
@@ -1388,6 +1427,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     })
 
     if (decision === 'observe') {
+      publishInbound(event, 'observe')
       // Log every observe so an unanswered mention is diagnosable from logs
       // alone instead of "routed but no prompting" silence. The bracketed
       // shape mirrors `prompting batch=` so log scraping can pair them.
@@ -1395,6 +1435,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       observe(live, event)
       return
     }
+
+    publishInbound(event, 'engage')
 
     updateLoopGuard(live, event)
 
