@@ -12,11 +12,12 @@ import {
   type ComposeDoctorReport,
 } from '@/compose'
 import { config } from '@/config'
+import { parseTailValue } from '@/container'
 import { formatJson, formatReport } from '@/doctor'
 
 import { formatComposeStatus } from './compose-status'
 import { formatComposeUsage, formatComposeUsageJson } from './compose-usage'
-import { c, spinner } from './ui'
+import { c, errorLine, spinner } from './ui'
 import { parseSince, parseUntil } from './usage-args'
 
 const startSub = defineCommand({
@@ -144,8 +145,23 @@ const logsSub = defineCommand({
       description: 'stream new log output as it arrives',
       default: false,
     },
+    tail: {
+      type: 'string',
+      alias: 'n',
+      description: 'number of lines to show from the end of each agent\'s logs (non-negative integer or "all")',
+    },
   },
   async run({ args }) {
+    let tail: string | undefined
+    if (args.tail !== undefined) {
+      const parsed = parseTailValue(args.tail)
+      if (!parsed.ok) {
+        console.error(errorLine(parsed.reason))
+        process.exit(2)
+      }
+      tail = parsed.value
+    }
+
     const controller = new AbortController()
     const onSig = (): void => controller.abort()
     process.once('SIGINT', onSig)
@@ -156,7 +172,12 @@ const logsSub = defineCommand({
       } else {
         console.log(c.dim('Showing logs for all agents.'))
       }
-      const result = await composeLogs({ rootCwd: process.cwd(), follow: args.follow, signal: controller.signal })
+      const result = await composeLogs({
+        rootCwd: process.cwd(),
+        follow: args.follow,
+        tail,
+        signal: controller.signal,
+      })
       if (result.agents.length === 0) {
         console.log(c.dim('No typeclaw agents found in immediate subdirectories of cwd.'))
         return

@@ -8,6 +8,7 @@ import { discoverAgents, type AgentEntry } from './discover'
 export type ComposeLogsOptions = {
   rootCwd: string
   follow: boolean
+  tail?: string
   out?: NodeJS.WritableStream
   err?: NodeJS.WritableStream
   signal?: AbortSignal
@@ -66,6 +67,7 @@ export function makeLinePrefixer(
 export async function composeLogs({
   rootCwd,
   follow,
+  tail,
   out = process.stdout,
   err = process.stderr,
   signal,
@@ -93,7 +95,11 @@ export async function composeLogs({
   const useColor = supportsColor(out)
 
   const procs = attached.map((agent) => {
-    const cmd = buildDockerLogsCmd({ containerName: agent.containerName, follow })
+    const cmd = buildDockerLogsCmd({
+      containerName: agent.containerName,
+      follow,
+      ...(tail !== undefined ? { tail } : {}),
+    })
     const proc = bun.spawn({ cmd, stdout: 'pipe', stderr: 'pipe' })
     return { agent, proc }
   })

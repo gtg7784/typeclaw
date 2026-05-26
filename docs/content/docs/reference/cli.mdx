@@ -8,17 +8,17 @@ TypeClaw runs code in three stages with different filesystems ([/concepts/archit
 
 ## Lifecycle
 
-| Command            | Description                                                                                                                |
-| ------------------ | -------------------------------------------------------------------------------------------------------------------------- |
-| `typeclaw init`    | Interactive wizard. Scaffolds the agent folder; optionally wires the first provider + first channel.                       |
-| `typeclaw start`   | `docker run` with configured ports + mounts + env-file. Spawns `hostd` on first call per host. Flags: `--port`, `--build`. |
-| `typeclaw restart` | `stop` + `start` with the same flag set as `start`.                                                                        |
-| `typeclaw stop`    | `docker stop` then `docker rm` so a clean stop leaves no trace.                                                            |
-| `typeclaw status`  | Container + daemon registration state.                                                                                     |
-| `typeclaw logs`    | Print container stdout/stderr with reformatted local timestamps. `-f` / `--follow` to stream.                              |
-| `typeclaw shell`   | Drop into a shell inside the running container. `--shell` to pick (defaults to `bash` if present, else `sh`).              |
-| `typeclaw tui`     | Attach an interactive TUI. Takes an optional one-shot prompt argument; `--url` to override the websocket URL.              |
-| `typeclaw reload`  | Re-read `typeclaw.json` and apply hot-reloadable fields. Reports which fields require a restart.                           |
+| Command            | Description                                                                                                                      |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------- |
+| `typeclaw init`    | Interactive wizard. Scaffolds the agent folder; optionally wires the first provider + first channel.                             |
+| `typeclaw start`   | `docker run` with configured ports + mounts + env-file. Spawns `hostd` on first call per host. Flags: `--port`, `--build`.       |
+| `typeclaw restart` | `stop` + `start` with the same flag set as `start`.                                                                              |
+| `typeclaw stop`    | `docker stop` then `docker rm` so a clean stop leaves no trace.                                                                  |
+| `typeclaw status`  | Container + daemon registration state.                                                                                           |
+| `typeclaw logs`    | Print container stdout/stderr with reformatted local timestamps. `-f` / `--follow` to stream; `-n` / `--tail <N\|all>` to limit. |
+| `typeclaw shell`   | Drop into a shell inside the running container. `--shell` to pick (defaults to `bash` if present, else `sh`).                    |
+| `typeclaw tui`     | Attach an interactive TUI. Takes an optional one-shot prompt argument; `--url` to override the websocket URL.                    |
+| `typeclaw reload`  | Re-read `typeclaw.json` and apply hot-reloadable fields. Reports which fields require a restart.                                 |
 
 `--port` is the **preferred** host port. On bind conflict, `start` allocates an ephemeral port; subsequent commands resolve the actual port by querying Docker.
 
