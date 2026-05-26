@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
 import { mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -46,9 +47,9 @@ describe('tunnel add/remove config flows', () => {
     expect(config.docker.file.cloudflared).toBe(true)
   })
 
-  test('interactive add writes a cloudflare-named channel tunnel and enables cloudflared', async () => {
+  test('interactive add writes a cloudflare-named channel tunnel, defaults tokenEnv, prompts for token, writes .env', async () => {
     const cwd = await makeAgentDir({})
-    const prompts = sequencedPrompts(['https://agent.example.com', 'CLOUDFLARE_TUNNEL_TOKEN'])
+    const textPrompts = sequencedPrompts(['https://agent.example.com'])
 
     const result = await tunnel.runTunnelAddFlow(
       cwd,
@@ -56,7 +57,8 @@ describe('tunnel add/remove config flows', () => {
       {
         selectProvider: async () => 'cloudflare-named',
         selectOwner: async () => 'channel',
-        text: prompts.text,
+        text: textPrompts.text,
+        password: async () => 'tunnel-token-from-prompt',
       },
     )
 
@@ -72,6 +74,49 @@ describe('tunnel add/remove config flows', () => {
       },
     ])
     expect(config.docker.file.cloudflared).toBe(true)
+    const env = await Bun.file(join(cwd, '.env')).text()
+    expect(env).toBe('CLOUDFLARE_TUNNEL_TOKEN=tunnel-token-from-prompt\n')
+  })
+
+  test('interactive add with cloudflare-named does NOT prompt for token when .env already has it', async () => {
+    const cwd = await makeAgentDir({})
+    await writeFile(join(cwd, '.env'), 'CLOUDFLARE_TUNNEL_TOKEN=preexisting-token\n', 'utf8')
+    let passwordCalls = 0
+
+    const result = await tunnel.runTunnelAddFlow(
+      cwd,
+      { name: 'github-webhook', forChannel: 'github' },
+      {
+        selectProvider: async () => 'cloudflare-named',
+        selectOwner: async () => 'channel',
+        text: async () => 'https://agent.example.com',
+        password: async () => {
+          passwordCalls += 1
+          return 'should-not-be-written'
+        },
+      },
+    )
+
+    expect(result.ok).toBe(true)
+    expect(passwordCalls).toBe(0)
+    const env = await Bun.file(join(cwd, '.env')).text()
+    expect(env).toBe('CLOUDFLARE_TUNNEL_TOKEN=preexisting-token\n')
+  })
+
+  test('non-interactive add with cloudflare-named defaults tokenEnv and never prompts for the token value', async () => {
+    const cwd = await makeAgentDir({})
+
+    const result = await tunnel.runTunnelAddFlow(cwd, {
+      name: 'github-webhook',
+      provider: 'cloudflare-named',
+      forChannel: 'github',
+      hostname: 'https://agent.example.com',
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.value.tokenEnv).toBe('CLOUDFLARE_TUNNEL_TOKEN')
+    expect(existsSync(join(cwd, '.env'))).toBe(false)
   })
 
   test('non-interactive add writes a cloudflare-named manual tunnel without upstreamPort', async () => {
@@ -569,6 +614,60 @@ describe('tunnel set config flow', () => {
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('unreachable')
     expect(result.reason).toMatch(/typeclaw\.json is invalid/)
+  })
+
+  test('interactive set switching TO cloudflare-named prompts for the token and writes .env', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'github-webhook',
+          provider: 'cloudflare-quick',
+          for: { kind: 'channel', name: 'github' },
+        },
+      ],
+    })
+
+    const result = await tunnel.runTunnelSetFlow(
+      cwd,
+      { name: 'github-webhook' },
+      {
+        selectProvider: async () => 'cloudflare-named',
+        selectOwner: async () => 'channel',
+        selectSetField: async () => 'provider',
+        text: async () => 'https://agent.example.com',
+        password: async () => 'rotated-token',
+      },
+    )
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.value.provider).toBe('cloudflare-named')
+    expect(result.value.tokenEnv).toBe('CLOUDFLARE_TUNNEL_TOKEN')
+    const env = await Bun.file(join(cwd, '.env')).text()
+    expect(env).toBe('CLOUDFLARE_TUNNEL_TOKEN=rotated-token\n')
+  })
+
+  test('non-interactive set switching TO cloudflare-named defaults tokenEnv and never prompts for the token value', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'github-webhook',
+          provider: 'cloudflare-quick',
+          for: { kind: 'channel', name: 'github' },
+        },
+      ],
+    })
+
+    const result = await tunnel.runTunnelSetFlow(cwd, {
+      name: 'github-webhook',
+      provider: 'cloudflare-named',
+      hostname: 'https://agent.example.com',
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.value.tokenEnv).toBe('CLOUDFLARE_TUNNEL_TOKEN')
+    expect(existsSync(join(cwd, '.env'))).toBe(false)
   })
 })
 
