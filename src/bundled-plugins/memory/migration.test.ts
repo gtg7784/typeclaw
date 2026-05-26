@@ -631,6 +631,54 @@ describe('runShardingMigration', () => {
     expect(latest.stdout).toContain('memory: clean up 2 pre-shard file(s) orphaned by earlier migration')
   })
 
+  test('commits pending legacy deletions even when topics dir was never created', async () => {
+    await initGitRepo(agentDir)
+    await writeFlatStream('2026-05-20', 'orphan-1\n')
+    await writeFlatStream('2026-05-21', 'orphan-2\n')
+    await writeFlatStream('2026-05-22', 'orphan-3\n')
+    await git(agentDir, ['add', '--', 'memory/2026-05-20.jsonl', 'memory/2026-05-21.jsonl', 'memory/2026-05-22.jsonl'])
+    await git(agentDir, ['commit', '-m', 'pre-shard legacy state'])
+    await rm(join(memoryDir, '2026-05-20.jsonl'))
+    await rm(join(memoryDir, '2026-05-21.jsonl'))
+    await rm(join(memoryDir, '2026-05-22.jsonl'))
+    await git(agentDir, [
+      'add',
+      '-u',
+      '--',
+      'memory/2026-05-20.jsonl',
+      'memory/2026-05-21.jsonl',
+      'memory/2026-05-22.jsonl',
+    ])
+    const beforePorcelain = await git(agentDir, ['status', '--porcelain', '--untracked-files=no'])
+    expect(beforePorcelain.stdout).toContain('D  memory/2026-05-20.jsonl')
+    expect(beforePorcelain.stdout).toContain('D  memory/2026-05-21.jsonl')
+    expect(beforePorcelain.stdout).toContain('D  memory/2026-05-22.jsonl')
+    expect(existsSync(join(memoryDir, 'topics'))).toBe(false)
+
+    await runShardingMigration({ agentDir, logger })
+
+    const porcelain = await git(agentDir, ['status', '--porcelain', '--untracked-files=no'])
+    expect(porcelain.stdout).toBe('')
+    const latest = await git(agentDir, ['log', '--oneline', '-1'])
+    expect(latest.stdout).toContain('memory: clean up 3 pre-shard file(s) orphaned by earlier migration')
+  })
+
+  test('commits pending legacy deletions when topics dir is absent and deletions are unstaged', async () => {
+    await initGitRepo(agentDir)
+    await writeFlatStream('2026-05-20', 'orphan-1\n')
+    await git(agentDir, ['add', '--', 'memory/2026-05-20.jsonl'])
+    await git(agentDir, ['commit', '-m', 'pre-shard legacy state'])
+    await rm(join(memoryDir, '2026-05-20.jsonl'))
+    expect(existsSync(join(memoryDir, 'topics'))).toBe(false)
+
+    await runShardingMigration({ agentDir, logger })
+
+    const porcelain = await git(agentDir, ['status', '--porcelain', '--untracked-files=no'])
+    expect(porcelain.stdout).toBe('')
+    const latest = await git(agentDir, ['log', '--oneline', '-1'])
+    expect(latest.stdout).toContain('memory: clean up 1 pre-shard file(s) orphaned by earlier migration')
+  })
+
   test('no-op when post-shard tree is clean and no pending deletions exist', async () => {
     await initGitRepo(agentDir)
     await writePreMigratedTree()
