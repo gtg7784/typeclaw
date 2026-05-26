@@ -60,6 +60,19 @@ describe('renderSubagentCompletionReminder', () => {
     expect(text).toContain('invisible')
   })
 
+  test('channel=true names the deferred-reply contract: this turn is when the promised reply lands', () => {
+    const text = renderSubagentCompletionReminder({
+      subagent: 'explorer',
+      taskId: 'bg_xyz',
+      ok: true,
+      durationMs: 5_000,
+      channel: true,
+    })
+    expect(text).toMatch(/promised reply lands/i)
+    expect(text).toContain('subagent_output')
+    expect(text).toMatch(/`NO_REPLY` is only correct when the result is genuinely empty/i)
+  })
+
   test('channel=true on a FAILED reminder also appends the nudge (failure still needs surfacing)', () => {
     const text = renderSubagentCompletionReminder({
       subagent: 'scout',

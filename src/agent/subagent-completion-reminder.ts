@@ -21,7 +21,10 @@ export type CompletionReminderArgs = {
 const CHANNEL_REPLY_NUDGE =
   'This reminder is a system message, not a user inbound — but you are in a channel session, ' +
   'so end your turn via `channel_reply` (or `channel_send`) to surface the result. ' +
-  'Plain-text output is invisible here. If there is genuinely nothing to surface, end with `NO_REPLY`.'
+  'Plain-text output is invisible here. If you spawned this subagent to answer a user, ' +
+  'this is the turn where that promised reply lands — fetch the result via `subagent_output` ' +
+  'and send it. `NO_REPLY` is only correct when the result is genuinely empty or duplicates ' +
+  'something you already replied with in this conversation.'
 
 export function renderSubagentCompletionReminder(args: CompletionReminderArgs): string {
   const durationStr = formatReminderDuration(args.durationMs)
