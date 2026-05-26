@@ -27,6 +27,15 @@ export type CreateRestartToolOptions = {
   // fixes. Required even when stream is absent so the type stays simple and
   // the field's presence documents the runtime contract.
   originatingSessionId: string
+  // Override the default 5s ACK budget. Production has no caller for this —
+  // 5s is generous against a real hostd on the same host. Test-only seam:
+  // restart.test.ts spawns a `Bun.serve` and awaits its HTTP roundtrip from
+  // the same parallel-test-runner that hosts dozens of other workers
+  // contending on libuv's I/O threads. Under that contention, an in-process
+  // 127.0.0.1 fetch can occasionally exceed 5s and the test's `expect(ok:
+  // true)` assertion flips to `ok: false, reason: 'daemon ack timeout'`.
+  // Optional so production callers keep the 5s default unchanged.
+  ackTimeoutMs?: number
 }
 
 export type RestartToolDetails = { ok: boolean; containerName: string; reason?: string }
@@ -45,9 +54,11 @@ export function createRestartTool({
   hostdToken,
   stream,
   originatingSessionId,
+  ackTimeoutMs,
 }: CreateRestartToolOptions) {
   const doExit = exit ?? ((code: number) => process.exit(code))
   const httpUrl = hostdUrl ?? process.env.TYPECLAW_HOSTD_URL
+  const ackBudget = ackTimeoutMs ?? ACK_TIMEOUT_MS
   const httpToken = hostdToken ?? process.env.TYPECLAW_HOSTD_TOKEN
 
   return defineTool({
@@ -78,8 +89,8 @@ export function createRestartTool({
       const request = { kind: 'restart' as const, containerName, build }
       const reply =
         httpUrl && httpToken
-          ? await sendHttp(request, { timeoutMs: ACK_TIMEOUT_MS, url: httpUrl, token: httpToken })
-          : await send(request, { timeoutMs: ACK_TIMEOUT_MS, socket: socketPath ?? containerSocketPath() })
+          ? await sendHttp(request, { timeoutMs: ackBudget, url: httpUrl, token: httpToken })
+          : await send(request, { timeoutMs: ackBudget, socket: socketPath ?? containerSocketPath() })
       if (!reply.ok) {
         const details: RestartToolDetails = { ok: false, containerName, reason: reply.reason }
         return {

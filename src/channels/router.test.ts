@@ -222,10 +222,19 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 async function waitForPersistedLastInboundAt(agentDir: string, expected: number): Promise<void> {
-  for (let i = 0; i < 20; i++) {
+  // Wall-clock-bounded poll, not iteration-bounded. The original 20-iteration
+  // × 1ms-sleep budget (~20ms total) was tight enough to lose the race
+  // against tmpdir fs persistence under `bun test --parallel` contention.
+  // The persistence chain is route -> flushDebounce -> writeFile(atomic
+  // temp + rename); each fs op can stall hundreds of ms when libuv's
+  // threadpool is saturated across 18 workers. 2s is the same shape every
+  // other waitFor helper in the repo uses (see scripts/require-parallel.ts
+  // for the global-timeout rationale).
+  const deadline = performance.now() + 2_000
+  while (performance.now() < deadline) {
     const loaded = await loadChannelSessions(agentDir)
     if (loaded[0]?.lastInboundAt === expected) return
-    await new Promise((resolve) => setTimeout(resolve, 1))
+    await new Promise((resolve) => setTimeout(resolve, 5))
   }
   const loaded = await loadChannelSessions(agentDir)
   throw new Error(`lastInboundAt persisted as ${String(loaded[0]?.lastInboundAt)}, expected ${expected}`)

@@ -66,19 +66,21 @@ describe('streamLive — live session events', () => {
 
     const ctrl = new AbortController()
     const liveFlags: boolean[] = []
+    const subscribed = Promise.withResolvers<void>()
     const gen = streamLive({
       url,
       sessionId: 'ses_a',
       signal: ctrl.signal,
       onSubscribed: (live) => {
         liveFlags.push(live)
+        subscribed.resolve()
       },
     })
 
-    setTimeout(() => {
+    void subscribed.promise.then(() => {
       session.emit({ type: 'tool_execution_start', toolCallId: 'c1', toolName: 'read', args: { path: 'x' } })
       session.emit({ type: 'tool_execution_end', toolCallId: 'c1', toolName: 'read', result: 'ok', isError: false })
-    }, 50)
+    })
 
     const events = await collectN(gen, 2)
     ctrl.abort()
@@ -100,9 +102,15 @@ describe('streamLive — live session events', () => {
     const { url } = await startServer({ registry })
 
     const ctrl = new AbortController()
-    const gen = streamLive({ url, sessionId: 'ses_a', signal: ctrl.signal })
+    const subscribed = Promise.withResolvers<void>()
+    const gen = streamLive({
+      url,
+      sessionId: 'ses_a',
+      signal: ctrl.signal,
+      onSubscribed: () => subscribed.resolve(),
+    })
 
-    setTimeout(() => {
+    void subscribed.promise.then(() => {
       session.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Hello ' } })
       session.emit({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'world' } })
       session.emit({
@@ -116,7 +124,7 @@ describe('streamLive — live session events', () => {
           usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
         },
       })
-    }, 50)
+    })
 
     const events = await collectN(gen, 1)
     ctrl.abort()
@@ -186,11 +194,17 @@ describe('streamLive — live session events', () => {
     const stream = createStream()
     const { url } = await startServer({ stream })
     const ctrl = new AbortController()
-    const gen = streamLive({ url, sessionId: 'ses_anything', signal: ctrl.signal })
+    const subscribed = Promise.withResolvers<void>()
+    const gen = streamLive({
+      url,
+      sessionId: 'ses_anything',
+      signal: ctrl.signal,
+      onSubscribed: () => subscribed.resolve(),
+    })
 
-    setTimeout(() => {
+    void subscribed.promise.then(() => {
       stream.publish({ target: { kind: 'broadcast' }, payload: { kind: 'subagent.completed', ok: true } })
-    }, 50)
+    })
 
     const events = await collectN(gen, 1)
     ctrl.abort()
@@ -297,11 +311,17 @@ describe('streamLive — live session events', () => {
     const stream = createStream()
     const { url } = await startServer({ stream })
     const ctrl = new AbortController()
-    const gen = streamLive({ url, sessionId: 'ses_anything', signal: ctrl.signal })
+    const subscribed = Promise.withResolvers<void>()
+    const gen = streamLive({
+      url,
+      sessionId: 'ses_anything',
+      signal: ctrl.signal,
+      onSubscribed: () => subscribed.resolve(),
+    })
 
-    setTimeout(() => {
+    void subscribed.promise.then(() => {
       stream.publish({ target: { kind: 'cron', jobId: 'daily-backup' }, payload: { schedule: '0 3 * * *' } })
-    }, 50)
+    })
 
     const events = await collectN(gen, 1)
     ctrl.abort()

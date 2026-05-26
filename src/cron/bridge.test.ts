@@ -33,6 +33,13 @@ function startFakeAgent(reply: (msg: ClientMessage) => ServerMessage | null): nu
   return bun.port
 }
 
+// Generous bound for happy-path WS round-trips under parallel-test
+// contention. Tests that deliberately exercise the timeout path (e.g.
+// "ignores replies whose requestId does not match") still use a tight
+// bound — those tests' contract IS the timeout, and bumping them would
+// just make the suite slower without making it more reliable.
+const HAPPY_PATH_TIMEOUT_MS = 10_000
+
 describe('cron list bridge', () => {
   test('redacts tokenized URLs in connection errors', async () => {
     const result = await fetchCronList({
@@ -71,7 +78,11 @@ describe('cron list bridge', () => {
       return { type: 'cron_list_result', requestId: msg.requestId, result: { ok: true, jobs: [job], nowMs: 999_500 } }
     })
 
-    const result = await fetchCronList({ cwd: process.cwd(), url: `ws://127.0.0.1:${port}`, timeoutMs: 2000 })
+    const result = await fetchCronList({
+      cwd: process.cwd(),
+      url: `ws://127.0.0.1:${port}`,
+      timeoutMs: HAPPY_PATH_TIMEOUT_MS,
+    })
     expect(result.kind).toBe('ok')
     if (result.kind !== 'ok') throw new Error('unreachable')
     expect(result.jobs).toEqual([job])
@@ -84,7 +95,11 @@ describe('cron list bridge', () => {
       return { type: 'cron_list_result', requestId: msg.requestId, result: { ok: false, reason: 'bad cron.json' } }
     })
 
-    const result = await fetchCronList({ cwd: process.cwd(), url: `ws://127.0.0.1:${port}`, timeoutMs: 2000 })
+    const result = await fetchCronList({
+      cwd: process.cwd(),
+      url: `ws://127.0.0.1:${port}`,
+      timeoutMs: HAPPY_PATH_TIMEOUT_MS,
+    })
     expect(result.kind).toBe('error')
     if (result.kind !== 'error') throw new Error('unreachable')
     expect(result.reason).toBe('bad cron.json')
