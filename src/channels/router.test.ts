@@ -4771,7 +4771,32 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     expect(sent).toEqual(['yes'])
   })
 
-  test('prepends a `> @author: excerpt` quote when the reply crosses the queueDelayMs threshold', async () => {
+  test('does NOT anchor a cold-start first turn just because prefetched scrollback exists (PR #374 regression)', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: string[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({ externalMessageId: 'h1', text: 'old chatter 1' }),
+        historyMessage({ externalMessageId: 'h2', text: 'old chatter 2' }),
+      ],
+    }))
+
+    await router.route(inbound({ text: 'hey bot', authorName: 'Alice' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    nowRef.value += 500
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'hi back' })
+    expect(sent).toEqual(['hi back'])
+  })
+
+  test('prepends a `> <@authorId>: excerpt` Discord mention when the reply crosses the queueDelayMs threshold', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1_000_000 }
     const sent: string[] = []
@@ -4781,12 +4806,12 @@ describe('ChannelRouter quote-anchor on outbound', () => {
       return { ok: true }
     })
 
-    await router.route(inbound({ text: 'are you there?', authorName: 'Alice' }))
+    await router.route(inbound({ text: 'are you there?', authorId: 'U_ALICE', authorName: 'Alice' }))
     await router.__testing!.flushDebounce(KEY)
 
     nowRef.value += 60_000
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'yes I am here' })
-    expect(sent).toEqual(['> @Alice: are you there?\nyes I am here'])
+    expect(sent).toEqual(['> <@U_ALICE>: are you there?\n\nyes I am here'])
   })
 
   test('prepends a quote when an observed message landed between inbound and reply, even within the threshold', async () => {
@@ -4799,7 +4824,7 @@ describe('ChannelRouter quote-anchor on outbound', () => {
       return { ok: true }
     })
 
-    await router.route(inbound({ text: 'cron status?', authorName: 'Alice' }))
+    await router.route(inbound({ text: 'cron status?', authorId: 'U_ALICE', authorName: 'Alice' }))
     nowRef.value += 100
     await router.route(
       inbound({
@@ -4814,7 +4839,7 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     nowRef.value += 200
 
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'still blocked' })
-    expect(sent[0]).toContain('> @Alice: cron status?')
+    expect(sent[0]).toContain('> <@U_ALICE>: cron status?')
     expect(sent[0]).toContain('still blocked')
   })
 
@@ -4828,14 +4853,14 @@ describe('ChannelRouter quote-anchor on outbound', () => {
       return { ok: true }
     })
 
-    await router.route(inbound({ text: 'walk me through it', authorName: 'Alice' }))
+    await router.route(inbound({ text: 'walk me through it', authorId: 'U_ALICE', authorName: 'Alice' }))
     await router.__testing!.flushDebounce(KEY)
     nowRef.value += 60_000
 
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'first chunk' })
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'second chunk' })
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'third chunk' })
-    expect(sent).toEqual(['> @Alice: walk me through it\nfirst chunk', 'second chunk', 'third chunk'])
+    expect(sent).toEqual(['> <@U_ALICE>: walk me through it\n\nfirst chunk', 'second chunk', 'third chunk'])
   })
 
   test('resets per turn so the next batch can anchor again', async () => {
@@ -4848,18 +4873,18 @@ describe('ChannelRouter quote-anchor on outbound', () => {
       return { ok: true }
     })
 
-    await router.route(inbound({ text: 'turn one', authorName: 'Alice', externalMessageId: 'm1' }))
+    await router.route(inbound({ text: 'turn one', authorId: 'U_ALICE', authorName: 'Alice', externalMessageId: 'm1' }))
     await router.__testing!.flushDebounce(KEY)
     nowRef.value += 60_000
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply one' })
 
-    await router.route(inbound({ text: 'turn two', authorName: 'Alice', externalMessageId: 'm2' }))
+    await router.route(inbound({ text: 'turn two', authorId: 'U_ALICE', authorName: 'Alice', externalMessageId: 'm2' }))
     await router.__testing!.flushDebounce(KEY)
     nowRef.value += 60_000
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply two' })
 
-    expect(sent[0]).toBe('> @Alice: turn one\nreply one')
-    expect(sent[1]).toBe('> @Alice: turn two\nreply two')
+    expect(sent[0]).toBe('> <@U_ALICE>: turn one\n\nreply one')
+    expect(sent[1]).toBe('> <@U_ALICE>: turn two\n\nreply two')
   })
 
   test('respects an adapter config opting out via quotedReply.enabled: false', async () => {
@@ -4894,7 +4919,7 @@ describe('ChannelRouter quote-anchor on outbound', () => {
       return { ok: true }
     })
 
-    await router.route(inbound({ text: 'screenshot pls', authorName: 'Alice' }))
+    await router.route(inbound({ text: 'screenshot pls', authorId: 'U_ALICE', authorName: 'Alice' }))
     await router.__testing!.flushDebounce(KEY)
     nowRef.value += 60_000
 
@@ -4904,6 +4929,6 @@ describe('ChannelRouter quote-anchor on outbound', () => {
       chat: 'c1',
       attachments: [{ path: '/agent/screen.png' }],
     })
-    expect(sent[0]?.text).toBe('> @Alice: screenshot pls')
+    expect(sent[0]?.text).toBe('> <@U_ALICE>: screenshot pls')
   })
 })
