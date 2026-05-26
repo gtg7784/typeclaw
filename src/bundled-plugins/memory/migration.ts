@@ -246,28 +246,32 @@ async function recoverShardingOrphans(
   logger: MigrationLogger,
   git: MigrationGit | undefined,
 ): Promise<void> {
-  if (!existsSync(topicsDir(agentDir))) return
+  if (existsSync(topicsDir(agentDir))) {
+    let cleaned = false
+    const memoryPath = rootMemoryPath(agentDir)
+    if (existsSync(memoryPath)) {
+      await unlink(memoryPath)
+      cleaned = true
+    }
 
-  let cleaned = false
-  const memoryPath = rootMemoryPath(agentDir)
-  if (existsSync(memoryPath)) {
-    await unlink(memoryPath)
-    cleaned = true
+    const memoryDir = join(agentDir, 'memory')
+    const dates = await collectFlatJsonlDates(memoryDir)
+    for (const date of dates) {
+      if (!existsSync(streamFilePath(agentDir, date))) continue
+      await unlink(join(memoryDir, `${date}.jsonl`))
+      cleaned = true
+    }
+
+    if (cleaned) logger.info('[memory:migration] cleaned orphaned pre-shard memory files')
   }
 
-  const memoryDir = join(agentDir, 'memory')
-  const dates = await collectFlatJsonlDates(memoryDir)
-  for (const date of dates) {
-    if (!existsSync(streamFilePath(agentDir, date))) continue
-    await unlink(join(memoryDir, `${date}.jsonl`))
-    cleaned = true
-  }
-
-  if (cleaned) logger.info('[memory:migration] cleaned orphaned pre-shard memory files')
-
-  // Always called, even when nothing was cleaned this boot: pre-#315 migrations
-  // and earlier runs of this function unlinked without committing, leaving
+  // Always called, even when nothing was cleaned this boot AND even when the
+  // sharded layout never landed on this agent: pre-#315 migrations and
+  // earlier runs of this function unlinked without committing, leaving
   // staged deletions that survive across reboots until cleared explicitly.
+  // The earlier guard (`return` when topicsDir is absent) stranded any agent
+  // whose pre-shard files were deleted but whose sharding never completed —
+  // their staged deletions sat in the index forever.
   await commitPendingLegacyDeletions(agentDir, logger, git)
 }
 
