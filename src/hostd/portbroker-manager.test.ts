@@ -44,7 +44,7 @@ describe('createPortbrokerManager Tailscale Serve', () => {
       },
     })
 
-    manager.start({
+    await manager.start({
       containerName: 'coder',
       cwd: '/agent/coder',
       policy: { allow: '*' },
@@ -94,7 +94,7 @@ describe('createPortbrokerManager Tailscale Serve', () => {
       },
     })
 
-    manager.start({
+    await manager.start({
       containerName: 'coder',
       cwd: '/agent/coder',
       policy: { allow: [] },
@@ -108,5 +108,74 @@ describe('createPortbrokerManager Tailscale Serve', () => {
 
     expect(startCalls).toBe(1)
     expect(calls).toEqual([])
+  })
+})
+
+describe('createPortbrokerManager re-register swap', () => {
+  // Why this matters: hostd respawn after ungraceful daemon death restores
+  // the leftover registration file (with the OLD broker token T1) and starts
+  // a T1 broker. The container that the file referred to is already gone;
+  // `typeclaw restart` then registers a NEW broker with T2 for the same
+  // container name. If the T1 broker's stop() were fire-and-forget, T1's
+  // connect loop could win the race and send broker-hello:T1 to the brand-new
+  // container whose env carries T2, producing a one-shot
+  // `auth-failed: token mismatch` broadcast.
+  test('start awaits the existing broker stop before creating the replacement', async () => {
+    const events: string[] = []
+    let releaseOldStop: () => void = () => {}
+    const oldStopHeld = new Promise<void>((resolve) => {
+      releaseOldStop = resolve
+    })
+    let nthBroker = 0
+    const manager = createPortbrokerManager({
+      resolveHostPortFor: async () => 12345,
+      createBrokerFor: (): Broker => {
+        nthBroker += 1
+        const which = nthBroker
+        return {
+          start: () => events.push(`broker${which}:start`),
+          stop: async () => {
+            if (which === 1) {
+              events.push(`broker${which}:stop:awaiting`)
+              await oldStopHeld
+              events.push(`broker${which}:stop:done`)
+            } else {
+              events.push(`broker${which}:stop`)
+            }
+          },
+          forwardedPorts: () => [],
+        }
+      },
+    })
+
+    await manager.start({
+      containerName: 'coder',
+      cwd: '/agent/coder',
+      policy: { allow: '*' },
+      wsHostPort: 12345,
+      brokerToken: 'T1',
+      onEvent: () => {},
+      onTailscaleServeEvent: () => {},
+    })
+
+    const secondStart = manager.start({
+      containerName: 'coder',
+      cwd: '/agent/coder',
+      policy: { allow: '*' },
+      wsHostPort: 12345,
+      brokerToken: 'T2',
+      onEvent: () => {},
+      onTailscaleServeEvent: () => {},
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(events).toEqual(['broker1:start', 'broker1:stop:awaiting'])
+
+    releaseOldStop()
+    await secondStart
+
+    expect(events).toEqual(['broker1:start', 'broker1:stop:awaiting', 'broker1:stop:done', 'broker2:start'])
+
+    await manager.stop('coder', 'deregistered')
   })
 })

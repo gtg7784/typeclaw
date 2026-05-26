@@ -109,7 +109,7 @@ describe('startDaemon', () => {
 
   test('status surfaces forwardedPorts reported by the portbroker callback', async () => {
     const portbroker: PortbrokerCallbacks = {
-      start: () => {},
+      start: async () => {},
       stop: async () => {},
       forwardedPorts: (name) => (name === 'coder' ? [3000, 5173] : []),
     }
@@ -628,14 +628,15 @@ describe('startDaemon', () => {
   })
 
   test('boot-time restore tolerates corrupted registration files', async () => {
-    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+    const alive = new Set(['good'])
+    daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000 })
     await send({ kind: 'register', containerName: 'good', cwd: '/agent/good' })
     await daemon.stop()
 
     await writeFile(join(registrationsDir(), 'broken.json'), '{ this is not json')
     await writeFile(join(registrationsDir(), 'mismatch.json'), JSON.stringify({ containerName: 'other', cwd: '/x' }))
 
-    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000 })
+    daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000 })
 
     const list = await send({ kind: 'list' })
     expect(list.ok).toBe(true)
@@ -643,17 +644,18 @@ describe('startDaemon', () => {
     expect((list.result as ListResult).registrations.map((r) => r.containerName).sort()).toEqual(['good'])
   })
 
-  test('boot-time restore revives portbroker for persisted registrations with portbroker fields', async () => {
+  test('boot-time restore revives portbroker for persisted registrations whose container is still alive', async () => {
     const startCalls: PortbrokerStartInput[] = []
     const portbroker: PortbrokerCallbacks = {
-      start: (input) => {
+      start: async (input) => {
         startCalls.push(input)
       },
       stop: async () => {},
       forwardedPorts: () => [],
     }
+    const alive = new Set(['with-broker'])
 
-    const d1 = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, portbroker })
+    const d1 = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, portbroker })
     await send({
       kind: 'register',
       containerName: 'with-broker',
@@ -666,13 +668,87 @@ describe('startDaemon', () => {
     await d1.stop()
 
     startCalls.length = 0
-    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, portbroker })
+    daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, portbroker })
 
     expect(startCalls).toHaveLength(1)
     expect(startCalls[0]?.containerName).toBe('with-broker')
     expect(startCalls[0]?.cwd).toBe('/agent/with-broker')
     expect(startCalls[0]?.wsHostPort).toBe(54321)
     expect(startCalls[0]?.brokerToken).toBe('btok')
+  })
+
+  test('boot-time restore skips persisted registrations whose container is gone, and unlinks the leftover file', async () => {
+    const startCalls: PortbrokerStartInput[] = []
+    const portbroker: PortbrokerCallbacks = {
+      start: async (input) => {
+        startCalls.push(input)
+      },
+      stop: async () => {},
+      forwardedPorts: () => [],
+    }
+
+    const d1 = await startDaemon({
+      exec: fakeExec(new Set(['ghost'])),
+      gcIntervalMs: 1_000_000,
+      portbroker,
+    })
+    await send({
+      kind: 'register',
+      containerName: 'ghost',
+      cwd: '/agent/ghost',
+      restartToken: 't',
+      wsHostPort: 54321,
+      portForward: { allow: '*' },
+      brokerToken: 'btok-old',
+    })
+    await d1.stop()
+
+    const filePath = registrationFilePath('ghost')
+    expect(existsSync(filePath)).toBe(true)
+
+    startCalls.length = 0
+    daemon = await startDaemon({ exec: fakeExec(new Set()), gcIntervalMs: 1_000_000, portbroker })
+
+    expect(startCalls).toHaveLength(0)
+    expect(existsSync(filePath)).toBe(false)
+
+    const list = await send({ kind: 'list' })
+    expect(list.ok).toBe(true)
+    if (!list.ok) return
+    expect((list.result as ListResult).registrations).toEqual([])
+  })
+
+  test('boot-time restore tolerates docker probe failures: unknown status still applies the registration', async () => {
+    const startCalls: PortbrokerStartInput[] = []
+    const portbroker: PortbrokerCallbacks = {
+      start: async (input) => {
+        startCalls.push(input)
+      },
+      stop: async () => {},
+      forwardedPorts: () => [],
+    }
+    const flakyExec: DockerExec = async (args) => {
+      if (args[0] === 'ps') return { exitCode: 1, stdout: '', stderr: 'docker daemon hiccup' }
+      return { exitCode: 1, stdout: '', stderr: 'unknown command' }
+    }
+
+    const d1 = await startDaemon({ exec: fakeExec(new Set(['flaky'])), gcIntervalMs: 1_000_000, portbroker })
+    await send({
+      kind: 'register',
+      containerName: 'flaky',
+      cwd: '/agent/flaky',
+      restartToken: 't',
+      wsHostPort: 54321,
+      portForward: { allow: '*' },
+      brokerToken: 'btok',
+    })
+    await d1.stop()
+
+    startCalls.length = 0
+    daemon = await startDaemon({ exec: flakyExec, gcIntervalMs: 1_000_000, portbroker })
+
+    expect(startCalls).toHaveLength(1)
+    expect(existsSync(registrationFilePath('flaky'))).toBe(true)
   })
 
   test('register invokes kakaoRenewal.start with the registered container and cwd', async () => {
@@ -726,7 +802,7 @@ describe('startDaemon', () => {
     expect(stopCalls.sort()).toEqual(['a', 'b'])
   })
 
-  test('boot-time restore invokes kakaoRenewal.start for persisted registrations', async () => {
+  test('boot-time restore invokes kakaoRenewal.start for persisted registrations whose container is still alive', async () => {
     const starts: KakaoRenewalStartInput[] = []
     const kakaoRenewal: KakaoRenewalCallbacks = {
       start: (input) => {
@@ -735,13 +811,14 @@ describe('startDaemon', () => {
       stop: async () => {},
       drain: async () => {},
     }
+    const alive = new Set(['persistent-kakao'])
 
-    const d1 = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, kakaoRenewal })
+    const d1 = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, kakaoRenewal })
     await send({ kind: 'register', containerName: 'persistent-kakao', cwd: '/agent/pk', restartToken: 't' })
     await d1.stop()
 
     starts.length = 0
-    daemon = await startDaemon({ exec: fakeExec(), gcIntervalMs: 1_000_000, kakaoRenewal })
+    daemon = await startDaemon({ exec: fakeExec(alive), gcIntervalMs: 1_000_000, kakaoRenewal })
 
     expect(starts).toEqual([{ containerName: 'persistent-kakao', cwd: '/agent/pk' }])
   })
