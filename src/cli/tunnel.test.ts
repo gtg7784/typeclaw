@@ -235,10 +235,181 @@ describe('tunnel add/remove config flows', () => {
 
     expect(refused.ok).toBe(false)
     if (refused.ok) throw new Error('unreachable')
-    expect(refused.reason).toContain('typeclaw channel remove github')
+    expect(refused.reason).toContain('typeclaw tunnel set github-webhook')
     expect(removed.ok).toBe(true)
     const config = await readConfig(cwd)
     expect(config.tunnels.map((entry: { name: string }) => entry.name)).toEqual(['github-webhook'])
+  })
+})
+
+describe('tunnel set config flow', () => {
+  test('non-interactive set rewrites externalUrl on a channel-owned tunnel', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'github-webhook',
+          provider: 'external',
+          for: { kind: 'channel', name: 'github' },
+          externalUrl: 'https://old.example.com',
+        },
+      ],
+    })
+
+    const result = await tunnel.runTunnelSetFlow(cwd, {
+      name: 'github-webhook',
+      externalUrl: 'https://new.example.com',
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.value.externalUrl).toBe('https://new.example.com')
+    expect(result.value.for).toEqual({ kind: 'channel', name: 'github' })
+    const config = await readConfig(cwd)
+    expect(config.tunnels[0].externalUrl).toBe('https://new.example.com')
+  })
+
+  test('non-interactive set swaps provider from cloudflare-quick to cloudflare-named and enables cloudflared', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'github-webhook',
+          provider: 'cloudflare-quick',
+          for: { kind: 'channel', name: 'github' },
+          upstreamPort: 8975,
+        },
+      ],
+    })
+
+    const result = await tunnel.runTunnelSetFlow(cwd, {
+      name: 'github-webhook',
+      provider: 'cloudflare-named',
+      hostname: 'https://agent.example.com',
+      tokenEnv: 'CLOUDFLARE_TUNNEL_TOKEN',
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.value.provider).toBe('cloudflare-named')
+    expect(result.value.hostname).toBe('https://agent.example.com')
+    expect(result.value.tokenEnv).toBe('CLOUDFLARE_TUNNEL_TOKEN')
+    expect(result.value.upstreamPort).toBeUndefined()
+    const config = await readConfig(cwd)
+    expect(config.tunnels[0].upstreamPort).toBeUndefined()
+    expect(config.docker?.file?.cloudflared).toBe(true)
+  })
+
+  test('non-interactive set rejects unknown tunnel name', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'github-webhook',
+          provider: 'external',
+          for: { kind: 'channel', name: 'github' },
+          externalUrl: 'https://hook.example.com',
+        },
+      ],
+    })
+
+    const result = await tunnel.runTunnelSetFlow(cwd, {
+      name: 'does-not-exist',
+      externalUrl: 'https://new.example.com',
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/unknown tunnel/)
+  })
+
+  test('non-interactive set rejects http externalUrl with a clean reason', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'github-webhook',
+          provider: 'external',
+          for: { kind: 'channel', name: 'github' },
+          externalUrl: 'https://hook.example.com',
+        },
+      ],
+    })
+
+    const result = await tunnel.runTunnelSetFlow(cwd, {
+      name: 'github-webhook',
+      externalUrl: 'http://insecure.example.com',
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/https:\/\//)
+    // typeclaw.json must be untouched on failure (the strict-gate semantics
+    // documented in runTunnelAddFlow).
+    const config = await readConfig(cwd)
+    expect(config.tunnels[0].externalUrl).toBe('https://hook.example.com')
+  })
+
+  test('non-interactive set provider=external without --external-url fails (no interactive prompt)', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'github-webhook',
+          provider: 'cloudflare-quick',
+          for: { kind: 'channel', name: 'github' },
+        },
+      ],
+    })
+
+    const result = await tunnel.runTunnelSetFlow(cwd, {
+      name: 'github-webhook',
+      provider: 'external',
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/--external-url/)
+    const config = await readConfig(cwd)
+    expect(config.tunnels[0].provider).toBe('cloudflare-quick')
+  })
+
+  test('interactive set picks externalUrl field and rewrites it', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'manual-demo',
+          provider: 'external',
+          for: { kind: 'manual' },
+          upstreamPort: 5173,
+          externalUrl: 'https://old.example.com',
+        },
+      ],
+    })
+
+    const result = await tunnel.runTunnelSetFlow(
+      cwd,
+      { name: 'manual-demo' },
+      {
+        selectProvider: async () => 'external',
+        selectOwner: async () => 'manual',
+        selectSetField: async () => 'externalUrl',
+        text: async () => 'https://new.example.com',
+      },
+    )
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.value.externalUrl).toBe('https://new.example.com')
+  })
+
+  test('set refuses cleanly when typeclaw.json is schema-invalid', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'typeclaw-tunnel-broken-'))
+    await writeFile(join(cwd, 'typeclaw.json'), JSON.stringify({ models: { default: 'not-a-known-model' } }), 'utf8')
+
+    const result = await tunnel.runTunnelSetFlow(cwd, {
+      name: 'github-webhook',
+      externalUrl: 'https://new.example.com',
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/typeclaw\.json is invalid/)
   })
 })
 
