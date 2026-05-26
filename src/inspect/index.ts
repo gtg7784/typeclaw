@@ -16,6 +16,8 @@ export { replayJsonl } from './replay'
 export { streamLive } from './live'
 export { parseDuration, parseFilter } from './types'
 export type { InspectCategory, InspectEvent, InspectFilter } from './types'
+export { runInspectLoop } from './loop'
+export type { RunInspectLoopOptions } from './loop'
 
 export type RunInspectOptions = {
   agentDir: string
@@ -29,6 +31,10 @@ export type RunInspectOptions = {
   stderr: (line: string) => void
   liveSource?: LiveSourceFactory
   signal?: AbortSignal
+  // Aborting escSignal (and only escSignal) returns escToPicker=true so a
+  // caller-side loop can re-open the picker; signal still means process exit.
+  escSignal?: AbortSignal
+  liveHint?: string
 }
 
 export type SelectSession = (sessions: SessionSummary[]) => Promise<SessionSummary | null>
@@ -40,7 +46,9 @@ export type LiveSourceFactory = (opts: {
   onSubscribed?: (sessionLive: boolean) => void
 }) => AsyncIterable<InspectEvent>
 
-export type RunInspectResult = { ok: true; exitCode: 0 } | { ok: false; exitCode: number; reason: string }
+export type RunInspectResult =
+  | { ok: true; exitCode: 0; escToPicker?: boolean }
+  | { ok: false; exitCode: number; reason: string }
 
 export async function runInspect(opts: RunInspectOptions): Promise<RunInspectResult> {
   const filterResult = parseFilter(opts.filter)
@@ -59,7 +67,7 @@ export async function runInspect(opts: RunInspectOptions): Promise<RunInspectRes
   const summary = await chooseSession(opts, sessionsDir, sinceMs)
   if (!summary.ok) return summary
 
-  await streamSession({
+  const streamResult = await streamSession({
     summary: summary.summary,
     filter,
     sinceMs,
@@ -69,7 +77,10 @@ export async function runInspect(opts: RunInspectOptions): Promise<RunInspectRes
     stderr: opts.stderr,
     ...(opts.liveSource !== undefined ? { liveSource: opts.liveSource } : {}),
     ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+    ...(opts.escSignal !== undefined ? { escSignal: opts.escSignal } : {}),
+    ...(opts.liveHint !== undefined ? { liveHint: opts.liveHint } : {}),
   })
+  if (streamResult.escToPicker) return { ok: true, exitCode: 0, escToPicker: true }
   return { ok: true, exitCode: 0 }
 }
 
@@ -132,7 +143,9 @@ async function streamSession(opts: {
   stderr: (line: string) => void
   liveSource?: LiveSourceFactory
   signal?: AbortSignal
-}): Promise<void> {
+  escSignal?: AbortSignal
+  liveHint?: string
+}): Promise<{ escToPicker: boolean }> {
   if (!opts.json) writeHeader(opts.summary, opts.color, opts.stdout)
   const emit = (event: InspectEvent): void => {
     if (opts.sinceMs !== undefined && event.ts > 0 && event.ts < opts.sinceMs) return
@@ -144,20 +157,26 @@ async function streamSession(opts: {
     }
   }
 
+  const escAborted = (): boolean => opts.escSignal?.aborted === true
+
   for await (const event of replayJsonl(opts.summary.sessionFile, { onWarn: opts.stderr })) {
+    if (escAborted()) return { escToPicker: true }
     emit(event)
   }
 
   if (opts.liveSource === undefined) {
     if (!opts.json) opts.stdout('─── end of transcript ───')
-    return
+    return { escToPicker: escAborted() }
   }
 
+  if (escAborted()) return { escToPicker: true }
+
+  const combinedSignal = combineSignals(opts.signal, opts.escSignal)
   let sessionLive = false
   const liveIter = opts.liveSource({
     sessionId: opts.summary.sessionId,
     ...(opts.sinceMs !== undefined ? { sinceMs: opts.sinceMs } : {}),
-    ...(opts.signal !== undefined ? { signal: opts.signal } : {}),
+    ...(combinedSignal !== undefined ? { signal: combinedSignal } : {}),
     onSubscribed: (live) => {
       sessionLive = live
     },
@@ -170,6 +189,9 @@ async function streamSession(opts: {
         opts.stdout(
           divider(opts.color, sessionLive ? '─── live ───' : '─── live (session not in registry; broadcasts only) ───'),
         )
+        if (opts.liveHint !== undefined && opts.liveHint !== '') {
+          opts.stdout(divider(opts.color, opts.liveHint))
+        }
         liveAnnounced = true
       }
       emit(event)
@@ -178,6 +200,21 @@ async function streamSession(opts: {
     opts.stderr(`live tail ended: ${err instanceof Error ? err.message : String(err)}`)
   }
   if (!opts.json) opts.stdout('─── end of transcript ───')
+  return { escToPicker: escAborted() && opts.signal?.aborted !== true }
+}
+
+function combineSignals(a: AbortSignal | undefined, b: AbortSignal | undefined): AbortSignal | undefined {
+  if (a === undefined) return b
+  if (b === undefined) return a
+  if (a.aborted) return a
+  if (b.aborted) return b
+  const ctrl = new AbortController()
+  const onAbort = (): void => {
+    ctrl.abort()
+  }
+  a.addEventListener('abort', onAbort, { once: true })
+  b.addEventListener('abort', onAbort, { once: true })
+  return ctrl.signal
 }
 
 function divider(color: boolean, text: string): string {

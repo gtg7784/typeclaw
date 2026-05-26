@@ -331,6 +331,58 @@ describe('runInspect — live tail (when liveSource is provided)', () => {
     expect(sink.out.find((l) => l.includes('─── live'))).toBeUndefined()
     expect(sink.out.at(-1)!).toContain('end of transcript')
   })
+
+  test('escSignal abort sets escToPicker=true; process signal abort does not', async () => {
+    await seedSession(`a_${ID_LIVET}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    const escCtrl = new AbortController()
+    const sink = captureSink()
+    async function* live(signal: AbortSignal | undefined): AsyncGenerator<import('./types').InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'tick' } }
+      await new Promise<void>((resolve) => {
+        if (signal === undefined || signal.aborted) return resolve()
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    }
+    queueMicrotask(() => escCtrl.abort())
+    const result = await runInspect({
+      agentDir,
+      sessionIdOrPrefix: ID_LIVET,
+      color: false,
+      selectSession: neverPick,
+      liveSource: (o) => live(o.signal),
+      escSignal: escCtrl.signal,
+      ...sink.push,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.escToPicker).toBe(true)
+  })
+
+  test('signal abort during live stream does NOT set escToPicker (process-exit path)', async () => {
+    await seedSession(`a_${ID_LIVET}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    const sigCtrl = new AbortController()
+    const sink = captureSink()
+    async function* live(signal: AbortSignal | undefined): AsyncGenerator<import('./types').InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'tick' } }
+      await new Promise<void>((resolve) => {
+        if (signal === undefined || signal.aborted) return resolve()
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    }
+    queueMicrotask(() => sigCtrl.abort())
+    const result = await runInspect({
+      agentDir,
+      sessionIdOrPrefix: ID_LIVET,
+      color: false,
+      selectSession: neverPick,
+      liveSource: (o) => live(o.signal),
+      signal: sigCtrl.signal,
+      ...sink.push,
+    })
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('unreachable')
+    expect(result.escToPicker).toBeFalsy()
+  })
 })
 
 describe('runInspect — picker path', () => {

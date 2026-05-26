@@ -2,10 +2,12 @@ import { defineCommand } from 'citty'
 
 import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir } from '@/init'
-import { runInspect, streamLive, type LiveSourceFactory, type SessionSummary } from '@/inspect'
+import { runInspectLoop, streamLive, type LiveSourceFactory, type SessionSummary } from '@/inspect'
 import { originLabel, shortSessionId } from '@/inspect/label'
 
 import { cancel, c, errorLine, isCancel } from './ui'
+
+const ESC_LISTEN_DELAY_MS = 50
 
 export const inspectCommand = defineCommand({
   meta: {
@@ -43,20 +45,34 @@ export const inspectCommand = defineCommand({
     const isJson = args.json === true
     const liveSource = isJson ? undefined : await buildLiveSource(cwd)
     const signal = installSigintAbort()
+    const escListener = isJson ? null : createEscListener()
+    const liveHint = escListener === null ? undefined : escHintLine(color)
 
-    const result = await runInspect({
+    const result = await runInspectLoop({
       agentDir: cwd,
       ...(sessionArg !== undefined ? { sessionIdOrPrefix: sessionArg } : {}),
       ...(filterArg !== undefined ? { filter: filterArg } : {}),
       ...(sinceArg !== undefined ? { since: sinceArg } : {}),
       json: isJson,
       color,
-      selectSession: clackSelect,
+      selectSession: (sessions) => {
+        escListener?.pause()
+        return clackSelect(sessions).finally(() => {
+          escListener?.resume()
+        })
+      },
       ...(liveSource !== undefined ? { liveSource } : {}),
       signal,
+      newEscSignal: () => {
+        if (escListener === null) return new AbortController().signal
+        return escListener.armForStream()
+      },
+      ...(liveHint !== undefined ? { liveHint } : {}),
       stdout: (line) => process.stdout.write(`${line}\n`),
       stderr: (line) => process.stderr.write(`${line}\n`),
     })
+
+    escListener?.stop()
 
     if (!result.ok) {
       process.stderr.write(`${errorLine(result.reason)}\n`)
@@ -95,6 +111,90 @@ function installSigintAbort(): AbortSignal {
   process.once('SIGINT', onSig)
   process.once('SIGTERM', onSig)
   return ctrl.signal
+}
+
+type EscListener = {
+  armForStream: () => AbortSignal
+  pause: () => void
+  resume: () => void
+  stop: () => void
+}
+
+function createEscListener(): EscListener | null {
+  const stdin = process.stdin
+  if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') return null
+
+  let currentCtrl: AbortController | null = null
+  let pendingEsc: ReturnType<typeof setTimeout> | null = null
+  let active = false
+
+  const onData = (chunk: Buffer): void => {
+    if (chunk.length === 0) return
+    const first = chunk[0]
+    if (first === 0x03) {
+      process.kill(process.pid, 'SIGINT')
+      return
+    }
+    if (chunk.length === 1 && first === 0x1b) {
+      if (pendingEsc !== null) clearTimeout(pendingEsc)
+      pendingEsc = setTimeout(() => {
+        pendingEsc = null
+        currentCtrl?.abort()
+      }, ESC_LISTEN_DELAY_MS)
+      return
+    }
+    if (pendingEsc !== null) {
+      clearTimeout(pendingEsc)
+      pendingEsc = null
+    }
+  }
+
+  const start = (): void => {
+    if (active) return
+    active = true
+    stdin.setRawMode(true)
+    stdin.resume()
+    stdin.on('data', onData)
+  }
+  const stop = (): void => {
+    if (!active) return
+    active = false
+    stdin.off('data', onData)
+    try {
+      stdin.setRawMode(false)
+    } catch {
+      /* terminal already torn down */
+    }
+    stdin.pause()
+    if (pendingEsc !== null) {
+      clearTimeout(pendingEsc)
+      pendingEsc = null
+    }
+  }
+
+  return {
+    armForStream: () => {
+      currentCtrl = new AbortController()
+      start()
+      return currentCtrl.signal
+    },
+    pause: () => {
+      stop()
+    },
+    resume: () => {
+      currentCtrl = new AbortController()
+      start()
+    },
+    stop: () => {
+      currentCtrl = null
+      stop()
+    },
+  }
+}
+
+function escHintLine(color: boolean): string {
+  const text = '(press esc to return to session list)'
+  return color ? `\u001b[2m${text}\u001b[0m` : text
 }
 
 function useColor(): boolean {
