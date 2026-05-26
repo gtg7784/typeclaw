@@ -21,8 +21,8 @@ export type PendingClaimRegistry = {
   cancel: (code: string) => boolean
   current: () => PendingClaim | null
   // Snapshot of consumption result without actually committing the grant.
-  // The router calls this on every DM-shaped inbound; the grant only fires
-  // when the result is 'consumed'.
+  // The router calls this on every claim-code-bearing inbound; the grant
+  // only fires when the result is 'consumed'.
   tryConsume: (
     code: string,
     origin: PartialChannelOrigin,

@@ -60,13 +60,13 @@ describe('ClaimController', () => {
     })
 
     expect(outcome.kind).toBe('consumed')
-    expect(grants).toEqual([{ role: 'owner', rule: 'slack:T0123 author:U_ME' }])
+    expect(grants).toEqual([{ role: 'owner', rule: 'slack:* author:U_ME' }])
     expect(replaceArg).toBe(provided)
     expect(events).toHaveLength(1)
     expect(events[0]!.kind).toBe('completed')
     if (events[0]!.kind === 'completed') {
       expect(events[0]!.role).toBe('owner')
-      expect(events[0]!.matchRule).toBe('slack:T0123 author:U_ME')
+      expect(events[0]!.matchRule).toBe('slack:* author:U_ME')
       expect(events[0]!.authorId).toBe('U_ME')
     }
   })

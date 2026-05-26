@@ -1,17 +1,17 @@
 import { randomBytes } from 'node:crypto'
 
 // Role-claim codes are short, human-typeable tokens the operator sends from
-// their host CLI to the bot via a channel DM to prove ownership of that
-// channel identity. Shape: `claim-XXXX-YYYY` where each block is 4 chars
-// from a Crockford-style base32 alphabet (0-9 + A-Z minus I, L, O, U to
-// dodge OCR-confusable / profane shapes). 8 chars * 5 bits = 40 bits of
-// entropy, which is overkill for a TTL'd in-memory window but cheap to
-// display and dictate over voice.
+// their host CLI to the bot in any chat (DM, group, channel) to prove
+// ownership of that channel identity. Shape: `claim-XXXX-YYYY` where each
+// block is 4 chars from a Crockford-style base32 alphabet (0-9 + A-Z minus
+// I, L, O, U to dodge OCR-confusable / profane shapes). 8 chars * 5 bits =
+// 40 bits of entropy, which is overkill for a TTL'd in-memory window but
+// cheap to display and dictate over voice.
 //
 // The `claim-` prefix lets the channel router recognize potential claim
-// attempts in a DM body without scanning the whole text for hex blocks,
-// and distinguishes claim DMs from normal first-message text like "hi"
-// which would otherwise need a regex of its own to disambiguate.
+// attempts in inbound text without scanning the whole body for hex blocks,
+// and distinguishes claim messages from normal first-message text like
+// "hi" which would otherwise need a regex of its own to disambiguate.
 
 export const CLAIM_CODE_PREFIX = 'claim-'
 

@@ -10,8 +10,9 @@ import { createPendingClaimRegistry, type PendingClaim, type PendingClaimRegistr
 //
 //   1. The host CLI (typeclaw role claim) opens a WS and sends `claim_start`.
 //   2. The WS server forwards that to controller.startClaim().
-//   3. The channel router's claimHandler (also wired here) intercepts DMs
-//      bearing the code and calls controller.tryConsumeInbound().
+//   3. The channel router's claimHandler (also wired here) intercepts any
+//      inbound bearing the code (DM, group, or channel) and calls
+//      controller.tryConsumeInbound().
 //   4. On consume, the controller writes to typeclaw.json#roles.<role>.match
 //      via grantRole, then reloads the live PermissionService so the new
 //      match rule takes effect without a container restart.
