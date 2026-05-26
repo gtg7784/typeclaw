@@ -2,9 +2,10 @@ import { afterEach, describe, expect, test } from 'bun:test'
 
 import type { Server } from 'bun'
 
+import { CONTAINER_PORT } from '@/container'
 import type { ClientMessage, CronListEntryPayload, ServerMessage } from '@/shared'
 
-import { fetchCronList } from './bridge'
+import { fetchCronList, resolveInContainerUrl } from './bridge'
 
 let server: Server<undefined> | null = null
 
@@ -113,5 +114,61 @@ describe('cron list bridge', () => {
 
     const result = await fetchCronList({ cwd: process.cwd(), url: `ws://127.0.0.1:${port}`, timeoutMs: 300 })
     expect(result.kind).toBe('timeout')
+  })
+})
+
+describe('resolveInContainerUrl', () => {
+  test('returns null when TYPECLAW_CONTAINER_NAME is unset (host stage)', () => {
+    expect(resolveInContainerUrl({})).toBeNull()
+    expect(resolveInContainerUrl({ TYPECLAW_TUI_TOKEN: 'tok' })).toBeNull()
+  })
+
+  test('builds a loopback URL on CONTAINER_PORT when running inside the container', () => {
+    const url = resolveInContainerUrl({ TYPECLAW_CONTAINER_NAME: 'agent', TYPECLAW_TUI_TOKEN: 'tok' })
+    expect(url).toBe(`ws://127.0.0.1:${CONTAINER_PORT}/?token=tok`)
+  })
+
+  test('omits the token query when TYPECLAW_TUI_TOKEN is unset or empty', () => {
+    expect(resolveInContainerUrl({ TYPECLAW_CONTAINER_NAME: 'agent' })).toBe(`ws://127.0.0.1:${CONTAINER_PORT}/`)
+    expect(resolveInContainerUrl({ TYPECLAW_CONTAINER_NAME: 'agent', TYPECLAW_TUI_TOKEN: '' })).toBe(
+      `ws://127.0.0.1:${CONTAINER_PORT}/`,
+    )
+  })
+})
+
+describe('fetchCronList in-container path', () => {
+  test('uses the env-derived in-container URL when no --url is given', async () => {
+    // The mutation check: if dial() ignored the injected env and fell
+    // back to resolveHostPort (the broken pre-fix behavior), it would
+    // try to shell out to docker — which on this host returns the
+    // configured port from typeclaw.json, NOT 127.0.0.1:CONTAINER_PORT.
+    // We can't bind on CONTAINER_PORT in test (collisions), so we assert
+    // that an in-container `fetchCronList` call dials CONTAINER_PORT
+    // specifically by inspecting the unreachable error.
+    const result = await fetchCronList({
+      cwd: process.cwd(),
+      timeoutMs: 200,
+      env: { TYPECLAW_CONTAINER_NAME: 'agent', TYPECLAW_TUI_TOKEN: 'secret-token-value' },
+    })
+    expect(result.kind).toBe('unreachable')
+    if (result.kind !== 'unreachable') throw new Error('expected unreachable result')
+    expect(result.reason).toContain(`127.0.0.1:${CONTAINER_PORT}`)
+    expect(result.reason).toContain('token=%3Credacted%3E')
+    expect(result.reason).not.toContain('secret-token-value')
+  })
+
+  test('explicit --url wins over the env-derived in-container URL', async () => {
+    const port = startFakeAgent((msg) => {
+      if (msg.type !== 'cron_list') return null
+      return { type: 'cron_list_result', requestId: msg.requestId, result: { ok: true, jobs: [], nowMs: 0 } }
+    })
+
+    const result = await fetchCronList({
+      cwd: process.cwd(),
+      url: `ws://127.0.0.1:${port}`,
+      timeoutMs: HAPPY_PATH_TIMEOUT_MS,
+      env: { TYPECLAW_CONTAINER_NAME: 'agent', TYPECLAW_TUI_TOKEN: 'tok' },
+    })
+    expect(result.kind).toBe('ok')
   })
 })
