@@ -7,8 +7,23 @@ import type { SecuritySeverity } from '../permissions'
 import { ACKNOWLEDGE_GUARDS, type SecurityBlock, isGuardAcknowledged } from '../policy'
 
 export const GUARD_CRON_PROMOTION = 'cronPromotion'
-// Classified `high` (audience-leak axis, adapted — same reasoning as
-// `rolePromotion`).
+// Classified `medium` (silent-attack axis). Originally `high`; reclassified
+// for the same reason as `rolePromotion`: the deferred-execution surface
+// is still operator-reviewable before the job fires. `cron.json` is
+// force-committed by the auto-backup plugin, the change appears in
+// `git log` and backup commits, and the cron consumer dispatches by
+// schedule — there is wall-clock time between the privileged write and
+// the privileged execution during which the operator can revert or
+// disable. Bypass produces operator-reviewable state, not direct
+// audience-leak.
+//
+// Net effect on the role-tower model: owner and trusted both bypass
+// without ack; member and guest still get blocked. The defense for
+// trusted depends on backup-commit review discipline — same tradeoff
+// as `rolePromotion`. Operators who want to keep this at high for
+// trusted can subtract: replace `roles.trusted.permissions[]` with an
+// explicit list that omits `security.bypass.medium`, then add narrower
+// per-guard medium grants as needed.
 //
 // Cron is the deferred-execution sibling of `roles`. Every cron job
 // carries a `scheduledByRole` field that the runtime stamps into the
@@ -17,12 +32,14 @@ export const GUARD_CRON_PROMOTION = 'cronPromotion'
 // table"). The `parseCronFile` boot gate rejects entries without
 // `scheduledByRole`, but it accepts any role name the file declares.
 //
-// Concrete breach pattern: a `member`-role agent that can `write`
-// `cron.json` authors a brand-new job with `"scheduledByRole": "owner"`
-// and a prompt that does whatever the agent's tool surface allows when
-// running as owner. The cron consumer fires it on schedule; the firing
-// session resolves to `owner` because that role name exists in the role
-// table. The agent has laundered itself into owner via the schedule.
+// Concrete breach pattern blocked at `medium`: a `member`-role agent
+// that can `write` `cron.json` authors a brand-new job with
+// `"scheduledByRole": "owner"` and a prompt that does whatever the
+// agent's tool surface allows when running as owner. The cron consumer
+// fires it on schedule; the firing session resolves to `owner` because
+// that role name exists in the role table. The agent has laundered
+// itself into owner via the schedule. This guard blocks the first step
+// — member does not carry `bypass.medium`.
 //
 // Same two-step shape as `gitRemoteTainted`: "do a privileged write
 // now, run the privileged thing later." This guard blocks the first
@@ -66,7 +83,7 @@ export const GUARD_CRON_PROMOTION = 'cronPromotion'
 // is treated as new and flagged. The only false positive is "operator
 // authored a fresh `cron.json` with privileged jobs," which they
 // acknowledge in the same call.
-export const GUARD_CRON_PROMOTION_SEVERITY: SecuritySeverity = 'high'
+export const GUARD_CRON_PROMOTION_SEVERITY: SecuritySeverity = 'medium'
 
 export type CronPromotionFinding =
   | { kind: 'job-added'; id: string; scheduledByRole: string }
