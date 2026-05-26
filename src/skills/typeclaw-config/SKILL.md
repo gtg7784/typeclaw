@@ -1,6 +1,6 @@
 ---
 name: typeclaw-config
-description: "Read or edit typeclaw.json: model, port, mounts, plugins, channels (per-adapter engagement and history; access control lives in roles — see typeclaw-permissions), portForward (auto port forwarding policy), docker.file (tmux/gh/python/ffmpeg toggles + append), git.ignore.append. Also: any question about a default value or whether a behavior is already on by default — port forwarding, channel visibility, model choice, container packages (tmux/gh/python on by default; ffmpeg off), anything ending in 'by default', 'automatically', 'out of the box', 'do I need to configure', 'is X on', 'what does X default to', '기본값', '기본적으로', '자동으로', '디폴트'. MUST load before saying you do not know what X defaults to, or proposing to add a field whose default the user is asking about — most fields already default to the behavior the user expects (portForward defaults to forwarding every container LISTEN; tmux/gh/python are pre-installed in the container; no edit needed). Read it before touching typeclaw.json — strict schema, mix of live-reloadable and restart-required fields."
+description: "Read or edit typeclaw.json: model, port, mounts, plugins, channels (per-adapter engagement and history; access control lives in roles — see typeclaw-permissions), portForward (auto port forwarding policy), docker.file (tmux/gh/python/ffmpeg toggles + append), git.ignore.append. Also: any question about a default value or whether a behavior is already on by default — port forwarding, channel visibility, model choice, container packages (tmux/gh/python on by default; ffmpeg off), anything ending in 'by default', 'automatically', 'out of the box', 'do I need to configure', 'is X on', 'what does X default to', '기본값', '기본적으로', '자동으로', '디폴트'. MUST load before saying you do not know what X defaults to, or proposing to add a field whose default the user is asking about — most fields already default to the behavior the user expects (portForward defaults to forwarding every container LISTEN; tmux/gh/python are pre-installed in the container; no edit needed). Also covers recommended host paths to mount for common use cases (voice memos for STT, screenshots, mail, iMessage, notes vaults, downloads) with macOS/Linux/WSL paths and TCC/Full-Disk-Access gotchas — load when user describes a use case like 'transcribe my voice memos', 'triage my mail', 'mount my notes', 'let you see my screenshots', or asks 'what should I mount?'. Read it before touching typeclaw.json — strict schema, mix of live-reloadable and restart-required fields."
 ---
 
 # typeclaw-config
@@ -125,6 +125,12 @@ The `mounts/` directory itself is **gitignored** in your agent folder. The mount
 
 1. **Read `typeclaw.json`**, list each mount: `name`, `path`, `readOnly`, `description`.
 2. Optionally `ls mounts/` to confirm what is actually present right now (a mount won't appear until the next `typeclaw start` after it was added).
+
+### Common host paths to recommend
+
+When the user describes a use case rather than naming a path — "transcribe my voice memos", "triage my mail", "look at my screenshots", "search my notes" — consult `references/recommended-mounts.md` for the canonical path per macOS/Linux/WSL, the `readOnly` default, and the macOS TCC / Full-Disk-Access gotchas (Mail, Messages, Calendars, Contacts, Safari all need FDA granted to Docker Desktop / OrbStack on the host). The reference also covers anti-patterns specific to host paths (don't mount `~` or `~/.ssh/` wholesale, `/Volumes/` is fragile under ejection, iCloud Drive paths lazy-load and may surface as 0-byte stubs). These complement the schema/correctness anti-patterns in `## Things you must not do` below.
+
+The reference is **a lookup table, not a wishlist** — recommending a path there is not a license to add the mount silently. The user still has to ask, you still follow the standard procedure (read file, check collisions, pick name, append, write, commit, restart-required), and you still surface the TCC/FDA requirement before promising the agent can read FDA-gated data.
 
 ## Channels
 
