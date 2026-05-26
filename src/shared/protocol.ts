@@ -57,6 +57,12 @@ export type InspectClientMessage = {
 
 export type InspectFramePayload =
   | { kind: 'text_delta'; sessionId: string; delta: string }
+  // Reasoning trace from the model, streamed as deltas like text. `thinking_end`
+  // closes a thinking block; `text` is the joined deltas (empty when redacted).
+  // `redacted: true` means the upstream provider hid the content behind a
+  // safety filter and only the opaque continuation payload survives.
+  | { kind: 'thinking_delta'; sessionId: string; delta: string }
+  | { kind: 'thinking_end'; sessionId: string; text: string; redacted?: boolean }
   | { kind: 'tool_start'; sessionId: string; toolCallId: string; name: string; args: unknown }
   | {
       kind: 'tool_end'

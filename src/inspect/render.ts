@@ -34,6 +34,8 @@ function renderTag(event: InspectEvent, opts: RenderOptions): string {
       return tint(opts, 'cyan', padEnd('user', 9))
     case 'assistant':
       return tint(opts, 'green', padEnd('assist', 9))
+    case 'thinking':
+      return tint(opts, 'gray', padEnd('think', 9))
     case 'tool':
       return tint(opts, 'yellow', padEnd(event.phase === 'start' ? 'tool ▸' : 'tool ◂', 9))
     case 'error':
@@ -57,6 +59,11 @@ function renderBody(event: InspectEvent, opts: RenderOptions): string {
       return truncate(singleLine(event.text), opts.maxTextLength ?? DEFAULT_MAX_TEXT)
     case 'assistant':
       return truncate(singleLine(event.text), opts.maxTextLength ?? DEFAULT_MAX_TEXT)
+    case 'thinking': {
+      const prefix = event.redacted === true ? `${tint(opts, 'dim', '[redacted]')} ` : ''
+      const body = event.text === '' ? '' : truncate(singleLine(event.text), opts.maxTextLength ?? DEFAULT_MAX_TEXT)
+      return `${prefix}${tint(opts, 'dim', body)}`
+    }
     case 'tool': {
       if (event.phase === 'start') {
         return `${event.name}(${renderArgs(event.args)})`

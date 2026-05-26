@@ -113,6 +113,7 @@ function* assistantEvents(
   ts: number,
   pending: Map<string, { name: string; startTs: number }>,
 ): Iterable<InspectEvent> {
+  yield* readThinkingEvents(message.content, ts)
   const text = readTextContent(message.content)
   if (text !== null && text !== '') {
     const ev: InspectEvent = {
@@ -215,6 +216,19 @@ function readUsage(value: unknown): {
     cacheWrite: numberOr(u.cacheWrite, 0),
     totalTokens: numberOr(u.totalTokens, 0),
     cost: numberOr(cost?.total, 0),
+  }
+}
+
+function* readThinkingEvents(content: unknown, ts: number): Iterable<InspectEvent> {
+  if (!Array.isArray(content)) return
+  for (const block of content) {
+    if (typeof block !== 'object' || block === null) continue
+    const b = block as Record<string, unknown>
+    if (b.type !== 'thinking') continue
+    const text = typeof b.thinking === 'string' ? b.thinking : ''
+    const redacted = b.redacted === true
+    if (text === '' && !redacted) continue
+    yield { cat: 'thinking', ts, text, ...(redacted ? { redacted: true } : {}) }
   }
 }
 
