@@ -29,7 +29,11 @@ import {
   saveChannelSessions,
   type ChannelSessionRecord,
 } from './persistence'
-import type { ChannelAdapterConfig } from './schema'
+import {
+  DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS,
+  QUOTED_REPLY_EXCERPT_MAX_CHARS,
+  type ChannelAdapterConfig,
+} from './schema'
 import type {
   ChannelHistoryMessage,
   ChannelKey,
@@ -302,6 +306,15 @@ type LiveSession = {
   // future hard cap without picking a threshold out of thin air.
   sendTimestamps: Map<string, number[]>
   successfulChannelSends: number
+  // Captured by drain() at batch dequeue; read+cleared by send() on the
+  // first tool-source send of the turn. The anchor decision (delay
+  // threshold + intervening-observed check) is evaluated at SEND time
+  // against this snapshot — not at drain time — because the relevant
+  // signal is how long the user waited from inbound to seeing the reply
+  // land, which only the send-side clock knows. Cleared after first
+  // consumption so multi-part replies anchor only on chunk 1. A new
+  // batch overwrites unconditionally.
+  pendingQuoteCandidate: QuoteAnchorCandidate | null
   // Loop-guard state. See PEER_BOT_TURNS_WINDOW_MS / MAX_* constants
   // above. Updated in route() on every engaged peer-bot inbound, reset on
   // any human inbound. The two axes (window ring buffer + since-human
@@ -913,6 +926,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         lastSentText: new Map(),
         sendTimestamps: new Map(),
         successfulChannelSends: 0,
+        pendingQuoteCandidate: null,
         recentEngagedPeerBotTurns: [],
         consecutiveEngagedPeerBotTurns: 0,
         loopGuardActive: false,
@@ -1213,6 +1227,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.consecutiveSends.clear()
           live.lastSentText.clear()
+          live.pendingQuoteCandidate = captureQuoteCandidate(batch, observed)
         } else if (live.lastTurnAuthorId !== null) {
           // Reminder-only turn (batch.length === 0, reminders.length > 0):
           // restore the author identity from the prior turn so author-
@@ -1695,6 +1710,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     })
     const live = liveSessions.get(keyId)
     const sendKey = consecutiveSendKey(msg.chat, msg.thread)
+    // Tool-source sends consume the captured quote candidate exactly
+    // once per turn — the decision (delay threshold + intervening-
+    // observed check) runs HERE against the live clock so the relevant
+    // signal is real wall-time between inbound and reply landing, not
+    // drain-vs-send timing artifacts. System sources (recovery, role-
+    // claim) skip so they can't accidentally swallow the candidate
+    // before the model's own first reply lands. Even when the decision
+    // returns null (delay below threshold, nothing intervened), the
+    // candidate is cleared — a multi-part reply that crosses the
+    // threshold mid-flight must not retroactively anchor chunk 2.
+    if (live && source === 'tool' && live.pendingQuoteCandidate !== null) {
+      const anchor = decideQuoteAnchor(live.pendingQuoteCandidate, now(), options.configForAdapter(msg.adapter))
+      if (anchor !== null) msg = { ...msg, text: prependQuoteAnchor(msg.text ?? '', anchor) }
+      live.pendingQuoteCandidate = null
+    }
     const text = normalizeSendText(msg.text)
 
     // Central enforcement. Tool-initiated sends are subject to two policies:
@@ -2230,6 +2260,95 @@ function formatAuthorLine(
   const tag = authorIsBot ? ' [bot]' : ''
   const stamp = ts > 0 ? `[${new Date(ts).toISOString()}] ` : ''
   return `${stamp}<@${authorId}> (${authorName})${tag}: ${text}`
+}
+
+export type QuoteAnchorSource = {
+  authorName: string
+  text: string
+}
+
+// Renders the single-line `> @name: excerpt` blockquote prepended to
+// outbound replies when the router decides the reply needs an anchor.
+// Collapses newlines to spaces so a multi-line user message renders on
+// one quoted line (markdown blockquote semantics: a blank line ends the
+// quote, and `> foo\nbar` would split the quote and the reply); strips
+// existing leading `>` so a quote-of-a-quote stays single-level. Empty
+// inbound text (mention-only inbounds like `<@bot>`) falls back to a
+// generic marker so the user still sees "the bot saw your ping".
+export function renderQuoteAnchor(source: QuoteAnchorSource): string {
+  const collapsed = source.text
+    .replace(/\s+/g, ' ')
+    .replace(/^>+\s*/, '')
+    .trim()
+  const excerpt =
+    collapsed === ''
+      ? '(no text)'
+      : collapsed.length > QUOTED_REPLY_EXCERPT_MAX_CHARS
+        ? `${collapsed.slice(0, QUOTED_REPLY_EXCERPT_MAX_CHARS - 1)}…`
+        : collapsed
+  return `> @${source.authorName}: ${excerpt}`
+}
+
+export function prependQuoteAnchor(replyText: string, source: QuoteAnchorSource): string {
+  const anchor = renderQuoteAnchor(source)
+  if (replyText === '') return anchor
+  return `${anchor}\n${replyText}`
+}
+
+type QuoteAnchorBatchEntry = {
+  text: string
+  authorName: string
+  authorIsBot: boolean
+  receivedAt: number
+}
+
+type QuoteAnchorObservedEntry = {
+  receivedAt: number
+}
+
+export type QuoteAnchorCandidate = {
+  source: QuoteAnchorSource
+  primaryReceivedAt: number
+  hadInterveningObserved: boolean
+}
+
+// Snapshot the primary inbound + observed-buffer state at drain time so
+// the send-side decision has the data it needs without holding a
+// reference to the batch arrays. Returns null when there's nothing
+// anchorable (empty batch, primary is a bot).
+export function captureQuoteCandidate(
+  batch: readonly QuoteAnchorBatchEntry[],
+  observed: readonly QuoteAnchorObservedEntry[],
+): QuoteAnchorCandidate | null {
+  if (batch.length === 0) return null
+  const primary = batch[batch.length - 1]!
+  if (primary.authorIsBot) return null
+  const hadInterveningObserved = observed.some((o) => o.receivedAt >= primary.receivedAt)
+  return {
+    source: { authorName: primary.authorName, text: primary.text },
+    primaryReceivedAt: primary.receivedAt,
+    hadInterveningObserved,
+  }
+}
+
+// Send-time decision: given a captured candidate and the current clock,
+// returns the source to anchor against or null. Skips when:
+//   - quotedReply is disabled in config
+//   - delay is under threshold AND no observed messages came between
+//     primary inbound and now (the "felt instantaneous" path)
+// A null candidate (no batch yet, or batch was bot-only) always skips.
+export function decideQuoteAnchor(
+  candidate: QuoteAnchorCandidate | null,
+  nowMs: number,
+  adapterConfig: ChannelAdapterConfig | undefined,
+): QuoteAnchorSource | null {
+  if (candidate === null) return null
+  const config = adapterConfig?.quotedReply
+  if (config !== undefined && config.enabled === false) return null
+  const threshold = config?.queueDelayMs ?? DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS
+  const delay = nowMs - candidate.primaryReceivedAt
+  if (delay < threshold && !candidate.hadInterveningObserved) return null
+  return candidate.source
 }
 
 type Sliced = { kind: 'message'; message: ChannelHistoryMessage } | { kind: 'elision'; elidedCount: number }

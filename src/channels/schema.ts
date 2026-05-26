@@ -87,6 +87,26 @@ const historySchema = z
     },
   })
 
+// When the agent's first send of a turn lands ≥ this many ms after the
+// inbound was received, OR there were intervening observed messages
+// between the inbound and the reply, the router prepends a `> @author:
+// ...` blockquote line referencing the inbound so the user can see which
+// message the reply is anchored to even after the channel has scrolled.
+// 10s is the empirical "felt instantaneous" ceiling — anything faster
+// reads as real-time and needs no anchor.
+export const DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS = 10_000
+
+// Long enough to disambiguate; short enough that a multi-paragraph user
+// message doesn't visually dominate the reply.
+export const QUOTED_REPLY_EXCERPT_MAX_CHARS = 100
+
+const quotedReplySchema = z
+  .object({
+    enabled: z.boolean().default(true),
+    queueDelayMs: z.number().int().min(0).default(DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS),
+  })
+  .default({ enabled: true, queueDelayMs: DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS })
+
 // Deliberately non-strict: a stale on-disk file may still carry the
 // legacy `allow` field (`migrateLegacyConfigShape` lifts it into
 // `roles.member.match[]` on load, but a between-reload window can
@@ -97,6 +117,7 @@ const adapterSchema = z.object({
   engagement: engagementSchema,
   history: historySchema,
   enabled: z.boolean().default(true),
+  quotedReply: quotedReplySchema.optional(),
 })
 
 export const DEFAULT_GITHUB_EVENT_ALLOWLIST = [
