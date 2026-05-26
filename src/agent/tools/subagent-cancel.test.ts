@@ -14,7 +14,6 @@ function makeLive(overrides: Partial<LiveSubagent> = {}): LiveSubagent {
     startedAt: 1_000,
     status: 'running',
     abort: async () => {},
-    awaitCompletion: async () => ({ ok: true, durationMs: 0 }),
     ...overrides,
   }
 }
