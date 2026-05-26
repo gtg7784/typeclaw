@@ -1426,21 +1426,23 @@ export async function setChannelSecrets(
   })
 }
 
-// Discriminated union of what GitHub credentials the user wants to rotate.
-// The three secrets (PAT/private-key, webhook secret) rotate independently,
+// Discriminated union of what GitHub credentials the user wants to update.
+// The three secrets (PAT/private-key, webhook secret) update independently,
 // so the CLI lets the user pick which one(s) to touch in a single call.
-// `auth.type` must match the existing on-disk auth type — flipping between
-// PAT and App auth is a structural change, not a credential rotation, and
-// belongs in a future `channel migrate-auth` or hand-edit of secrets.json.
+// `auth.type` may differ from the on-disk auth type — switching between PAT
+// and App auth replaces the entire auth block (no field carryover from the
+// previous auth type, since the two shapes share no fields beyond `type`).
 export type GithubCredentialPatch = {
   webhookSecret?: string
   auth?: { type: 'pat'; pat: string } | { type: 'app'; privateKey: string; appId?: number; installationId?: number }
 }
 
-// Rotate one or more credential fields on an already-configured GitHub
+// Update one or more credential fields on an already-configured GitHub
 // channel. Like setChannelSecrets, refuses when secrets.json has no
-// existing github entry. Additionally refuses when the requested auth.type
-// doesn't match the on-disk type — see `GithubCredentialPatch` above.
+// existing github entry. Supports both same-type rotation (preserves env
+// bindings, carries appId/installationId forward when not supplied) and
+// auth-type switching (replaces the entire auth block — see
+// `GithubCredentialPatch` above).
 export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch): Promise<SetChannelTokensResult> {
   if (!existsSync(join(cwd, CONFIG_FILE))) {
     return {
@@ -1466,27 +1468,22 @@ export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch
     if (patch.auth !== undefined) {
       const existingAuth = block.auth
       const existingAuthType = readGithubAuthTypeFromObject(existingAuth)
-      if (existingAuthType !== patch.auth.type) {
-        return {
-          result: {
-            ok: false,
-            reason: `github auth type mismatch: secrets.json currently uses "${existingAuthType ?? 'unknown'}" auth, but you tried to rotate a "${patch.auth.type}" credential. Edit secrets.json by hand to migrate between PAT and App auth.`,
-          },
-        }
-      }
+      const isSameType = existingAuthType === patch.auth.type
       if (patch.auth.type === 'pat') {
-        const previousToken = isObjectRecord(existingAuth) ? (existingAuth as { token?: unknown }).token : undefined
+        const previousToken =
+          isSameType && isObjectRecord(existingAuth) ? (existingAuth as { token?: unknown }).token : undefined
         block.auth = { type: 'pat', token: rotatedSecret(previousToken, patch.auth.pat) }
       } else {
-        const existingApp = isObjectRecord(existingAuth) ? (existingAuth as Record<string, unknown>) : {}
+        const existingApp = isSameType && isObjectRecord(existingAuth) ? (existingAuth as Record<string, unknown>) : {}
         const appId = patch.auth.appId ?? (existingApp.appId as number | undefined)
         const installationId = patch.auth.installationId ?? (existingApp.installationId as number | undefined)
         if (typeof appId !== 'number') {
           return {
             result: {
               ok: false,
-              reason:
-                'github App auth requires appId, but it is missing from secrets.json. Re-run `typeclaw channel add github` to re-establish the App auth block.',
+              reason: isSameType
+                ? 'github App auth requires appId, but it is missing from secrets.json. Re-run `typeclaw channel add github` to re-establish the App auth block.'
+                : 'github App auth requires appId when switching from PAT to App auth.',
             },
           }
         }
