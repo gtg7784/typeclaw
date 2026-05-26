@@ -281,6 +281,56 @@ set -eu
 #   -nolisten tcp           refuse TCP connections (Unix socket only).
 #                           Defense-in-depth — we are in a netns with
 #                           no inbound exposure anyway.
+# link_persistent_home_files symlinks credential files that tools write
+# to $HOME into a bind-mounted location so they survive container
+# restarts. The canonical case is Codex CLI's ~/.codex/auth.json: codex
+# rewrites the file in place to rotate OAuth tokens, and the official
+# CI/CD guidance is to persist auth.json so refresh-token state
+# compounds across runs. The container's $HOME (/root by default) lives
+# on Docker's writable overlay and is wiped on every \`stop\`+\`start\`
+# cycle, so without this symlink the operator would have to re-paste
+# auth.json after every restart.
+#
+# The persist root lives under /agent/.typeclaw/home/ (bind-mounted
+# from the agent folder via the -v <cwd>:/agent flag in start.ts).
+# Namespacing under .typeclaw/ keeps the agent's top-level layout clean and reserves
+# a system-owned subtree we can extend later (e.g. ~/.gemini/,
+# ~/.config/<tool>/) without colliding with user files. The directory
+# is gitignored by buildGitignore() so credentials never enter history.
+#
+# Three invariants this function enforces:
+#
+# 1. Symlink is unconditional and idempotent. We never check whether
+#    auth.json exists before linking — \`ln -sfn\` creates a dangling
+#    symlink on first boot, and the first \`codex login\` write goes
+#    through it to land at the persistent location. -f replaces an
+#    existing symlink; -n stops ln from dereferencing into a directory
+#    if a previous container life happened to write a real ~/.codex/
+#    dir before this code shipped.
+#
+# 2. We symlink the FILE, not the directory. Codex writes other state
+#    to ~/.codex/ over time (history.jsonl, log/, config.toml). Linking
+#    only auth.json keeps the persistence scope tight to credentials;
+#    history/logs stay ephemeral by design. Future credentials get
+#    added file-by-file here, not by widening to a directory link.
+#
+# 3. We mkdir -p the target's parent on every boot. /agent is bind-
+#    mounted, so the host-side path may exist or not depending on
+#    whether the operator ever started the container before this code
+#    shipped. mkdir -p is idempotent and cheap.
+#
+# 4. The root is overridable via TYPECLAW_PERSIST_HOME_ROOT, which only
+#    the shim's executable tests set. Production never sets it, so the
+#    in-container path is always /agent/.typeclaw/home/. The override
+#    lets the shim's behavioral tests verify symlink semantics against
+#    a real tmpdir on the host without touching /agent (which doesn't
+#    exist on developer machines and CI runners).
+link_persistent_home_files() {
+  persist_root="\${TYPECLAW_PERSIST_HOME_ROOT:-/agent/.typeclaw/home}"
+  mkdir -p "$persist_root/.codex" "$HOME/.codex"
+  ln -sfn "$persist_root/.codex/auth.json" "$HOME/.codex/auth.json"
+}
+
 start_xvfb() {
   if ! command -v Xvfb >/dev/null 2>&1; then
     return 0
@@ -314,6 +364,7 @@ start_xvfb() {
 }
 
 if [ "\${TYPECLAW_NETWORK_BLOCK_INTERNAL:-0}" != "1" ]; then
+  link_persistent_home_files
   start_xvfb
   exec bun run typeclaw "$@"
 fi
@@ -359,6 +410,7 @@ ip6tables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 ip6tables -A OUTPUT -o lo -j ACCEPT
 ${ipv6Rules.join('\n')}
 
+link_persistent_home_files
 start_xvfb
 exec setpriv --bounding-set -net_admin --inh-caps -net_admin --ambient-caps -net_admin -- bun run typeclaw "$@"
 `
