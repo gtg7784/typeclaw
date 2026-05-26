@@ -31,18 +31,14 @@ export async function logs({
   const bun = getBun()
   if (!bun) return { ok: false, reason: 'bun runtime not available' }
 
-  const { containerName } = planLogs(cwd, { follow })
+  const plan = planLogs(cwd, { follow })
 
   try {
-    if (!(await containerExists(containerName))) {
-      return { ok: false, reason: `Container ${containerName} not found. Run \`typeclaw start\` first.` }
+    if (!(await containerExists(plan.containerName))) {
+      return { ok: false, reason: `Container ${plan.containerName} not found. Run \`typeclaw start\` first.` }
     }
 
-    const cmd = ['docker', 'logs', '--timestamps']
-    if (follow) cmd.push('-f')
-    cmd.push(containerName)
-
-    const proc = bun.spawn({ cmd, cwd, stdout: 'pipe', stderr: 'pipe' })
+    const proc = bun.spawn({ cmd: buildDockerLogsCmd(plan), cwd, stdout: 'pipe', stderr: 'pipe' })
 
     const onAbort = (): void => {
       try {
@@ -62,7 +58,7 @@ export async function logs({
     const exitCode = await proc.exited
     signal?.removeEventListener('abort', onAbort)
 
-    return { ok: true, containerName, exitCode }
+    return { ok: true, containerName: plan.containerName, exitCode }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
   }
@@ -70,6 +66,14 @@ export async function logs({
 
 export function planLogs(cwd: string, { follow }: { follow: boolean }): LogsPlan {
   return { containerName: containerNameFromCwd(cwd), follow }
+}
+
+// Exported so `compose/logs.ts` builds the exact same `docker logs` argv shape.
+export function buildDockerLogsCmd(plan: LogsPlan): string[] {
+  const cmd = ['docker', 'logs', '--timestamps']
+  if (plan.follow) cmd.push('-f')
+  cmd.push(plan.containerName)
+  return cmd
 }
 
 // Exported for `compose/logs.ts` so the multi-agent path reuses the same

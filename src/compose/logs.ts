@@ -1,4 +1,4 @@
-import { containerExists } from '@/container'
+import { buildDockerLogsCmd, containerExists } from '@/container'
 import { supportsColor } from '@/container/log-colors'
 import { makeLogTimestampReformatter, type TimestampReformatter } from '@/container/log-timestamps'
 import { getBun } from '@/container/shared'
@@ -93,9 +93,7 @@ export async function composeLogs({
   const useColor = supportsColor(out)
 
   const procs = attached.map((agent) => {
-    const cmd = follow
-      ? ['docker', 'logs', '--timestamps', '-f', agent.containerName]
-      : ['docker', 'logs', '--timestamps', agent.containerName]
+    const cmd = buildDockerLogsCmd({ containerName: agent.containerName, follow })
     const proc = bun.spawn({ cmd, stdout: 'pipe', stderr: 'pipe' })
     return { agent, proc }
   })

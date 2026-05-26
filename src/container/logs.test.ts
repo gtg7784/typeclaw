@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { makeLogTimestampReformatter } from './log-timestamps'
-import { planLogs, pumpWithTimestamps } from './logs'
+import { buildDockerLogsCmd, planLogs, pumpWithTimestamps } from './logs'
 
 let root: string
 
@@ -23,6 +23,27 @@ describe('planLogs', () => {
 
     expect(planLogs(folder, { follow: false })).toEqual({ containerName: 'coder', follow: false })
     expect(planLogs(folder, { follow: true })).toEqual({ containerName: 'coder', follow: true })
+  })
+})
+
+describe('buildDockerLogsCmd', () => {
+  test('builds the base argv when follow is false', () => {
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: false })).toEqual([
+      'docker',
+      'logs',
+      '--timestamps',
+      'coder',
+    ])
+  })
+
+  test('appends -f before the container name when follow is true', () => {
+    expect(buildDockerLogsCmd({ containerName: 'coder', follow: true })).toEqual([
+      'docker',
+      'logs',
+      '--timestamps',
+      '-f',
+      'coder',
+    ])
   })
 })
 
