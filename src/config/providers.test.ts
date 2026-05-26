@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'bun:test'
 
-import { KNOWN_PROVIDERS, listKnownModelRefs, providerForModelRef, supportsApiKey, supportsOAuth } from './providers'
+import {
+  defaultThinkingLevelForRef,
+  KNOWN_PROVIDERS,
+  listKnownModelRefs,
+  providerForModelRef,
+  supportsApiKey,
+  supportsOAuth,
+} from './providers'
 
 describe('KNOWN_PROVIDERS', () => {
   test('every provider model carries a baseUrl that matches the outer provider baseUrl', () => {
@@ -123,5 +130,36 @@ describe('providerForModelRef anthropic', () => {
 
   test('routes claude-opus-4-7 to anthropic', () => {
     expect(providerForModelRef('anthropic/claude-opus-4-7')).toBe('anthropic')
+  })
+})
+
+describe('defaultThinkingLevelForRef', () => {
+  test('OpenAI api-key models default to low', () => {
+    expect(defaultThinkingLevelForRef('openai/gpt-5.4-nano')).toBe('low')
+    expect(defaultThinkingLevelForRef('openai/gpt-5.4-mini')).toBe('low')
+    expect(defaultThinkingLevelForRef('openai/gpt-5.4')).toBe('low')
+    expect(defaultThinkingLevelForRef('openai/gpt-5.5')).toBe('low')
+  })
+
+  test('OpenAI Codex (ChatGPT Plus/Pro OAuth) models also default to low', () => {
+    expect(defaultThinkingLevelForRef('openai-codex/gpt-5.4-mini')).toBe('low')
+    expect(defaultThinkingLevelForRef('openai-codex/gpt-5.4')).toBe('low')
+    expect(defaultThinkingLevelForRef('openai-codex/gpt-5.5')).toBe('low')
+  })
+
+  test('non-OpenAI providers defer to the SDK default (returns undefined)', () => {
+    expect(defaultThinkingLevelForRef('anthropic/claude-opus-4-7')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('anthropic/claude-sonnet-4-6')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('anthropic/claude-haiku-4-5')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('zai/glm-4.6')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('zai-coding/glm-5.1')).toBeUndefined()
+  })
+
+  test('every known model ref is classified (no provider falls through unhandled)', () => {
+    for (const ref of listKnownModelRefs()) {
+      const level = defaultThinkingLevelForRef(ref)
+      expect(level === 'low' || level === undefined, `${ref} returned unexpected ${String(level)}`).toBe(true)
+    }
   })
 })
