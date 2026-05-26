@@ -44,6 +44,14 @@ export type TuiOptions = {
   onVersionMismatch?: (info: VersionMismatch) => void
 }
 
+// Outcome of a single `run()` cycle. The CLI's reconnect loop reads this to
+// decide whether to spin again or exit. `lostConnection` is true when the
+// WS closed AFTER the connected handshake without a deliberate /quit or
+// Ctrl+C — exactly the case a self-restart produces, and the only one
+// where a fresh connect can recover the session. Quit / Ctrl+C / pre-
+// handshake errors all resolve with `lostConnection: false`.
+export type TuiRunOutcome = { lostConnection: boolean }
+
 export function createTui({
   url,
   initialPrompt,
@@ -54,7 +62,7 @@ export function createTui({
   expectedVersion,
   onVersionMismatch,
 }: TuiOptions) {
-  async function run(): Promise<void> {
+  async function run(): Promise<TuiRunOutcome> {
     const terminal = createTerminal()
     const tui = new TUI(terminal)
     const displayUrl = redactUrl(url)
@@ -80,6 +88,8 @@ export function createTui({
       exit(1)
       throw err
     })
+
+    let userInitiatedShutdown = false
     const { sessionId, serverVersion } = handshake
     status.setText(colors.dim(`session: ${sessionId}`))
     tui.requestRender()
@@ -196,11 +206,11 @@ export function createTui({
       }
     })
 
-    const closed = new Promise<void>((resolve) => {
+    const closed = new Promise<boolean>((resolve) => {
       client.onClose(() => {
         appendHistory(new Text(colors.dim('disconnected'), 0, 0))
         tui.requestRender()
-        resolve()
+        resolve(!userInitiatedShutdown)
       })
     })
 
@@ -223,6 +233,7 @@ export function createTui({
     })
 
     const shutdown = (code: number) => {
+      userInitiatedShutdown = true
       tui.stop()
       client.close()
       exit(code)
@@ -268,13 +279,14 @@ export function createTui({
       // instead of leaking the command into the agent's chat context.
       if (isQuitCommand(initialPrompt)) {
         shutdown(0)
-        return
+        return { lostConnection: false }
       }
       await send(initialPrompt)
     }
 
-    await closed
+    const lostConnection = await closed
     tui.stop()
+    return { lostConnection }
   }
 
   return { run }

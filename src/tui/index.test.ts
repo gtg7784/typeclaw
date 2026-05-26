@@ -931,4 +931,50 @@ describe('createTui queue panel', () => {
       'WARN: host CLI is v1.2.3, agent container is v1.2.0. Some commands may hang or fail. Try `typeclaw restart --build`.',
     )
   })
+
+  test('returns lostConnection: true when the WS closes after handshake without user action', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-lost' })
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: () => {},
+    })
+
+    // when
+    const runPromise = tui.run()
+    await flush()
+    client.triggerClose()
+
+    // then
+    await expect(runPromise).resolves.toEqual({ lostConnection: true })
+  })
+
+  test('returns lostConnection: false when the user submits /quit', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-quit' })
+    let exitCode: number | undefined
+    const tui = createTui({
+      url: 'ws://ignored',
+      initialPrompt: '/quit',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: (code) => {
+        exitCode = code
+        client.triggerClose()
+      },
+    })
+
+    // when
+    const outcome = await tui.run()
+
+    // then
+    expect(outcome).toEqual({ lostConnection: false })
+    expect(exitCode).toBe(0)
+  })
 })
