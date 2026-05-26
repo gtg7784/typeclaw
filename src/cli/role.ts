@@ -11,7 +11,7 @@ const claimSub = defineCommand({
   meta: {
     name: 'claim',
     description:
-      'claim a channel identity (Slack/Discord/etc.) for a role on this agent. Sends a code via the host CLI; you DM that code back to the bot to prove control of the channel account.',
+      'claim a channel identity (Slack/Discord/etc.) for a role on this agent. Sends a code via the host CLI; you send that code back to the bot from any chat (DM, group, channel) to prove control of the channel account. The resulting match rule grants the role to your author identity across every chat on that platform.',
   },
   args: {
     as: {
@@ -57,7 +57,7 @@ const claimSub = defineCommand({
         s.stop('Ready.')
         const expiresInSec = Math.max(0, Math.round((payload.expiresAt - Date.now()) / 1000))
         const lines = [
-          `Send this message to your bot as a DM:`,
+          `Send this message to your bot from any chat (DM, group, or channel):`,
           '',
           `  ${c.bold(payload.code)}`,
           '',
