@@ -37,7 +37,11 @@ export type RunInspectOptions = {
   liveHint?: string
 }
 
-export type SelectSession = (sessions: SessionSummary[]) => Promise<SessionSummary | null>
+export type SelectSessionOptions = {
+  initialSessionId?: string
+}
+
+export type SelectSession = (sessions: SessionSummary[], opts?: SelectSessionOptions) => Promise<SessionSummary | null>
 
 export type LiveSourceFactory = (opts: {
   sessionId: string
