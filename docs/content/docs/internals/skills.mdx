@@ -1,0 +1,30 @@
+---
+title: Skills
+description: Four loading sources, naming rules, and why descriptions are triggers
+icon: BookOpen
+---
+
+Skills are markdown files with `name` + `description` frontmatter, loaded on demand via the `skill` tool. Four sources, each with a different owner:
+
+| Source                 | Path                                        | Owner             | When to add                                                                                                                 |
+| ---------------------- | ------------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| **Bundled**            | `src/skills/<name>/SKILL.md`                | typeclaw repo     | Cross-cutting agent guidance shipped with the CLI. Auto-discovered; no wiring. Use `typeclaw-` prefix (reserved namespace). |
+| **User-installed**     | `<agentDir>/.agents/skills/<name>/SKILL.md` | end user          | Personal skills the user drops in. Existence-gated; wired explicitly.                                                       |
+| **Muscle memory**      | `<agentDir>/memory/skills/<name>/SKILL.md`  | dreaming subagent | Procedures distilled from sessions. Don't write here from main-agent code.                                                  |
+| **Plugin-contributed** | Plugin dir or in-memory `PluginSkill[]`     | plugins           | Bundled inside a plugin; both routes converge as ordinary skill dirs.                                                       |
+
+Wiring: `setupSession` in `src/agent/index.ts`. Default to **bundled** when adding a new skill.
+
+> Footgun: `<agentDir>/skills/` (no `.agents/`) is auto-discovered by upstream but not supported here. Don't use it.
+
+## Naming
+
+`typeclaw-` prefix for bundled. One-segment kebab-case. Sanitizer regex `^[a-z0-9][a-z0-9-_]*$`.
+
+## Descriptions are triggers, not summaries
+
+The LLM picks skills by description. Name the failure modes, platforms, and verbs that should activate the skill. Vague descriptions = dead weight.
+
+## Skills are lazy
+
+Adding one costs zero tokens until loaded. Right home for platform-specific guidance and large runbooks. **Do not** copy skill content into tool descriptions — those reload into every tool-call prefix, which is exactly the cost model skills avoid.

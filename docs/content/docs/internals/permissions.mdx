@@ -1,0 +1,86 @@
+---
+title: Permissions
+description: Role resolution, match-rule DSL, cron/subagent provenance, security guard tiers
+icon: ShieldCheck
+---
+
+`src/permissions/` is per-actor access control. Roles bundle permission strings AND match rules. Actors are derived at runtime from `SessionOrigin`; nothing about an actor is stored on disk. Consumers query via `ctx.permissions.has(origin, perm)`. Today's consumers: security plugin (every guard) and channel router (`channel.respond` wake-up gate).
+
+## Model
+
+- **Actor** — runtime, derived from `SessionOrigin`. Not stored.
+- **Role** — named bundle of `permissions[]` + `match[]`. Declared under `typeclaw.json#roles`.
+- **Permission** — `<plugin>.<verb>.<noun>` string. Plugins declare via `definePlugin({ permissions: [...] })`.
+
+Resolution walks roles in severity-then-declaration order: `owner` → `trusted` → custom (reverse declaration; later wins) → `member` → `guest`. First role with any matching rule wins. Built-in privileged roles always go first, so a broad rule on `member` can't shadow a narrower rule on `owner`. Fallback is built-in `guest` (no permissions).
+
+## Built-in roles (`src/permissions/builtins.ts`)
+
+| Role      | Built-in `match[]` (prepended) | Built-in `permissions[]`                                                                                                                                        |
+| --------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`   | `[{ kind: 'tui' }]`            | `channel.respond`, `cron.schedule`, `cron.modify`, `security.bypass.low/medium/high`, plus the wildcard sentinel expanded to every plugin's `security.bypass.*` |
+| `trusted` | `[]`                           | `channel.respond`, `cron.schedule`, `security.bypass.low/medium`                                                                                                |
+| `member`  | `[]`                           | `channel.respond`, `security.bypass.low`, `subagent.spawn/cancel/output`                                                                                        |
+| `guest`   | `[]`                           | (none)                                                                                                                                                          |
+
+User-declared `match[]` **appends**; user-declared `permissions[]` **replaces** (no merge — `[]` means none). Custom role names must declare both.
+
+## Match-rule DSL (`src/permissions/match-rule.ts`)
+
+Compact strings parsed at boot:
+
+```
+tui
+cron
+subagent
+subagent:memory-logger
+*                                # any channel session
+slack:*                          # any Slack chat
+slack:T0123                      # one workspace
+slack:T0123/C0ABCDE              # one chat
+slack:T0123 author:U_ME          # author qualifier
+slack:dm/*                       # any Slack DM
+discord:9999 author:U_MOD
+kakao:group/*
+```
+
+Within one rule, tokens AND. Across rules on the same role, OR. Strict equality everywhere — no regex, no glob beyond listed `*` shapes. The parser owns precise typo errors, rejection of redundant forms (`slack:*/*` etc.), and legacy-prefix rejection with remediation. `migrateLegacyConfigShape` rewrites legacy `team:`/`guild:`/`tg:` prefixes to canonical DSL on load.
+
+## Cron and subagent provenance
+
+These origins don't resolve via match-rule walking. They carry stamped provenance:
+
+- **Cron**: `origin.scheduledByRole` + `origin.scheduledByOrigin` (audit snapshot). Role = `scheduledByRole` directly.
+- **Subagent**: `origin.spawnedByRole` + `origin.spawnedByOrigin`. Snapshot at spawn; parent cleanup doesn't affect it.
+
+This closes the laundering attack: a `guest` who asks the agent to schedule a cron gets `scheduledByRole: 'guest'` stamped. When the job fires, the security plugin blocks `bash env` again. Hand-authored `cron.json` entries missing `scheduledByRole` are auto-migrated to `"owner"` by `migrateLegacyCronShape` (one-shot rewrite + git commit) — needed to unstick agents that crash-looped post-PR #171.
+
+## Wiring
+
+1. **Config**: top-level `roles?` parsed by `rolesConfigSchema`. **`roles` is restart-required**.
+2. **Plugin registration**: `definePlugin({ permissions: [...] })`. Read at boot before any factory runs; the union expands the owner wildcard and powers the boot-time typo warning.
+3. **`PluginContext.permissions: PermissionService`** is constructed once at plugin load and lives for the plugin's lifetime.
+4. **`ToolBeforeEvent.origin` carries the LIVE origin** via a mutable `originRef` on `CreateSessionOptions`. Channel sessions update the holder per-turn in `src/channels/router.ts` so the event sees current-turn `lastInboundAuthorId`. TUI/cron/subagent sessions pass `origin` directly.
+5. **Cron stamping**: `createSessionForCron` reads provenance from the persisted job. `parseCronFile` rejects entries without `scheduledByRole`; plugin cron defaults to `'owner'` via `toCronJob`.
+6. **Subagent stamping**: the `new-session` stream target carries `parentSessionId`, `spawnedByRole`, and `spawnedByOriginJson`. `SubagentConsumer` decodes and forwards.
+7. **Plugin `ctx.spawnSubagent`**: hook callers pass `{ parentSessionId, spawnedByOrigin: event.origin }`. The runtime resolves `spawnedByRole` from the origin via PermissionService — callers can't forge a role.
+8. **Channel router (`channel.respond` gate)**: every inbound is gated BEFORE `ensureLive`. Denial logs `[channels] <key>: denied by permissions (channel.respond) author=<id> id=<msg>` and returns. Legacy `channels.<adapter>.allow[]` is gone — auto-translated to `roles.member.match[]`.
+
+## Rules of thumb
+
+- **Plugins declare `permissions: [...]` on `definePlugin(...)`, not on `PluginExports`.** Read before the factory runs; owner-wildcard expansion is deterministic.
+- **Users can't write `*` in their own `permissions[]`.** The owner wildcard is a sentinel internal to the built-in spec. Schema enforces dotted `<plugin>.<verb>.<noun>` shape.
+- **Unknown role names resolve to `guest`.** Forecloses forging role strings into job records.
+- **Bundled security guards have a two-axis policy.** Each guard exports `GUARD_*_SEVERITY` (`'low'|'medium'|'high'`). `tool.before` accepts EITHER the tier permission (`security.bypass.low/medium/high`) OR the per-guard permission (e.g. `security.bypass.gitExfil`). The tiers:
+  - **high** — direct audience-leak with no operator-visible intermediate step. Owner only. Inhabitants: `outboundSecret`, `systemPromptLeak`, `gitRemoteTainted`.
+  - **medium** — silent-attack OR operator-reviewable state (operator sees the privileged write before the privileged effect fires). Owner + trusted. Inhabitants: `secretExfilBash`, `secretExfilRead`, `ssrf`, `sessionSearchSecrets`, `gitExfil`, `rolePromotion`, `cronPromotion`.
+  - **low** — noisy, immediately recoverable. Owner + trusted + member. No inhabitants today (forward-compat for member).
+
+  To narrow a role's tier cap, declare the explicit list in `roles.<role>.permissions[]` (replaces the default). To widen a lower role for one guard, add the per-guard string. New guards MUST export a severity constant or `SEVERITY_PERMISSION` indexing fails — no silent permissive fallback.
+
+  Trusted bypassing medium widens its default authority over agent state in exchange for fewer acks. Defense leans on operator review of auto-backup commits to `typeclaw.json` and `cron.json`. Deployments that don't review backup commits should keep trusted's match narrow OR subtract `security.bypass.medium`.
+
+- **The recorder-vs-checker split in the security plugin is load-bearing.** `recordGitRemoteTaintIfAny` runs unconditionally for any actor who could execute `set-url`, independent of `checkGitRemoteTaintedGuard`'s decision. The split is what makes `gitExfil → medium` safe: trusted's first-step retarget succeeds AND the recorder fires; second-step push hits the high-tier `gitRemoteTainted` block. Collapsing recorder and checker disables the two-step defense.
+- **Plugin-contributed cron defaults to `scheduledByRole: 'owner'`.** Without this, the bundled memory dreaming cron resolves to `guest` and loses every bypass it needs.
+- **Permissions gate _actions_, not _state_.** Memory, `workspace/`, `sessions/` are shared across origins. State isolation requires separate agent folders.
+- **No role coverage = silent agent.** The `channel.respond` gate is unconditional. Without matching roles, every inbound resolves to `guest`, which has no `channel.respond`. TUI keeps working via the built-in `owner.match`. Denial logs name the author and channel — silent agents are diagnosable.

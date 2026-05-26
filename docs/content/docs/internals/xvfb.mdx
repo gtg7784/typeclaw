@@ -1,0 +1,75 @@
+---
+title: Headed browser (Xvfb)
+description: The headed-via-Xvfb decision, NET_ADMIN drop, persistent-$HOME overlay, agent-browser headed-mode wrapper
+icon: Monitor
+---
+
+By default the container ships `xvfb` and the entrypoint shim spawns Xvfb in the background, exporting `DISPLAY=:99` into the env passed to `bun run typeclaw`. Headless from Docker's perspective; X runs in-memory inside the container.
+
+## Why headed-via-Xvfb instead of `--headless`
+
+Modern WAFs (Akamai, Cloudflare, PerimeterX) fingerprint Chrome's headless modes via signals JavaScript can't patch — CDP `Runtime.enable` side effects, headless rendering pipeline asymmetries, GPU codec set, `navigator.plugins`, `matchMedia` etc. UA spoofing passes the cheap filter but fails the JS-VM sensor. Verified empirically against an Akamai-protected target where headed got `_abck=~0~` (pass) and headless got `_abck=~-1~` (fail).
+
+## Toggle, not invariant
+
+`docker.file.xvfb` defaults to `true`. Set `false` for agents that never touch a browser (saves ~5MB image + ~10MB RAM). The shim self-heals: if `Xvfb` isn't on PATH, `start_xvfb` returns without spawning. No flag plumbing.
+
+## Forward-shipping
+
+Xvfb is in the per-agent apt layer (toggle), not the baseline image. Upgrading typeclaw to a version that newly uses Xvfb does NOT require a fresh base release — the next `typeclaw start --build` re-runs the apt layer.
+
+## Xvfb runs with NET_ADMIN stripped
+
+On the `network.blockInternal=true` path, the shim holds `CAP_NET_ADMIN` at PID 1 long enough to install iptables rules, then drops it via `setpriv` before either Xvfb or the agent runs. `start_xvfb` routes Xvfb through the same setpriv invocation. Off-path setpriv is a no-op (no caps granted) so the same helper works in both paths.
+
+## Why not `xvfb-run`
+
+Hangs forever as PID 1 — its `wait`+SIGUSR1 dance races with PID 1's silent-ignore default for unhandled signals. Industry workarounds: add `tini`, or spawn Xvfb directly. We pick the second — no new dep, identical effect.
+
+## Xvfb startup failure is loud
+
+`start_xvfb` polls both `/tmp/.X11-unix/X99` and `kill -0 $xvfb_pid` on a 3s budget; exits non-zero on early exit or timeout. Fail-fast — silently exporting `DISPLAY=:99` to a non-existent server surfaces as a confusing `cannot open display`.
+
+## Persistent-`$HOME` overlay (`link_persistent_home_files`)
+
+Container `$HOME` lives on the overlay and is wiped on every stop+start. Some tools (today: Codex CLI's `~/.codex/auth.json`) write credentials there and expect them to survive. The shim symlinks specific files into `/agent/.typeclaw/home/` (the bind-mounted agent folder); `buildGitignore` ignores `.typeclaw/home/`. The helper symlinks **files**, not dirs — keeps the persistence scope tight to credentials and leaves other CLI state ephemeral. Symlink approach (vs bind-mounting `~/.codex/`) avoids requiring a `mounts[]` entry and keeps persistence a system-shipped invariant. Files live inside the agent folder (not a sibling on the host) so `tar c agent-folder/` stays a complete migration.
+
+The helper is called on both network paths before `start_xvfb` and exec. `ln -sfn` is idempotent; the `-n` flag is load-bearing (without it, a previous container's real `~/.codex/` dir from before this code shipped would cause `ln -sf` to dereference into it).
+
+## Xvfb args
+
+- `:99` — fixed display. X11 sockets are netns-scoped, so safe across Compose'd containers.
+- `-screen 0 1920x1080x24` — matches agent-browser's reported viewport. Mismatch is itself a fingerprinting signal.
+- `+extension RANDR` — without it Chrome can't query screen geometry without errors.
+- `-ac` — disables host-based access control; Chrome connects without XAUTHORITY plumbing.
+- `-nolisten tcp` — Unix socket only.
+
+## `--shm-size=2g` on `docker run`
+
+Default 64MB `/dev/shm` is too small for Chrome's renderer; crashes surface as blank pages or "target closed". Set unconditionally in `planStart()` runArgs. It's a cap, not an allocation — containers that never run Chrome pay zero.
+
+## No GPU passthrough
+
+Container Chrome uses SwiftShader (CPU WebGL). WebGL renderer reports `"ANGLE (Google, SwiftShader, ...)"` — a signal, but one weak-laptop users produce, so most WAFs don't block. Targets that DO block on software renderers need a real GPU host outside the container model.
+
+## Overhead vs `--headless=new`
+
+~50–100MB extra RAM, ~5–10% extra CPU, +400ms cold start. Invisible for single-session work; sizes up with batch concurrency.
+
+## Layer 4.5: agent-browser headed-mode wrapper
+
+Works around [vercel-labs/agent-browser#1083](https://github.com/vercel-labs/agent-browser/issues/1083) ("headed silently ignored on existing session"). When a headless daemon is already running and a command requests headed, the existing browser is reused. Three upstream PRs (#660, #370, #387) have been open for months as of agent-browser 0.27.0.
+
+Patch: `mv` the real binary to `/usr/local/bin/agent-browser.real`; drop a POSIX shell wrapper at the original path. When headed mode is requested and the subcommand is `open`/`goto`/`navigate`, the wrapper runs `"$real" close` then exec-passes through to `.real`. Forces a clean relaunch.
+
+**Allowlist, not denylist.** Pre-close only for `open|goto|navigate` — the three verbs that start a new browsing session. Other subcommands (`click`, `snapshot`, `chat`, `connect`, `record`, ...) pass through untouched. A denylist would destroy live state (mid-recording, in-progress page, attached CDP, etc.).
+
+**Truthy contract mirrors upstream's `env_var_is_truthy`**: any non-empty `AGENT_BROWSER_HEADED` except case-insensitive `0`/`false`/`no` is truthy. Argv triggers: bare `--headed`, `--headed=true`, `--headed=1`.
+
+**Re-entrancy guard.** `_TYPECLAW_AGENT_BROWSER_HEADED_HANDLED=1` is set on the env passed to both pre-close and final exec; the wrapper bypasses straight to `.real` when set. Pre-close runs `"$real" close` directly (not through the wrapper), and `close` isn't on the allowlist, so it can't cascade.
+
+**Pre-close failure is non-fatal.** `"$real" close >/dev/null 2>&1 || true`. Wrapper still exec-passes.
+
+**Layer ordering.** 4.5 must run before Layer 5's `agent-browser install --with-deps` so the `mv` doesn't race the Chrome install. Wrapper is present in `buildBaseDockerfile` and the inline per-agent path, but NOT the versioned per-agent path (which FROMs the base image carrying the wrapper).
+
+**Removing when upstream merges.** Bump Layer 4 pin to the version with the fix, delete `LAYER_4_5_AGENT_BROWSER_HEADED_WRAPPER` + matching test block (search `#1083`), `typeclaw start --build`. Version bump alone removes it from existing agents because the Dockerfile regenerates on every `start`.

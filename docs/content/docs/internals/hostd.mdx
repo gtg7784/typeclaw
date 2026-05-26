@@ -1,0 +1,86 @@
+---
+title: Host daemon (hostd)
+description: Singleton host-stage daemon, three trust channels, the control protocol, portbroker internals
+icon: Server
+---
+
+`src/hostd/` is a singleton host-stage daemon owning host-side capabilities the running container needs: the **supervisor** (restart), the **port broker** (delegated to `src/portbroker/`), and the **KakaoTalk renewal cron**. Singleton per host, not per agent. Only persistent host-side process; only persistent host-stage state (`~/.typeclaw/`). New host-side capabilities plug in as `src/hostd/<capability>-manager.ts` glue + a `src/<capability>/` module + an optional `DaemonOptions` callback. **Don't add new daemons.**
+
+## Why it exists
+
+Two cross-stage problems converge on a long-lived host process:
+
+1. **Port forwarding.** Docker can't publish new ports on a running container (create-time-only `HostConfig.PortBindings`). Many dev servers also bind `127.0.0.1` inside the netns, which `docker run -p` can't reach. The portbroker proxies LISTEN events from the container with the upstream side of every connection running **inside** the container's typeclaw process, where `Bun.connect('127.0.0.1', port)` reaches loopback naturally.
+2. **Container self-restart.** The container has no Docker access. When the agent updates the CLI source or hits a `restart-required` field, the only path back is through a host-stage process.
+
+## Process topology
+
+```
+host:
+  typeclaw start/stop  →  short-lived clients of hostd
+                          (Unix socket ~/.typeclaw/run/hostd.sock)
+
+  typeclaw _hostd (singleton)
+    ├─ supervisor                          (restart capability)
+    ├─ portbroker-manager                  (one Broker per container)
+    │     └─ ws → /portbroker on each agent
+    ├─ kakao-renewal-manager               (daily tick per container)
+    └─ persistent registry: ~/.typeclaw/run/registrations/<name>.json
+
+container:  typeclaw run
+  ├─ /                  TUI WS protocol
+  ├─ /portbroker        hostd port-forward broker
+  ├─ /tunnel-logs       tunnel logs (typeclaw tunnel logs)
+  └─ agent's `restart` tool  →  HTTP host.docker.internal:8974 (Bearer auth)
+```
+
+The daemon is `typeclaw _hostd` (hidden subcommand). First container launch spawns it detached via `Bun.spawn` + `proc.unref()`. **This is the only detached spawn in the codebase.** Subsequent `start` calls connect, probe the daemon's source fingerprint via the `version` RPC, and respawn on mismatch via `shutdown` RPC (never SIGTERM by pidfile — that's what makes PID-reuse safe). A 30s GC tick deregisters containers that no longer exist.
+
+## Container ↔ host channels
+
+Three channels, each scoped:
+
+1. **Unix socket on `~/.typeclaw/run/hostd.sock`** (CLI ↔ daemon). NDJSON RPC. Never bind-mounted (macOS 9p/virtiofs can `stat` socket files but can't pass `connect()` through).
+2. **HTTP on `host.docker.internal:8974`** (container → daemon). Carries `restart` only. Per-container `restartToken` (32 bytes, base64url) for Bearer auth. Preferred port falls back to ephemeral on `EADDRINUSE`. Used instead of bind-mounted socket because of the macOS limitation above. `host.docker.internal` instead of bridge IP because Docker Desktop on macOS doesn't route the bridge subnet.
+3. **WebSocket on `ws://127.0.0.1:${hostPort}/portbroker`** (hostd-initiated). Multiplexed portbroker protocol. Auth: `brokerToken` via env var; container rejects mismatching `broker-hello`. Token regenerates per register.
+
+Container name plumbed via `TYPECLAW_CONTAINER_NAME`. Inside the container, cwd is `/agent` and the host folder is otherwise unrecoverable.
+
+## Control protocol
+
+NDJSON over the Unix socket. Connection-per-request. Kinds: `register`, `deregister`, `list`, `status`, `restart`, `http-info`, `version`, `shutdown`. `register` is idempotent at the cwds level but always (re)spawns the broker (handles TOCTOU port-retry). Payload persisted atomically to `registrations/<name>.json` (0600); replayed on boot before opening the socket. `restart` and `shutdown` ACK then execute asynchronously so the calling container/CLI sees success before the listener disappears. Adding a new request kind: extend both `Request` in `protocol.ts` and the dispatch switch.
+
+## Components
+
+`src/hostd/`:
+
+- `daemon.ts` — singleton process. Owns the cwds/token registries, socket server, HTTP control surface, RPC dispatch, GC tick. Replays registrations on boot. SIGTERM/SIGINT → orderly shutdown. `restart`/`portbroker.start`/`kakaoRenewal.start` are honored only when the corresponding `DaemonOptions` callback is set — tests omit them.
+- `supervisor.ts` — restart. ACK-then-execute. Wired by `src/cli/hostd.ts` via `DaemonOptions.restart` so `daemon.ts` stays free of `@/container` imports.
+- `portbroker-manager.ts` — glue. One `Broker` per container. `resolveHostPort` callback re-queries Docker on reconnect (host port may change across restarts).
+- `kakao-renewal-manager.ts` — daily tick per container. `shouldRenew` gate (CLI plumbs a predicate that reads `typeclaw.json#channels.kakaotalk`). `onRenewalOk` restarts the container so fresh tokens propagate into the live LOCO client.
+- `client.ts` — `isDaemonReachable()`, `send(req)` (Unix socket), `sendHttp(req, opts)` (HTTP from container).
+- `spawn.ts` — `ensureDaemon()`. Lockfile-arbitrated spawn race; version-drift detection via `version` + `shutdown`.
+- `version.ts` — sha256 fingerprint over `src/**/*.ts` (tests excluded). `UNVERSIONED_SENTINEL` fallback when `src/` ancestor isn't findable.
+- `paths.ts` — `~/.typeclaw/` paths. Honors `TYPECLAW_HOME`.
+
+`src/portbroker/`:
+
+- `policy.ts` — `shouldForward({ policy, port })`, `brokerEnabled(policy)`. Always implicitly excludes `CONTAINER_PORT`.
+- `proc-net-tcp.ts` — pure parser. Prefers `127.0.0.1` on IPv4/IPv6 dedup. Never throws on garbage input.
+- `container-server.ts` — container side. PortWatcher polls `/proc/net/tcp[6]` every 500ms. Per `relay-open`, opens `Bun.connect('127.0.0.1', port)`.
+- `hostd-client.ts` — host side. Per allowed LISTEN port, `Bun.listen(127.0.0.1, port)`. **Bun's TCP `data` callback reuses its buffer** — copy chunks into fresh `Uint8Array` before queuing.
+- Reconnect on disconnect: tear down forwarders, then backoff loop (1s/2s/4s/10s) with `resolveHostPort()` re-resolution per attempt.
+
+## Rules of thumb
+
+- **`portForward` defaults to `{ allow: '*' }` at the schema layer**, but `start()` defaults to no broker when called without `cliEntry` (test isolation). The CLI passes `process.argv[1]` explicitly. Tests omit it.
+- **The supervisor is on whenever the daemon is on; the broker is on whenever `portForward.allow !== []`.** `restart` is always available without separate opt-in.
+- **`portForward` is `restart-required`.** Captured at register time.
+- **Host port equals container port for forwarded ports.** No random-port fallback — predictable URLs are the point. Collisions log `port-forward-failed` and emit a TUI broadcast.
+- **`port-forward-result` is sent for every `port-listen-opened`,** including policy-excluded. Consumers (e.g. `bindWithForward`) wait on this for cross-container collision detection.
+- **Forward goes through `127.0.0.1`, not the bridge IP.** macOS doesn't route the bridge subnet; many dev servers bind loopback anyway.
+- **Wire-protocol changes to `/portbroker` require a container restart.** Bun has no hot-reload. Same as TUI protocol.
+- **CLI never SIGTERMs by PID.** `stop` deregisters via socket; pidfile is a discovery hint. Drift respawn uses `shutdown` RPC + socket-file polling. If it doesn't honor shutdown within 5s, hard failure — never escalate to signals.
+- **Daemon-source drift is detected, not assumed.** `_hostd` loads `src/` once at boot; without the version probe, every fix to daemon logic was silently a no-op until manual `pkill`. Portbroker source is part of the fingerprint.
+- **Trust boundaries scale per channel.** Unix socket → UID via 0600. HTTP → containerName + Bearer token. WS → brokerToken. New cross-container capabilities need new RPC kinds with explicit auth, not wider mounts.
+- **Persistence is per-container.** One file per registration; corrupt files skip one container, not all. CLI never writes these — only hostd does, inside `runSerially(name)`.

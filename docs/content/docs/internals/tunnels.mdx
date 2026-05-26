@@ -1,0 +1,75 @@
+---
+title: Tunnels
+description: Schema, providers, why cloudflared runs in-container, integration with channel adapters
+icon: Globe
+---
+
+`src/tunnels/` is an in-container subsystem that exposes a container-private port to the public internet. Two use cases share one primitive: GitHub webhooks past NAT, and ad-hoc demo exposure.
+
+## Why container-side, not host-side
+
+Cloudflared runs inside the container:
+
+- No host-side install — `cloudflared` lives in the Dockerfile.
+- Loopback-friendly — connects to `127.0.0.1:<port>` natively.
+- No new RPC kinds — URL events publish on the in-process Stream.
+- Per-agent isolation; lifecycle = container lifecycle.
+- The egress shim doesn't interfere (Cloudflare edge is public internet; loopback is ACCEPT'd by rule 2).
+
+## Schema
+
+```jsonc
+{
+  "tunnels": [
+    {
+      "name": "github-webhook",
+      "provider": "external",
+      "for": { "kind": "channel", "name": "github" },
+      "externalUrl": "https://my.tunnel.example.com",
+    },
+    {
+      "name": "demo",
+      "provider": "external",
+      "for": { "kind": "manual" },
+      "upstreamPort": 5173,
+      "externalUrl": "https://demo.example.com",
+    },
+  ],
+}
+```
+
+`tunnels[]` is **`restart-required`** — manager reads once at boot. URL changes from running tunnels (cloudflared re-resolve) are live via `broadcast` Stream messages, not config reload.
+
+The `for` discriminator owns lifecycle: `{ kind: 'channel', name }` is owned by `typeclaw channel add/remove`; `{ kind: 'manual' }` is owned by `typeclaw tunnel add/remove`. The two CLI paths share zero state.
+
+## Providers
+
+| Provider                           | Subprocess                     | URL source                                | When                                                      |
+| ---------------------------------- | ------------------------------ | ----------------------------------------- | --------------------------------------------------------- |
+| `external`                         | none                           | static `externalUrl` (must be `https://`) | User-supplied reverse proxy (Caddy, ngrok)                |
+| `cloudflare-quick`                 | `cloudflared tunnel --url ...` | parsed from cloudflared stderr            | Default for `channel add github`; URL rotates on restart  |
+| `cloudflare-named` (deferred PR 3) | `cloudflared tunnel run <id>`  | static (`hostname`)                       | After `typeclaw tunnel upgrade`; needs Cloudflare account |
+
+Schema rejects unimplemented provider names so `start` fails fast instead of tearing down a working container on each restart.
+
+## Integration
+
+GitHub adapter reads `channels.github.webhookUrl` at every `start()` when present. Otherwise the channel manager supplies a `tunnelUrl()` callback. Adapter computes `cfg.webhookUrl ?? tunnelUrl()` and registers webhooks only when a URL is available. URL rotation: `src/channels/tunnel-bridge.ts` subscribes to `tunnel-url-changed` broadcasts and calls `channelManager.restartAdapter('github')` (per-adapter mutex). No config mutation — rotating URLs would be stale on next restart.
+
+Webhook server itself is not a separate module — the GitHub adapter in `src/channels/adapters/github/index.ts` runs `Bun.serve({ port: configRef().webhookPort })` directly. Consolidation deferred until N≥2 webhook adapters.
+
+## Rules of thumb
+
+- **`tunnels[]` is `restart-required`, not `applied`.** Manager doesn't subscribe to reload events. URL changes at runtime are live; _config_ changes are not.
+- **Channel adapters subscribe to `tunnel-url-changed`; they don't call the manager directly.** The broadcast is the contract.
+- **External tunnels are the universal escape hatch.** No subprocess, no signup, no Dockerfile dep.
+- **The provider enum is intentionally scoped to what's implemented.** Future PRs widen the enum and the manager switch together.
+- **`upstreamPort` is container-side.** For channel tunnels this is automatic. For manual tunnels with a host-facing proxy companion (e.g. agent-browser publishes `proxy-port` and `upstream-port` separately), point at the upstream, not the proxy. The bundled agent-browser skill carries the user-facing version.
+
+## WebSocket endpoints
+
+Three paths on the container port:
+
+- `/` — TUI protocol + prompt queue.
+- `/portbroker` — hostd broker.
+- `/tunnel-logs?name=<tunnelName>` — tunnel logs (same TUI token auth).

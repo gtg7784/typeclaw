@@ -1,0 +1,26 @@
+---
+title: Internals
+description: Implementation notes for contributors and curious readers
+icon: Wrench
+---
+
+These pages are the contributor-facing companion to [Concepts](/docs/concepts/architecture). Where Concepts explains _what_ each subsystem does and _why_ it's shaped that way for users, Internals documents the load-bearing invariants, file paths, and "order matters" rules that hold the runtime together.
+
+Read here before changing a subsystem. Skim here when something doesn't behave the way Concepts implied — there's usually a one-line note that explains the gap.
+
+## What you'll find
+
+- [Skills](/docs/internals/skills) — the four loading sources, naming rules, why descriptions matter more than they look.
+- [Secrets](/docs/internals/secrets) — `.env` vs `secrets.json` policy, the `Secret` shape, bridge idempotency, KakaoTalk encryption-at-rest.
+- [Permissions](/docs/internals/permissions) — role resolution, the match-rule DSL, cron/subagent provenance, the security guard tier model.
+- [Host daemon (hostd)](/docs/internals/hostd) — singleton process, three trust channels (Unix socket / HTTP / WebSocket), the control protocol, portbroker internals.
+- [Tunnels](/docs/internals/tunnels) — schema, providers, why cloudflared runs in-container, integration with channel adapters.
+- [Message stream](/docs/internals/message-stream) — four typed targets, subagent dispatch, the cron split, wire-protocol contracts with the TUI.
+- [Web search](/docs/internals/web-search) — why DDG goes through `curl-impersonate`, the lexiforest pin, failure modes.
+- [Xvfb](/docs/internals/xvfb) — the headed-via-Xvfb decision, NET_ADMIN drop, persistent-`$HOME` overlay, agent-browser headed-mode wrapper.
+
+## Audience and tone
+
+These pages are written for someone who is about to edit `src/`. They assume you've read [Concepts](/docs/concepts/architecture) and know the user-facing shape, and they leave out the friendly prose. If a sentence here looks terse, it's because every word is meant to survive a refactor.
+
+Whether you're reading these as a contributor or just to see how the runtime is built, the same things hold: file paths name the actual file, "load-bearing" means there's a test pinning the behavior, and "order matters" means the comment above the call site explains why.
