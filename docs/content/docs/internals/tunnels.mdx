@@ -44,13 +44,15 @@ The `for` discriminator owns lifecycle: `{ kind: 'channel', name }` is owned by 
 
 ## Providers
 
-| Provider                           | Subprocess                     | URL source                                | When                                                      |
-| ---------------------------------- | ------------------------------ | ----------------------------------------- | --------------------------------------------------------- |
-| `external`                         | none                           | static `externalUrl` (must be `https://`) | User-supplied reverse proxy (Caddy, ngrok)                |
-| `cloudflare-quick`                 | `cloudflared tunnel --url ...` | parsed from cloudflared stderr            | Default for `channel add github`; URL rotates on restart  |
-| `cloudflare-named` (deferred PR 3) | `cloudflared tunnel run <id>`  | static (`hostname`)                       | After `typeclaw tunnel upgrade`; needs Cloudflare account |
+| Provider           | Subprocess                                             | URL source                                | When                                                                                                            |
+| ------------------ | ------------------------------------------------------ | ----------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `external`         | none                                                   | static `externalUrl` (must be `https://`) | User-supplied reverse proxy (Caddy, ngrok)                                                                      |
+| `cloudflare-quick` | `cloudflared tunnel --url ...`                         | parsed from cloudflared stderr            | Default for `channel add github`; URL rotates on restart                                                        |
+| `cloudflare-named` | `cloudflared tunnel --no-autoupdate run --token <jwt>` | static (`hostname`)                       | Stable URL bound to a Cloudflare dashboard tunnel; needs a Cloudflare account + a domain in the account's zones |
 
 Schema rejects unimplemented provider names so `start` fails fast instead of tearing down a working container on each restart.
+
+`cloudflare-named` reads its token from an env var named by `tokenEnv` (e.g. `CLOUDFLARE_TUNNEL_TOKEN`) set in `.env`. The token never lives in `typeclaw.json`. `hostname` is informational — `cloudflared` learns the actual hostname → upstream mapping from the Cloudflare dashboard's Public Hostname config, not from typeclaw. If the dashboard hostname drifts from `tunnels[].hostname`, traffic stops flowing but typeclaw still reports the stale URL.
 
 ## Integration
 

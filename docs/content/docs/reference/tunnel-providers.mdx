@@ -9,21 +9,69 @@ icon: Globe
 ```ts
 type Tunnel = {
   name: string
-  provider: 'cloudflare-quick' | 'external'
+  provider: 'cloudflare-quick' | 'cloudflare-named' | 'external'
   for: { kind: 'channel'; name: string } | { kind: 'manual' }
-  upstreamPort?: number // required when `for.kind === 'manual'`
+  upstreamPort?: number // required when `for.kind === 'manual'` AND provider !== 'cloudflare-named'
   externalUrl?: string // required when `provider === 'external'`
+  hostname?: string // required when `provider === 'cloudflare-named'`; must be https://
+  tokenEnv?: string // required when `provider === 'cloudflare-named'`; env var name in .env
 }
 ```
 
 ## Providers
 
-| Provider           | URL source                                | Subprocess                   | Stability                         |
-| ------------------ | ----------------------------------------- | ---------------------------- | --------------------------------- |
-| `cloudflare-quick` | parsed from cloudflared stderr at runtime | `cloudflared tunnel --url …` | rotates every cloudflared restart |
-| `external`         | static, from `externalUrl` in config      | none                         | as stable as the URL you provided |
+| Provider           | URL source                                | Subprocess                                         | Stability                           |
+| ------------------ | ----------------------------------------- | -------------------------------------------------- | ----------------------------------- |
+| `cloudflare-quick` | parsed from cloudflared stderr at runtime | `cloudflared tunnel --url …`                       | rotates every cloudflared restart   |
+| `cloudflare-named` | static, from `hostname` in config         | `cloudflared tunnel --no-autoupdate run --token …` | as stable as the dashboard hostname |
+| `external`         | static, from `externalUrl` in config      | none                                               | as stable as the URL you provided   |
 
-`cloudflare-named` is reserved but not yet implemented. The schema rejects provider names with no runtime implementation so `typeclaw start` fails fast before tearing down a working container.
+The schema rejects unknown provider names so `typeclaw start` fails fast before tearing down a working container.
+
+## `cloudflare-named` setup
+
+A `cloudflare-named` tunnel is a "remotely-managed" tunnel ([Cloudflare docs](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/configure-tunnels/remote-management/)). The user creates and configures it in the Cloudflare Zero Trust dashboard; typeclaw only runs `cloudflared` with the dashboard-issued token.
+
+Required dashboard steps:
+
+1. **Create a tunnel.** `Networks → Tunnels → Create a tunnel → Cloudflared`. Name it, install method = anything (typeclaw doesn't use the installer; just the token). Copy the token shown on the install screen.
+2. **Add a Public Hostname.** On the new tunnel's page, `Public Hostname` tab → `Add a public hostname`. Pick a subdomain + a domain from your account's zones, service type `HTTP`, URL `localhost:<port>` where `<port>` is the in-container upstream.
+
+A tunnel without a Public Hostname registers but routes nothing. `curl` against the configured hostname returns Cloudflare error 530 or 1033. typeclaw cannot detect this — the tunnel shows healthy.
+
+Required typeclaw steps:
+
+1. **Put the token in `.env`.** Pick a var name (convention: `CLOUDFLARE_TUNNEL_TOKEN`):
+
+   ```sh
+   echo 'CLOUDFLARE_TUNNEL_TOKEN=eyJhIjoi…' >> .env
+   ```
+
+2. **Add the tunnel to `typeclaw.json`** via `typeclaw tunnel add` or by hand:
+
+   ```jsonc
+   {
+     "tunnels": [
+       {
+         "name": "github-webhook",
+         "provider": "cloudflare-named",
+         "for": { "kind": "channel", "name": "github" },
+         "hostname": "https://agent.example.com",
+         "tokenEnv": "CLOUDFLARE_TUNNEL_TOKEN",
+       },
+     ],
+   }
+   ```
+
+3. **`typeclaw restart`** so the Dockerfile is regenerated with the `cloudflared` layer and the tunnel manager picks up the new entry.
+
+### Drift between dashboard and config
+
+`hostname` in `typeclaw.json` is informational — `cloudflared` learns the actual hostname→upstream mapping from the dashboard. If the user changes the Public Hostname in the dashboard without updating `tunnels[].hostname`, traffic stops flowing but typeclaw still reports the stale URL on `tunnel-url-changed` events. There is no programmatic detection; typeclaw deliberately does not poll Cloudflare's API.
+
+### Missing token
+
+If `process.env[tokenEnv]` is unset or empty when the manager starts, the named provider transitions to `permanently-failed` with a detail naming the missing env var. `cloudflared` is never spawned. Fix `.env` and `typeclaw restart`.
 
 ## `for` discriminator
 
