@@ -8,7 +8,7 @@ import type { AgentSession, ToolDefinition } from '@mariozechner/pi-coding-agent
 import { loadMemory } from '@/bundled-plugins/memory/load-memory'
 import type { ChannelRouter } from '@/channels/router'
 import { getConfig, resolveModel, resolveProfile } from '@/config'
-import { providerForModelRef, type KnownModelRef } from '@/config/providers'
+import { defaultThinkingLevelForRef, providerForModelRef, type KnownModelRef } from '@/config/providers'
 import type { PermissionService } from '@/permissions'
 import type {
   BuiltinToolRef,
@@ -341,6 +341,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
       : customToolsPreBudget
 
   const model = resolveModel(activeRef)
+  const thinkingLevel = defaultThinkingLevelForRef(activeRef)
   const { session } = await createAgentSession({
     model,
     sessionManager,
@@ -350,6 +351,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     resourceLoader,
     ...(tools ? { tools } : {}),
     customTools,
+    ...(thinkingLevel ? { thinkingLevel } : {}),
   })
 
   // Re-narrow the active tool set after `createAgentSession`. pi 0.67.3's

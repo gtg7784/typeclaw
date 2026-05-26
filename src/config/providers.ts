@@ -465,6 +465,24 @@ export function providerForModelRef(ref: KnownModelRef): KnownProviderId {
   throw new Error(`Unknown provider in model ref: ${ref}`)
 }
 
+// Per-provider default for pi-coding-agent's `thinkingLevel` knob. Returning
+// `undefined` defers to the SDK default (`medium`); returning a level pins it
+// to that value at session-creation time.
+//
+// OpenAI-family providers (`openai`, `openai-codex`) pin to `low`: GPT-5.x at
+// `medium` pads reasoning tokens on routine tool-driven turns (code edits,
+// channel replies, cron prompts) with no observable quality delta on this
+// codebase's workloads. Applies to every session that resolves to a GPT model
+// regardless of profile, so the saving is uniform.
+//
+// Anthropic, GLM, and Kimi don't share the padding behavior, so they keep the
+// SDK default.
+export function defaultThinkingLevelForRef(ref: KnownModelRef): 'low' | undefined {
+  const providerId = providerForModelRef(ref)
+  if (providerId === 'openai' || providerId === 'openai-codex') return 'low'
+  return undefined
+}
+
 // `as const satisfies` narrows each entry's `auth` to a tuple of its specific
 // literal values, which makes `provider.auth.includes('oauth')` fail to
 // compile on api-key-only entries (because TS thinks the array can never
