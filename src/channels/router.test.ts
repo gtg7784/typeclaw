@@ -4751,3 +4751,159 @@ describe('ChannelRouter injectSubagentCompletionReminder', () => {
     expect(router.liveCount()).toBe(1)
   })
 })
+
+describe('ChannelRouter quote-anchor on outbound', () => {
+  test('does NOT prepend a quote when the reply lands within the threshold and nothing intervened', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: string[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'are you there?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    nowRef.value += 500
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'yes' })
+    expect(sent).toEqual(['yes'])
+  })
+
+  test('prepends a `> @author: excerpt` quote when the reply crosses the queueDelayMs threshold', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: string[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'are you there?', authorName: 'Alice' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    nowRef.value += 60_000
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'yes I am here' })
+    expect(sent).toEqual(['> @Alice: are you there?\nyes I am here'])
+  })
+
+  test('prepends a quote when an observed message landed between inbound and reply, even within the threshold', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: string[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'cron status?', authorName: 'Alice' }))
+    nowRef.value += 100
+    await router.route(
+      inbound({
+        isBotMention: false,
+        externalMessageId: 'm-observed',
+        authorId: 'bob',
+        authorName: 'bob',
+        text: 'unrelated chatter',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value += 200
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'still blocked' })
+    expect(sent[0]).toContain('> @Alice: cron status?')
+    expect(sent[0]).toContain('still blocked')
+  })
+
+  test('anchors only the FIRST send of a multi-part reply; subsequent sends in the same turn are bare', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: string[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'walk me through it', authorName: 'Alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value += 60_000
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'first chunk' })
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'second chunk' })
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'third chunk' })
+    expect(sent).toEqual(['> @Alice: walk me through it\nfirst chunk', 'second chunk', 'third chunk'])
+  })
+
+  test('resets per turn so the next batch can anchor again', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: string[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'turn one', authorName: 'Alice', externalMessageId: 'm1' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value += 60_000
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply one' })
+
+    await router.route(inbound({ text: 'turn two', authorName: 'Alice', externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value += 60_000
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply two' })
+
+    expect(sent[0]).toBe('> @Alice: turn one\nreply one')
+    expect(sent[1]).toBe('> @Alice: turn two\nreply two')
+  })
+
+  test('respects an adapter config opting out via quotedReply.enabled: false', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: string[] = []
+    const config: ChannelAdapterConfig = {
+      ...baseConfig,
+      quotedReply: { enabled: false, queueDelayMs: 0 },
+    }
+    const { router } = makeRouter(dir, { nowRef, config })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'quiet please', authorName: 'Alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value += 600_000
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'sure' })
+    expect(sent).toEqual(['sure'])
+  })
+
+  test('attachments-only sends still anchor (the bare anchor stands alone as the message body)', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: Array<{ text: string | undefined; attachments: unknown }> = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text, attachments: msg.attachments })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'screenshot pls', authorName: 'Alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value += 60_000
+
+    await router.send({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      attachments: [{ path: '/agent/screen.png' }],
+    })
+    expect(sent[0]?.text).toBe('> @Alice: screenshot pls')
+  })
+})
