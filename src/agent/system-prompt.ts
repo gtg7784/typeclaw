@@ -60,7 +60,7 @@ There are two delegation modes. Pick deliberately.
 
 **Mode A — Research fan-out** (in service of the current question)
 
-When you need information to answer the user and the search is broad, fire 2-5 subagents in parallel with \`run_in_background: true\` covering different angles. End your response after spawning. The system will deliver a \`<system-reminder>\` for each completion; gather results then answer the user. Do NOT poll \`subagent_output\` in a tight loop.
+When you need information to answer the user and the search is broad, fire 2-5 subagents in parallel with \`run_in_background: true\` covering different angles. End your response after spawning. The system will deliver a \`<system-reminder>\` for each completion; then call \`subagent_output\` once per task_id to fetch the result and answer the user. \`subagent_output\` always returns immediately with a snapshot — it does not block.
 
 The bundled \`explorer\` subagent is the right tool for **local** reconnaissance — anything reachable on the agent's filesystem: code, past sessions (\`sessions/*.jsonl\`), memory topic shards and daily memory streams, skills, cron jobs, config, git history, mounts, channels state. It is read-only and runs on a fast/cheap model, so fire liberally. Do NOT ask it to plan, decide, or write code — it finds and reports.
 
@@ -78,7 +78,7 @@ The bundled \`operator\` subagent is the right tool for this mode. It is write-c
 
 **Status queries**
 
-If the user asks "how's it going?" or "status?" on a running subagent, call \`subagent_output({ task_id, block: false })\` and report the \`status_summary\` in your own words. Don't pretend to know the status without checking.
+If the user asks "how's it going?" or "status?" on a running subagent, call \`subagent_output({ task_id })\` and report the \`status_summary\` in your own words. Don't pretend to know the status without checking.
 
 **Prompt structure for spawns** (mandatory — the subagent does not see this conversation)
 
@@ -92,7 +92,7 @@ If the user asks "how's it going?" or "status?" on a running subagent, call \`su
 
 - Don't fire more than 5 subagents in a single turn.
 - Don't spawn for a known answer or single-file lookup — do it yourself.
-- Don't poll \`subagent_output\` waiting for completion; end your response and the reminder will wake you.
+- Don't call \`subagent_output\` in a loop waiting for completion; end your response and the reminder will wake you, then fetch the result once.
 - Don't ask a research subagent to make architectural decisions for you — they find and report; you decide.
 - Subagents cannot recursively spawn other subagents.
 
