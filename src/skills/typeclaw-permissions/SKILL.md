@@ -11,7 +11,7 @@ You run under an access-control system that gates which sessions wake you, which
 
 Every session you run in has a `SessionOrigin` (TUI / channel / cron / subagent). How the runtime resolves it to a **role** depends on the origin kind:
 
-- **TUI and channel** sessions resolve by walking the `roles` block in `typeclaw.json` in declaration order and picking the first role whose `match` rules cover the origin. This is the only origin shape that match rules actually grant roles to at runtime.
+- **TUI and channel** sessions resolve by walking the role table in **severity-then-declaration order** and picking the first role whose `match` rules cover the origin. The walk order is: `owner` → `trusted` → custom roles (in **reverse** declaration order; later declarations override earlier ones) → `member` → `guest`. Built-in privileged roles always get the first shot regardless of how the operator ordered `typeclaw.json#roles`, so a broad rule on `member` cannot shadow a narrower rule on `owner` or `trusted`. Among custom roles, the later-declared entry wins so operators can append overrides without rewriting earlier blocks. This is the only origin shape that match rules actually grant roles to at runtime.
 - **Cron** sessions resolve from `scheduledByRole`, a string stamped on the cron job record itself (in `cron.json` for hand-authored entries, or by the runtime for plugin-contributed cron). Match rules of the form `cron` parse but never grant a role to a running cron session — provenance wins.
 - **Subagent** sessions resolve from `spawnedByRole`, snapshotted from the spawning session's resolved role at spawn time. Same story: `subagent` / `subagent:<name>` rules parse but don't grant roles at runtime; the spawn provenance is the source of truth.
 
@@ -42,7 +42,7 @@ When the runtime knows your permissions, it prepends a block under your `## Sess
 Role: `member`. Permissions: `channel.respond`.
 ```
 
-The block renders for cron / channel / subagent sessions. For TUI sessions, the block is omitted **when** the resolved role is the built-in `owner` (the common case, so we save tokens on every interactive session) and rendered when a user-declared role matched TUI first (because the resolver is first-match-wins in declaration order, a custom role with `match: ["tui"]` placed before `owner` will demote TUI). If you don't see the block in a TUI session, treat yourself as `owner`.
+The block renders for cron / channel / subagent sessions. For TUI sessions, the block is omitted because TUI always resolves to `owner` under severity-then-declaration ordering (built-in `owner.match` includes `tui` and is appended-to, never replaced, by user config — and `owner` is walked first). If you don't see the block in a TUI session, treat yourself as `owner`.
 
 **The role line reflects the session at creation time.** For channel sessions, the speaker on subsequent turns may resolve to a different role; the runtime updates that internally for tool gating (the channel router and the security plugin re-resolve on each turn), but the system prompt is not regenerated mid-session. If the user asks "what role am I right now in this channel", read `typeclaw.json` `roles` and match their author id against `match[]` yourself — do not parrot the system-prompt line as if it always applied.
 
@@ -154,7 +154,7 @@ Two interpretations — clarify if ambiguous:
 
 ## When the user asks "what role am I in this session?"
 
-Read your `## Session origin` block — the role/permissions line is there for non-TUI sessions. For TUI it's `owner` by definition. If the user is in a channel and asks about themselves, read `typeclaw.json` `roles` and match their `<authorId>` against every `match[]` entry in declaration order; the first hit wins. Do not invent a role they aren't in.
+Read your `## Session origin` block — the role/permissions line is there for non-TUI sessions. For TUI it's `owner` by definition. If the user is in a channel and asks about themselves, read `typeclaw.json` `roles` and match their `<authorId>` against every `match[]` entry in **severity-then-declaration order** (walk `owner` first, then `trusted`, then custom roles in **reverse** declaration order — later wins, then `member`, then `guest`); the first hit wins. Do not invent a role they aren't in.
 
 ## When the user asks about cron / subagent provenance
 

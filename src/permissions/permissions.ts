@@ -152,6 +152,29 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
   }
 }
 
+// Walk order: owner, trusted, custom roles (in REVERSE declaration order),
+// member, guest. First role whose `match[]` covers the origin wins.
+//
+// Built-in tower: owner > trusted > member > guest. Pinning the tower
+// ahead of any user-declared rule closes a load-bearing footgun in the
+// previous pure-declaration-order resolver: declaring
+// `member.match: ["*"]` before `owner.match: [...]` resolved every
+// channel session — INCLUDING the owner's — to `member`, because the
+// wildcard matched first. The rolePromotion guard then made it
+// un-fixable from inside the demoted session (a member-resolved speaker
+// cannot rewrite `roles` without a TUI-issued ack).
+//
+// Custom roles use REVERSE declaration order: later declarations override
+// earlier ones. This matches the standard "later config wins" mental
+// model — when an operator adds a new role with the same match-scope as
+// an existing one (or appends a new author-pinned override to an existing
+// broad rule), the newer entry takes precedence. The previous "earlier
+// wins" was an arbitrary consequence of map iteration order rather than
+// a deliberate semantic.
+//
+// Custom roles cannot self-promote above trusted (no inherent severity
+// guarantee) and cannot demote themselves below member (declaring a custom
+// role implies the operator wants it to win against bottom catch-alls).
 function buildRoleTable(
   roles: RolesConfig,
   pluginPermissions: readonly string[],
@@ -160,16 +183,20 @@ function buildRoleTable(
   const out: ResolvedRole[] = []
   const seen = new Set<string>()
 
-  for (const name of Object.keys(roles)) {
-    if (seen.has(name)) continue
+  const emit = (name: string): void => {
+    if (seen.has(name)) return
     seen.add(name)
     out.push(resolveOne(name, roles[name], pluginPermissions, ownerWildcardExclusions))
   }
 
-  for (const name of BUILTIN_ROLE_NAMES) {
-    if (seen.has(name)) continue
-    out.push(resolveOne(name, undefined, pluginPermissions, ownerWildcardExclusions))
+  emit('owner')
+  emit('trusted')
+  const customRoles = Object.keys(roles).filter((name) => !isBuiltinRoleName(name))
+  for (let i = customRoles.length - 1; i >= 0; i--) {
+    emit(customRoles[i]!)
   }
+  emit('member')
+  emit('guest')
 
   return out
 }

@@ -83,7 +83,7 @@ describe('PermissionService — user-declared roles', () => {
     expect(svc.has(slackStrangerChat, 'channel.respond')).toBe(false)
   })
 
-  test('declaration order: first role with any matching pattern wins', () => {
+  test('severity ordering: trusted wins over member regardless of declaration order', () => {
     const roles = parseRoles({
       trusted: { match: ['slack:T0123 author:U_ME'] },
       member: { match: ['slack:T0123'] },
@@ -91,6 +91,54 @@ describe('PermissionService — user-declared roles', () => {
     const svc = createPermissionService({ roles, pluginPermissions: PLUGIN_PERMS })
     expect(svc.resolveRole(slackOwnerChat)).toBe('trusted')
     expect(svc.resolveRole(slackStrangerChat)).toBe('member')
+  })
+
+  test('severity ordering: owner wins even when member with broader match is declared first', () => {
+    const roles = parseRoles({
+      member: { match: ['*'] },
+      owner: { match: ['slack:T0123 author:U_ME'] },
+    })
+    const svc = createPermissionService({ roles, pluginPermissions: PLUGIN_PERMS })
+    expect(svc.resolveRole(slackOwnerChat)).toBe('owner')
+    expect(svc.resolveRole(slackStrangerChat)).toBe('member')
+  })
+
+  test('severity ordering: trusted wins even when member with broader match is declared first', () => {
+    const roles = parseRoles({
+      member: { match: ['slack:T0123'] },
+      trusted: { match: ['slack:T0123 author:U_ME'] },
+    })
+    const svc = createPermissionService({ roles, pluginPermissions: PLUGIN_PERMS })
+    expect(svc.resolveRole(slackOwnerChat)).toBe('trusted')
+    expect(svc.resolveRole(slackStrangerChat)).toBe('member')
+  })
+
+  test('custom roles slot between trusted and member', () => {
+    const roles = parseRoles({
+      member: { match: ['*'] },
+      partner: { match: ['slack:T0123 author:U_PARTNER'], permissions: ['channel.respond'] },
+    })
+    const svc = createPermissionService({ roles, pluginPermissions: PLUGIN_PERMS })
+    const partner: SessionOrigin = { ...slackOwnerChat, lastInboundAuthorId: 'U_PARTNER' }
+    expect(svc.resolveRole(partner)).toBe('partner')
+    expect(svc.resolveRole(slackStrangerChat)).toBe('member')
+  })
+
+  test('custom roles cannot intercept TUI (owner always wins for TUI)', () => {
+    const roles = parseRoles({
+      ops: { match: ['tui'], permissions: ['channel.respond'] },
+    })
+    const svc = createPermissionService({ roles, pluginPermissions: PLUGIN_PERMS })
+    expect(svc.resolveRole(tui)).toBe('owner')
+  })
+
+  test('multiple custom roles: later declaration overrides earlier (later wins)', () => {
+    const roles = parseRoles({
+      beta: { match: ['slack:T0123'], permissions: ['channel.respond'] },
+      alpha: { match: ['slack:T0123'], permissions: ['channel.respond'] },
+    })
+    const svc = createPermissionService({ roles, pluginPermissions: PLUGIN_PERMS })
+    expect(svc.resolveRole(slackOwnerChat)).toBe('alpha')
   })
 
   test('explicit permissions array replaces built-in (no merge)', () => {

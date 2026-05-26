@@ -890,12 +890,12 @@ function resolveRoleContext(
 ): SessionRoleContext | undefined {
   if (permissions === undefined) return undefined
   const described = permissions.describe(origin)
-  // TUI normally resolves to `owner` via the built-in `owner.match = [tui]`
-  // entry, and we skip the role block in that case to save tokens on every
-  // interactive session. But user-declared roles can match TUI first (the
-  // resolver is first-match-wins in declaration order), so a non-owner TUI
-  // role is possible and the agent needs to see it. The "TUI is always owner"
-  // shorthand in docs is the common case, not an invariant.
+  // TUI resolves to `owner` because the built-in `owner.match = [tui]` is
+  // walked first under severity-then-declaration ordering AND is always
+  // appended (not replaced) by user-declared `roles.owner.match[]`. We skip
+  // the role block in that case to save tokens on every interactive
+  // session. The guard remains here as defense-in-depth in case a future
+  // change ever makes TUI resolve to something other than owner.
   if (origin.kind === 'tui' && described.role === 'owner') return undefined
   return described
 }

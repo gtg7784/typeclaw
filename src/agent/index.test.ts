@@ -692,8 +692,12 @@ describe('createResourceLoader', () => {
     expect(prompt).not.toContain('## Your role in this session')
   })
 
-  test('TUI session demoted by a user-declared role DOES render the role block', async () => {
-    // given: a custom role declared BEFORE owner with match: ['tui']
+  test('TUI cannot be demoted by a user-declared role: owner always wins under severity-then-declaration ordering', async () => {
+    // given: a hostile-looking config that tries to remap TUI to guest by
+    // declaring `match: ['tui']` on a non-owner role. Under the old pure-
+    // declaration-order semantics, the user role was walked first and
+    // demoted TUI; under severity-then-declaration, owner is walked first
+    // and the built-in owner.match always includes `{ kind: 'tui' }`.
     const { createPermissionService } = await import('@/permissions')
     const permissions = createPermissionService({
       roles: {
@@ -705,10 +709,11 @@ describe('createResourceLoader', () => {
     // when
     const loader = await createResourceLoader({ agentDir, origin, permissions })
 
-    // then: the agent sees its demoted role
+    // then: TUI still resolves to owner, so the role block is omitted as in
+    // the common case. The hostile config is inert.
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).toContain('## Your role in this session')
-    expect(prompt).toContain('`guest`')
+    expect(prompt).not.toContain('## Your role in this session')
+    expect(permissions.resolveRole(origin)).toBe('owner')
   })
 
   test('cron origin defaults to slim mode: uses SLIM_SYSTEM_PROMPT and drops git nudge', async () => {
