@@ -17,7 +17,10 @@ icon: Inbox
 ```json
 {
   "channels": {
-    "slack-bot": { "enabled": true },
+    "slack-bot": {
+      "enabled": true,
+      "quotedReply": { "enabled": true, "queueDelayMs": 10000 }
+    },
     "discord-bot": { "enabled": true },
     "telegram-bot": { "enabled": true },
     "github": {
@@ -30,11 +33,14 @@ icon: Inbox
 }
 ```
 
-| Field         | Adapters | Notes                                                                      |
-| ------------- | -------- | -------------------------------------------------------------------------- |
-| `enabled`     | all      | live-reloadable                                                            |
-| `webhookPort` | `github` | container-side port the webhook server listens on; default `8975`          |
-| `webhookUrl`  | `github` | optional override; when omitted, the URL comes from a channel-owned tunnel |
+| Field                      | Adapters | Notes                                                                                            |
+| -------------------------- | -------- | ------------------------------------------------------------------------------------------------ |
+| `enabled`                  | all      | live-reloadable                                                                                  |
+| `quotedReply`              | all      | auto-anchor delayed replies with a `> @author: …` blockquote prefix; defaults to on, 10s         |
+| `quotedReply.enabled`      | all      | set `false` to never prepend the anchor                                                          |
+| `quotedReply.queueDelayMs` | all      | reply delay threshold in ms; `0` anchors every reply, large values anchor only very late replies |
+| `webhookPort`              | `github` | container-side port the webhook server listens on; default `8975`                                |
+| `webhookUrl`               | `github` | optional override; when omitted, the URL comes from a channel-owned tunnel                       |
 
 Credentials live in `secrets.json#channels.<adapter>` ([/reference/secrets-json](/docs/reference/secrets-json)).
 
@@ -56,6 +62,8 @@ When a message arrives:
 4. Outgoing tool calls (`channel_send`, `channel_reply`) flow back through the adapter.
 
 The router never blocks on a slow adapter. Each adapter owns its own outbound queue.
+
+When the agent's first send of a turn lands later than `quotedReply.queueDelayMs` after the inbound was received, OR the channel had observed messages between the inbound and the reply, the router prepends a single-line `> @author: excerpt` markdown blockquote referencing the inbound so the user can see which message the reply is anchored to even after the channel has scrolled. Slack and Discord get platform-native `<@authorId>` mentions inside the quote; Telegram, KakaoTalk, and GitHub fall back to plain author names because they have no reliable id-only mention syntax inside markdown. Anchoring is first-send-only per turn — multi-part replies don't repeat the quote on every chunk.
 
 ## Per-adapter quirks
 

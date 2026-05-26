@@ -41,6 +41,8 @@ Plugin-owned config blocks live at the top level under their plugin name and are
 
 `default` is required. Other profile names are conventional but not enforced. Each value is either a single `<provider>/<model>` ref or a non-empty array forming a fallback chain: on failure, the runtime disposes the failed session and replays the prompt against the next ref.
 
+Provider-family defaults override the SDK's reasoning level at session creation: OpenAI-family refs (`openai/*`, `openai-codex/*`) pin `thinkingLevel: 'low'` because GPT-5.x at the SDK default of `medium` pads reasoning tokens on routine tool-driven turns with no observable quality delta. Anthropic, GLM, and Kimi refs keep the SDK default.
+
 ## `network`
 
 ```json
