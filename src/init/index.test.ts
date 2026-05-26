@@ -16,6 +16,7 @@ import {
   defaultRunHatching,
   findAgentDir,
   hasExistingChannelSecrets,
+  hasExistingOAuthCredentials,
   type HatchingResult,
   type HatchRunner,
   initGitRepo,
@@ -1429,6 +1430,54 @@ describe('writeSecrets', () => {
 
     expect((await readSecrets(root)).providers?.fireworks).toEqual({ type: 'api_key', key: { value: 'fw_test' } })
     expect((await readSecrets(root)).channels).toEqual({})
+  })
+})
+
+describe('hasExistingOAuthCredentials', () => {
+  async function seedProviders(providers: Record<string, unknown>): Promise<void> {
+    await writeFile(join(root, 'secrets.json'), `${JSON.stringify({ version: 2, providers, channels: {} }, null, 2)}\n`)
+  }
+
+  test('returns false when secrets.json does not exist', async () => {
+    expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(false)
+    expect(await hasExistingOAuthCredentials(root, 'anthropic')).toBe(false)
+  })
+
+  test('returns false for providers without OAuth support', async () => {
+    await seedProviders({ openai: { type: 'oauth', access_token: 'tok-x' } })
+    expect(await hasExistingOAuthCredentials(root, 'openai')).toBe(false)
+    expect(await hasExistingOAuthCredentials(root, 'fireworks')).toBe(false)
+  })
+
+  test('returns true when the OAuth slot has a non-empty access_token', async () => {
+    await seedProviders({ 'openai-codex': { type: 'oauth', access_token: 'tok-fresh', refresh_token: 'r' } })
+    expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(true)
+  })
+
+  test('returns false when the slot is api_key-shaped instead of oauth', async () => {
+    await seedProviders({ 'openai-codex': { type: 'api_key', key: { value: 'sk-anything' } } })
+    expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(false)
+  })
+
+  test('returns false when access_token is missing', async () => {
+    await seedProviders({ 'openai-codex': { type: 'oauth' } })
+    expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(false)
+  })
+
+  test('returns false when access_token is empty or whitespace', async () => {
+    await seedProviders({ 'openai-codex': { type: 'oauth', access_token: '' } })
+    expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(false)
+    await seedProviders({ 'openai-codex': { type: 'oauth', access_token: '   ' } })
+    expect(await hasExistingOAuthCredentials(root, 'openai-codex')).toBe(false)
+  })
+
+  test('routes by oauthProviderId, not the providerId argument', async () => {
+    // anthropic's oauthProviderId === 'anthropic' (same name), so this is
+    // a sanity check rather than a mismatch case — but the test pins the
+    // behavior so a future provider whose oauthProviderId diverges from
+    // its id can't silently break this code path.
+    await seedProviders({ anthropic: { type: 'oauth', access_token: 'ant-tok' } })
+    expect(await hasExistingOAuthCredentials(root, 'anthropic')).toBe(true)
   })
 })
 

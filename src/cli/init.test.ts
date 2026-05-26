@@ -5,56 +5,11 @@ import type { ModelOption } from '@/init/models-dev'
 
 import {
   collectWizardInputs,
-  decideExistingApiKeyReuse,
   formatModelLabel,
   sortRecommendedFirst,
   WizardAbortedError,
   type WizardPrompts,
 } from './init'
-
-describe('decideExistingApiKeyReuse', () => {
-  test('reuses an existing API key when the user confirms', async () => {
-    const messages: string[] = []
-
-    const decision = await decideExistingApiKeyReuse(KNOWN_PROVIDERS.openai, 'openai-existing-key', async (message) => {
-      messages.push(message)
-      return true
-    })
-
-    expect(decision).toBe('reuse')
-    expect(messages).toEqual(['Reuse existing OpenAI API key from secrets.json?'])
-  })
-
-  test('prompts for a new API key when the user declines reuse', async () => {
-    const decision = await decideExistingApiKeyReuse(KNOWN_PROVIDERS.fireworks, 'fw_existing', async () => false)
-
-    expect(decision).toBe('prompt')
-  })
-
-  test('skips the reuse question when there is no existing API key', async () => {
-    let asked = false
-
-    const decision = await decideExistingApiKeyReuse(KNOWN_PROVIDERS.openai, null, async () => {
-      asked = true
-      return true
-    })
-
-    expect(decision).toBe('prompt')
-    expect(asked).toBe(false)
-  })
-
-  test('skips the reuse question for OAuth-only providers', async () => {
-    let asked = false
-
-    const decision = await decideExistingApiKeyReuse(KNOWN_PROVIDERS['openai-codex'], 'unused-key', async () => {
-      asked = true
-      return true
-    })
-
-    expect(decision).toBe('prompt')
-    expect(asked).toBe(false)
-  })
-})
 
 describe('collectWizardInputs back-aware flow', () => {
   const fireworksModel: ModelOption = {
@@ -122,9 +77,9 @@ describe('collectWizardInputs back-aware flow', () => {
     return {
       loadCatalog: async () => ({ options: [fireworksModel, openaiModel, codexModel], source: 'curated' }),
       readExistingApiKey: async () => null,
+      hasExistingOAuthCredentials: async () => false,
       pickProvider: async () => ({ kind: 'value', value: 'fireworks' as KnownProviderId }),
       pickModel: async () => ({ kind: 'value', value: fireworksModel }),
-      askReuseExistingKey: async () => ({ kind: 'value', value: 'prompt' }),
       pickAuthMethod: async () => ({ kind: 'value', value: 'api-key' }),
       askApiKey: async () => ({ kind: 'value', value: 'sk_test' }),
       validateApiKey: async () => ({ kind: 'ok' as const }),
@@ -132,7 +87,6 @@ describe('collectWizardInputs back-aware flow', () => {
       pickVisionModel: async () => ({ kind: 'value', value: openaiModel }),
       pickChannel: async () => ({ kind: 'value', value: 'none' }),
       hasExistingChannelSecrets: async () => false,
-      askReuseExistingChannel: async () => ({ kind: 'value', value: 'prompt' }),
       runChannelFlow: async () => ({ kind: 'value', value: {} }),
       runOAuthLogin: async () => ({ ok: true }),
       askOAuthFailureRecovery: async () => 'abort',
@@ -154,10 +108,6 @@ describe('collectWizardInputs back-aware flow', () => {
       pickModel: async () => {
         record('pick-model')
         return { kind: 'value', value: fireworksModel }
-      },
-      askReuseExistingKey: async () => {
-        record('reuse-existing-key')
-        return { kind: 'value', value: 'prompt' }
       },
       pickAuthMethod: async () => {
         record('pick-auth-method')
@@ -183,7 +133,6 @@ describe('collectWizardInputs back-aware flow', () => {
       'load-catalog',
       'pick-provider',
       'pick-model',
-      'reuse-existing-key',
       'pick-auth-method',
       'enter-api-key',
       'pick-channel',
@@ -319,15 +268,11 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(calls).toEqual(['pick-auth-method', 'pick-channel', 'pick-auth-method', 'pick-channel'])
   })
 
-  test('back from pick-channel returns to reuse-existing-key when reuse was chosen', async () => {
+  test('auto-resume: existing api-key skips pick-auth-method and enter-api-key silently', async () => {
     const calls: string[] = []
     let channelBacked = false
     const prompts = makePrompts({
       readExistingApiKey: async () => 'sk_existing',
-      askReuseExistingKey: async () => {
-        calls.push('reuse-existing-key')
-        return { kind: 'value', value: 'reuse' }
-      },
       pickAuthMethod: async () => {
         calls.push('pick-auth-method')
         return { kind: 'value', value: 'api-key' }
@@ -346,16 +291,17 @@ describe('collectWizardInputs back-aware flow', () => {
       },
     })
 
-    await collectWizardInputs('/agent', prompts)
+    const result = await collectWizardInputs('/agent', prompts)
 
-    expect(calls).toEqual(['reuse-existing-key', 'pick-channel', 'reuse-existing-key', 'pick-channel'])
+    expect(calls).toEqual(['pick-channel', 'pick-channel'])
     expect(calls).not.toContain('pick-auth-method')
     expect(calls).not.toContain('enter-api-key')
+    expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk_existing' })
   })
 
   test('changing provider clears the previously picked model so it is re-asked fresh', async () => {
     let providerCallCount = 0
-    let reuseBacked = false
+    let authBacked = false
     const modelInitials: (string | undefined)[] = []
     const prompts = makePrompts({
       pickProvider: async () => {
@@ -369,12 +315,12 @@ describe('collectWizardInputs back-aware flow', () => {
           value: providerId === 'fireworks' ? fireworksModel : openaiModel,
         }
       },
-      askReuseExistingKey: async () => {
-        if (!reuseBacked) {
-          reuseBacked = true
+      pickAuthMethod: async () => {
+        if (!authBacked) {
+          authBacked = true
           return { kind: 'back' }
         }
-        return { kind: 'value', value: 'prompt' }
+        return { kind: 'value', value: 'api-key' }
       },
     })
 
@@ -404,12 +350,12 @@ describe('collectWizardInputs back-aware flow', () => {
         }
         return { kind: 'value', value: openaiModel }
       },
-      askReuseExistingKey: async () => {
+      pickAuthMethod: async () => {
         if (!modelBackedOnce) {
           modelBackedOnce = true
           return { kind: 'back' }
         }
-        return { kind: 'value', value: 'prompt' }
+        return { kind: 'value', value: 'api-key' }
       },
     })
 
@@ -620,183 +566,82 @@ describe('collectWizardInputs back-aware flow', () => {
     expect(result.channelSecrets).toEqual({ discordBotToken: 'tok' })
   })
 
-  test('existing channel secrets: prompts to reuse and skips channel-flow on accept', async () => {
+  test('auto-resume: existing channel secrets are silently reused, skipping channel-flow', async () => {
     const calls: string[] = []
+    const runFlow = mock(async () => ({ kind: 'value' as const, value: { discordBotToken: 'tok' } }))
     const prompts = makePrompts({
       pickChannel: async () => {
         calls.push('pick-channel')
         return { kind: 'value', value: 'discord' }
       },
       hasExistingChannelSecrets: async (_cwd, channel) => channel === 'discord',
-      askReuseExistingChannel: async () => {
-        calls.push('reuse-existing-channel')
-        return { kind: 'value', value: 'reuse' }
-      },
-      runChannelFlow: async () => {
-        calls.push('channel-flow')
-        return { kind: 'value', value: { discordBotToken: 'tok' } }
-      },
+      runChannelFlow: runFlow,
     })
 
     const result = await collectWizardInputs('/agent', prompts)
 
-    expect(calls).toEqual(['pick-channel', 'reuse-existing-channel'])
-    expect(calls).not.toContain('channel-flow')
+    expect(runFlow).not.toHaveBeenCalled()
+    expect(calls).toEqual(['pick-channel'])
     expect(result.reuseExistingChannel).toBe(true)
     expect(result.channelChoice).toBe('discord')
     expect(result.channelSecrets).toEqual({})
   })
 
-  test('existing channel secrets: declining reuse falls through to channel-flow', async () => {
+  test('no existing channel secrets: falls through to channel-flow without asking to reuse', async () => {
     const calls: string[] = []
-    const prompts = makePrompts({
-      pickChannel: async () => {
-        calls.push('pick-channel')
-        return { kind: 'value', value: 'discord' }
-      },
-      hasExistingChannelSecrets: async () => true,
-      askReuseExistingChannel: async () => {
-        calls.push('reuse-existing-channel')
-        return { kind: 'value', value: 'prompt' }
-      },
-      runChannelFlow: async () => {
-        calls.push('channel-flow')
-        return { kind: 'value', value: { discordBotToken: 'new-tok' } }
-      },
-    })
-
-    const result = await collectWizardInputs('/agent', prompts)
-
-    expect(calls).toEqual(['pick-channel', 'reuse-existing-channel', 'channel-flow'])
-    expect(result.reuseExistingChannel).toBe(false)
-    expect(result.channelSecrets).toEqual({ discordBotToken: 'new-tok' })
-  })
-
-  test('no existing channel secrets: reuse prompt is suppressed entirely', async () => {
-    const calls: string[] = []
-    const askReuse = mock(async () => ({ kind: 'value' as const, value: 'reuse' as const }))
     const prompts = makePrompts({
       pickChannel: async () => {
         calls.push('pick-channel')
         return { kind: 'value', value: 'discord' }
       },
       hasExistingChannelSecrets: async () => false,
-      askReuseExistingChannel: askReuse,
       runChannelFlow: async () => {
         calls.push('channel-flow')
         return { kind: 'value', value: { discordBotToken: 'tok' } }
-      },
-    })
-
-    await collectWizardInputs('/agent', prompts)
-
-    expect(askReuse).not.toHaveBeenCalled()
-    expect(calls).toEqual(['pick-channel', 'channel-flow'])
-  })
-
-  test('back from reuse-existing-channel returns to pick-channel', async () => {
-    const calls: string[] = []
-    let reuseBacked = false
-    const prompts = makePrompts({
-      pickChannel: async () => {
-        calls.push('pick-channel')
-        return { kind: 'value', value: 'discord' }
-      },
-      hasExistingChannelSecrets: async () => true,
-      askReuseExistingChannel: async () => {
-        calls.push('reuse-existing-channel')
-        if (!reuseBacked) {
-          reuseBacked = true
-          return { kind: 'back' }
-        }
-        return { kind: 'value', value: 'reuse' }
-      },
-    })
-
-    await collectWizardInputs('/agent', prompts)
-
-    expect(calls).toEqual(['pick-channel', 'reuse-existing-channel', 'pick-channel', 'reuse-existing-channel'])
-  })
-
-  test('back from channel-flow returns to reuse-existing-channel when reuse was offered', async () => {
-    const calls: string[] = []
-    let flowBacked = false
-    const prompts = makePrompts({
-      pickChannel: async () => {
-        calls.push('pick-channel')
-        return { kind: 'value', value: 'discord' }
-      },
-      hasExistingChannelSecrets: async () => true,
-      askReuseExistingChannel: async () => {
-        calls.push('reuse-existing-channel')
-        return { kind: 'value', value: 'prompt' }
-      },
-      runChannelFlow: async () => {
-        calls.push('channel-flow')
-        if (!flowBacked) {
-          flowBacked = true
-          return { kind: 'back' }
-        }
-        return { kind: 'value', value: { discordBotToken: 'tok' } }
-      },
-    })
-
-    await collectWizardInputs('/agent', prompts)
-
-    expect(calls).toEqual([
-      'pick-channel',
-      'reuse-existing-channel',
-      'channel-flow',
-      'reuse-existing-channel',
-      'channel-flow',
-    ])
-  })
-
-  test('changing channel after declining reuse clears the offered state so telegram skips reuse prompt', async () => {
-    const calls: string[] = []
-    let pickCount = 0
-    let reuseBacked = false
-    const prompts = makePrompts({
-      pickChannel: async () => {
-        pickCount += 1
-        calls.push(`pick-channel:${pickCount}`)
-        return { kind: 'value', value: pickCount === 1 ? 'discord' : 'telegram' }
-      },
-      hasExistingChannelSecrets: async (_cwd, channel) => channel === 'discord',
-      askReuseExistingChannel: async () => {
-        calls.push('reuse-existing-channel')
-        if (!reuseBacked) {
-          reuseBacked = true
-          return { kind: 'back' }
-        }
-        return { kind: 'value', value: 'prompt' }
-      },
-      runChannelFlow: async (choice) => {
-        calls.push(`channel-flow:${choice}`)
-        return { kind: 'value', value: choice === 'telegram' ? { telegramBotToken: 'tg' } : { discordBotToken: 'd' } }
       },
     })
 
     const result = await collectWizardInputs('/agent', prompts)
 
-    expect(result.channelChoice).toBe('telegram')
-    expect(result.channelSecrets).toEqual({ telegramBotToken: 'tg' })
-    expect(calls).toEqual(['pick-channel:1', 'reuse-existing-channel', 'pick-channel:2', 'channel-flow:telegram'])
+    expect(calls).toEqual(['pick-channel', 'channel-flow'])
+    expect(result.reuseExistingChannel).toBe(false)
+    expect(result.channelSecrets).toEqual({ discordBotToken: 'tok' })
+  })
+
+  test('reset: forces re-prompting even when channel secrets already exist on disk', async () => {
+    const calls: string[] = []
+    const hasExisting = mock(async () => true)
+    const prompts = makePrompts({
+      pickChannel: async () => {
+        calls.push('pick-channel')
+        return { kind: 'value', value: 'discord' }
+      },
+      hasExistingChannelSecrets: hasExisting,
+      runChannelFlow: async () => {
+        calls.push('channel-flow')
+        return { kind: 'value', value: { discordBotToken: 'fresh' } }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts, { reset: true })
+
+    expect(hasExisting).not.toHaveBeenCalled()
+    expect(calls).toEqual(['pick-channel', 'channel-flow'])
+    expect(result.reuseExistingChannel).toBe(false)
+    expect(result.channelSecrets).toEqual({ discordBotToken: 'fresh' })
   })
 
   test('github: wizard collects structured credentials into channelSecrets.github', async () => {
     const calls: string[] = []
     // Production hasExistingChannelSecrets returns false for github so the
-    // reuse prompt is suppressed. The test mirrors that contract here.
+    // auto-resume short-circuit is suppressed. The test mirrors that contract here.
     const hasExisting = mock(async (_cwd: string, channel: string) => channel !== 'github')
-    const askReuse = mock(async () => ({ kind: 'value' as const, value: 'reuse' as const }))
     const prompts = makePrompts({
       pickChannel: async () => {
         calls.push('pick-channel')
         return { kind: 'value', value: 'github' }
       },
       hasExistingChannelSecrets: hasExisting,
-      askReuseExistingChannel: askReuse,
       runChannelFlow: async (choice) => {
         calls.push(`channel-flow:${choice}`)
         return {
@@ -818,7 +663,6 @@ describe('collectWizardInputs back-aware flow', () => {
     const result = await collectWizardInputs('/agent', prompts)
 
     expect(hasExisting).toHaveBeenCalledWith('/agent', 'github')
-    expect(askReuse).not.toHaveBeenCalled()
     expect(calls).toEqual(['pick-channel', 'channel-flow:github'])
     expect(result.channelChoice).toBe('github')
     expect(result.reuseExistingChannel).toBe(false)
@@ -1178,6 +1022,112 @@ describe('collectWizardInputs back-aware flow', () => {
 
     expect(apiKeyAvailableSeen).toBe(true)
     expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk-ant-recovered' })
+  })
+
+  test('auto-resume: existing OAuth credentials skip the browser login', async () => {
+    const runOAuth = mock(async () => ({ ok: true as const }))
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: codexModel }),
+      hasExistingOAuthCredentials: async (_cwd, providerId) => providerId === 'openai-codex',
+      pickAuthMethod: async () => ({ kind: 'value', value: 'oauth', auto: true }),
+      runOAuthLogin: runOAuth,
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(runOAuth).not.toHaveBeenCalled()
+    expect(result.llmAuth).toEqual({ kind: 'oauth-completed' })
+  })
+
+  test('auto-resume: existing vision OAuth credentials skip the second browser login', async () => {
+    const runOAuth = mock(async () => ({ ok: true as const }))
+    const prompts = makePrompts({
+      loadCatalog: async () => ({ options: [zaiTextOnlyModel, codexModel], source: 'curated' }),
+      pickProvider: async () => ({ kind: 'value', value: 'zai' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: zaiTextOnlyModel }),
+      askApiKey: async () => ({ kind: 'value', value: 'zai_key' }),
+      pickVisionProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickVisionModel: async () => ({ kind: 'value', value: codexModel }),
+      hasExistingOAuthCredentials: async (_cwd, providerId) => providerId === 'openai-codex',
+      pickAuthMethod: async (provider) => ({
+        kind: 'value',
+        value: provider.id === 'openai-codex' ? 'oauth' : 'api-key',
+      }),
+      runOAuthLogin: runOAuth,
+    })
+
+    const result = await collectWizardInputs('/agent', prompts)
+
+    expect(runOAuth).not.toHaveBeenCalled()
+    expect(result.vision?.llmAuth).toEqual({ kind: 'oauth-completed' })
+  })
+
+  test('reset: existing OAuth credentials are ignored, browser login runs again', async () => {
+    const runOAuth = mock(async () => ({ ok: true as const }))
+    const hasOAuth = mock(async () => true)
+    const prompts = makePrompts({
+      pickProvider: async () => ({ kind: 'value', value: 'openai-codex' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: codexModel }),
+      hasExistingOAuthCredentials: hasOAuth,
+      pickAuthMethod: async () => ({ kind: 'value', value: 'oauth', auto: true }),
+      runOAuthLogin: runOAuth,
+    })
+
+    const result = await collectWizardInputs('/agent', prompts, { reset: true })
+
+    expect(hasOAuth).not.toHaveBeenCalled()
+    expect(runOAuth).toHaveBeenCalledTimes(1)
+    expect(result.llmAuth).toEqual({ kind: 'oauth-completed' })
+  })
+
+  test('reset: existing api-key on disk is ignored, askApiKey is prompted', async () => {
+    const calls: string[] = []
+    const readExisting = mock(async () => 'sk_existing')
+    const prompts = makePrompts({
+      readExistingApiKey: readExisting,
+      pickAuthMethod: async () => {
+        calls.push('pick-auth-method')
+        return { kind: 'value', value: 'api-key' }
+      },
+      askApiKey: async () => {
+        calls.push('enter-api-key')
+        return { kind: 'value', value: 'sk_fresh' }
+      },
+    })
+
+    const result = await collectWizardInputs('/agent', prompts, { reset: true })
+
+    expect(readExisting).not.toHaveBeenCalled()
+    expect(calls).toEqual(['pick-auth-method', 'enter-api-key'])
+    expect(result.llmAuth).toEqual({ kind: 'api-key', apiKey: 'sk_fresh' })
+  })
+
+  test('auto-resume + reset: reset honors both api-key AND OAuth bypass; auto-resume off honors both', async () => {
+    // Defense-in-depth: a single options.reset must short-circuit every
+    // existence check (api-key, OAuth, channel). This is the test that
+    // catches a future contributor who plumbs reset through one path
+    // but forgets another.
+    const readExisting = mock(async () => 'sk_existing')
+    const hasOAuth = mock(async () => true)
+    const hasChannel = mock(async () => true)
+    const prompts = makePrompts({
+      readExistingApiKey: readExisting,
+      hasExistingOAuthCredentials: hasOAuth,
+      hasExistingChannelSecrets: hasChannel,
+      pickProvider: async () => ({ kind: 'value', value: 'anthropic' as KnownProviderId }),
+      pickModel: async () => ({ kind: 'value', value: anthropicModel }),
+      pickAuthMethod: async () => ({ kind: 'value', value: 'api-key' }),
+      askApiKey: async () => ({ kind: 'value', value: 'sk_fresh' }),
+      pickChannel: async () => ({ kind: 'value', value: 'discord' }),
+      runChannelFlow: async () => ({ kind: 'value', value: { discordBotToken: 'fresh' } }),
+    })
+
+    await collectWizardInputs('/agent', prompts, { reset: true })
+
+    expect(readExisting).not.toHaveBeenCalled()
+    expect(hasOAuth).not.toHaveBeenCalled()
+    expect(hasChannel).not.toHaveBeenCalled()
   })
 })
 

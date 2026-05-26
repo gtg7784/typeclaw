@@ -810,6 +810,37 @@ export async function readExistingProviderApiKey(root: string, providerId: Known
   return new SecretsBackend(join(root, 'secrets.json')).tryReadProviderApiKeySync(providerId)
 }
 
+// Detects whether the requested provider has usable OAuth credentials already
+// written to `secrets.json#providers.<oauthProviderId>`. Used by the init
+// wizard's auto-resume path: when the user picks an OAuth-capable provider
+// and credentials already exist on disk from a prior partial run, skip the
+// browser login entirely instead of dragging them through a second OAuth
+// flow.
+//
+// Mirrors `readExistingProviderApiKey`'s contract — returns `false` when:
+//   - The provider has no OAuth support (`oauthProviderId === null`)
+//   - The file doesn't exist
+//   - The slot exists but has the wrong shape (api-key instead of oauth, or
+//     missing access_token)
+//   - The token is empty / whitespace
+//
+// We do NOT validate the token's freshness here. A stale access_token still
+// counts as "exists" — pi-ai's secrets store handles refresh on first use,
+// and surfacing an "expired token" check at init-time would require a
+// network call we'd rather not run during a wizard. The runtime will fall
+// back to OAuth login on use if refresh fails; that's a separate UX path.
+export async function hasExistingOAuthCredentials(root: string, providerId: KnownProviderId): Promise<boolean> {
+  const provider = KNOWN_PROVIDERS[providerId]
+  if (provider.oauthProviderId === null) return false
+  const backend = new SecretsBackend(join(root, 'secrets.json'))
+  const providers = backend.tryReadProvidersSync()
+  const credential = providers[provider.oauthProviderId]
+  if (credential === undefined) return false
+  if (credential.type !== 'oauth') return false
+  const accessToken = (credential as { access_token?: unknown }).access_token
+  return typeof accessToken === 'string' && accessToken.trim().length > 0
+}
+
 // Detects whether the requested channel already has usable credentials in
 // `secrets.json#channels`, so the init wizard can offer to reuse them
 // instead of re-prompting for tokens. Mirrors `readExistingProviderApiKey`:

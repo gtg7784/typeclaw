@@ -6,7 +6,6 @@ import { defineCommand } from 'citty'
 
 import {
   KNOWN_PROVIDERS,
-  providerForModelRef,
   supportsApiKey as providerSupportsApiKey,
   supportsOAuth as providerSupportsOAuth,
   type KnownModelRef,
@@ -19,6 +18,7 @@ import {
   formatEagerGithubWebhookInstallResult,
   hasEnvKey,
   hasExistingChannelSecrets,
+  hasExistingOAuthCredentials,
   isDirectoryNonEmpty,
   isHatched,
   readExistingProviderApiKey,
@@ -81,8 +81,17 @@ export const init = defineCommand({
     name: 'init',
     description: 'initialize a new typeclaw agent in the current directory',
   },
-  async run() {
+  args: {
+    reset: {
+      type: 'boolean',
+      description:
+        'ignore any partial secrets.json state from an earlier aborted run and re-prompt for every credential',
+      default: false,
+    },
+  },
+  async run({ args }) {
     const cwd = process.cwd()
+    const reset = args.reset === true
 
     const existingAgent = findAgentDir(cwd)
     if (existingAgent !== null && existingAgent !== cwd) {
@@ -131,7 +140,7 @@ export const init = defineCommand({
 
     let collected: CollectedInputs
     try {
-      collected = await collectWizardInputs(cwd, defaultWizardPrompts)
+      collected = await collectWizardInputs(cwd, defaultWizardPrompts, { reset })
     } catch (error) {
       if (error instanceof WizardAbortedError) {
         if (error.oauthCredentialsSaved) {
@@ -332,17 +341,13 @@ type StepId =
 export interface WizardPrompts {
   loadCatalog: () => Promise<NonNullable<WizardState['catalog']>>
   readExistingApiKey: (cwd: string, providerId: KnownProviderId) => Promise<string | null>
+  hasExistingOAuthCredentials: (cwd: string, providerId: KnownProviderId) => Promise<boolean>
   pickProvider: (options: ModelOption[], initial: KnownProviderId | undefined) => Promise<StepResult<KnownProviderId>>
   pickModel: (
     options: ModelOption[],
     providerId: KnownProviderId,
     initial: KnownModelRef | undefined,
   ) => Promise<StepResult<ModelOption>>
-  askReuseExistingKey: (
-    provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
-    existingApiKey: string | null,
-    initial: boolean | undefined,
-  ) => Promise<StepResult<'reuse' | 'prompt'>>
   pickAuthMethod: (
     provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
     initial: 'api-key' | 'oauth' | undefined,
@@ -360,17 +365,12 @@ export interface WizardPrompts {
   ) => Promise<StepResult<ModelOption>>
   pickChannel: (initial: ChannelChoice | undefined) => Promise<StepResult<ChannelChoice>>
   hasExistingChannelSecrets: (cwd: string, channel: Exclude<ChannelChoice, 'none'>) => Promise<boolean>
-  askReuseExistingChannel: (channel: Exclude<ChannelChoice, 'none'>) => Promise<StepResult<'reuse' | 'prompt'>>
   runChannelFlow: (choice: ChannelChoice, cwd: string) => Promise<StepResult<CollectedInputs['channelSecrets']>>
   runOAuthLogin: (
     provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
     cwd: string,
     model: KnownModelRef,
   ) => Promise<OAuthLoginResult>
-  // Asked after a failed OAuth login. `apiKeyAvailable` is true when the
-  // provider also supports api-key auth (so the wizard can offer a fallback
-  // path); false for OAuth-only providers like openai-codex, where the only
-  // options are retry or abort.
   askOAuthFailureRecovery: (
     provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
     reason: string,
@@ -378,14 +378,18 @@ export interface WizardPrompts {
   ) => Promise<OAuthFailureRecovery>
 }
 
+export type CollectWizardInputsOptions = {
+  reset?: boolean
+}
+
 export type OAuthFailureRecovery = 'retry' | 'api-key' | 'abort'
 
 export const defaultWizardPrompts: WizardPrompts = {
   loadCatalog,
   readExistingApiKey: readExistingProviderApiKey,
+  hasExistingOAuthCredentials,
   pickProvider,
   pickModel: pickModelForProvider,
-  askReuseExistingKey,
   pickAuthMethod,
   askApiKey,
   validateApiKey,
@@ -393,7 +397,6 @@ export const defaultWizardPrompts: WizardPrompts = {
   pickVisionModel,
   pickChannel,
   hasExistingChannelSecrets,
-  askReuseExistingChannel,
   runChannelFlow,
   runOAuthLogin: async (provider, cwd, model) => {
     const { callbacks, dispose } = buildOAuthCallbacks(provider.name)
@@ -406,7 +409,12 @@ export const defaultWizardPrompts: WizardPrompts = {
   askOAuthFailureRecovery,
 }
 
-export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): Promise<CollectedInputs> {
+export async function collectWizardInputs(
+  cwd: string,
+  prompts: WizardPrompts,
+  options: CollectWizardInputsOptions = {},
+): Promise<CollectedInputs> {
+  const reset = options.reset === true
   const catalog = await prompts.loadCatalog()
   const state: WizardState = { catalog }
   let step: StepId = 'pick-provider'
@@ -425,6 +433,21 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
       pendingBackOrigin = null
     }
     return result
+  }
+
+  const readExistingApiKey = async (providerId: KnownProviderId): Promise<string | null> => {
+    if (reset) return null
+    return await prompts.readExistingApiKey(cwd, providerId)
+  }
+
+  const hasExistingOAuth = async (providerId: KnownProviderId): Promise<boolean> => {
+    if (reset) return false
+    return await prompts.hasExistingOAuthCredentials(cwd, providerId)
+  }
+
+  const hasExistingChannel = async (channel: Exclude<ChannelChoice, 'none'>): Promise<boolean> => {
+    if (reset) return false
+    return await prompts.hasExistingChannelSecrets(cwd, channel)
   }
 
   while (true) {
@@ -458,17 +481,15 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
 
       case 'reuse-existing-key': {
         const provider = KNOWN_PROVIDERS[state.providerId!]
-        const existingApiKey = await prompts.readExistingApiKey(cwd, state.providerId!)
-        const decision = onResult(
-          step,
-          await prompts.askReuseExistingKey(provider, existingApiKey, state.reuseExisting),
-        )
-        if (decision.kind === 'back') {
-          step = 'pick-model'
-          break
-        }
-        if (decision.value === 'reuse' && existingApiKey !== null) {
-          log.info(`Using existing ${provider.name} API key from secrets.json.`)
+        // Auto-resume: if `secrets.json` already has a usable api-key for
+        // this provider, reuse it silently. Issue #330: re-running init
+        // after a partial abort should pick up where the user left off
+        // without re-prompting for credentials they already supplied.
+        // `--reset` bypasses this by making `readExistingApiKey` return
+        // null, falling through to the normal auth-method flow.
+        const existingApiKey = await readExistingApiKey(state.providerId!)
+        if (existingApiKey !== null) {
+          log.info(`Reusing existing ${provider.name} API key from secrets.json.`)
           state.llmAuth = { kind: 'api-key', apiKey: existingApiKey }
           state.reuseExisting = true
           step = stepAfterDefaultAuth(state)
@@ -484,11 +505,29 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
         const provider = KNOWN_PROVIDERS[state.providerId!]
         const result = onResult(step, await prompts.pickAuthMethod(provider, state.authMethod))
         if (result.kind === 'back') {
-          step = 'reuse-existing-key'
+          // Skip past `reuse-existing-key` — it is a silent auto-resume
+          // step with no user prompt, so unwind directly to pick-model
+          // (the prior user-visible step). This only fires when
+          // pickAuthMethod was an interactive choice (dual-auth providers);
+          // single-method providers return autoValue and never reach the
+          // back branch.
+          step = 'pick-model'
           break
         }
         state.authMethod = result.value
         if (result.value === 'oauth') {
+          // Auto-resume: skip the browser flow when OAuth credentials are
+          // already on disk from a prior partial run. The fresh-tokens path
+          // and the resume path both leave `state.llmAuth = oauth-completed`,
+          // so downstream steps (vision, channel, scaffold) can't tell the
+          // difference. `--reset` short-circuits this by making
+          // `hasExistingOAuth` return false.
+          if (await hasExistingOAuth(state.providerId!)) {
+            log.info(`Reusing existing ${provider.name} OAuth credentials from secrets.json.`)
+            state.llmAuth = { kind: 'oauth-completed' }
+            step = stepAfterDefaultAuth(state)
+            break
+          }
           // Run the browser login eagerly so the user sees the OAuth URL the
           // moment they pick "OAuth (browser login)" — not at the end of the
           // wizard. On failure we ask the user how to recover (retry / fall
@@ -585,9 +624,9 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
           step = 'pick-channel'
           break
         }
-        const existingVisionKey = await prompts.readExistingApiKey(cwd, state.visionProviderId!)
+        const existingVisionKey = await readExistingApiKey(state.visionProviderId!)
         if (existingVisionKey !== null) {
-          log.info(`Using existing ${KNOWN_PROVIDERS[state.visionProviderId!].name} API key from secrets.json.`)
+          log.info(`Reusing existing ${KNOWN_PROVIDERS[state.visionProviderId!].name} API key from secrets.json.`)
           state.visionLlmAuth = { kind: 'api-key', apiKey: existingVisionKey }
           state.visionReuseExisting = true
           step = 'pick-channel'
@@ -608,6 +647,16 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
         }
         state.visionAuthMethod = result.value
         if (result.value === 'oauth') {
+          // Auto-resume mirror of the default-provider branch above: skip
+          // the browser flow when vision OAuth credentials are already on
+          // disk. The same `--reset` short-circuit applies via
+          // `hasExistingOAuth`.
+          if (await hasExistingOAuth(state.visionProviderId!)) {
+            log.info(`Reusing existing ${provider.name} OAuth credentials from secrets.json.`)
+            state.visionLlmAuth = { kind: 'oauth-completed' }
+            step = 'pick-channel'
+            break
+          }
           // Same eager-login + recovery-prompt rationale as the default-provider branch above.
           const login = await runOAuthLoginSafely(prompts, provider, cwd, state.visionModel!.ref)
           if (!login.ok) {
@@ -669,27 +718,22 @@ export async function collectWizardInputs(cwd: string, prompts: WizardPrompts): 
 
       case 'reuse-existing-channel': {
         const choice = state.channelChoice as Exclude<ChannelChoice, 'none'>
-        const present = await prompts.hasExistingChannelSecrets(cwd, choice)
+        // Auto-resume: when usable channel credentials already exist on
+        // disk, reuse them silently — mirrors the api-key and OAuth
+        // resume paths above. `--reset` short-circuits via
+        // `hasExistingChannel` returning false, falling through to the
+        // normal channel-flow prompts.
+        const present = await hasExistingChannel(choice)
         if (!present) {
           state.channelReuseOffered = false
           state.channelReuseExisting = false
           step = 'channel-flow'
           break
         }
+        log.info(`Reusing existing ${channelDisplayName(choice)} credentials from secrets.json.`)
         state.channelReuseOffered = true
-        const decision = onResult(step, await prompts.askReuseExistingChannel(choice))
-        if (decision.kind === 'back') {
-          step = 'pick-channel'
-          break
-        }
-        if (decision.value === 'reuse') {
-          log.info(`Using existing ${channelDisplayName(choice)} credentials from secrets.json.`)
-          state.channelReuseExisting = true
-          return finalize(state, {})
-        }
-        state.channelReuseExisting = false
-        step = 'channel-flow'
-        break
+        state.channelReuseExisting = true
+        return finalize(state, {})
       }
 
       case 'channel-flow': {
@@ -818,31 +862,6 @@ async function pickModelForProvider(
   const picked = candidates.find((o) => o.ref === choice)
   if (!picked) throw new Error(`Internal error: picked model ${choice} not in candidates`)
   return value(picked)
-}
-
-async function askReuseExistingKey(
-  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
-  existingApiKey: string | null,
-  initial: boolean | undefined,
-): Promise<StepResult<'reuse' | 'prompt'>> {
-  if (!providerSupportsApiKey(provider) || existingApiKey === null) return value('prompt')
-  const reuse = await confirm({
-    message: `Reuse existing ${provider.name} API key from secrets.json?`,
-    initialValue: initial ?? true,
-  })
-  if (isCancel(reuse)) return back()
-  return value(reuse === true ? 'reuse' : 'prompt')
-}
-
-async function askReuseExistingChannel(
-  channel: Exclude<ChannelChoice, 'none'>,
-): Promise<StepResult<'reuse' | 'prompt'>> {
-  const reuse = await confirm({
-    message: `Reuse existing ${channelDisplayName(channel)} credentials from secrets.json?`,
-    initialValue: true,
-  })
-  if (isCancel(reuse)) return back()
-  return value(reuse === true ? 'reuse' : 'prompt')
 }
 
 async function pickAuthMethod(
@@ -1470,18 +1489,6 @@ function reportHatching(event: Extract<InitStepEvent, { step: 'hatching' }>): vo
   } else {
     console.error(errorLine(`Hatching failed: ${event.result.reason}`))
   }
-}
-
-export async function decideExistingApiKeyReuse(
-  provider: (typeof KNOWN_PROVIDERS)[KnownProviderId],
-  existingApiKey: string | null,
-  askReuse: (message: string) => Promise<unknown>,
-): Promise<'reuse' | 'prompt' | 'cancel'> {
-  if (!providerSupportsApiKey(provider) || existingApiKey === null) return 'prompt'
-
-  const reuse = await askReuse(`Reuse existing ${provider.name} API key from secrets.json?`)
-  if (isCancel(reuse)) return 'cancel'
-  return reuse === true ? 'reuse' : 'prompt'
 }
 
 function uniqueProviders(options: ModelOption[]): KnownProviderId[] {
