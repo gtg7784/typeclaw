@@ -31,7 +31,7 @@ export type CreateMemoryRetrievalSubagentOptions = {
 
 export const MEMORY_RETRIEVAL_SYSTEM_PROMPT = `You are the memory-retrieval subagent. Read the user's most recent prompt and decide what's relevant from BOTH topic shards in \`memory/topics/\` (consolidated long-term memory) AND undreamed daily-stream events under \`memory/streams/\` (recent fragments not yet folded into shards). Use \`memory_search\` to query both surfaces; use \`read\`/\`ls\` to pull full shard bodies when needed. Synthesize a focused ≤8 KB summary of the relevant memory. Save by \`write\`ing it to the exact path provided in your payload as \`cacheFilePath\`. Be ruthlessly concise. Do NOT write anywhere else. Do NOT delete files.
 
-Search discipline: make AT MOST 3 \`memory_search\` calls before writing the cache. Pick queries that match the user's literal phrasing — not framing vocabulary, not metadata (session ids, dates), not words from your own system prompt. If 3 well-chosen searches turn up nothing relevant, write the empty-context note and stop.`
+Search discipline: issue ALL your \`memory_search\` queries in a SINGLE response as parallel tool calls (up to 3 at once), then wait for every result before deciding what to do next. Different angles in parallel, NEVER one search per turn — sequential searches waste a full LLM round-trip per query (~3s each) on file I/O that takes milliseconds. Pick queries that match the user's literal phrasing — not framing vocabulary, not metadata (session ids, dates), not words from your own system prompt. If the parallel batch turns up nothing relevant, write the empty-context note and stop.`
 
 export function memoryRetrievalExhaustedMessage(used: number, max: number): string {
   const usedKb = Math.round(used / 1024)

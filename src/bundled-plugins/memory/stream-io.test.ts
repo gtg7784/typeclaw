@@ -7,6 +7,7 @@ import { DREAMING_STATE_FILE } from './dreaming-state'
 import { streamFilePath, streamsDir } from './paths'
 import type { FragmentEvent, LegacyProseEvent, WatermarkEvent } from './stream-events'
 import {
+  __resetStreamFileCacheForTests,
   appendEvents,
   countEvents,
   filterUndreamedEvents,
@@ -391,3 +392,85 @@ function fragmentFor(id: string, topic: string): FragmentEvent {
     body: `body for ${topic}`,
   }
 }
+
+describe('readEvents cache', () => {
+  let dir: string
+  let path: string
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(os.tmpdir(), 'typeclaw-stream-cache-'))
+    path = join(dir, 'stream.jsonl')
+    __resetStreamFileCacheForTests()
+  })
+
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+    __resetStreamFileCacheForTests()
+  })
+
+  test('second read returns the same array reference (cache hit) when file is untouched', async () => {
+    const fragment = fragmentFor('e1', 't1')
+    await appendEvents(path, [fragment])
+
+    const first = await readEvents(path)
+    const second = await readEvents(path)
+
+    expect(second).toBe(first)
+  })
+
+  test('appendEvents invalidates the cache (mtime change picked up by stat-based key)', async () => {
+    await appendEvents(path, [fragmentFor('e1', 't1')])
+    const first = await readEvents(path)
+    expect(first).toHaveLength(1)
+
+    await appendEvents(path, [fragmentFor('e2', 't2')])
+    const second = await readEvents(path)
+
+    expect(second).not.toBe(first)
+    expect(second).toHaveLength(2)
+    expect(second.map((e) => (e.type === 'fragment' ? e.id : null))).toEqual(['e1', 'e2'])
+  })
+
+  test('writeEventsAtomic invalidates the cache (rename bumps mtime)', async () => {
+    await appendEvents(path, [fragmentFor('e1', 't1'), fragmentFor('e2', 't2')])
+    const first = await readEvents(path)
+    expect(first).toHaveLength(2)
+
+    await writeEventsAtomic(path, [fragmentFor('e2', 't2')])
+    const second = await readEvents(path)
+
+    expect(second).not.toBe(first)
+    expect(second).toHaveLength(1)
+    expect(second[0]!.type === 'fragment' && second[0]!.id).toBe('e2')
+  })
+
+  test('cache drops entry when file disappears so a recreate returns fresh content', async () => {
+    await appendEvents(path, [fragmentFor('e1', 't1')])
+    const first = await readEvents(path)
+    expect(first).toHaveLength(1)
+
+    await rm(path)
+    const empty = await readEvents(path)
+    expect(empty).toEqual([])
+
+    await appendEvents(path, [fragmentFor('e2', 't2')])
+    const recreated = await readEvents(path)
+    expect(recreated).toHaveLength(1)
+    expect(recreated[0]!.type === 'fragment' && recreated[0]!.id).toBe('e2')
+  })
+
+  test('cache survives across readAllStreamDays calls when no writes occur', async () => {
+    const agentDir = await mkdtemp(join(os.tmpdir(), 'typeclaw-stream-cache-days-'))
+    try {
+      await mkdir(streamsDir(agentDir), { recursive: true })
+      await appendEvents(streamFilePath(agentDir, '2026-05-20'), [fragmentFor('e1', 't1')])
+
+      const first = await readAllStreamDays(agentDir)
+      const second = await readAllStreamDays(agentDir)
+
+      expect(second[0]!.events).toBe(first[0]!.events)
+    } finally {
+      await rm(agentDir, { recursive: true, force: true })
+    }
+  })
+})

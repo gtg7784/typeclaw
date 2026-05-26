@@ -1,10 +1,28 @@
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 export const DREAMING_STATE_FILE = 'memory/.dreaming-state.json'
 
 const VERSION = 2
+
+// Stat-keyed cache for `.dreaming-state.json`. The file is read once at
+// the start of every dreaming run AND once per `readAllStreamDays` call
+// (which fires inside every `memory_search` invocation). For a retrieval
+// subagent that issues 3 parallel searches, this cache turns 3 reads +
+// 3 JSON.parses into 3 stats + 1 parse — small per-call savings, but the
+// file is tiny so the win is mostly avoiding GC pressure on busy
+// channel sessions. Invalidation key matches the stream-file cache
+// (`load-shards.ts` and `stream-io.ts` use the same `(mtimeMs, ctimeMs,
+// size)` shape); `saveDreamingState` uses `writeFile` which bumps both
+// mtime and ctime.
+type DreamingStateCacheEntry = {
+  mtimeMs: number
+  ctimeMs: number
+  size: number
+  state: DreamingState
+}
+const dreamingStateCache = new Map<string, DreamingStateCacheEntry>()
 
 // Per-day "dreamed" set: the set of stream-event ids dreaming has already
 // reasoned over for a given day. Anything in this set is either cited from
@@ -32,8 +50,35 @@ export function emptyState(): DreamingState {
 
 export async function loadDreamingState(agentDir: string): Promise<DreamingState> {
   const path = join(agentDir, DREAMING_STATE_FILE)
-  if (!existsSync(path)) return emptyState()
+  if (!existsSync(path)) {
+    dreamingStateCache.delete(path)
+    return emptyState()
+  }
 
+  let fileStat: { mtimeMs: number; ctimeMs: number; size: number }
+  try {
+    const s = await stat(path)
+    fileStat = { mtimeMs: s.mtimeMs, ctimeMs: s.ctimeMs, size: s.size }
+  } catch {
+    return emptyState()
+  }
+
+  const cached = dreamingStateCache.get(path)
+  if (
+    cached !== undefined &&
+    cached.mtimeMs === fileStat.mtimeMs &&
+    cached.ctimeMs === fileStat.ctimeMs &&
+    cached.size === fileStat.size
+  ) {
+    return cached.state
+  }
+
+  const state = await loadDreamingStateFromDisk(path)
+  dreamingStateCache.set(path, { ...fileStat, state })
+  return state
+}
+
+async function loadDreamingStateFromDisk(path: string): Promise<DreamingState> {
   let raw: string
   try {
     raw = await readFile(path, 'utf8')
@@ -56,6 +101,10 @@ export async function saveDreamingState(agentDir: string, state: DreamingState):
   const path = join(agentDir, DREAMING_STATE_FILE)
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
+}
+
+export function __resetDreamingStateCacheForTests(): void {
+  dreamingStateCache.clear()
 }
 
 export function getDreamedIds(state: DreamingState, date: string): ReadonlySet<string> {
