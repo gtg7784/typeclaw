@@ -53,7 +53,7 @@ describe('parseFilter', () => {
     expect(out.ok).toBe(false)
     if (out.ok) throw new Error('unreachable')
     expect(out.reason).toContain('"wat"')
-    expect(out.reason).toContain('meta, user, assistant, tool, error, done')
+    expect(out.reason).toContain('meta, user, assistant, tool, error, done, broadcast, cron-fire, inbound')
   })
 
   test('case-insensitive token match', () => {

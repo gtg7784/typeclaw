@@ -87,6 +87,30 @@ export type InspectFramePayload =
     }
   | { kind: 'broadcast'; payload: unknown; meta?: Record<string, string> }
   | { kind: 'cron-fire'; jobId: string; payload: unknown }
+  // Channel inbound message observed by the router. Surfaced regardless
+  // of the engagement decision so inspect can show what the agent saw,
+  // not just what it chose to act on. `decision` mirrors the router's
+  // EngagementDecision plus 'denied' (channel.respond gate) and 'claim'
+  // (role-claim intercept) for completeness. `text` is the raw inbound
+  // text — no batching, no compose-prompt wrapping.
+  | {
+      kind: 'channel_inbound'
+      adapter: string
+      workspace: string
+      chat: string
+      thread: string | null
+      authorId: string
+      authorName: string
+      authorIsBot: boolean
+      isDm: boolean
+      isBotMention: boolean
+      text: string
+      externalMessageId: string
+      // 0 = platform timestamp unknown; the renderer uses the frame's
+      // wall-clock ts instead.
+      ts: number
+      decision: 'engage' | 'observe' | 'denied' | 'claim'
+    }
 
 export type InspectServerMessage =
   | { type: 'subscribed'; sessionId: string; sessionLive: boolean }

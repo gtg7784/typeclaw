@@ -172,6 +172,23 @@ function frameToEvent(
       }
     case 'cron-fire':
       return { cat: 'cron-fire', ts, jobId: payload.jobId, payload: payload.payload }
+    case 'channel_inbound':
+      return {
+        cat: 'inbound',
+        ts: payload.ts > 0 ? payload.ts : ts,
+        adapter: payload.adapter,
+        workspace: payload.workspace,
+        chat: payload.chat,
+        thread: payload.thread,
+        authorId: payload.authorId,
+        authorName: payload.authorName,
+        authorIsBot: payload.authorIsBot,
+        isDm: payload.isDm,
+        isBotMention: payload.isBotMention,
+        text: payload.text,
+        externalMessageId: payload.externalMessageId,
+        decision: payload.decision,
+      }
     default:
       return null
   }

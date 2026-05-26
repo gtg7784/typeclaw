@@ -44,6 +44,8 @@ function renderTag(event: InspectEvent, opts: RenderOptions): string {
       return tint(opts, 'magenta', padEnd('bcast', 9))
     case 'cron-fire':
       return tint(opts, 'magenta', padEnd('cron', 9))
+    case 'inbound':
+      return tint(opts, 'cyan', padEnd('inbound', 9))
   }
 }
 
@@ -72,6 +74,29 @@ function renderBody(event: InspectEvent, opts: RenderOptions): string {
       return renderBroadcastBody(event.payload, opts.maxTextLength ?? DEFAULT_MAX_TEXT)
     case 'cron-fire':
       return `${event.jobId} fired`
+    case 'inbound':
+      return renderInboundBody(event, opts)
+  }
+}
+
+function renderInboundBody(event: Extract<InspectEvent, { cat: 'inbound' }>, opts: RenderOptions): string {
+  const coord = `${event.adapter}:${event.workspace}/${event.chat}${event.thread === null ? '' : `#${event.thread}`}`
+  const who = event.authorName !== '' ? event.authorName : event.authorId
+  const decisionTag = tint(opts, decisionColor(event.decision), `[${event.decision}]`)
+  const text = truncate(singleLine(event.text), opts.maxTextLength ?? DEFAULT_MAX_TEXT)
+  return `${decisionTag} ${tint(opts, 'dim', coord)} ${who}: ${text}`
+}
+
+function decisionColor(decision: Extract<InspectEvent, { cat: 'inbound' }>['decision']): ColorName {
+  switch (decision) {
+    case 'engage':
+      return 'green'
+    case 'observe':
+      return 'dim'
+    case 'denied':
+      return 'red'
+    case 'claim':
+      return 'magenta'
   }
 }
 
