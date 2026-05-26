@@ -205,6 +205,111 @@ describe('replayLines', () => {
     expect(errorEvent.message).toBe('provider returned 503')
   })
 
+  test('assistant thinking content block yields a thinking event ordered before text and tool calls', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: 'Need to read the file to know its shape.' },
+                { type: 'text', text: 'Reading the file now.' },
+                { type: 'toolCall', id: 'c1', name: 'read', arguments: { path: 'x' } },
+              ],
+              stopReason: 'toolUse',
+              usage: { input: 10, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 30, cost: { total: 0.0001 } },
+              timestamp: 10_000,
+            },
+          }),
+        ]),
+      ),
+    )
+    expect(events.map((e) => e.cat)).toEqual(['thinking', 'assistant', 'tool', 'done'])
+    const thinking = events[0]!
+    if (thinking.cat !== 'thinking') throw new Error('expected thinking')
+    expect(thinking.text).toBe('Need to read the file to know its shape.')
+    expect(thinking.ts).toBe(10_000)
+    expect(thinking.redacted).toBeUndefined()
+  })
+
+  test('multiple thinking blocks in one turn each yield a thinking event in content-array order', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: 'first thought' },
+                { type: 'thinking', thinking: 'second thought' },
+                { type: 'text', text: 'done thinking' },
+              ],
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+              timestamp: 5_000,
+            },
+          }),
+        ]),
+      ),
+    )
+    const thinks = events.filter((e) => e.cat === 'thinking')
+    expect(thinks).toHaveLength(2)
+    if (thinks[0]!.cat !== 'thinking' || thinks[1]!.cat !== 'thinking') throw new Error('unreachable')
+    expect(thinks[0]!.text).toBe('first thought')
+    expect(thinks[1]!.text).toBe('second thought')
+  })
+
+  test('redacted thinking block surfaces with redacted:true and empty text (so users see the safety-filter cut, not silence)', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: '', redacted: true, thinkingSignature: 'opaque-blob' },
+                { type: 'text', text: 'I cannot show my reasoning here.' },
+              ],
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+              timestamp: 5_000,
+            },
+          }),
+        ]),
+      ),
+    )
+    const thinking = events.find((e) => e.cat === 'thinking')
+    expect(thinking).toBeDefined()
+    if (thinking?.cat !== 'thinking') throw new Error('unreachable')
+    expect(thinking.redacted).toBe(true)
+    expect(thinking.text).toBe('')
+  })
+
+  test('empty non-redacted thinking block is dropped (no noise)', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: '' },
+                { type: 'text', text: 'hello' },
+              ],
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+              timestamp: 5_000,
+            },
+          }),
+        ]),
+      ),
+    )
+    expect(events.find((e) => e.cat === 'thinking')).toBeUndefined()
+    expect(events.find((e) => e.cat === 'assistant')).toBeDefined()
+  })
+
   test('malformed JSON lines are skipped, surrounding events still emit', async () => {
     const warnings: string[] = []
     const events = await collect(

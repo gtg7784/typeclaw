@@ -1158,10 +1158,20 @@ function forwardAgentEventToInspect(
   const e = event as { type?: unknown }
   const now = Date.now()
   if (e.type === 'message_update') {
-    const ev = event as { assistantMessageEvent?: { type?: unknown; delta?: unknown } }
+    const ev = event as { assistantMessageEvent?: { type?: unknown; delta?: unknown; content?: unknown } }
     const ame = ev.assistantMessageEvent
     if (ame?.type === 'text_delta' && typeof ame.delta === 'string') {
       sendInspect(ws, { type: 'frame', ts: now, payload: { kind: 'text_delta', sessionId, delta: ame.delta } })
+      return
+    }
+    if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string') {
+      sendInspect(ws, { type: 'frame', ts: now, payload: { kind: 'thinking_delta', sessionId, delta: ame.delta } })
+      return
+    }
+    if (ame?.type === 'thinking_end') {
+      const text = typeof ame.content === 'string' ? ame.content : ''
+      sendInspect(ws, { type: 'frame', ts: now, payload: { kind: 'thinking_end', sessionId, text } })
+      return
     }
     return
   }

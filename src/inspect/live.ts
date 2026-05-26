@@ -21,6 +21,7 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
   let pendingError: string | null = null
 
   const accumulators = new Map<string, string>()
+  const thinkingAccumulators = new Map<string, string>()
 
   const wake = (): void => {
     if (resolveNext !== null) {
@@ -55,7 +56,7 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
       return
     }
     if (msg.type !== 'frame') return
-    const event = frameToEvent(msg.payload, msg.ts, accumulators)
+    const event = frameToEvent(msg.payload, msg.ts, accumulators, thinkingAccumulators)
     if (event !== null) {
       buffer.push(event)
       wake()
@@ -134,12 +135,25 @@ function frameToEvent(
   payload: InspectFramePayload,
   ts: number,
   accumulators: Map<string, string>,
+  thinkingAccumulators: Map<string, string>,
 ): InspectEvent | null {
   switch (payload.kind) {
     case 'text_delta': {
       const existing = accumulators.get(payload.sessionId) ?? ''
       accumulators.set(payload.sessionId, existing + payload.delta)
       return null
+    }
+    case 'thinking_delta': {
+      const existing = thinkingAccumulators.get(payload.sessionId) ?? ''
+      thinkingAccumulators.set(payload.sessionId, existing + payload.delta)
+      return null
+    }
+    case 'thinking_end': {
+      const accumulated = thinkingAccumulators.get(payload.sessionId) ?? ''
+      thinkingAccumulators.delete(payload.sessionId)
+      const text = accumulated !== '' ? accumulated : payload.text
+      if (text === '' && payload.redacted !== true) return null
+      return { cat: 'thinking', ts, text, ...(payload.redacted === true ? { redacted: true } : {}) }
     }
     case 'tool_start':
       return {

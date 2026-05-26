@@ -83,6 +83,27 @@ describe('renderEvent (plain, no color)', () => {
     expect(stripTime(renderEvent(ev, PLAIN))).toBe('HH:MM:SS  error      provider returned 503')
   })
 
+  test('thinking event renders with think tag and the reasoning text', () => {
+    const ev: InspectEvent = {
+      cat: 'thinking',
+      ts: dateMs('15:08:42'),
+      text: 'I should read the file before editing it.',
+    }
+    expect(stripTime(renderEvent(ev, PLAIN))).toBe('HH:MM:SS  think      I should read the file before editing it.')
+  })
+
+  test('redacted thinking event shows [redacted] marker (safety-filter cut, not silence)', () => {
+    const ev: InspectEvent = { cat: 'thinking', ts: dateMs('15:08:42'), text: '', redacted: true }
+    expect(stripTime(renderEvent(ev, PLAIN))).toBe('HH:MM:SS  think      [redacted] ')
+  })
+
+  test('thinking event respects maxTextLength truncation', () => {
+    const ev: InspectEvent = { cat: 'thinking', ts: dateMs('15:08:42'), text: 'x'.repeat(500) }
+    const out = renderEvent(ev, { color: false, maxTextLength: 20 })
+    expect(out).toContain('…')
+    expect(stripTime(out)).toBe(`HH:MM:SS  think      ${'x'.repeat(20)}…`)
+  })
+
   test('long text is truncated with an ellipsis', () => {
     const ev: InspectEvent = { cat: 'user', ts: dateMs('15:08:42'), text: 'a'.repeat(500) }
     const out = renderEvent(ev, { color: false, maxTextLength: 30 })

@@ -158,6 +158,30 @@ describe('/inspect WS handler', () => {
     ws.close()
   })
 
+  test('thinking_delta and thinking_end events forward as frames', async () => {
+    const registry = new LiveSessionRegistry()
+    const session = createFakeAgent()
+    registry.register({ sessionId: 'ses_live', session })
+    const { url } = await startServer({ liveSessionRegistry: registry })
+    const { ws, waitFor } = await connectInspect(url)
+    ws.send(JSON.stringify({ type: 'subscribe', sessionId: 'ses_live' }))
+    await waitFor((m) => m.type === 'subscribed')
+
+    session.emit({ type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', delta: 'planning ' } })
+    const deltaFrame = await waitFor((m) => m.type === 'frame' && m.payload.kind === 'thinking_delta')
+    if (deltaFrame.type !== 'frame' || deltaFrame.payload.kind !== 'thinking_delta') throw new Error('unreachable')
+    expect(deltaFrame.payload.delta).toBe('planning ')
+
+    session.emit({
+      type: 'message_update',
+      assistantMessageEvent: { type: 'thinking_end', content: 'planning ahead' },
+    })
+    const endFrame = await waitFor((m) => m.type === 'frame' && m.payload.kind === 'thinking_end')
+    if (endFrame.type !== 'frame' || endFrame.payload.kind !== 'thinking_end') throw new Error('unreachable')
+    expect(endFrame.payload.text).toBe('planning ahead')
+    ws.close()
+  })
+
   test('message_end events forward as frames with usage normalised', async () => {
     const registry = new LiveSessionRegistry()
     const session = createFakeAgent()

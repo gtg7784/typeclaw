@@ -53,7 +53,7 @@ describe('parseFilter', () => {
     expect(out.ok).toBe(false)
     if (out.ok) throw new Error('unreachable')
     expect(out.reason).toContain('"wat"')
-    expect(out.reason).toContain('meta, user, assistant, tool, error, done, broadcast, cron-fire, inbound')
+    expect(out.reason).toContain('meta, user, assistant, thinking, tool, error, done, broadcast, cron-fire, inbound')
   })
 
   test('case-insensitive token match', () => {
@@ -61,6 +61,15 @@ describe('parseFilter', () => {
     if (!out.ok) throw new Error('expected ok')
     expect(matchesFilter(sampleTool, out.filter)).toBe(true)
     expect(matchesFilter(sampleAssistant, out.filter)).toBe(false)
+  })
+
+  test('thinking category parses and gates correctly (typeclaw inspect --filter thinking)', () => {
+    const out = parseFilter('thinking')
+    if (!out.ok) throw new Error('expected ok')
+    const sampleThinking: InspectEvent = { cat: 'thinking', ts: 0, text: 'reasoning here' }
+    expect(matchesFilter(sampleThinking, out.filter)).toBe(true)
+    expect(matchesFilter(sampleAssistant, out.filter)).toBe(false)
+    expect(matchesFilter(sampleUser, out.filter)).toBe(false)
   })
 })
 

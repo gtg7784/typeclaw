@@ -4,6 +4,7 @@ export const INSPECT_CATEGORIES = [
   'meta',
   'user',
   'assistant',
+  'thinking',
   'tool',
   'error',
   'done',
@@ -19,6 +20,12 @@ export type InspectEvent =
   | { cat: 'meta'; ts: number; origin: MinimalSessionOrigin }
   | { cat: 'user'; ts: number; text: string }
   | { cat: 'assistant'; ts: number; text: string; provider?: string; model?: string }
+  // Reasoning trace from the model (Claude extended thinking, OpenAI reasoning
+  // summary, Gemini thoughts, etc.). Surfaced for debugging — why the model
+  // picked the next tool / wrote the next thing. `redacted` is true when the
+  // upstream provider hid the content behind a safety filter and only the
+  // opaque continuation payload survives; in that case `text` is empty.
+  | { cat: 'thinking'; ts: number; text: string; redacted?: boolean }
   | {
       cat: 'tool'
       ts: number

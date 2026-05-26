@@ -127,6 +127,61 @@ describe('streamLive — live session events', () => {
     expect(assist.model).toBe('m')
   })
 
+  test('thinking_delta events accumulate until thinking_end then emit one thinking event', async () => {
+    const registry = new LiveSessionRegistry()
+    const session = createFakeAgent()
+    registry.register({ sessionId: 'ses_a', session })
+    const { url } = await startServer({ registry })
+
+    const ctrl = new AbortController()
+    const gen = streamLive({ url, sessionId: 'ses_a', signal: ctrl.signal })
+
+    setTimeout(() => {
+      session.emit({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'Should I ' },
+      })
+      session.emit({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_delta', delta: 'read the file?' },
+      })
+      session.emit({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_end', content: 'Should I read the file?' },
+      })
+    }, 50)
+
+    const events = await collectN(gen, 1)
+    ctrl.abort()
+    const think = events[0]!
+    if (think.cat !== 'thinking') throw new Error('expected thinking')
+    expect(think.text).toBe('Should I read the file?')
+    expect(think.redacted).toBeUndefined()
+  })
+
+  test('thinking_end without preceding deltas falls back to event content (Gemini-shaped batched thinking)', async () => {
+    const registry = new LiveSessionRegistry()
+    const session = createFakeAgent()
+    registry.register({ sessionId: 'ses_a', session })
+    const { url } = await startServer({ registry })
+
+    const ctrl = new AbortController()
+    const gen = streamLive({ url, sessionId: 'ses_a', signal: ctrl.signal })
+
+    setTimeout(() => {
+      session.emit({
+        type: 'message_update',
+        assistantMessageEvent: { type: 'thinking_end', content: 'one-shot thought' },
+      })
+    }, 50)
+
+    const events = await collectN(gen, 1)
+    ctrl.abort()
+    const think = events[0]!
+    if (think.cat !== 'thinking') throw new Error('expected thinking')
+    expect(think.text).toBe('one-shot thought')
+  })
+
   test('broadcast events surface as InspectEvent.broadcast', async () => {
     const stream = createStream()
     const { url } = await startServer({ stream })
