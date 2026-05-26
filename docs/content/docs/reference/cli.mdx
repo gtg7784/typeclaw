@@ -78,6 +78,18 @@ typeclaw cron list --json
 
 Cron jobs are authored in `cron.json`; the CLI doesn't add/remove them. After editing the file, `typeclaw reload`.
 
+## Inspect
+
+```sh
+typeclaw inspect                                   # pick a session from a list
+typeclaw inspect <session-id-or-prefix>            # replay then live-tail
+typeclaw inspect --filter tool,assistant           # category filter (prefix with ! to exclude)
+typeclaw inspect --since 5m                        # only events newer than 5m (forms: 30s, 5m, 1h, 7d)
+typeclaw inspect <session> --json                  # one JSON event per line; requires an explicit session id
+```
+
+Replays the session's persisted transcript, then keeps the stream open and live-tails new events as they happen — no `--follow` toggle. Press `Esc` to return to the session picker; `Ctrl+C` exits. `--json` mode prints raw events without color or interactive controls.
+
 ## Tunnels
 
 ```sh
