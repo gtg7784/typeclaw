@@ -343,32 +343,105 @@ describe('setGithubSecrets', () => {
     expect(gh.webhookSecret).toEqual({ value: 'wh-new' })
   })
 
-  test('refuses to flip auth from pat to app', async () => {
+  test('switches auth from pat to app and replaces the entire auth block', async () => {
     await seedPatGithub()
 
     const result = await setGithubSecrets(root, {
-      auth: { type: 'app', privateKey: 'whatever' },
+      auth: {
+        type: 'app',
+        appId: 4242,
+        privateKey: '-----BEGIN PRIVATE KEY-----\nswitched\n-----END PRIVATE KEY-----',
+        installationId: 7777,
+      },
+    })
+
+    expect(result).toEqual({ ok: true })
+    const secrets = await readSecrets()
+    const gh = secrets.channels?.github as Record<string, unknown>
+    expect(gh.auth).toEqual({
+      type: 'app',
+      appId: 4242,
+      privateKey: { value: '-----BEGIN PRIVATE KEY-----\nswitched\n-----END PRIVATE KEY-----' },
+      installationId: 7777,
+    })
+  })
+
+  test('switches auth from pat to app without an installationId when omitted', async () => {
+    await seedPatGithub()
+
+    const result = await setGithubSecrets(root, {
+      auth: {
+        type: 'app',
+        appId: 4242,
+        privateKey: '-----BEGIN PRIVATE KEY-----\nswitched\n-----END PRIVATE KEY-----',
+      },
+    })
+
+    expect(result).toEqual({ ok: true })
+    const secrets = await readSecrets()
+    const gh = secrets.channels?.github as Record<string, unknown>
+    expect(gh.auth).toEqual({
+      type: 'app',
+      appId: 4242,
+      privateKey: { value: '-----BEGIN PRIVATE KEY-----\nswitched\n-----END PRIVATE KEY-----' },
+    })
+  })
+
+  test('refuses to switch from pat to app when appId is missing', async () => {
+    await seedPatGithub()
+
+    const result = await setGithubSecrets(root, {
+      auth: { type: 'app', privateKey: '-----BEGIN PRIVATE KEY-----\nswitched\n-----END PRIVATE KEY-----' },
     })
 
     expect(result.ok).toBe(false)
     if (result.ok) throw new Error('unreachable')
-    expect(result.reason).toMatch(/auth type mismatch/i)
-    expect(result.reason).toMatch(/pat/)
+    expect(result.reason).toMatch(/appId/i)
     const secrets = await readSecrets()
     const gh = secrets.channels?.github as Record<string, unknown>
     expect(gh.auth).toEqual({ type: 'pat', token: { value: 'ghp_old' } })
   })
 
-  test('refuses to flip auth from app to pat', async () => {
+  test('switches auth from app to pat and replaces the entire auth block', async () => {
     await seedAppGithub()
 
     const result = await setGithubSecrets(root, {
-      auth: { type: 'pat', pat: 'ghp_whatever' },
+      auth: { type: 'pat', pat: 'ghp_switched' },
     })
 
-    expect(result.ok).toBe(false)
-    if (result.ok) throw new Error('unreachable')
-    expect(result.reason).toMatch(/auth type mismatch/i)
+    expect(result).toEqual({ ok: true })
+    const secrets = await readSecrets()
+    const gh = secrets.channels?.github as Record<string, unknown>
+    expect(gh.auth).toEqual({ type: 'pat', token: { value: 'ghp_switched' } })
+  })
+
+  test('switch from pat to app discards any env-binding on the previous PAT token', async () => {
+    await seedPatGithub()
+    const raw = JSON.parse(await readFile(join(root, 'secrets.json'), 'utf8')) as {
+      channels: Record<string, Record<string, unknown>>
+    }
+    raw.channels.github = {
+      auth: { type: 'pat', token: { value: 'ghp_old', env: 'CUSTOM_GH_PAT' } },
+      webhookSecret: { value: 'wh-old' },
+    }
+    await writeFile(join(root, 'secrets.json'), JSON.stringify(raw, null, 2))
+
+    const result = await setGithubSecrets(root, {
+      auth: {
+        type: 'app',
+        appId: 4242,
+        privateKey: '-----BEGIN PRIVATE KEY-----\nswitched\n-----END PRIVATE KEY-----',
+      },
+    })
+
+    expect(result).toEqual({ ok: true })
+    const secrets = await readSecrets()
+    const gh = secrets.channels?.github as Record<string, unknown>
+    expect(gh.auth).toEqual({
+      type: 'app',
+      appId: 4242,
+      privateKey: { value: '-----BEGIN PRIVATE KEY-----\nswitched\n-----END PRIVATE KEY-----' },
+    })
   })
 
   test('refuses to rotate github when secrets.json has no github entry', async () => {

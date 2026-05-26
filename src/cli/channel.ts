@@ -518,14 +518,14 @@ async function runSetGithub(cwd: string): Promise<void> {
   }
   const authLabel =
     authType === 'pat'
-      ? 'Personal access token (PAT) — the authentication credential (recommended)'
-      : 'GitHub App private key — the authentication credential (recommended)'
+      ? 'Auth credential — rotate the PAT, or switch to GitHub App auth (recommended)'
+      : 'Auth credential — rotate the App private key, or switch to PAT auth (recommended)'
   const choice = await select<GithubSetChoice>({
-    message: 'Which GitHub secret do you want to rotate?',
+    message: 'Which GitHub secret do you want to update?',
     options: [
       { value: 'auth', label: authLabel },
       { value: 'webhook', label: 'Webhook secret — shared secret for verifying GitHub payloads' },
-      { value: 'both', label: 'Both secrets — rotate the auth credential and the webhook secret' },
+      { value: 'both', label: 'Both secrets — update the auth credential and the webhook secret' },
     ],
     initialValue: 'auth',
   })
@@ -537,36 +537,7 @@ async function runSetGithub(cwd: string): Promise<void> {
   const patch: GithubCredentialPatch = {}
 
   if (choice === 'auth' || choice === 'both') {
-    if (authType === 'pat') {
-      note(
-        [
-          'Rotate at https://github.com/settings/personal-access-tokens.',
-          'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
-          'Metadata read, and Webhooks read/write.',
-        ].join('\n'),
-        'Rotate the GitHub PAT',
-      )
-      const { pat } = await promptGithubPatAuth()
-      patch.auth = { type: 'pat', pat }
-    } else {
-      note(
-        [
-          'Rotate at https://github.com/settings/apps/<your-app> → Private keys → Generate a private key.',
-          'GitHub immediately downloads the new .pem. The previous key keeps working until you delete it,',
-          'so it is safe to rotate without downtime.',
-        ].join('\n'),
-        'Rotate the GitHub App private key',
-      )
-      const privateKeyInput = await text({
-        message: 'New GitHub App private key PEM, escaped PEM, or path to .pem file',
-        validate: (value) => (value && value.length > 0 ? undefined : 'Private key is required'),
-      })
-      if (isCancel(privateKeyInput)) {
-        cancel('Aborted.')
-        process.exit(0)
-      }
-      patch.auth = { type: 'app', privateKey: await resolvePrivateKeyInput(privateKeyInput) }
-    }
+    patch.auth = await promptGithubAuthUpdate(authType)
   }
 
   if (choice === 'webhook' || choice === 'both') {
@@ -776,6 +747,88 @@ async function promptCloudflareNamedTunnel(): Promise<{ hostname: string; tokenE
     process.exit(0)
   }
   return { hostname, tokenEnv }
+}
+
+type GithubAuthUpdateAction = 'rotate' | 'switch'
+
+async function promptGithubAuthUpdate(currentType: 'pat' | 'app'): Promise<GithubCredentialPatch['auth']> {
+  const rotateLabel =
+    currentType === 'pat'
+      ? 'Rotate the PAT (replace the current personal access token)'
+      : 'Rotate the App private key (replace the current GitHub App private key)'
+  const switchLabel =
+    currentType === 'pat'
+      ? 'Switch to GitHub App auth (replace the PAT with App credentials)'
+      : 'Switch to PAT auth (replace the App credentials with a personal access token)'
+  const action = await select<GithubAuthUpdateAction>({
+    message: 'Update the GitHub auth credential',
+    options: [
+      { value: 'rotate', label: rotateLabel },
+      { value: 'switch', label: switchLabel },
+    ],
+    initialValue: 'rotate',
+  })
+  if (isCancel(action)) {
+    cancel('Aborted.')
+    process.exit(0)
+  }
+
+  const nextType: 'pat' | 'app' = action === 'rotate' ? currentType : currentType === 'pat' ? 'app' : 'pat'
+
+  if (nextType === 'pat') {
+    if (action === 'rotate') {
+      note(
+        [
+          'Rotate at https://github.com/settings/personal-access-tokens.',
+          'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
+          'Metadata read, and Webhooks read/write.',
+        ].join('\n'),
+        'Rotate the GitHub PAT',
+      )
+    } else {
+      note(
+        [
+          'Create a fine-grained PAT at https://github.com/settings/personal-access-tokens.',
+          'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
+          'Metadata read, and Webhooks read/write.',
+        ].join('\n'),
+        'Switch to GitHub PAT auth',
+      )
+    }
+    return await promptGithubPatAuth()
+  }
+
+  if (action === 'rotate') {
+    note(
+      [
+        'Rotate at https://github.com/settings/apps/<your-app> → Private keys → Generate a private key.',
+        'GitHub immediately downloads the new .pem. The previous key keeps working until you delete it,',
+        'so it is safe to rotate without downtime.',
+      ].join('\n'),
+      'Rotate the GitHub App private key',
+    )
+    const privateKeyInput = await text({
+      message: 'New GitHub App private key PEM, escaped PEM, or path to .pem file',
+      validate: (value) => (value && value.length > 0 ? undefined : 'Private key is required'),
+    })
+    if (isCancel(privateKeyInput)) {
+      cancel('Aborted.')
+      process.exit(0)
+    }
+    return { type: 'app', privateKey: await resolvePrivateKeyInput(privateKeyInput) }
+  }
+
+  note(
+    [
+      'Create a GitHub App at https://github.com/settings/apps/new and install it on your repositories.',
+      'Required permissions: Issues read/write, Pull requests read/write, Discussions read/write (if used),',
+      'Metadata read, and Webhooks read/write.',
+      'Then collect the App ID, generate a private key (.pem), and grab the Installation ID from the URL',
+      'of the installation page (https://github.com/settings/installations/<installation-id>).',
+    ].join('\n'),
+    'Switch to GitHub App auth',
+  )
+  return await promptGithubAppAuth()
 }
 
 async function promptGithubPatAuth(): Promise<{ type: 'pat'; pat: string }> {
