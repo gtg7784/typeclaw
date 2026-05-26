@@ -1,6 +1,9 @@
+import { basename } from 'node:path'
+
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
+import { writeRestartHandoff } from '@/agent/restart-handoff'
 import { send, sendHttp } from '@/hostd/client'
 import { containerSocketPath } from '@/hostd/paths'
 import type { Stream } from '@/stream'
@@ -36,6 +39,24 @@ export type CreateRestartToolOptions = {
   // true)` assertion flips to `ok: false, reason: 'daemon ack timeout'`.
   // Optional so production callers keep the 5s default unchanged.
   ackTimeoutMs?: number
+  // Agent folder root. Required to write the cross-restart handoff file
+  // (`<agentDir>/.typeclaw/restart-pending.json`) that lets the next
+  // container reattach to the originating session and produce the
+  // "I'm back" turn. Omit to skip the handoff write (used by sessions
+  // whose origin is not TUI — see `originatingSessionFile` below — and
+  // by ad-hoc tool construction in tests that do not need the handoff).
+  agentDir?: string
+  // Absolute path or basename of the originating session's JSONL file on
+  // disk. Required alongside `agentDir` to enable the handoff; the new
+  // container uses this to reopen the session via `SessionManager.open`
+  // so the `typeclaw.restart-self` custom message entry that was just
+  // appended is part of the LLM context on the next turn. When omitted,
+  // no handoff is written — the new container cold-starts and no
+  // "I'm back" greeting fires. Gates the handoff on the origin being a
+  // TUI session: channel/cron/subagent origins should pass undefined so
+  // the next boot does not produce a stray channel post or unattended
+  // greeting (see issue #291's scoping concerns).
+  originatingSessionFile?: string
 }
 
 export type RestartToolDetails = { ok: boolean; containerName: string; reason?: string }
@@ -55,6 +76,8 @@ export function createRestartTool({
   stream,
   originatingSessionId,
   ackTimeoutMs,
+  agentDir,
+  originatingSessionFile,
 }: CreateRestartToolOptions) {
   const doExit = exit ?? ((code: number) => process.exit(code))
   const httpUrl = hostdUrl ?? process.env.TYPECLAW_HOSTD_URL
@@ -104,12 +127,30 @@ export function createRestartTool({
       // synchronous (broker.ts deliver()) and SessionManager.appendCustomMessageEntry
       // does a synchronous JSONL write, so the fan-out completes inside this
       // tick — well before the EXIT_DELAY_MS timer fires.
+      const restartedAt = new Date().toISOString()
       const broadcast: ContainerRestartingBroadcast = {
         kind: 'container-restarting',
-        restartedAt: new Date().toISOString(),
+        restartedAt,
         originatingSessionId,
       }
       stream?.publish({ target: { kind: 'broadcast' }, payload: broadcast })
+
+      // Write the cross-restart handoff AFTER the broadcast has run so the
+      // originating session's JSONL already contains the `typeclaw.restart-self`
+      // custom message entry that the next container will hydrate on
+      // `SessionManager.open`. Without that ordering, the new container could
+      // theoretically open the JSONL before the entry was flushed and miss
+      // the model-instruction the entry carries. Gated on agentDir +
+      // originatingSessionFile so non-TUI origins (channel/cron/subagent)
+      // skip the file write — see issue #291's scoping concerns.
+      if (agentDir !== undefined && originatingSessionFile !== undefined) {
+        await writeRestartHandoff(agentDir, {
+          schemaVersion: 1,
+          restartedAt,
+          originatingSessionId,
+          originatingSessionFile: basename(originatingSessionFile),
+        })
+      }
 
       // Schedule the exit on the next tick so the tool result is delivered to
       // the model before the process dies. The host daemon polls for the

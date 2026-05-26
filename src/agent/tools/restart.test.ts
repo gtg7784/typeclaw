@@ -1,5 +1,10 @@
-import { afterEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { existsSync } from 'node:fs'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
+import { restartHandoffPath } from '@/agent/restart-handoff'
 import { createStream, type StreamMessage } from '@/stream'
 
 import { createRestartTool } from './restart'
@@ -293,5 +298,139 @@ describe('createRestartTool', () => {
     expect(result.details).toEqual({ ok: true, containerName: 'coder' })
     await waitForCondition(() => exitCode !== undefined)
     expect(exitCode).toBe(0)
+  })
+})
+
+describe('createRestartTool restart-pending handoff', () => {
+  let agentDir: string
+
+  beforeEach(async () => {
+    agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-restart-tool-handoff-'))
+  })
+
+  afterEach(async () => {
+    await rm(agentDir, { recursive: true, force: true })
+  })
+
+  test('writes the handoff file when agentDir and originatingSessionFile are passed', async () => {
+    // given
+    server = startOkServer()
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-originator',
+      exit: () => {},
+      agentDir,
+      originatingSessionFile: '/some/abs/path/ses-originator.jsonl',
+    })
+
+    // when
+    await tool.execute('id', {}, undefined, undefined, fakeCtx)
+
+    // then
+    const raw = await readFile(restartHandoffPath(agentDir), 'utf8')
+    const parsed = JSON.parse(raw)
+    expect(parsed.schemaVersion).toBe(1)
+    expect(parsed.originatingSessionId).toBe('ses-originator')
+    expect(parsed.originatingSessionFile).toBe('ses-originator.jsonl')
+    expect(typeof parsed.restartedAt).toBe('string')
+    expect(new Date(parsed.restartedAt).toISOString()).toBe(parsed.restartedAt)
+  })
+
+  test('skips the handoff when agentDir is omitted (non-TUI origins do not greet)', async () => {
+    // given
+    server = startOkServer()
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-channel',
+      exit: () => {},
+      originatingSessionFile: 'ses-channel.jsonl',
+    })
+
+    // when
+    await tool.execute('id', {}, undefined, undefined, fakeCtx)
+
+    // then
+    expect(existsSync(restartHandoffPath(agentDir))).toBe(false)
+  })
+
+  test('skips the handoff when originatingSessionFile is omitted (in-memory sessions)', async () => {
+    // given
+    server = startOkServer()
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-inmem',
+      exit: () => {},
+      agentDir,
+    })
+
+    // when
+    await tool.execute('id', {}, undefined, undefined, fakeCtx)
+
+    // then
+    expect(existsSync(restartHandoffPath(agentDir))).toBe(false)
+  })
+
+  test('does not write the handoff when hostd denies the restart', async () => {
+    // given
+    server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ ok: false, reason: 'denied' })
+      },
+    })
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      hostdToken: 'bad',
+      originatingSessionId: 'ses-originator',
+      exit: () => {
+        throw new Error('exit should not run')
+      },
+      agentDir,
+      originatingSessionFile: 'ses-originator.jsonl',
+    })
+
+    // when
+    await tool.execute('id', {}, undefined, undefined, fakeCtx)
+
+    // then
+    expect(existsSync(restartHandoffPath(agentDir))).toBe(false)
+  })
+
+  test('uses the broadcast restartedAt timestamp in the handoff (single source of truth)', async () => {
+    // given
+    server = startOkServer()
+    const stream = createStream()
+    const received: StreamMessage[] = []
+    stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => received.push(msg))
+    const tool = createRestartTool({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      hostdToken: 'secret',
+      originatingSessionId: 'ses-originator',
+      exit: () => {},
+      stream,
+      agentDir,
+      originatingSessionFile: 'ses-originator.jsonl',
+    })
+
+    // when
+    await tool.execute('id', {}, undefined, undefined, fakeCtx)
+
+    // then
+    const broadcastTs = (received[0]?.payload as { restartedAt: string }).restartedAt
+    const handoff = JSON.parse(await readFile(restartHandoffPath(agentDir), 'utf8'))
+    expect(handoff.restartedAt).toBe(broadcastTs)
   })
 })
