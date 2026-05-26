@@ -1340,10 +1340,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     // Role-claim intercept runs BEFORE the channel.respond gate so the
     // operator can bootstrap permissions on a fresh agent that has no
-    // role match rules yet. Cheap pre-check: only DMs whose text contains
-    // a `claim-` prefix can be claim attempts, and only when a handler
+    // role match rules yet. Cheap pre-check: any inbound whose text
+    // contains a `claim-` prefix is a candidate, and only when a handler
     // is registered. Everything else falls straight through to the gate.
-    if (claimHandler !== undefined && event.isDm && extractClaimCode(event.text) !== null) {
+    // Claims are accepted from any chat (DM, group, thread) because the
+    // resulting match rule is platform-wide + author-scoped — see
+    // src/role-claim/match-rule.ts.
+    if (claimHandler !== undefined && extractClaimCode(event.text) !== null) {
       const outcome = await claimHandler({
         adapter: event.adapter,
         workspace: event.workspace,

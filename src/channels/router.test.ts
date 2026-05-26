@@ -4295,23 +4295,32 @@ describe('ChannelRouter role-claim bypass', () => {
     expect(router.liveCount()).toBe(0)
   })
 
-  test('non-DM with claim code → handler NOT invoked, falls through to gate (denied)', async () => {
+  test('non-DM (group/channel) with claim code → handler IS invoked, reply sent, no session created, gate bypassed', async () => {
     const dir = await tempDir()
+    const sent: SentMsg[] = []
     let calls = 0
-    const claimHandler: ClaimHandler = async () => {
+    const claimHandler: ClaimHandler = async (input) => {
       calls++
-      return { kind: 'consumed', reply: 'x' }
+      expect(input.isDm).toBe(false)
+      expect(input.text).toContain('claim-')
+      return { kind: 'consumed', reply: 'Welcome owner!' }
     }
     const { router, sessions } = makeRouter(dir, {
       permissions: denyAllPermissions,
       claimHandler,
     })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ adapter: msg.adapter, chat: msg.chat, text: msg.text })
+      return { ok: true }
+    })
 
     await router.route(inbound({ isDm: false, text: 'claim-AAAA-BBBB' }))
     await new Promise((r) => setTimeout(r, 10))
 
-    expect(calls).toBe(0)
+    expect(calls).toBe(1)
+    expect(sent).toEqual([{ adapter: 'discord-bot', chat: 'c1', text: 'Welcome owner!' }])
     expect(sessions).toHaveLength(0)
+    expect(router.liveCount()).toBe(0)
   })
 
   test('DM without a claim code → handler NOT invoked, falls through to gate (denied)', async () => {
