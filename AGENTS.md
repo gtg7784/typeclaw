@@ -369,7 +369,7 @@ The `getAccount()` accessor in `SecretsKakaoCredentialStore` strips `email`/`enc
 - **Role** — named bundle of `permissions[]` + `match[]`. Static, declared under `typeclaw.json#roles`.
 - **Permission** — namespaced string of the shape `<plugin>.<verb>.<noun>`. Plugins declare them on their `definePlugin({ permissions: [...] })`; consumers check by string.
 
-Resolution walks roles in declaration order. For each role, every rule in `match[]` is tested against the origin. The first role with any matching rule wins. The fallback role is built-in `guest`, which has no permissions.
+Resolution walks roles in **severity-then-declaration order**: `owner` → `trusted` → custom roles (in **reverse** `typeclaw.json` declaration order; later declarations override earlier ones) → `member` → `guest`. For each role, every rule in `match[]` is tested against the origin. The first role with any matching rule wins. The fallback role is built-in `guest`, which has no permissions. Built-in privileged roles always get the first shot regardless of how the operator ordered `roles` in `typeclaw.json`, so a broad rule on `member` cannot shadow a narrower rule on `owner` or `trusted` — the prior trap (declaring `member.match: ["*"]` ahead of `owner.match: [...]` resolved every channel session including the owner's to `member`, which was then un-fixable from inside the demoted session because `rolePromotion` blocks rewriting `roles` without a TUI-issued ack) is closed by construction. Among custom roles, later wins so operators can append override entries without rewriting earlier blocks.
 
 ### Built-in roles (`src/permissions/builtins.ts`)
 
