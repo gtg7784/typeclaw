@@ -10,7 +10,7 @@ import { cancel, c, errorLine, isCancel } from './ui'
 export const inspectCommand = defineCommand({
   meta: {
     name: 'inspect',
-    description: 'replay a session transcript and tail live activity (host stage)',
+    description: 'observe a session: replay the transcript, then tail live activity (host stage)',
   },
   args: {
     session: {
@@ -32,12 +32,6 @@ export const inspectCommand = defineCommand({
       description: 'emit one JSON event per line; requires an explicit session id',
       default: false,
     },
-    follow: {
-      type: 'boolean',
-      description:
-        'tail live activity after replay (default: true when the container is running); pass --no-follow to replay-then-exit',
-      default: true,
-    },
   },
   async run({ args }) {
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
@@ -45,10 +39,9 @@ export const inspectCommand = defineCommand({
     const sessionArg = typeof args.session === 'string' ? args.session : undefined
     const filterArg = typeof args.filter === 'string' ? args.filter : undefined
     const sinceArg = typeof args.since === 'string' ? args.since : undefined
-    const follow = args.follow !== false
 
     const isJson = args.json === true
-    const liveSource = !follow || isJson ? undefined : await buildLiveSource(cwd)
+    const liveSource = isJson ? undefined : await buildLiveSource(cwd)
     const signal = installSigintAbort()
 
     const result = await runInspect({
