@@ -1,3 +1,4 @@
+import { SessionManager } from '@mariozechner/pi-coding-agent'
 import type { Server as BunServer, ServerWebSocket } from 'bun'
 
 import {
@@ -10,6 +11,7 @@ import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
 import type { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { LiveSubagentRegistry } from '@/agent/live-subagents'
 import { detectProviderError } from '@/agent/provider-error'
+import { consumeRestartHandoff, type RestartHandoff } from '@/agent/restart-handoff'
 import type { SessionOrigin } from '@/agent/session-origin'
 import { parseSubagentCompletedPayload, renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
 import type { CreateSessionForSubagent } from '@/agent/subagents'
@@ -233,6 +235,42 @@ export function createServer({
 }: ServerOptions) {
   const sessionStates = new WeakMap<Ws, SessionState>()
   const callIdToWs = new Map<string, AnyOwnerWs>()
+
+  // The first TUI WS open per container lifetime checks for
+  // `.typeclaw/restart-pending.json`; subsequent opens see null. The
+  // in-flight promise serializes concurrent first-opens — two TUIs
+  // reconnecting at the same instant share the single consume() call rather
+  // than each racing to reopen the originator's JSONL. Once the promise
+  // resolves, the handoff is consumed exactly once: subsequent opens see
+  // `handoffPending === false` and return null without checking the file.
+  let handoffInFlight: Promise<RestartHandoff | null> | null = null
+  let handoffPending = true
+  async function takeRestartHandoff(): Promise<RestartHandoff | null> {
+    if (!handoffPending) return null
+    if (handoffInFlight !== null) return handoffInFlight
+    if (agentDir === undefined) {
+      handoffPending = false
+      return null
+    }
+    handoffInFlight = consumeRestartHandoff(agentDir).catch(() => null)
+    const result = await handoffInFlight
+    handoffPending = false
+    handoffInFlight = null
+    return result
+  }
+
+  function resumeFromHandoff(handoff: RestartHandoff, factory: SessionFactory | undefined): SessionManager | null {
+    if (factory === undefined) return null
+    const sessionPath = `${factory.sessionDir()}/${handoff.originatingSessionFile}`
+    try {
+      return SessionManager.open(sessionPath)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      logger.warn(`restart-handoff: failed to reopen ${sessionPath}: ${message}`)
+      return null
+    }
+  }
+
   const commandRunner: CommandRunner | undefined = commandRunnerFactory
     ? commandRunnerFactory({
         stdout(callId, chunk) {
@@ -397,7 +435,9 @@ export function createServer({
           if (rawWs.data.kind === 'inspect') return
           const ws = rawWs as Ws
           try {
-            const sessionManager = sessionFactory?.createPersisted()
+            const handoff = await takeRestartHandoff()
+            const resumed = handoff !== null ? resumeFromHandoff(handoff, sessionFactory) : null
+            const sessionManager = resumed ?? sessionFactory?.createPersisted()
             const sessionFileId = sessionManager?.getSessionId() ?? ws.data.sessionId
             // Snapshot the runtime once so the entire session lifecycle for this
             // ws connection sees one consistent generation of registry+hooks. A
@@ -485,6 +525,24 @@ export function createServer({
               ...(runtimeVersion !== undefined ? { serverVersion: runtimeVersion } : {}),
             })
             console.log(`session ${sessionFileId}: open`)
+
+            // Fire the post-restart kick. The originator's JSONL already
+            // contains the `typeclaw.restart-self` custom message entry that
+            // the dying container appended (see subscribeRestartNotice in
+            // src/agent/index.ts). pi's buildSessionContext() hydrates that
+            // entry as a `role: "user"` LLM message on the next prompt, so
+            // a single-space kick is enough to trigger a turn — the entry's
+            // own text instructs the model to "briefly confirm the restart
+            // completed". Publish AFTER the session-target subscription is
+            // wired (state.unsubPrompts above) so the kick is enqueued, not
+            // dropped on the floor.
+            if (resumed !== null && stream) {
+              stream.publish({
+                target: { kind: 'session', sessionId: sessionFileId },
+                payload: { kind: 'prompt', text: ' ', delivery: 'queue' },
+                meta: { source: 'restart-handoff' },
+              })
+            }
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err)
             console.error(`session ${ws.data.sessionId}: open failed: ${message}`)
