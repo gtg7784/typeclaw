@@ -75,12 +75,12 @@ If `process.env[tokenEnv]` is unset or empty when the manager starts, the named 
 
 ## `for` discriminator
 
-| `for`                                    | Owned by                      | Lifecycle                                                                |
-| ---------------------------------------- | ----------------------------- | ------------------------------------------------------------------------ |
-| `{ kind: 'channel', name: '<adapter>' }` | `typeclaw channel add/remove` | adapter subscribes to URL changes; re-registers its webhook on rotation  |
-| `{ kind: 'manual' }`                     | `typeclaw tunnel add/remove`  | adapter-agnostic; you point `--upstream-port` at the in-container server |
+| `for`                                    | Owned by                                              | Lifecycle                                                                |
+| ---------------------------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------ |
+| `{ kind: 'channel', name: '<adapter>' }` | `typeclaw channel add` + `typeclaw tunnel set <name>` | adapter subscribes to URL changes; re-registers its webhook on rotation  |
+| `{ kind: 'manual' }`                     | `typeclaw tunnel add` / `set` / `remove`              | adapter-agnostic; you point `--upstream-port` at the in-container server |
 
-`typeclaw tunnel remove` refuses to delete a channel-owned tunnel and points the user at `channel remove <name>` instead.
+`typeclaw tunnel remove` refuses to delete a channel-owned tunnel — use `typeclaw tunnel set <name>` to change its provider/URL in place. To detach the tunnel from its channel entirely, hand-edit `typeclaw.json` to remove both the channel block and the tunnel entry.
 
 ## URL change notifications
 

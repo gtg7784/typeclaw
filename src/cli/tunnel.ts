@@ -23,6 +23,15 @@ type AddArgs = {
   tokenEnv?: string
 }
 
+type SetArgs = {
+  name: string
+  provider?: string
+  upstreamPort?: string
+  externalUrl?: string
+  hostname?: string
+  tokenEnv?: string
+}
+
 type RemoveArgs = { name: string }
 
 type LiveArgs = { url?: string; timeout?: string }
@@ -33,9 +42,15 @@ type LiveResult<T> = { ok: true; value: T } | { ok: false; reason: string }
 
 export type TextValidator = (value: string) => string | undefined
 
+export type TunnelSetField = 'provider' | 'externalUrl' | 'hostname' | 'tokenEnv' | 'upstreamPort'
+
 export type TunnelPrompts = {
   selectProvider: () => Promise<TunnelProvider | symbol>
   selectOwner: () => Promise<'channel' | 'manual' | symbol>
+  // Only `runTunnelSetFlow` uses this; `runTunnelAddFlow` callers can omit it.
+  selectSetField?: (
+    choices: readonly { value: TunnelSetField; label: string; hint?: string }[],
+  ) => Promise<TunnelSetField | symbol>
   text: (message: string, validate?: TextValidator) => Promise<string | symbol>
 }
 
@@ -62,6 +77,15 @@ const defaultPrompts: TunnelPrompts = {
         { value: 'channel', label: 'Channel' },
         { value: 'manual', label: 'Manual upstream' },
       ],
+    }),
+  selectSetField: (choices) =>
+    select<TunnelSetField>({
+      message: 'Which field do you want to change?',
+      options: choices.map((choice) => ({
+        value: choice.value,
+        label: choice.label,
+        ...(choice.hint !== undefined ? { hint: choice.hint } : {}),
+      })),
     }),
   text: (message, validate) =>
     text({ message, ...(validate !== undefined ? { validate: (v) => validate(v ?? '') } : {}) }),
@@ -145,6 +169,50 @@ const removeSub = defineCommand({
   },
 })
 
+const setSub = defineCommand({
+  meta: {
+    name: 'set',
+    description: 'edit an existing tunnel entry in typeclaw.json (symmetric with `typeclaw channel set`)',
+  },
+  args: {
+    name: { type: 'positional', required: true, description: 'tunnel name' },
+    provider: { type: 'string', description: 'external | cloudflare-quick | cloudflare-named' },
+    'upstream-port': { type: 'string', description: 'container-local upstream port (manual non-named tunnels)' },
+    'external-url': { type: 'string', description: 'https URL for provider=external' },
+    hostname: { type: 'string', description: 'https URL for provider=cloudflare-named (dashboard Public Hostname)' },
+    'token-env': {
+      type: 'string',
+      description: 'env var name holding the cloudflared token (provider=cloudflare-named)',
+    },
+  },
+  async run({ args }) {
+    const result = await runTunnelSetFlow(ensureAgentDir(), {
+      name: String(args.name),
+      ...(args.provider !== undefined ? { provider: String(args.provider) } : {}),
+      ...(args['upstream-port'] !== undefined ? { upstreamPort: String(args['upstream-port']) } : {}),
+      ...(args['external-url'] !== undefined ? { externalUrl: String(args['external-url']) } : {}),
+      ...(args.hostname !== undefined ? { hostname: String(args.hostname) } : {}),
+      ...(args['token-env'] !== undefined ? { tokenEnv: String(args['token-env']) } : {}),
+    })
+    if (!result.ok) {
+      console.error(errorLine(result.reason))
+      process.exit(1)
+    }
+    log.success(`Updated tunnel "${result.value.name}" in typeclaw.json.`)
+    if (result.value.for.kind === 'channel') {
+      // The container-side adapter (see src/channels/adapters/github/index.ts)
+      // re-runs webhook registration on every start. A restart is required
+      // anyway because `tunnels` is restart-required (FIELD_EFFECTS in
+      // src/config/config.ts), so on the next start the adapter picks up the
+      // new URL and re-points its managed webhooks at it. No CLI-side
+      // eager re-install needed.
+      log.info(`Run typeclaw restart to apply (the ${result.value.for.name} adapter will re-register its webhooks).`)
+    } else {
+      log.info('Run typeclaw restart to apply.')
+    }
+  },
+})
+
 const logsSub = defineCommand({
   meta: { name: 'logs', description: 'print or follow a tunnel log ring' },
   args: {
@@ -174,7 +242,7 @@ const logsSub = defineCommand({
 
 export const tunnelCommand = defineCommand({
   meta: { name: 'tunnel', description: 'manage public tunnels for channels and manual upstreams' },
-  subCommands: { add: addSub, list: listSub, status: statusSub, remove: removeSub, logs: logsSub },
+  subCommands: { add: addSub, set: setSub, list: listSub, status: statusSub, remove: removeSub, logs: logsSub },
 })
 
 export async function runTunnelAddFlow(
@@ -256,7 +324,7 @@ export function runTunnelRemoveFlow(cwd: string, args: RemoveArgs): LiveResult<{
   if (tunnel.for.kind === 'channel') {
     return {
       ok: false,
-      reason: `tunnel "${args.name}" is owned by channel "${tunnel.for.name}"; run typeclaw channel remove ${tunnel.for.name}`,
+      reason: `tunnel "${args.name}" is owned by channel "${tunnel.for.name}". Use \`typeclaw tunnel set ${args.name}\` to change its provider/URL, or hand-edit typeclaw.json to remove both the channel block and the tunnel.`,
     }
   }
   const raw = readRawConfig(cwd)
@@ -264,6 +332,232 @@ export function runTunnelRemoveFlow(cwd: string, args: RemoveArgs): LiveResult<{
   writeRawConfig(cwd, raw)
   loadConfigSync(cwd)
   return { ok: true, value: { removed: tunnel } }
+}
+
+export async function runTunnelSetFlow(
+  cwd: string,
+  args: SetArgs,
+  prompts: TunnelPrompts = defaultPrompts,
+): Promise<LiveResult<TunnelConfig>> {
+  const validation = validateConfig(cwd)
+  if (!validation.ok) return { ok: false, reason: validation.reason }
+  const config = loadConfigSync(cwd)
+  const existing = config.tunnels.find((entry) => entry.name === args.name)
+  if (existing === undefined) return { ok: false, reason: `unknown tunnel: ${args.name}` }
+
+  const flagFields = collectSetFlagFields(args)
+  const interactive = flagFields.length === 0
+
+  let nextProvider = existing.provider
+  let nextExternalUrl = existing.externalUrl
+  let nextHostname = existing.hostname
+  let nextTokenEnv = existing.tokenEnv
+  let nextUpstreamPort = existing.upstreamPort
+
+  if (args.provider !== undefined) {
+    const resolved = await resolveProvider(args.provider, prompts)
+    nextProvider = resolved
+  } else if (interactive) {
+    const choices = buildSetFieldChoices(existing)
+    if (choices.length === 0) {
+      return { ok: false, reason: `tunnel "${args.name}" has no editable fields for provider "${existing.provider}"` }
+    }
+    if (prompts.selectSetField === undefined) {
+      return { ok: false, reason: 'interactive set requires selectSetField prompt (pass a flag, e.g. --provider)' }
+    }
+    const field = await prompts.selectSetField(choices)
+    if (isCancel(field)) {
+      cancel('Aborted.')
+      process.exit(0)
+    }
+    if (field === 'provider') {
+      nextProvider = await resolveProvider(undefined, prompts)
+    } else {
+      const interactivePatch = await collectInteractiveFieldPatch(field, prompts)
+      if (!interactivePatch.ok) return interactivePatch
+      nextExternalUrl = interactivePatch.value.externalUrl ?? nextExternalUrl
+      nextHostname = interactivePatch.value.hostname ?? nextHostname
+      nextTokenEnv = interactivePatch.value.tokenEnv ?? nextTokenEnv
+      nextUpstreamPort = interactivePatch.value.upstreamPort ?? nextUpstreamPort
+    }
+  }
+
+  if (args.externalUrl !== undefined) {
+    const err = validateHttpsUrl(args.externalUrl)
+    if (err !== undefined) return { ok: false, reason: `external URL: ${err}` }
+    nextExternalUrl = args.externalUrl
+  }
+  if (args.hostname !== undefined) {
+    const err = validateHttpsUrl(args.hostname)
+    if (err !== undefined) return { ok: false, reason: `hostname: ${err}` }
+    nextHostname = args.hostname
+  }
+  if (args.tokenEnv !== undefined) {
+    const err = validateTokenEnv(args.tokenEnv)
+    if (err !== undefined) return { ok: false, reason: `token-env: ${err}` }
+    nextTokenEnv = args.tokenEnv
+  }
+  if (args.upstreamPort !== undefined) {
+    const err = validateUpstreamPort(args.upstreamPort)
+    if (err !== undefined) return { ok: false, reason: `upstream port: ${err}` }
+    nextUpstreamPort = Number(args.upstreamPort)
+  }
+
+  // On a provider switch, drop fields the new provider forbids and require
+  // fields the new provider needs. This mirrors the per-provider refinements
+  // in tunnelEntrySchema (src/config/config.ts) so the schema-validation
+  // round-trip after write doesn't fail on stale fields from the old shape.
+  if (nextProvider !== existing.provider) {
+    if (nextProvider !== 'external') nextExternalUrl = undefined
+    if (nextProvider !== 'cloudflare-named') {
+      nextHostname = undefined
+      nextTokenEnv = undefined
+    }
+    if (nextProvider === 'cloudflare-named') nextUpstreamPort = undefined
+    if (nextProvider === 'external' && nextExternalUrl === undefined) {
+      const raw =
+        args.externalUrl ??
+        (interactive ? await promptText('External HTTPS URL', prompts, validateHttpsUrl) : undefined)
+      if (raw === undefined) return { ok: false, reason: "provider 'external' requires --external-url" }
+      const err = validateHttpsUrl(raw)
+      if (err !== undefined) return { ok: false, reason: `external URL: ${err}` }
+      nextExternalUrl = raw
+    }
+    if (nextProvider === 'cloudflare-named') {
+      if (nextHostname === undefined) {
+        const raw =
+          args.hostname ??
+          (interactive
+            ? await promptText(
+                'Public hostname configured in the Cloudflare dashboard (https://...)',
+                prompts,
+                validateHttpsUrl,
+              )
+            : undefined)
+        if (raw === undefined) return { ok: false, reason: "provider 'cloudflare-named' requires --hostname" }
+        const err = validateHttpsUrl(raw)
+        if (err !== undefined) return { ok: false, reason: `hostname: ${err}` }
+        nextHostname = raw
+      }
+      if (nextTokenEnv === undefined) {
+        const raw =
+          args.tokenEnv ??
+          (interactive
+            ? await promptText('Env var name holding the tunnel token', prompts, validateTokenEnv)
+            : undefined)
+        if (raw === undefined) return { ok: false, reason: "provider 'cloudflare-named' requires --token-env" }
+        const err = validateTokenEnv(raw)
+        if (err !== undefined) return { ok: false, reason: `token-env: ${err}` }
+        nextTokenEnv = raw
+      }
+    }
+    if (existing.for.kind === 'manual' && nextProvider !== 'cloudflare-named' && nextUpstreamPort === undefined) {
+      const raw = interactive ? await promptText('Upstream port', prompts, validateUpstreamPort) : undefined
+      if (raw === undefined)
+        return { ok: false, reason: 'manual tunnels require --upstream-port (except cloudflare-named)' }
+      const err = validateUpstreamPort(raw)
+      if (err !== undefined) return { ok: false, reason: `upstream port: ${err}` }
+      nextUpstreamPort = Number(raw)
+    }
+  }
+
+  const next: TunnelConfig = {
+    name: existing.name,
+    provider: nextProvider,
+    for: existing.for,
+    ...(nextExternalUrl !== undefined ? { externalUrl: nextExternalUrl } : {}),
+    ...(nextUpstreamPort !== undefined ? { upstreamPort: nextUpstreamPort } : {}),
+    ...(nextHostname !== undefined ? { hostname: nextHostname } : {}),
+    ...(nextTokenEnv !== undefined ? { tokenEnv: nextTokenEnv } : {}),
+  }
+
+  const raw = readRawConfig(cwd)
+  raw.tunnels = config.tunnels.map((entry) => (entry.name === existing.name ? next : entry))
+  if (nextProvider === 'cloudflare-quick' || nextProvider === 'cloudflare-named') {
+    raw.docker = { ...asRecord(raw.docker), file: { ...asRecord(asRecord(raw.docker).file), cloudflared: true } }
+  }
+  writeRawConfig(cwd, raw)
+  // The strict gate above already validated the on-disk shape; calling
+  // validateConfig again here catches any post-write schema violation (e.g.
+  // a provider/field combination the explicit checks above missed) and
+  // surfaces it as a clean LiveResult instead of a thrown error on the next
+  // `loadConfigSync`. We roll back the file on failure so the user's
+  // typeclaw.json doesn't end up in an invalid state.
+  const postWrite = validateConfig(cwd)
+  if (!postWrite.ok) {
+    raw.tunnels = config.tunnels
+    writeRawConfig(cwd, raw)
+    return { ok: false, reason: postWrite.reason }
+  }
+  loadConfigSync(cwd)
+  return { ok: true, value: next }
+}
+
+function collectSetFlagFields(args: SetArgs): TunnelSetField[] {
+  const out: TunnelSetField[] = []
+  if (args.provider !== undefined) out.push('provider')
+  if (args.externalUrl !== undefined) out.push('externalUrl')
+  if (args.hostname !== undefined) out.push('hostname')
+  if (args.tokenEnv !== undefined) out.push('tokenEnv')
+  if (args.upstreamPort !== undefined) out.push('upstreamPort')
+  return out
+}
+
+function buildSetFieldChoices(existing: TunnelConfig): { value: TunnelSetField; label: string; hint?: string }[] {
+  const choices: { value: TunnelSetField; label: string; hint?: string }[] = [
+    { value: 'provider', label: 'Provider', hint: `currently ${existing.provider}` },
+  ]
+  if (existing.provider === 'external') {
+    choices.push({ value: 'externalUrl', label: 'External URL', hint: existing.externalUrl ?? '-' })
+  }
+  if (existing.provider === 'cloudflare-named') {
+    choices.push({ value: 'hostname', label: 'Hostname', hint: existing.hostname ?? '-' })
+    choices.push({ value: 'tokenEnv', label: 'Token env var name', hint: existing.tokenEnv ?? '-' })
+  }
+  if (existing.for.kind === 'manual' && existing.provider !== 'cloudflare-named') {
+    choices.push({
+      value: 'upstreamPort',
+      label: 'Upstream port',
+      hint: existing.upstreamPort !== undefined ? String(existing.upstreamPort) : '-',
+    })
+  }
+  return choices
+}
+
+async function collectInteractiveFieldPatch(
+  field: Exclude<TunnelSetField, 'provider'>,
+  prompts: TunnelPrompts,
+): Promise<LiveResult<{ externalUrl?: string; hostname?: string; tokenEnv?: string; upstreamPort?: number }>> {
+  switch (field) {
+    case 'externalUrl': {
+      const value = await promptText('External HTTPS URL', prompts, validateHttpsUrl)
+      const err = validateHttpsUrl(value)
+      if (err !== undefined) return { ok: false, reason: `external URL: ${err}` }
+      return { ok: true, value: { externalUrl: value } }
+    }
+    case 'hostname': {
+      const value = await promptText(
+        'Public hostname configured in the Cloudflare dashboard (https://...)',
+        prompts,
+        validateHttpsUrl,
+      )
+      const err = validateHttpsUrl(value)
+      if (err !== undefined) return { ok: false, reason: `hostname: ${err}` }
+      return { ok: true, value: { hostname: value } }
+    }
+    case 'tokenEnv': {
+      const value = await promptText('Env var name holding the tunnel token', prompts, validateTokenEnv)
+      const err = validateTokenEnv(value)
+      if (err !== undefined) return { ok: false, reason: `token-env: ${err}` }
+      return { ok: true, value: { tokenEnv: value } }
+    }
+    case 'upstreamPort': {
+      const value = await promptText('Upstream port', prompts, validateUpstreamPort)
+      const err = validateUpstreamPort(value)
+      if (err !== undefined) return { ok: false, reason: `upstream port: ${err}` }
+      return { ok: true, value: { upstreamPort: Number(value) } }
+    }
+  }
 }
 
 export async function fetchTunnelList(opts: {
