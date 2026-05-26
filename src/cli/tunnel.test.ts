@@ -131,6 +131,84 @@ describe('tunnel add/remove config flows', () => {
     expect(result.reason).toMatch(/env var name/)
   })
 
+  test('interactive add prompts for the name when omitted and writes the new tunnel', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'existing',
+          provider: 'external',
+          for: { kind: 'manual' },
+          upstreamPort: 5173,
+          externalUrl: 'https://demo.example.com',
+        },
+      ],
+    })
+    const prompts = sequencedPrompts(['fresh', '5174'])
+
+    const result = await tunnel.runTunnelAddFlow(
+      cwd,
+      {},
+      {
+        selectProvider: async () => 'cloudflare-quick',
+        selectOwner: async () => 'manual',
+        text: prompts.text,
+      },
+    )
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.value.name).toBe('fresh')
+    const config = await readConfig(cwd)
+    expect(config.tunnels.map((entry: { name: string }) => entry.name)).toEqual(['existing', 'fresh'])
+  })
+
+  test('add rejects a duplicate name surfaced through the interactive prompt', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'existing',
+          provider: 'external',
+          for: { kind: 'manual' },
+          upstreamPort: 5173,
+          externalUrl: 'https://demo.example.com',
+        },
+      ],
+    })
+    const prompts = sequencedPrompts(['existing'])
+
+    const result = await tunnel.runTunnelAddFlow(
+      cwd,
+      {},
+      {
+        selectProvider: async () => 'cloudflare-quick',
+        selectOwner: async () => 'manual',
+        text: prompts.text,
+      },
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/already exists/)
+  })
+
+  test('non-interactive add rejects a name that violates the schema regex', async () => {
+    const cwd = await makeAgentDir({})
+
+    const result = await tunnel.runTunnelAddFlow(cwd, {
+      name: 'Bad Name',
+      provider: 'external',
+      forManual: true,
+      upstreamPort: '5173',
+      externalUrl: 'https://demo.example.com',
+    })
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/lowercase, digits/)
+    const config = await readConfig(cwd)
+    expect(config.tunnels ?? []).toEqual([])
+  })
+
   test('non-interactive add writes an external manual tunnel', async () => {
     const cwd = await makeAgentDir({})
 
@@ -396,6 +474,87 @@ describe('tunnel set config flow', () => {
     expect(result.ok).toBe(true)
     if (!result.ok) throw new Error(result.reason)
     expect(result.value.externalUrl).toBe('https://new.example.com')
+  })
+
+  test('interactive set with no name auto-picks the only configured tunnel', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'manual-demo',
+          provider: 'external',
+          for: { kind: 'manual' },
+          upstreamPort: 5173,
+          externalUrl: 'https://old.example.com',
+        },
+      ],
+    })
+
+    const result = await tunnel.runTunnelSetFlow(
+      cwd,
+      {},
+      {
+        selectProvider: async () => 'external',
+        selectOwner: async () => 'manual',
+        selectSetField: async () => 'externalUrl',
+        text: async () => 'https://new.example.com',
+      },
+    )
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.value.name).toBe('manual-demo')
+    expect(result.value.externalUrl).toBe('https://new.example.com')
+  })
+
+  test('interactive set with no name picks from multiple configured tunnels', async () => {
+    const cwd = await makeAgentDir({
+      tunnels: [
+        {
+          name: 'first',
+          provider: 'external',
+          for: { kind: 'manual' },
+          upstreamPort: 5173,
+          externalUrl: 'https://first.example.com',
+        },
+        {
+          name: 'second',
+          provider: 'external',
+          for: { kind: 'manual' },
+          upstreamPort: 5174,
+          externalUrl: 'https://second-old.example.com',
+        },
+      ],
+    })
+
+    const result = await tunnel.runTunnelSetFlow(
+      cwd,
+      {},
+      {
+        selectProvider: async () => 'external',
+        selectOwner: async () => 'manual',
+        selectSetField: async () => 'externalUrl',
+        selectExistingTunnel: async () => 'second',
+        text: async () => 'https://second-new.example.com',
+      },
+    )
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error(result.reason)
+    expect(result.value.name).toBe('second')
+    expect(result.value.externalUrl).toBe('https://second-new.example.com')
+    const config = await readConfig(cwd)
+    expect(config.tunnels[0].externalUrl).toBe('https://first.example.com')
+    expect(config.tunnels[1].externalUrl).toBe('https://second-new.example.com')
+  })
+
+  test('set refuses cleanly with no name when there are zero tunnels', async () => {
+    const cwd = await makeAgentDir({})
+
+    const result = await tunnel.runTunnelSetFlow(cwd, {})
+
+    expect(result.ok).toBe(false)
+    if (result.ok) throw new Error('unreachable')
+    expect(result.reason).toMatch(/no tunnels configured/)
   })
 
   test('set refuses cleanly when typeclaw.json is schema-invalid', async () => {
