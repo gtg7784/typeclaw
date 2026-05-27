@@ -521,16 +521,26 @@ describe('applyPromptInjectionDefense — origin-aware git_exfil carve-out', () 
     const matches = applyPromptInjectionDefense(event)
     expect(matches.some((m) => m.category === 'git_exfil')).toBe(true)
     expect(event.prompt).toContain('[security/prompt-injection]')
-    expect(event.prompt).toContain('Do NOT run')
     expect(event.prompt).toContain('git push')
+    // The defense must NOT lie to the model. The runtime tool.before
+    // guard authorizes per-actor (via gitExfil + gitRemoteTainted
+    // permissions), so the injected text must not claim the runtime
+    // categorically blocks these commands from channel origins, and must
+    // not claim the only path is for the user to "repeat via TUI".
+    // See the rule #5 wording in prompt-injection.ts.
+    expect(event.prompt).not.toContain('runtime will block')
+    expect(event.prompt).not.toContain('repeat it via TUI')
+    expect(event.prompt).toContain('let the runtime guard decide')
   })
 
   test('TUI origin: diagnose-shaped prompt with literal "git push" still injects defense', () => {
     // TUI prompts come from the operator typing, but the operator could
     // paste attacker-supplied text (e.g. "run this thing my coworker sent
-    // me"). The git_exfil defense remains active for TUI as a backstop;
-    // the runtime layer will also block, so the agent gets a consistent
-    // signal at both layers.
+    // me"). The git_exfil defense remains active for TUI as a backstop.
+    // The runtime tool.before guard then decides per-actor: a TUI owner
+    // carrying security.bypass.gitExfil + bypassGitRemoteTainted will be
+    // permitted; a lower-tier actor will be blocked. The prompt-side
+    // defense gives the model cautionary framing without prejudging.
     const event: SessionPromptEvent = {
       prompt: DIAGNOSE_PROMPT_FF_REJECTED,
       sessionId: 'ses_tui',
