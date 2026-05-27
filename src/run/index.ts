@@ -59,6 +59,7 @@ import { createTunnelManager, type TunnelManager, type TunnelManagerOptions } fr
 
 import { BUNDLED_PLUGINS } from './bundled-plugins'
 import { buildChannelSessionFactory } from './channel-session-factory'
+import { installCodexFetchObserver } from './codex-fetch-observer'
 import { createPluginRuntime, type PluginRuntime, type PluginSubagentEntry } from './plugin-runtime'
 
 type BunServer = ReturnType<Server['start']>
@@ -112,6 +113,14 @@ export async function startAgent({
   createTunnelManager: createTunnelManagerFor = createTunnelManager,
 }: StartAgentOptions): Promise<StartAgentResult> {
   const reloadRegistry = new ReloadRegistry()
+
+  // Wrap globalThis.fetch BEFORE any plugin/session/manager construction so
+  // every Codex Responses call from anywhere in the container is observed.
+  // Logs one `[codex-fetch]` line per matched request with phase timings;
+  // never aborts, never retries — purely passive instrumentation while we
+  // investigate the recurring multi-minute Codex stalls (see issue #394).
+  // Opt out with TYPECLAW_CODEX_FETCH_OBSERVER=off.
+  const uninstallCodexFetchObserver = installCodexFetchObserver()
 
   // The host CLI sets TYPECLAW_CONTAINER_NAME when it `docker run`s us. When
   // running outside a typeclaw container (tests, ad-hoc `bun run typeclaw run`
@@ -585,6 +594,7 @@ export async function startAgent({
     subagentCompletionBridge.stop()
     await tunnelManager.stop()
     await channelManager.stop()
+    uninstallCodexFetchObserver()
   }
 
   if (!attachTui) {
