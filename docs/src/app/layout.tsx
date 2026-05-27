@@ -31,7 +31,7 @@ export const metadata: Metadata = {
     url: 'https://typeclaw.dev',
     siteName: 'TypeClaw',
     type: 'website',
-    images: [{ url: '/typeclaw.png', width: 1024, height: 1024, alt: 'TypeClaw mascot' }],
+    images: [{ url: '/typeclaw.png', width: 1000, height: 1000, alt: 'Typeey, the TypeClaw mascot' }],
   },
   twitter: {
     card: 'summary',

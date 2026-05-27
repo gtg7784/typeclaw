@@ -1,11 +1,14 @@
 'use client'
 
+import { Feather } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import Image from 'next/image'
 import Link from 'next/link'
 import { useEffect, useState } from 'react'
 
 import logo from './icon.png'
+
+const TYPEEY_HERO_SRC = '/typeey-cutout.png'
 
 const INSTALL_COMMAND = 'bun add -g typeclaw'
 
@@ -181,7 +184,7 @@ function ExampleBlock() {
           <span className="text-zinc-400 dark:text-zinc-600">$ </span>
           <span className="text-zinc-800 dark:text-zinc-100">typeclaw start</span>
           {'\n'}
-          <span className="text-cyan-700 dark:text-cyan-400">●</span>
+          <span className="text-brand-700 dark:text-brand-300">●</span>
           <span className="text-zinc-600 dark:text-zinc-400"> my-agent started on host port 8973</span>
           {'\n\n'}
           <span className="text-zinc-400 dark:text-zinc-600">$ </span>
@@ -200,12 +203,21 @@ function ExampleBlock() {
   )
 }
 
+function FeatherBullet() {
+  return (
+    <Feather
+      aria-hidden
+      className="size-[14px] shrink-0 translate-y-[3px] text-brand-600 dark:text-brand-300"
+      strokeWidth={2.2}
+    />
+  )
+}
+
 function FeatureItem({ feature }: { feature: Feature }) {
   return (
     <li className="flex items-baseline gap-3 py-2.5">
-      <span aria-hidden className="font-mono text-xs text-cyan-600 dark:text-cyan-400">
-        ✦
-      </span>
+      <FeatherBullet />
+
       <div className="text-sm leading-relaxed">
         <span className="font-medium text-zinc-900 dark:text-zinc-100">{feature.title}</span>
         <span className="text-zinc-500 dark:text-zinc-400"> — {feature.detail}</span>
@@ -250,11 +262,19 @@ export default function Home() {
       </nav>
 
       <main>
-        <section className="mx-auto max-w-3xl px-6 pt-24 pb-16 text-center sm:pt-32 sm:pb-20">
+        <section className="relative mx-auto max-w-3xl px-6 pt-24 pb-16 text-center sm:pt-32 sm:pb-20">
+          <Image
+            src={TYPEEY_HERO_SRC}
+            alt=""
+            width={895}
+            height={858}
+            aria-hidden
+            className="pointer-events-none absolute top-20 right-[-120px] hidden w-44 select-none lg:block xl:right-[-160px] xl:w-52"
+          />
           <h1 className="text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
             A TypeScript agent runtime,
             <br />
-            <span className="text-cyan-700 dark:text-cyan-400">yours in one command.</span>
+            <span className="text-brand-700 dark:text-brand-300">yours in one command.</span>
           </h1>
           <p className="mx-auto mt-5 max-w-xl text-balance text-base leading-relaxed text-zinc-600 sm:text-lg dark:text-zinc-400">
             TypeClaw gives you a local AI agent that lives in a folder. It can answer in Slack, run on a schedule, and
@@ -271,7 +291,7 @@ export default function Home() {
             and Docker or OrbStack. Then{' '}
             <Link
               href="/docs/guides/getting-started"
-              className="text-cyan-700 underline-offset-2 hover:underline dark:text-cyan-400"
+              className="text-brand-700 underline-offset-2 hover:underline dark:text-brand-300"
             >
               the getting-started guide
             </Link>{' '}
@@ -316,12 +336,12 @@ export default function Home() {
                 >
                   <span
                     aria-hidden
-                    className="font-mono text-xs text-zinc-300 transition-colors group-hover:text-cyan-600 dark:text-zinc-700 dark:group-hover:text-cyan-400"
+                    className="font-mono text-xs text-zinc-300 transition-colors group-hover:text-brand-600 dark:text-zinc-700 dark:group-hover:text-brand-300"
                   >
                     →
                   </span>
                   <span className="text-sm">
-                    <span className="font-medium text-zinc-900 group-hover:text-cyan-700 dark:text-zinc-100 dark:group-hover:text-cyan-300">
+                    <span className="font-medium text-zinc-900 group-hover:text-brand-700 dark:text-zinc-100 dark:group-hover:text-brand-200">
                       {doc.title}
                     </span>
                     <span className="text-zinc-500 dark:text-zinc-400"> — {doc.blurb}</span>

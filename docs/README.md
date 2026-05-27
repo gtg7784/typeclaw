@@ -65,7 +65,7 @@ docs/
 │   │   ├── layout.config.tsx # nav title and GitHub link shared by every layout
 │   │   ├── page.tsx          # custom landing page
 │   │   ├── globals.css       # Tailwind + Fumadocs preset imports
-│   │   ├── icon.svg          # favicon (paw emblem)
+│   │   ├── icon.png          # favicon and shared logo (typeey)
 │   │   ├── api/search/route.ts
 │   │   └── docs/
 │   │       ├── layout.tsx
