@@ -6,13 +6,18 @@ import type { GithubSecretsBlock } from '@/secrets/schema'
 import { buildAuthStrategy } from './auth'
 import { createGithubChannelNameResolver } from './channel-resolver'
 import { createDeliveryDedup } from './dedup'
+import { findPermissionGaps } from './event-permissions'
 import { createGithubFetchAttachmentCallback } from './fetch-attachment'
 import { createGithubHistoryCallback } from './history'
 import { createGithubWebhookHandler } from './inbound'
 import { applyManagedPath, buildManagedPath, resolveAgentId } from './managed-path'
 import { createGithubMembershipResolver } from './membership'
 import { createGithubOutboundCallback } from './outbound'
-import { buildPermissionGuidance, parseListHooksPermissionStatus } from './permission-guidance'
+import {
+  buildAppPermissionPreflightGuidance,
+  buildPermissionGuidance,
+  parseListHooksPermissionStatus,
+} from './permission-guidance'
 import { deregisterGithubWebhooks, registerGithubWebhooks, type WebhookRegistrationResult } from './webhook-register'
 
 export type GithubAdapterLogger = {
@@ -141,6 +146,11 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       process.env.GH_TOKEN = await auth.token()
       started = true
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
+      // Best-effort: App-only preflight that compares the installation's granted
+      // permissions against the configured eventAllowlist and warns about gaps.
+      // Catches the most common misconfiguration (App installed with the default
+      // metadata-only permission set) before any event fires a 403.
+      await runAppPermissionPreflight(logger, auth, options.configRef().eventAllowlist)
       // Repository webhook registration is best-effort: failures are logged
       // per-repo, the adapter stays up. A misconfigured PAT or App that
       // can't manage hooks must not prevent the adapter from accepting
@@ -289,6 +299,24 @@ function logRegistrationOutcome(
   if (permissionFailures.length > 0) {
     logger.warn(buildPermissionGuidance(authType, permissionFailures))
   }
+}
+
+async function runAppPermissionPreflight(
+  logger: GithubAdapterLogger,
+  auth: ReturnType<typeof buildAuthStrategy>,
+  eventAllowlist: readonly string[],
+): Promise<void> {
+  if (auth.getInstallationGrants === undefined) return
+  let grants
+  try {
+    grants = await auth.getInstallationGrants()
+  } catch (err) {
+    logger.warn(`[github] permission preflight skipped: ${err instanceof Error ? err.message : String(err)}`)
+    return
+  }
+  const gaps = findPermissionGaps(eventAllowlist, grants.permissions)
+  if (gaps.length === 0) return
+  logger.warn(buildAppPermissionPreflightGuidance(gaps))
 }
 
 function logDeregistrationOutcome(

@@ -1,3 +1,5 @@
+import type { PermissionGap } from './event-permissions'
+
 export type GithubAuthType = 'pat' | 'app'
 
 // Parses webhook-register errors of the shape `list hooks failed: <status> <body>`.
@@ -65,5 +67,31 @@ export function buildPermissionGuidance(
       '    5. If the app permissions changed in step 2, install owners must accept the updated permissions from the install page before the new access takes effect.',
     )
   }
+  return lines.join('\n')
+}
+
+// Always GitHub App: PATs don't have per-installation permission grants
+// (their access is gated by token scopes, surfaced by the existing 404/403
+// flow in webhook-register).
+export function buildAppPermissionPreflightGuidance(gaps: ReadonlyArray<PermissionGap>): string {
+  const lines = [
+    `[github] GitHub App installation is missing permissions for ${gaps.length} configured event ${gaps.length === 1 ? 'family' : 'families'}:`,
+  ]
+  for (const gap of gaps) {
+    const eventList = gap.events.join(', ')
+    const grantedLabel = gap.granted === null ? 'none' : gap.granted
+    const needLabel = gap.needsWrite ? 'Read and write' : 'Read-only'
+    lines.push(`  - ${gap.uiLabel}: granted=${grantedLabel}, need=${needLabel} (covers: ${eventList})`)
+  }
+  lines.push(
+    '',
+    '  Fix:',
+    '    1. Open https://github.com/settings/apps and edit the app TypeClaw is using.',
+    '    2. Under "Permissions & events" → "Repository permissions", set each missing permission above to the listed level. Save.',
+    '    3. Open the install page (Install App / Configure for the org) and accept the updated permissions request — the new access only takes effect after the install owner accepts.',
+    '    4. If the org enforces SAML SSO, ensure the App is authorized for the org from the org settings → Third-party Apps page.',
+    '',
+    '  Webhooks already received will continue to deliver, but payload fields and reply attempts that require the missing permission will fail with 403 ("Resource not accessible by integration") until the install is reaccepted.',
+  )
   return lines.join('\n')
 }

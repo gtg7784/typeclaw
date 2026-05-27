@@ -1,6 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 
-import { buildPermissionGuidance, parseListHooksPermissionStatus } from './permission-guidance'
+import {
+  buildAppPermissionPreflightGuidance,
+  buildPermissionGuidance,
+  parseListHooksPermissionStatus,
+} from './permission-guidance'
 
 describe('parseListHooksPermissionStatus', () => {
   test('returns 404 for a 404 list-hooks error', () => {
@@ -126,5 +130,75 @@ describe('buildPermissionGuidance', () => {
     expect(patMsg).toContain('hides private repos')
     expect(appMsg).toContain('404')
     expect(appMsg).toContain('hides private repos')
+  })
+})
+
+describe('buildAppPermissionPreflightGuidance', () => {
+  test('headlines with the number of missing permission families', () => {
+    const msg = buildAppPermissionPreflightGuidance([
+      { permissionKey: 'issues', uiLabel: 'Issues', granted: null, events: ['issues.opened'], needsWrite: true },
+    ])
+    expect(msg).toContain('missing permissions for 1 configured event family')
+  })
+
+  test('pluralises the headline when multiple families are missing', () => {
+    const msg = buildAppPermissionPreflightGuidance([
+      { permissionKey: 'issues', uiLabel: 'Issues', granted: null, events: ['issues.opened'], needsWrite: true },
+      {
+        permissionKey: 'pull_requests',
+        uiLabel: 'Pull requests',
+        granted: null,
+        events: ['pull_request.opened'],
+        needsWrite: true,
+      },
+    ])
+    expect(msg).toContain('2 configured event families')
+  })
+
+  test('uses verbatim github.com UI labels for each gap', () => {
+    const msg = buildAppPermissionPreflightGuidance([
+      {
+        permissionKey: 'pull_requests',
+        uiLabel: 'Pull requests',
+        granted: 'read',
+        events: ['pull_request.opened'],
+        needsWrite: true,
+      },
+    ])
+    expect(msg).toContain('Pull requests: granted=read, need=Read and write')
+    expect(msg).toContain('Permissions & events')
+  })
+
+  test('lists the events covered by each missing permission so the user knows what will fail', () => {
+    const msg = buildAppPermissionPreflightGuidance([
+      {
+        permissionKey: 'issues',
+        uiLabel: 'Issues',
+        granted: null,
+        events: ['issue_comment.created', 'issues.opened'],
+        needsWrite: true,
+      },
+    ])
+    expect(msg).toContain('covers: issue_comment.created, issues.opened')
+  })
+
+  test('reports granted=none when no grant exists at all (not "read" or "write")', () => {
+    const msg = buildAppPermissionPreflightGuidance([
+      {
+        permissionKey: 'discussions',
+        uiLabel: 'Discussions',
+        granted: null,
+        events: ['discussion.created'],
+        needsWrite: true,
+      },
+    ])
+    expect(msg).toContain('granted=none')
+  })
+
+  test('mentions the 403 message users will see if they ignore the warning', () => {
+    const msg = buildAppPermissionPreflightGuidance([
+      { permissionKey: 'issues', uiLabel: 'Issues', granted: null, events: ['issues.opened'], needsWrite: true },
+    ])
+    expect(msg).toContain('Resource not accessible by integration')
   })
 })

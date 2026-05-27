@@ -2,7 +2,7 @@ import { createPrivateKey } from 'node:crypto'
 
 import { resolveSecret, type Secret } from '@/secrets/resolve'
 
-import type { GithubAuthStrategy, GithubSelfUser } from './auth'
+import type { GithubAuthStrategy, GithubInstallationGrants, GithubSelfUser } from './auth'
 import { GITHUB_API_BASE, githubJsonHeaders, githubPublicHeaders } from './auth-pat'
 
 export class AppAuthStrategy implements GithubAuthStrategy {
@@ -67,6 +67,24 @@ export class AppAuthStrategy implements GithubAuthStrategy {
     }
     this._selfUser = { id: user.id, login: user.login }
     return this._selfUser
+  }
+
+  async getInstallationGrants(): Promise<GithubInstallationGrants> {
+    const jwt = await this.mintJwt()
+    const installId = await this.resolveInstallationId(jwt)
+    const response = await this.fetchImpl(`${GITHUB_API_BASE}/app/installations/${installId}`, {
+      headers: githubJsonHeaders(jwt),
+    })
+    if (!response.ok) throw new Error(`GitHub App installation fetch failed: ${response.status}`)
+    const raw = (await response.json()) as { permissions?: unknown; events?: unknown }
+    const permissions: Record<string, 'read' | 'write' | 'admin'> = {}
+    if (raw.permissions !== null && typeof raw.permissions === 'object') {
+      for (const [key, value] of Object.entries(raw.permissions as Record<string, unknown>)) {
+        if (value === 'read' || value === 'write' || value === 'admin') permissions[key] = value
+      }
+    }
+    const events = Array.isArray(raw.events) ? raw.events.filter((e): e is string => typeof e === 'string') : []
+    return { permissions, events }
   }
 
   async dispose(): Promise<void> {
