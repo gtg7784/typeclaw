@@ -1,10 +1,27 @@
 import { describe, expect, test } from 'bun:test'
+import { generateKeyPairSync } from 'node:crypto'
 
 import { createChannelRouter, type ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig, GithubAdapterConfig } from '@/channels/schema'
 import type { GithubSecretsBlock } from '@/secrets/schema'
 
 import { createGithubAdapter } from './index'
+
+const APP_PRIVATE_KEY_PEM = generateKeyPairSync('rsa', { modulusLength: 2048 })
+  .privateKey.export({ type: 'pkcs8', format: 'pem' })
+  .toString()
+
+function appSecrets(): GithubSecretsBlock {
+  return {
+    auth: {
+      type: 'app',
+      appId: 12345,
+      installationId: 99,
+      privateKey: { value: APP_PRIVATE_KEY_PEM },
+    },
+    webhookSecret: { value: 'wh-secret' },
+  }
+}
 
 type Call = { url: string; method: string; body?: string }
 
@@ -584,5 +601,144 @@ describe('createGithubAdapter lifecycle', () => {
     await adapter.stop()
 
     expect(deleted).toEqual([])
+  })
+
+  test('App auth: preflight warns when installation permissions do not cover the configured eventAllowlist', async () => {
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url === 'https://api.github.com/app' && method === 'GET') {
+        return Response.json({ slug: 'typeey-app' })
+      }
+      if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
+        return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
+        return Response.json({
+          permissions: { metadata: 'read', repository_hooks: 'write' },
+          events: [],
+        })
+      }
+      if (url === 'https://api.github.com/app/installations/99/access_tokens' && method === 'POST') {
+        return Response.json({ token: 'ghs_inst', expires_at: '2099-01-01T00:00:00Z' })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const logger = recordingLogger()
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig([], null),
+      secrets: appSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    const preflightWarning = logger.messages.find((m) =>
+      m.startsWith('warn:[github] GitHub App installation is missing permissions'),
+    )
+    expect(preflightWarning).toBeDefined()
+    expect(preflightWarning).toContain('Issues: granted=none, need=Read and write')
+    expect(preflightWarning).toContain('Pull requests: granted=none, need=Read and write')
+    expect(preflightWarning).toContain('covers: issue_comment.created')
+    expect(preflightWarning).toContain('Resource not accessible by integration')
+  })
+
+  test('App auth: preflight stays silent when every required permission is granted', async () => {
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url === 'https://api.github.com/app' && method === 'GET') {
+        return Response.json({ slug: 'typeey-app' })
+      }
+      if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
+        return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
+        return Response.json({
+          permissions: { issues: 'write', pull_requests: 'write', metadata: 'read' },
+          events: ['issues', 'issue_comment', 'pull_request'],
+        })
+      }
+      if (url === 'https://api.github.com/app/installations/99/access_tokens' && method === 'POST') {
+        return Response.json({ token: 'ghs_inst', expires_at: '2099-01-01T00:00:00Z' })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const logger = recordingLogger()
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig([], null),
+      secrets: appSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    expect(logger.messages.some((m) => m.includes('GitHub App installation is missing'))).toBe(false)
+  })
+
+  test('PAT auth: preflight is skipped (no installation grant to inspect)', async () => {
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const logger = recordingLogger()
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig([], null),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    expect(logger.messages.some((m) => m.includes('GitHub App installation is missing'))).toBe(false)
+    expect(logger.messages.some((m) => m.includes('preflight skipped'))).toBe(false)
+  })
+
+  test('App auth: preflight failure is logged as a skip, not propagated as an adapter-start error', async () => {
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url === 'https://api.github.com/app' && method === 'GET') {
+        return Response.json({ slug: 'typeey-app' })
+      }
+      if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
+        return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
+        return new Response('boom', { status: 500 })
+      }
+      if (url === 'https://api.github.com/app/installations/99/access_tokens' && method === 'POST') {
+        return Response.json({ token: 'ghs_inst', expires_at: '2099-01-01T00:00:00Z' })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const logger = recordingLogger()
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig([], null),
+      secrets: appSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+    })
+
+    await expect(adapter.start()).resolves.toBeUndefined()
+    await adapter.stop()
+
+    expect(logger.messages.find((m) => m.startsWith('warn:[github] permission preflight skipped:'))).toBeDefined()
   })
 })
