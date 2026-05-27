@@ -1,0 +1,125 @@
+---
+title: typeclaw compose
+description: Fan host-stage commands out across every agent folder in cwd
+icon: Layers
+---
+
+import { Callout } from 'fumadocs-ui/components/callout'
+
+<Callout type="warn" title="Beta">
+  `typeclaw compose` is beta. Flags, output format, and exit-code semantics may change between minor releases. Pin your
+  typeclaw version if you script against it.
+</Callout>
+
+`compose` is a thin fan-out wrapper around the per-agent host-stage commands. It discovers every immediate subdirectory of cwd that contains a `typeclaw.json`, runs the matching per-agent command against each one in parallel, and aggregates results.
+
+There is no shared lifecycle, no "compose project," and no inter-agent coordination at runtime. Each agent keeps its own container, port, mounts, env file, and config. `compose` is sugar over `for d in */; do (cd "$d" && typeclaw <cmd>); done` — with a single progress board, deterministic ordering, and per-agent failure isolation.
+
+## Discovery
+
+Cwd is scanned **one directory deep**. A subdirectory is treated as an agent when:
+
+- the name does not start with `.` (skips `.git/`, `.vscode/`, etc.)
+- the name does not start with `_` (park disabled or in-progress agents as `_archived-coder/`, `_wip-foo/` without compose touching them)
+- the directory contains a `typeclaw.json`
+
+Agents are sorted by folder name so output across `start` / `stop` / `status` / `restart` / `logs` is stable regardless of filesystem readdir order. When zero agents are discovered, every subcommand exits 0 with a `No typeclaw agents found in immediate subdirectories of cwd.` notice — discovery is not a failure.
+
+## Subcommands
+
+| Command                    | Per-agent equivalent | Parallel | Notes                                                                                       |
+| -------------------------- | -------------------- | -------- | ------------------------------------------------------------------------------------------- |
+| `typeclaw compose start`   | `typeclaw start`     | yes      | host port collisions fall back to ephemeral per agent                                       |
+| `typeclaw compose stop`    | `typeclaw stop`      | yes      | already-stopped agents report `not running`, not failure                                    |
+| `typeclaw compose restart` | `typeclaw restart`   | yes      | `stop` then `start` per agent; surfaces both phases on the progress board                   |
+| `typeclaw compose status`  | (inspects Docker)    | yes      | running / stopped / absent + resolved host port for running agents                          |
+| `typeclaw compose logs`    | `typeclaw logs`      | yes      | multiplexed; each line prefixed with the agent name and a deterministic color               |
+| `typeclaw compose usage`   | `typeclaw usage`     | yes      | aggregates per-agent token usage; one corrupt `sessions/` dir does not blank out the report |
+| `typeclaw compose doctor`  | `typeclaw doctor`    | yes      | per-agent `doctor` plus cross-agent checks (port collisions, container-name collisions)     |
+
+## Flags
+
+### `start` / `restart`
+
+| Flag         | Default                    | Effect                                                                               |
+| ------------ | -------------------------- | ------------------------------------------------------------------------------------ |
+| `--port <n>` | each agent's `config.port` | preferred host port for every agent; per-agent bind conflicts fall back to ephemeral |
+| `--build`    | `false`                    | force-regenerate each Dockerfile from the template and rebuild before starting       |
+
+### `logs`
+
+| Flag                    | Default | Effect                                                                                       |
+| ----------------------- | ------- | -------------------------------------------------------------------------------------------- |
+| `-f`, `--follow`        | `false` | stream new log output as it arrives                                                          |
+| `-n`, `--tail <N\|all>` | (none)  | show only the last `N` lines per agent (or `all`); non-negative integer or the literal `all` |
+
+Agents without a running container are skipped with a `compose: skipping <name> (container not running)` notice on stderr. Lines arriving at the same time from multiple agents are interleaved at line boundaries — partial lines are buffered, never shredded mid-character.
+
+### `usage`
+
+| Flag      | Default | Effect                                                               |
+| --------- | ------- | -------------------------------------------------------------------- |
+| `--since` | (none)  | ISO date or relative duration (`today`, `7d`, `30d`)                 |
+| `--until` | (none)  | ISO date upper bound, exclusive                                      |
+| `--json`  | `false` | emit the aggregated report as JSON (one object covering every agent) |
+
+### `doctor`
+
+| Flag              | Default | Effect                                                                                                                                                  |
+| ----------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-v`, `--verbose` | `false` | show per-check details                                                                                                                                  |
+| `--json`          | `false` | emit the full report as JSON                                                                                                                            |
+| `--fix`           | `false` | attempt per-agent auto-fixes; on success, `git add` + `git commit` the changed paths inside each agent folder (skipped if the folder is not a git repo) |
+| `--only <a,b,c>`  | (none)  | comma-separated category filter forwarded to each agent's `doctor` run                                                                                  |
+| `--shallow`       | `false` | run cross-agent checks only; skip per-agent `doctor` runs                                                                                               |
+
+`status`, `stop` take no flags.
+
+## Cross-agent checks (`compose doctor`)
+
+Beyond fanning out per-agent `doctor`, `compose doctor` runs whole-fleet checks:
+
+| Check                                  | Status on conflict | Detects                                                               |
+| -------------------------------------- | ------------------ | --------------------------------------------------------------------- |
+| `compose.no-port-collisions`           | `warning`          | two or more agents declaring the same `typeclaw.json#port`            |
+| `compose.no-container-name-collisions` | `error`            | two different agent folders hashing to the same Docker container name |
+
+Port collisions are warnings, not errors: `start` resolves them at runtime by falling back to ephemeral ports per agent. Container-name collisions are errors: Docker enforces unique names, and a collision means one agent will fail to start until you rename a folder.
+
+## Exit codes
+
+| Code | Meaning                                                                                                       |
+| ---- | ------------------------------------------------------------------------------------------------------------- |
+| `0`  | every agent succeeded, or zero agents were discovered                                                         |
+| `1`  | at least one agent failed (the progress board shows which); for `logs`, a non-cancelled child exited non-zero |
+| `2`  | invalid flag value (e.g. `--tail` not a non-negative integer or `all`)                                        |
+
+Sigint/sigterm during `logs --follow` shuts every child `docker logs` down cleanly and exits 0; only real per-child failures bubble up.
+
+## Layout
+
+```
+~/agents/
+├── alice/           # typeclaw agent
+│   ├── typeclaw.json
+│   └── ...
+├── bob/             # typeclaw agent
+│   ├── typeclaw.json
+│   └── ...
+├── _archived-coder/ # skipped (leading underscore)
+│   └── typeclaw.json
+└── .git/            # skipped (leading dot)
+```
+
+From `~/agents/`:
+
+```sh
+typeclaw compose start            # starts alice and bob in parallel
+typeclaw compose logs -f          # streams alice and bob's docker logs, interleaved
+typeclaw compose doctor --shallow # cross-agent checks only, fast
+```
+
+## Related
+
+- Per-agent commands: [/reference/cli](/docs/reference/cli)
+- Port and container-name mechanics: [/concepts/architecture](/docs/concepts/architecture)

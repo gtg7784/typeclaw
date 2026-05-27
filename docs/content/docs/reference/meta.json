@@ -10,6 +10,7 @@
     "permissions",
     "channel-adapters",
     "tunnel-providers",
+    "compose",
     "plugin-api",
     "bundled-plugins",
     "stream-targets",
