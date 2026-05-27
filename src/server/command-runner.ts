@@ -1,4 +1,9 @@
-import { createSessionWithDispose, type SessionOrigin } from '@/agent'
+import {
+  createSessionWithDispose,
+  type CreateSessionOptions,
+  type CreateSessionResult,
+  type SessionOrigin,
+} from '@/agent'
 import type { PermissionService } from '@/permissions'
 import type {
   CommandExecResult,
@@ -11,6 +16,7 @@ import type {
   SpawnSubagentOptions,
 } from '@/plugin'
 import type { PluginRuntime } from '@/run/plugin-runtime'
+import type { SessionFactory } from '@/sessions'
 
 export type CommandSpawnSubagent = (name: string, payload?: unknown, options?: SpawnSubagentOptions) => Promise<void>
 
@@ -29,6 +35,14 @@ export type CommandRunnerOptions = {
   runtimeVersion: string | undefined
   containerName: string | undefined
   outbound: CommandOutbound
+  // Hands a persisted SessionManager to every prompt session spawned from a
+  // plugin command's `ctx.prompt`. Required so the session writes its JSONL
+  // (and therefore its `message.usage`) under sessions/, which is what
+  // `typeclaw usage` and the `bundled-plugins/backup` plugin scan. Without
+  // this every plugin-command LLM call would fall through to
+  // `SessionManager.inMemory()` and never persist usage — see
+  // `runPromptForCommand` below.
+  sessionFactory: SessionFactory
 }
 
 type CommandHandle = {
@@ -166,6 +180,7 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
               containerName: opts.containerName,
               permissions: opts.permissions,
               signal: abortController.signal,
+              sessionFactory: opts.sessionFactory,
             }),
           subagent: (subName, payload) =>
             opts.spawnSubagent(subName, payload, {
@@ -331,6 +346,8 @@ function writeLine(stream: WritableStream<Uint8Array>, line: string): void {
   void writer.write(new TextEncoder().encode(`${line}\n`)).then(() => writer.releaseLock())
 }
 
+export type CreateSessionForCommand = (options: CreateSessionOptions) => Promise<CreateSessionResult>
+
 export async function runPromptForCommand(args: {
   text: string
   origin: SessionOrigin
@@ -340,6 +357,16 @@ export async function runPromptForCommand(args: {
   containerName: string | undefined
   permissions: PermissionService
   signal: AbortSignal
+  // Persisted-session source. Each call gets a fresh SessionManager so the
+  // resulting JSONL is its own file under sessions/ — the same shape the
+  // cron `prompt` path uses in src/run/index.ts. Passing in-memory here
+  // regresses `typeclaw usage` (see CommandRunnerOptions.sessionFactory).
+  sessionFactory: SessionFactory
+  // Test seam for the agent-session boundary. Production passes the real
+  // `createSessionWithDispose`; tests inject a fake to verify wiring
+  // (specifically: the sessionManager handed off must be persisted, not
+  // in-memory) without booting the full session stack.
+  _createSession?: CreateSessionForCommand
 }): Promise<string> {
   // Mirrors src/agent/multimodal/look-at.ts: spawn a session, prompt, capture
   // the final assistant text, dispose. Unlike look-at we want the FULL agent
@@ -349,9 +376,11 @@ export async function runPromptForCommand(args: {
   // loader (no `systemPromptOverride`).
   const snapshot = args.runtime.get()
   const sessionId = resolveSessionIdForOrigin(args.origin)
-  const { session, dispose } = await createSessionWithDispose({
+  const create = args._createSession ?? createSessionWithDispose
+  const { session, dispose } = await create({
     origin: args.origin,
     permissions: args.permissions,
+    sessionManager: args.sessionFactory.createPersisted(),
     plugins: {
       registry: snapshot.registry,
       hooks: snapshot.hooks,

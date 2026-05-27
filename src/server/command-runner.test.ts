@@ -1,4 +1,7 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 import { z } from 'zod'
 
@@ -8,11 +11,13 @@ import type { PluginCommand, PluginRegistry } from '@/plugin'
 import { defineCommand } from '@/plugin/define'
 import { emptyRegistry, type RegisteredCommand } from '@/plugin/registry'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
+import { createSessionFactory, type SessionFactory } from '@/sessions'
 
 import {
   bindSignalToSession,
   createCommandRunner,
   runExecForCommand,
+  runPromptForCommand,
   type CommandOutbound,
   type CommandSpawnSubagent,
 } from './command-runner'
@@ -74,19 +79,26 @@ function registerCommand(
 
 const noopSpawn: CommandSpawnSubagent = async () => {}
 
+function makeSessionFactoryForTest(): { sessionFactory: SessionFactory; agentDir: string } {
+  const agentDir = mkdtempSync(join(tmpdir(), 'typeclaw-cmdrunner-'))
+  return { sessionFactory: createSessionFactory({ agentDir }), agentDir }
+}
+
 function makeRunner(commands: RegisteredCommand[]) {
   const { outbound, frames, decodeStdout } = makeOutboundCapture()
   const runtime = makeRuntime(commands)
+  const { sessionFactory, agentDir } = makeSessionFactoryForTest()
   const runner = createCommandRunner({
     pluginRuntime: runtime,
     permissions: noopPermissionService,
     spawnSubagent: noopSpawn,
-    agentDir: '/tmp/agent',
+    agentDir,
     runtimeVersion: '0.0.0-test',
     containerName: 'test-agent',
     outbound,
+    sessionFactory,
   })
-  return { runner, frames, decodeStdout }
+  return { runner, frames, decodeStdout, agentDir }
 }
 
 async function waitForExit(frames: CapturedFrame[], callId: string, timeoutMs = 2_000): Promise<CapturedFrame> {
@@ -227,10 +239,10 @@ describe('CommandRunner', () => {
         return 0
       },
     })
-    const { runner, frames, decodeStdout } = makeRunner([registerCommand('eitheristic', cmd)])
+    const { runner, frames, decodeStdout, agentDir } = makeRunner([registerCommand('eitheristic', cmd)])
     runner.start({ callId: 'g1', name: 'eitheristic', args: undefined }, null)
     await waitForExit(frames, 'g1')
-    expect(decodeStdout()).toContain('agentDir=/tmp/agent')
+    expect(decodeStdout()).toBe(`agentDir=${agentDir}`)
   })
 
   test('QA-C8: concurrent commands with distinct callIds do not interfere', async () => {
@@ -385,14 +397,16 @@ describe('CommandRunner', () => {
     })
     const { outbound, frames } = makeOutboundCapture()
     const runtime = makeRuntime([registerCommand('parent', cmd)])
+    const { sessionFactory, agentDir } = makeSessionFactoryForTest()
     const runner = createCommandRunner({
       pluginRuntime: runtime,
       permissions: noopPermissionService,
       spawnSubagent: capturingSpawn,
-      agentDir: '/tmp/agent',
+      agentDir,
       runtimeVersion: '0.0.0-test',
       containerName: 'test-agent',
       outbound,
+      sessionFactory,
     })
     runner.start({ callId: 'sub-1', name: 'parent', args: undefined }, null)
     await waitForExit(frames, 'sub-1')
@@ -627,5 +641,88 @@ describe('CommandRunner — review follow-ups', () => {
     expect(parsed.spawnedByOrigin?.kind).toBe('cron')
     expect(parsed.spawnedByOrigin?.jobId).toBe('nightly-checks')
     expect(parsed.spawnedByOrigin?.scheduledByRole).toBe('member')
+  })
+})
+
+describe('runPromptForCommand', () => {
+  // Regression guard: ctx.prompt sessions used to fall through to
+  // SessionManager.inMemory() (no sessionManager passed to
+  // createSessionWithDispose), which silently dropped every plugin
+  // cron-handler / plugin-command LLM call from `typeclaw usage` reports
+  // even though Fireworks still billed them. The persisted SessionManager
+  // is what makes the session JSONL exist on disk; the session-meta stamp
+  // in src/agent/index.ts only fires when getSessionFile() is defined.
+  test('hands createSessionWithDispose a persisted sessionManager rooted under sessions/', async () => {
+    const { sessionFactory, agentDir } = makeSessionFactoryForTest()
+    const runtime = makeRuntime([])
+    let captured: { sessionManager: { getSessionFile: () => string | undefined } } | undefined
+    const fakeCreate = async (options: unknown): Promise<{ session: object; dispose: () => Promise<void> }> => {
+      captured = options as typeof captured
+      const session = {
+        prompt: async () => {},
+        getLastAssistantText: () => 'ok',
+        dispose: () => {},
+        abort: async () => {},
+      }
+      return { session: session as object, dispose: async () => {} }
+    }
+
+    const result = await runPromptForCommand({
+      text: 'hi',
+      origin: { kind: 'cron', jobId: 'test', jobKind: 'handler', scheduledByOrigin: { kind: 'config-file' } },
+      runtime,
+      agentDir,
+      permissions: noopPermissionService,
+      signal: new AbortController().signal,
+      runtimeVersion: '0.0.0-test',
+      containerName: 'test-agent',
+      sessionFactory,
+      _createSession: fakeCreate as Parameters<typeof runPromptForCommand>[0]['_createSession'],
+    })
+
+    expect(result).toBe('ok')
+    expect(captured).toBeDefined()
+    const sessionFile = captured!.sessionManager.getSessionFile()
+    expect(typeof sessionFile).toBe('string')
+    expect(sessionFile).toContain(sessionFactory.sessionDir())
+  })
+
+  test('each call gets a fresh sessionManager (distinct files per invocation)', async () => {
+    const { sessionFactory, agentDir } = makeSessionFactoryForTest()
+    const runtime = makeRuntime([])
+    const seen: string[] = []
+    const fakeCreate = async (options: unknown): Promise<{ session: object; dispose: () => Promise<void> }> => {
+      const file = (options as { sessionManager: { getSessionFile: () => string } }).sessionManager.getSessionFile()
+      seen.push(file)
+      const session = {
+        prompt: async () => {},
+        getLastAssistantText: () => '',
+        dispose: () => {},
+        abort: async () => {},
+      }
+      return { session: session as object, dispose: async () => {} }
+    }
+
+    const origin = {
+      kind: 'cron' as const,
+      jobId: 'test',
+      jobKind: 'handler' as const,
+      scheduledByOrigin: { kind: 'config-file' as const },
+    }
+    for (let i = 0; i < 3; i++) {
+      await runPromptForCommand({
+        text: `tick ${i}`,
+        origin,
+        runtime,
+        agentDir,
+        permissions: noopPermissionService,
+        signal: new AbortController().signal,
+        runtimeVersion: '0.0.0-test',
+        containerName: 'test-agent',
+        sessionFactory,
+        _createSession: fakeCreate as Parameters<typeof runPromptForCommand>[0]['_createSession'],
+      })
+    }
+    expect(new Set(seen).size).toBe(3)
   })
 })
