@@ -1,11 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { captureQuoteCandidate, decideQuoteAnchor, prependQuoteAnchor, renderQuoteAnchor } from './router'
-import {
-  DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS,
-  QUOTED_REPLY_EXCERPT_MAX_CHARS,
-  type ChannelAdapterConfig,
-} from './schema'
+import { QUOTED_REPLY_EXCERPT_MAX_CHARS, type ChannelAdapterConfig } from './schema'
 
 const baseConfig: ChannelAdapterConfig = {
   engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
@@ -46,17 +42,23 @@ describe('renderQuoteAnchor', () => {
     )
   })
 
-  test('GitHub: falls back to plain authorName (inbound authorId is a numeric user id, not the handle)', () => {
+  test('GitHub: emits @authorName because inbound authorId is a numeric user id, not the handle', () => {
     expect(renderQuoteAnchor({ adapter: 'github', authorId: '12345', authorName: 'alice', text: 'hello' })).toBe(
-      '> alice: hello',
+      '> @alice: hello',
     )
   })
 
-  test('does NOT emit a literal `> @name:` form on any adapter (PR #374 regression)', () => {
-    for (const adapter of ['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk', 'github'] as const) {
+  test('does NOT emit a literal `> @name:` form on adapters where that is not platform mention syntax', () => {
+    for (const adapter of ['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk'] as const) {
       const out = renderQuoteAnchor({ adapter, authorId: 'U1', authorName: 'Alice', text: 'hi' })
       expect(out.startsWith('> @')).toBe(false)
     }
+  })
+
+  test('GitHub does not double-prefix handles that already include @', () => {
+    expect(renderQuoteAnchor({ adapter: 'github', authorId: '12345', authorName: '@alice', text: 'hello' })).toBe(
+      '> @alice: hello',
+    )
   })
 
   test('collapses newlines so the quote stays on one line', () => {
@@ -178,19 +180,9 @@ describe('decideQuoteAnchor', () => {
     expect(decideQuoteAnchor(null, 999_999, baseConfig)).toBeNull()
   })
 
-  test('returns null when send-time delay is below threshold and no intervening observed', () => {
+  test('returns null when no observed message intervened, even after a long delay', () => {
     const candidate = captureQuoteCandidate('slack-bot', [humanInbound], [])!
-    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 1_000, baseConfig)).toBeNull()
-  })
-
-  test('returns the anchor when send-time delay crosses the default threshold', () => {
-    const candidate = captureQuoteCandidate('slack-bot', [humanInbound], [])!
-    const out = decideQuoteAnchor(
-      candidate,
-      humanInbound.receivedAt + DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS + 1,
-      baseConfig,
-    )
-    expect(out).toEqual({ adapter: 'slack-bot', authorId: 'U_ALICE', authorName: 'Alice', text: 'hey there' })
+    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 600_000, baseConfig)).toBeNull()
   })
 
   test('returns the anchor when an observed message landed after the primary, even within threshold', () => {
@@ -210,21 +202,23 @@ describe('decideQuoteAnchor', () => {
     expect(out).toBeNull()
   })
 
-  test('respects a custom queueDelayMs', () => {
+  test('does not let custom queueDelayMs force a quote when no message intervened', () => {
     const candidate = captureQuoteCandidate('slack-bot', [humanInbound], [])!
     const aggressive: ChannelAdapterConfig = { ...baseConfig, quotedReply: { enabled: true, queueDelayMs: 0 } }
-    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt, aggressive)).toEqual({
+    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 600_000, aggressive)).toBeNull()
+  })
+
+  test('quotes with no quotedReply config when an observed message intervened', () => {
+    const candidate = captureQuoteCandidate(
+      'slack-bot',
+      [humanInbound],
+      [{ receivedAt: humanInbound.receivedAt + 500, source: 'observed' }],
+    )!
+    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 1_000, baseConfig)).toEqual({
       adapter: 'slack-bot',
       authorId: 'U_ALICE',
       authorName: 'Alice',
       text: 'hey there',
     })
-  })
-
-  test('falls back to the default threshold when the adapter has no quotedReply config', () => {
-    const candidate = captureQuoteCandidate('slack-bot', [humanInbound], [])!
-    expect(
-      decideQuoteAnchor(candidate, humanInbound.receivedAt + DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS + 1, baseConfig),
-    ).toEqual({ adapter: 'slack-bot', authorId: 'U_ALICE', authorName: 'Alice', text: 'hey there' })
   })
 })

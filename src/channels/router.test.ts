@@ -774,6 +774,27 @@ describe('ChannelRouter engagement and prompt composition', () => {
     expect(line).not.toMatch(/\[\d{4}-\d{2}-\d{2}T/)
   })
 
+  test('GitHub prompt attribution uses @login instead of numeric-id mention syntax', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const key: ChannelKey = { adapter: 'github', workspace: 'typeclaw/typeclaw', chat: 'issue:398', thread: null }
+
+    await router.route(
+      inbound({
+        adapter: 'github',
+        workspace: 'typeclaw/typeclaw',
+        chat: 'issue:398',
+        authorId: '12345',
+        authorName: 'devxoul',
+        text: '@typeey can you review this PR',
+      }),
+    )
+    await router.__testing!.flushDebounce(key)
+
+    expect(sessions[0]!.prompts[0]).toContain('@devxoul (devxoul): @typeey can you review this PR')
+    expect(sessions[0]!.prompts[0]).not.toContain('<@12345>')
+  })
+
   test('non-engaging inbound goes to context buffer, not session.prompt', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
@@ -4796,7 +4817,7 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     expect(sent).toEqual(['hi back'])
   })
 
-  test('prepends a `> <@authorId>: excerpt` Discord mention when the reply crosses the queueDelayMs threshold', async () => {
+  test('does NOT prepend a quote after a long delay when no message intervened', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1_000_000 }
     const sent: string[] = []
@@ -4811,7 +4832,7 @@ describe('ChannelRouter quote-anchor on outbound', () => {
 
     nowRef.value += 60_000
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'yes I am here' })
-    expect(sent).toEqual(['> <@U_ALICE>: are you there?\n\nyes I am here'])
+    expect(sent).toEqual(['yes I am here'])
   })
 
   test('prepends a quote when an observed message landed between inbound and reply, even within the threshold', async () => {
@@ -4843,6 +4864,34 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     expect(sent[0]).toContain('still blocked')
   })
 
+  test('prepends a quote when an observed message lands after prompt drain but before outbound reply', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: string[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'deploy status?', authorId: 'U_ALICE', authorName: 'Alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value += 100
+    await router.route(
+      inbound({
+        isBotMention: false,
+        externalMessageId: 'm-observed-after-drain',
+        authorId: 'bob',
+        authorName: 'bob',
+        text: 'also waiting',
+      }),
+    )
+    nowRef.value += 200
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'still deploying' })
+    expect(sent).toEqual(['> <@U_ALICE>: deploy status?\n\nstill deploying'])
+  })
+
   test('anchors only the FIRST send of a multi-part reply; subsequent sends in the same turn are bare', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1_000_000 }
@@ -4854,6 +4903,16 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     })
 
     await router.route(inbound({ text: 'walk me through it', authorId: 'U_ALICE', authorName: 'Alice' }))
+    nowRef.value += 100
+    await router.route(
+      inbound({
+        isBotMention: false,
+        externalMessageId: 'm-observed',
+        authorId: 'bob',
+        authorName: 'bob',
+        text: 'following along',
+      }),
+    )
     await router.__testing!.flushDebounce(KEY)
     nowRef.value += 60_000
 
@@ -4874,11 +4933,31 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     })
 
     await router.route(inbound({ text: 'turn one', authorId: 'U_ALICE', authorName: 'Alice', externalMessageId: 'm1' }))
+    nowRef.value += 100
+    await router.route(
+      inbound({
+        isBotMention: false,
+        externalMessageId: 'm1-observed',
+        authorId: 'bob',
+        authorName: 'bob',
+        text: 'turn one chatter',
+      }),
+    )
     await router.__testing!.flushDebounce(KEY)
     nowRef.value += 60_000
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply one' })
 
     await router.route(inbound({ text: 'turn two', authorId: 'U_ALICE', authorName: 'Alice', externalMessageId: 'm2' }))
+    nowRef.value += 100
+    await router.route(
+      inbound({
+        isBotMention: false,
+        externalMessageId: 'm2-observed',
+        authorId: 'bob',
+        authorName: 'bob',
+        text: 'turn two chatter',
+      }),
+    )
     await router.__testing!.flushDebounce(KEY)
     nowRef.value += 60_000
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply two' })
@@ -4920,6 +4999,16 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     })
 
     await router.route(inbound({ text: 'screenshot pls', authorId: 'U_ALICE', authorName: 'Alice' }))
+    nowRef.value += 100
+    await router.route(
+      inbound({
+        isBotMention: false,
+        externalMessageId: 'm-observed',
+        authorId: 'bob',
+        authorName: 'bob',
+        text: 'also curious',
+      }),
+    )
     await router.__testing!.flushDebounce(KEY)
     nowRef.value += 60_000
 

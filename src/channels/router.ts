@@ -29,12 +29,7 @@ import {
   saveChannelSessions,
   type ChannelSessionRecord,
 } from './persistence'
-import {
-  DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS,
-  QUOTED_REPLY_EXCERPT_MAX_CHARS,
-  type AdapterId,
-  type ChannelAdapterConfig,
-} from './schema'
+import { QUOTED_REPLY_EXCERPT_MAX_CHARS, type AdapterId, type ChannelAdapterConfig } from './schema'
 import type {
   ChannelHistoryMessage,
   ChannelKey,
@@ -1236,6 +1231,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const observed = live.contextBuffer.splice(0, live.contextBuffer.length)
         const reminders = live.pendingSystemReminders.splice(0, live.pendingSystemReminders.length)
         const text = composeTurnPrompt(observed, batch, {
+          adapter: live.key.adapter,
           loopGuardActive: live.loopGuardActive,
           systemReminders: reminders,
         })
@@ -1730,17 +1726,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const live = liveSessions.get(keyId)
     const sendKey = consecutiveSendKey(msg.chat, msg.thread)
     // Tool-source sends consume the captured quote candidate exactly
-    // once per turn — the decision (delay threshold + intervening-
-    // observed check) runs HERE against the live clock so the relevant
-    // signal is real wall-time between inbound and reply landing, not
-    // drain-vs-send timing artifacts. System sources (recovery, role-
+    // once per turn — the intervening-observed check runs HERE against
+    // the live buffer so the relevant signal is actual channel chatter
+    // between inbound and reply landing, not drain-vs-send timing
+    // artifacts. System sources (recovery, role-
     // claim) skip so they can't accidentally swallow the candidate
     // before the model's own first reply lands. Even when the decision
-    // returns null (delay below threshold, nothing intervened), the
-    // candidate is cleared — a multi-part reply that crosses the
-    // threshold mid-flight must not retroactively anchor chunk 2.
+    // returns null (nothing intervened), the candidate is cleared — a
+    // multi-part reply must not retroactively anchor chunk 2.
     if (live && source === 'tool' && live.pendingQuoteCandidate !== null) {
-      const anchor = decideQuoteAnchor(live.pendingQuoteCandidate, now(), options.configForAdapter(msg.adapter))
+      const quoteCandidate = refreshQuoteCandidate(live.pendingQuoteCandidate, live.contextBuffer)
+      const anchor = decideQuoteAnchor(quoteCandidate, now(), options.configForAdapter(msg.adapter))
       if (anchor !== null) msg = { ...msg, text: prependQuoteAnchor(msg.text ?? '', anchor) }
       live.pendingQuoteCandidate = null
     }
@@ -2180,8 +2176,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 function composeTurnPrompt(
   observed: readonly ObservedInbound[],
   batch: readonly QueuedInbound[],
-  state: { loopGuardActive: boolean; systemReminders?: readonly string[] } = { loopGuardActive: false },
+  state: { adapter?: AdapterId; loopGuardActive: boolean; systemReminders?: readonly string[] } = {
+    loopGuardActive: false,
+  },
 ): string {
+  const adapter = state.adapter ?? 'discord-bot'
   const parts: string[] = []
   // System reminders (subagent-completion wakeups today) lead the turn body
   // because they are typically what triggered the drain — when the prompt
@@ -2247,7 +2246,7 @@ function composeTurnPrompt(
   if (observed.length > 0) {
     parts.push('## Recent context (not addressed to you, for awareness only)')
     for (const o of observed) {
-      parts.push(formatAuthorLine(o.ts, o.authorId, o.authorName, o.authorIsBot, o.text))
+      parts.push(formatAuthorLine(o.ts, adapter, o.authorId, o.authorName, o.authorIsBot, o.text))
     }
     parts.push('')
   }
@@ -2265,7 +2264,7 @@ function composeTurnPrompt(
       )
     }
     for (const b of batch) {
-      parts.push(formatAuthorLine(b.ts, b.authorId, b.authorName, b.authorIsBot, b.text))
+      parts.push(formatAuthorLine(b.ts, adapter, b.authorId, b.authorName, b.authorIsBot, b.text))
     }
   }
   return parts.join('\n')
@@ -2273,6 +2272,7 @@ function composeTurnPrompt(
 
 function formatAuthorLine(
   ts: number,
+  adapter: AdapterId,
   authorId: string,
   authorName: string,
   authorIsBot: boolean,
@@ -2280,7 +2280,7 @@ function formatAuthorLine(
 ): string {
   const tag = authorIsBot ? ' [bot]' : ''
   const stamp = ts > 0 ? `[${new Date(ts).toISOString()}] ` : ''
-  return `${stamp}<@${authorId}> (${authorName})${tag}: ${text}`
+  return `${stamp}${formatAuthorReference(adapter, authorId, authorName)} (${authorName})${tag}: ${text}`
 }
 
 export type QuoteAnchorSource = {
@@ -2290,18 +2290,11 @@ export type QuoteAnchorSource = {
   text: string
 }
 
-// Picks the right author syntax for the platform so the rendered anchor
-// shows a real, clickable mention link (Slack/Discord) instead of literal
-// `@name` text. The literal-text form was the original bug report on
-// PR #374: a plain `@username` string inside the quote looks like (but
-// isn't) a Slack mention; users read that as "wrong-shape mention"
-// because the platform-native form would have been `<@U…>`. Adapters
-// without a stable id-only mention syntax (Telegram dot-form
-// `[name](tg://user?id=)`
-// requires MarkdownV2 escaping; KakaoTalk has no mention syntax at all;
-// GitHub uses `@handle` but the inbound `authorId` is a numeric user id,
-// not the handle) fall back to plain `authorName` so a malformed mention
-// never ships to the platform.
+// Picks the right author syntax for the platform so prompts and rendered
+// quote anchors use the same form the user would type in that channel.
+// Slack/Discord need id mentions (`<@U…>`), GitHub needs handle mentions
+// (`@login`) because inbound author ids are numeric, and adapters without
+// stable id-only mention syntax fall back to plain display names.
 //
 // Notification semantics: Slack and Discord both render `<@…>` as a
 // styled mention link inside blockquotes; whether the mentioned user is
@@ -2310,15 +2303,17 @@ export type QuoteAnchorSource = {
 // `allowed_mentions` field which defaults to "ping everyone parsed").
 // This matches PR #374's intent — the user IS being notified that the
 // agent replied to them, which is the whole point of a quote anchor.
-function formatAuthorMention(adapter: AdapterId, authorId: string, authorName: string): string {
+function formatAuthorReference(adapter: AdapterId, authorId: string, authorName: string): string {
+  const displayName = authorName.trim() !== '' ? authorName.trim() : authorId
   switch (adapter) {
     case 'slack-bot':
     case 'discord-bot':
       return `<@${authorId}>`
+    case 'github':
+      return displayName.startsWith('@') ? displayName : `@${displayName}`
     case 'telegram-bot':
     case 'kakaotalk':
-    case 'github':
-      return authorName
+      return displayName
   }
 }
 
@@ -2341,7 +2336,7 @@ export function renderQuoteAnchor(source: QuoteAnchorSource): string {
       : collapsed.length > QUOTED_REPLY_EXCERPT_MAX_CHARS
         ? `${collapsed.slice(0, QUOTED_REPLY_EXCERPT_MAX_CHARS - 1)}…`
         : collapsed
-  const mention = formatAuthorMention(source.adapter, source.authorId, source.authorName)
+  const mention = formatAuthorReference(source.adapter, source.authorId, source.authorName)
   return `> ${mention}: ${excerpt}`
 }
 
@@ -2400,31 +2395,40 @@ export function captureQuoteCandidate(
   if (batch.length === 0) return null
   const primary = batch[batch.length - 1]!
   if (primary.authorIsBot) return null
-  const hadInterveningObserved = observed.some((o) => o.source === 'observed' && o.receivedAt >= primary.receivedAt)
   return {
     source: { adapter, authorId: primary.authorId, authorName: primary.authorName, text: primary.text },
     primaryReceivedAt: primary.receivedAt,
-    hadInterveningObserved,
+    hadInterveningObserved: hasInterveningObserved(primary.receivedAt, observed),
   }
+}
+
+function refreshQuoteCandidate(
+  candidate: QuoteAnchorCandidate,
+  observed: readonly QuoteAnchorObservedEntry[],
+): QuoteAnchorCandidate {
+  if (candidate.hadInterveningObserved) return candidate
+  if (!hasInterveningObserved(candidate.primaryReceivedAt, observed)) return candidate
+  return { ...candidate, hadInterveningObserved: true }
+}
+
+function hasInterveningObserved(primaryReceivedAt: number, observed: readonly QuoteAnchorObservedEntry[]): boolean {
+  return observed.some((o) => o.source === 'observed' && o.receivedAt >= primaryReceivedAt)
 }
 
 // Send-time decision: given a captured candidate and the current clock,
 // returns the source to anchor against or null. Skips when:
 //   - quotedReply is disabled in config
-//   - delay is under threshold AND no observed messages came between
-//     primary inbound and now (the "felt instantaneous" path)
+//   - no observed messages came between primary inbound and now
 // A null candidate (no batch yet, or batch was bot-only) always skips.
 export function decideQuoteAnchor(
   candidate: QuoteAnchorCandidate | null,
-  nowMs: number,
+  _nowMs: number,
   adapterConfig: ChannelAdapterConfig | undefined,
 ): QuoteAnchorSource | null {
   if (candidate === null) return null
   const config = adapterConfig?.quotedReply
   if (config !== undefined && config.enabled === false) return null
-  const threshold = config?.queueDelayMs ?? DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS
-  const delay = nowMs - candidate.primaryReceivedAt
-  if (delay < threshold && !candidate.hadInterveningObserved) return null
+  if (!candidate.hadInterveningObserved) return null
   return candidate.source
 }
 
