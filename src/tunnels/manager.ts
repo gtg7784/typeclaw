@@ -57,6 +57,7 @@ export function createTunnelManager(options: TunnelManagerOptions): TunnelManage
       options.cloudflareNamedBinary,
       resolveEnv,
       options.cloudflareQuickProbeReady,
+      logger,
     )
     handles.set(config.name, handle)
   }
@@ -109,6 +110,7 @@ function buildProvider(
   cloudflareNamedBinary: string | undefined,
   resolveEnv: (name: string) => string | undefined,
   cloudflareQuickProbeReady: TunnelManagerOptions['cloudflareQuickProbeReady'],
+  logger: TunnelManagerLogger,
 ): TunnelProviderHandle {
   switch (config.provider) {
     case 'external':
@@ -119,6 +121,7 @@ function buildProvider(
         upstreamPort: resolveUpstreamPort(config, resolveChannelUpstreamPort),
         onUrlChange,
         binary: cloudflareQuickBinary,
+        logger,
         ...(cloudflareQuickProbeReady !== undefined ? { probeReady: cloudflareQuickProbeReady } : {}),
       })
     case 'cloudflare-named':

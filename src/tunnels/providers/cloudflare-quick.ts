@@ -9,17 +9,28 @@ const DEFAULT_RESTART_BACKOFF_MS = [1_000, 2_000, 4_000, 10_000, 30_000]
 const DEFAULT_MAX_FAILURES_WITHOUT_URL = 10
 const DEFAULT_STOP_GRACE_MS = 5_000
 // cloudflared prints the trycloudflare.com URL to stderr the moment the
-// quick-tunnel control connection is established, but the Cloudflare edge
-// does not start accepting HTTPS for that hostname until ~hundreds of ms
-// to a few seconds later. If we publish the URL the instant it's parsed,
-// any caller that registers the URL with an external service (notably
-// GitHub webhook registration → immediate `ping`) loses the first request
-// with "failed to connect to host". We probe the URL ourselves until the
-// edge responds, then emit. Budget is generous enough to absorb a slow
-// edge propagation but bounded so a genuinely broken tunnel still hits
-// the restart cap via `handleExit`.
-const DEFAULT_PROBE_BACKOFF_MS = [250, 500, 1_000, 1_000, 2_000, 2_000, 3_000, 5_000]
-const DEFAULT_PROBE_TIMEOUT_MS = 5_000
+// quick-tunnel control connection comes up, but the ephemeral subdomain
+// can take 1–3 minutes to propagate through DNS resolvers (see
+// cloudflared docs: "it may take some time to be reachable"). If we
+// publish the URL before the edge is reachable, any caller that
+// registers it with an external service (notably GitHub webhook
+// registration → immediate `ping`) loses the first request with
+// "failed to connect to host".
+//
+// Strategy: probe the URL in the background, but ALWAYS emit it once
+// either (a) the probe succeeds, or (b) the fallback deadline expires.
+// Fail-open by design — a flaky probe must never gate registration
+// entirely. Falling back to pre-probe behavior in the worst case is
+// strictly better than silently never emitting at all.
+const DEFAULT_PROBE_INITIAL_BACKOFF_MS = 250
+const DEFAULT_PROBE_MAX_BACKOFF_MS = 5_000
+const DEFAULT_PROBE_FETCH_TIMEOUT_MS = 5_000
+const DEFAULT_PROBE_DEADLINE_MS = 180_000
+
+export type CloudflareQuickProviderLogger = {
+  info: (msg: string) => void
+  warn: (msg: string) => void
+}
 
 export type CloudflareQuickProviderOptions = {
   config: TunnelConfig
@@ -30,18 +41,28 @@ export type CloudflareQuickProviderOptions = {
   maxConsecutiveFailuresWithoutUrl?: number
   stopGraceMs?: number
   // Probes the public URL until the Cloudflare edge is actually serving
-  // traffic. Returns `true` once a response is observed (any HTTP status
-  // counts — even 404 from the upstream means the tunnel itself routed
-  // the request), `false` if the probe budget is exhausted. Defaults to
-  // a real `fetch` with retry/backoff; tests inject a stub.
+  // traffic. Returns `true` once any response is observed (including
+  // 4xx/5xx — those still mean the tunnel hostname routed). The provider
+  // calls this in a retry loop until success or `probeDeadlineMs`.
+  // Defaults to a real `fetch`; tests inject a stub.
   probeReady?: (url: string, signal: AbortSignal) => Promise<boolean>
-  probeBackoffMs?: number[]
+  // Hard deadline after URL parse, after which we emit the URL anyway
+  // (with a warning log). 3 minutes by default — covers the slowest
+  // observed quick-tunnel DNS propagation. Must be long enough that
+  // genuinely working tunnels always pass; short enough that broken
+  // tunnels still surface to the caller.
+  probeDeadlineMs?: number
+  probeInitialBackoffMs?: number
+  probeMaxBackoffMs?: number
+  logger?: CloudflareQuickProviderLogger
 }
 
 export type CloudflareQuickProviderHandle = TunnelProviderHandle & {
   tail: () => string[]
   subscribeToLogs: (cb: LogLineSubscriber) => Unsubscribe
 }
+
+const silentLogger: CloudflareQuickProviderLogger = { info: () => {}, warn: () => {} }
 
 export function createCloudflareQuickProvider(options: CloudflareQuickProviderOptions): CloudflareQuickProviderHandle {
   const { config, upstreamPort, onUrlChange } = options
@@ -56,8 +77,12 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
   const restartBackoffMs = options.restartBackoffMs ?? DEFAULT_RESTART_BACKOFF_MS
   const maxConsecutiveFailuresWithoutUrl = options.maxConsecutiveFailuresWithoutUrl ?? DEFAULT_MAX_FAILURES_WITHOUT_URL
   const stopGraceMs = options.stopGraceMs ?? DEFAULT_STOP_GRACE_MS
-  const probeBackoffMs = options.probeBackoffMs ?? DEFAULT_PROBE_BACKOFF_MS
+  const probeDeadlineMs = options.probeDeadlineMs ?? DEFAULT_PROBE_DEADLINE_MS
+  const probeInitialBackoffMs = options.probeInitialBackoffMs ?? DEFAULT_PROBE_INITIAL_BACKOFF_MS
+  const probeMaxBackoffMs = options.probeMaxBackoffMs ?? DEFAULT_PROBE_MAX_BACKOFF_MS
   const probeReady = options.probeReady ?? defaultProbeReady
+  const logger = options.logger ?? silentLogger
+  const logPrefix = `[tunnels] ${config.name}`
   const logs = createLogRing()
   const state: TunnelState = {
     name: config.name,
@@ -74,13 +99,11 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
   let proc: ReturnType<typeof Bun.spawn> | null = null
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let restartFailuresWithoutUrl = 0
-  let attemptEmittedUrl = false
   let probeAbort: AbortController | null = null
 
   async function launch(): Promise<void> {
     if (!started || stopping) return
 
-    attemptEmittedUrl = false
     state.status = 'starting'
     state.detail = 'starting cloudflared'
     const spawned = Bun.spawn(
@@ -108,28 +131,38 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
     cancelProbe()
     const abort = new AbortController()
     probeAbort = abort
+    const startedAt = Date.now()
 
+    logger.info(
+      `${logPrefix}: cloudflared printed URL ${url}; probing for edge reachability (deadline ${probeDeadlineMs}ms)`,
+    )
     state.status = 'starting'
-    state.detail = 'probing tunnel readiness'
+    state.detail = `probing tunnel readiness (deadline ${probeDeadlineMs}ms)`
 
-    const ready = await probeWithBackoff(url, abort.signal, probeReady, probeBackoffMs)
+    const ready = await probeWithDeadline(url, abort.signal, probeReady, {
+      deadlineMs: probeDeadlineMs,
+      initialBackoffMs: probeInitialBackoffMs,
+      maxBackoffMs: probeMaxBackoffMs,
+    })
     if (probeAbort !== abort) return
     probeAbort = null
     if (!started || stopping) return
     if (proc !== owningProc) return
 
-    if (!ready) {
-      state.detail = 'tunnel URL emitted but probe failed; will restart'
-      owningProc.kill('SIGKILL')
-      return
+    const elapsedMs = Date.now() - startedAt
+    if (ready) {
+      logger.info(`${logPrefix}: edge reachable after ${elapsedMs}ms`)
+      state.detail = `quick tunnel URL reachable after ${elapsedMs}ms`
+    } else {
+      logger.warn(
+        `${logPrefix}: edge probe did not succeed within ${elapsedMs}ms; emitting URL anyway. First webhook delivery may fail if DNS hasn't propagated yet.`,
+      )
+      state.detail = `quick tunnel URL emitted without probe confirmation after ${elapsedMs}ms`
     }
-
-    attemptEmittedUrl = true
     restartFailuresWithoutUrl = 0
     state.url = url
     state.status = 'healthy'
     state.lastUrlAt = Date.now()
-    state.detail = 'quick tunnel URL emitted and reachable'
     onUrlChange(url)
   }
 
@@ -141,7 +174,7 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
   }
 
   function handleExit(code: number): void {
-    if (!attemptEmittedUrl) restartFailuresWithoutUrl += 1
+    if (state.url === null) restartFailuresWithoutUrl += 1
     if (restartFailuresWithoutUrl >= maxConsecutiveFailuresWithoutUrl) {
       state.status = 'permanently-failed'
       state.detail = `cloudflared exited ${code}; retry cap reached before URL emission`
@@ -150,6 +183,7 @@ export function createCloudflareQuickProvider(options: CloudflareQuickProviderOp
 
     state.status = 'unhealthy'
     state.detail = `cloudflared exited ${code}; restarting`
+    state.url = null
     const delay = restartBackoffMs[Math.min(restartFailuresWithoutUrl - 1, restartBackoffMs.length - 1)] ?? 30_000
     retryTimer = setTimeout(() => {
       retryTimer = null
@@ -256,37 +290,45 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   })
 }
 
-async function probeWithBackoff(
+type ProbeDeadlineOptions = {
+  deadlineMs: number
+  initialBackoffMs: number
+  maxBackoffMs: number
+}
+
+async function probeWithDeadline(
   url: string,
   signal: AbortSignal,
   probe: (url: string, signal: AbortSignal) => Promise<boolean>,
-  backoffMs: number[],
+  opts: ProbeDeadlineOptions,
 ): Promise<boolean> {
-  for (let attempt = 0; attempt <= backoffMs.length; attempt += 1) {
-    if (signal.aborted) return false
+  const deadline = Date.now() + opts.deadlineMs
+  let backoff = opts.initialBackoffMs
+  while (!signal.aborted && Date.now() < deadline) {
     try {
       if (await probe(url, signal)) return true
     } catch {
-      // Probe threw (network error, abort, etc.) — treat as not-ready and back off.
+      // Probe threw (DNS NXDOMAIN, connection refused, abort, etc.) —
+      // treat as not-ready and back off. These errors are expected
+      // during the propagation window for a fresh quick tunnel.
     }
     if (signal.aborted) return false
-    const delay = backoffMs[attempt]
-    if (delay === undefined) return false
-    await sleep(delay, signal)
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return false
+    await sleep(Math.min(backoff, remaining), signal)
+    backoff = Math.min(backoff * 2, opts.maxBackoffMs)
   }
   return false
 }
 
 async function defaultProbeReady(url: string, signal: AbortSignal): Promise<boolean> {
-  const timeout = AbortSignal.timeout(DEFAULT_PROBE_TIMEOUT_MS)
+  const timeout = AbortSignal.timeout(DEFAULT_PROBE_FETCH_TIMEOUT_MS)
   const combined = AbortSignal.any([signal, timeout])
-  try {
-    // Any response from the Cloudflare edge — including 404, 502, etc. from
-    // the unbound upstream — means the tunnel hostname is live. We only
-    // care about edge reachability, not upstream health.
-    await fetch(url, { method: 'HEAD', redirect: 'manual', signal: combined })
-    return true
-  } catch {
-    return false
-  }
+  // Any response from the Cloudflare edge — including 404/405/502/530
+  // from the unbound or wrong-method upstream — means the tunnel
+  // hostname is live and routing. We only care about edge reachability,
+  // not upstream health. HEAD is the cheapest verb; redirect:'manual'
+  // keeps us from following 301s into unrelated hosts.
+  await fetch(url, { method: 'HEAD', redirect: 'manual', signal: combined })
+  return true
 }

@@ -20,6 +20,8 @@ function installFakeCloudflared(scratchDir: string): string {
     `#!/bin/sh
 echo "2026-01-01T00:00:00Z INF Requesting new quick Tunnel on trycloudflare.com..." >&2
 echo "2026-01-01T00:00:00Z INF | https://integration.trycloudflare.com |" >&2
+trap 'exit 0' TERM
+sleep 30
 `,
     'utf8',
   )
