@@ -51,6 +51,7 @@ import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
 import { createRestartTool } from './tools/restart'
+import { createSkipResponseTool } from './tools/skip-response'
 import { createSpawnSubagentTool } from './tools/spawn-subagent'
 import { createStreamSnapshotTool } from './tools/stream-snapshot'
 import { createSubagentCancelTool } from './tools/subagent-cancel'
@@ -298,7 +299,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
             lookAtTool,
             ...(options.reloadRegistry ? [createReloadTool({ registry: options.reloadRegistry })] : []),
             ...(options.stream ? [createStreamSnapshotTool({ stream: options.stream })] : []),
-            ...buildChannelTools(options.channelRouter, options.origin),
+            ...buildChannelTools(options.channelRouter, options.origin, sessionManager.getSessionId()),
             ...(options.containerName
               ? [
                   createRestartTool({
@@ -487,13 +488,21 @@ export function formatRestartNoticeOriginating(restartedAt: string): string {
 }
 
 // Builds the channel tool subset: channel_send (always when a router is
-// available), plus channel_reply + channel_history (only when the session
-// origin is a channel — those rely on origin-bound addressing). Extracted
-// from createSessionWithDispose so composition can be unit-tested without
+// available), plus channel_reply + channel_history + skip_response (only
+// when the session origin is a channel — those rely on origin-bound
+// addressing or per-session turn state). Extracted from
+// createSessionWithDispose so composition can be unit-tested without
 // going through createAgentSession / auth.
+//
+// `sessionId` is required for `skip_response` (the tool addresses the
+// LiveSession by id when stamping the skip flag) and optional otherwise.
+// Callers that don't have it (e.g. early composition tests) get the
+// pre-skip-response tool set, which is forward-compatible — the prompt
+// guidance still mentions the NO_REPLY fallback for those cases.
 export function buildChannelTools(
   channelRouter: ChannelRouter | undefined,
   origin: SessionOrigin | undefined,
+  sessionId?: string,
 ): ToolDefinition[] {
   if (!channelRouter) return []
   const tools: ToolDefinition[] = []
@@ -513,6 +522,9 @@ export function buildChannelTools(
         origin: { adapter: origin.adapter },
       }),
     )
+    if (sessionId !== undefined) {
+      tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
+    }
   } else {
     tools.push(createChannelSendTool({ router: channelRouter }))
   }

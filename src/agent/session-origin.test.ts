@@ -128,7 +128,27 @@ describe('renderSessionOrigin', () => {
     expect(out).toMatch(/promised a reply you have not delivered/i)
     expect(out).toMatch(/subagent-completion .*system-reminder.* arrives/i)
     expect(out).toMatch(/subagent_output/)
-    expect(out).toMatch(/`NO_REPLY` is only legal on the post-result turn/i)
+    expect(out).toMatch(/only legal on the\s+post-result\s+turn/i)
+    expect(out).toMatch(/`skip_response`\s*\(or `NO_REPLY`\)/i)
+  })
+
+  test('channel origin teaches skip_response as the preferred silent-turn signal with NO_REPLY as fallback', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: '1700000000.000100',
+    })
+    expect(out).toContain('skip_response({ reason })')
+    expect(out).toContain('preferred')
+    expect(out).toMatch(/`NO_REPLY` text sentinel.*fallback/is)
+    expect(out).toMatch(/contract is bidirectional/i)
+    expect(out).toMatch(/after calling `skip_response`[\s\S]*?will be rejected/i)
+    expect(out).toMatch(/AND calling `skip_response` after a reply[\s\S]*?will also be rejected/i)
+    expect(out).toMatch(/[Cc]ommit to silence or commit to\s+replying, not both/i)
+    expect(out).toMatch(/typeclaw logs -f/)
+    expect(out).toMatch(/Do not include secrets/i)
   })
 
   test('channel origin teaches channel_reply as the default and channel_send as the escape hatch', () => {
