@@ -34,6 +34,7 @@ describe('tunnel URL to channel adapter restart integration', () => {
     const manager = createTunnelManager({
       stream,
       cloudflareQuickBinary: installFakeCloudflared(scratchDir),
+      cloudflareQuickProbeReady: async () => true,
       resolveChannelUpstreamPort: (name) => (name === 'github' ? 8975 : null),
       logger: silentLogger(),
       tunnels: [
