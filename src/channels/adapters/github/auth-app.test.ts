@@ -184,6 +184,36 @@ describe('AppAuthStrategy', () => {
 
     expect(calls).toEqual(['https://api.github.com/app', 'https://api.github.com/users/typeclaw%5Bbot%5D'])
   })
+
+  it('looks up the bot user without an Authorization header', async () => {
+    const usersAuth: (string | null)[] = []
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: privateKeyPem },
+      fetchImpl: fakeFetch(async (url, init) => {
+        if (String(url).endsWith('/app')) return Response.json({ slug: 'typeclaw' })
+        usersAuth.push(new Headers(init?.headers).get('authorization'))
+        return Response.json({ id: 42, login: 'typeclaw[bot]' })
+      }),
+    })
+
+    await strategy.getSelf()
+
+    expect(usersAuth).toEqual([null])
+  })
+
+  it('surfaces the upstream status when the bot user lookup fails', async () => {
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: privateKeyPem },
+      fetchImpl: fakeFetch(async (url) => {
+        if (String(url).endsWith('/app')) return Response.json({ slug: 'typeclaw' })
+        return new Response('Bad credentials', { status: 401 })
+      }),
+    })
+
+    await expect(strategy.getSelf()).rejects.toThrow(/bot user lookup failed: 401/i)
+  })
 })
 
 function fakeFetch(handler: (url: RequestInfo | URL, init?: RequestInit) => Promise<Response>): typeof fetch {

@@ -3,7 +3,7 @@ import { createPrivateKey } from 'node:crypto'
 import { resolveSecret, type Secret } from '@/secrets/resolve'
 
 import type { GithubAuthStrategy, GithubSelfUser } from './auth'
-import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
+import { GITHUB_API_BASE, githubJsonHeaders, githubPublicHeaders } from './auth-pat'
 
 export class AppAuthStrategy implements GithubAuthStrategy {
   private readonly appId: number
@@ -54,8 +54,11 @@ export class AppAuthStrategy implements GithubAuthStrategy {
     if (typeof app.slug !== 'string') throw new Error('GitHub /app response missing slug')
 
     const botLogin = `${app.slug}[bot]`
+    // GET /users/{login} is a public endpoint and rejects App JWTs with 401.
+    // Installation tokens also fail here (404 — they're scoped to repos, not user lookups).
+    // The bot user is publicly visible, so no auth is the only path that works.
     const userResponse = await this.fetchImpl(`${GITHUB_API_BASE}/users/${encodeURIComponent(botLogin)}`, {
-      headers: githubJsonHeaders(jwt),
+      headers: githubPublicHeaders(),
     })
     if (!userResponse.ok) throw new Error(`GitHub bot user lookup failed: ${userResponse.status}`)
     const user = (await userResponse.json()) as { id?: unknown; login?: unknown }
