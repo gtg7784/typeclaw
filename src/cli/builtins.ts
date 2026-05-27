@@ -23,6 +23,7 @@ export const BUILTIN_COMMAND_NAMES = [
   'model',
   'doctor',
   'usage',
+  'update',
   '_hostd',
 ] as const
 

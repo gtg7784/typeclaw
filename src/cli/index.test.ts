@@ -71,6 +71,7 @@ describe('BUILTIN_COMMAND_NAMES exposure', () => {
     expect(BUILTIN_COMMAND_NAMES).toContain('tui')
     expect(BUILTIN_COMMAND_NAMES).toContain('doctor')
     expect(BUILTIN_COMMAND_NAMES).toContain('cron')
+    expect(BUILTIN_COMMAND_NAMES).toContain('update')
     expect(BUILTIN_COMMAND_NAMES).toContain('_hostd')
   })
 })
@@ -118,6 +119,23 @@ describe('typeclaw --help on host stage', () => {
     const { stdout, code } = await runCli(['--help'], dir)
     expect(code).toBe(0)
     expect(stdout).not.toContain('Plugin commands:')
+  })
+})
+
+describe('typeclaw update on host stage', () => {
+  test.concurrent('dry-run prints the selected updater command without hitting the registry', async () => {
+    const dir = await mkAgent()
+    const { stdout, stderr, code } = await runCli(['update', '--manager=bun', '--dry-run'], dir)
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    expect(stdout.trim()).toBe('bun update -g typeclaw --latest')
+  })
+
+  test.concurrent('auto mode refuses a source checkout because it cannot prove the global manager', async () => {
+    const dir = await mkAgent()
+    const { stderr, code } = await runCli(['update', '--dry-run'], dir)
+    expect(code).toBe(1)
+    expect(stderr).toContain('Cannot auto-detect how TypeClaw was installed')
   })
 })
 
