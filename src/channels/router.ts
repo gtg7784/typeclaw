@@ -1109,7 +1109,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         return
       }
       if (now() - live.typingStartedAt >= MAX_TYPING_HEARTBEAT_MS) {
-        logger.warn(`[channels] ${live.keyId}: typing heartbeat timed out after ${MAX_TYPING_HEARTBEAT_MS}ms`)
+        logger.warn(
+          `[channels] ${live.keyId}: typing indicator paused after ${MAX_TYPING_HEARTBEAT_MS}ms; prompt still in flight`,
+        )
         live.typingTimedOut = true
         void stopTypingHeartbeat(live)
         return
@@ -2136,7 +2138,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           return
         }
         if (now() - live.typingStartedAt >= MAX_TYPING_HEARTBEAT_MS) {
-          logger.warn(`[channels] ${live.keyId}: typing heartbeat timed out after ${MAX_TYPING_HEARTBEAT_MS}ms`)
+          logger.warn(
+            `[channels] ${live.keyId}: typing indicator paused after ${MAX_TYPING_HEARTBEAT_MS}ms; prompt still in flight`,
+          )
           live.typingTimedOut = true
           await stopTypingHeartbeat(live)
           return

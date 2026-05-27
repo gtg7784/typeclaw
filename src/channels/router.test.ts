@@ -2714,7 +2714,7 @@ describe('ChannelRouter typing indicator', () => {
 
     expect(phases).toEqual(['tick', 'stop'])
     expect(router.__testing!.isTypingActive(KEY)).toBe(false)
-    expect(logs.some((m) => m.includes('typing heartbeat timed out'))).toBe(true)
+    expect(logs.some((m) => m.includes('typing indicator paused') && m.includes('prompt still in flight'))).toBe(true)
 
     releasePrompt!()
     await draining
