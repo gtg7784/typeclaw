@@ -78,7 +78,12 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     process.env.GH_TOKEN = t
     return t
   }
-  const outbound = createGithubOutboundCallback({ token: tokenFn, logger, fetchImpl })
+  const outbound = createGithubOutboundCallback({
+    token: tokenFn,
+    authType: options.secrets.auth.type,
+    logger,
+    fetchImpl,
+  })
   const history = createGithubHistoryCallback({
     token: tokenFn,
     fetchImpl,

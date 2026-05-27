@@ -123,7 +123,12 @@ describe('PR line comment → channel_reply → /pulls/{N}/comments/{T}/replies'
       },
       { preconnect: () => {} },
     ) as typeof fetch
-    const outbound = createGithubOutboundCallback({ token: async () => 'tok', logger: silent, fetchImpl })
+    const outbound = createGithubOutboundCallback({
+      token: async () => 'tok',
+      authType: 'app',
+      logger: silent,
+      fetchImpl,
+    })
 
     const origin: ChannelReplyOrigin = {
       adapter: 'github',
@@ -165,7 +170,12 @@ describe('PR line comment → channel_reply → /pulls/{N}/comments/{T}/replies'
       },
       { preconnect: () => {} },
     ) as typeof fetch
-    const outbound = createGithubOutboundCallback({ token: async () => 'tok', logger: silent, fetchImpl })
+    const outbound = createGithubOutboundCallback({
+      token: async () => 'tok',
+      authType: 'app',
+      logger: silent,
+      fetchImpl,
+    })
 
     const tool = createChannelReplyTool({
       router: fakeRouter(async (msg) => outbound(msg)),
@@ -192,7 +202,12 @@ describe('PR line comment → channel_reply → /pulls/{N}/comments/{T}/replies'
       },
       { preconnect: () => {} },
     ) as typeof fetch
-    const outbound = createGithubOutboundCallback({ token: async () => 'tok', logger: silent, fetchImpl })
+    const outbound = createGithubOutboundCallback({
+      token: async () => 'tok',
+      authType: 'app',
+      logger: silent,
+      fetchImpl,
+    })
 
     const tool = createChannelReplyTool({
       router: fakeRouter(async (msg) => outbound(msg)),
