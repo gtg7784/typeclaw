@@ -1,8 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { createInterface, type Interface } from 'node:readline'
-import { type Readable } from 'node:stream'
 
-import { isCancel, log } from '@clack/prompts'
+import { log } from '@clack/prompts'
 
 const BEGIN_MARKER = '-----BEGIN'
 const END_MARKER_RE = /^-----END [A-Z0-9 ]*PRIVATE KEY-----\s*$/
@@ -77,7 +76,7 @@ function createStdinLineReader(): StdinLineReader {
   return createReadlineLineReader(process.stdin)
 }
 
-export function createReadlineLineReader(input: NodeJS.ReadableStream | Readable): StdinLineReader {
+export function createReadlineLineReader(input: NodeJS.ReadableStream): StdinLineReader {
   const rl: Interface = createInterface({ input, terminal: false })
   const queue: string[] = []
   const waiters: ((value: string | typeof CANCEL_SYMBOL) => void)[] = []
@@ -112,5 +111,3 @@ export function createReadlineLineReader(input: NodeJS.ReadableStream | Readable
     close: () => rl.close(),
   }
 }
-
-export { isCancel }
