@@ -36,21 +36,22 @@ When an incoming message says **"requested your review on PR #N"** (or "requeste
    gh pr view <N> --repo owner/repo --json title,body,baseRefName,headRefOid,files
    ```
 
-2. **Submit a multi-comment review** in one API call. `comments[]` accepts line-level entries; each one lands on the diff exactly like a human reviewer's inline comment:
+2. **Submit a multi-comment review** in one API call by piping a JSON payload to `gh api --input -`. `comments[]` accepts line-level entries; each one lands on the diff exactly like a human reviewer's inline comment:
 
    ```sh
-   gh api -X POST /repos/owner/repo/pulls/<N>/reviews \
-     -F event=COMMENT \
-     -f body="Overall: looks good with a few nits." \
-     -F 'comments[][path]=src/foo.ts' \
-     -F 'comments[][line]=42' \
-     -F 'comments[][side]=RIGHT' \
-     -F 'comments[][body]=nit: prefer `const` here.' \
-     -F 'comments[][path]=src/bar.ts' \
-     -F 'comments[][line]=10' \
-     -F 'comments[][side]=RIGHT' \
-     -F 'comments[][body]=Consider extracting this branch into a helper.'
+   cat <<'JSON' | gh api -X POST /repos/owner/repo/pulls/<N>/reviews --input -
+   {
+     "event": "COMMENT",
+     "body": "Overall: looks good with a few nits.",
+     "comments": [
+       { "path": "src/foo.ts", "line": 42, "side": "RIGHT", "body": "nit: prefer `const` here." },
+       { "path": "src/bar.ts", "line": 10, "side": "RIGHT", "body": "Consider extracting this branch into a helper." }
+     ]
+   }
+   JSON
    ```
+
+   **Always use `--input -` with a quoted heredoc (`<<'JSON'`) for review bodies.** Do **not** use `-f body=...` or `-F 'comments[][body]=...'`: those go through shell argument parsing, so backticks (\`) trigger command substitution and have to be backslash-escaped, which leaks the literal `\` into the rendered comment. The quoted heredoc passes the JSON through untouched — backticks, newlines, and `${...}` all survive verbatim. The same applies to any other `gh api` POST whose body contains backticks, embedded newlines, or shell metacharacters.
 
 3. **Then** post a one-line summary with `channel_reply` so the conversation has a human-readable trace pointing at the review.
 
