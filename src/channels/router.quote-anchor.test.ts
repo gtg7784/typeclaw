@@ -1,11 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { captureQuoteCandidate, decideQuoteAnchor, prependQuoteAnchor, renderQuoteAnchor } from './router'
-import {
-  DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS,
-  QUOTED_REPLY_EXCERPT_MAX_CHARS,
-  type ChannelAdapterConfig,
-} from './schema'
+import { QUOTED_REPLY_EXCERPT_MAX_CHARS, type ChannelAdapterConfig } from './schema'
 
 const baseConfig: ChannelAdapterConfig = {
   engagement: { trigger: ['mention', 'reply', 'dm'], stickiness: { perReply: { window: 60_000 } } },
@@ -178,19 +174,9 @@ describe('decideQuoteAnchor', () => {
     expect(decideQuoteAnchor(null, 999_999, baseConfig)).toBeNull()
   })
 
-  test('returns null when send-time delay is below threshold and no intervening observed', () => {
+  test('returns null when no observed message intervened, even after a long delay', () => {
     const candidate = captureQuoteCandidate('slack-bot', [humanInbound], [])!
-    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 1_000, baseConfig)).toBeNull()
-  })
-
-  test('returns the anchor when send-time delay crosses the default threshold', () => {
-    const candidate = captureQuoteCandidate('slack-bot', [humanInbound], [])!
-    const out = decideQuoteAnchor(
-      candidate,
-      humanInbound.receivedAt + DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS + 1,
-      baseConfig,
-    )
-    expect(out).toEqual({ adapter: 'slack-bot', authorId: 'U_ALICE', authorName: 'Alice', text: 'hey there' })
+    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 600_000, baseConfig)).toBeNull()
   })
 
   test('returns the anchor when an observed message landed after the primary, even within threshold', () => {
@@ -210,21 +196,23 @@ describe('decideQuoteAnchor', () => {
     expect(out).toBeNull()
   })
 
-  test('respects a custom queueDelayMs', () => {
+  test('does not let custom queueDelayMs force a quote when no message intervened', () => {
     const candidate = captureQuoteCandidate('slack-bot', [humanInbound], [])!
     const aggressive: ChannelAdapterConfig = { ...baseConfig, quotedReply: { enabled: true, queueDelayMs: 0 } }
-    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt, aggressive)).toEqual({
+    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 600_000, aggressive)).toBeNull()
+  })
+
+  test('quotes with no quotedReply config when an observed message intervened', () => {
+    const candidate = captureQuoteCandidate(
+      'slack-bot',
+      [humanInbound],
+      [{ receivedAt: humanInbound.receivedAt + 500, source: 'observed' }],
+    )!
+    expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 1_000, baseConfig)).toEqual({
       adapter: 'slack-bot',
       authorId: 'U_ALICE',
       authorName: 'Alice',
       text: 'hey there',
     })
-  })
-
-  test('falls back to the default threshold when the adapter has no quotedReply config', () => {
-    const candidate = captureQuoteCandidate('slack-bot', [humanInbound], [])!
-    expect(
-      decideQuoteAnchor(candidate, humanInbound.receivedAt + DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS + 1, baseConfig),
-    ).toEqual({ adapter: 'slack-bot', authorId: 'U_ALICE', authorName: 'Alice', text: 'hey there' })
   })
 })

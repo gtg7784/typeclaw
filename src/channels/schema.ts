@@ -87,13 +87,12 @@ const historySchema = z
     },
   })
 
-// When the agent's first send of a turn lands ≥ this many ms after the
-// inbound was received, OR there were intervening observed messages
-// between the inbound and the reply, the router prepends a `> @author:
-// ...` blockquote line referencing the inbound so the user can see which
-// message the reply is anchored to even after the channel has scrolled.
-// 10s is the empirical "felt instantaneous" ceiling — anything faster
-// reads as real-time and needs no anchor.
+// Legacy quote-delay knob retained for config compatibility. Quote anchors
+// are now driven by channel ordering instead: when another live-observed
+// message lands between the inbound and the agent's first reply, the router
+// prepends a platform-specific `> author: ...` blockquote line referencing
+// the inbound. If nothing intervened, the reply is adjacent enough in the
+// channel timeline that it needs no anchor regardless of elapsed wall time.
 export const DEFAULT_QUOTED_REPLY_QUEUE_DELAY_MS = 10_000
 
 // Long enough to disambiguate; short enough that a multi-paragraph user
