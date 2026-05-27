@@ -1977,7 +1977,7 @@ describe('defaultRunHatching', () => {
     const calls: Parameters<typeof import('@/tui').createTui>[0][] = []
     const fn: typeof import('@/tui').createTui = (options) => {
       calls.push(options)
-      return { run: async () => {} } as ReturnType<typeof import('@/tui').createTui>
+      return { run: async () => ({ lostConnection: false }) } as ReturnType<typeof import('@/tui').createTui>
     }
     return { fn, calls }
   }
