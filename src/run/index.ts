@@ -338,6 +338,7 @@ export async function startAgent({
             signal: abortController.signal,
             runtimeVersion: runtimeVersionOpt.runtimeVersion,
             containerName: containerNameOpt.containerName,
+            sessionFactory,
           }),
         subagent: (subName: string, payload?: unknown) =>
           dispatchSpawnSubagent(subName, payload, {
@@ -551,6 +552,7 @@ export async function startAgent({
       runtimeVersion: CLI_VERSION,
       containerName,
       outbound,
+      sessionFactory,
     })
 
   const server = createServer({

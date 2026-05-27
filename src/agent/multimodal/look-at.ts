@@ -80,6 +80,14 @@ export const lookAtTool = defineTool({
         parentSessionId: '<look-at-tool>',
       }
 
+      // TODO(usage-accounting): this falls through to SessionManager.inMemory()
+      // because no sessionManager is passed, so the look_at subagent's
+      // message.usage never reaches the sessions/ JSONLs that `typeclaw usage`
+      // and the bundled `backup` plugin scan. Same root-cause class as the
+      // plugin-command/cron-handler path fixed in `runPromptForCommand`
+      // (src/server/command-runner.ts). Fixing this requires threading a
+      // SessionFactory into pi-coding-agent's tool execute() signature, which
+      // is a separate change.
       const { session, dispose } = await createSessionWithDispose({
         systemPromptOverride: systemPrompt,
         origin,
