@@ -58,6 +58,7 @@ When an incoming message says **"requested your review on PR #N"** (or "requeste
 ### Rules
 
 - Use `event=COMMENT` by default. Use `APPROVE` only when you have high confidence the PR is ready to merge. Use `REQUEST_CHANGES` only when the PR has clear blockers — not for nits.
+- **Only post comments that the author needs to act on.** Do not post praise ("looks good", "nice refactor", "great work"), affirmations of correct code, or restatements of what a line does. If every comment in your review is positive, post a top-level summary via `channel_reply` instead of a review — or skip commenting and just `APPROVE`. Inline comments are for changes, questions, and blockers, not validation.
 - `line` is a line number **in the file**, not a position in the diff. `side: RIGHT` is the new revision (default for additions); `side: LEFT` is the old revision (use for comments on removed lines).
 - For multi-line comments, also set `start_line` and `start_side` (same semantics).
 - If you need to read whole files at the PR's head SHA, use `gh api /repos/owner/repo/contents/<path>?ref=<headRefOid>`.
