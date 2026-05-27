@@ -18,6 +18,7 @@ import {
   buildPermissionGuidance,
   parseListHooksPermissionStatus,
 } from './permission-guidance'
+import { createTeamMembershipChecker } from './team-membership'
 import { deregisterGithubWebhooks, registerGithubWebhooks, type WebhookRegistrationResult } from './webhook-register'
 
 export type GithubAdapterLogger = {
@@ -110,12 +111,14 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   // No-op typing callback: GitHub has no typing indicator API.
   const typing = async (): Promise<void> => {}
   const dedup = createDeliveryDedup()
+  const isBotInTeam = createTeamMembershipChecker({ token: tokenFn, fetchImpl })
   const handler = createGithubWebhookHandler({
     webhookSecret,
     dedup,
     allowlist: () => options.configRef().eventAllowlist,
     selfId: () => selfId,
     selfLogin: () => selfLogin,
+    isBotInTeam,
     logger,
     route: (message) => {
       rememberWorkspace(message.workspace, message.chat)
