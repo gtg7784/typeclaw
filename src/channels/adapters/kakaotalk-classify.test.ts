@@ -70,6 +70,39 @@ describe('classifyInbound', () => {
     expect(verdict).toEqual({ kind: 'drop', reason: 'unknown_chat' })
   })
 
+  test('drops bot_message when LOCO message_type=71 (kakao notification feed)', () => {
+    const verdict = classifyInbound(
+      event({ message_type: 71, author_id: 406180744, author_name: '카카오 고객센터', message: '시스템 알림' }),
+      groupConfig(),
+      { selfUserId: '999', lookupChat: groupLookup },
+    )
+    expect(verdict).toEqual({ kind: 'drop', reason: 'bot_message' })
+  })
+
+  test('bot_message drop wins over unknown_chat (independent of resolver state)', () => {
+    const verdict = classifyInbound(event({ message_type: 71 }), groupConfig(), {
+      selfUserId: '999',
+      lookupChat: () => null,
+    })
+    expect(verdict).toEqual({ kind: 'drop', reason: 'bot_message' })
+  })
+
+  test('self_author still wins over bot_message (defense in depth)', () => {
+    const verdict = classifyInbound(event({ message_type: 71, author_id: 999 }), groupConfig(), {
+      selfUserId: '999',
+      lookupChat: groupLookup,
+    })
+    expect(verdict).toEqual({ kind: 'drop', reason: 'self_author' })
+  })
+
+  test('normal text (message_type=1) is not dropped as bot_message', () => {
+    const verdict = classifyInbound(event({ message_type: 1 }), dmConfig(), {
+      selfUserId: '999',
+      lookupChat: dmLookup,
+    })
+    expect(verdict.kind).toBe('route')
+  })
+
   test('routes a 1:1 message and stamps the dm workspace + isDm', () => {
     const verdict = classifyInbound(event(), dmConfig(), {
       selfUserId: '999',

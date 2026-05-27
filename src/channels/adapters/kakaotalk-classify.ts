@@ -4,7 +4,16 @@ import { matchesAnyAlias } from '@/channels/engagement'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type { InboundMessage } from '@/channels/types'
 
-export type InboundDropReason = 'self_author' | 'empty_text' | 'unknown_chat' | 'pre_connect'
+export type InboundDropReason = 'self_author' | 'empty_text' | 'unknown_chat' | 'pre_connect' | 'bot_message'
+
+// LOCO message_type 71 is KakaoTalk's notification/feed channel — official
+// accounts like "카카오 고객센터" and "카카오계정" (login alerts, security
+// notices, system messages). These arrive in @kakao-group buckets because
+// they aren't normal user chats, but they are not human conversation and
+// the agent should never reply to them. Not enumerated in
+// agent-messenger's `KAKAO_MESSAGE_TYPE` because that const only covers
+// user-composable types (TEXT/PHOTO/VIDEO/AUDIO/FILE/MULTIPHOTO).
+const KAKAO_NOTIFICATION_MESSAGE_TYPE = 71
 
 export type InboundClassification =
   | { kind: 'drop'; reason: InboundDropReason }
@@ -31,6 +40,9 @@ export function classifyInbound(
   }
   if (String(event.author_id) === context.selfUserId) {
     return { kind: 'drop', reason: 'self_author' }
+  }
+  if (event.message_type === KAKAO_NOTIFICATION_MESSAGE_TYPE) {
+    return { kind: 'drop', reason: 'bot_message' }
   }
 
   const text = event.message ?? ''
