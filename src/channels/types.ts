@@ -84,7 +84,7 @@ export type OutboundMessage = {
   attachments?: OutboundAttachment[]
 }
 
-export type SendErrorCode = 'duplicate' | 'turn-cap' | 'no-adapter' | 'callback-rejected'
+export type SendErrorCode = 'duplicate' | 'turn-cap' | 'no-adapter' | 'callback-rejected' | 'skip-locked'
 
 export type SendResult = { ok: true } | { ok: false; error: string; code?: SendErrorCode }
 

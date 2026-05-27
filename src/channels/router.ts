@@ -315,6 +315,23 @@ type LiveSession = {
   // future hard cap without picking a threshold out of thin air.
   sendTimestamps: Map<string, number[]>
   successfulChannelSends: number
+  // Monotonic per-LiveSession turn counter incremented just before each
+  // `live.session.prompt(...)` call in `drain()`. Used as a turn identity
+  // so `skip_response` can record "I skipped turn N" without leaking
+  // across turns. `validateChannelTurn` only honors `skippedTurn` when it
+  // equals `turnSeq`; a stale value from a crashed/aborted prior turn is
+  // ignored (defensive: an unmatched skippedTurn would otherwise silently
+  // drop the next user-facing reply). NOT cleared on drain finally — the
+  // counter is purely monotonic; the matching comparison is what protects
+  // against stale state.
+  turnSeq: number
+  // Stamped by `markTurnSkipped` (called from the `skip_response` tool)
+  // with the current `turnSeq`. Read at the top of `validateChannelTurn`:
+  // if it matches the just-completed turn, recovery is skipped entirely
+  // (no NO_REPLY check, no Kimi leak check, no assistant-text recovery).
+  // The model has explicitly opted out of this turn and we honor that
+  // unconditionally. `null` when no skip has been recorded.
+  skippedTurn: { turnSeq: number; reason: string } | null
   // Captured by drain() at batch dequeue; read+cleared by send() on the
   // first tool-source send of the turn. The anchor decision (delay
   // threshold + intervening-observed check) is evaluated at SEND time
@@ -377,6 +394,11 @@ export const DUPLICATE_SEND_ERROR =
 export const TURN_CAP_ERROR =
   `Send-cap reached for this turn (${MAX_CHANNEL_SENDS_PER_TURN} messages already sent to this conversation). ` +
   'End your turn now. The user can prompt you again for more output.'
+
+export const SKIP_RESPONSE_LOCK_ERROR =
+  'You called `skip_response` earlier in this turn, which committed to staying silent. ' +
+  'Channel sends are blocked for the rest of this turn. End your turn now; if you have ' +
+  'something to say, send it on the next turn.'
 
 export type ChannelRouter = {
   route: (event: InboundMessage) => Promise<void>
@@ -443,6 +465,22 @@ export type ChannelRouter = {
     durationMs: number
     error?: string
   }) => { kind: 'delivered'; keyId: string } | { kind: 'no-live-session' }
+  // Record that the agent invoked `skip_response` during the current turn
+  // for the channel session identified by `parentSessionId`. The reason is
+  // logged at INFO level inside `validateChannelTurn` (single log line per
+  // skip, so operators see exactly one record per silent turn). Stamps the
+  // current `turnSeq` on the live session so a stale record from an earlier
+  // turn cannot drop a future legitimate reply.
+  //
+  // Returns:
+  //   - 'recorded'    — the live session was found and the skip was stamped
+  //   - 'no-live-session' — no matching channel session (e.g. tool fired
+  //                         outside a channel origin); the tool should
+  //                         still log the reason but cannot suppress.
+  markTurnSkipped: (args: {
+    parentSessionId: string
+    reason: string
+  }) => { kind: 'recorded'; keyId: string } | { kind: 'no-live-session' }
   stop: () => Promise<void>
   liveCount: () => number
   __testing?: {
@@ -935,6 +973,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         lastSentText: new Map(),
         sendTimestamps: new Map(),
         successfulChannelSends: 0,
+        turnSeq: 0,
+        skippedTurn: null,
         pendingQuoteCandidate: null,
         recentEngagedPeerBotTurns: [],
         consecutiveEngagedPeerBotTurns: 0,
@@ -1273,6 +1313,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.info(`[channels] ${live.keyId} prompting batch=${batch.length} text_len=${text.length}`)
         const promptStart = now()
         const successfulSendsBeforePrompt = live.successfulChannelSends
+        live.turnSeq++
         await fireSessionTurnStart(live, text)
         try {
           await live.session.prompt(text)
@@ -1754,6 +1795,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     let priorLastSentText: string | undefined
     let reserved = false
     if (live && source === 'tool') {
+      // Tool-source send after `skip_response` for the same turn is a contract
+      // violation: the model already committed to silence. Reject before any
+      // state mutation so the model gets a clear error and the channel stays
+      // silent. System-source sends (recovery, role-claim) are not affected.
+      if (live.skippedTurn !== null && live.skippedTurn.turnSeq === live.turnSeq) {
+        return { ok: false, error: SKIP_RESPONSE_LOCK_ERROR, code: 'skip-locked' }
+      }
       const currentCount = live.consecutiveSends.get(sendKey) ?? 0
       if (currentCount >= MAX_CHANNEL_SENDS_PER_TURN) {
         return { ok: false, error: TURN_CAP_ERROR, code: 'turn-cap' }
@@ -1840,6 +1888,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 
   const validateChannelTurn = async (live: LiveSession, successfulSendsBeforePrompt: number): Promise<void> => {
+    // `skip_response` short-circuit. Must run before the `successfulChannelSends`
+    // check so a model that called both `skip_response` and a channel tool in
+    // the same turn still resolves as "skipped" — the rejection inside `send()`
+    // means the channel tool returned an error and never actually delivered.
+    // Stale-flag protection: only honor when stamped on the just-completed
+    // turn. A flag set by a previous turn that crashed before validation
+    // would otherwise drop the next legitimate user-facing reply.
+    if (live.skippedTurn !== null && live.skippedTurn.turnSeq === live.turnSeq) {
+      const { reason } = live.skippedTurn
+      live.skippedTurn = null
+      logger.info(`[channels] ${live.keyId} skipped_by_tool reason=${JSON.stringify(reason)}`)
+      return
+    }
     if (live.successfulChannelSends > successfulSendsBeforePrompt) return
 
     const candidate = recoverableAssistantText(live.session)
@@ -2086,6 +2147,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return { kind: 'no-live-session' }
   }
 
+  const markTurnSkipped = (args: {
+    parentSessionId: string
+    reason: string
+  }): { kind: 'recorded'; keyId: string } | { kind: 'no-live-session' } => {
+    for (const live of liveSessions.values()) {
+      if (live.destroyed) continue
+      if (live.sessionId !== args.parentSessionId) continue
+      live.skippedTurn = { turnSeq: live.turnSeq, reason: args.reason }
+      return { kind: 'recorded', keyId: live.keyId }
+    }
+    return { kind: 'no-live-session' }
+  }
+
   return {
     route,
     send,
@@ -2108,6 +2182,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     executeCommand,
     getSelfAliases: computeSelfAliases,
     injectSubagentCompletionReminder,
+    markTurnSkipped,
     stop,
     liveCount: () => liveSessions.size,
     __testing: {

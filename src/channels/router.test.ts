@@ -28,7 +28,14 @@ import {
   type ClaimHandler,
 } from './router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from './schema'
-import type { ChannelHistoryMessage, ChannelKey, FetchHistoryArgs, HistoryCallback, InboundMessage } from './types'
+import type {
+  ChannelHistoryMessage,
+  ChannelKey,
+  FetchHistoryArgs,
+  HistoryCallback,
+  InboundMessage,
+  SendResult,
+} from './types'
 
 class FakeSession {
   public prompts: string[] = []
@@ -1373,6 +1380,148 @@ describe('ChannelRouter channel-turn protocol', () => {
 
     expect(sent).toHaveLength(1)
     expect(sent[0]!.text).toContain('NO_REPLY_MODE')
+  })
+
+  test('skip_response: markTurnSkipped + skip-only turn produces no channel send, logs reason, no recovery', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'just FYI, no question' }))
+    sessions[0]!.onPrompt = () => {
+      const result = router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'no new info to add' })
+      expect(result.kind).toBe('recorded')
+      sessions[0]!.setAssistantText('Nothing actionable here.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('skipped_by_tool reason="no new info to add"'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(false)
+  })
+
+  test('skip_response: suppresses recovery even when the assistant turn produced visible prose', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'casual' }))
+    sessions[0]!.onPrompt = () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'duplicate' })
+      // given: model leaked meta-narration before / instead of NO_REPLY.
+      // The skip guard must win — recovery would otherwise post this.
+      sessions[0]!.setAssistantText("Same story as before; I'll stay quiet here.")
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('skipped_by_tool'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('skip_response: stale skippedTurn from an earlier turnSeq does NOT suppress the next turn', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // Turn 1: skip cleanly.
+    await router.route(inbound({ text: 'turn-1' }))
+    sessions[0]!.onPrompt = () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'turn-1-skip' })
+      sessions[0]!.setAssistantText('')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(sent).toHaveLength(0)
+
+    // Turn 2: do NOT skip. The skip flag from turn 1 was consumed at the
+    // end of validateChannelTurn; if it had not been (or if turnSeq match
+    // were missing), the model's reply here would be silently dropped.
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('Actual reply to turn 2.')
+    }
+    await router.route(inbound({ text: 'turn-2', externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('Actual reply to turn 2')
+  })
+
+  test('skip_response: channel_send after skip_response in the same turn is rejected with SKIP_RESPONSE_LOCK_ERROR', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hi' }))
+    let sendResult: SendResult | undefined
+    sessions[0]!.onPrompt = async () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'on second thought' })
+      sendResult = await router.send({
+        adapter: 'discord-bot',
+        workspace: 'g1',
+        chat: 'c1',
+        text: 'wait, I do want to reply',
+      })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sendResult?.ok).toBe(false)
+    expect(sendResult?.ok === false ? sendResult.code : '').toBe('skip-locked')
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('skipped_by_tool'))).toBe(true)
+  })
+
+  test('skip_response: system-source sends (recovery, role-claim) bypass the skip lock', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hi' }))
+    sessions[0]!.onPrompt = async () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'tool skip' })
+      // when: a system-source send fires (mimicking recovery / role-claim)
+      const result = await router.send(
+        { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'system-side message' },
+        { source: 'system' },
+      )
+      // then: lock does NOT apply to system sources — the message delivers
+      expect(result.ok).toBe(true)
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('system-side message')
+  })
+
+  test('skip_response: markTurnSkipped returns no-live-session when sessionId does not match any live session', () => {
+    const result = makeRouter('/tmp/unused').router.markTurnSkipped({
+      parentSessionId: 'ses_no_such_session',
+      reason: 'whatever',
+    })
+    expect(result.kind).toBe('no-live-session')
   })
 
   test('suppresses upstream `(Empty response: ...)` sentinel instead of leaking thinking/signature', async () => {
