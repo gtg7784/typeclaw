@@ -7,4 +7,26 @@
 @theme inline {
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  /* Brand scale anchored on the typeey logo wing (#162859 = brand-900). */
+  --color-brand-50: #f1f3fa;
+  --color-brand-100: #e1e6f4;
+  --color-brand-200: #c3cae6;
+  --color-brand-300: #9da7d2;
+  --color-brand-400: #6f7eb8;
+  --color-brand-500: #4d5d9e;
+  --color-brand-600: #364884;
+  --color-brand-700: #2a3a6e;
+  --color-brand-800: #1f2d5a;
+  --color-brand-900: #162859;
+  --color-brand-950: #0d1736;
+}
+
+/* Dark mode lifts the primary to brand-300 so links stay legible on dark bg. */
+:root {
+  --color-fd-primary: var(--color-brand-700);
+}
+
+.dark {
+  --color-fd-primary: var(--color-brand-300);
 }
