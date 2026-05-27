@@ -325,6 +325,14 @@ type LiveSession = {
   // counter is purely monotonic; the matching comparison is what protects
   // against stale state.
   turnSeq: number
+  // Snapshot of `successfulChannelSends` taken at turn start (same
+  // moment `turnSeq` increments). Lets `markTurnSkipped` detect "a
+  // channel send already landed in this turn" and reject the skip,
+  // making the rejection symmetric with the send-after-skip lock in
+  // `send()`: commit to silence or commit to replying, not both,
+  // regardless of which order the model tried them in. Updated only at
+  // turn start; reads against the live counter elsewhere are intentional.
+  successfulSendsAtTurnStart: number
   // Stamped by `markTurnSkipped` (called from the `skip_response` tool)
   // with the current `turnSeq`. Read at the top of `validateChannelTurn`:
   // if it matches the just-completed turn, recovery is skipped entirely
@@ -473,14 +481,23 @@ export type ChannelRouter = {
   // turn cannot drop a future legitimate reply.
   //
   // Returns:
-  //   - 'recorded'    — the live session was found and the skip was stamped
+  //   - 'recorded'      — the live session was found and the skip was stamped
+  //   - 'send-already-happened' — a tool-source channel send already landed
+  //                       in this turn; the skip is refused (symmetric with
+  //                       the send-after-skip lock in `send()`) so the model
+  //                       cannot land a reply AND claim silence. The flag is
+  //                       NOT stamped, so the turn proceeds as a normal
+  //                       reply turn.
   //   - 'no-live-session' — no matching channel session (e.g. tool fired
   //                         outside a channel origin); the tool should
   //                         still log the reason but cannot suppress.
   markTurnSkipped: (args: {
     parentSessionId: string
     reason: string
-  }) => { kind: 'recorded'; keyId: string } | { kind: 'no-live-session' }
+  }) =>
+    | { kind: 'recorded'; keyId: string }
+    | { kind: 'send-already-happened'; keyId: string }
+    | { kind: 'no-live-session' }
   stop: () => Promise<void>
   liveCount: () => number
   __testing?: {
@@ -974,6 +991,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         sendTimestamps: new Map(),
         successfulChannelSends: 0,
         turnSeq: 0,
+        successfulSendsAtTurnStart: 0,
         skippedTurn: null,
         pendingQuoteCandidate: null,
         recentEngagedPeerBotTurns: [],
@@ -1314,6 +1332,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const promptStart = now()
         const successfulSendsBeforePrompt = live.successfulChannelSends
         live.turnSeq++
+        live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
         await fireSessionTurnStart(live, text)
         try {
           await live.session.prompt(text)
@@ -2150,10 +2169,16 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const markTurnSkipped = (args: {
     parentSessionId: string
     reason: string
-  }): { kind: 'recorded'; keyId: string } | { kind: 'no-live-session' } => {
+  }):
+    | { kind: 'recorded'; keyId: string }
+    | { kind: 'send-already-happened'; keyId: string }
+    | { kind: 'no-live-session' } => {
     for (const live of liveSessions.values()) {
       if (live.destroyed) continue
       if (live.sessionId !== args.parentSessionId) continue
+      if (live.successfulChannelSends > live.successfulSendsAtTurnStart) {
+        return { kind: 'send-already-happened', keyId: live.keyId }
+      }
       live.skippedTurn = { turnSeq: live.turnSeq, reason: args.reason }
       return { kind: 'recorded', keyId: live.keyId }
     }
