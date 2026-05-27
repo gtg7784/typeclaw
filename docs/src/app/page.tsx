@@ -1,384 +1,556 @@
-'use client'
-
-import { Feather } from 'lucide-react'
-import { useTheme } from 'next-themes'
+import { ArrowRight, BookOpen, Check, Container, Github, Sparkles, Star, X } from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
-import { useEffect, useState } from 'react'
 
-import logo from './icon.png'
+import { AnimatedTerminal } from './_components/animated-terminal'
+import { CHANNELS } from './_components/channel-icons'
+import { CopyButton } from './_components/copy-button'
+import { COMPETITORS, INSTALL_COMMAND, MEMORY_LOOP } from './_components/data'
+import { ThemeToggle } from './_components/theme-toggle'
 
-const TYPEEY_HERO_SRC = '/typeey-cutout.png'
+const PLUGIN_CODE = `import { definePlugin } from 'typeclaw'
 
-const INSTALL_COMMAND = 'bun add -g typeclaw'
-
-interface Feature {
-  title: string
-  detail: string
-}
-
-const FEATURES: Feature[] = [
-  { title: 'Sandboxed by default', detail: 'every agent runs in its own Docker container' },
-  { title: 'TypeScript end to end', detail: 'core, plugins, channels, CLI, TUI' },
-  { title: 'Plugins as TS modules', detail: 'plain .ts files; no IPC, no FFI' },
-  { title: 'Multi-channel', detail: 'Slack, Discord, Telegram, KakaoTalk, GitHub — plus a websocket TUI' },
-  { title: 'Cron', detail: 'scheduled prompts and shell commands, with coalescing' },
-  { title: 'Self-improving memory', detail: 'observes its own work and writes its own skills' },
-  { title: 'Hot reload', detail: 'most config reloads live; boot-only fields ask for a restart' },
-  { title: 'Auto port-forward', detail: 'dev servers in the container appear on localhost' },
-  { title: 'Public tunnels', detail: 'Cloudflare Quick or your own URL — built in' },
-  { title: 'Skills on demand', detail: 'markdown procedures with zero token cost until used' },
-  { title: 'Group-chat aware', detail: 'knows who is in the room and when to reply' },
-  { title: 'Roles and permissions', detail: 'platform-aware match rules gate every action' },
-]
-
-interface DocLink {
-  href: string
-  title: string
-  blurb: string
-}
-
-const DOC_LINKS: DocLink[] = [
-  { href: '/docs/guides/getting-started', title: 'Getting started', blurb: 'install through first reply' },
-  { href: '/docs/guides/first-channel', title: 'Add a channel', blurb: 'wire Slack, Discord, Telegram, GitHub' },
-  { href: '/docs/guides/teach-the-agent', title: 'Teach the agent', blurb: 'the self-improving memory loop' },
-  { href: '/docs/guides/write-a-plugin', title: 'Write a plugin', blurb: 'tools, skills, and channels in TypeScript' },
-  {
-    href: '/docs/concepts/architecture',
-    title: 'Architecture',
-    blurb: 'three stages, the host daemon, the trust boundary',
+export default definePlugin({
+  name: 'pr-review',
+  tools: {
+    triage: async ({ pr }) => {
+      const diff = await gh.getDiff(pr)
+      return summarize(diff)
+    },
   },
-  { href: '/docs/reference/typeclaw-json', title: 'Reference', blurb: 'every field, every flag, every grammar' },
-]
+  skills: ['skills/pr-review.md'],
+})`
 
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false)
-
+function HeroInstall() {
   return (
-    <button
-      type="button"
-      onClick={() => {
-        navigator.clipboard.writeText(text).then(() => {
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1800)
-        })
-      }}
-      className="flex shrink-0 items-center justify-center rounded-md p-2 text-zinc-400 transition-colors hover:text-zinc-700 dark:text-zinc-500 dark:hover:text-zinc-200"
-      aria-label={copied ? 'Copied' : 'Copy to clipboard'}
-    >
-      {copied ? (
-        <svg
-          className="size-4"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-      ) : (
-        <svg
-          className="size-4"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-          <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
-        </svg>
-      )}
-    </button>
-  )
-}
-
-function ThemeToggle() {
-  const [mounted, setMounted] = useState(false)
-  const { setTheme, resolvedTheme } = useTheme()
-
-  useEffect(() => {
-    setMounted(true)
-  }, [])
-
-  if (!mounted) {
-    return <div className="size-9" />
-  }
-
-  return (
-    <button
-      type="button"
-      onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
-      className="flex size-9 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-      aria-label="Toggle theme"
-    >
-      {resolvedTheme === 'dark' ? (
-        <svg
-          className="size-[18px]"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <circle cx="12" cy="12" r="5" />
-          <line x1="12" y1="1" x2="12" y2="3" />
-          <line x1="12" y1="21" x2="12" y2="23" />
-          <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
-          <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
-          <line x1="1" y1="12" x2="3" y2="12" />
-          <line x1="21" y1="12" x2="23" y2="12" />
-          <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
-          <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
-        </svg>
-      ) : (
-        <svg
-          className="size-[18px]"
-          viewBox="0 0 24 24"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        >
-          <path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z" />
-        </svg>
-      )}
-    </button>
-  )
-}
-
-function InstallBlock() {
-  return (
-    <div className="mx-auto flex w-full max-w-xl items-center justify-between gap-2 rounded-2xl border border-zinc-200 bg-zinc-50 py-2 pr-2 pl-5 font-mono text-sm text-zinc-800 shadow-[0_1px_0_0_rgba(0,0,0,0.02)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-zinc-100">
-      <span className="select-none text-zinc-400 dark:text-zinc-600">$</span>
-      <span className="flex-1 truncate">{INSTALL_COMMAND}</span>
-      <CopyButton text={INSTALL_COMMAND} />
+    <div className="group relative mx-auto w-full max-w-xl">
+      <div
+        aria-hidden
+        className="absolute -inset-px rounded-2xl bg-gradient-to-r from-brand-400/30 via-brand-200/40 to-brand-400/30 opacity-70 blur-md transition-opacity group-hover:opacity-100 dark:from-brand-700/40 dark:via-brand-500/30 dark:to-brand-700/40"
+      />
+      <div className="relative flex items-center justify-between gap-2 rounded-2xl border border-zinc-200 bg-white py-3 pr-2 pl-5 font-mono text-sm text-zinc-800 shadow-lg dark:border-white/[0.1] dark:bg-zinc-950 dark:text-zinc-100">
+        <span className="text-zinc-400 dark:text-zinc-600" aria-hidden>
+          $
+        </span>
+        <span className="flex-1 truncate">{INSTALL_COMMAND}</span>
+        <CopyButton text={INSTALL_COMMAND} />
+      </div>
     </div>
   )
 }
 
-function ExampleBlock() {
+function DotGrid() {
   return (
-    <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-[0_1px_0_0_rgba(0,0,0,0.02)] dark:border-white/[0.08] dark:bg-zinc-950">
+    <div
+      aria-hidden
+      className="pointer-events-none absolute inset-0 -z-10 opacity-[0.45] dark:opacity-[0.25]"
+      style={{
+        backgroundImage: 'radial-gradient(circle at center, currentColor 1px, transparent 1px)',
+        backgroundSize: '24px 24px',
+        color: 'rgba(54, 72, 132, 0.18)',
+        maskImage: 'radial-gradient(ellipse 80% 60% at 50% 0%, black 30%, transparent 75%)',
+        WebkitMaskImage: 'radial-gradient(ellipse 80% 60% at 50% 0%, black 30%, transparent 75%)',
+      }}
+    />
+  )
+}
+
+function ChannelTrust() {
+  return (
+    <div className="mx-auto flex max-w-3xl flex-col items-center gap-5">
+      <p className="text-xs tracking-[0.2em] text-zinc-500 uppercase dark:text-zinc-500">
+        Talks to — and a websocket TUI
+      </p>
+      <div className="flex flex-wrap items-center justify-center gap-x-8 gap-y-4">
+        {CHANNELS.map(({ name, Icon }) => (
+          <div
+            key={name}
+            className="flex items-center gap-2 text-zinc-500 grayscale transition-all hover:text-zinc-800 hover:grayscale-0 dark:text-zinc-500 dark:hover:text-zinc-200"
+          >
+            <Icon className="size-5" />
+            <span className="text-sm font-medium">{name}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function SandboxDiagram() {
+  return (
+    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
+      <div className="relative flex h-full items-center justify-center">
+        <div className="relative w-full max-w-xs">
+          <div className="absolute -inset-4 rounded-2xl border-2 border-dashed border-zinc-300 dark:border-white/[0.1]" />
+          <div className="absolute -top-3 left-4 bg-white px-2 font-mono text-[10px] tracking-widest text-zinc-400 uppercase dark:bg-zinc-950 dark:text-zinc-600">
+            your host
+          </div>
+          <div className="relative rounded-xl border border-brand-200 bg-white p-5 shadow-lg dark:border-brand-800/60 dark:bg-zinc-900">
+            <div className="absolute -top-3 left-4 inline-flex items-center gap-1.5 rounded-md bg-brand-700 px-2 py-0.5 font-mono text-[10px] tracking-wider text-white uppercase dark:bg-brand-600">
+              <Container className="size-3" strokeWidth={2.4} aria-hidden />
+              docker
+            </div>
+            <p className="mt-2 text-sm font-semibold text-zinc-800 dark:text-zinc-100">my-agent</p>
+            <ul className="mt-3 space-y-1.5 font-mono text-xs text-zinc-500 dark:text-zinc-500">
+              <li>~ typeclaw run</li>
+              <li>~ /agent mounted</li>
+              <li>~ slack-bot · up</li>
+              <li>~ cron · 3 jobs</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function PluginCode() {
+  return (
+    <div className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-lg dark:border-white/[0.08] dark:bg-zinc-950">
       <div className="flex items-center justify-between border-b border-zinc-100 bg-zinc-50 px-4 py-2.5 dark:border-white/[0.04] dark:bg-white/[0.02]">
         <div className="flex gap-1.5">
           <span className="size-2.5 rounded-full bg-zinc-300 dark:bg-zinc-700" />
           <span className="size-2.5 rounded-full bg-zinc-300 dark:bg-zinc-700" />
           <span className="size-2.5 rounded-full bg-zinc-300 dark:bg-zinc-700" />
         </div>
-        <span className="font-mono text-xs text-zinc-400 dark:text-zinc-600">my-agent</span>
+        <span className="font-mono text-xs text-zinc-400 dark:text-zinc-600">plugins/pr-review.ts</span>
         <span className="size-2.5" />
       </div>
-      <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-relaxed">
-        <code>
-          <span className="text-zinc-400 dark:text-zinc-600">$ </span>
-          <span className="text-zinc-800 dark:text-zinc-100">typeclaw init</span>
-          {'\n'}
-          <span className="text-zinc-600 dark:text-zinc-400">Egg laid. 🥚</span>
-          {'\n\n'}
-          <span className="text-zinc-400 dark:text-zinc-600">$ </span>
-          <span className="text-zinc-800 dark:text-zinc-100">typeclaw start</span>
-          {'\n'}
-          <span className="text-brand-700 dark:text-brand-300">●</span>
-          <span className="text-zinc-600 dark:text-zinc-400"> my-agent started on host port 8973</span>
-          {'\n\n'}
-          <span className="text-zinc-400 dark:text-zinc-600">$ </span>
-          <span className="text-zinc-800 dark:text-zinc-100">typeclaw channel add slack-bot</span>
-          {'\n'}
-          <span className="text-zinc-600 dark:text-zinc-400">Slack channel added.</span>
-          {'\n\n'}
-          <span className="text-zinc-400 dark:text-zinc-600">$ </span>
-          <span className="text-zinc-800 dark:text-zinc-100">git log memory/ --oneline</span>
-          {'\n'}
-          <span className="text-zinc-500 dark:text-zinc-500">a3f2c1d</span>
-          <span className="text-zinc-600 dark:text-zinc-400"> dream: 4 fragments + new skill {`'pr-review'`} 🔮</span>
-        </code>
+      <pre className="overflow-x-auto p-5 font-mono text-[13px] leading-relaxed text-zinc-700 dark:text-zinc-300">
+        <code>{PLUGIN_CODE}</code>
       </pre>
     </div>
   )
 }
 
-function FeatherBullet() {
+function MemoryLoopVertical() {
   return (
-    <Feather
-      aria-hidden
-      className="size-[14px] shrink-0 translate-y-[3px] text-brand-600 dark:text-brand-300"
-      strokeWidth={2.2}
-    />
+    <div className="relative">
+      <ol className="space-y-1">
+        {MEMORY_LOOP.map((stage, i) => (
+          <li key={stage.label} className="relative pl-12">
+            <div className="absolute top-0 left-0 flex size-9 items-center justify-center rounded-full border-2 border-brand-200 bg-white font-mono text-xs font-semibold text-brand-700 dark:border-brand-800/60 dark:bg-zinc-950 dark:text-brand-300">
+              {i + 1}
+            </div>
+            {i < MEMORY_LOOP.length - 1 && (
+              <div
+                aria-hidden
+                className="absolute top-9 left-[18px] h-12 w-px bg-gradient-to-b from-brand-300 to-brand-100 dark:from-brand-700 dark:to-brand-900/30"
+              />
+            )}
+            <div className="pb-6">
+              <p className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{stage.label}</p>
+              <p className="mt-1 text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">{stage.blurb}</p>
+            </div>
+          </li>
+        ))}
+      </ol>
+      <div className="mt-2 inline-flex items-center gap-2 rounded-full bg-brand-50 px-3 py-1 text-xs font-medium text-brand-700 dark:bg-brand-950/60 dark:text-brand-300">
+        <ArrowRight className="size-3.5 -rotate-90" strokeWidth={2.4} aria-hidden />
+        loops back into the next session log
+      </div>
+    </div>
   )
 }
 
-function FeatureItem({ feature }: { feature: Feature }) {
-  return (
-    <li className="flex items-baseline gap-3 py-2.5">
-      <FeatherBullet />
-
-      <div className="text-sm leading-relaxed">
-        <span className="font-medium text-zinc-900 dark:text-zinc-100">{feature.title}</span>
-        <span className="text-zinc-500 dark:text-zinc-400"> — {feature.detail}</span>
+function CheckCell({ value }: { value: boolean | 'partial' }) {
+  if (value === 'partial') {
+    return (
+      <div className="inline-flex size-7 items-center justify-center rounded-full bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+        <span className="font-mono text-xs">~</span>
       </div>
-    </li>
+    )
+  }
+  return value ? (
+    <div className="inline-flex size-7 items-center justify-center rounded-full bg-brand-100 text-brand-700 dark:bg-brand-900/50 dark:text-brand-300">
+      <Check className="size-4" strokeWidth={2.5} aria-hidden />
+    </div>
+  ) : (
+    <div className="inline-flex size-7 items-center justify-center rounded-full bg-zinc-100 text-zinc-400 dark:bg-white/[0.04] dark:text-zinc-600">
+      <X className="size-4" strokeWidth={2.5} aria-hidden />
+    </div>
+  )
+}
+
+function MarketingTable() {
+  return (
+    <div className="-mx-2 overflow-x-auto sm:mx-0">
+      <table className="w-full min-w-[820px] text-left text-sm">
+        <thead>
+          <tr className="border-b border-zinc-200 text-xs tracking-wider text-zinc-500 uppercase dark:border-white/[0.06] dark:text-zinc-500">
+            <th className="px-4 py-4 font-medium">Runtime</th>
+            <th className="px-4 py-4 text-center font-medium">Docker-sandboxed</th>
+            <th className="px-4 py-4 text-center font-medium">Self-improving</th>
+            <th className="px-4 py-4 text-center font-medium">Multi-channel</th>
+            <th className="px-4 py-4 text-center font-medium">Full-featured plugins</th>
+            <th className="px-4 py-4 text-center font-medium">Git-native</th>
+            <th className="px-4 py-4 font-medium">Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {COMPETITORS.map((r) => (
+            <tr
+              key={r.name}
+              className={
+                r.highlight
+                  ? 'border-b border-brand-200/60 bg-brand-50/70 dark:border-brand-800/40 dark:bg-brand-950/30'
+                  : 'border-b border-zinc-100 dark:border-white/[0.04]'
+              }
+            >
+              <td className="px-4 py-5">
+                <div
+                  className={
+                    r.highlight
+                      ? 'font-semibold text-brand-800 dark:text-brand-100'
+                      : 'font-medium text-zinc-800 dark:text-zinc-200'
+                  }
+                >
+                  {r.name}
+                </div>
+                <div className="mt-0.5 font-mono text-[11px] text-zinc-500 dark:text-zinc-500">{r.lang}</div>
+              </td>
+              <td className="px-4 py-5 text-center">
+                <CheckCell value={r.dockerSandboxed} />
+              </td>
+              <td className="px-4 py-5 text-center">
+                <CheckCell value={r.selfImproving} />
+              </td>
+              <td className="px-4 py-5 text-center">
+                <CheckCell value={r.multiChannel} />
+              </td>
+              <td className="px-4 py-5 text-center">
+                <CheckCell value={r.fullFeaturedPlugins} />
+              </td>
+              <td className="px-4 py-5 text-center">
+                <CheckCell value={r.gitNative} />
+              </td>
+              <td className="px-4 py-5 text-zinc-600 dark:text-zinc-400">
+                <span className="font-medium text-zinc-700 dark:text-zinc-300">{r.strength}</span>
+                <span className="text-zinc-400 dark:text-zinc-600"> · {r.tradeoff}</span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+interface FeatureRowProps {
+  eyebrow: string
+  title: string
+  blurb: string
+  reverse?: boolean
+  visual: React.ReactNode
+}
+
+function FeatureRow({ eyebrow, title, blurb, reverse, visual }: FeatureRowProps) {
+  return (
+    <div className="grid grid-cols-1 items-center gap-10 lg:grid-cols-2 lg:gap-16">
+      <div className={reverse ? 'lg:order-2' : ''}>
+        <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">{eyebrow}</p>
+        <h3 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">{title}</h3>
+        <p className="mt-4 max-w-md text-base leading-relaxed text-zinc-600 dark:text-zinc-400">{blurb}</p>
+      </div>
+      <div className={reverse ? 'lg:order-1' : ''}>{visual}</div>
+    </div>
   )
 }
 
 export default function Home() {
   return (
     <div className="min-h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-      <nav className="sticky top-0 z-50 flex h-14 items-center justify-between border-b border-zinc-100 bg-white/85 px-5 backdrop-blur-md sm:px-8 dark:border-white/[0.06] dark:bg-zinc-950/85">
-        <Link href="/" className="flex items-center gap-2 text-sm font-semibold tracking-tight">
-          <Image src={logo} alt="TypeClaw" width={22} height={22} className="rounded-md" />
-          typeclaw
-        </Link>
-        <div className="flex items-center gap-1 sm:gap-2">
-          <Link
-            href="/docs"
-            className="rounded-md px-2.5 py-1.5 text-sm text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            docs
+      <nav className="sticky top-0 z-50 border-b border-zinc-100 bg-white/85 backdrop-blur-md dark:border-white/[0.06] dark:bg-zinc-950/85">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-5 sm:px-8">
+          <Link href="/" className="flex items-center gap-2 text-sm font-semibold tracking-tight">
+            <div className="relative">
+              <Image src="/typeclaw.png" alt="TypeClaw" width={22} height={22} className="rounded-md" />
+              <span
+                aria-hidden
+                className="absolute -right-0.5 -bottom-0.5 size-2 rounded-full bg-emerald-500 ring-2 ring-white dark:ring-zinc-950"
+              />
+            </div>
+            typeclaw
+            <span className="ml-1 rounded-md bg-zinc-100 px-1.5 py-0.5 font-mono text-[10px] text-zinc-500 dark:bg-white/[0.06] dark:text-zinc-400">
+              v0.11
+            </span>
           </Link>
-          <a
-            href="https://github.com/typeclaw/typeclaw"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-md px-2.5 py-1.5 text-sm text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            github
-          </a>
-          <a
-            href="https://www.npmjs.com/package/typeclaw"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="rounded-md px-2.5 py-1.5 text-sm text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
-          >
-            npm
-          </a>
-          <ThemeToggle />
-        </div>
-      </nav>
-
-      <main>
-        <section className="relative mx-auto max-w-3xl px-6 pt-24 pb-16 text-center sm:pt-32 sm:pb-20">
-          <Image
-            src={TYPEEY_HERO_SRC}
-            alt=""
-            width={895}
-            height={858}
-            aria-hidden
-            className="pointer-events-none absolute top-20 right-[-120px] hidden w-44 select-none lg:block xl:right-[-160px] xl:w-52"
-          />
-          <h1 className="text-balance text-4xl font-semibold tracking-tight sm:text-5xl">
-            A TypeScript agent runtime,
-            <br />
-            <span className="text-brand-700 dark:text-brand-300">yours in one command.</span>
-          </h1>
-          <p className="mx-auto mt-5 max-w-xl text-balance text-base leading-relaxed text-zinc-600 sm:text-lg dark:text-zinc-400">
-            TypeClaw gives you a local AI agent that lives in a folder. It can answer in Slack, run on a schedule, and
-            remember what it did yesterday — sandboxed in its own container, so trying it costs nothing.
-          </p>
-          <div className="mt-10">
-            <InstallBlock />
-          </div>
-          <p className="mx-auto mt-4 max-w-md text-xs text-zinc-400 dark:text-zinc-600">
-            Requires{' '}
-            <a href="https://bun.sh" className="underline-offset-2 hover:underline">
-              Bun
-            </a>{' '}
-            and Docker or OrbStack. Then{' '}
+          <div className="flex items-center gap-1 sm:gap-2">
             <Link
-              href="/docs/guides/getting-started"
-              className="text-brand-700 underline-offset-2 hover:underline dark:text-brand-300"
+              href="/docs"
+              className="rounded-md px-2.5 py-1.5 text-sm text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
             >
-              the getting-started guide
-            </Link>{' '}
-            walks you through the first run.
-          </p>
-        </section>
-
-        <section className="mx-auto max-w-4xl px-6 pb-16 sm:pb-20">
-          <h2 className="text-center text-xs font-medium tracking-[0.18em] text-zinc-400 uppercase dark:text-zinc-500">
-            What you get
-          </h2>
-          <ul className="mt-8 grid grid-cols-1 gap-x-10 gap-y-0 sm:grid-cols-2">
-            {FEATURES.map((feature) => (
-              <FeatureItem key={feature.title} feature={feature} />
-            ))}
-          </ul>
-        </section>
-
-        <section className="mx-auto max-w-3xl px-6 pb-16 sm:pb-20">
-          <h2 className="text-center text-xs font-medium tracking-[0.18em] text-zinc-400 uppercase dark:text-zinc-500">
-            One minute, end to end
-          </h2>
-          <div className="mt-8">
-            <ExampleBlock />
-          </div>
-          <p className="mx-auto mt-6 max-w-2xl text-center text-sm text-zinc-500 dark:text-zinc-500">
-            Four commands. The agent is live in its own container, wired into Slack, and — after a few days of work —
-            keeps a log of what it learned, committed back into git.
-          </p>
-        </section>
-
-        <section className="mx-auto max-w-4xl px-6 pb-16 sm:pb-20">
-          <h2 className="text-center text-xs font-medium tracking-[0.18em] text-zinc-400 uppercase dark:text-zinc-500">
-            Read more
-          </h2>
-          <ul className="mt-8 grid grid-cols-1 gap-x-10 gap-y-1 sm:grid-cols-2">
-            {DOC_LINKS.map((doc) => (
-              <li key={doc.href}>
-                <Link
-                  href={doc.href}
-                  className="group flex items-baseline gap-3 rounded-md py-2.5 transition-colors hover:bg-zinc-50 dark:hover:bg-white/[0.03]"
-                >
-                  <span
-                    aria-hidden
-                    className="font-mono text-xs text-zinc-300 transition-colors group-hover:text-brand-600 dark:text-zinc-700 dark:group-hover:text-brand-300"
-                  >
-                    →
-                  </span>
-                  <span className="text-sm">
-                    <span className="font-medium text-zinc-900 group-hover:text-brand-700 dark:text-zinc-100 dark:group-hover:text-brand-200">
-                      {doc.title}
-                    </span>
-                    <span className="text-zinc-500 dark:text-zinc-400"> — {doc.blurb}</span>
-                  </span>
-                </Link>
-              </li>
-            ))}
-          </ul>
-        </section>
-      </main>
-
-      <footer className="border-t border-zinc-100 px-6 py-10 dark:border-white/[0.04]">
-        <div className="mx-auto flex max-w-4xl flex-col items-center gap-4 text-xs text-zinc-400 sm:flex-row sm:justify-between dark:text-zinc-600">
-          <div className="flex items-center gap-2">
-            <Image src={logo} alt="" width={16} height={16} className="rounded-sm opacity-70" />
-            <span>typeclaw · MIT · {new Date().getFullYear()}</span>
-          </div>
-          <div className="flex items-center gap-5">
-            <Link href="/docs" className="transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
-              docs
+              Docs
             </Link>
             <a
               href="https://github.com/typeclaw/typeclaw"
               target="_blank"
               rel="noopener noreferrer"
-              className="transition-colors hover:text-zinc-700 dark:hover:text-zinc-300"
+              className="rounded-md px-2.5 py-1.5 text-sm text-zinc-600 transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100"
             >
-              github
+              GitHub
             </a>
-            <a
-              href="https://www.npmjs.com/package/typeclaw"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="transition-colors hover:text-zinc-700 dark:hover:text-zinc-300"
-            >
-              npm
-            </a>
+            <ThemeToggle />
+          </div>
+        </div>
+      </nav>
+
+      <main>
+        <section className="relative overflow-hidden">
+          <DotGrid />
+          <div className="relative z-10 mx-auto max-w-4xl px-6 pt-24 pb-20 text-center sm:pt-32">
+            <div className="inline-flex items-center gap-2 rounded-full border border-zinc-200 bg-white/60 px-3 py-1 text-xs font-medium text-zinc-600 backdrop-blur dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-zinc-400">
+              <Sparkles className="size-3.5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} aria-hidden />
+              v0.11 · TypeScript agent runtime
+            </div>
+            <div className="relative mt-8">
+              <Image
+                src="/typeey-cutout.png"
+                alt=""
+                width={895}
+                height={858}
+                aria-hidden
+                priority
+                className="pointer-events-none absolute top-1/2 right-[-60px] -z-10 hidden w-44 -translate-y-1/2 -rotate-6 select-none lg:block xl:right-[-80px] xl:w-52"
+              />
+              <h1 className="text-balance text-5xl font-semibold tracking-tight sm:text-6xl lg:text-7xl">
+                A TypeScript agent
+                <br />
+                <span className="bg-gradient-to-br from-brand-700 to-brand-500 bg-clip-text text-transparent dark:from-brand-200 dark:to-brand-400">
+                  Well-organized.
+                  <br />
+                  Self-improving.
+                </span>
+              </h1>
+            </div>
+            <p className="mx-auto mt-7 max-w-xl text-balance text-lg leading-relaxed text-zinc-600 dark:text-zinc-400">
+              A local AI agent that lives in your repo. Sandboxed, plugin-driven, hot-reloaded — and it watches its own
+              work, distilling what it learned into skills you can read.
+            </p>
+            <div className="mt-10">
+              <HeroInstall />
+            </div>
+            <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
+              <Link
+                href="/docs/guides/getting-started"
+                className="inline-flex items-center gap-2 rounded-xl bg-brand-700 px-5 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
+              >
+                Read the docs
+                <ArrowRight className="size-4" strokeWidth={2.4} aria-hidden />
+              </Link>
+              <a
+                href="https://github.com/typeclaw/typeclaw"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 rounded-xl border border-zinc-300 bg-white px-5 py-3 text-sm font-medium text-zinc-800 transition-all hover:border-zinc-400 hover:shadow-sm dark:border-white/[0.12] dark:bg-white/[0.02] dark:text-zinc-200 dark:hover:border-white/[0.2]"
+              >
+                <Star className="size-4" strokeWidth={2.4} aria-hidden />
+                Star on GitHub
+              </a>
+            </div>
+          </div>
+        </section>
+
+        <section className="border-y border-zinc-100 bg-zinc-50/50 py-12 dark:border-white/[0.04] dark:bg-white/[0.01]">
+          <ChannelTrust />
+        </section>
+
+        <section className="mx-auto max-w-6xl space-y-28 px-6 py-28">
+          <FeatureRow
+            eyebrow="Sandboxed by default"
+            title="Try it without worrying. Bin it without worrying."
+            blurb="Every agent boots in its own Docker container with its own .env, its own mounts, its own port. The host CLI is purely a launcher. Delete the folder, it's gone."
+            visual={<SandboxDiagram />}
+          />
+          <FeatureRow
+            eyebrow="Plugins as TypeScript"
+            title="No IPC. No FFI. Just imports."
+            blurb="Plugins are plain .ts files. They contribute tools, skills, subagents, channels, commands, typed config — all in the language you already write."
+            reverse
+            visual={<PluginCode />}
+          />
+          <FeatureRow
+            eyebrow="Self-improving"
+            title="It watches its own work. Then it sleeps on it."
+            blurb="A dreaming subagent distills each session into sharded long-term memory and reusable skills. No prompts to write. It gets sharper while you're not looking."
+            visual={
+              <div className="rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/80 to-white p-8 dark:border-brand-900/40 dark:from-brand-950/40 dark:to-zinc-950">
+                <MemoryLoopVertical />
+              </div>
+            }
+          />
+        </section>
+
+        <section className="mx-auto max-w-3xl px-6 pb-28">
+          <div className="mb-10 text-center">
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
+              one minute, end to end
+            </p>
+            <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
+              Four commands. It&apos;s live.
+            </h2>
+          </div>
+          <AnimatedTerminal variant="glow" />
+        </section>
+
+        <section className="mx-auto max-w-6xl px-6 pb-28">
+          <div className="mb-10 text-center">
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
+              how it compares
+            </p>
+            <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
+              There are great agents. None had the right shape.
+            </h2>
+            <p className="mx-auto mt-4 max-w-xl text-base text-zinc-600 dark:text-zinc-400">
+              If you live in TypeScript and want plugins that are just imports, here&apos;s the honest landscape.
+            </p>
+          </div>
+          <MarketingTable />
+        </section>
+
+        <section className="relative overflow-hidden border-y border-brand-100 bg-gradient-to-br from-brand-50 via-white to-brand-50 py-24 dark:border-brand-900/40 dark:from-brand-950/40 dark:via-zinc-950 dark:to-brand-950/40">
+          <div
+            aria-hidden
+            className="absolute inset-0 opacity-40 dark:opacity-20"
+            style={{
+              backgroundImage: 'radial-gradient(circle at center, rgba(54, 72, 132, 0.15) 1px, transparent 1px)',
+              backgroundSize: '24px 24px',
+            }}
+          />
+          <div className="relative mx-auto max-w-3xl px-6 text-center">
+            <Image src="/typeey-cutout.png" alt="" width={120} height={120} aria-hidden className="mx-auto" />
+            <h2 className="mt-4 text-balance text-4xl font-semibold tracking-tight sm:text-5xl">Ready to try it?</h2>
+            <p className="mx-auto mt-4 max-w-lg text-balance text-base text-zinc-600 dark:text-zinc-400">
+              One command, one folder, one container. Trying it costs nothing.
+            </p>
+            <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
+              <Link
+                href="/docs/guides/getting-started"
+                className="inline-flex items-center gap-2 rounded-xl bg-brand-700 px-6 py-3 text-sm font-medium text-white shadow-sm transition-all hover:translate-y-[-1px] hover:bg-brand-800 hover:shadow-md dark:bg-brand-600 dark:hover:bg-brand-500"
+              >
+                <BookOpen className="size-4" strokeWidth={2.4} aria-hidden />
+                Read the docs
+              </Link>
+              <a
+                href="https://github.com/typeclaw/typeclaw"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 rounded-xl border border-zinc-300 bg-white px-6 py-3 text-sm font-medium text-zinc-800 transition-all hover:border-zinc-400 hover:shadow-sm dark:border-white/[0.12] dark:bg-white/[0.02] dark:text-zinc-200 dark:hover:border-white/[0.2]"
+              >
+                <Github className="size-4" strokeWidth={2.4} aria-hidden />
+                Star on GitHub
+              </a>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer className="border-t border-zinc-100 bg-white dark:border-white/[0.04] dark:bg-zinc-950">
+        <div className="mx-auto grid max-w-6xl grid-cols-2 gap-10 px-6 py-16 sm:grid-cols-5">
+          <div className="col-span-2">
+            <div className="flex items-center gap-2">
+              <Image src="/typeclaw.png" alt="TypeClaw" width={24} height={24} className="rounded-md" />
+              <span className="text-sm font-semibold tracking-tight">typeclaw</span>
+            </div>
+            <p className="mt-3 max-w-xs text-sm leading-relaxed text-zinc-500 dark:text-zinc-500">
+              A TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime.
+            </p>
+            <p className="mt-6 text-xs text-zinc-400 dark:text-zinc-600">© {new Date().getFullYear()} typeclaw · MIT</p>
+          </div>
+          <div>
+            <p className="text-xs font-medium tracking-wider text-zinc-400 uppercase dark:text-zinc-500">Product</p>
+            <ul className="mt-3 space-y-2 text-sm">
+              <li>
+                <Link
+                  href="/"
+                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                >
+                  Overview
+                </Link>
+              </li>
+              <li>
+                <a
+                  href="https://www.npmjs.com/package/typeclaw"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                >
+                  npm
+                </a>
+              </li>
+            </ul>
+          </div>
+          <div>
+            <p className="text-xs font-medium tracking-wider text-zinc-400 uppercase dark:text-zinc-500">Docs</p>
+            <ul className="mt-3 space-y-2 text-sm">
+              <li>
+                <Link
+                  href="/docs/guides/getting-started"
+                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                >
+                  Getting started
+                </Link>
+              </li>
+              <li>
+                <Link
+                  href="/docs/guides/write-a-plugin"
+                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                >
+                  Write a plugin
+                </Link>
+              </li>
+              <li>
+                <Link
+                  href="/docs/concepts/architecture"
+                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                >
+                  Architecture
+                </Link>
+              </li>
+              <li>
+                <Link
+                  href="/docs/reference/typeclaw-json"
+                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                >
+                  Reference
+                </Link>
+              </li>
+            </ul>
+          </div>
+          <div>
+            <p className="text-xs font-medium tracking-wider text-zinc-400 uppercase dark:text-zinc-500">Community</p>
+            <ul className="mt-3 space-y-2 text-sm">
+              <li>
+                <a
+                  href="https://github.com/typeclaw/typeclaw"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                >
+                  GitHub
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/typeclaw/typeclaw/discussions"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                >
+                  Discussions
+                </a>
+              </li>
+              <li>
+                <a
+                  href="https://github.com/typeclaw/typeclaw/blob/main/LICENSE"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-zinc-600 hover:text-brand-700 dark:text-zinc-400 dark:hover:text-brand-300"
+                >
+                  MIT License
+                </a>
+              </li>
+            </ul>
           </div>
         </div>
       </footer>
