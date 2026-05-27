@@ -93,7 +93,7 @@ bun run lint
 bun run format
 ```
 
-See [AGENTS.md](./AGENTS.md) for the long-form architecture notes — stages, hostd internals, message stream, plugin contracts, and the testing philosophy. The docs site at [typeclaw.dev](https://typeclaw.dev) lives in [`docs/`](./docs/).
+See [CONTRIBUTING.md](./CONTRIBUTING.md) for the recommended local dev loop (`bun link` → `typeclaw init`), commit and PR conventions, and where to ask questions. See [AGENTS.md](./AGENTS.md) for the long-form architecture notes — stages, hostd internals, message stream, plugin contracts, and the testing philosophy. The docs site at [typeclaw.dev](https://typeclaw.dev) lives in [`docs/`](./docs/).
 
 ## Acknowledgments
 
