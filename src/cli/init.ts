@@ -36,7 +36,7 @@ import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
 import { API_KEY_DASHBOARD_URL, validateApiKey, type KeyValidationResult } from '@/init/validate-api-key'
 
 import { buildOAuthCallbacks } from './oauth-callbacks'
-import { c, done, errorLine, printSlackAppManifestSetup } from './ui'
+import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup } from './ui'
 
 // ESC and Ctrl+C both produce clack's cancel symbol (the keypress layer
 // aliases both to the same "cancel" action — there's no way to tell them
@@ -1066,6 +1066,7 @@ async function runDiscordFlow(): Promise<StepResult<CollectedInputs['channelSecr
     validate: (v) => (v && v.length > 0 ? undefined : 'Token is required'),
   })
   if (isCancel(token)) return back()
+  printDiscordInviteHint(token)
   return value({ discordBotToken: token })
 }
 
