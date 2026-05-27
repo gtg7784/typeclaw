@@ -27,7 +27,7 @@ import {
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 
-import { c, done, errorLine, printSlackAppManifestSetup } from './ui'
+import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup } from './ui'
 
 const CHANNEL_LABELS: Record<ChannelKind, string> = {
   'slack-bot': 'Slack',
@@ -927,6 +927,7 @@ async function promptDiscordToken(): Promise<string> {
     cancel('Aborted.')
     process.exit(0)
   }
+  printDiscordInviteHint(token)
   return token
 }
 

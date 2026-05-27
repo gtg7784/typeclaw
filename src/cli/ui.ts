@@ -2,6 +2,7 @@ import { styleText } from 'node:util'
 
 import { cancel, intro, isCancel, log, note, outro, spinner as clackSpinner } from '@clack/prompts'
 
+import { buildDiscordInviteUrl, deriveAppIdFromBotToken } from '@/channels/adapters/discord-bot-invite'
 import { type AutoUpgradeOutcome, describeAutoUpgrade } from '@/init/auto-upgrade'
 
 export { cancel, intro, isCancel, log, note, outro }
@@ -241,5 +242,26 @@ export function printSlackAppManifestSetup(output: NodeJS.WritableStream = proce
       '   /invite @TypeClaw',
     ].join('\n'),
     'Finish Slack setup',
+  )
+}
+
+// Discord's portal hands out a bot token but no invite URL — operators have to
+// hunt down Application ID → OAuth2 Generator → tick scopes → tick permissions
+// → copy. We short-circuit all of that: the application id is encoded in the
+// token's first base64 segment, so we can hand back a click-ready URL with
+// the exact permission bitfield the adapter uses. No-ops when the token isn't
+// parseable as a Discord bot token so we never block onboarding on best-effort
+// guidance.
+export function printDiscordInviteHint(token: string): void {
+  const appId = deriveAppIdFromBotToken(token)
+  if (appId === null) return
+  note(
+    [
+      buildDiscordInviteUrl(appId),
+      '',
+      'Open it, pick a server, click Authorize.',
+      "The bot won't receive messages until it's in at least one server.",
+    ].join('\n'),
+    'Invite the bot to a server',
   )
 }

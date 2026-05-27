@@ -55,6 +55,8 @@ typeclaw channel add github          # PAT or GitHub App; pairs with a tunnel
 typeclaw channel add kakaotalk       # email + password, encrypted at rest
 ```
 
+Discord needs one extra step the portal doesn't surface well: after you paste the bot token, `channel add discord-bot` prints a `https://discord.com/oauth2/authorize?...` URL with the right scopes (`bot` + `applications.commands`) and permission bitfield pre-filled. Open it, pick a server, click Authorize — the bot can't receive anything until it's in at least one guild.
+
 GitHub needs a public URL for webhook delivery. The CLI offers to create a Cloudflare Quick tunnel during `channel add` — that path is covered in [Expose a port](/docs/guides/first-tunnel).
 
 KakaoTalk is the only adapter where the credentials need to survive a ~7-day token expiry; TypeClaw handles the renewal automatically using the email and password you provide (stored encrypted, key outside the agent folder). See [/concepts/secrets-policy](/docs/concepts/secrets-policy) for the threat model.
