@@ -46,7 +46,7 @@ export interface Competitor {
   strength: string
   tradeoff: string
   lang: string
-  dockerSandboxed: CompetitorScore
+  dockerFirst: CompetitorScore
   selfImproving: CompetitorScore
   multiChannel: CompetitorScore
   fullFeaturedPlugins: CompetitorScore
@@ -60,7 +60,7 @@ export const COMPETITORS: Competitor[] = [
     strength: 'Feature-rich',
     tradeoff: 'Heavy',
     lang: 'TypeScript',
-    dockerSandboxed: true,
+    dockerFirst: true,
     selfImproving: 'partial',
     multiChannel: true,
     fullFeaturedPlugins: true,
@@ -71,7 +71,7 @@ export const COMPETITORS: Competitor[] = [
     strength: 'Simple',
     tradeoff: 'No plugin system',
     lang: 'TypeScript',
-    dockerSandboxed: false,
+    dockerFirst: false,
     selfImproving: false,
     multiChannel: false,
     fullFeaturedPlugins: false,
@@ -82,7 +82,7 @@ export const COMPETITORS: Competitor[] = [
     strength: 'Fast',
     tradeoff: 'Plugins live outside the runtime',
     lang: 'Go',
-    dockerSandboxed: false,
+    dockerFirst: false,
     selfImproving: false,
     multiChannel: 'partial',
     fullFeaturedPlugins: 'partial',
@@ -93,7 +93,7 @@ export const COMPETITORS: Competitor[] = [
     strength: 'Light',
     tradeoff: 'Plugins live outside the runtime',
     lang: 'Rust',
-    dockerSandboxed: false,
+    dockerFirst: false,
     selfImproving: false,
     multiChannel: 'partial',
     fullFeaturedPlugins: 'partial',
@@ -104,7 +104,7 @@ export const COMPETITORS: Competitor[] = [
     strength: 'Awesome',
     tradeoff: 'Python',
     lang: 'Python',
-    dockerSandboxed: 'partial',
+    dockerFirst: 'partial',
     selfImproving: true,
     multiChannel: true,
     fullFeaturedPlugins: true,
@@ -115,7 +115,7 @@ export const COMPETITORS: Competitor[] = [
     strength: 'TypeScript end to end',
     tradeoff: 'the answer',
     lang: 'TypeScript',
-    dockerSandboxed: true,
+    dockerFirst: true,
     selfImproving: true,
     multiChannel: true,
     fullFeaturedPlugins: true,

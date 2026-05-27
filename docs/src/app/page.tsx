@@ -179,7 +179,7 @@ function MarketingTable() {
         <thead>
           <tr className="border-b border-zinc-200 text-xs tracking-wider text-zinc-500 uppercase dark:border-white/[0.06] dark:text-zinc-500">
             <th className="px-4 py-4 font-medium">Runtime</th>
-            <th className="px-4 py-4 text-center font-medium">Docker-sandboxed</th>
+            <th className="px-4 py-4 text-center font-medium">Docker-first</th>
             <th className="px-4 py-4 text-center font-medium">Self-improving</th>
             <th className="px-4 py-4 text-center font-medium">Multi-channel</th>
             <th className="px-4 py-4 text-center font-medium">Full-featured plugins</th>
@@ -210,7 +210,7 @@ function MarketingTable() {
                 <div className="mt-0.5 font-mono text-[11px] text-zinc-500 dark:text-zinc-500">{r.lang}</div>
               </td>
               <td className="px-4 py-5 text-center">
-                <CheckCell value={r.dockerSandboxed} />
+                <CheckCell value={r.dockerFirst} />
               </td>
               <td className="px-4 py-5 text-center">
                 <CheckCell value={r.selfImproving} />
