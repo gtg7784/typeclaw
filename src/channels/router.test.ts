@@ -774,6 +774,27 @@ describe('ChannelRouter engagement and prompt composition', () => {
     expect(line).not.toMatch(/\[\d{4}-\d{2}-\d{2}T/)
   })
 
+  test('GitHub prompt attribution uses @login instead of numeric-id mention syntax', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const key: ChannelKey = { adapter: 'github', workspace: 'typeclaw/typeclaw', chat: 'issue:398', thread: null }
+
+    await router.route(
+      inbound({
+        adapter: 'github',
+        workspace: 'typeclaw/typeclaw',
+        chat: 'issue:398',
+        authorId: '12345',
+        authorName: 'devxoul',
+        text: '@typeey can you review this PR',
+      }),
+    )
+    await router.__testing!.flushDebounce(key)
+
+    expect(sessions[0]!.prompts[0]).toContain('@devxoul (devxoul): @typeey can you review this PR')
+    expect(sessions[0]!.prompts[0]).not.toContain('<@12345>')
+  })
+
   test('non-engaging inbound goes to context buffer, not session.prompt', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)

@@ -42,17 +42,23 @@ describe('renderQuoteAnchor', () => {
     )
   })
 
-  test('GitHub: falls back to plain authorName (inbound authorId is a numeric user id, not the handle)', () => {
+  test('GitHub: emits @authorName because inbound authorId is a numeric user id, not the handle', () => {
     expect(renderQuoteAnchor({ adapter: 'github', authorId: '12345', authorName: 'alice', text: 'hello' })).toBe(
-      '> alice: hello',
+      '> @alice: hello',
     )
   })
 
-  test('does NOT emit a literal `> @name:` form on any adapter (PR #374 regression)', () => {
-    for (const adapter of ['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk', 'github'] as const) {
+  test('does NOT emit a literal `> @name:` form on adapters where that is not platform mention syntax', () => {
+    for (const adapter of ['slack-bot', 'discord-bot', 'telegram-bot', 'kakaotalk'] as const) {
       const out = renderQuoteAnchor({ adapter, authorId: 'U1', authorName: 'Alice', text: 'hi' })
       expect(out.startsWith('> @')).toBe(false)
     }
+  })
+
+  test('GitHub does not double-prefix handles that already include @', () => {
+    expect(renderQuoteAnchor({ adapter: 'github', authorId: '12345', authorName: '@alice', text: 'hello' })).toBe(
+      '> @alice: hello',
+    )
   })
 
   test('collapses newlines so the quote stays on one line', () => {

@@ -1231,6 +1231,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const observed = live.contextBuffer.splice(0, live.contextBuffer.length)
         const reminders = live.pendingSystemReminders.splice(0, live.pendingSystemReminders.length)
         const text = composeTurnPrompt(observed, batch, {
+          adapter: live.key.adapter,
           loopGuardActive: live.loopGuardActive,
           systemReminders: reminders,
         })
@@ -2175,8 +2176,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 function composeTurnPrompt(
   observed: readonly ObservedInbound[],
   batch: readonly QueuedInbound[],
-  state: { loopGuardActive: boolean; systemReminders?: readonly string[] } = { loopGuardActive: false },
+  state: { adapter?: AdapterId; loopGuardActive: boolean; systemReminders?: readonly string[] } = {
+    loopGuardActive: false,
+  },
 ): string {
+  const adapter = state.adapter ?? 'discord-bot'
   const parts: string[] = []
   // System reminders (subagent-completion wakeups today) lead the turn body
   // because they are typically what triggered the drain — when the prompt
@@ -2242,7 +2246,7 @@ function composeTurnPrompt(
   if (observed.length > 0) {
     parts.push('## Recent context (not addressed to you, for awareness only)')
     for (const o of observed) {
-      parts.push(formatAuthorLine(o.ts, o.authorId, o.authorName, o.authorIsBot, o.text))
+      parts.push(formatAuthorLine(o.ts, adapter, o.authorId, o.authorName, o.authorIsBot, o.text))
     }
     parts.push('')
   }
@@ -2260,7 +2264,7 @@ function composeTurnPrompt(
       )
     }
     for (const b of batch) {
-      parts.push(formatAuthorLine(b.ts, b.authorId, b.authorName, b.authorIsBot, b.text))
+      parts.push(formatAuthorLine(b.ts, adapter, b.authorId, b.authorName, b.authorIsBot, b.text))
     }
   }
   return parts.join('\n')
@@ -2268,6 +2272,7 @@ function composeTurnPrompt(
 
 function formatAuthorLine(
   ts: number,
+  adapter: AdapterId,
   authorId: string,
   authorName: string,
   authorIsBot: boolean,
@@ -2275,7 +2280,7 @@ function formatAuthorLine(
 ): string {
   const tag = authorIsBot ? ' [bot]' : ''
   const stamp = ts > 0 ? `[${new Date(ts).toISOString()}] ` : ''
-  return `${stamp}<@${authorId}> (${authorName})${tag}: ${text}`
+  return `${stamp}${formatAuthorReference(adapter, authorId, authorName)} (${authorName})${tag}: ${text}`
 }
 
 export type QuoteAnchorSource = {
@@ -2298,15 +2303,16 @@ export type QuoteAnchorSource = {
 // `allowed_mentions` field which defaults to "ping everyone parsed").
 // This matches PR #374's intent — the user IS being notified that the
 // agent replied to them, which is the whole point of a quote anchor.
-function formatAuthorMention(adapter: AdapterId, authorId: string, authorName: string): string {
+function formatAuthorReference(adapter: AdapterId, authorId: string, authorName: string): string {
   const displayName = authorName.trim() !== '' ? authorName.trim() : authorId
   switch (adapter) {
     case 'slack-bot':
     case 'discord-bot':
       return `<@${authorId}>`
+    case 'github':
+      return displayName.startsWith('@') ? displayName : `@${displayName}`
     case 'telegram-bot':
     case 'kakaotalk':
-    case 'github':
       return displayName
   }
 }
@@ -2330,7 +2336,7 @@ export function renderQuoteAnchor(source: QuoteAnchorSource): string {
       : collapsed.length > QUOTED_REPLY_EXCERPT_MAX_CHARS
         ? `${collapsed.slice(0, QUOTED_REPLY_EXCERPT_MAX_CHARS - 1)}…`
         : collapsed
-  const mention = formatAuthorMention(source.adapter, source.authorId, source.authorName)
+  const mention = formatAuthorReference(source.adapter, source.authorId, source.authorName)
   return `> ${mention}: ${excerpt}`
 }
 
