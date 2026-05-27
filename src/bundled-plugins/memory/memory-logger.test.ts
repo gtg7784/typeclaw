@@ -145,6 +145,15 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('dreaming')
   })
 
+  test("does not direct the subagent to read memory/topics/ — cross-shard reasoning is dreaming's concern", () => {
+    // Positive prohibition is present.
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/you do not read `memory\/topics\/`|do not read memory\/topics\//i)
+    // No imperative instructing the subagent TO read topics (matches "Read memory/topics/" or
+    // "read memory/topics/ and ..." style instructions, regardless of leading capitalization).
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).not.toMatch(/(?:^|[^a-z])Read `?memory\/topics\/`?/m)
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).not.toMatch(/read `?memory\/topics\/`? (?:and|first|to)/i)
+  })
+
   test('declares a watermark contract that handles the zero-fragment case', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('watermark')
   })
@@ -414,7 +423,7 @@ describe('memoryLoggerSubagent', () => {
     expect(prompt.toLowerCase()).toMatch(/per-fragment provenance|specific transcript entry that anchors/i)
   })
 
-  test('handler points the subagent at memory/topics/ so it can read existing memory first', async () => {
+  test("handler does NOT instruct the subagent to read memory/topics/ — that is dreaming's concern", async () => {
     const agentDir = makeAgentDir()
     const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
     writeFileSync(transcript, '')
@@ -424,8 +433,10 @@ describe('memoryLoggerSubagent', () => {
       agentDir,
     )
 
-    expect(runSessionCalls[0]!.userPrompt!).toContain(join(agentDir, 'memory', 'topics'))
-    expect(runSessionCalls[0]!.userPrompt!).toMatch(/read memory\/topics\//i)
+    const prompt = runSessionCalls[0]!.userPrompt!
+    expect(prompt).not.toContain(join(agentDir, 'memory', 'topics'))
+    expect(prompt).not.toMatch(/(?:^|[^a-z])Read `?memory\/topics\/`?/m)
+    expect(prompt).not.toMatch(/read `?memory\/topics\/`? (?:and|first|to)/i)
   })
 
   test('handler indicates "no prior watermark" when none exists', async () => {
