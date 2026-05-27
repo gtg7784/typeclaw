@@ -55,9 +55,12 @@ export function createSkipResponseTool({
       'Decline to send a user-facing reply this turn, with a logged reason. Use this ' +
       'instead of narrating "I have nothing to add" / "I will stay quiet" in your visible ' +
       'response. The reason is written to host logs (visible via `typeclaw logs -f`) but ' +
-      'never delivered to the user. After calling this, any `channel_reply` / `channel_send` ' +
-      'in the same turn will be rejected — commit to silence or commit to replying, not both. ' +
-      'Prefer this over the `NO_REPLY` text sentinel whenever you have a reason worth recording.',
+      'never delivered to the user. The contract is bidirectional: after calling this, any ' +
+      '`channel_reply` / `channel_send` in the same turn will be rejected, AND calling this ' +
+      'after a `channel_reply` / `channel_send` has already landed in this turn will also ' +
+      'be rejected — commit to silence or commit to replying, not both. Decide before you ' +
+      'send, and call this as your terminal tool when you decide to stay silent. Prefer ' +
+      'this over the `NO_REPLY` text sentinel whenever you have a reason worth recording.',
     parameters: Type.Object({
       reason: Type.String({
         description:
@@ -82,6 +85,38 @@ export function createSkipResponseTool({
       }
 
       const result = router.markTurnSkipped({ parentSessionId: sessionId, reason })
+      if (result.kind === 'send-already-happened') {
+        // Symmetric counterpart of the send-after-skip lock in `router.send()`.
+        // The model already committed to replying earlier in this turn; calling
+        // skip_response now would land the reply AND claim silence at the same
+        // time, which is the contract violation the lock exists to prevent.
+        // Surface a clear error and refuse to stamp the flag so the rest of
+        // the turn behaves as a normal reply turn.
+        logger.warn(
+          formatChannelToolFailure(
+            'skip_response',
+            `channel send already happened this turn (reason=${JSON.stringify(reason)})`,
+          ),
+        )
+        const details: SkipResponseDetails = {
+          ok: false,
+          suppressed: false,
+          reason,
+          error: 'send-already-happened',
+        }
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text:
+                'skip_response denied: you already sent a channel reply in this turn. ' +
+                'Commit to silence or commit to replying, not both. ' +
+                'End your turn now; the reply you already sent stands.',
+            },
+          ],
+          details,
+        }
+      }
       if (result.kind === 'no-live-session') {
         // Defensive: the tool is only wired into channel-origin sessions
         // by buildChannelTools, so this branch should be unreachable in

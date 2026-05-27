@@ -107,6 +107,30 @@ describe('createSkipResponseTool', () => {
     expect(warns.some((w) => w.includes('empty reason'))).toBe(true)
   })
 
+  test('send-already-happened: tool refuses, returns ok=false with structured error, logs the violation', async () => {
+    const { logger, warns } = memoryLogger()
+    const tool = createSkipResponseTool({
+      router: fakeRouter({
+        markResult: { kind: 'send-already-happened', keyId: 'discord-bot:g1:c1' },
+      }),
+      sessionId: 'ses_abc',
+      logger,
+    })
+    const result = await runTool(tool, { reason: 'changed my mind' })
+
+    expect(result.details).toMatchObject({
+      ok: false,
+      suppressed: false,
+      reason: 'changed my mind',
+      error: 'send-already-happened',
+    })
+    const body = result.content[0]?.type === 'text' ? result.content[0].text : ''
+    expect(body).toContain('skip_response denied')
+    expect(body).toContain('already sent a channel reply')
+    expect(body).toContain('Commit to silence or commit to replying, not both')
+    expect(warns.some((w) => w.includes('channel send already happened this turn'))).toBe(true)
+  })
+
   test('no live session: tool still returns ok but suppressed=false and logs a warning', async () => {
     const { logger, warns } = memoryLogger()
     const tool = createSkipResponseTool({
