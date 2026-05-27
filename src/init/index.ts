@@ -21,7 +21,7 @@ import { resolveBaseImageVersion, resolveScaffoldVersion } from './cli-version'
 import { buildDockerfile, DOCKERFILE } from './dockerfile'
 import { installGithubWebhooksEagerly, type EagerGithubWebhookInstallResult } from './github-webhook-install'
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
-import { HATCHING_PROMPT } from './hatching'
+import { buildHatchingPrompt } from './hatching'
 import type { OAuthLoginRunner, OAuthLoginResult } from './oauth-login'
 import { GITKEEP_FILE, PACKAGES_DIR } from './paths'
 import { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
@@ -427,14 +427,26 @@ export async function defaultRunHatching({
       await runClaim({ url, configuredChannels })
     }
 
+    const typeclawJsonContent = await readTypeclawJsonRaw(cwd)
     const tui = tuiFactory({
       url: buildTuiUrl(hostPort, launch.tuiToken),
-      initialPrompt: HATCHING_PROMPT,
+      initialPrompt: buildHatchingPrompt(typeclawJsonContent !== undefined ? { typeclawJsonContent } : undefined),
     })
     await tui.run()
     return { ok: true }
   } catch (error) {
     return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+// Read the raw bytes of `typeclaw.json` to inline into the hatching prompt.
+// Returns `undefined` on any failure so the agent falls back to reading the
+// file itself — hatching must not abort just because we couldn't pre-fetch.
+async function readTypeclawJsonRaw(cwd: string): Promise<string | undefined> {
+  try {
+    return await readFile(join(cwd, CONFIG_FILE), 'utf8')
+  } catch {
+    return undefined
   }
 }
 

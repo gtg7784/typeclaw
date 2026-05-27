@@ -1969,4 +1969,69 @@ describe('defaultRunHatching', () => {
 
     expect(result).toEqual({ ok: false, reason: 'docker not running' })
   })
+
+  function capturingTui(): {
+    fn: typeof import('@/tui').createTui
+    calls: Parameters<typeof import('@/tui').createTui>[0][]
+  } {
+    const calls: Parameters<typeof import('@/tui').createTui>[0][] = []
+    const fn: typeof import('@/tui').createTui = (options) => {
+      calls.push(options)
+      return { run: async () => {} } as ReturnType<typeof import('@/tui').createTui>
+    }
+    return { fn, calls }
+  }
+
+  test('inlines typeclaw.json content into the hatching prompt when readable', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-hatch-inline-'))
+    try {
+      const json = '{\n  "models": {\n    "default": "openai-codex/gpt-5.4-mini"\n  }\n}\n'
+      await writeFile(join(cwd, 'typeclaw.json'), json, 'utf8')
+
+      const { fn: tui, calls: tuiCalls } = capturingTui()
+      const { fn: startFn } = fakeStart()
+
+      await defaultRunHatching({
+        cwd,
+        port: 8973,
+        startContainer: startFn,
+        tui,
+        waitForAgent: fakeWaitForAgent,
+      })
+
+      expect(tuiCalls).toHaveLength(1)
+      const prompt = tuiCalls[0]?.initialPrompt
+      expect(prompt).toBeDefined()
+      expect(prompt).toContain('<current-typeclaw-json>')
+      expect(prompt).toContain(json)
+      expect(prompt).toContain('in the SAME assistant message')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
+
+  test('falls back to read-instructions when typeclaw.json is missing', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'tc-hatch-nofile-'))
+    try {
+      const { fn: tui, calls: tuiCalls } = capturingTui()
+      const { fn: startFn } = fakeStart()
+
+      const result = await defaultRunHatching({
+        cwd,
+        port: 8973,
+        startContainer: startFn,
+        tui,
+        waitForAgent: fakeWaitForAgent,
+      })
+
+      expect(result).toEqual({ ok: true })
+      expect(tuiCalls).toHaveLength(1)
+      const prompt = tuiCalls[0]?.initialPrompt
+      expect(prompt).toBeDefined()
+      expect(prompt).not.toContain('<current-typeclaw-json>')
+      expect(prompt).toContain('Read `typeclaw.json`')
+    } finally {
+      await rm(cwd, { recursive: true, force: true })
+    }
+  })
 })
