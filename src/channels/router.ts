@@ -2473,10 +2473,32 @@ export type QuoteAnchorCandidate = {
   hadInterveningObserved: boolean
 }
 
+// Strips `[<Adapter> message with ...]` placeholders that adapter
+// classifiers synthesize for non-text inbounds (KakaoTalk stickers,
+// Slack/Discord/Telegram attachments). The quote anchor is a UX
+// affordance pointing the human at *their words* — quoting a sticker as
+// `> Alice: [KakaoTalk message with sticker (sticker_ani) pack=... path=...]`
+// is noise, and for mixed inbounds like `사진 [KakaoTalk message with
+// photo 1254x1254 ...]` the human only wrote `사진`, so the placeholder
+// is the wrong thing to surface. The callsite (captureQuoteCandidate)
+// treats an empty residue as "no quote anchor"; mixed inbounds keep the
+// human-written portion. renderQuoteAnchor later collapses whitespace
+// so residual double-spaces from mid-string strips are harmless.
+const CHANNEL_MEDIA_PLACEHOLDER_RE = /\[(?:KakaoTalk|Slack|Discord|Telegram) message with [^\]]*\]/g
+
+export function stripChannelMediaPlaceholders(text: string): string {
+  return text
+    .replace(CHANNEL_MEDIA_PLACEHOLDER_RE, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim()
+}
+
 // Snapshot the primary inbound + observed-buffer state at drain time so
 // the send-side decision has the data it needs without holding a
 // reference to the batch arrays. Returns null when there's nothing
-// anchorable (empty batch, primary is a bot).
+// anchorable (empty batch, primary is a bot, or primary is a non-text
+// inbound with no residual human-written text after stripping the
+// adapter's media placeholder).
 //
 // `hadInterveningObserved` counts ONLY live observations (`source ===
 // 'observed'`), not prefetched scrollback. Prefetch stamps `receivedAt =
@@ -2495,8 +2517,10 @@ export function captureQuoteCandidate(
   if (batch.length === 0) return null
   const primary = batch[batch.length - 1]!
   if (primary.authorIsBot) return null
+  const cleaned = stripChannelMediaPlaceholders(primary.text)
+  if (cleaned === '') return null
   return {
-    source: { adapter, authorId: primary.authorId, authorName: primary.authorName, text: primary.text },
+    source: { adapter, authorId: primary.authorId, authorName: primary.authorName, text: cleaned },
     primaryReceivedAt: primary.receivedAt,
     hadInterveningObserved: hasInterveningObserved(primary.receivedAt, observed),
   }

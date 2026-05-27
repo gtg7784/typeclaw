@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 
-import { captureQuoteCandidate, decideQuoteAnchor, prependQuoteAnchor, renderQuoteAnchor } from './router'
+import {
+  captureQuoteCandidate,
+  decideQuoteAnchor,
+  prependQuoteAnchor,
+  renderQuoteAnchor,
+  stripChannelMediaPlaceholders,
+} from './router'
 import { QUOTED_REPLY_EXCERPT_MAX_CHARS, type ChannelAdapterConfig } from './schema'
 
 const baseConfig: ChannelAdapterConfig = {
@@ -172,6 +178,91 @@ describe('captureQuoteCandidate', () => {
       ],
     )
     expect(result?.hadInterveningObserved).toBe(true)
+  })
+
+  test('returns null for a pure KakaoTalk sticker inbound (placeholder is the whole text)', () => {
+    const stickerOnly = {
+      ...humanInbound,
+      text: '[KakaoTalk message with sticker (sticker_ani) pack=4417024 path=4417024.emot_008.webp]',
+    }
+    expect(captureQuoteCandidate('kakaotalk', [stickerOnly], [])).toBeNull()
+  })
+
+  test('returns null for a pure KakaoTalk photo inbound', () => {
+    const photoOnly = {
+      ...humanInbound,
+      text: '[KakaoTalk message with photo 1254x1254 (image/png) https://talk.kakaocdn.net/dna/bInpde/o3eFRt3]',
+    }
+    expect(captureQuoteCandidate('kakaotalk', [photoOnly], [])).toBeNull()
+  })
+
+  test('returns null for a pure Slack attachment inbound', () => {
+    const attachmentOnly = {
+      ...humanInbound,
+      text: '[Slack message with attachment: diagram.png (image/png) id=F1]',
+    }
+    expect(captureQuoteCandidate('slack-bot', [attachmentOnly], [])).toBeNull()
+  })
+
+  test('strips the KakaoTalk photo placeholder but keeps the human-written caption', () => {
+    const caption = {
+      ...humanInbound,
+      text: '사진\n[KakaoTalk message with photo 1254x1254 (image/png) https://talk.kakaocdn.net/dna/x]',
+    }
+    const result = captureQuoteCandidate('kakaotalk', [caption], [])
+    expect(result?.source.text).toBe('사진')
+  })
+
+  test('strips multiple placeholders when an inbound carried several attachments', () => {
+    const multi = {
+      ...humanInbound,
+      text: 'look\n[Slack message with attachment: one.png (image/png) id=F1]\n[Slack message with attachment: two.txt (text/plain) id=F2]',
+    }
+    const result = captureQuoteCandidate('slack-bot', [multi], [])
+    expect(result?.source.text).toBe('look')
+  })
+
+  test('preserves inbounds that only happen to contain bracketed prose', () => {
+    const bracketed = { ...humanInbound, text: '[important] please check' }
+    const result = captureQuoteCandidate('slack-bot', [bracketed], [])
+    expect(result?.source.text).toBe('[important] please check')
+  })
+})
+
+describe('stripChannelMediaPlaceholders', () => {
+  test('drops a standalone KakaoTalk sticker placeholder', () => {
+    expect(
+      stripChannelMediaPlaceholders(
+        '[KakaoTalk message with sticker (sticker_ani) pack=4417024 path=4417024.emot_008.webp]',
+      ),
+    ).toBe('')
+  })
+
+  test('drops a standalone KakaoTalk photo placeholder with a long URL', () => {
+    expect(
+      stripChannelMediaPlaceholders(
+        '[KakaoTalk message with photo 1254x1254 (image/png) https://talk.kakaocdn.net/dna/bInpde/o3eFRt3]',
+      ),
+    ).toBe('')
+  })
+
+  test('keeps caption text written alongside a media placeholder', () => {
+    expect(
+      stripChannelMediaPlaceholders(
+        '사진\n[KakaoTalk message with photo 1254x1254 (image/png) https://talk.kakaocdn.net/dna/x]',
+      ),
+    ).toBe('사진')
+  })
+
+  test('strips all known adapter placeholders', () => {
+    expect(stripChannelMediaPlaceholders('hi [Slack message with attachment: a.png id=F1] yo')).toBe('hi  yo')
+    expect(stripChannelMediaPlaceholders('[Discord message with sticker: party parrot]')).toBe('')
+    expect(stripChannelMediaPlaceholders('[Telegram message with photo: 1280x960 file_id=big]')).toBe('')
+  })
+
+  test('does not strip unrelated bracketed prose', () => {
+    expect(stripChannelMediaPlaceholders('[important] hi')).toBe('[important] hi')
+    expect(stripChannelMediaPlaceholders('[NOTE] check the file')).toBe('[NOTE] check the file')
   })
 })
 
