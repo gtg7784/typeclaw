@@ -51,6 +51,7 @@ export interface Competitor {
   multiChannel: CompetitorScore
   fullFeaturedPlugins: CompetitorScore
   gitNative: CompetitorScore
+  permissionSystem: CompetitorScore
   highlight?: boolean
 }
 
@@ -65,6 +66,7 @@ export const COMPETITORS: Competitor[] = [
     multiChannel: true,
     fullFeaturedPlugins: true,
     gitNative: false,
+    permissionSystem: true,
   },
   {
     name: 'NanoClaw',
@@ -76,6 +78,7 @@ export const COMPETITORS: Competitor[] = [
     multiChannel: false,
     fullFeaturedPlugins: false,
     gitNative: false,
+    permissionSystem: true,
   },
   {
     name: 'PicoClaw',
@@ -87,6 +90,7 @@ export const COMPETITORS: Competitor[] = [
     multiChannel: 'partial',
     fullFeaturedPlugins: 'partial',
     gitNative: false,
+    permissionSystem: false,
   },
   {
     name: 'ZeroClaw',
@@ -98,6 +102,7 @@ export const COMPETITORS: Competitor[] = [
     multiChannel: 'partial',
     fullFeaturedPlugins: 'partial',
     gitNative: false,
+    permissionSystem: true,
   },
   {
     name: 'Hermes Agent',
@@ -109,6 +114,7 @@ export const COMPETITORS: Competitor[] = [
     multiChannel: true,
     fullFeaturedPlugins: true,
     gitNative: 'partial',
+    permissionSystem: false,
   },
   {
     name: 'TypeClaw',
@@ -120,6 +126,7 @@ export const COMPETITORS: Competitor[] = [
     multiChannel: true,
     fullFeaturedPlugins: true,
     gitNative: true,
+    permissionSystem: true,
     highlight: true,
   },
 ]
