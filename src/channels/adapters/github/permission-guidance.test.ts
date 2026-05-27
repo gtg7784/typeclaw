@@ -2,7 +2,9 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   buildAppPermissionPreflightGuidance,
+  buildOutboundPermissionGuidance,
   buildPermissionGuidance,
+  isOutboundPermissionDenial,
   parseListHooksPermissionStatus,
 } from './permission-guidance'
 
@@ -200,5 +202,65 @@ describe('buildAppPermissionPreflightGuidance', () => {
       { permissionKey: 'issues', uiLabel: 'Issues', granted: null, events: ['issues.opened'], needsWrite: true },
     ])
     expect(msg).toContain('Resource not accessible by integration')
+  })
+})
+
+describe('isOutboundPermissionDenial', () => {
+  test('matches the exact GitHub body for a permission-denied integration', () => {
+    expect(isOutboundPermissionDenial(403, '{"message":"Resource not accessible by integration"}')).toBe(true)
+  })
+
+  test('does not match other 403 bodies (e.g. org SSO)', () => {
+    expect(isOutboundPermissionDenial(403, '{"message":"Resource protected by organization SAML enforcement."}')).toBe(
+      false,
+    )
+  })
+
+  test('does not match a permission-denial string on a non-403 status', () => {
+    expect(isOutboundPermissionDenial(401, 'Resource not accessible by integration')).toBe(false)
+    expect(isOutboundPermissionDenial(404, 'Resource not accessible by integration')).toBe(false)
+  })
+
+  test('matches when the denial string is embedded in a longer body', () => {
+    expect(
+      isOutboundPermissionDenial(403, '{"foo":1,"message":"Resource not accessible by integration","bar":2}'),
+    ).toBe(true)
+  })
+})
+
+describe('buildOutboundPermissionGuidance', () => {
+  test('App + issue-comment names the "Issues" permission at "Read and write"', () => {
+    const g = buildOutboundPermissionGuidance({ authType: 'app', endpointKind: 'issue-comment' })
+    expect(g).toContain('Fix (GitHub App): the App needs "Issues" → "Read and write".')
+    expect(g).toContain('Open the install page')
+  })
+
+  test('App + pr-review-reply names "Pull requests", not "Issues"', () => {
+    const g = buildOutboundPermissionGuidance({ authType: 'app', endpointKind: 'pr-review-reply' })
+    expect(g).toContain('"Pull requests" → "Read and write"')
+    expect(g).not.toContain('"Issues" →')
+  })
+
+  test('App + discussion-comment names "Discussions"', () => {
+    const g = buildOutboundPermissionGuidance({ authType: 'app', endpointKind: 'discussion-comment' })
+    expect(g).toContain('"Discussions" → "Read and write"')
+  })
+
+  test('PAT + issue-comment names "Issues" for fine-grained and "repo" for classic', () => {
+    const g = buildOutboundPermissionGuidance({ authType: 'pat', endpointKind: 'issue-comment' })
+    expect(g).toContain('Fix (fine-grained personal access token)')
+    expect(g).toContain('"Issues" → "Read and write"')
+    expect(g).toContain('"repo (or public_repo for public repos)" scope')
+  })
+
+  test('PAT + discussion-comment uses the discussion-specific scope and label', () => {
+    const g = buildOutboundPermissionGuidance({ authType: 'pat', endpointKind: 'discussion-comment' })
+    expect(g).toContain('"Discussions" → "Read and write"')
+    expect(g).toContain('"repo" scope')
+  })
+
+  test('App guidance reminds the user the install owner must reaccept the new permissions', () => {
+    const g = buildOutboundPermissionGuidance({ authType: 'app', endpointKind: 'issue-comment' })
+    expect(g).toContain('accept the updated permissions request')
   })
 })

@@ -1,11 +1,18 @@
 import type { OutboundCallback, OutboundMessage, SendResult } from '@/channels/types'
 
 import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
+import {
+  buildOutboundPermissionGuidance,
+  type GithubAuthType,
+  isOutboundPermissionDenial,
+  type OutboundEndpointKind,
+} from './permission-guidance'
 
 export type GithubOutboundLogger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void }
 
 export function createGithubOutboundCallback(deps: {
   token: () => Promise<string>
+  authType: GithubAuthType
   logger: GithubOutboundLogger
   fetchImpl?: typeof fetch
 }): OutboundCallback {
@@ -22,19 +29,35 @@ export function createGithubOutboundCallback(deps: {
     if (target === null) return { ok: false, error: `invalid GitHub chat: ${msg.chat}` }
 
     if (target.kind === 'discussion') {
-      return await postDiscussionComment({ ...deps, fetchImpl, repo, discussionNumber: target.number, body })
+      return await postDiscussionComment({
+        ...deps,
+        fetchImpl,
+        repo,
+        discussionNumber: target.number,
+        body,
+      })
     }
 
-    const endpoint =
-      target.kind === 'pr' && msg.thread !== null && msg.thread !== undefined && msg.thread !== ''
-        ? `${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/pulls/${target.number}/comments/${encodeURIComponent(msg.thread)}/replies`
-        : `${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/issues/${target.number}/comments`
-    return await postJson(fetchImpl, await deps.token(), endpoint, { body })
+    const isPrReviewReply = target.kind === 'pr' && msg.thread !== null && msg.thread !== undefined && msg.thread !== ''
+    const endpoint = isPrReviewReply
+      ? `${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/pulls/${target.number}/comments/${encodeURIComponent(msg.thread ?? '')}/replies`
+      : `${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/issues/${target.number}/comments`
+    return await postJson(
+      fetchImpl,
+      await deps.token(),
+      endpoint,
+      { body },
+      {
+        authType: deps.authType,
+        endpointKind: isPrReviewReply ? 'pr-review-reply' : 'issue-comment',
+      },
+    )
   }
 }
 
 async function postDiscussionComment(options: {
   token: () => Promise<string>
+  authType: GithubAuthType
   fetchImpl: typeof fetch
   repo: RepoRef
   discussionNumber: number
@@ -43,14 +66,21 @@ async function postDiscussionComment(options: {
   const discussionId = await fetchDiscussionId(options)
   if (!discussionId.ok) return discussionId
   const mutation = `mutation($discussionId:ID!,$body:String!){addDiscussionComment(input:{discussionId:$discussionId,body:$body}){comment{id}}}`
-  return await postGraphql(options.fetchImpl, await options.token(), mutation, {
-    discussionId: discussionId.id,
-    body: options.body,
-  })
+  return await postGraphql(
+    options.fetchImpl,
+    await options.token(),
+    mutation,
+    {
+      discussionId: discussionId.id,
+      body: options.body,
+    },
+    { authType: options.authType, endpointKind: 'discussion-comment' },
+  )
 }
 
 async function fetchDiscussionId(options: {
   token: () => Promise<string>
+  authType: GithubAuthType
   fetchImpl: typeof fetch
   repo: RepoRef
   discussionNumber: number
@@ -65,6 +95,7 @@ async function fetchDiscussionId(options: {
       name: options.repo.name,
       number: options.discussionNumber,
     },
+    { authType: options.authType, endpointKind: 'discussion-comment' },
   )
   if (!result.ok) return result
   const id = result.data.repository?.discussion?.id
@@ -76,8 +107,9 @@ async function postGraphql(
   token: string,
   query: string,
   variables: Record<string, unknown>,
+  guidance: { authType: GithubAuthType; endpointKind: OutboundEndpointKind },
 ): Promise<SendResult> {
-  const result = await graphql(fetchImpl, token, query, variables)
+  const result = await graphql(fetchImpl, token, query, variables, guidance)
   return result.ok ? { ok: true } : { ok: false, error: result.error }
 }
 
@@ -86,6 +118,7 @@ async function graphql<T>(
   token: string,
   query: string,
   variables: Record<string, unknown>,
+  guidance: { authType: GithubAuthType; endpointKind: OutboundEndpointKind },
 ): Promise<{ ok: true; data: T } | { ok: false; error: string }> {
   try {
     const response = await fetchImpl(`${GITHUB_API_BASE}/graphql`, {
@@ -95,10 +128,15 @@ async function graphql<T>(
     })
     const raw = (await response.json()) as { data?: T; errors?: Array<{ message?: string }> }
     if (!response.ok || raw.errors !== undefined) {
-      return {
-        ok: false,
-        error: raw.errors?.map((e) => e.message ?? 'unknown').join('; ') ?? `HTTP ${response.status}`,
-      }
+      // GraphQL errors carry a permission-denial in their `errors[].type` =
+      // 'FORBIDDEN' or message text. Match on either the HTTP 403 (rare for
+      // GraphQL) or the literal denial string in any error message.
+      const message = raw.errors?.map((e) => e.message ?? 'unknown').join('; ') ?? `HTTP ${response.status}`
+      const baseError = response.ok ? message : `GitHub API ${response.status}: ${message}`
+      const decorated = isOutboundPermissionDenial(response.ok ? 403 : response.status, message)
+        ? `${baseError}${buildOutboundPermissionGuidance(guidance)}`
+        : baseError
+      return { ok: false, error: decorated }
     }
     if (raw.data === undefined) return { ok: false, error: 'GraphQL response missing data' }
     return { ok: true, data: raw.data }
@@ -107,7 +145,13 @@ async function graphql<T>(
   }
 }
 
-async function postJson(fetchImpl: typeof fetch, token: string, url: string, payload: unknown): Promise<SendResult> {
+async function postJson(
+  fetchImpl: typeof fetch,
+  token: string,
+  url: string,
+  payload: unknown,
+  guidance: { authType: GithubAuthType; endpointKind: OutboundEndpointKind },
+): Promise<SendResult> {
   try {
     const response = await fetchImpl(url, {
       method: 'POST',
@@ -116,7 +160,11 @@ async function postJson(fetchImpl: typeof fetch, token: string, url: string, pay
     })
     if (response.ok) return { ok: true }
     const text = await response.text().catch(() => '')
-    return { ok: false, error: `GitHub API ${response.status}${text !== '' ? `: ${text}` : ''}` }
+    const baseError = `GitHub API ${response.status}${text !== '' ? `: ${text}` : ''}`
+    const decorated = isOutboundPermissionDenial(response.status, text)
+      ? `${baseError}${buildOutboundPermissionGuidance(guidance)}`
+      : baseError
+    return { ok: false, error: decorated }
   } catch (err) {
     return { ok: false, error: describe(err) }
   }
