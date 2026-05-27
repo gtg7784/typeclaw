@@ -60,6 +60,23 @@ export async function validateApiKey(
       return { kind: 'skipped', reason: 'network-error', detail: 'unexpected response shape' }
     }
     if (res.status === 401 || res.status === 403) {
+      // Fireworks issues two key classes that probe the same /v1/models
+      // endpoint differently:
+      //   * Standard keys (fw_...)  → 200 with the models list
+      //   * Fire Pass keys (fpk_...) → 403 with {"error":{"code":"FORBIDDEN",
+      //     "message":"Fire Pass API keys are not authorized for this route."}}
+      // The 403 *proves* authentication succeeded — the route is just out of
+      // scope for the key. Fire Pass keys do work at chat-completions, which
+      // is exactly the surface typeclaw needs (the only Fireworks model wired
+      // here is the Fire Pass router `kimi-k2p6-turbo`). Treating that 403
+      // as `rejected` is the bug; recognize the marker and accept the key.
+      // Genuinely bad keys still come back as 401 UNAUTHORIZED, untouched.
+      if (providerId === 'fireworks' && res.status === 403) {
+        const body = await readCapped(res, MAX_BODY_BYTES)
+        if (body !== null && isFireworksFirePassForbidden(body)) {
+          return { kind: 'ok' }
+        }
+      }
       return { kind: 'rejected', status: res.status }
     }
     return { kind: 'skipped', reason: 'network-error', detail: `HTTP ${res.status}` }
@@ -73,6 +90,20 @@ export async function validateApiKey(
 }
 
 const MAX_BODY_BYTES = 4096
+
+function isFireworksFirePassForbidden(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as { error?: { code?: unknown; message?: unknown } }
+    const err = parsed.error
+    if (!err || typeof err !== 'object') return false
+    if (err.code === 'FORBIDDEN' && typeof err.message === 'string' && err.message.includes('Fire Pass')) {
+      return true
+    }
+    return false
+  } catch {
+    return false
+  }
+}
 
 async function isModelsListShape(res: Response): Promise<boolean> {
   const text = await readCapped(res, MAX_BODY_BYTES)
