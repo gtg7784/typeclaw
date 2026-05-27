@@ -125,6 +125,8 @@ export const DEFAULT_GITHUB_EVENT_ALLOWLIST = [
   'discussion_comment.created',
   'issues.opened',
   'pull_request.opened',
+  'pull_request.review_requested',
+  'pull_request.review_request_removed',
   'discussion.created',
   'pull_request_review.submitted',
 ] as const

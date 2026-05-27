@@ -15,6 +15,10 @@ export type GithubWebhookHandlerOptions = {
   selfLogin: () => string | null
   route: (message: InboundMessage) => void
   logger: GithubInboundLogger
+  // Optional: resolves whether the bot is a member of the given team. When
+  // omitted, team-reviewer requests are silently dropped (the v1 fallback
+  // behavior). The adapter wires this in production; tests inject a fake.
+  isBotInTeam?: (input: { org: string; slug: string; login: string }) => Promise<boolean>
 }
 
 export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions): (req: Request) => Promise<Response> {
@@ -43,7 +47,10 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
     const author = readAuthor(payload)
     if (selfId !== null && author !== null && String(author.id) === selfId) return ok()
 
-    const classified = classifyGithubInbound(event, payload, options.selfLogin())
+    const teamIsBotMember = await resolveTeamMembership(event, payload, options)
+    const classified = classifyGithubInbound(event, payload, options.selfLogin(), {
+      teamIsBotMember,
+    })
     if (classified === null) return ok()
 
     if (delivery !== '') options.dedup.add(delivery)
@@ -64,6 +71,7 @@ export function classifyGithubInbound(
   event: string,
   payload: Record<string, unknown>,
   selfLogin: string | null,
+  options?: { teamIsBotMember?: boolean },
 ): InboundMessage | null {
   const repository = readRepository(payload)
   if (repository === null) return null
@@ -151,6 +159,18 @@ export function classifyGithubInbound(
     const number = readNumber(pr, 'number')
     const id = readNumber(pr, 'id') ?? number
     if (number === null || id === null) return null
+    const action = readString(payload, 'action')
+    if (action === 'review_requested' || action === 'review_request_removed') {
+      return classifyReviewRequest({
+        action,
+        payload,
+        pr,
+        number,
+        base,
+        selfLogin,
+        teamIsBotMember: options?.teamIsBotMember,
+      })
+    }
     return buildInbound(
       { ...base, chat: `pr:${number}`, thread: null },
       pr.body,
@@ -197,6 +217,85 @@ export function classifyGithubInbound(
   return null
 }
 
+type ReviewRequestInput = {
+  action: 'review_requested' | 'review_request_removed'
+  payload: Record<string, unknown>
+  pr: Record<string, unknown>
+  number: number
+  base: Pick<InboundMessage, 'adapter' | 'workspace' | 'isDm' | 'mentionsOthers' | 'replyToOtherMessageId'>
+  selfLogin: string | null
+  teamIsBotMember: boolean | undefined
+}
+
+function classifyReviewRequest(input: ReviewRequestInput): InboundMessage | null {
+  const { action, payload, pr, number, base, selfLogin, teamIsBotMember } = input
+  if (selfLogin === null) return null
+  const sender = readUser(payload.sender)
+  if (sender === null) return null
+  // Self-loop guard: if the bot itself requested (or un-requested) the
+  // review, drop the event. The bot adding itself as a reviewer would
+  // otherwise wake a fresh session every time it self-assigns.
+  if (sender.login === selfLogin) return null
+
+  const requestedUser = readUser(payload.requested_reviewer)
+  const requestedTeam = readReviewerTeam(payload.requested_team)
+
+  const isMeAsUser = requestedUser !== null && requestedUser.login === selfLogin
+  const isMyTeam = requestedTeam !== null && teamIsBotMember === true
+  if (!isMeAsUser && !isMyTeam) return null
+
+  const title = readString(pr, 'title') ?? `#${number}`
+  const head = readString(readRecord(pr.head), 'ref')
+  const baseRef = readString(readRecord(pr.base), 'ref')
+  const branchSegment = head !== null && baseRef !== null ? ` Branch: ${head} → ${baseRef}.` : ''
+  const verbed =
+    action === 'review_requested'
+      ? isMyTeam
+        ? `requested a review from team @${requestedTeam?.slug} (you're a member of) on PR #${number}: "${title}".`
+        : `requested your review on PR #${number}: "${title}".`
+      : isMyTeam
+        ? `removed the review request for team @${requestedTeam?.slug} on PR #${number}: "${title}".`
+        : `removed your review request on PR #${number}: "${title}".`
+  const closing =
+    action === 'review_requested'
+      ? ' Please review the changes line-by-line and post your feedback.'
+      : ' You can stop any in-progress review.'
+  const text = `@${sender.login} ${verbed}${branchSegment}${closing}`
+
+  // Synthesize a stable per-event externalMessageId. The PR's `updated_at`
+  // changes on every review-request mutation, so combining it with the PR id
+  // and the action keeps separate "requested → removed → requested again"
+  // events from collapsing into one dedup'd id.
+  const updatedAt = readString(pr, 'updated_at') ?? ''
+  const prId = readNumber(pr, 'id') ?? number
+  const externalMessageId = `pr-${prId}-${action}-${updatedAt}`
+
+  return {
+    ...base,
+    chat: `pr:${number}`,
+    thread: null,
+    text,
+    externalMessageId,
+    authorId: String(sender.id),
+    authorName: sender.login,
+    authorIsBot: sender.type === 'Bot',
+    isBotMention: true,
+    replyToBotMessageId: null,
+    ts: updatedAt !== '' ? Date.parse(updatedAt) || 0 : 0,
+  }
+}
+
+export type GithubReviewerTeam = { slug: string; id: number; org: string | null }
+
+export function readReviewerTeam(value: unknown): GithubReviewerTeam | null {
+  const team = readRecord(value)
+  const slug = readString(team, 'slug')
+  const id = readNumber(team, 'id')
+  if (slug === null || id === null) return null
+  const org = readString(readRecord(team?.organization), 'login')
+  return { slug, id, org }
+}
+
 function buildInbound(
   key: Pick<
     InboundMessage,
@@ -220,6 +319,32 @@ function buildInbound(
     isBotMention: selfLogin !== null && text.includes(`@${selfLogin}`),
     replyToBotMessageId: null,
     ts: typeof rawTs === 'string' ? Date.parse(rawTs) || 0 : 0,
+  }
+}
+
+async function resolveTeamMembership(
+  event: string,
+  payload: Record<string, unknown>,
+  options: GithubWebhookHandlerOptions,
+): Promise<boolean | undefined> {
+  if (event !== 'pull_request') return undefined
+  const action = readString(payload, 'action')
+  if (action !== 'review_requested' && action !== 'review_request_removed') return undefined
+  const team = readReviewerTeam(payload.requested_team)
+  if (team === null) return undefined
+  const selfLogin = options.selfLogin()
+  if (selfLogin === null) return false
+  if (options.isBotInTeam === undefined) return false
+  // The team payload sometimes omits `organization.login`. Fall back to the
+  // repository owner, which is the only org GitHub can legally route team
+  // reviewers from on a given PR.
+  const org = team.org ?? readRepository(payload)?.owner ?? null
+  if (org === null) return false
+  try {
+    return await options.isBotInTeam({ org, slug: team.slug, login: selfLogin })
+  } catch (err) {
+    options.logger.warn(`[github] team membership lookup failed: ${describe(err)}`)
+    return false
   }
 }
 
