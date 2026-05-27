@@ -18,10 +18,11 @@ import type {
   SessionTurnStartEvent,
 } from '@/plugin'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
+import { formatLocalDate } from '@/shared'
 
 import { renderShard } from './frontmatter'
 import memoryPlugin from './index'
-import { topicShardPath, topicsDir } from './paths'
+import { streamFilePath, topicShardPath, topicsDir } from './paths'
 
 // Fake timers replace ~10s of real setTimeout waits used to exercise the idle
 // debouncer and spawn-timeout race. Date is included in `toFake` so the
@@ -859,6 +860,321 @@ describe('session.idle hook (buffer-bytes ceiling)', () => {
     // then: only A's session triggered a spawn
     expect(spawned).toHaveLength(1)
     expect((spawned[0]!.payload as { parentSessionId: string }).parentSessionId).toBe('ses_a')
+  })
+})
+
+describe('session.idle min-delta gate', () => {
+  beforeEach(installFakeClock)
+  afterEach(uninstallFakeClock)
+
+  test('skips idle spawn when transcript line growth is below minIdleDeltaLines', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a\nb\n')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 1000,
+      bufferBytes: 0,
+      minIdleDeltaLines: 3,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    // given: 2-line transcript, no prior spawn (baseline absent → 0). Delta=2 < 3.
+    await exports.hooks!['session.idle']!(event, ctx)
+    // when: idleMs elapses (gate runs at timer-fire)
+    await tickMs(1100)
+    await tickMs(50)
+    // then: no spawn
+    expect(spawned).toHaveLength(0)
+  })
+
+  test('fires idle spawn when transcript line growth meets minIdleDeltaLines', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a\nb\nc\nd\n')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 1000,
+      bufferBytes: 0,
+      minIdleDeltaLines: 3,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    // 4 lines, baseline=0, delta=4 >= 3 → spawn
+    await exports.hooks!['session.idle']!(event, ctx)
+    await tickMs(1100)
+    await waitFor(() => spawned.length >= 1, 'idle spawn fires when delta >= minIdleDeltaLines')
+    expect(spawned).toHaveLength(1)
+  })
+
+  test('skips subsequent idle spawn when new lines since last spawn is below threshold', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a\nb\nc\nd\ne\n')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 1000,
+      bufferBytes: 0,
+      minIdleDeltaLines: 3,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    // given: first idle spawns (5 lines vs baseline 0)
+    await exports.hooks!['session.idle']!(event, ctx)
+    await tickMs(1100)
+    await waitFor(() => spawned.length >= 1, 'first idle spawns')
+    expect(spawned).toHaveLength(1)
+
+    // when: 2 more lines arrive (delta = 2 from baseline of 5) and idle fires again
+    await appendFile(transcript, 'f\ng\n')
+    await exports.hooks!['session.idle']!(event, ctx)
+    await tickMs(1100)
+    // then: no second spawn (2 < 3)
+    expect(spawned).toHaveLength(1)
+
+    // and: when one more line arrives (delta = 3), idle does spawn
+    await appendFile(transcript, 'h\n')
+    await exports.hooks!['session.idle']!(event, ctx)
+    await tickMs(1100)
+    await waitFor(() => spawned.length >= 2, 'second idle spawns when delta reaches threshold')
+    expect(spawned).toHaveLength(2)
+  })
+
+  test('minIdleDeltaLines=0 disables the gate (legacy always-fire behavior)', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a\n')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 1000,
+      bufferBytes: 0,
+      minIdleDeltaLines: 0,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    await exports.hooks!['session.idle']!(event, ctx)
+    await tickMs(1100)
+    await waitFor(() => spawned.length >= 1, 'spawn fires when gate is disabled')
+    expect(spawned).toHaveLength(1)
+  })
+
+  test('zero-line transcript is not gated — preserves legacy "fire and let logger decide" behavior', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, '')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 1000,
+      bufferBytes: 0,
+      minIdleDeltaLines: 3,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    await exports.hooks!['session.idle']!(event, ctx)
+    await tickMs(1100)
+    await waitFor(() => spawned.length >= 1, 'empty-transcript spawn still fires')
+    expect(spawned).toHaveLength(1)
+  })
+
+  test('buffer-trip path is independent of minIdleDeltaLines', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a\n')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 60_000,
+      bufferBytes: 10_000,
+      minIdleDeltaLines: 1000,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    // given: baseline initialized
+    await exports.hooks!['session.idle']!(event, ctx)
+    // when: byte growth crosses bufferBytes (only 2 lines added, well below 1000-line gate)
+    await appendFile(transcript, 'b'.repeat(11_000))
+    await exports.hooks!['session.idle']!(event, ctx)
+    // then: buffer-trip fires synchronously despite the gate
+    expect(spawned).toHaveLength(1)
+  })
+})
+
+describe('session.end byte-equality skip', () => {
+  beforeEach(installFakeClock)
+  afterEach(uninstallFakeClock)
+
+  test('skips spawn when session.end arrives with no new bytes since the last logger run', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a'.repeat(15_000))
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 60_000,
+      bufferBytes: 10_000,
+      minIdleDeltaLines: 0,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    // given: first idle initializes baseline at 15_000 bytes (no spawn)
+    await exports.hooks!['session.idle']!(event, ctx)
+    // when: transcript crosses bufferBytes and idle fires → buffer-trip spawn (baseline now 25_000)
+    await appendFile(transcript, 'b'.repeat(10_000))
+    await exports.hooks!['session.idle']!(event, ctx)
+    await waitFor(() => spawned.length >= 1, 'buffer-trip spawn')
+    expect(spawned).toHaveLength(1)
+
+    // when: session.end arrives with no new bytes
+    await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
+    // give the async session.end body a microtask to settle
+    await tickMs(50)
+    // then: no second spawn — the buffer-trip already drained this transcript
+    expect(spawned).toHaveLength(1)
+  })
+
+  test('still spawns on session.end when transcript grew since the last logger run', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a'.repeat(15_000))
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 60_000,
+      bufferBytes: 10_000,
+      minIdleDeltaLines: 0,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    await exports.hooks!['session.idle']!(event, ctx)
+    await appendFile(transcript, 'b'.repeat(10_000))
+    await exports.hooks!['session.idle']!(event, ctx)
+    await waitFor(() => spawned.length >= 1, 'buffer-trip spawn')
+
+    // given: transcript grows again after the spawn
+    await appendFile(transcript, 'c'.repeat(500))
+    // when: session.end arrives
+    await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
+
+    // then: a second spawn fires (delta = 500 bytes > 0)
+    await waitFor(() => spawned.length >= 2, 'session-end spawn fires when transcript grew')
+    expect(spawned).toHaveLength(2)
+  })
+
+  test('still spawns on session.end when no prior logger run set a baseline', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a'.repeat(5000))
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 60_000,
+      bufferBytes: 0,
+      minIdleDeltaLines: 0,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    // given: idle event set lastIdleEvent (so session.end knows the path), but no prior spawn
+    await exports.hooks!['session.idle']!(event, ctx)
+    // when: session.end fires before any logger spawn has set a baseline
+    await exports.hooks!['session.end']!({ sessionId: 'ses_a' } as SessionEndEvent, ctx)
+    // then: spawn fires (baseline === undefined means "always fire")
+    await waitFor(() => spawned.length >= 1, 'session-end spawn fires with no baseline')
+    expect(spawned).toHaveLength(1)
+  })
+})
+
+describe('stream line cursor', () => {
+  beforeEach(installFakeClock)
+  afterEach(uninstallFakeClock)
+
+  test('first spawn for a session has no streamLineCursor in the payload', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a'.repeat(15_000))
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 60_000,
+      bufferBytes: 10_000,
+      minIdleDeltaLines: 0,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    await exports.hooks!['session.idle']!(event, ctx)
+    await appendFile(transcript, 'b'.repeat(10_000))
+    await exports.hooks!['session.idle']!(event, ctx)
+    await waitFor(() => spawned.length >= 1, 'first spawn')
+
+    expect(spawned[0]!.payload).not.toHaveProperty('streamLineCursor')
+  })
+
+  test('subsequent spawn for the same session on the same day carries a streamLineCursor reflecting the daily-stream line count', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a'.repeat(15_000))
+
+    // pre-seed today's daily stream with two lines (e.g. earlier sessions today)
+    const today = formatLocalDate()
+    const streamPath = streamFilePath(agentDir, today)
+    await mkdir(join(agentDir, 'memory', 'streams'), { recursive: true })
+    await writeFile(streamPath, '{"kind":"fragment"}\n{"kind":"watermark"}\n')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 60_000,
+      bufferBytes: 10_000,
+      minIdleDeltaLines: 0,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    // first spawn (via buffer-trip) — its post-spawn read of the daily stream
+    // sees the 2 pre-seeded lines and stamps the cursor as 2
+    await exports.hooks!['session.idle']!(event, ctx)
+    await appendFile(transcript, 'b'.repeat(10_000))
+    await exports.hooks!['session.idle']!(event, ctx)
+    await waitFor(() => spawned.length >= 1, 'first spawn')
+
+    // allow the post-spawn cursor-stamp microtask to run
+    await new Promise((r) => setImmediate(r))
+
+    // second spawn — should carry streamLineCursor=2 (set by the first spawn's
+    // post-spawn read of the daily stream)
+    await appendFile(transcript, 'c'.repeat(10_000))
+    await exports.hooks!['session.idle']!(event, ctx)
+    await waitFor(() => spawned.length >= 2, 'second spawn')
+
+    expect(spawned[1]!.payload).toHaveProperty('streamLineCursor', 2)
+  })
+
+  test("cursor is per-session — session B does not inherit session A's cursor", async () => {
+    const transcriptA = join(agentDir, 'a.jsonl')
+    const transcriptB = join(agentDir, 'b.jsonl')
+    await writeFile(transcriptA, 'a'.repeat(15_000))
+    await writeFile(transcriptB, 'b'.repeat(15_000))
+
+    // pre-seed today's daily stream with three lines
+    const today = formatLocalDate()
+    const streamPath = streamFilePath(agentDir, today)
+    await mkdir(join(agentDir, 'memory', 'streams'), { recursive: true })
+    await writeFile(streamPath, '{"a":1}\n{"a":2}\n{"a":3}\n')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 60_000,
+      bufferBytes: 10_000,
+      minIdleDeltaLines: 0,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+
+    // session A spawns first; cursor for ses_a gets set to 3
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: transcriptA, idleMs: 0 }, ctx)
+    await appendFile(transcriptA, 'x'.repeat(10_000))
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: transcriptA, idleMs: 0 }, ctx)
+    await waitFor(() => spawned.length >= 1, 'session A first spawn')
+    await new Promise((r) => setImmediate(r))
+
+    // session B's first spawn — should NOT see session A's cursor
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_b', parentTranscriptPath: transcriptB, idleMs: 0 }, ctx)
+    await appendFile(transcriptB, 'y'.repeat(10_000))
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_b', parentTranscriptPath: transcriptB, idleMs: 0 }, ctx)
+    await waitFor(() => spawned.length >= 2, 'session B first spawn')
+
+    const sessionBSpawn = spawned.find((s) => (s.payload as { parentSessionId: string }).parentSessionId === 'ses_b')
+    expect(sessionBSpawn).toBeDefined()
+    expect(sessionBSpawn!.payload).not.toHaveProperty('streamLineCursor')
   })
 })
 

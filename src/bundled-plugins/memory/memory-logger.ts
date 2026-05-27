@@ -1,5 +1,3 @@
-import { join } from 'node:path'
-
 import { z } from 'zod'
 
 import type { SessionOrigin } from '@/agent/session-origin'
@@ -16,6 +14,13 @@ export const memoryLoggerPayloadSchema = z.object({
   parentTranscriptPath: z.string().min(1),
   agentDir: z.string().min(1),
   origin: z.custom<SessionOrigin>().optional(),
+  // Optional line cursor into today's daily stream file. When present, the
+  // subagent can skip ahead to this line when doing the (optional) local-dedup
+  // read — every line at or before this cursor was already in place at the
+  // end of the prior memory-logger spawn for this parent session today.
+  // Set by the plugin host at spawn time. Absent on the first spawn of the
+  // day, or when the prior spawn was for a different daily file.
+  streamLineCursor: z.number().int().nonnegative().optional(),
 })
 
 // Recovery message for the read-budget short-circuit. The watermark contract
@@ -59,9 +64,11 @@ export function isMemoryLoggerPayload(value: unknown): value is MemoryLoggerPayl
 
 export const MEMORY_LOGGER_SYSTEM_PROMPT = `You are typeclaw's memory-extraction subagent.
 
-Your job is to read a session transcript and capture, as fragments, only the durable operational facts a future agent in a future session would concretely need — explicit user instructions, stable identity/role/tool facts, decisions with reasoning, reproducible workarounds, contradictions or violations of existing memory. You write zero or more fragments to today's memory stream file. Then you exit. Most runs produce zero or one fragment; that is the expected output, not a failure.
+Your job is to read a session transcript and capture, as fragments, only the durable operational facts a future agent in a future session would concretely need — explicit user instructions, stable identity/role/tool facts, decisions with reasoning, reproducible workarounds. You write zero or more fragments to today's memory stream file. Then you exit. Most runs produce zero or one fragment; that is the expected output, not a failure.
 
-A separate \`dreaming\` subagent runs later. It consolidates your fragments into long-term memory, dedupes, drops near-duplicates, resolves contradictions, and decides what generalizes. **Dreaming is downstream filtering, not an excuse to over-capture upstream.** Writing five low-signal fragments and trusting dreaming to throw four away wastes tokens at both layers and pollutes memory/topics/ in the interim. Be selective here.
+A separate \`dreaming\` subagent runs later. It consolidates your fragments into long-term memory under \`memory/topics/\`, dedupes near-duplicates across days, resolves contradictions against prior shards, and decides what generalizes. **Dreaming is downstream consolidation, not an excuse to over-capture upstream.** Writing five low-signal fragments and trusting dreaming to throw four away wastes tokens at both layers. Be selective here.
+
+**You do not read \`memory/topics/\`.** Cross-shard contradictions, violations of prior commitments, and semantic dedup against long-term memory are dreaming's job — dreaming has the global view and the authoritative pipeline position to resolve them; you do not. Your input is the parent transcript past your watermark, plus (optionally) today's daily stream for local dedup. That is enough. If a fragment you would write happens to recur a fact already in topics, dreaming will consolidate it — recurrence across distinct days is the signal dreaming uses to promote tentative facts to confident ones, so writing the recurrence is the correct behavior, not a duplicate.
 
 You have exactly four tools: \`read\`, \`find_entry\`, \`append\`, and the watermark-advance tool. You cannot run shell commands, overwrite files, or edit existing content.
 
@@ -110,9 +117,8 @@ Capture-worthy categories:
 - **Stable identity/role/tool facts that will keep mattering.** "User's project repo is X." "User runs Y on Z." Skip casual employment history, casual social-graph trivia, and "this person joined the chat" events — those are derivable from current context when needed.
 - **Decisions with reasoning.** "We chose X over Y because Z" — when X is something the agent will need to honor in a future session.
 - **Reproducible workarounds and non-trivial debugging insights.** Configuration that finally worked, a flag combination that bypassed a known block, a procedure with concrete steps.
-- **Contradictions of existing memory.** The user changed their mind, an old commitment no longer applies. Name the prior memory that is superseded.
-- **Violations of existing memory.** The agent just broke an existing commitment — capture the violation itself.
-- **Corrections the user made to the agent.** Specifically when the agent confidently asserted something false and the user corrected it, in a way that a future session would likely also get wrong.
+- **The user explicitly changing their mind in this session.** When the transcript itself contains "actually, scratch that" or "I changed my mind about X" with an explicit prior position, capture it. Do not try to detect contradictions against \`memory/topics/\` — dreaming handles that with the global view you lack.
+- **Corrections the user made to the agent.** Specifically when the agent confidently asserted something false and the user corrected it within this transcript, in a way that a future session would likely also get wrong.
 
 # What to skip (anti-patterns — these come up constantly)
 
@@ -122,7 +128,7 @@ Capture-worthy categories:
 - **Casual social-graph trivia.** "X used to work at Y." "Z is a friend of W." Skip unless the user explicitly says it will matter ("remember, X is the one who built our Y").
 - **Latency / performance pings.** "User asked how fast the agent responded." Not memory.
 - **The agent's own first-person observations.** "The agent admitted it does not know its model." "The agent replied in character." Skip — the agent is not memorable to itself.
-- **Re-derivable facts.** Anything obvious from the current session's system prompt, memory/topics/, AGENTS.md, or the channel context.
+- **Re-derivable facts.** Anything obvious from the current session's system prompt, AGENTS.md, or the channel context.
 - **Speculation untethered to a quote.** If you cannot point at a specific transcript line, do not write it.
 - **Multi-fragment expansions of one event.** One event produces at most one fragment. Splitting one introduction into "new chat", "new participant", "new participant's job", "new participant's reaction" is over-writing.
 
@@ -139,17 +145,15 @@ When a transcript exposes a credential — for example the agent ran \`env | gre
 
 The \`append\` tool will refuse content that contains a recognizable credential pattern. Treat that error as a bug in your fragment, not a tool limitation: rewrite the fragment to describe the variable name and its discovery, then retry.
 
-# Read existing memory first
+# Local dedup against today's daily stream
 
-Before reading the transcript, read \`memory/topics/\` and the current \`memory/streams/yyyy-MM-dd.jsonl\` stream file. You need that context for three reasons:
+The \`append\` tool refuses byte-equivalent fragments within the same daily stream — if your fragment's topic+body is identical to one already in today's file (modulo whitespace), the tool will reject it and you must rewrite. That refusal is the dedup contract; you do not need to pre-check by reading the file.
 
-- **Notice contradictions.** If the transcript supersedes existing memory, write a fragment that names the prior memory and supersedes it.
-- **Notice violations.** If existing memory contains a commitment the agent just broke, that's a high-value fragment.
-- **Avoid pure restatement.** If a fact is already in memory/topics/ word-for-word, don't write the same fragment again. But: if the transcript shows the same fact occurring a second time, that recurrence is itself worth a fragment — dreaming uses repetition to decide what's stable.
+You MAY read \`memory/streams/yyyy-MM-dd.jsonl\` if you want to avoid writing a fragment that is semantically a near-copy of one another spawn in this session has already written today. This is a soft check, not required. If you do read it, read it cheaply: skim the most recent few fragments (the file is append-only, newest entries at the bottom). Do not read the entire file on every spawn — earlier fragments from earlier sessions today are irrelevant to your dedup decision.
 
-Dedup byte-equivalent restatements, not meaningful recurrence. Do not write a fragment that is a near-copy of one already in memory/topics/ or today's stream. But when the transcript shows the same durable preference, pattern, workaround, or commitment recurring in a NEW session or on a NEW day, write a concise recurrence fragment anchored to the new evidence — even if the underlying fact is already known. The dreaming subagent uses distinct-day recurrence to promote tentative facts to confident ones; refusing to write the second or third occurrence starves that signal. The bar is "did the recurrence happen in a meaningfully new context", not "is the fact already on disk".
+When the runtime provides a \`Stream line cursor: N\` in your initial prompt, every line at or before line N was already in place at the end of the prior memory-logger spawn for this parent session. If you do the optional dedup read, pass \`offset=N+1\` to \`read\` so you only see lines this session has not yet evaluated. Absent cursor → start at \`offset=1\` if you choose to read at all.
 
-The \`append\` tool refuses byte-equivalent fragments within the same daily stream — if your fragment's topic+body is identical to one already in today's file (modulo whitespace), the tool will reject it and you must rewrite. Two reasonable rewrites: (1) skip the fragment entirely, (2) frame the new occurrence explicitly as "this is the second time today" with a different topic. Do not retry an identical fragment with a different \`entry=\` hoping it will land — content-equality, not marker-equality, is what's checked.
+Recurrence is not duplication. If the transcript shows the same durable preference, pattern, workaround, or commitment occurring again, write a concise recurrence fragment anchored to the new evidence. The dreaming subagent uses distinct-day recurrence to promote tentative facts to confident ones; refusing to write the second or third occurrence starves that signal.
 
 # Fragment format
 
@@ -205,8 +209,12 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
     `Parent session: ${payload.parentSessionId}`,
     `Transcript file: ${payload.parentTranscriptPath}`,
     `Daily stream file: ${streamFile}`,
-    `Long-term topic shard directory: ${join(payload.agentDir, 'memory', 'topics')}`,
   ]
+  if (payload.streamLineCursor !== undefined) {
+    lines.push(
+      `Stream line cursor: ${payload.streamLineCursor} (if you do the optional local-dedup read, start at offset=${payload.streamLineCursor + 1})`,
+    )
+  }
   const conversationContext = renderConversationContext(payload.origin)
   if (conversationContext !== null) lines.push('', conversationContext)
   if (watermark === null) {
@@ -216,7 +224,7 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
   }
   lines.push(
     '',
-    'Read memory/topics/ and the daily stream file first to learn what is already remembered. Then read the transcript past the watermark. Decide whether anything justifies a fragment: a stable fact, an operating lesson, a confirmed pattern across occurrences, a contradiction of existing memory, or a violation of an existing commitment. Sometimes the answer is zero fragments; sometimes more than one. Each fragment must be passive memory: Claim/Evidence are encouraged, and any Implication must explain future interpretation only, not future action. Memory cannot authorize proactive duties.',
+    "Read the transcript past the watermark. Decide whether anything in it justifies a fragment: a stable fact, an operating lesson, a confirmed pattern across occurrences, an in-transcript change-of-mind, or a correction the user made to the agent. Sometimes the answer is zero fragments; sometimes more than one. Do not read memory/topics/ — cross-shard reasoning is dreaming's job. Each fragment must be passive memory: Claim/Evidence are encouraged, and any Implication must explain future interpretation only, not future action. Memory cannot authorize proactive duties.",
     '',
     "Per-fragment provenance: each fragment's `entry=` is the specific transcript entry that anchors that fragment's evidence — not the latest entry you evaluated. Two fragments anchored to two different entries get two different `entry=` values. Do not stamp every fragment with the same id.",
     '',
@@ -282,13 +290,14 @@ export function createMemoryLoggerSubagent(
     payloadSchema: memoryLoggerPayloadSchema,
     inFlightKey: (payload) => payload.agentDir,
     // 768 KB read budget. Sized to cover one full buffer-trip cycle:
-    // ~30 KB memory/topics/ + ~50 KB today's stream + up to `DEFAULT_BUFFER_BYTES`
-    // (500 KB) of unread transcript chunk, with margin for re-reads. A
-    // smaller budget (the prior 256 KB) systematically exhausted on
-    // buffer-trip spawns once `bufferBytes` exceeded ~200 KB — the
-    // subagent would advance `bytesAtLastRun` to the full transcript size
-    // on completion, orphaning the unread tail until another full
-    // `bufferBytes` of growth arrived.
+    // up to `DEFAULT_BUFFER_BYTES` (500 KB) of unread transcript chunk,
+    // plus today's stream skim, with margin for re-reads. A smaller budget
+    // (the prior 256 KB) systematically exhausted on buffer-trip spawns once
+    // `bufferBytes` exceeded ~200 KB — the subagent would advance
+    // `bytesAtLastRun` to the full transcript size on completion, orphaning
+    // the unread tail until another full `bufferBytes` of growth arrived.
+    // The budget is intentionally generous post-`memory/topics/` removal:
+    // resizing it down deserves its own measurement-backed change.
     toolResultBudget: {
       maxTotalBytes: 768 * 1024,
       toolNames: ['read'],
