@@ -14,6 +14,13 @@ export const memoryLoggerPayloadSchema = z.object({
   parentTranscriptPath: z.string().min(1),
   agentDir: z.string().min(1),
   origin: z.custom<SessionOrigin>().optional(),
+  // Optional line cursor into today's daily stream file. When present, the
+  // subagent can skip ahead to this line when doing the (optional) local-dedup
+  // read — every line at or before this cursor was already in place at the
+  // end of the prior memory-logger spawn for this parent session today.
+  // Set by the plugin host at spawn time. Absent on the first spawn of the
+  // day, or when the prior spawn was for a different daily file.
+  streamLineCursor: z.number().int().nonnegative().optional(),
 })
 
 // Recovery message for the read-budget short-circuit. The watermark contract
@@ -144,6 +151,8 @@ The \`append\` tool refuses byte-equivalent fragments within the same daily stre
 
 You MAY read \`memory/streams/yyyy-MM-dd.jsonl\` if you want to avoid writing a fragment that is semantically a near-copy of one another spawn in this session has already written today. This is a soft check, not required. If you do read it, read it cheaply: skim the most recent few fragments (the file is append-only, newest entries at the bottom). Do not read the entire file on every spawn — earlier fragments from earlier sessions today are irrelevant to your dedup decision.
 
+When the runtime provides a \`Stream line cursor: N\` in your initial prompt, every line at or before line N was already in place at the end of the prior memory-logger spawn for this parent session. If you do the optional dedup read, pass \`offset=N+1\` to \`read\` so you only see lines this session has not yet evaluated. Absent cursor → start at \`offset=1\` if you choose to read at all.
+
 Recurrence is not duplication. If the transcript shows the same durable preference, pattern, workaround, or commitment occurring again, write a concise recurrence fragment anchored to the new evidence. The dreaming subagent uses distinct-day recurrence to promote tentative facts to confident ones; refusing to write the second or third occurrence starves that signal.
 
 # Fragment format
@@ -201,6 +210,11 @@ function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, wa
     `Transcript file: ${payload.parentTranscriptPath}`,
     `Daily stream file: ${streamFile}`,
   ]
+  if (payload.streamLineCursor !== undefined) {
+    lines.push(
+      `Stream line cursor: ${payload.streamLineCursor} (if you do the optional local-dedup read, start at offset=${payload.streamLineCursor + 1})`,
+    )
+  }
   const conversationContext = renderConversationContext(payload.origin)
   if (conversationContext !== null) lines.push('', conversationContext)
   if (watermark === null) {

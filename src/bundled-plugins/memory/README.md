@@ -126,6 +126,10 @@ The `session.idle` hook fires after every prompt completion. A chatty channel se
 
 When `session.end` arrives and an earlier idle/buffer-trip spawn already drained the transcript to its current size, the session-end spawn is skipped. The skip is logged as `memory-logger session-end skip ses_X (no new bytes since last spawn at N)`. The skip only applies when a real baseline was recorded (`bytesAtLastRun > 0`); sessions that ended before any spawn ran still fire on close.
 
+### Daily-stream cursor (memory-logger payload)
+
+Each `memory-logger` spawn captures the line count of `memory/streams/<today>.jsonl` at the END of its run and stamps it on a per-`parentSessionId` cursor keyed by today's date. The NEXT spawn for the same session on the same day receives `streamLineCursor: N` in its payload — the subagent uses it to skip ahead to `offset=N+1` if it does the optional local-dedup read of today's stream. The cursor is dropped on cross-day rollover (yesterday's cursor points into yesterday's file, which is no longer the spawn's target) and on `session.end`.
+
 ## Tests
 
 Test files in this directory (kebab-case, `.test.ts` neighbors): `paths`, `slug`, `frontmatter`, `topics`, `shard-snapshot`, `delete-tool`, `citations`, `citation-superset`, `migration`, `load-shards`, `load-memory`, `injection-plan`, `search-tool`, `memory-retrieval`, `memory-logger`, `dreaming`, `index`, `integration`. Plus guard policies in `../guard/policies/`: `memory-topics-delete`, `memory-topics-write`, `memory-retrieval-cache-write`.

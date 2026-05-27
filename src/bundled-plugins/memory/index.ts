@@ -7,6 +7,7 @@ import { z } from 'zod'
 
 import type { SessionOrigin } from '@/agent/session-origin'
 import { definePlugin } from '@/plugin'
+import { formatLocalDate } from '@/shared'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
 import { buildInjectionPlan, DEFAULT_INJECTION_BUDGET_BYTES, MIN_INJECTION_BUDGET_BYTES } from './injection-plan'
@@ -164,6 +165,12 @@ export default definePlugin({
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
     const bytesAtLastRun = new Map<string, number>()
     const linesAtLastRun = new Map<string, number>()
+    // Per-session stream-file cursor: the JSONL line count of the daily
+    // stream file at the END of this session's most recent memory-logger
+    // spawn. Keyed by sessionId, valued by `{ date, lineCount }`. Honored
+    // only when `date` matches today's date — yesterday's cursor points
+    // into yesterday's file and the spawn's payload omits it.
+    const streamCursorAtLastRun = new Map<string, { date: string; lineCount: number }>()
 
     // memory-logger is coalesced per agentDir (not per parentSessionId) so that
     // two concurrent channel sessions for the same agent never write to the same
@@ -187,11 +194,16 @@ export default definePlugin({
       const last = lastIdleEvent.get(sessionId)
       if (!last || last.parentTranscriptPath === undefined) return Promise.resolve()
       const parentTranscriptPath = last.parentTranscriptPath
+      const today = formatLocalDate()
+      const priorCursor = streamCursorAtLastRun.get(sessionId)
+      const streamLineCursor =
+        priorCursor !== undefined && priorCursor.date === today ? priorCursor.lineCount : undefined
       const payload: MemoryLoggerPayload = {
         parentSessionId: sessionId,
         parentTranscriptPath,
         agentDir: ctx.agentDir,
         ...(last.origin !== undefined ? { origin: last.origin } : {}),
+        ...(streamLineCursor !== undefined ? { streamLineCursor } : {}),
       }
       const spawnOptions = {
         parentSessionId: sessionId,
@@ -210,6 +222,14 @@ export default definePlugin({
           } catch (err) {
             ctx.logger.error(`memory-logger spawn failed: ${err instanceof Error ? err.message : String(err)}`)
           }
+          // Capture the daily-stream line count POST-spawn so the next spawn
+          // (in the same session, on the same day) can resume past anything
+          // this spawn appended. Tied to today's date — `fireMemoryLogger`
+          // checks the date before honoring the cursor.
+          const todayAfterSpawn = formatLocalDate()
+          const streamPath = streamFilePath(ctx.agentDir, todayAfterSpawn)
+          const streamLineCount = await readLineCount(streamPath)
+          streamCursorAtLastRun.set(sessionId, { date: todayAfterSpawn, lineCount: streamLineCount })
         })
       spawnChain = next
       return next
@@ -458,6 +478,7 @@ export default definePlugin({
             lastIdleEvent.delete(sessionId)
             bytesAtLastRun.delete(sessionId)
             linesAtLastRun.delete(sessionId)
+            streamCursorAtLastRun.delete(sessionId)
           })()
           const cacheFilePath = join(ctx.agentDir, 'memory', '.retrieval-cache', `${sessionId}.md`)
           unlink(cacheFilePath).catch((err) => {

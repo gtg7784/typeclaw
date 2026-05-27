@@ -145,6 +145,11 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()).toContain('dreaming')
   })
 
+  test('teaches the subagent to respect the optional Stream line cursor when present', () => {
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/Stream line cursor:/)
+    expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/offset=N\+1/i)
+  })
+
   test("does not direct the subagent to read memory/topics/ — cross-shard reasoning is dreaming's concern", () => {
     // Positive prohibition is present.
     expect(MEMORY_LOGGER_SYSTEM_PROMPT).toMatch(/you do not read `memory\/topics\/`|do not read memory\/topics\//i)
@@ -437,6 +442,35 @@ describe('memoryLoggerSubagent', () => {
     expect(prompt).not.toContain(join(agentDir, 'memory', 'topics'))
     expect(prompt).not.toMatch(/(?:^|[^a-z])Read `?memory\/topics\/`?/m)
     expect(prompt).not.toMatch(/read `?memory\/topics\/`? (?:and|first|to)/i)
+  })
+
+  test('handler emits Stream line cursor line when streamLineCursor is in the payload', async () => {
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+
+    const { runSessionCalls } = await invokeWith(
+      { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir, streamLineCursor: 7 },
+      agentDir,
+    )
+
+    const prompt = runSessionCalls[0]!.userPrompt!
+    expect(prompt).toMatch(/Stream line cursor: 7/)
+    expect(prompt).toMatch(/offset=8/)
+  })
+
+  test('handler omits Stream line cursor line when payload has no streamLineCursor', async () => {
+    const agentDir = makeAgentDir()
+    const transcript = join(agentDir, 'sessions', 'ses_abc.jsonl')
+    writeFileSync(transcript, '')
+
+    const { runSessionCalls } = await invokeWith(
+      { parentSessionId: 'ses_abc', parentTranscriptPath: transcript, agentDir },
+      agentDir,
+    )
+
+    const prompt = runSessionCalls[0]!.userPrompt!
+    expect(prompt).not.toMatch(/Stream line cursor:/)
   })
 
   test('handler indicates "no prior watermark" when none exists', async () => {

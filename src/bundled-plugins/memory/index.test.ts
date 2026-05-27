@@ -18,10 +18,11 @@ import type {
   SessionTurnStartEvent,
 } from '@/plugin'
 import { createPluginContext, createPluginLogger } from '@/plugin/context'
+import { formatLocalDate } from '@/shared'
 
 import { renderShard } from './frontmatter'
 import memoryPlugin from './index'
-import { topicShardPath, topicsDir } from './paths'
+import { streamFilePath, topicShardPath, topicsDir } from './paths'
 
 // Fake timers replace ~10s of real setTimeout waits used to exercise the idle
 // debouncer and spawn-timeout race. Date is included in `toFake` so the
@@ -1075,6 +1076,105 @@ describe('session.end byte-equality skip', () => {
     // then: spawn fires (baseline === undefined means "always fire")
     await waitFor(() => spawned.length >= 1, 'session-end spawn fires with no baseline')
     expect(spawned).toHaveLength(1)
+  })
+})
+
+describe('stream line cursor', () => {
+  beforeEach(installFakeClock)
+  afterEach(uninstallFakeClock)
+
+  test('first spawn for a session has no streamLineCursor in the payload', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a'.repeat(15_000))
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 60_000,
+      bufferBytes: 10_000,
+      minIdleDeltaLines: 0,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    await exports.hooks!['session.idle']!(event, ctx)
+    await appendFile(transcript, 'b'.repeat(10_000))
+    await exports.hooks!['session.idle']!(event, ctx)
+    await waitFor(() => spawned.length >= 1, 'first spawn')
+
+    expect(spawned[0]!.payload).not.toHaveProperty('streamLineCursor')
+  })
+
+  test('subsequent spawn for the same session on the same day carries a streamLineCursor reflecting the daily-stream line count', async () => {
+    const transcript = join(agentDir, 'transcript.jsonl')
+    await writeFile(transcript, 'a'.repeat(15_000))
+
+    // pre-seed today's daily stream with two lines (e.g. earlier sessions today)
+    const today = formatLocalDate()
+    const streamPath = streamFilePath(agentDir, today)
+    await mkdir(join(agentDir, 'memory', 'streams'), { recursive: true })
+    await writeFile(streamPath, '{"kind":"fragment"}\n{"kind":"watermark"}\n')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 60_000,
+      bufferBytes: 10_000,
+      minIdleDeltaLines: 0,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+    const event: SessionIdleEvent = { sessionId: 'ses_a', parentTranscriptPath: transcript, idleMs: 0 }
+
+    // first spawn (via buffer-trip) — its post-spawn read of the daily stream
+    // sees the 2 pre-seeded lines and stamps the cursor as 2
+    await exports.hooks!['session.idle']!(event, ctx)
+    await appendFile(transcript, 'b'.repeat(10_000))
+    await exports.hooks!['session.idle']!(event, ctx)
+    await waitFor(() => spawned.length >= 1, 'first spawn')
+
+    // allow the post-spawn cursor-stamp microtask to run
+    await new Promise((r) => setImmediate(r))
+
+    // second spawn — should carry streamLineCursor=2 (set by the first spawn's
+    // post-spawn read of the daily stream)
+    await appendFile(transcript, 'c'.repeat(10_000))
+    await exports.hooks!['session.idle']!(event, ctx)
+    await waitFor(() => spawned.length >= 2, 'second spawn')
+
+    expect(spawned[1]!.payload).toHaveProperty('streamLineCursor', 2)
+  })
+
+  test("cursor is per-session — session B does not inherit session A's cursor", async () => {
+    const transcriptA = join(agentDir, 'a.jsonl')
+    const transcriptB = join(agentDir, 'b.jsonl')
+    await writeFile(transcriptA, 'a'.repeat(15_000))
+    await writeFile(transcriptB, 'b'.repeat(15_000))
+
+    // pre-seed today's daily stream with three lines
+    const today = formatLocalDate()
+    const streamPath = streamFilePath(agentDir, today)
+    await mkdir(join(agentDir, 'memory', 'streams'), { recursive: true })
+    await writeFile(streamPath, '{"a":1}\n{"a":2}\n{"a":3}\n')
+
+    const { exports, spawned } = await bootMemoryPlugin(agentDir, {
+      idleMs: 60_000,
+      bufferBytes: 10_000,
+      minIdleDeltaLines: 0,
+    })
+    const ctx = { agentDir, pluginName: 'memory', logger: createPluginLogger('m') }
+
+    // session A spawns first; cursor for ses_a gets set to 3
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: transcriptA, idleMs: 0 }, ctx)
+    await appendFile(transcriptA, 'x'.repeat(10_000))
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_a', parentTranscriptPath: transcriptA, idleMs: 0 }, ctx)
+    await waitFor(() => spawned.length >= 1, 'session A first spawn')
+    await new Promise((r) => setImmediate(r))
+
+    // session B's first spawn — should NOT see session A's cursor
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_b', parentTranscriptPath: transcriptB, idleMs: 0 }, ctx)
+    await appendFile(transcriptB, 'y'.repeat(10_000))
+    await exports.hooks!['session.idle']!({ sessionId: 'ses_b', parentTranscriptPath: transcriptB, idleMs: 0 }, ctx)
+    await waitFor(() => spawned.length >= 2, 'session B first spawn')
+
+    const sessionBSpawn = spawned.find((s) => (s.payload as { parentSessionId: string }).parentSessionId === 'ses_b')
+    expect(sessionBSpawn).toBeDefined()
+    expect(sessionBSpawn!.payload).not.toHaveProperty('streamLineCursor')
   })
 })
 
