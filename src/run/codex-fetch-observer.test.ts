@@ -576,6 +576,64 @@ describe('installCodexFetchObserver', () => {
     expect(codexLines[0]!.msg).toContain('body_bytes=18')
   })
 
+  test('Idle abort listener count stays bounded across many chunks (no leak)', async () => {
+    // given: a stream that will emit 100 chunks with a long idle window. The
+    // pre-fix shape called `idleController.signal.addEventListener('abort', …)`
+    // inside the per-iteration `Promise.race`, leaking one closure per chunk
+    // when `reader.read()` won. The fix shares one listener across the whole
+    // stream, so listener installations across N chunks must stay at <= 1.
+    const { logger } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    const RealAbortController = globalThis.AbortController
+    let installedAbortListeners = 0
+    class CountingAbortController extends RealAbortController {
+      constructor() {
+        super()
+        const realAdd = this.signal.addEventListener.bind(this.signal)
+        this.signal.addEventListener = ((
+          type: string,
+          listener: EventListenerOrEventListenerObject,
+          options?: AddEventListenerOptions | boolean,
+        ) => {
+          if (type === 'abort') installedAbortListeners += 1
+          return realAdd(type, listener, options)
+        }) as typeof this.signal.addEventListener
+      }
+    }
+    globalThis.AbortController = CountingAbortController as unknown as typeof AbortController
+
+    globalThis.fetch = (async () => {
+      clock.set(5)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 10_000 })
+    try {
+      // when: 100 chunks flow through, each one comfortably inside the idle window
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const drainPromise = drainQuiet(response.body)
+      const chunk = new TextEncoder().encode('x')
+      for (let i = 0; i < 100; i++) {
+        clock.set(10 + i)
+        await ctrl.push(chunk)
+      }
+      clock.set(200)
+      await ctrl.close()
+      await drainPromise
+    } finally {
+      uninstall()
+      globalThis.AbortController = RealAbortController
+    }
+
+    // then: only the single shared listener should ever be installed across
+    // the full lifetime of the stream, regardless of chunk count
+    expect(installedAbortListeners).toBeLessThanOrEqual(1)
+  })
+
   test('TYPECLAW_CODEX_TIMEOUTS=off disables timeouts but keeps observer active', async () => {
     const { logger, entries } = captureLogger()
     const clock = makeClock()

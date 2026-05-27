@@ -210,23 +210,34 @@ function attachBodyTimingTap(
     }
   }
 
+  // The idle abort listener is installed exactly once for the lifetime of the
+  // stream and removed in `finally`. Earlier shapes constructed a fresh
+  // `Promise.race` listener per chunk; if `reader.read()` won the race, the
+  // listener was never removed and closures accumulated on the signal across a
+  // long stream. Keeping one shared abort promise bounds the listener count to
+  // 1 regardless of chunk count.
   const observerBody = new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = piped.getReader()
       armIdleTimer()
+      let abortFired = false
+      let onAbort: (() => void) | null = null
+      const abortPromise = idleController
+        ? new Promise<never>((_, reject) => {
+            onAbort = () => {
+              abortFired = true
+              reject(idleController.signal.reason ?? new Error('idle timeout'))
+            }
+            if (idleController.signal.aborted) onAbort()
+            else idleController.signal.addEventListener('abort', onAbort, { once: true })
+          })
+        : null
+      // Swallow the shared rejection if no race ever observes it (clean stream
+      // end before any timeout). Without this, an aborted-after-close path
+      // could surface as an unhandled rejection on the runtime.
+      abortPromise?.catch(() => {})
       try {
         while (true) {
-          let abortFired = false
-          const abortPromise = idleController
-            ? new Promise<never>((_, reject) => {
-                const onAbort = () => {
-                  abortFired = true
-                  reject(idleController.signal.reason ?? new Error('idle timeout'))
-                }
-                if (idleController.signal.aborted) onAbort()
-                else idleController.signal.addEventListener('abort', onAbort, { once: true })
-              })
-            : null
           const readPromise = reader.read()
           const result = abortPromise ? await Promise.race([readPromise, abortPromise]) : await readPromise
           if (abortFired) {
@@ -248,6 +259,9 @@ function attachBodyTimingTap(
         settle(message)
         controller.error(err)
       } finally {
+        if (onAbort !== null && idleController !== null && !idleController.signal.aborted) {
+          idleController.signal.removeEventListener('abort', onAbort)
+        }
         reader.releaseLock()
       }
     },
