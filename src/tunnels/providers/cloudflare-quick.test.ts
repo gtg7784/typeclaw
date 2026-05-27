@@ -46,7 +46,6 @@ sleep 30
       binary,
       onUrlChange: (url) => urls.push(url),
       stopGraceMs: 10,
-      probeReady: async () => true,
     })
 
     try {
@@ -91,7 +90,6 @@ sleep 30
       binary,
       onUrlChange: () => {},
       stopGraceMs: 10,
-      probeReady: async () => true,
     })
 
     try {
@@ -136,7 +134,6 @@ sleep 30
       onUrlChange: (url) => urls.push(url),
       restartBackoffMs: [5],
       stopGraceMs: 10,
-      probeReady: async () => true,
     })
 
     try {
@@ -173,7 +170,6 @@ exit 3
       onUrlChange: () => {},
       restartBackoffMs: [1],
       maxConsecutiveFailuresWithoutUrl: 2,
-      probeReady: async () => true,
     })
 
     try {
@@ -204,7 +200,6 @@ sleep 30
       binary,
       onUrlChange: () => {},
       stopGraceMs: 10,
-      probeReady: async () => true,
     })
 
     try {
@@ -213,182 +208,6 @@ sleep 30
 
       await provider.stop()
 
-      expect(provider.snapshot().status).toBe('stopped')
-    } finally {
-      await provider.stop()
-      rmSync(scratchDir, { recursive: true, force: true })
-    }
-  })
-
-  it('delays onUrlChange until the readiness probe succeeds', async () => {
-    const scratchDir = createScratchDir()
-    const binary = installFakeCloudflared(
-      scratchDir,
-      `
-echo "https://probe-pending.trycloudflare.com" >&2
-trap 'exit 0' TERM
-sleep 30
-`,
-    )
-    const probeCalls: string[] = []
-    let allowProbe = false
-    const urls: string[] = []
-    const provider = createCloudflareQuickProvider({
-      config,
-      upstreamPort: 8975,
-      binary,
-      onUrlChange: (url) => urls.push(url),
-      stopGraceMs: 10,
-      probeDeadlineMs: 60_000,
-      probeInitialBackoffMs: 5,
-      probeMaxBackoffMs: 5,
-      probeReady: async (url) => {
-        probeCalls.push(url)
-        return allowProbe
-      },
-    })
-
-    try {
-      await provider.start()
-      await waitFor(() => probeCalls.length >= 2, { description: 'probe attempted at least twice' })
-
-      expect(urls).toEqual([])
-      expect(provider.snapshot()).toMatchObject({ status: 'starting', url: null })
-
-      allowProbe = true
-      await waitFor(() => urls.length === 1, { description: 'URL emitted after probe success' })
-
-      expect(urls).toEqual(['https://probe-pending.trycloudflare.com'])
-      expect(provider.snapshot()).toMatchObject({
-        status: 'healthy',
-        url: 'https://probe-pending.trycloudflare.com',
-      })
-      expect(probeCalls.every((u) => u === 'https://probe-pending.trycloudflare.com')).toBe(true)
-
-      await provider.stop()
-    } finally {
-      await provider.stop()
-      rmSync(scratchDir, { recursive: true, force: true })
-    }
-  })
-
-  it('emits the URL anyway after the probe deadline expires, with a warning', async () => {
-    const scratchDir = createScratchDir()
-    const binary = installFakeCloudflared(
-      scratchDir,
-      `
-echo "https://stuck-probe.trycloudflare.com" >&2
-trap 'exit 0' TERM
-sleep 30
-`,
-    )
-    const urls: string[] = []
-    const warns: string[] = []
-    const provider = createCloudflareQuickProvider({
-      config,
-      upstreamPort: 8975,
-      binary,
-      onUrlChange: (url) => urls.push(url),
-      stopGraceMs: 10,
-      probeDeadlineMs: 100,
-      probeInitialBackoffMs: 20,
-      probeMaxBackoffMs: 20,
-      probeReady: async () => false,
-      logger: { info: () => {}, warn: (msg) => warns.push(msg) },
-    })
-
-    try {
-      await provider.start()
-      await waitFor(() => urls.length === 1, {
-        description: 'URL emitted via fail-open after probe deadline',
-      })
-
-      expect(urls).toEqual(['https://stuck-probe.trycloudflare.com'])
-      expect(provider.snapshot().status).toBe('healthy')
-      expect(warns.some((m) => m.includes('edge probe did not succeed'))).toBe(true)
-      expect(warns.some((m) => m.includes('emitting URL anyway'))).toBe(true)
-
-      await provider.stop()
-    } finally {
-      await provider.stop()
-      rmSync(scratchDir, { recursive: true, force: true })
-    }
-  })
-
-  it('logs probe lifecycle so operators can diagnose tunnel issues from typeclaw logs', async () => {
-    const scratchDir = createScratchDir()
-    const binary = installFakeCloudflared(
-      scratchDir,
-      `
-echo "https://observable.trycloudflare.com" >&2
-trap 'exit 0' TERM
-sleep 30
-`,
-    )
-    const infos: string[] = []
-    const provider = createCloudflareQuickProvider({
-      config,
-      upstreamPort: 8975,
-      binary,
-      onUrlChange: () => {},
-      stopGraceMs: 10,
-      probeDeadlineMs: 5_000,
-      probeInitialBackoffMs: 5,
-      probeMaxBackoffMs: 5,
-      probeReady: async () => true,
-      logger: { info: (msg) => infos.push(msg), warn: () => {} },
-    })
-
-    try {
-      await provider.start()
-      await waitFor(() => provider.snapshot().status === 'healthy', { description: 'healthy' })
-
-      expect(infos.some((m) => m.includes('cloudflared printed URL https://observable.trycloudflare.com'))).toBe(true)
-      expect(infos.some((m) => m.includes('edge reachable after'))).toBe(true)
-
-      await provider.stop()
-    } finally {
-      await provider.stop()
-      rmSync(scratchDir, { recursive: true, force: true })
-    }
-  })
-
-  it('cancels an in-flight readiness probe on stop()', async () => {
-    const scratchDir = createScratchDir()
-    const binary = installFakeCloudflared(
-      scratchDir,
-      `
-echo "https://abort-me.trycloudflare.com" >&2
-trap 'exit 0' TERM
-sleep 30
-`,
-    )
-    let probeAborted = false
-    const provider = createCloudflareQuickProvider({
-      config,
-      upstreamPort: 8975,
-      binary,
-      onUrlChange: () => {},
-      stopGraceMs: 10,
-      probeDeadlineMs: 60_000,
-      probeReady: (_url, signal) =>
-        new Promise<boolean>((resolve) => {
-          signal.addEventListener('abort', () => {
-            probeAborted = true
-            resolve(false)
-          })
-        }),
-    })
-
-    try {
-      await provider.start()
-      await waitFor(() => provider.snapshot().detail.startsWith('probing tunnel readiness'), {
-        description: 'probe started',
-      })
-
-      await provider.stop()
-
-      expect(probeAborted).toBe(true)
       expect(provider.snapshot().status).toBe('stopped')
     } finally {
       await provider.stop()

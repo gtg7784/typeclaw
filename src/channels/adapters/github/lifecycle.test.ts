@@ -121,6 +121,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger: silentLogger(),
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -151,6 +152,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger: silentLogger(),
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -179,6 +181,7 @@ describe('createGithubAdapter lifecycle', () => {
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
       tunnelUrl: () => 'https://x.trycloudflare.com',
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -208,6 +211,7 @@ describe('createGithubAdapter lifecycle', () => {
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
       tunnelUrl: () => 'https://x.trycloudflare.com',
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -237,6 +241,7 @@ describe('createGithubAdapter lifecycle', () => {
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
       tunnelConfiguredForChannel: () => false,
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -267,6 +272,7 @@ describe('createGithubAdapter lifecycle', () => {
       httpListenImpl: () => ({ stop: async () => {} }),
       tunnelUrl: () => null,
       tunnelConfiguredForChannel: () => true,
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -296,6 +302,7 @@ describe('createGithubAdapter lifecycle', () => {
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
       tunnelConfiguredForChannel: () => true,
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -329,6 +336,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger: silentLogger(),
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -351,6 +359,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger: silentLogger(),
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -374,6 +383,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger: silentLogger(),
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -399,6 +409,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger,
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -431,6 +442,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger,
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -486,6 +498,7 @@ describe('createGithubAdapter lifecycle', () => {
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
       tunnelUrl: () => currentTunnelUrl,
+      webhookRegistrationDelayMs: 0,
     })
     await adapter1.start()
     expect(repoHooks.length).toBe(1)
@@ -504,6 +517,7 @@ describe('createGithubAdapter lifecycle', () => {
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
       tunnelUrl: () => currentTunnelUrl,
+      webhookRegistrationDelayMs: 0,
     })
     await adapter2.start()
 
@@ -563,6 +577,7 @@ describe('createGithubAdapter lifecycle', () => {
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
       tunnelUrl: () => 'https://fresh.trycloudflare.com',
+      webhookRegistrationDelayMs: 0,
     })
     await adapter.start()
 
@@ -595,6 +610,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger: silentLogger(),
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -632,6 +648,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger,
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -676,6 +693,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger,
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -699,6 +717,7 @@ describe('createGithubAdapter lifecycle', () => {
       logger,
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await adapter.start()
@@ -734,11 +753,86 @@ describe('createGithubAdapter lifecycle', () => {
       logger,
       fetchImpl,
       httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
     })
 
     await expect(adapter.start()).resolves.toBeUndefined()
     await adapter.stop()
 
     expect(logger.messages.find((m) => m.startsWith('warn:[github] permission preflight skipped:'))).toBeDefined()
+  })
+
+  test('start() sleeps webhookRegistrationDelayMs before calling the GitHub hooks API', async () => {
+    const events: string[] = []
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      if (url.includes('/repos/acme/widgets/hooks')) {
+        if (method === 'GET') {
+          events.push('hooks-list')
+          return Response.json([])
+        }
+        if (method === 'POST') {
+          events.push('hooks-create')
+          return Response.json({ id: 42 }, { status: 201 })
+        }
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets']),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger: silentLogger(),
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 1234,
+      sleep: async (ms) => {
+        events.push(`sleep(${ms})`)
+      },
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    expect(events).toEqual(['sleep(1234)', 'hooks-list', 'hooks-create'])
+  })
+
+  test('start() skips the sleep when webhookRegistrationDelayMs is 0', async () => {
+    const events: string[] = []
+    let sleepCalls = 0
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'GET') {
+        events.push('hooks-list')
+        return Response.json([])
+      }
+      if (url.includes('/repos/acme/widgets/hooks') && method === 'POST') {
+        events.push('hooks-create')
+        return Response.json({ id: 42 }, { status: 201 })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets']),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger: silentLogger(),
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
+      sleep: async () => {
+        sleepCalls += 1
+      },
+    })
+
+    await adapter.start()
+    await adapter.stop()
+
+    expect(sleepCalls).toBe(0)
+    expect(events).toEqual(['hooks-list', 'hooks-create'])
   })
 })
