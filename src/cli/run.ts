@@ -49,20 +49,39 @@ export const run = defineCommand({
       initialPrompt: args.prompt,
     })
 
-    const onSignal = () => {
-      stop()
-      process.exit(0)
+    const exit = (code: number): void => {
+      process.exit(code)
+    }
+    const onSignal = (): void => {
+      void shutdown({ stop, exit })
     }
     process.once('SIGINT', onSignal)
     process.once('SIGTERM', onSignal)
 
     if (tuiPromise) {
       await tuiPromise
-      stop()
-      process.exit(0)
+      await shutdown({ stop, exit })
     }
   },
 })
+
+// Awaits `stop()` BEFORE exiting so async teardown side-effects (channel
+// adapter teardown, in particular GitHub webhook deregistration) actually
+// complete. The previous code called `stop()` without awaiting and then
+// `process.exit(0)` synchronously, so the in-process DELETE /repos/.../hooks/
+// requests never went out and webhooks survived `typeclaw stop` (which
+// `docker stop`s the container → SIGTERM).
+export async function shutdown(deps: {
+  stop: () => void | Promise<void>
+  exit: (code: number) => void
+}): Promise<void> {
+  try {
+    await deps.stop()
+    deps.exit(0)
+  } catch {
+    deps.exit(1)
+  }
+}
 
 function resolveAttachTui({
   tui,
