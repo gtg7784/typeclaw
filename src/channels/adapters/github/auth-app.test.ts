@@ -214,6 +214,60 @@ describe('AppAuthStrategy', () => {
 
     await expect(strategy.getSelf()).rejects.toThrow(/bot user lookup failed: 401/i)
   })
+
+  it('reads installation permissions and events via GET /app/installations/{id}', async () => {
+    const calls: string[] = []
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: privateKeyPem },
+      installationId: 99,
+      fetchImpl: fakeFetch(async (url) => {
+        calls.push(String(url))
+        return Response.json({
+          permissions: { issues: 'write', metadata: 'read' },
+          events: ['issues', 'issue_comment'],
+        })
+      }),
+    })
+
+    const grants = await strategy.getInstallationGrants()
+
+    expect(grants).toEqual({
+      permissions: { issues: 'write', metadata: 'read' },
+      events: ['issues', 'issue_comment'],
+    })
+    expect(calls).toEqual(['https://api.github.com/app/installations/99'])
+  })
+
+  it('filters unknown permission levels and non-string events out of the grants', async () => {
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: privateKeyPem },
+      installationId: 99,
+      fetchImpl: fakeFetch(async () =>
+        Response.json({
+          permissions: { issues: 'write', metadata: 'read', mystery: 'banana' },
+          events: ['issues', 42, null],
+        }),
+      ),
+    })
+
+    const grants = await strategy.getInstallationGrants()
+
+    expect(grants.permissions).toEqual({ issues: 'write', metadata: 'read' })
+    expect(grants.events).toEqual(['issues'])
+  })
+
+  it('throws when the installation lookup fails', async () => {
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: privateKeyPem },
+      installationId: 99,
+      fetchImpl: fakeFetch(async () => new Response('boom', { status: 500 })),
+    })
+
+    await expect(strategy.getInstallationGrants()).rejects.toThrow(/installation fetch failed: 500/i)
+  })
 })
 
 function fakeFetch(handler: (url: RequestInfo | URL, init?: RequestInit) => Promise<Response>): typeof fetch {
