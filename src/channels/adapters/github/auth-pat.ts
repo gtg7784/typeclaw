@@ -40,8 +40,11 @@ export class PatAuthStrategy implements GithubAuthStrategy {
 }
 
 export function githubJsonHeaders(token: string): HeadersInit {
+  return { ...githubPublicHeaders(), Authorization: `Bearer ${token}` }
+}
+
+export function githubPublicHeaders(): HeadersInit {
   return {
-    Authorization: `Bearer ${token}`,
     Accept: 'application/vnd.github+json',
     'Content-Type': 'application/json',
     'X-GitHub-Api-Version': '2022-11-28',
