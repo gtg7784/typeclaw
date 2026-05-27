@@ -41,6 +41,17 @@ export type GithubAdapterOptions = {
   // wrong)" so the skip-registration log can be precise and actionable.
   // Optional so tests that don't exercise the tunnel-status path can omit it.
   tunnelConfiguredForChannel?: () => boolean
+  // Sleep between learning the public webhook URL and telling GitHub about
+  // it. cloudflared prints the trycloudflare.com URL as soon as the control
+  // connection comes up, but the Cloudflare edge needs a beat to start
+  // routing traffic for that hostname. If we register with GitHub the
+  // instant we know the URL, GitHub's automatic `ping` delivery races the
+  // edge and lands "failed to connect to host". 2s is enough on every
+  // network we've tested; tests pass 0 to skip.
+  webhookRegistrationDelayMs?: number
+  // Test-only: replaces the wall-clock sleep used for the registration
+  // delay above. Production leaves it undefined and we use `setTimeout`.
+  sleep?: (ms: number) => Promise<void>
 }
 
 export type GithubAdapter = {
@@ -55,9 +66,13 @@ const consoleLogger: GithubAdapterLogger = {
   error: (m) => console.error(m),
 }
 
+const DEFAULT_WEBHOOK_REGISTRATION_DELAY_MS = 2_000
+
 export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapter {
   const logger = options.logger ?? consoleLogger
   const fetchImpl = options.fetchImpl ?? fetch
+  const webhookRegistrationDelayMs = options.webhookRegistrationDelayMs ?? DEFAULT_WEBHOOK_REGISTRATION_DELAY_MS
+  const sleep = options.sleep ?? defaultSleep
   const auth = buildAuthStrategy({ auth: options.secrets.auth, fetchImpl })
   const webhookSecret = resolveSecret(options.secrets.webhookSecret, undefined, process.env)
   if (webhookSecret === undefined || webhookSecret.trim() === '') throw new Error('GitHub webhookSecret is missing')
@@ -178,6 +193,12 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         })
       } else if (repos.length > 0) {
         const legacyProviderHostSuffix = detectLegacyProviderHostSuffix(effectiveUrl)
+        if (webhookRegistrationDelayMs > 0) {
+          logger.info(
+            `[github] waiting ${webhookRegistrationDelayMs}ms before registering webhook so the Cloudflare edge can warm up`,
+          )
+          await sleep(webhookRegistrationDelayMs)
+        }
         const registration = await registerGithubWebhooks({
           token: tokenFn,
           webhookUrl: effectiveUrl,
@@ -333,4 +354,8 @@ function logDeregistrationOutcome(
     else if (h.action === 'missing') logger.info(`[github] webhook ${h.hookId} on ${h.repo} already gone`)
     else logger.warn(`[github] webhook detach failed for ${h.repo}#${h.hookId}: ${h.error ?? 'unknown error'}`)
   }
+}
+
+function defaultSleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
