@@ -50,6 +50,14 @@ describe('discoverAgents', () => {
     expect(discoverAgents(root).map((a) => a.name)).toEqual(['coder'])
   })
 
+  test('skips underscore-prefixed directories', async () => {
+    await makeAgent(root, 'coder')
+    await makeAgent(root, '_archived-coder')
+    await makeAgent(root, '_wip')
+
+    expect(discoverAgents(root).map((a) => a.name)).toEqual(['coder'])
+  })
+
   test('ignores files at the compose root, even if named typeclaw.json', async () => {
     await writeFile(join(root, 'typeclaw.json'), '{}\n')
     await makeAgent(root, 'coder')
