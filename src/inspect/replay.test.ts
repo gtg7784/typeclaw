@@ -163,6 +163,49 @@ describe('replayLines', () => {
     expect(done0.cost).toBe(0.0012)
   })
 
+  test('message events use the JSONL entry timestamp over the nested provider timestamp', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            timestamp: '2026-05-27T05:38:47.773Z',
+            message: {
+              role: 'assistant',
+              content: [
+                { type: 'thinking', thinking: 'ready' },
+                { type: 'toolCall', id: 'c1', name: 'channel_reply', arguments: { text: 'ack' } },
+              ],
+              stopReason: 'toolUse',
+              usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { total: 0 } },
+              timestamp: 1779860021370,
+            },
+          }),
+          JSON.stringify({
+            type: 'message',
+            timestamp: '2026-05-27T05:38:48.506Z',
+            message: {
+              role: 'toolResult',
+              toolCallId: 'c1',
+              toolName: 'channel_reply',
+              content: [{ type: 'text', text: 'posted' }],
+              isError: false,
+              timestamp: 1779860021370,
+            },
+          }),
+        ]),
+      ),
+    )
+
+    const expectedStart = Date.parse('2026-05-27T05:38:47.773Z')
+    const expectedEnd = Date.parse('2026-05-27T05:38:48.506Z')
+    expect(events.map((event) => event.ts)).toEqual([expectedStart, expectedStart, expectedStart, expectedEnd])
+
+    const toolEnd = events[3]!
+    if (toolEnd.cat !== 'tool' || toolEnd.phase !== 'end') throw new Error('expected tool end')
+    expect(toolEnd.durationMs).toBe(expectedEnd - expectedStart)
+  })
+
   test('assistant turn with zero usage and no stopReason yields no done event (avoids noisy "(no usage)" lines on tool-result turns)', async () => {
     const events = await collect(
       replayLines(

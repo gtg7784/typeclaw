@@ -66,7 +66,7 @@ function* eventsFromEntry(
   if (!isMessageEntry(entry)) return
   const message = entry.message
   const role = message.role
-  const ts = numberOr(readField(message, 'timestamp'), 0)
+  const ts = entryTimestampMs(entry, message)
   if (role === 'user') {
     const text = readTextContent(message.content)
     if (text !== null) yield { cat: 'user', ts, text }
@@ -217,6 +217,20 @@ function readUsage(value: unknown): {
     totalTokens: numberOr(u.totalTokens, 0),
     cost: numberOr(cost?.total, 0),
   }
+}
+
+function entryTimestampMs(
+  entry: { type: 'message'; message: { role: string; [k: string]: unknown } },
+  message: { role: string; [k: string]: unknown },
+): number {
+  return timestampMs(readField(entry, 'timestamp')) ?? timestampMs(readField(message, 'timestamp')) ?? 0
+}
+
+function timestampMs(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value !== 'string' || value === '') return null
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function* readThinkingEvents(content: unknown, ts: number): Iterable<InspectEvent> {
