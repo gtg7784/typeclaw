@@ -62,6 +62,15 @@ export const TYPING_HEARTBEAT_MS = 8000
 // platform-side typing forever. Slack Assistant status in particular has a
 // documented 2-minute timeout, so repeatedly refreshing it after that point
 // turns a temporary status into a permanent-looking artifact.
+//
+// The cap is measured from `live.typingStartedAt`, which is refreshed by
+// two signals of life (see `bumpTypingActivity`):
+//   1. Each new `drain()` iteration (a new turn is starting).
+//   2. Each `tool_execution_end` from the agent session (a tool just
+//      completed — the prompt is progressing, not stuck).
+// A 2-minute bash command that emits no intermediate events still trips
+// the cap, but a chatty agent running long tools stays under it
+// indefinitely. The cap exists to catch *silence*, not duration.
 export const MAX_TYPING_HEARTBEAT_MS = 2 * 60 * 1000
 
 // Idle GC: a LiveSession whose `lastInboundAt` is older than
@@ -361,6 +370,7 @@ type LiveSession = {
   membershipFetch: Promise<MembershipCount | null> | null
   destroyed: boolean
   unsubProviderErrors: (() => void) | null
+  unsubTypingActivity: (() => void) | null
 }
 
 // `event` is null for command invocations that originated outside the inbound
@@ -1000,10 +1010,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         membershipFetch,
         destroyed: false,
         unsubProviderErrors: null,
+        unsubTypingActivity: null,
       }
       live.unsubProviderErrors = subscribeProviderErrors(created.session, (err) => {
         logger.error(`[channels] ${live.keyId}: LLM call failed: ${err.message}`)
       })
+      live.unsubTypingActivity = subscribeTypingActivity(created.session, live)
       liveSessions.set(keyId, live)
 
       if (isColdStart) {
@@ -1149,9 +1161,25 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     )
   }
 
+  const bumpTypingActivity = (live: LiveSession): void => {
+    if (live.typingTimer === null) return
+    live.typingStartedAt = now()
+  }
+
+  const subscribeTypingActivity = (session: AgentSession, live: LiveSession): (() => void) => {
+    return session.subscribe((event) => {
+      if (event.type !== 'tool_execution_end') return
+      bumpTypingActivity(live)
+    })
+  }
+
   const startTypingHeartbeat = (live: LiveSession): void => {
     if (live.typingTimedOut || live.typingStopPromise) return
-    if (live.typingTimer || live.destroyed) return
+    if (live.destroyed) return
+    if (live.typingTimer) {
+      bumpTypingActivity(live)
+      return
+    }
     live.typingStartedAt = now()
     // Fire immediately so the indicator appears on the very first inbound,
     // not 8 seconds later.
@@ -1163,7 +1191,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       }
       if (now() - live.typingStartedAt >= MAX_TYPING_HEARTBEAT_MS) {
         logger.warn(
-          `[channels] ${live.keyId}: typing indicator paused after ${MAX_TYPING_HEARTBEAT_MS}ms; prompt still in flight`,
+          `[channels] ${live.keyId}: typing indicator paused after ${MAX_TYPING_HEARTBEAT_MS}ms with no activity; prompt still in flight`,
         )
         live.typingTimedOut = true
         void stopTypingHeartbeat(live)
@@ -2029,6 +2057,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     live.debounceTimer = null
     live.unsubProviderErrors?.()
     live.unsubProviderErrors = null
+    live.unsubTypingActivity?.()
+    live.unsubTypingActivity = null
     await stopTypingHeartbeat(live)
     try {
       await live.session.abort()
@@ -2235,7 +2265,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         }
         if (now() - live.typingStartedAt >= MAX_TYPING_HEARTBEAT_MS) {
           logger.warn(
-            `[channels] ${live.keyId}: typing indicator paused after ${MAX_TYPING_HEARTBEAT_MS}ms; prompt still in flight`,
+            `[channels] ${live.keyId}: typing indicator paused after ${MAX_TYPING_HEARTBEAT_MS}ms with no activity; prompt still in flight`,
           )
           live.typingTimedOut = true
           await stopTypingHeartbeat(live)

@@ -53,7 +53,7 @@ class FakeSession {
     getEntry: (id: string): SessionEntry | undefined => this.entriesById.get(id),
   }
 
-  private subscribers = new Set<(event: { type: string; message?: unknown }) => void>()
+  private subscribers = new Set<(event: Record<string, unknown> & { type: string }) => void>()
 
   prompt = async (text: string): Promise<void> => {
     this.prompts.push(text)
@@ -65,11 +65,11 @@ class FakeSession {
   dispose = (): void => {
     this.disposed++
   }
-  subscribe = (cb: (event: { type: string; message?: unknown }) => void): (() => void) => {
+  subscribe = (cb: (event: Record<string, unknown> & { type: string }) => void): (() => void) => {
     this.subscribers.add(cb)
     return () => this.subscribers.delete(cb)
   }
-  emit = (event: { type: string; message?: unknown }): void => {
+  emit = (event: Record<string, unknown> & { type: string }): void => {
     for (const cb of this.subscribers) cb(event)
   }
 
@@ -3121,6 +3121,188 @@ describe('ChannelRouter typing indicator', () => {
     await router.route(inbound({ thread: 'thread-7', text: 'hi bot' }))
     await router.__testing!.flushDebounce({ ...KEY, thread: 'thread-7' })
     expect(stopTargets).toEqual([{ chat: 'c1', thread: 'thread-7' }])
+  })
+
+  test('tool_execution_end resets the heartbeat clock so a long but progressing prompt keeps typing alive', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { nowRef, logs })
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+
+    await router.route(inbound({ text: 'long task' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    // given: time advances to the very edge of the cap, but a tool just finished
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS - 1
+    sessions[0]!.emit({ type: 'tool_execution_end', toolCallId: 'c1', toolName: 'bash', result: 'ok', isError: false })
+    // when: we now step past the original cap; the timer should NOT trip
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS + 100
+    await router.__testing!.fireTypingInterval(KEY)
+
+    // then: still active, still ticking, no cap warning logged
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    expect(phases.at(-1)).toBe('tick')
+    expect(logs.some((m) => m.includes('typing indicator paused'))).toBe(false)
+
+    releasePrompt!()
+    await draining
+  })
+
+  test('cap still fires after MAX_TYPING_HEARTBEAT_MS of pure silence (no tool events)', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { nowRef, logs })
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+
+    await router.route(inbound({ text: 'silent task' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
+    await router.__testing!.fireTypingInterval(KEY)
+
+    expect(phases).toEqual(['tick', 'stop'])
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+    expect(logs.some((m) => m.includes('typing indicator paused') && m.includes('no activity'))).toBe(true)
+
+    releasePrompt!()
+    await draining
+  })
+
+  test('multiple tool_execution_end events repeatedly push the cap forward', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async () => {})
+
+    await router.route(inbound({ text: 'multi-tool task' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    // given: three tools finish at the cap edge, one after another
+    for (let i = 0; i < 3; i++) {
+      nowRef.value += MAX_TYPING_HEARTBEAT_MS - 1
+      sessions[0]!.emit({
+        type: 'tool_execution_end',
+        toolCallId: `c${i}`,
+        toolName: 'bash',
+        result: 'ok',
+        isError: false,
+      })
+      await router.__testing!.fireTypingInterval(KEY)
+      expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+    }
+
+    releasePrompt!()
+    await draining
+  })
+
+  test('tool_execution_end after the cap has already tripped does NOT resurrect typing', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    const phases: Array<'tick' | 'stop'> = []
+    let releasePrompt: (() => void) | undefined
+    router.registerTyping('discord-bot', async (target) => {
+      phases.push(target.phase)
+    })
+
+    await router.route(inbound({ text: 'silent then loud' }))
+    sessions[0]!.onPrompt = async () => {
+      await new Promise<void>((resolve) => {
+        releasePrompt = resolve
+      })
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releasePrompt !== undefined)
+
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS
+    await router.__testing!.fireTypingInterval(KEY)
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+
+    sessions[0]!.emit({
+      type: 'tool_execution_end',
+      toolCallId: 'late',
+      toolName: 'bash',
+      result: 'ok',
+      isError: false,
+    })
+    expect(router.__testing!.isTypingActive(KEY)).toBe(false)
+    expect(phases).toEqual(['tick', 'stop'])
+
+    releasePrompt!()
+    await draining
+  })
+
+  test('a fresh drain iteration after a long prior turn refreshes the cap clock', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    let releaseFirstPrompt: (() => void) | undefined
+    let releaseSecondPrompt: (() => void) | undefined
+    let promptCount = 0
+    router.registerTyping('discord-bot', async () => {})
+
+    await router.route(inbound({ text: 'first' }))
+    sessions[0]!.onPrompt = async () => {
+      promptCount++
+      if (promptCount === 1) {
+        await new Promise<void>((resolve) => {
+          releaseFirstPrompt = resolve
+        })
+      } else {
+        await new Promise<void>((resolve) => {
+          releaseSecondPrompt = resolve
+        })
+      }
+    }
+    const draining = router.__testing!.flushDebounce(KEY)
+    await waitFor(() => releaseFirstPrompt !== undefined)
+
+    // queue a second turn while the first is still in flight
+    await router.route(inbound({ text: 'second', externalMessageId: 'm2' }))
+
+    // advance most of the way through the cap, then complete the first turn
+    nowRef.value = 1000 + MAX_TYPING_HEARTBEAT_MS - 1000
+    releaseFirstPrompt!()
+    await waitFor(() => releaseSecondPrompt !== undefined)
+
+    // step past the ORIGINAL cap boundary; if we hadn't refreshed
+    // typingStartedAt at the top of the second drain iteration, this
+    // would have tripped the cap.
+    nowRef.value += 2000
+    await router.__testing!.fireTypingInterval(KEY)
+    expect(router.__testing!.isTypingActive(KEY)).toBe(true)
+
+    releaseSecondPrompt!()
+    await draining
   })
 })
 
