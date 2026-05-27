@@ -23,8 +23,10 @@ const CHANNEL_REPLY_NUDGE =
   'so end your turn via `channel_reply` (or `channel_send`) to surface the result. ' +
   'Plain-text output is invisible here. If you spawned this subagent to answer a user, ' +
   'this is the turn where that promised reply lands — fetch the result via `subagent_output` ' +
-  'and send it. `NO_REPLY` is only correct when the result is genuinely empty or duplicates ' +
-  'something you already replied with in this conversation.'
+  'and send it. If the result is genuinely empty or duplicates something you already replied ' +
+  'with in this conversation, call `skip_response({ reason: "..." })` instead so the operator ' +
+  'can see why the post-completion turn was silent. `NO_REPLY` is the legacy fallback only when ' +
+  '`skip_response` is unavailable.'
 
 export function renderSubagentCompletionReminder(args: CompletionReminderArgs): string {
   const durationStr = formatReminderDuration(args.durationMs)

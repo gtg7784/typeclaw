@@ -70,7 +70,13 @@ describe('renderSubagentCompletionReminder', () => {
     })
     expect(text).toMatch(/promised reply lands/i)
     expect(text).toContain('subagent_output')
-    expect(text).toMatch(/`NO_REPLY` is only correct when the result is genuinely empty/i)
+    // The "empty / duplicate" silent-turn carve-out now points at
+    // skip_response (structured, logs reason) with NO_REPLY as legacy
+    // fallback. Pin BOTH phrases so a future refactor that drops one
+    // surfaces here instead of silently regressing the guidance.
+    expect(text).toContain('skip_response')
+    expect(text).toMatch(/genuinely empty or duplicates/i)
+    expect(text).toContain('legacy fallback')
   })
 
   test('channel=true on a FAILED reminder also appends the nudge (failure still needs surfacing)', () => {
