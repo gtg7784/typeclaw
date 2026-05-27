@@ -1,3 +1,5 @@
+import { createPrivateKey } from 'node:crypto'
+
 import { resolveSecret, type Secret } from '@/secrets/resolve'
 
 import type { GithubAuthStrategy, GithubSelfUser } from './auth'
@@ -111,10 +113,31 @@ function base64url(input: string | Buffer): string {
 }
 
 async function importRsaPrivateKey(pem: string): Promise<CryptoKey> {
-  const b64 = pem
-    .replace(/-----BEGIN [^-]+-----/, '')
-    .replace(/-----END [^-]+-----/, '')
-    .replace(/\s/g, '')
-  const der = Buffer.from(b64, 'base64')
-  return await crypto.subtle.importKey('pkcs8', der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['sign'])
+  // GitHub's "Generate a private key" button hands out PKCS#1 (`-----BEGIN RSA PRIVATE KEY-----`),
+  // but WebCrypto's importKey only accepts PKCS#8. Round-trip through node:crypto, which accepts
+  // both PKCS#1 and PKCS#8 PEM, then re-export as PKCS#8 DER for WebCrypto.
+  const pkcs8Der = pemToPkcs8Der(pem)
+  return await crypto.subtle.importKey('pkcs8', pkcs8Der, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, [
+    'sign',
+  ])
+}
+
+function pemToPkcs8Der(pem: string): ArrayBuffer {
+  if (/-----BEGIN ENCRYPTED PRIVATE KEY-----/.test(pem)) {
+    throw new Error('GitHub App private key is encrypted; provide an unencrypted PEM')
+  }
+  let keyObject
+  try {
+    keyObject = createPrivateKey({ key: pem, format: 'pem' })
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`GitHub App private key is invalid: ${message}`)
+  }
+  if (keyObject.asymmetricKeyType !== 'rsa') {
+    throw new Error(`GitHub App private key must be RSA, got ${keyObject.asymmetricKeyType ?? 'unknown'}`)
+  }
+  const der = keyObject.export({ type: 'pkcs8', format: 'der' })
+  const out = new ArrayBuffer(der.byteLength)
+  new Uint8Array(out).set(der)
+  return out
 }

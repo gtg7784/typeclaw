@@ -6,12 +6,14 @@ import { AppAuthStrategy } from './auth-app'
 const fixedNow = Date.parse('2026-05-18T12:00:00Z')
 
 let privateKeyPem = ''
+let privateKeyPkcs1Pem = ''
 let publicKeyPem = ''
 let originalNow: () => number
 
 beforeAll(() => {
   const pair = generateKeyPairSync('rsa', { modulusLength: 2048 })
   privateKeyPem = pair.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString()
+  privateKeyPkcs1Pem = pair.privateKey.export({ type: 'pkcs1', format: 'pem' }).toString()
   publicKeyPem = pair.publicKey.export({ type: 'spki', format: 'pem' }).toString()
 })
 
@@ -118,6 +120,51 @@ describe('AppAuthStrategy', () => {
     })
 
     await expect(strategy.token()).rejects.toThrow(/multiple installations \(11, 22\)/i)
+  })
+
+  it('accepts PKCS#1 RSA private keys (the format GitHub hands out by default)', async () => {
+    let jwt = ''
+    const strategy = new AppAuthStrategy({
+      appId: 12345,
+      privateKey: { value: privateKeyPkcs1Pem },
+      installationId: 67890,
+      fetchImpl: fakeFetch(async (_url, init) => {
+        jwt = bearerToken(init)
+        return Response.json({ token: 'installation-token', expires_at: '2026-05-18T13:00:00Z' })
+      }),
+    })
+
+    await strategy.token()
+
+    expect(privateKeyPkcs1Pem).toContain('-----BEGIN RSA PRIVATE KEY-----')
+    expect(verifyJwtSignature(jwt)).toBe(true)
+  })
+
+  it('rejects encrypted private keys with a clear message', async () => {
+    const encryptedPem = generateKeyPairSync('rsa', {
+      modulusLength: 2048,
+      privateKeyEncoding: { type: 'pkcs8', format: 'pem', cipher: 'aes-256-cbc', passphrase: 'topsecret' },
+    }).privateKey
+
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: encryptedPem },
+      installationId: 99,
+      fetchImpl: fakeFetch(async () => new Response('unreachable', { status: 500 })),
+    })
+
+    await expect(strategy.token()).rejects.toThrow(/encrypted/i)
+  })
+
+  it('rejects malformed PEM input with a descriptive error', async () => {
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: '-----BEGIN RSA PRIVATE KEY-----\nnot-base64\n-----END RSA PRIVATE KEY-----\n' },
+      installationId: 99,
+      fetchImpl: fakeFetch(async () => new Response('unreachable', { status: 500 })),
+    })
+
+    await expect(strategy.token()).rejects.toThrow(/invalid/i)
   })
 
   it('resolves and caches the GitHub App bot user', async () => {
