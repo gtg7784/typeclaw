@@ -671,6 +671,8 @@ function dropHint(reason: InboundDropReason): string {
   switch (reason) {
     case 'unknown_chat':
       return ' (chat not in cache after refresh and provisional registration; check earlier resolver-refresh-failed warnings)'
+    case 'bot_message':
+      return ' (LOCO message_type=71 is KakaoTalk notification/feed; official accounts like 카카오 고객센터 / 카카오계정 / login alerts)'
     case 'empty_text':
     case 'pre_connect':
     case 'self_author':
