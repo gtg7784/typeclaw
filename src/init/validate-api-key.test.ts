@@ -35,6 +35,61 @@ describe('validateApiKey', () => {
     expect(result).toEqual({ kind: 'rejected', status: 401 })
   })
 
+  test('accepts a Fireworks Fire Pass key whose 403 body carries the FORBIDDEN/Fire Pass marker', async () => {
+    const firePassBody = JSON.stringify({
+      error: {
+        message: 'Fire Pass API keys are not authorized for this route.',
+        code: 'FORBIDDEN',
+        type: 'error',
+      },
+    })
+    const result = await validateApiKey(
+      'fireworks',
+      'fpk_test',
+      fakeFetch((url, init) => {
+        expect(url).toBe('https://api.fireworks.ai/inference/v1/models')
+        expect((init.headers as Record<string, string>).Authorization).toBe('Bearer fpk_test')
+        return new Response(firePassBody, { status: 403 })
+      }),
+    )
+    expect(result).toEqual({ kind: 'ok' })
+  })
+
+  test('rejects a Fireworks 403 that is not the Fire Pass marker (e.g. genuinely forbidden)', async () => {
+    const result = await validateApiKey(
+      'fireworks',
+      'fw_test',
+      fakeFetch(() => new Response('{"error":{"message":"forbidden","code":"FORBIDDEN"}}', { status: 403 })),
+    )
+    expect(result).toEqual({ kind: 'rejected', status: 403 })
+  })
+
+  test('does not apply the Fire Pass exception to non-Fireworks providers', async () => {
+    const firePassBody = JSON.stringify({
+      error: { message: 'Fire Pass API keys are not authorized for this route.', code: 'FORBIDDEN' },
+    })
+    const result = await validateApiKey(
+      'openai',
+      'sk-test',
+      fakeFetch(() => new Response(firePassBody, { status: 403 })),
+    )
+    expect(result).toEqual({ kind: 'rejected', status: 403 })
+  })
+
+  test('rejects a Fireworks 401 even if the body somehow mentions Fire Pass', async () => {
+    const result = await validateApiKey(
+      'fireworks',
+      'fpk_bad',
+      fakeFetch(
+        () =>
+          new Response('{"error":{"message":"Fire Pass key invalid","code":"UNAUTHORIZED"}}', {
+            status: 401,
+          }),
+      ),
+    )
+    expect(result).toEqual({ kind: 'rejected', status: 401 })
+  })
+
   test('uses x-api-key + anthropic-version for Anthropic', async () => {
     let seenHeaders: Record<string, string> | null = null
     await validateApiKey(
