@@ -1,5 +1,4 @@
 import { randomBytes } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 
 import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
@@ -36,6 +35,7 @@ import { makeOAuthLoginRunner, type OAuthLoginResult } from '@/init/oauth-login'
 import { API_KEY_DASHBOARD_URL, validateApiKey, type KeyValidationResult } from '@/init/validate-api-key'
 
 import { buildOAuthCallbacks } from './oauth-callbacks'
+import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
 import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup } from './ui'
 
 // ESC and Ctrl+C both produce clack's cancel symbol (the keypress layer
@@ -1300,11 +1300,8 @@ async function promptGithubAppAuth(): Promise<{
     validate: (v) => validatePositiveInteger(v ?? '', 'App ID is required'),
   })
   if (isCancel(appId)) return null
-  const privateKeyInput = await text({
-    message: 'GitHub App private key PEM, escaped PEM, or path to .pem file',
-    validate: (v) => (v && v.length > 0 ? undefined : 'Private key is required'),
-  })
-  if (isCancel(privateKeyInput)) return null
+  const privateKey = await promptPrivateKeyPem('GitHub App private key PEM, escaped PEM, or path to .pem file')
+  if (privateKey === CANCEL_SYMBOL) return null
   const installationId = await text({
     message: 'Installation ID (optional; leave blank to auto-discover)',
     validate: (v) =>
@@ -1315,15 +1312,9 @@ async function promptGithubAppAuth(): Promise<{
   return {
     type: 'app',
     appId: Number(appId),
-    privateKey: await resolveGithubPrivateKey(privateKeyInput),
+    privateKey,
     ...(parsedInstallationId !== undefined ? { installationId: parsedInstallationId } : {}),
   }
-}
-
-async function resolveGithubPrivateKey(input: string): Promise<string> {
-  const normalized = input.replace(/\\n/g, '\n')
-  if (normalized.includes('-----BEGIN') && normalized.includes('PRIVATE KEY-----')) return normalized
-  return await readFile(input, 'utf8')
 }
 
 function parseGithubRepos(input: string): string[] {
