@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { buildPermissionGuidance, parseListHooksPermissionStatus } from './index'
+import { buildPermissionGuidance, parseListHooksPermissionStatus } from './permission-guidance'
 
 describe('parseListHooksPermissionStatus', () => {
   test('returns 404 for a 404 list-hooks error', () => {
