@@ -7,12 +7,51 @@ export type CodexFetchObserverOptions = {
   logger?: CodexFetchObserverLogger
   codexHost?: string
   now?: () => number
+  // Override the default pre-headers (TTFB) deadline applied to the outer
+  // fetch(). When the codex backend silently holds a request without sending
+  // response headers, this is the timer that releases the request so
+  // `pi-coding-agent`'s `_isRetryableError` can retry. Default: 15_000 ms.
+  //
+  // Healthy Codex turns return response headers within ~1s (observed
+  // production p50: ~860ms). The first SSE event (`response.created`) is
+  // emitted before any model work begins and arrives within ~50ms of
+  // headers. Pathological-but-healthy upper bounds: TLS handshake on a cold
+  // connection (~2s), prompt-prefill on a cache miss with large input
+  // (~3s), Cloudflare PoP routing slowness (~2s) — sum ~7s. 15s is ~2x
+  // that, so anything past it is almost certainly the silent-hang failure
+  // mode rather than a real request making progress. False-positive cost
+  // is one retry (~5s extra); false-negative cost is the full Bun socket
+  // deadline (~268s). Aggressive wins.
+  ttfbMs?: number
+  // Override the sliding inter-chunk idle deadline applied to the SSE body
+  // reader. Resets on every chunk; if no bytes arrive within this window the
+  // body stream errors. Default: 300_000 ms, matches `openai/codex`'s Rust CLI
+  // `DEFAULT_STREAM_IDLE_TIMEOUT_MS`. Set to 0 to disable just this timer.
+  idleMs?: number
+  // Schedule fn for tests. Receives (delayMs, callback) and returns a handle
+  // the wrapper can pass to `clear`. Default: `setTimeout`/`clearTimeout`.
+  scheduler?: TimeoutScheduler
+}
+
+export type TimeoutScheduler = {
+  set: (delayMs: number, cb: () => void) => unknown
+  clear: (handle: unknown) => void
 }
 
 const DEFAULT_CODEX_HOST = 'chatgpt.com'
 const CODEX_PATH_FRAGMENT = '/codex/responses'
-const ENV_DISABLE = 'TYPECLAW_CODEX_FETCH_OBSERVER'
+const ENV_DISABLE_OBSERVER = 'TYPECLAW_CODEX_FETCH_OBSERVER'
+const ENV_DISABLE_TIMEOUTS = 'TYPECLAW_CODEX_TIMEOUTS'
+const ENV_TTFB_MS = 'TYPECLAW_CODEX_TTFB_MS'
+const ENV_IDLE_MS = 'TYPECLAW_CODEX_IDLE_MS'
+const DEFAULT_TTFB_MS = 15_000
+const DEFAULT_IDLE_MS = 300_000
 const LOG_PREFIX = '[codex-fetch]'
+
+const defaultScheduler: TimeoutScheduler = {
+  set: (delayMs, cb) => setTimeout(cb, delayMs),
+  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+}
 
 const consoleLogger: CodexFetchObserverLogger = {
   info: (m) => console.log(m),
@@ -61,6 +100,7 @@ function formatLine(fields: {
   retryAfter: string | null
   requestId: string | null
   error: string | null
+  cause: string | null
 }): string {
   return [
     LOG_PREFIX,
@@ -72,7 +112,21 @@ function formatLine(fields: {
     `retry_after=${fields.retryAfter === null ? 'null' : fields.retryAfter}`,
     `request_id=${fields.requestId === null ? 'null' : fields.requestId}`,
     `error=${quote(fields.error)}`,
+    `cause=${fields.cause === null ? 'null' : fields.cause}`,
   ].join(' ')
+}
+
+function readEnvMs(name: string, fallback: number): number {
+  const raw = process.env[name]
+  if (raw === undefined || raw === '') return fallback
+  const parsed = Number.parseInt(raw, 10)
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback
+  return parsed
+}
+
+type BodyTapConfig = {
+  idleMs: number
+  scheduler: TimeoutScheduler
 }
 
 function attachBodyTimingTap(
@@ -84,6 +138,7 @@ function attachBodyTimingTap(
   requestId: string | null,
   now: () => number,
   logger: CodexFetchObserverLogger,
+  config: BodyTapConfig,
 ): Response {
   if (response.body === null) {
     logger.info(
@@ -96,6 +151,7 @@ function attachBodyTimingTap(
         retryAfter,
         requestId,
         error: null,
+        cause: null,
       }),
     )
     return response
@@ -104,6 +160,7 @@ function attachBodyTimingTap(
   let firstByteMs: number | null = null
   let bodyBytes = 0
   let settled = false
+  let cause: string | null = null
 
   const settle = (error: string | null) => {
     if (settled) return
@@ -118,6 +175,7 @@ function attachBodyTimingTap(
         retryAfter,
         requestId,
         error,
+        cause,
       }),
     )
   }
@@ -135,24 +193,57 @@ function attachBodyTimingTap(
 
   const piped = response.body.pipeThrough(tap, { preventCancel: false })
 
-  // We can't observe a `cancel()` on the downstream consumer directly from
-  // the TransformStream, but pipeThrough propagates cancellation to the
-  // source, which terminates the readable side; the `flush` callback fires
-  // on a clean close, and any error surfaces by aborting the piped stream's
-  // reader. The consumer-facing stream below adds an explicit cancel hook.
+  const idleController = config.idleMs > 0 ? new AbortController() : null
+  let idleHandle: unknown = null
+  const armIdleTimer = () => {
+    if (idleController === null) return
+    if (idleHandle !== null) config.scheduler.clear(idleHandle)
+    idleHandle = config.scheduler.set(config.idleMs, () => {
+      cause = 'idle_timeout'
+      idleController.abort(new Error(`Codex SSE body idle for ${config.idleMs}ms (typeclaw observer timeout)`))
+    })
+  }
+  const disarmIdleTimer = () => {
+    if (idleHandle !== null) {
+      config.scheduler.clear(idleHandle)
+      idleHandle = null
+    }
+  }
+
   const observerBody = new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = piped.getReader()
+      armIdleTimer()
       try {
         while (true) {
-          const { done, value } = await reader.read()
+          let abortFired = false
+          const abortPromise = idleController
+            ? new Promise<never>((_, reject) => {
+                const onAbort = () => {
+                  abortFired = true
+                  reject(idleController.signal.reason ?? new Error('idle timeout'))
+                }
+                if (idleController.signal.aborted) onAbort()
+                else idleController.signal.addEventListener('abort', onAbort, { once: true })
+              })
+            : null
+          const readPromise = reader.read()
+          const result = abortPromise ? await Promise.race([readPromise, abortPromise]) : await readPromise
+          if (abortFired) {
+            reader.cancel(idleController!.signal.reason).catch(() => {})
+            throw idleController!.signal.reason
+          }
+          const { done, value } = result
           if (done) {
+            disarmIdleTimer()
             controller.close()
             return
           }
+          armIdleTimer()
           controller.enqueue(value)
         }
       } catch (err) {
+        disarmIdleTimer()
         const message = err instanceof Error ? err.message : String(err)
         settle(message)
         controller.error(err)
@@ -161,6 +252,7 @@ function attachBodyTimingTap(
       }
     },
     cancel(reason) {
+      disarmIdleTimer()
       const message = reason === undefined ? 'cancelled' : reason instanceof Error ? reason.message : String(reason)
       settle(message)
     },
@@ -174,7 +266,7 @@ function attachBodyTimingTap(
 }
 
 export function installCodexFetchObserver(opts: CodexFetchObserverOptions = {}): () => void {
-  if (process.env[ENV_DISABLE] === 'off') {
+  if (process.env[ENV_DISABLE_OBSERVER] === 'off') {
     return () => {}
   }
   const logger = opts.logger ?? consoleLogger
@@ -185,6 +277,10 @@ export function installCodexFetchObserver(opts: CodexFetchObserverOptions = {}):
 
   const codexHost = opts.codexHost ?? DEFAULT_CODEX_HOST
   const now = opts.now ?? Date.now
+  const scheduler = opts.scheduler ?? defaultScheduler
+  const timeoutsEnabled = process.env[ENV_DISABLE_TIMEOUTS] !== 'off'
+  const ttfbMs = timeoutsEnabled ? (opts.ttfbMs ?? readEnvMs(ENV_TTFB_MS, DEFAULT_TTFB_MS)) : 0
+  const idleMs = timeoutsEnabled ? (opts.idleMs ?? readEnvMs(ENV_IDLE_MS, DEFAULT_IDLE_MS)) : 0
   const originalFetch = globalThis.fetch
 
   const wrappedImpl = async (
@@ -195,11 +291,32 @@ export function installCodexFetchObserver(opts: CodexFetchObserverOptions = {}):
       return originalFetch(input, init)
     }
     const start = now()
+
+    let ttfbCause: 'ttfb_timeout' | null = null
+    let ttfbHandle: unknown = null
+    let initWithSignal: RequestInit | undefined = init
+    if (ttfbMs > 0) {
+      const ttfbController = new AbortController()
+      ttfbHandle = scheduler.set(ttfbMs, () => {
+        ttfbCause = 'ttfb_timeout'
+        ttfbController.abort(
+          new Error(`Codex fetch timed out before response headers after ${ttfbMs}ms (typeclaw observer timeout)`),
+        )
+      })
+      const signal = init?.signal ? AbortSignal.any([init.signal, ttfbController.signal]) : ttfbController.signal
+      initWithSignal = { ...init, signal }
+    }
+
     let response: Response
     try {
-      response = await originalFetch(input, init)
+      response = await originalFetch(input, initWithSignal)
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      if (ttfbHandle !== null) scheduler.clear(ttfbHandle)
+      const isTtfbAbort = ttfbCause === 'ttfb_timeout'
+      const surfacedError = isTtfbAbort
+        ? new Error(`Codex fetch timed out before response headers after ${ttfbMs}ms (typeclaw observer timeout)`)
+        : err
+      const message = surfacedError instanceof Error ? surfacedError.message : String(surfacedError)
       logger.info(
         formatLine({
           status: null,
@@ -210,14 +327,19 @@ export function installCodexFetchObserver(opts: CodexFetchObserverOptions = {}):
           retryAfter: null,
           requestId: null,
           error: message,
+          cause: ttfbCause,
         }),
       )
-      throw err
+      throw surfacedError
     }
+    if (ttfbHandle !== null) scheduler.clear(ttfbHandle)
     const headersMs = now() - start
     const retryAfter = response.headers.get('retry-after')
     const requestId = response.headers.get('x-request-id')
-    return attachBodyTimingTap(response, start, headersMs, response.status, retryAfter, requestId, now, logger)
+    return attachBodyTimingTap(response, start, headersMs, response.status, retryAfter, requestId, now, logger, {
+      idleMs,
+      scheduler,
+    })
   }
 
   // Preserve any static methods Bun attaches to `globalThis.fetch` (e.g.

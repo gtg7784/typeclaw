@@ -1,6 +1,40 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
-import { installCodexFetchObserver } from './codex-fetch-observer'
+import { installCodexFetchObserver, type TimeoutScheduler } from './codex-fetch-observer'
+
+// Programmable scheduler for tests. Tasks scheduled for time T fire when the
+// test calls `fire(T)`. Out-of-order T values (T must be monotonically
+// non-decreasing across calls) are not supported; tests advance time forward.
+function makeScheduler(): TimeoutScheduler & { fire: (t: number) => Promise<void>; pending: () => number } {
+  type Entry = { id: number; dueAt: number; cb: () => void; cancelled: boolean }
+  let counter = 0
+  let nowMs = 0
+  const entries: Entry[] = []
+  return {
+    set: (delayMs, cb) => {
+      const e: Entry = { id: ++counter, dueAt: nowMs + delayMs, cb, cancelled: false }
+      entries.push(e)
+      return e
+    },
+    clear: (handle) => {
+      const e = handle as Entry
+      e.cancelled = true
+    },
+    fire: async (t) => {
+      nowMs = t
+      const flush = () => new Promise<void>((r) => queueMicrotask(r))
+      while (true) {
+        const due = entries.find((e) => !e.cancelled && e.dueAt <= t)
+        if (!due) break
+        due.cancelled = true
+        due.cb()
+        await flush()
+        await flush()
+      }
+    },
+    pending: () => entries.filter((e) => !e.cancelled).length,
+  }
+}
 
 type LogEntry = { level: 'info' | 'warn'; msg: string }
 
@@ -90,13 +124,19 @@ const originalFetch = globalThis.fetch
 
 describe('installCodexFetchObserver', () => {
   beforeEach(() => {
-    // Tests can mutate globalThis.fetch; reset to the platform default each
-    // time so a misbehaving test doesn't leak into the next.
     globalThis.fetch = originalFetch
+    delete process.env.TYPECLAW_CODEX_TIMEOUTS
+    delete process.env.TYPECLAW_CODEX_TTFB_MS
+    delete process.env.TYPECLAW_CODEX_IDLE_MS
+    delete process.env.TYPECLAW_CODEX_FETCH_OBSERVER
   })
 
   afterEach(() => {
     globalThis.fetch = originalFetch
+    delete process.env.TYPECLAW_CODEX_TIMEOUTS
+    delete process.env.TYPECLAW_CODEX_TTFB_MS
+    delete process.env.TYPECLAW_CODEX_IDLE_MS
+    delete process.env.TYPECLAW_CODEX_FETCH_OBSERVER
   })
 
   test('passes non-Codex requests through unchanged (no wrapping)', async () => {
@@ -341,5 +381,267 @@ describe('installCodexFetchObserver', () => {
     }
 
     expect(entries.filter((e) => e.msg.startsWith('[codex-fetch]')).length).toBe(1)
+  })
+
+  test('TTFB timeout aborts pending fetch with a retryable error message', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+
+    let underlyingSignal: AbortSignal | undefined
+    let fetchRejection: Promise<never> | null = null
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      underlyingSignal = init?.signal ?? undefined
+      fetchRejection = new Promise<never>((_, reject) => {
+        underlyingSignal?.addEventListener('abort', () => reject(underlyingSignal!.reason), { once: true })
+      })
+      return fetchRejection as unknown as Response
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 50, idleMs: 0 })
+    let caught: Error | null = null
+    try {
+      clock.set(0)
+      const pending = fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      clock.set(50)
+      await scheduler.fire(50)
+      await pending.catch((e) => {
+        caught = e
+      })
+    } finally {
+      uninstall()
+    }
+
+    expect(caught).not.toBeNull()
+    expect(caught!.message).toContain('timed out')
+    expect(caught!.message).toContain('15ms'.replace('15', '50'))
+    expect(underlyingSignal?.aborted).toBe(true)
+
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines.length).toBe(1)
+    const line = codexLines[0]!.msg
+    expect(line).toContain('status=null')
+    expect(line).toContain('headers_ms=null')
+    expect(line).toContain('first_byte_ms=null')
+    expect(line).toContain('total_ms=50')
+    expect(line).toContain('cause=ttfb_timeout')
+    expect(line).toMatch(/error="Codex fetch timed out before response headers after 50ms.*"/)
+  })
+
+  test('TTFB timer is cancelled once headers arrive (healthy fast turn)', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    globalThis.fetch = (async () => {
+      clock.set(10)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 1000, idleMs: 0 })
+    try {
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const drainPromise = drainQuiet(response.body)
+      clock.set(50)
+      await ctrl.push(new TextEncoder().encode('hi'))
+      clock.set(100)
+      await ctrl.close()
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    expect(scheduler.pending()).toBe(0)
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines.length).toBe(1)
+    expect(codexLines[0]!.msg).toContain('status=200')
+    expect(codexLines[0]!.msg).toContain('cause=null')
+    expect(codexLines[0]!.msg).toContain('error=null')
+  })
+
+  test('TTFB composes with caller-provided AbortSignal (caller abort still wins)', async () => {
+    const { logger } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+
+    const callerController = new AbortController()
+    let underlyingSignal: AbortSignal | undefined
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      underlyingSignal = init?.signal ?? undefined
+      return new Promise<never>((_, reject) => {
+        underlyingSignal?.addEventListener('abort', () => reject(underlyingSignal!.reason), { once: true })
+      }) as unknown as Response
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 60000, idleMs: 0 })
+    let caught: Error | null = null
+    try {
+      const pending = fetch('https://chatgpt.com/backend-api/codex/responses', {
+        method: 'POST',
+        signal: callerController.signal,
+      })
+      callerController.abort(new Error('user pressed escape'))
+      await pending.catch((e) => {
+        caught = e
+      })
+    } finally {
+      uninstall()
+    }
+
+    expect(caught).not.toBeNull()
+    expect(caught!.message).toBe('user pressed escape')
+    expect(underlyingSignal?.aborted).toBe(true)
+  })
+
+  test('Idle timeout aborts body reader when no chunks arrive within the window', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    globalThis.fetch = (async () => {
+      clock.set(5)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 100 })
+    let drainErr: Error | null = null
+    try {
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const reader = response.body!.getReader()
+      const drainPromise = (async () => {
+        try {
+          while (true) {
+            const { done } = await reader.read()
+            if (done) break
+          }
+        } catch (e) {
+          drainErr = e as Error
+        }
+      })()
+      clock.set(105)
+      await scheduler.fire(105)
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    expect(drainErr).not.toBeNull()
+    expect(drainErr!.message).toContain('idle for 100ms')
+
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines.length).toBe(1)
+    const line = codexLines[0]!.msg
+    expect(line).toContain('status=200')
+    expect(line).toContain('cause=idle_timeout')
+    expect(line).toMatch(/error=".*idle for 100ms.*"/)
+  })
+
+  test('Idle timer resets on every chunk', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    globalThis.fetch = (async () => {
+      clock.set(5)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 0, idleMs: 100 })
+    try {
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const drainPromise = drainQuiet(response.body)
+      clock.set(80)
+      await ctrl.push(new TextEncoder().encode('chunk1'))
+      clock.set(160)
+      await ctrl.push(new TextEncoder().encode('chunk2'))
+      clock.set(240)
+      await ctrl.push(new TextEncoder().encode('chunk3'))
+      clock.set(300)
+      await ctrl.close()
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines.length).toBe(1)
+    expect(codexLines[0]!.msg).toContain('cause=null')
+    expect(codexLines[0]!.msg).toContain('error=null')
+    expect(codexLines[0]!.msg).toContain('body_bytes=18')
+  })
+
+  test('TYPECLAW_CODEX_TIMEOUTS=off disables timeouts but keeps observer active', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+    const ctrl = makeControllableBody()
+
+    process.env.TYPECLAW_CODEX_TIMEOUTS = 'off'
+    globalThis.fetch = (async () => {
+      clock.set(5)
+      return new Response(ctrl.body, { status: 200 })
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, ttfbMs: 50, idleMs: 50 })
+    try {
+      clock.set(0)
+      const response = await fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      const drainPromise = drainQuiet(response.body)
+      clock.set(10000)
+      await ctrl.push(new TextEncoder().encode('x'))
+      clock.set(20000)
+      await ctrl.close()
+      await drainPromise
+    } finally {
+      uninstall()
+    }
+
+    expect(scheduler.pending()).toBe(0)
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines.length).toBe(1)
+    expect(codexLines[0]!.msg).toContain('status=200')
+    expect(codexLines[0]!.msg).toContain('cause=null')
+  })
+
+  test('TYPECLAW_CODEX_TTFB_MS env var overrides default', async () => {
+    const { logger, entries } = captureLogger()
+    const clock = makeClock()
+    const scheduler = makeScheduler()
+
+    process.env.TYPECLAW_CODEX_TTFB_MS = '250'
+    let underlyingSignal: AbortSignal | undefined
+    globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
+      underlyingSignal = init?.signal ?? undefined
+      return new Promise<never>((_, reject) => {
+        underlyingSignal?.addEventListener('abort', () => reject(underlyingSignal!.reason), { once: true })
+      }) as unknown as Response
+    }) as unknown as typeof fetch
+
+    const uninstall = installCodexFetchObserver({ logger, now: clock.now, scheduler, idleMs: 0 })
+    let caught: Error | null = null
+    try {
+      clock.set(0)
+      const pending = fetch('https://chatgpt.com/backend-api/codex/responses', { method: 'POST' })
+      clock.set(250)
+      await scheduler.fire(250)
+      await pending.catch((e) => {
+        caught = e
+      })
+    } finally {
+      uninstall()
+    }
+
+    expect(caught).not.toBeNull()
+    expect(caught!.message).toContain('250ms')
+
+    const codexLines = entries.filter((e) => e.msg.startsWith('[codex-fetch]'))
+    expect(codexLines[0]!.msg).toContain('total_ms=250')
+    expect(codexLines[0]!.msg).toContain('cause=ttfb_timeout')
   })
 })
