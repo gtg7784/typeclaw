@@ -65,13 +65,13 @@ Agents without a running container are skipped with a `compose: skipping <name> 
 
 ### `doctor`
 
-| Flag              | Default | Effect                                                                   |
-| ----------------- | ------- | ------------------------------------------------------------------------ |
-| `-v`, `--verbose` | `false` | show per-check details                                                   |
-| `--json`          | `false` | emit the full report as JSON                                             |
-| `--fix`           | `false` | attempt per-agent auto-fixes and commit changes inside each agent folder |
-| `--only <a,b,c>`  | (none)  | comma-separated category filter forwarded to each agent's `doctor` run   |
-| `--shallow`       | `false` | run cross-agent checks only; skip per-agent `doctor` runs                |
+| Flag              | Default | Effect                                                                                                                                                  |
+| ----------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `-v`, `--verbose` | `false` | show per-check details                                                                                                                                  |
+| `--json`          | `false` | emit the full report as JSON                                                                                                                            |
+| `--fix`           | `false` | attempt per-agent auto-fixes; on success, `git add` + `git commit` the changed paths inside each agent folder (skipped if the folder is not a git repo) |
+| `--only <a,b,c>`  | (none)  | comma-separated category filter forwarded to each agent's `doctor` run                                                                                  |
+| `--shallow`       | `false` | run cross-agent checks only; skip per-agent `doctor` runs                                                                                               |
 
 `status`, `stop` take no flags.
 
@@ -79,10 +79,10 @@ Agents without a running container are skipped with a `compose: skipping <name> 
 
 Beyond fanning out per-agent `doctor`, `compose doctor` runs whole-fleet checks:
 
-| Check                                  | Status on conflict | Detects                                                                          |
-| -------------------------------------- | ------------------ | -------------------------------------------------------------------------------- |
-| `compose.no-port-collisions`           | `warning`          | two or more agents declaring the same `typeclaw.json#port`                       |
-| `compose.no-container-name-collisions` | `error`            | two folders hashing to the same Docker container name (folder paths must differ) |
+| Check                                  | Status on conflict | Detects                                                               |
+| -------------------------------------- | ------------------ | --------------------------------------------------------------------- |
+| `compose.no-port-collisions`           | `warning`          | two or more agents declaring the same `typeclaw.json#port`            |
+| `compose.no-container-name-collisions` | `error`            | two different agent folders hashing to the same Docker container name |
 
 Port collisions are warnings, not errors: `start` resolves them at runtime by falling back to ephemeral ports per agent. Container-name collisions are errors: Docker enforces unique names, and a collision means one agent will fail to start until you rename a folder.
 
