@@ -59,12 +59,14 @@ export function AnimatedTerminal({ variant = 'default', title = 'my-agent', clas
 
   let remaining = chars
   const rendered: Array<{ text: string; className: string; key: number }> = []
+  const ghost: Array<{ text: string; key: number }> = []
   for (let i = 0; i < SCRIPT.length; i++) {
     const seg = SCRIPT[i]
-    if (remaining <= 0) break
-    const slice = seg.text.slice(0, remaining)
-    rendered.push({ text: slice, className: seg.className, key: i })
-    remaining -= slice.length
+    const visible = remaining > 0 ? seg.text.slice(0, remaining) : ''
+    const hidden = seg.text.slice(visible.length)
+    if (visible) rendered.push({ text: visible, className: seg.className, key: i })
+    if (hidden) ghost.push({ text: hidden, key: i })
+    remaining -= visible.length
   }
 
   const isDone = chars >= TOTAL_CHARS
@@ -103,6 +105,11 @@ export function AnimatedTerminal({ variant = 'default', title = 'my-agent', clas
             }`}
             style={{ height: '1em' }}
           />
+          {ghost.map((seg) => (
+            <span key={`ghost-${seg.key}`} aria-hidden className="text-transparent">
+              {seg.text}
+            </span>
+          ))}
         </code>
       </pre>
     </div>
