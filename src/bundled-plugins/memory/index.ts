@@ -1,5 +1,5 @@
 import { existsSync } from 'node:fs'
-import { access, constants as fsConstants, mkdir, readdir, stat, unlink, writeFile } from 'node:fs/promises'
+import { access, constants as fsConstants, mkdir, readFile, readdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 import { CronExpressionParser } from 'cron-parser'
@@ -20,6 +20,22 @@ import { memorySearchTool } from './search-tool'
 const DEFAULT_IDLE_MS = 60_000
 const DEFAULT_BUFFER_BYTES = 500_000
 const MIN_BUFFER_BYTES = 10_000
+// Minimum JSONL line growth since the last memory-logger run required to spawn
+// on a plain `session.idle` tick. The hook fires after every prompt completion,
+// so a chatty channel session that goes briefly quiet 4 times in 7 minutes
+// would otherwise pay the full per-spawn floor (~50 KB context + 4-11 turns of
+// LLM decision-making) on each tick — even when the new transcript content is
+// a handful of lines almost certain to contain nothing memorable.
+//
+// Gate semantics: skip the spawn when (currentLines - linesAtLastRun) < N AND
+// the transcript file actually exists with at least one line. A zero-line
+// transcript (test dummies, brand-new sessions) is NOT gated — the existing
+// "fire and let memory-logger decide" behavior is preserved.
+//
+// The buffer-trip path (size-based ceiling) is independent and unaffected:
+// busy sessions that grow `bufferBytes` of unread transcript still spawn
+// regardless of the idle delta.
+const DEFAULT_MIN_IDLE_DELTA_LINES = 3
 // 30-minute default. Fires short-circuit before any LLM call when nothing
 // sits past the watermark (`dreaming.ts` handler returns when
 // `snapshots.undreamed.length === 0`), so frequent no-op fires are cheap.
@@ -92,6 +108,7 @@ const memoryConfigSchema = z
       })
       .default(DEFAULT_BUFFER_BYTES),
     injectionBudgetBytes: z.number().int().min(MIN_INJECTION_BUDGET_BYTES).default(DEFAULT_INJECTION_BUDGET_BYTES),
+    minIdleDeltaLines: z.number().int().min(0).default(DEFAULT_MIN_IDLE_DELTA_LINES),
     // Test seam: per-spawn ceiling for memory-logger. Operators have no
     // reason to tune this; it exists so the wedge-recovery test can fire
     // the timeout in milliseconds instead of the production 50s. Kept
@@ -108,6 +125,7 @@ const memoryConfigSchema = z
     idleMs: DEFAULT_IDLE_MS,
     bufferBytes: DEFAULT_BUFFER_BYTES,
     injectionBudgetBytes: DEFAULT_INJECTION_BUDGET_BYTES,
+    minIdleDeltaLines: DEFAULT_MIN_IDLE_DELTA_LINES,
     spawnTimeoutMs: SPAWN_TIMEOUT_MS,
     retrievalSpawnTimeoutMs: RETRIEVAL_SPAWN_TIMEOUT_MS,
   })
@@ -117,6 +135,7 @@ export default definePlugin({
   plugin: async (ctx) => {
     const idleMs = ctx.config.idleMs
     const bufferBytes = ctx.config.bufferBytes
+    const minIdleDeltaLines = ctx.config.minIdleDeltaLines
     const spawnTimeoutMs = ctx.config.spawnTimeoutMs
     const retrievalSpawnTimeoutMs = ctx.config.retrievalSpawnTimeoutMs
     const dreamingSchedule = ctx.config.dreaming?.schedule ?? DEFAULT_DREAMING_SCHEDULE
@@ -144,6 +163,7 @@ export default definePlugin({
     const idleTimers = new Map<string, ReturnType<typeof setTimeout>>()
     const lastIdleEvent = new Map<string, { parentTranscriptPath: string | undefined; origin?: SessionOrigin }>()
     const bytesAtLastRun = new Map<string, number>()
+    const linesAtLastRun = new Map<string, number>()
 
     // memory-logger is coalesced per agentDir (not per parentSessionId) so that
     // two concurrent channel sessions for the same agent never write to the same
@@ -181,7 +201,9 @@ export default definePlugin({
         .catch(() => undefined)
         .then(async () => {
           const currentSize = await readSize(parentTranscriptPath)
+          const currentLines = await readLineCount(parentTranscriptPath)
           bytesAtLastRun.set(sessionId, currentSize)
+          linesAtLastRun.set(sessionId, currentLines)
           ctx.logger.info(`memory-logger spawn ${sessionId} reason=${reason} transcript_bytes=${currentSize}`)
           try {
             await raceSpawn(ctx.spawnSubagent('memory-logger', payload, spawnOptions), spawnTimeoutMs)
@@ -210,6 +232,14 @@ export default definePlugin({
         return false
       }
       return currentSize - baseline >= bufferBytes
+    }
+
+    const shouldSkipIdleSpawn = async (sessionId: string, transcriptPath: string): Promise<boolean> => {
+      if (minIdleDeltaLines === 0) return false
+      const currentLines = await readLineCount(transcriptPath)
+      if (currentLines === 0) return false
+      const baseline = linesAtLastRun.get(sessionId) ?? 0
+      return currentLines - baseline < minIdleDeltaLines
     }
 
     const runMemoryRetrieval = async (event: {
@@ -295,9 +325,18 @@ export default definePlugin({
           })
           cancelTimer(event.sessionId)
           const sessionId = event.sessionId
+          const transcriptPath = event.parentTranscriptPath
           const timer = setTimeout(() => {
             idleTimers.delete(sessionId)
-            void fireMemoryLogger(sessionId, 'idle')
+            void (async () => {
+              if (transcriptPath !== undefined && (await shouldSkipIdleSpawn(sessionId, transcriptPath))) {
+                ctx.logger.info(
+                  `memory-logger idle skip ${sessionId} (delta below minIdleDeltaLines=${minIdleDeltaLines})`,
+                )
+                return
+              }
+              void fireMemoryLogger(sessionId, 'idle')
+            })()
           }, idleMs)
           idleTimers.set(sessionId, timer)
           if (
@@ -390,13 +429,40 @@ export default definePlugin({
         'session.end': (event) => {
           if (event.origin?.kind === 'subagent') return
           cancelTimer(event.sessionId)
-          void fireMemoryLogger(event.sessionId, 'session-end')
-          const cacheFilePath = join(ctx.agentDir, 'memory', '.retrieval-cache', `${event.sessionId}.md`)
+          const sessionId = event.sessionId
+          // The skip path detaches via `void (async () => …)()` because
+          // readSize requires an await. fireMemoryLogger itself captures its
+          // payload synchronously from `lastIdleEvent` (see fireMemoryLogger
+          // comment block), so the `lastIdleEvent.delete` that follows can
+          // never race with the chained spawn. The cache-cleanup and
+          // bookkeeping deletes are dispatched alongside (not blocking the
+          // hook return) to preserve the "session.end returns synchronously"
+          // contract that the channel router's tearDownLive path depends on
+          // (see the comment block above this hook).
+          void (async () => {
+            const last = lastIdleEvent.get(sessionId)
+            let skip = false
+            if (last?.parentTranscriptPath !== undefined) {
+              const baseline = bytesAtLastRun.get(sessionId)
+              if (baseline !== undefined && baseline > 0) {
+                const currentSize = await readSize(last.parentTranscriptPath)
+                if (currentSize === baseline) {
+                  ctx.logger.info(
+                    `memory-logger session-end skip ${sessionId} (no new bytes since last spawn at ${baseline})`,
+                  )
+                  skip = true
+                }
+              }
+            }
+            if (!skip) void fireMemoryLogger(sessionId, 'session-end')
+            lastIdleEvent.delete(sessionId)
+            bytesAtLastRun.delete(sessionId)
+            linesAtLastRun.delete(sessionId)
+          })()
+          const cacheFilePath = join(ctx.agentDir, 'memory', '.retrieval-cache', `${sessionId}.md`)
           unlink(cacheFilePath).catch((err) => {
             if (!isEnoent(err)) ctx.logger.warn(`[memory] failed to clean retrieval cache: ${err}`)
           })
-          lastIdleEvent.delete(event.sessionId)
-          bytesAtLastRun.delete(event.sessionId)
         },
       },
       doctorChecks: {
@@ -611,6 +677,21 @@ async function readSize(path: string): Promise<number> {
   try {
     const s = await stat(path)
     return s.size
+  } catch {
+    return 0
+  }
+}
+
+async function readLineCount(path: string): Promise<number> {
+  try {
+    const buf = await readFile(path)
+    if (buf.length === 0) return 0
+    let count = 0
+    for (let i = 0; i < buf.length; i++) {
+      if (buf[i] === 0x0a) count++
+    }
+    if (buf[buf.length - 1] !== 0x0a) count++
+    return count
   } catch {
     return 0
   }

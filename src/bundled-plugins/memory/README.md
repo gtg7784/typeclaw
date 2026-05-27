@@ -12,6 +12,7 @@ Auto-loaded by every TypeClaw agent. No `plugins[]` entry to add and no opt-out.
     "idleMs": 60000,
     "bufferBytes": 500000,
     "injectionBudgetBytes": 16384,
+    "minIdleDeltaLines": 3,
     "dreaming": { "schedule": "*/30 * * * *" }
   }
 }
@@ -22,6 +23,7 @@ Auto-loaded by every TypeClaw agent. No `plugins[]` entry to add and no opt-out.
 | `memory.idleMs`               | `60000`          | Debounce window before `memory-logger` spawns after a prompt completes. Minimum `1000`.                                                                                                                                                        |
 | `memory.bufferBytes`          | `500000`         | Size-based ceiling: spawns `memory-logger` when the transcript grows by this many bytes since the last run. `0` disables. Minimum `10000` when non-zero.                                                                                       |
 | `memory.injectionBudgetBytes` | `16384`          | Total shard-body budget for direct-mode memory injection. Above this, `loadMemory` switches to index-mode (headings + metadata only) and the agent must call `memory_search` to fetch specific topics or recent stream events. Minimum `4096`. |
+| `memory.minIdleDeltaLines`    | `3`              | Minimum JSONL line growth since the last `memory-logger` run required to fire an idle spawn. Below this, the idle timer ticks but no spawn fires. `0` disables (legacy always-fire-on-idle behavior). Independent of `bufferBytes`.            |
 | `memory.dreaming.schedule`    | `"*/30 * * * *"` | Five-field cron expression for the dreaming subagent.                                                                                                                                                                                          |
 
 All fields are **restart-required** — the plugin reads them once at boot.
@@ -108,11 +110,21 @@ The migration is idempotent and crash-safe.
 
 ## How `session.idle` works
 
-Core fires `session.idle` immediately after every `session.prompt()` completion. The plugin owns the debounce: a `Map<sessionId, Timeout>` reset on every event. When the timer fires, the plugin spawns `memory-logger` for that session.
+Core fires `session.idle` immediately after every `session.prompt()` completion. The plugin owns the debounce: a `Map<sessionId, Timeout>` reset on every event. When the timer fires, the plugin spawns `memory-logger` for that session — unless the min-delta gate suppresses the spawn (see below).
 
-If the user starts a new prompt before the timer fires, the next `session.idle` resets it. If the user disconnects, `session.end` cancels the timer and fires `memory-logger` immediately.
+If the user starts a new prompt before the timer fires, the next `session.idle` resets it. If the user disconnects, `session.end` cancels the timer and fires `memory-logger` immediately (unless the byte-equality skip suppresses it; see below).
 
 In busy channel sessions the agent rarely goes idle long enough to trip the timer. The size-based ceiling handles this: on every `session.idle` the plugin `fs.stat`s the transcript and compares against the size at the last memory-logger run. Once growth reaches `memory.bufferBytes`, the timer is cancelled and `memory-logger` spawns immediately.
+
+### Min-delta gate (idle)
+
+The `session.idle` hook fires after every prompt completion. A chatty channel session that briefly quiets four times in seven minutes would otherwise pay the per-spawn floor (system-prompt prefill + stream-file read + several decision-making turns) on each tick — even when only a handful of new transcript lines have arrived, almost certainly containing nothing memorable.
+
+`memory.minIdleDeltaLines` (default `3`) gates the idle-timer spawn: when the timer fires, if the transcript grew by fewer than this many JSONL lines since the last memory-logger run for the session, the spawn is skipped. The skip is logged as `memory-logger idle skip ses_X (delta below minIdleDeltaLines=N)`. The buffer-trip path is unaffected — sessions that grow `bufferBytes` of unread transcript still spawn regardless of line delta.
+
+### Byte-equality skip (session.end)
+
+When `session.end` arrives and an earlier idle/buffer-trip spawn already drained the transcript to its current size, the session-end spawn is skipped. The skip is logged as `memory-logger session-end skip ses_X (no new bytes since last spawn at N)`. The skip only applies when a real baseline was recorded (`bytesAtLastRun > 0`); sessions that ended before any spawn ran still fire on close.
 
 ## Tests
 
