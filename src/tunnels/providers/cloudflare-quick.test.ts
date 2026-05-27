@@ -239,7 +239,9 @@ sleep 30
       binary,
       onUrlChange: (url) => urls.push(url),
       stopGraceMs: 10,
-      probeBackoffMs: [5, 5, 5, 5, 5, 5, 5, 5, 5, 5],
+      probeDeadlineMs: 60_000,
+      probeInitialBackoffMs: 5,
+      probeMaxBackoffMs: 5,
       probeReady: async (url) => {
         probeCalls.push(url)
         return allowProbe
@@ -270,47 +272,79 @@ sleep 30
     }
   })
 
-  it('restarts cloudflared when the readiness probe never succeeds', async () => {
+  it('emits the URL anyway after the probe deadline expires, with a warning', async () => {
     const scratchDir = createScratchDir()
-    const countFile = join(scratchDir, 'count.txt')
     const binary = installFakeCloudflared(
       scratchDir,
       `
-count=0
-if [ -f "${countFile}" ]; then count=$(cat "${countFile}"); fi
-count=$((count + 1))
-printf '%s' "$count" > "${countFile}"
-echo "https://attempt-$count.trycloudflare.com" >&2
+echo "https://stuck-probe.trycloudflare.com" >&2
 trap 'exit 0' TERM
 sleep 30
 `,
     )
     const urls: string[] = []
-    let allowProbe = false
+    const warns: string[] = []
     const provider = createCloudflareQuickProvider({
       config,
       upstreamPort: 8975,
       binary,
       onUrlChange: (url) => urls.push(url),
-      restartBackoffMs: [5],
       stopGraceMs: 10,
-      probeBackoffMs: [5, 5],
-      probeReady: async () => allowProbe,
+      probeDeadlineMs: 100,
+      probeInitialBackoffMs: 20,
+      probeMaxBackoffMs: 20,
+      probeReady: async () => false,
+      logger: { info: () => {}, warn: (msg) => warns.push(msg) },
     })
 
     try {
       await provider.start()
-      await waitFor(() => Number(Bun.file(countFile).size) > 0, { description: 'first launch recorded' })
-      await waitFor(async () => (await Bun.file(countFile).text()) === '2', {
-        description: 'second launch after probe failure',
+      await waitFor(() => urls.length === 1, {
+        description: 'URL emitted via fail-open after probe deadline',
       })
 
-      expect(urls).toEqual([])
-
-      allowProbe = true
-      await waitFor(() => urls.length === 1, { description: 'URL emitted after probe recovers' })
-      expect(urls[0]?.startsWith('https://attempt-')).toBe(true)
+      expect(urls).toEqual(['https://stuck-probe.trycloudflare.com'])
       expect(provider.snapshot().status).toBe('healthy')
+      expect(warns.some((m) => m.includes('edge probe did not succeed'))).toBe(true)
+      expect(warns.some((m) => m.includes('emitting URL anyway'))).toBe(true)
+
+      await provider.stop()
+    } finally {
+      await provider.stop()
+      rmSync(scratchDir, { recursive: true, force: true })
+    }
+  })
+
+  it('logs probe lifecycle so operators can diagnose tunnel issues from typeclaw logs', async () => {
+    const scratchDir = createScratchDir()
+    const binary = installFakeCloudflared(
+      scratchDir,
+      `
+echo "https://observable.trycloudflare.com" >&2
+trap 'exit 0' TERM
+sleep 30
+`,
+    )
+    const infos: string[] = []
+    const provider = createCloudflareQuickProvider({
+      config,
+      upstreamPort: 8975,
+      binary,
+      onUrlChange: () => {},
+      stopGraceMs: 10,
+      probeDeadlineMs: 5_000,
+      probeInitialBackoffMs: 5,
+      probeMaxBackoffMs: 5,
+      probeReady: async () => true,
+      logger: { info: (msg) => infos.push(msg), warn: () => {} },
+    })
+
+    try {
+      await provider.start()
+      await waitFor(() => provider.snapshot().status === 'healthy', { description: 'healthy' })
+
+      expect(infos.some((m) => m.includes('cloudflared printed URL https://observable.trycloudflare.com'))).toBe(true)
+      expect(infos.some((m) => m.includes('edge reachable after'))).toBe(true)
 
       await provider.stop()
     } finally {
@@ -336,7 +370,7 @@ sleep 30
       binary,
       onUrlChange: () => {},
       stopGraceMs: 10,
-      probeBackoffMs: [5_000],
+      probeDeadlineMs: 60_000,
       probeReady: (_url, signal) =>
         new Promise<boolean>((resolve) => {
           signal.addEventListener('abort', () => {
@@ -348,7 +382,7 @@ sleep 30
 
     try {
       await provider.start()
-      await waitFor(() => provider.snapshot().detail === 'probing tunnel readiness', {
+      await waitFor(() => provider.snapshot().detail.startsWith('probing tunnel readiness'), {
         description: 'probe started',
       })
 
