@@ -1,5 +1,9 @@
 # TypeClaw
 
+<p align="center">
+  <img src="./docs/public/typeey.png" alt="Typeey, the TypeClaw mascot — a plush bird with navy wings sitting in grass" width="240" />
+</p>
+
 > A TypeScript-native, Bun-powered, Docker-friendly general-purpose agent runtime.
 
 ## Why?
