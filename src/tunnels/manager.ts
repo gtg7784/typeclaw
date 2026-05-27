@@ -21,6 +21,10 @@ export type TunnelManagerOptions = {
   // Parameterized so tests can drive the named-provider token path without
   // poking global env and so the manager stays a pure function of its inputs.
   resolveEnv?: (name: string) => string | undefined
+  // Override the cloudflare-quick readiness probe. Tests inject a stub so
+  // they don't hit the network; production leaves it undefined and the
+  // provider falls back to a real `fetch` against the tunnel URL.
+  cloudflareQuickProbeReady?: (url: string, signal: AbortSignal) => Promise<boolean>
   logger?: TunnelManagerLogger
 }
 
@@ -52,6 +56,7 @@ export function createTunnelManager(options: TunnelManagerOptions): TunnelManage
       options.cloudflareQuickBinary,
       options.cloudflareNamedBinary,
       resolveEnv,
+      options.cloudflareQuickProbeReady,
     )
     handles.set(config.name, handle)
   }
@@ -103,6 +108,7 @@ function buildProvider(
   cloudflareQuickBinary: string | undefined,
   cloudflareNamedBinary: string | undefined,
   resolveEnv: (name: string) => string | undefined,
+  cloudflareQuickProbeReady: TunnelManagerOptions['cloudflareQuickProbeReady'],
 ): TunnelProviderHandle {
   switch (config.provider) {
     case 'external':
@@ -113,6 +119,7 @@ function buildProvider(
         upstreamPort: resolveUpstreamPort(config, resolveChannelUpstreamPort),
         onUrlChange,
         binary: cloudflareQuickBinary,
+        ...(cloudflareQuickProbeReady !== undefined ? { probeReady: cloudflareQuickProbeReady } : {}),
       })
     case 'cloudflare-named':
       return createCloudflareNamedProvider({
