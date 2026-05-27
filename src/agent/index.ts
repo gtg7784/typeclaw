@@ -305,6 +305,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
                     containerName: options.containerName,
                     originatingSessionId: sessionManager.getSessionId(),
                     ...(options.stream ? { stream: options.stream } : {}),
+                    ...buildRestartHandoffWiring(options, sessionManager),
                   }),
                 ]
               : []),
@@ -376,6 +377,26 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
     if (materializedSkills) await materializedSkills.dispose()
   }
   return { session, dispose }
+}
+
+// Decides whether the restart tool should write the cross-restart handoff
+// file (`<agentDir>/.typeclaw/restart-pending.json`) and supplies the agentDir
+// + session file path it needs to do so. Returns an empty object — meaning
+// "no handoff" — for any session whose origin is not TUI, so a channel-
+// originated or cron-originated `restart` call cannot accidentally produce an
+// "I'm back" greeting in the next container's first TUI session. See
+// issue #291's scoping concerns. Also returns empty when the session is not
+// persisted to disk (in-memory sessions have no file the next container could
+// reopen).
+export function buildRestartHandoffWiring(
+  options: { origin?: SessionOrigin; plugins?: { agentDir: string } },
+  sessionManager: SessionManager,
+): { agentDir?: string; originatingSessionFile?: string } {
+  if (options.origin?.kind !== 'tui') return {}
+  const agentDir = options.plugins?.agentDir
+  const sessionFile = sessionManager.getSessionFile()
+  if (agentDir === undefined || sessionFile === undefined) return {}
+  return { agentDir, originatingSessionFile: sessionFile }
 }
 
 // Subscribes the given session to the in-process broadcast that the `restart`

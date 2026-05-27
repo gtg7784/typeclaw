@@ -63,7 +63,7 @@ import { createPluginRuntime, type PluginRuntime, type PluginSubagentEntry } fro
 
 type BunServer = ReturnType<Server['start']>
 
-export type TuiFactory = (options: TuiOptions) => { run: () => Promise<void> }
+export type TuiFactory = (options: TuiOptions) => { run: () => Promise<unknown> }
 
 export type LoadCronFn = (agentDir: string, options?: { subagents?: SubagentRegistry }) => Promise<LoadCronResult>
 export type SchedulerFactory = (options: { cwd: string; file: CronFile; onFire: (job: CronJob) => void }) => Scheduler
@@ -86,7 +86,7 @@ export type StartAgentOptions = {
 
 export type StartAgentResult = {
   server: BunServer
-  tuiPromise: Promise<void> | null
+  tuiPromise: Promise<unknown> | null
   scheduler: Scheduler | null
   cronConsumer: CronConsumer | null
   subagentConsumer: SubagentConsumer

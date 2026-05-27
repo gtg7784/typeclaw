@@ -25,16 +25,40 @@ export const tui = defineCommand({
     },
   },
   async run({ args }) {
-    const url = args.url ?? (await defaultUrl())
-    const tui = createTui({
-      url,
-      ...(args.prompt !== undefined ? { initialPrompt: args.prompt } : {}),
-      expectedVersion: CLI_VERSION,
-      onVersionMismatch: (info) => {
-        process.stderr.write(`${formatVersionMismatchWarning(info)}\n`)
-      },
-    })
-    await tui.run()
+    const resolveUrl: () => Promise<string> = args.url !== undefined ? async () => args.url as string : defaultUrl
+
+    let initialPrompt: string | undefined = args.prompt
+    let attempt = 0
+    const RECONNECT_MAX_ATTEMPTS = 30
+    const RECONNECT_BACKOFF_MS = 1_000
+
+    while (true) {
+      const url = await resolveUrl()
+      const tui = createTui({
+        url,
+        ...(initialPrompt !== undefined ? { initialPrompt } : {}),
+        expectedVersion: CLI_VERSION,
+        onVersionMismatch: (info) => {
+          process.stderr.write(`${formatVersionMismatchWarning(info)}\n`)
+        },
+      })
+      const outcome = await tui.run()
+      if (!outcome.lostConnection) return
+      // The TUI lost its WS post-handshake (container restart, network blip,
+      // hostd hiccup). Re-resolve the URL because the host port can change
+      // across container lifecycles (see resolveHostPort), then reconnect.
+      // The initial prompt is intentionally cleared after the first cycle:
+      // on a reconnect, the agent is resuming the same session — replaying
+      // the prompt would re-send it to the LLM.
+      initialPrompt = undefined
+      attempt += 1
+      if (attempt > RECONNECT_MAX_ATTEMPTS) {
+        console.error(errorLine(`disconnected; gave up after ${RECONNECT_MAX_ATTEMPTS} reconnect attempts`))
+        process.exit(1)
+      }
+      process.stderr.write(`reconnecting (attempt ${attempt}/${RECONNECT_MAX_ATTEMPTS})...\n`)
+      await new Promise((resolve) => setTimeout(resolve, RECONNECT_BACKOFF_MS))
+    }
   },
 })
 

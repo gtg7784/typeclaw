@@ -11,7 +11,7 @@ import type { CreateSessionForSubagent, SubagentRegistry } from '@/agent/subagen
 import type { CronJob } from '@/cron'
 import { createHookBus, type HookBus, type PluginRegistry } from '@/plugin'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
-import type { SessionFactory } from '@/sessions'
+import { createSessionFactory, type SessionFactory } from '@/sessions'
 import type { ServerMessage, TunnelLogsServerMessage } from '@/shared'
 import { createStream } from '@/stream'
 import { expectStable, waitFor as waitForState } from '@/test-helpers/wait-for'
@@ -576,6 +576,206 @@ describe('createServer session persistence wiring', () => {
     expect(connected.serverVersion).toBeUndefined()
 
     ws.close()
+  })
+})
+
+describe('createServer restart-handoff consumption', () => {
+  // pi's SessionManager._persist no-ops until the first assistant message is
+  // appended (line 549-557 of pi 0.67.3's session-manager.js). For the seed
+  // session to land on disk so the server can reopen it, the seed has to
+  // include a user + assistant turn before the restart-self custom message.
+  // In production, the originating session has run many turns before the
+  // restart fires, so this matches reality.
+  async function makeAgentDirWithSession(): Promise<{
+    agentDir: string
+    sessionsDir: string
+    sessionId: string
+    sessionFile: string
+  }> {
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-server-handoff-'))
+    const sessionsDir = join(agentDir, 'sessions')
+    const seedFactory = createSessionFactory({ agentDir })
+    const seedManager = seedFactory.createPersisted()
+    const now = Date.now()
+    seedManager.appendMessage({ role: 'user', content: 'hi', timestamp: now })
+    seedManager.appendMessage({
+      role: 'assistant',
+      content: [{ type: 'text', text: 'hello' }],
+      api: 'fake',
+      provider: 'fake',
+      model: 'fake',
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 2,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 },
+      },
+      stopReason: 'stop',
+      timestamp: now + 1,
+    })
+    seedManager.appendCustomMessageEntry('typeclaw.restart-self', 'restart instruction', false)
+    const sessionFile = seedManager.getSessionFile()
+    if (!sessionFile) throw new Error('expected persisted session file')
+    return { agentDir, sessionsDir, sessionId: seedManager.getSessionId(), sessionFile }
+  }
+
+  async function writeHandoff(
+    agentDir: string,
+    payload: { restartedAt: string; originatingSessionId: string; originatingSessionFile: string },
+  ): Promise<void> {
+    const { mkdir } = await import('node:fs/promises')
+    await mkdir(join(agentDir, '.typeclaw'), { recursive: true })
+    await writeFile(
+      join(agentDir, '.typeclaw', 'restart-pending.json'),
+      JSON.stringify({ schemaVersion: 1, ...payload }),
+      'utf8',
+    )
+  }
+
+  test('reopens the originating session and fires a kick prompt when a fresh handoff is present', async () => {
+    // given
+    const { agentDir, sessionId, sessionFile } = await makeAgentDirWithSession()
+    await writeHandoff(agentDir, {
+      restartedAt: new Date().toISOString(),
+      originatingSessionId: sessionId,
+      originatingSessionFile: sessionFile.split('/').pop()!,
+    })
+
+    const session = createFakeSession()
+    const stream = createStream()
+    const observed: CreateSessionOptions[] = []
+    const factory = createSessionFactory({ agentDir })
+    const built = createServer({
+      port: 0,
+      agentDir,
+      sessionFactory: factory,
+      stream,
+      createSession: async (options = {}) => {
+        observed.push(options)
+        return session
+      },
+    }).start()
+    server = built
+
+    // when
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    const connected = await waitFor((m) => m.type === 'connected')
+
+    // then
+    if (connected.type !== 'connected') throw new Error('unreachable')
+    expect(connected.sessionId).toBe(sessionId)
+    await waitForState(() => session.promptCalls.length > 0)
+    expect(session.promptCalls).toEqual([' '])
+
+    ws.close()
+  })
+
+  test('cold-starts a fresh session when no handoff file is present', async () => {
+    // given
+    const agentDir = await mkdtemp(join(tmpdir(), 'typeclaw-server-handoff-cold-'))
+
+    const session = createFakeSession()
+    const stream = createStream()
+    const factory = createSessionFactory({ agentDir })
+    const built = createServer({
+      port: 0,
+      agentDir,
+      sessionFactory: factory,
+      stream,
+      createSession: async () => session,
+    }).start()
+    server = built
+
+    // when
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    const connected = await waitFor((m) => m.type === 'connected')
+
+    // then
+    if (connected.type !== 'connected') throw new Error('unreachable')
+    expect(connected.sessionId).not.toBe('')
+    await expectStable(() => session.promptCalls.length > 0, { durationMs: 200, intervalMs: 50 })
+    expect(session.promptCalls).toEqual([])
+
+    ws.close()
+  })
+
+  test('ignores an expired handoff file (>60s old) and cold-starts instead', async () => {
+    // given
+    const { agentDir, sessionId, sessionFile } = await makeAgentDirWithSession()
+    await writeHandoff(agentDir, {
+      restartedAt: new Date(Date.now() - 90_000).toISOString(),
+      originatingSessionId: sessionId,
+      originatingSessionFile: sessionFile.split('/').pop()!,
+    })
+
+    const session = createFakeSession()
+    const stream = createStream()
+    const factory = createSessionFactory({ agentDir })
+    const built = createServer({
+      port: 0,
+      agentDir,
+      sessionFactory: factory,
+      stream,
+      createSession: async () => session,
+    }).start()
+    server = built
+
+    // when
+    const { ws, waitFor } = await connect(`ws://localhost:${built.port}`)
+    const connected = await waitFor((m) => m.type === 'connected')
+
+    // then
+    if (connected.type !== 'connected') throw new Error('unreachable')
+    expect(connected.sessionId).not.toBe(sessionId)
+    await expectStable(() => session.promptCalls.length > 0, { durationMs: 200, intervalMs: 50 })
+    expect(session.promptCalls).toEqual([])
+
+    ws.close()
+  })
+
+  test('handoff is consumed exactly once across multiple ws opens (second ws is a fresh session)', async () => {
+    // given
+    const { agentDir, sessionId, sessionFile } = await makeAgentDirWithSession()
+    await writeHandoff(agentDir, {
+      restartedAt: new Date().toISOString(),
+      originatingSessionId: sessionId,
+      originatingSessionFile: sessionFile.split('/').pop()!,
+    })
+
+    const sessions: ReturnType<typeof createFakeSession>[] = []
+    const stream = createStream()
+    const factory = createSessionFactory({ agentDir })
+    const built = createServer({
+      port: 0,
+      agentDir,
+      sessionFactory: factory,
+      stream,
+      createSession: async () => {
+        const s = createFakeSession()
+        sessions.push(s)
+        return s
+      },
+    }).start()
+    server = built
+    const url = `ws://localhost:${built.port}`
+
+    // when
+    const a = await connect(url)
+    const connectedA = await a.waitFor((m) => m.type === 'connected')
+    if (connectedA.type !== 'connected') throw new Error('unreachable')
+    a.ws.close()
+
+    const b = await connect(url)
+    const connectedB = await b.waitFor((m) => m.type === 'connected')
+
+    // then
+    if (connectedB.type !== 'connected') throw new Error('unreachable')
+    expect(connectedA.sessionId).toBe(sessionId)
+    expect(connectedB.sessionId).not.toBe(sessionId)
+
+    b.ws.close()
   })
 })
 
