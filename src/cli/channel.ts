@@ -1,5 +1,4 @@
 import { randomBytes } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
 
 import { cancel, confirm, intro, isCancel, log, note, password, select, spinner, text } from '@clack/prompts'
 import { defineCommand } from 'citty'
@@ -27,6 +26,7 @@ import {
 import { runKakaotalkBootstrap } from '@/init/kakaotalk-auth'
 import { SecretsKakaoCredentialStore } from '@/secrets/kakao-store'
 
+import { CANCEL_SYMBOL, promptPrivateKeyPem } from './prompt-pem'
 import { c, done, errorLine, printDiscordInviteHint, printSlackAppManifestSetup } from './ui'
 
 const CHANNEL_LABELS: Record<ChannelKind, string> = {
@@ -805,15 +805,12 @@ async function promptGithubAuthUpdate(currentType: 'pat' | 'app'): Promise<Githu
       ].join('\n'),
       'Rotate the GitHub App private key',
     )
-    const privateKeyInput = await text({
-      message: 'New GitHub App private key PEM, escaped PEM, or path to .pem file',
-      validate: (value) => (value && value.length > 0 ? undefined : 'Private key is required'),
-    })
-    if (isCancel(privateKeyInput)) {
+    const privateKey = await promptPrivateKeyPem('New GitHub App private key PEM, escaped PEM, or path to .pem file')
+    if (privateKey === CANCEL_SYMBOL) {
       cancel('Aborted.')
       process.exit(0)
     }
-    return { type: 'app', privateKey: await resolvePrivateKeyInput(privateKeyInput) }
+    return { type: 'app', privateKey }
   }
 
   note(
@@ -855,11 +852,8 @@ async function promptGithubAppAuth(): Promise<{
     cancel('Aborted.')
     process.exit(0)
   }
-  const privateKeyInput = await text({
-    message: 'GitHub App private key PEM, escaped PEM, or path to .pem file',
-    validate: (value) => (value && value.length > 0 ? undefined : 'Private key is required'),
-  })
-  if (isCancel(privateKeyInput)) {
+  const privateKey = await promptPrivateKeyPem('GitHub App private key PEM, escaped PEM, or path to .pem file')
+  if (privateKey === CANCEL_SYMBOL) {
     cancel('Aborted.')
     process.exit(0)
   }
@@ -876,15 +870,9 @@ async function promptGithubAppAuth(): Promise<{
   return {
     type: 'app',
     appId: Number(appId),
-    privateKey: await resolvePrivateKeyInput(privateKeyInput),
+    privateKey,
     ...(parsedInstallationId !== undefined ? { installationId: parsedInstallationId } : {}),
   }
-}
-
-async function resolvePrivateKeyInput(input: string): Promise<string> {
-  const normalized = input.replace(/\\n/g, '\n')
-  if (normalized.includes('-----BEGIN') && normalized.includes('PRIVATE KEY-----')) return normalized
-  return await readFile(input, 'utf8')
 }
 
 function parseRepos(input: string): string[] {
