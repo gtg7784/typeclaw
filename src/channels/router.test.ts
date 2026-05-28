@@ -17,6 +17,7 @@ import {
   DUPLICATE_SEND_ERROR,
   MAX_CHANNEL_SENDS_PER_TURN,
   MAX_TYPING_HEARTBEAT_MS,
+  OUTBOUND_FLOOD_ERROR,
   SEND_RATE_WARN_THRESHOLD,
   SEND_RATE_WINDOW_MS,
   SESSION_GC_INTERVAL_MS,
@@ -2295,6 +2296,65 @@ describe('ChannelRouter duplicate-send guard', () => {
     )
     expect(sys).toEqual({ ok: true })
     expect(delivered).toBe(2)
+  })
+})
+
+describe('ChannelRouter outbound flood guard', () => {
+  test('blocks repeated-character outbound text before adapter delivery', async () => {
+    const dir = await tempDir()
+    let delivered = 0
+    const { router } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async () => {
+      delivered++
+      return { ok: true }
+    })
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    const result = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'ㅋ'.repeat(500) })
+    expect(result).toEqual({ ok: false, error: OUTBOUND_FLOOD_ERROR, code: 'outbound-flood' })
+    expect(delivered).toBe(0)
+  })
+
+  test('does not pre-drop repeated-character inbound messages', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ text: 'ㅋ'.repeat(500) }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sessions[0]!.prompts[0]).toContain('ㅋ'.repeat(500))
+  })
+
+  test('allows a normal reply when only the quote anchor contains repeated-character inbound text', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: string[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'ㅋ'.repeat(500), authorId: 'U_ALICE', authorName: 'Alice' }))
+    nowRef.value += 100
+    await router.route(
+      inbound({
+        isBotMention: false,
+        externalMessageId: 'm-observed',
+        authorId: 'bob',
+        authorName: 'bob',
+        text: 'also waiting',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value += 200
+
+    const result = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'normal reply' })
+    expect(result).toEqual({ ok: true })
+    expect(sent).toHaveLength(1)
+    expect(sent[0]).toContain('normal reply')
   })
 })
 

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ChannelRouter } from '@/channels/router'
+import { OUTBOUND_FLOOD_ERROR, type ChannelRouter } from '@/channels/router'
 import type { OutboundMessage, SendResult } from '@/channels/types'
 
 import {
@@ -147,6 +147,18 @@ describe('createChannelReplyTool', () => {
     const text = (result.content[0] as { text: string }).text
     expect(text).toContain('channel_reply denied')
     expect(text).toContain('denied by allow rules')
+  })
+
+  test('reports outbound flood denial back to the agent without posting', async () => {
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: false, error: OUTBOUND_FLOOD_ERROR, code: 'outbound-flood' })),
+      origin: slackThreadOrigin,
+    })
+    const result = await runTool(tool, { text: 'ㅋ'.repeat(500) })
+    expect(result.details).toEqual({ ok: false, error: OUTBOUND_FLOOD_ERROR })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('channel_reply denied')
+    expect(text).toContain(OUTBOUND_FLOOD_ERROR)
   })
 
   describe('tool-result marker', () => {

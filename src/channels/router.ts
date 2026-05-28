@@ -21,6 +21,7 @@ import {
   type MembershipResolverResult,
 } from './membership'
 import { createMembershipCache, type MembershipCache } from './membership-cache'
+import { checkOutboundFlood } from './outbound-flood-filter'
 import { updateParticipants } from './participants'
 import {
   channelsSessionsPath,
@@ -107,6 +108,7 @@ export const SEND_RATE_WINDOW_MS = 5_000
 // send still emits a structured log line regardless of rate — this
 // constant only controls when the warning marker appears.
 export const SEND_RATE_WARN_THRESHOLD = 3
+export const OUTBOUND_FLOOD_ERROR = 'outbound message denied: content looks like a repeated-character flood'
 
 /**
  * Maximum age of the last engaged inbound before the next inbound triggers a fresh session.
@@ -1843,6 +1845,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const callbacks = outboundCallbacks.get(msg.adapter)
     if (!callbacks || callbacks.size === 0) {
       return { ok: false, error: `no adapter registered for "${msg.adapter}"`, code: 'no-adapter' }
+    }
+
+    const authoredText = normalizeSendText(msg.text)
+    if (authoredText !== undefined) {
+      const flood = checkOutboundFlood(authoredText)
+      if (!flood.ok) return { ok: false, error: OUTBOUND_FLOOD_ERROR, code: 'outbound-flood' }
     }
 
     const keyId = channelKeyId({
