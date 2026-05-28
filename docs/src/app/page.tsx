@@ -175,7 +175,7 @@ function CheckCell({ value }: { value: boolean | 'partial' }) {
 function MarketingTable() {
   return (
     <div className="-mx-2 overflow-x-auto sm:mx-0">
-      <table className="w-full min-w-[820px] text-left text-sm">
+      <table className="w-full min-w-[940px] text-left text-sm">
         <thead>
           <tr className="border-b border-zinc-200 text-xs tracking-wider text-zinc-500 uppercase dark:border-white/[0.06] dark:text-zinc-500">
             <th className="px-4 py-4 font-medium">Runtime</th>
@@ -184,6 +184,7 @@ function MarketingTable() {
             <th className="px-4 py-4 text-center font-medium">Multi-channel</th>
             <th className="px-4 py-4 text-center font-medium">Full-featured plugins</th>
             <th className="px-4 py-4 text-center font-medium">Git-native</th>
+            <th className="px-4 py-4 text-center font-medium">Permission system</th>
             <th className="px-4 py-4 font-medium">Notes</th>
           </tr>
         </thead>
@@ -223,6 +224,9 @@ function MarketingTable() {
               </td>
               <td className="px-4 py-5 text-center">
                 <CheckCell value={r.gitNative} />
+              </td>
+              <td className="px-4 py-5 text-center">
+                <CheckCell value={r.permissionSystem} />
               </td>
               <td className="px-4 py-5 text-zinc-600 dark:text-zinc-400">
                 <span className="font-medium text-zinc-700 dark:text-zinc-300">{r.strength}</span>
