@@ -4,9 +4,9 @@ import type { KakaoMessage, KakaoTalkPushEmoticonEvent } from 'agent-messenger/k
 
 import {
   emoticonEventToMessageEvent,
-  formatEmoticonText,
-  formatHistoryText,
-  formatInboundText,
+  splitEmoticonInbound,
+  splitHistoryInbound,
+  splitInbound,
 } from './kakaotalk-attachment'
 
 const emoticon = (overrides: Partial<KakaoTalkPushEmoticonEvent> = {}): KakaoTalkPushEmoticonEvent => ({
@@ -34,111 +34,123 @@ const historyMsg = (overrides: Partial<KakaoMessage> = {}): KakaoMessage => ({
   ...overrides,
 })
 
-describe('formatInboundText', () => {
+describe('splitInbound', () => {
   test('returns raw text unchanged for type=1 with no attachment', () => {
-    expect(formatInboundText({ message: 'hello', message_type: 1, attachment: null })).toBe('hello')
+    expect(splitInbound({ message: 'hello', message_type: 1, attachment: null })).toEqual({
+      text: 'hello',
+      attachments: [],
+    })
   })
 
   test('returns empty string for empty text without attachment so classifier can still drop it', () => {
-    expect(formatInboundText({ message: '', message_type: 1, attachment: null })).toBe('')
+    expect(splitInbound({ message: '', message_type: 1, attachment: null })).toEqual({ text: '', attachments: [] })
   })
 
-  test('wraps photo (type=2) with dimensions, mime, and url so the agent has something to reason about', () => {
-    const text = formatInboundText({
+  test('wraps photo with metadata while keeping the ref structured only', () => {
+    const result = splitInbound({
       message: '',
       message_type: 2,
       attachment: { k: 'abc/photo.jpg', w: 1320, h: 2868, mt: 'image/jpeg', url: 'https://talk.kakaocdn.net/p/abc' },
     })
-    expect(text).toBe('[KakaoTalk message with photo 1320x2868 (image/jpeg) https://talk.kakaocdn.net/p/abc]')
+    expect(result.text).toBe('[KakaoTalk attachment #1: photo 1320x2868 image/jpeg]')
+    expect(result.attachments).toEqual([
+      {
+        id: 1,
+        kind: 'photo',
+        ref: 'https://talk.kakaocdn.net/p/abc',
+        mimetype: 'image/jpeg',
+        width: 1320,
+        height: 2868,
+      },
+    ])
   })
 
-  test('photo without url falls back to the CDN key', () => {
-    const text = formatInboundText({
+  test('photo without url drops the CDN-key fallback and leaves ref empty', () => {
+    const result = splitInbound({
       message: '',
       message_type: 2,
       attachment: { k: 'abc/photo.jpg', w: 100, h: 100, mt: 'image/jpeg' },
     })
-    expect(text).toBe('[KakaoTalk message with photo 100x100 (image/jpeg) abc/photo.jpg]')
+    expect(result.text).toBe('[KakaoTalk attachment #1: photo 100x100 image/jpeg]')
+    expect(result.attachments[0]?.ref).toBe('')
   })
 
-  test('appends caption + summary on separate lines so caption-with-photo preserves user prose', () => {
-    const text = formatInboundText({
+  test('appends caption + placeholder on separate lines', () => {
+    const result = splitInbound({
       message: 'look at this',
       message_type: 2,
       attachment: { w: 100, h: 100, mt: 'image/jpeg', url: 'https://example.com/x.jpg' },
     })
-    expect(text).toBe('look at this\n[KakaoTalk message with photo 100x100 (image/jpeg) https://example.com/x.jpg]')
+    expect(result.text).toBe('look at this\n[KakaoTalk attachment #1: photo 100x100 image/jpeg]')
+    expect(result.attachments[0]?.ref).toBe('https://example.com/x.jpg')
   })
 
-  test('file (type=18) renders the friendly name and size when available', () => {
-    const text = formatInboundText({
+  test('file renders name, mimetype, and size as safe metadata', () => {
+    const result = splitInbound({
       message: '',
       message_type: 18,
       attachment: { name: 'spec.pdf', mt: 'application/pdf', size: 12345, url: 'https://example.com/spec.pdf' },
     })
-    expect(text).toBe(
-      '[KakaoTalk message with file spec.pdf (application/pdf) size=12345 https://example.com/spec.pdf]',
-    )
+    expect(result.text).toBe('[KakaoTalk attachment #1: file application/pdf name=spec.pdf size=12345]')
+    expect(result.attachments).toEqual([
+      {
+        id: 1,
+        kind: 'file',
+        ref: 'https://example.com/spec.pdf',
+        filename: 'spec.pdf',
+        mimetype: 'application/pdf',
+        sizeBytes: 12345,
+      },
+    ])
   })
 
-  test('file with unknown shape falls back to a keys preview rather than dropping the payload', () => {
-    const text = formatInboundText({ message: '', message_type: 18, attachment: { weirdField: 'opaque', other: 1 } })
-    expect(text).toBe('[KakaoTalk message with file keys=[other,weirdField]]')
-  })
-
-  test('video (type=3) surfaces the url alongside the keys preview so the agent has a fetchable ref', () => {
-    const text = formatInboundText({
+  test('generic media preserves fetchable url in ref without rendering it', () => {
+    const result = splitInbound({
       message: '',
       message_type: 3,
-      attachment: { url: 'https://example.com/v.mp4', dur: 5000 },
+      attachment: { url: 'https://example.com/v.mp4', mt: 'video/mp4' },
     })
-    expect(text).toBe('[KakaoTalk message with video (keys=[dur,url]) https://example.com/v.mp4]')
+    expect(result.text).toBe('[KakaoTalk attachment #1: video video/mp4]')
+    expect(result.attachments[0]).toEqual({
+      id: 1,
+      kind: 'video',
+      ref: 'https://example.com/v.mp4',
+      mimetype: 'video/mp4',
+    })
   })
 
-  test('audio (type=5) surfaces the url alongside the keys preview', () => {
-    const text = formatInboundText({ message: '', message_type: 5, attachment: { url: 'https://example.com/a.m4a' } })
-    expect(text).toBe('[KakaoTalk message with audio (keys=[url]) https://example.com/a.m4a]')
-  })
-
-  test('multiphoto (type=27) without a url falls back to a keys-only preview', () => {
-    const text = formatInboundText({ message: '', message_type: 27, attachment: { kl: ['a', 'b', 'c'] } })
-    expect(text).toBe('[KakaoTalk message with multiphoto keys=[kl]]')
-  })
-
-  test('video without a url falls back to a keys-only preview rather than fabricating a ref', () => {
-    const text = formatInboundText({ message: '', message_type: 3, attachment: { dur: 5000 } })
-    expect(text).toBe('[KakaoTalk message with video keys=[dur]]')
+  test('generic media without a url remains visible but unfetchable', () => {
+    const result = splitInbound({ message: '', message_type: 27, attachment: { kl: ['a', 'b', 'c'] } })
+    expect(result.text).toBe('[KakaoTalk attachment #1: multiphoto]')
+    expect(result.attachments[0]).toEqual({ id: 1, kind: 'multiphoto', ref: '' })
   })
 
   test('unknown non-text type with empty message returns empty text so classifyInbound can drop it as noise', () => {
-    expect(formatInboundText({ message: '', message_type: 99, attachment: { foo: 'bar' } })).toBe('')
+    expect(splitInbound({ message: '', message_type: 99, attachment: { foo: 'bar' } })).toEqual({
+      text: '',
+      attachments: [],
+    })
   })
 
   test('unknown non-text type with caption keeps the caption verbatim without inventing a placeholder', () => {
-    expect(formatInboundText({ message: 'hello', message_type: 99, attachment: { foo: 'bar' } })).toBe('hello')
-  })
-
-  test('text-type with stray attachment returns the raw text unchanged (LOCO does not mix text+attachment but we never lie about it)', () => {
-    expect(formatInboundText({ message: 'hi', message_type: 1, attachment: { foo: 'bar' } })).toBe('hi')
+    expect(splitInbound({ message: 'hello', message_type: 99, attachment: { foo: 'bar' } })).toEqual({
+      text: 'hello',
+      attachments: [],
+    })
   })
 })
 
-describe('formatEmoticonText', () => {
-  test('renders sticker with pack_id and path when both are available', () => {
-    expect(formatEmoticonText(emoticon())).toBe(
-      '[KakaoTalk message with sticker (sticker) pack=4412724 path=4412724.emot_001.webp]',
-    )
+describe('splitEmoticonInbound', () => {
+  test('renders sticker with filename metadata and empty ref', () => {
+    expect(splitEmoticonInbound(emoticon())).toEqual({
+      text: '[KakaoTalk attachment #1: sticker name=4412724.emot_001.webp]',
+      attachments: [{ id: 1, kind: 'sticker', ref: '', filename: '4412724.emot_001.webp' }],
+    })
   })
 
-  test('omits pack and path when null so we never emit dangling keys', () => {
-    expect(formatEmoticonText(emoticon({ pack_id: null, sticker_path: null }))).toBe(
-      '[KakaoTalk message with sticker (sticker)]',
-    )
-  })
-
-  test('animated sticker carries through the emoticon_kind label', () => {
-    expect(formatEmoticonText(emoticon({ emoticon_kind: 'sticker_ani', message_type: 20 }))).toBe(
-      '[KakaoTalk message with sticker (sticker_ani) pack=4412724 path=4412724.emot_001.webp]',
+  test('falls back to the emoticon kind when path is absent', () => {
+    expect(splitEmoticonInbound(emoticon({ pack_id: null, sticker_path: null })).attachments[0]?.filename).toBe(
+      'sticker-sticker',
     )
   })
 })
@@ -154,51 +166,31 @@ describe('emoticonEventToMessageEvent', () => {
     expect(wrapped.message_type).toBe(12)
     expect(wrapped.attachment).toBeNull()
     expect(wrapped.sent_at).toBe(1_730_000_000_000)
-  })
-
-  test('synthesizes message text so classifier empty_text drop does not fire on stickers', () => {
-    const wrapped = emoticonEventToMessageEvent(emoticon())
-    expect(wrapped.message).toBe('[KakaoTalk message with sticker (sticker) pack=4412724 path=4412724.emot_001.webp]')
-  })
-
-  test('preserves author_name passthrough so the resolver does not need to re-lookup', () => {
-    const wrapped = emoticonEventToMessageEvent(emoticon({ author_name: 'Alice' }))
-    expect(wrapped.author_name).toBe('Alice')
+    expect(wrapped.message).toBe('[KakaoTalk attachment #1: sticker name=4412724.emot_001.webp]')
   })
 })
 
-describe('formatHistoryText', () => {
+describe('splitHistoryInbound', () => {
   test('returns plain text for text-only history messages', () => {
-    expect(formatHistoryText(historyMsg({ message: 'hi', type: 1 }))).toBe('hi')
+    expect(splitHistoryInbound(historyMsg({ message: 'hi', type: 1 }))).toEqual({ text: 'hi', attachments: [] })
   })
 
   test('renders photo history messages the same way as live photo events', () => {
-    const text = formatHistoryText(
-      historyMsg({
-        type: 2,
-        attachment: { w: 100, h: 100, mt: 'image/jpeg', url: 'https://example.com/x.jpg' },
-      }),
+    const result = splitHistoryInbound(
+      historyMsg({ type: 2, attachment: { w: 100, h: 100, mt: 'image/jpeg', url: 'https://example.com/x.jpg' } }),
     )
-    expect(text).toBe('[KakaoTalk message with photo 100x100 (image/jpeg) https://example.com/x.jpg]')
+    expect(result.text).toBe('[KakaoTalk attachment #1: photo 100x100 image/jpeg]')
+    expect(result.attachments[0]?.ref).toBe('https://example.com/x.jpg')
   })
 
   test('renders historical stickers with the sticker shape derived from the attachment path', () => {
-    const text = formatHistoryText(
+    const result = splitHistoryInbound(
       historyMsg({
         type: 12,
-        attachment: { path: '4412724.emot_001.webp', emoticonItemPath: '4412724.emot_001.webp', name: '(emoticon)' },
+        attachment: { path: '4412724.emot_001.webp', emoticonItemPath: '4412724.emot_001.webp' },
       }),
     )
-    expect(text).toBe('[KakaoTalk message with sticker (sticker) pack=4412724 path=4412724.emot_001.webp]')
-  })
-
-  test('falls back to the emoticonItemPath when only it is set', () => {
-    const text = formatHistoryText(historyMsg({ type: 20, attachment: { emoticonItemPath: '3333.emot_009.png' } }))
-    expect(text).toBe('[KakaoTalk message with sticker (sticker_ani) pack=3333 path=3333.emot_009.png]')
-  })
-
-  test('historical sticker without any path still surfaces the kind label', () => {
-    const text = formatHistoryText(historyMsg({ type: 12, attachment: null }))
-    expect(text).toBe('[KakaoTalk message with sticker (sticker)]')
+    expect(result.text).toBe('[KakaoTalk attachment #1: sticker name=4412724.emot_001.webp]')
+    expect(result.attachments[0]).toEqual({ id: 1, kind: 'sticker', ref: '', filename: '4412724.emot_001.webp' })
   })
 })

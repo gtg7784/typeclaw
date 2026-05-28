@@ -692,8 +692,9 @@ export function createOutboundCallback(deps: {
 // plain HTTP tool. Routing through the SDK's `downloadFile(fileId)` is
 // the only path that works — it issues `files.info` to fetch metadata
 // (mimetype + name) then GETs `url_private` with the bot token. The
-// classifier emits `id=Fxxxx` in the inbound text exactly so the agent
-// can hand the id back to this callback.
+// classifiers now keep the bare `Fxxxx` id in structured InboundAttachment.ref
+// (legacy persisted state may still carry the old prompt-visible `id=` shape,
+// which channel_fetch_attachment strips before reaching this callback).
 export function createFetchAttachmentCallback(deps: {
   client: Pick<SlackBotClient, 'downloadFile'>
   logger: SlackBotAdapterLogger

@@ -34,6 +34,8 @@ function fakeRouter(
     registerFetchAttachment: () => {},
     unregisterFetchAttachment: () => {},
     fetchAttachment: async () => ({ ok: false, error: 'no fetchAttachment' }),
+    lookupInboundAttachment: () => null,
+    listInboundAttachmentIds: () => [],
     getSelfAliases: () => [],
     stop: async () => {},
     liveCount: () => 0,

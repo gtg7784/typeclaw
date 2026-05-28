@@ -6,7 +6,7 @@ import type {
 } from 'agent-messenger/discordbot'
 
 import type { ChannelAdapterConfig } from '@/channels/schema'
-import type { InboundMessage } from '@/channels/types'
+import type { InboundAttachment, InboundMessage } from '@/channels/types'
 
 export type InboundDropReason =
   | 'self_author' // event.author.id === botUserId; we never route our own messages back to ourselves
@@ -35,7 +35,7 @@ export function classifyInbound(
   if (botUserId !== null && event.author.id === botUserId) {
     return { kind: 'drop', reason: 'self_author' }
   }
-  const text = inboundText(event)
+  const { text, attachments } = splitInbound(event)
   if (text === '') return { kind: 'drop', reason: 'empty_content' }
 
   const isDm = event.guild_id === undefined
@@ -80,6 +80,7 @@ export function classifyInbound(
       chat: event.channel_id,
       thread: null,
       text,
+      ...(attachments.length > 0 ? { attachments } : {}),
       externalMessageId: event.id,
       authorId: event.author.id,
       // Discord's post-2023 username system allows pure-numeric handles (e.g.
@@ -107,38 +108,45 @@ function isReplyToBot(event: DiscordGatewayMessageCreateEvent, botUserId: string
   return (event.mentions ?? []).some((m) => m.id === botUserId)
 }
 
-function inboundText(event: DiscordGatewayMessageCreateEvent): string {
-  const mediaSummary = summarizeDiscordMedia(event)
-  if (mediaSummary.length === 0) return event.content
-  const summary = `[Discord message with ${mediaSummary.join('; ')}]`
-  return event.content === '' ? summary : `${event.content}\n${summary}`
+type SplitInbound = { text: string; attachments: InboundAttachment[] }
+
+function splitInbound(event: DiscordGatewayMessageCreateEvent): SplitInbound {
+  const attachments = describeDiscordMedia(event)
+  if (attachments.length === 0) return { text: event.content, attachments: [] }
+  const summary = attachments.map(renderPlaceholder).join('\n')
+  const text = event.content === '' ? summary : `${event.content}\n${summary}`
+  return { text, attachments }
 }
 
-function summarizeDiscordMedia(event: DiscordGatewayMessageCreateEvent): string[] {
+function describeDiscordMedia(event: DiscordGatewayMessageCreateEvent): InboundAttachment[] {
   return [
-    ...(event.attachments ?? []).map(summarizeAttachment),
-    ...(event.embeds ?? []).map(summarizeEmbed),
-    ...(event.sticker_items ?? []).map(summarizeSticker),
-  ]
+    ...(event.attachments ?? []).map(describeAttachment),
+    ...(event.embeds ?? []).map(describeEmbed),
+    ...(event.sticker_items ?? []).map(describeSticker),
+  ].map((attachment, index) => ({ ...attachment, id: index + 1 }))
 }
 
-function summarizeAttachment(attachment: DiscordFile): string {
-  return compactJoin(' ', [
-    `attachment: ${attachment.filename}`,
-    attachment.content_type === undefined ? undefined : `(${attachment.content_type})`,
-    attachment.url,
-  ])
+function describeAttachment(attachment: DiscordFile): Omit<InboundAttachment, 'id'> {
+  return {
+    kind: 'file',
+    ref: attachment.url,
+    filename: attachment.filename,
+    ...(attachment.content_type !== undefined ? { mimetype: attachment.content_type } : {}),
+  }
 }
 
-function summarizeEmbed(embed: DiscordGatewayEmbed): string {
+function describeEmbed(embed: DiscordGatewayEmbed): Omit<InboundAttachment, 'id'> {
   const label = embed.title ?? embed.description ?? embed.url ?? embed.type ?? 'embed'
-  return compactJoin(' ', ['embed:', label, embed.url !== undefined && embed.url !== label ? embed.url : undefined])
+  return { kind: 'embed', ref: embed.url ?? '', filename: label }
 }
 
-function summarizeSticker(sticker: DiscordGatewayStickerItem): string {
-  return `sticker: ${sticker.name}`
+function describeSticker(sticker: DiscordGatewayStickerItem): Omit<InboundAttachment, 'id'> {
+  return { kind: 'sticker', ref: '', filename: sticker.name }
 }
 
-function compactJoin(separator: string, parts: Array<string | undefined>): string {
-  return parts.filter((part) => part !== undefined && part !== '').join(separator)
+function renderPlaceholder(attachment: InboundAttachment): string {
+  const parts: string[] = [`Discord attachment #${attachment.id}: ${attachment.kind}`]
+  if (attachment.mimetype !== undefined) parts.push(attachment.mimetype)
+  if (attachment.filename !== undefined) parts.push(`name=${attachment.filename}`)
+  return `[${parts.join(' ')}]`
 }

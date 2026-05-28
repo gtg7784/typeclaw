@@ -1,7 +1,7 @@
 import type { TelegramBotUser, TelegramMessage, TelegramMessageEntity } from 'agent-messenger/telegrambot'
 
 import type { ChannelAdapterConfig } from '@/channels/schema'
-import type { InboundMessage } from '@/channels/types'
+import type { InboundAttachment, InboundMessage } from '@/channels/types'
 
 export type InboundDropReason = 'self_author' | 'no_user' | 'empty_text' | 'pre_connect'
 
@@ -31,7 +31,7 @@ export function classifyInbound(
     return { kind: 'drop', reason: 'self_author' }
   }
 
-  const text = inboundText(event)
+  const { text, attachments } = splitInbound(event)
   if (text === '') return { kind: 'drop', reason: 'empty_text' }
 
   const chat = String(event.chat.id)
@@ -70,6 +70,7 @@ export function classifyInbound(
       chat,
       thread,
       text,
+      ...(attachments.length > 0 ? { attachments } : {}),
       externalMessageId: String(event.message_id),
       authorId: String(author.id),
       authorName: formatAuthorName(author),
@@ -130,24 +131,46 @@ function isUserMentionForBot(
   return false
 }
 
-function inboundText(event: TelegramMessage): string {
+type SplitInbound = { text: string; attachments: InboundAttachment[] }
+
+function splitInbound(event: TelegramMessage): SplitInbound {
   const body = event.text ?? event.caption ?? ''
-  const mediaSummary = summarizeMedia(event)
-  if (mediaSummary.length === 0) return body
-  const summary = `[Telegram message with ${mediaSummary.join('; ')}]`
-  return body === '' ? summary : `${body}\n${summary}`
+  const attachments = describeMedia(event)
+  if (attachments.length === 0) return { text: body, attachments: [] }
+  const summary = attachments.map(renderPlaceholder).join('\n')
+  const text = body === '' ? summary : `${body}\n${summary}`
+  return { text, attachments }
 }
 
-function summarizeMedia(event: TelegramMessage): string[] {
-  const parts: string[] = []
+function describeMedia(event: TelegramMessage): InboundAttachment[] {
+  const parts: InboundAttachment[] = []
   if (event.document !== undefined) {
-    const name = event.document.file_name ?? event.document.file_id
-    const mime = event.document.mime_type !== undefined ? ` (${event.document.mime_type})` : ''
-    parts.push(`document: ${name}${mime} file_id=${event.document.file_id}`)
+    parts.push({
+      id: parts.length + 1,
+      kind: 'file',
+      ref: event.document.file_id,
+      ...(event.document.file_name !== undefined ? { filename: event.document.file_name } : {}),
+      ...(event.document.mime_type !== undefined ? { mimetype: event.document.mime_type } : {}),
+    })
   }
   if (event.photo !== undefined && event.photo.length > 0) {
     const largest = event.photo[event.photo.length - 1]!
-    parts.push(`photo: ${largest.width}x${largest.height} file_id=${largest.file_id}`)
+    parts.push({
+      id: parts.length + 1,
+      kind: 'photo',
+      ref: largest.file_id,
+      width: largest.width,
+      height: largest.height,
+    })
   }
   return parts
+}
+
+function renderPlaceholder(attachment: InboundAttachment): string {
+  const parts: string[] = [`Telegram attachment #${attachment.id}: ${attachment.kind}`]
+  if (attachment.width !== undefined && attachment.height !== undefined)
+    parts.push(`${attachment.width}x${attachment.height}`)
+  if (attachment.mimetype !== undefined) parts.push(attachment.mimetype)
+  if (attachment.filename !== undefined) parts.push(`name=${attachment.filename}`)
+  return `[${parts.join(' ')}]`
 }

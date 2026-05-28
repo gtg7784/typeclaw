@@ -148,6 +148,19 @@ describe('classifyInbound', () => {
     expect(verdict.payload.isBotMention).toBe(true)
   })
 
+  test('threads structured attachments from context into the routed payload', () => {
+    const attachments = [{ id: 1, kind: 'photo' as const, ref: 'https://example.com/p.jpg', mimetype: 'image/jpeg' }]
+    const verdict = classifyInbound(event({ message: '[KakaoTalk attachment #1: photo image/jpeg]' }), dmConfig(), {
+      selfUserId: '999',
+      lookupChat: dmLookup,
+      attachments,
+    })
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') return
+    expect(verdict.payload.attachments).toBe(attachments)
+  })
+
   test('absent alias keeps isBotMention=false on plain message', () => {
     const verdict = classifyInbound(event({ message: 'random thought' }), dmConfig(), {
       selfUserId: '999',

@@ -4,7 +4,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { ChannelRouter } from '@/channels/router'
-import type { FetchAttachmentResult, FetchHistoryResult, OutboundMessage, SendResult } from '@/channels/types'
+import type {
+  FetchAttachmentResult,
+  FetchHistoryResult,
+  InboundAttachment,
+  OutboundMessage,
+  SendResult,
+} from '@/channels/types'
 
 import { createChannelFetchAttachmentTool } from './channel-fetch-attachment'
 import { createChannelHistoryTool } from './channel-history'
@@ -28,6 +34,7 @@ type RouterOverrides = {
   send?: (msg: OutboundMessage) => Promise<SendResult>
   fetchHistory?: () => Promise<FetchHistoryResult>
   fetchAttachment?: () => Promise<FetchAttachmentResult>
+  attachments?: readonly InboundAttachment[]
 }
 
 function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
@@ -50,6 +57,8 @@ function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
     registerFetchAttachment: () => {},
     unregisterFetchAttachment: () => {},
     fetchAttachment: overrides.fetchAttachment ?? (async () => ({ ok: false, error: 'no callback' })),
+    lookupInboundAttachment: (args) => overrides.attachments?.find((attachment) => attachment.id === args.id) ?? null,
+    listInboundAttachmentIds: () => (overrides.attachments ?? []).map((attachment) => attachment.id),
     getSelfAliases: () => [],
     stop: async () => {},
     liveCount: () => 0,
@@ -60,6 +69,7 @@ function fakeRouter(overrides: RouterOverrides = {}): ChannelRouter {
 }
 
 const fakeCtx = {} as Parameters<ReturnType<typeof createChannelSendTool>['execute']>[4]
+const attachmentOrigin = { adapter: 'slack-bot' as const, workspace: 'T0', chat: 'C0', thread: null }
 
 describe('channel_send failure logging', () => {
   test('logs router.send rejection with adapter+chat context', async () => {
@@ -209,12 +219,15 @@ describe('channel_fetch_attachment failure logging', () => {
   test('logs fetchAttachment upstream errors', async () => {
     const logger = captureLogger()
     const tool = createChannelFetchAttachmentTool({
-      router: fakeRouter({ fetchAttachment: async () => ({ ok: false, error: 'file_not_found' }) }),
-      origin: { adapter: 'slack-bot' },
+      router: fakeRouter({
+        fetchAttachment: async () => ({ ok: false, error: 'file_not_found' }),
+        attachments: [{ id: 1, kind: 'file', ref: 'Fxxx' }],
+      }),
+      origin: attachmentOrigin,
       inboxDir,
       logger,
     })
-    await tool.execute('id', { ref: 'Fxxx' }, undefined, undefined, fakeCtx)
+    await tool.execute('id', { attachment_id: 1 }, undefined, undefined, fakeCtx)
     expect(logger.warnings).toEqual(['[channels] channel_fetch_attachment failed: slack-bot: file_not_found'])
   })
 
@@ -229,14 +242,15 @@ describe('channel_fetch_attachment failure logging', () => {
           size: 3,
           mimetype: 'text/plain',
         }),
+        attachments: [{ id: 1, kind: 'file', ref: 'Fxxx' }],
       }),
-      origin: { adapter: 'slack-bot' },
+      origin: attachmentOrigin,
       // Pointing at a path that exists as a FILE forces mkdir(recursive) to throw ENOTDIR.
       // This exercises the write-failure branch without mocking node:fs.
       inboxDir: '/dev/null/not-a-dir',
       logger,
     })
-    await tool.execute('id', { ref: 'Fxxx' }, undefined, undefined, fakeCtx)
+    await tool.execute('id', { attachment_id: 1 }, undefined, undefined, fakeCtx)
     expect(logger.warnings).toHaveLength(1)
     expect(logger.warnings[0]).toContain('[channels] channel_fetch_attachment failed:')
     expect(logger.warnings[0]).toContain('write failed:')
@@ -253,8 +267,9 @@ describe('channel_fetch_attachment failure logging', () => {
           size: 3,
           mimetype: 'text/plain',
         }),
+        attachments: [{ id: 1, kind: 'file', ref: 'Fxxx' }],
       }),
-      origin: { adapter: 'slack-bot' },
+      origin: attachmentOrigin,
       inboxDir,
       logger,
     })

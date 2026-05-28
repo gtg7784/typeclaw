@@ -8,9 +8,13 @@ import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
+import { normalizeRef } from './normalize-ref'
 
 export type ChannelFetchAttachmentOrigin = {
   adapter: AdapterId
+  workspace: string
+  chat: string
+  thread: string | null
 }
 
 export type CreateChannelFetchAttachmentToolOptions = {
@@ -34,18 +38,16 @@ export function createChannelFetchAttachmentTool({
     name: 'channel_fetch_attachment',
     label: 'Channel Fetch Attachment',
     description:
-      'Download a file the user attached to the inbound channel message and save it to disk. Inbound channel ' +
-      'messages with uploads carry a `[<Platform> message with attachment: <name> (<mime>) <ref>]` summary — pass ' +
-      "the literal `<ref>` value as `ref`. For Slack the ref looks like `id=Fxxxx` (use `Fxxxx`); for Discord it's " +
-      'the full `https://cdn.discordapp.com/...` URL. The tool authenticates with the channel adapter (Slack ' +
-      'url_private requires the bot token; Discord CDN URLs are signed and expire ~24h, so fetch promptly). On ' +
-      'success returns the absolute path of the saved file plus its detected mimetype and size. On failure returns ' +
-      'the upstream error verbatim.',
+      'Download a file the user attached to the current inbound channel message and save it to disk. Inbound channel ' +
+      'messages with attachments show `[<Platform> attachment #N: <kind> <metadata>]` in the text. Pass `N` as ' +
+      '`attachment_id`; do not invent ids that are not present in the inbound message. The router validates the id ' +
+      'against the current turn and resolves the private platform ref itself. On success returns the absolute path ' +
+      'of the saved file plus its detected mimetype and size.',
     parameters: Type.Object({
-      ref: Type.String({
+      attachment_id: Type.Integer({
         description:
-          'Slack: the file id `Fxxxx` (with or without the `id=` prefix). Discord: the full `https://cdn.discordapp.com/...` or `https://media.discordapp.net/...` URL.',
-        minLength: 1,
+          'The number N from the inbound `[<Platform> attachment #N: ...]` placeholder. Must be present in this turn.',
+        minimum: 1,
       }),
       filename: Type.Optional(
         Type.String({
@@ -58,10 +60,38 @@ export function createChannelFetchAttachmentTool({
 
     async execute(_toolCallId, params) {
       type Details = { ok: boolean; error?: string; path?: string; mimetype?: string; size?: number }
-      const ref = normalizeRef(params.ref)
+      const found = router.lookupInboundAttachment({
+        adapter,
+        workspace: origin.workspace,
+        chat: origin.chat,
+        thread: origin.thread,
+        id: params.attachment_id,
+      })
+      if (found === null) {
+        const validIds = router.listInboundAttachmentIds({
+          adapter,
+          workspace: origin.workspace,
+          chat: origin.chat,
+          thread: origin.thread,
+        })
+        const validMsg =
+          validIds.length === 0
+            ? 'no attachments are present in the current turn'
+            : `valid attachment_ids in this turn: ${validIds.join(', ')}`
+        return errorResult(
+          `no attachment with id=${params.attachment_id} in this turn (${validMsg}). Do not call channel_fetch_attachment for attachments that do not appear in the inbound message — they do not exist.`,
+        )
+      }
+      if (found.ref === '') {
+        return errorResult(
+          `attachment #${params.attachment_id} (${found.kind}) has no fetchable ref — likely a sticker or an upstream payload without a public URL. Acknowledge the user but do not promise to view it.`,
+        )
+      }
+      const ref = normalizeRef(found.ref)
+      const filename = params.filename ?? found.filename
       const result = await router.fetchAttachment(adapter, {
         ref,
-        ...(params.filename !== undefined ? { filename: params.filename } : {}),
+        ...(filename !== undefined ? { filename } : {}),
       })
       if (!result.ok) {
         logger.warn(formatChannelToolFailure('channel_fetch_attachment', `${adapter}: ${result.error}`))
@@ -98,10 +128,9 @@ export function createChannelFetchAttachmentTool({
   })
 }
 
-function normalizeRef(ref: string): string {
-  const trimmed = ref.trim()
-  if (trimmed.startsWith('id=')) return trimmed.slice(3)
-  return trimmed
+function errorResult(message: string) {
+  const details = { ok: false, error: message }
+  return { content: [{ type: 'text' as const, text: `channel_fetch_attachment error: ${message}` }], details }
 }
 
 const UNSAFE_FILENAME_CHARS = /[^A-Za-z0-9._-]/g

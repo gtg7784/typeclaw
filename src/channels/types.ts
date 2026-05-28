@@ -7,12 +7,56 @@ export type ChannelKey = {
   thread: string | null
 }
 
+// Inbound (non-text) media that the user attached to a channel message.
+// The classifier produces these alongside `InboundMessage.text`; the router
+// stores them and lets channel tools look them up by `id` so the agent can
+// fetch / view a specific attachment without ever seeing the underlying
+// platform-side `ref` (URL, file id, CDN key) in its prompt context.
+//
+// Design contract:
+// - `id` is a 1-based index that is stable WITHIN A SINGLE inbound message
+//   and assigned by the adapter classifier. It is NOT globally unique —
+//   different inbounds re-use small ids (1, 2, ...). The router's lookup
+//   scopes the search to one (adapter,workspace,chat,thread) session and
+//   returns the MOST RECENT match across that session's promptQueue +
+//   contextBuffer, so within a single turn the agent always resolves
+//   `attachment_id: 1` to the attachment on the current inbound — earlier
+//   uses of id 1 from buffered context cannot intercept the lookup.
+// - `ref` is the opaque platform handle that the adapter's
+//   FetchAttachmentCallback knows how to download (Slack file id, Discord
+//   CDN URL, KakaoCDN URL, Telegram file_id). It is INTENTIONALLY not
+//   rendered into the user-visible prompt text — keeping it out of the
+//   LLM's context prevents the dialect-confusion bug where the agent
+//   pastes a malformed ref (e.g. a KakaoCDN bare key) into a tool.
+// - The kind labels (photo/video/...) are coarse on purpose: they exist
+//   for the prompt placeholder ("an image arrived") and for tool routing,
+//   not for platform-specific behavior.
+export type InboundAttachment = {
+  id: number
+  kind: 'photo' | 'video' | 'audio' | 'file' | 'sticker' | 'multiphoto' | 'embed'
+  ref: string
+  // Optional metadata that the adapter classifier may surface for the
+  // placeholder rendering. Every field MUST be safe to print into a prompt
+  // (no credentials, no long opaque tokens). If a piece of metadata would
+  // leak fetchable state, leave it off and rely on `ref` instead.
+  mimetype?: string
+  filename?: string
+  width?: number
+  height?: number
+  sizeBytes?: number
+}
+
 export type InboundMessage = {
   adapter: AdapterId
   workspace: string
   chat: string
   thread: string | null
   text: string
+  // Non-text attachments the user sent on this inbound. Empty / omitted
+  // when the message is text-only. The router carries these through to
+  // the live session's promptQueue/contextBuffer so channel tools can
+  // resolve `attachment_id` → ref without the agent ever seeing the ref.
+  attachments?: readonly InboundAttachment[]
   externalMessageId: string
   authorId: string
   authorName: string
@@ -124,6 +168,7 @@ export type ChannelHistoryMessage = {
   authorId: string
   authorName: string
   text: string
+  attachments?: readonly InboundAttachment[]
   ts: number
   isBot: boolean
   replyToBotMessageId: string | null

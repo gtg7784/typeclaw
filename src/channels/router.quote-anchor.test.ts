@@ -258,6 +258,8 @@ describe('stripChannelMediaPlaceholders', () => {
     expect(stripChannelMediaPlaceholders('hi [Slack message with attachment: a.png id=F1] yo')).toBe('hi  yo')
     expect(stripChannelMediaPlaceholders('[Discord message with sticker: party parrot]')).toBe('')
     expect(stripChannelMediaPlaceholders('[Telegram message with photo: 1280x960 file_id=big]')).toBe('')
+    expect(stripChannelMediaPlaceholders('[KakaoTalk attachment #1: photo 1254x1254 image/jpeg]')).toBe('')
+    expect(stripChannelMediaPlaceholders('look\n[Slack attachment #2: file image/png name=diagram.png]')).toBe('look')
   })
 
   test('does not strip unrelated bracketed prose', () => {
