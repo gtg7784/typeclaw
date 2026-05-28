@@ -1,6 +1,6 @@
 ---
 name: typeclaw-channel-kakaotalk
-description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `kakaotalk`, AND before calling `channel_fetch_attachment` against a KakaoTalk URL. KakaoTalk renders messages as plain text — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and other markdown all appear literally. There is no `@mention` syntax, no message threads, no replies-with-quote, and no outbound stickers. Outbound file attachments (photos, videos, audio, generic files, multi-photo galleries) ARE supported — pass them via `attachments[]` on `channel_send` / `channel_reply` and the adapter routes by MIME. Inbound photos / files / video / audio CAN be downloaded via `channel_fetch_attachment` (the placeholder text includes the URL); inbound stickers are metadata-only and cannot be fetched. URLs expire ~3 days after the message arrives. Read this skill before composing or fetching anything on KakaoTalk.
+description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `kakaotalk`, AND before fetching/viewing KakaoTalk inbound attachments. KakaoTalk renders messages as plain text — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and other markdown all appear literally. There is no `@mention` syntax, no message threads, no replies-with-quote, and no outbound stickers. Outbound file attachments (photos, videos, audio, generic files, multi-photo galleries) ARE supported — pass them via `attachments[]` on `channel_send` / `channel_reply` and the adapter routes by MIME. Inbound attachments appear as `[KakaoTalk attachment #N: ...]`; fetch with `channel_fetch_attachment({ attachment_id: N })` or view images with `look_at_channel_attachment({ attachment_id: N })`. Read this skill before composing or fetching anything on KakaoTalk.
 ---
 
 # typeclaw-channel-kakaotalk
@@ -37,24 +37,23 @@ If you produce any of the following, KakaoTalk will render it literally and the 
 
 ## Inbound attachments and stickers
 
-Even though you cannot SEND attachments or stickers, you DO receive them. The adapter surfaces incoming non-text content by appending a `[KakaoTalk message with ...]` placeholder to the inbound text (same convention as Slack/Discord/Telegram). Examples of what you'll see:
+Even though you cannot SEND stickers, you DO receive attachments and stickers. The adapter surfaces incoming non-text content by appending a ref-free `[KakaoTalk attachment #N: <kind> <metadata>]` placeholder to the inbound text (same convention as Slack/Discord/Telegram). Examples of what you'll see:
 
-- A photo (with no caption): `[KakaoTalk message with photo 1320x2868 (image/jpeg) https://talk.kakaocdn.net/...]`
-- A photo with a caption: `look at this\n[KakaoTalk message with photo 1320x2868 (image/jpeg) https://...]`
-- A file: `[KakaoTalk message with file spec.pdf (application/pdf) size=12345 https://...]`
-- A video / audio (with a usable URL): `[KakaoTalk message with video (keys=[dur,url]) https://talk.kakaocdn.net/...]`. The SDK leaves video / audio / multiphoto payloads opaque, so we list the keys that were present alongside the URL when one exists; when no URL is present the placeholder is just `[KakaoTalk message with video keys=[...]]` and there is nothing for you to fetch.
-- A sticker / emoticon: `[KakaoTalk message with sticker (sticker) pack=4412724 path=4412724.emot_001.webp]`
-- An animated sticker: `[KakaoTalk message with sticker (sticker_ani) pack=... path=...]`
+- A photo (with no caption): `[KakaoTalk attachment #1: photo 1320x2868 image/jpeg]`
+- A photo with a caption: `look at this\n[KakaoTalk attachment #1: photo 1320x2868 image/jpeg]`
+- A file: `[KakaoTalk attachment #1: file application/pdf name=spec.pdf size=12345]`
+- A video / audio / multiphoto: `[KakaoTalk attachment #1: video video/mp4]` or `[KakaoTalk attachment #1: multiphoto]`
+- A sticker / emoticon: `[KakaoTalk attachment #1: sticker name=4412724.emot_001.webp]`
 
 ### Fetching attachment bytes
 
-For photos, files, and any video / audio / multiphoto whose placeholder includes a `https://...kakaocdn.net/...` URL, call `channel_fetch_attachment` with that URL as the `ref` to download the bytes. The adapter validates the host (only `*.kakaocdn.net` is accepted — you cannot use this tool as a generic web fetcher) and returns the raw buffer plus mimetype.
+For photos, files, and any video / audio / multiphoto with an attachment token, call `channel_fetch_attachment` with the numeric `attachment_id` from the token to download the bytes. To view an image directly, call `look_at_channel_attachment` with the same `attachment_id`.
 
 Use this when you actually need to look at the content — e.g. the user sends a screenshot and asks "what's in this?". The download lands in your inbox directory and you can pass it to a vision-capable inspection tool or read it directly depending on the file type.
 
-**Expiry caveat**: KakaoCDN URLs are pre-signed with an `expires=` timestamp baked into the query string — empirically ~3 days after the message arrived. Fetch promptly. If the URL has expired you will get a `403` error with the hint _"likely an expired pre-signed URL; ask the sender to re-share"_ — relay that to the user verbatim rather than guessing the cause.
+If no attachment token appears in the inbound text, no attachment was sent. Do not invent attachment ids — the tool will reject ids that do not appear in the current turn.
 
-**Stickers cannot be fetched** as bytes through this tool. The sticker placeholder carries `pack=` and `path=` identifiers (KakaoTalk sticker pack metadata), not a downloadable URL. Treat stickers as descriptive metadata only — acknowledge them ("cute sticker") without trying to "see" them.
+**Stickers cannot be fetched** as bytes through this tool. Treat stickers as descriptive metadata only — acknowledge them ("cute sticker") without trying to "see" them.
 
 If the inbound text is JUST a sticker (no accompanying text), the agent still gets a routed event — stickers count as engagement under `reply` and `dm` triggers (group chats with only sticker activity will not trigger `mention` because aliases require text matching).
 

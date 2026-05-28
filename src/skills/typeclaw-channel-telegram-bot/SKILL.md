@@ -48,6 +48,14 @@ You do NOT need to manually escape any of `_ * [ ] ( ) ~ \` > # + - = | { } . !`
 
 URLs containing **unescaped parentheses** (Wikipedia-style `Foo_(bar)`) intentionally fall back to escaped literal text rather than render as a link — the adapter cannot disambiguate the closing `)` from a content paren. If you need to link such a URL, percent-encode the parens in the URL (`%28`, `%29`) before putting it in the link.
 
+## Inbound attachments
+
+Inbound Telegram messages with photos or documents show a ref-free attachment token in the text: `[Telegram attachment #N: <kind> <metadata>]`, for example `[Telegram attachment #1: photo 1280x960]` or `[Telegram attachment #1: file application/pdf name=spec.pdf]`.
+
+- To download the attachment, call `channel_fetch_attachment` with `attachment_id: N`.
+- To view an image, call `look_at_channel_attachment` with `attachment_id: N`.
+- If no attachment token appears in the inbound, no attachment was sent. Do not invent attachment ids — the tool will reject ids that do not appear in the current turn.
+
 ## When the user says "your formatting looks broken"
 
 Three classes of failure to triage in this order:
