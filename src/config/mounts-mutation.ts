@@ -132,11 +132,6 @@ function writeMounts(
     return { ok: false, reason: `mounts block would be invalid: ${parsed.error.issues.map(formatIssue).join('; ')}` }
   }
 
-  for (const mount of parsed.data.mounts) {
-    const check = validateMount(mount, cwd)
-    if (!check.ok) return check
-  }
-
   try {
     writeFileSync(join(cwd, CONFIG_FILE), `${JSON.stringify(record, null, 2)}\n`)
   } catch (error) {

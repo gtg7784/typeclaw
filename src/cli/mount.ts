@@ -121,9 +121,10 @@ export function formatMountList(mounts: readonly MountListEntry[]): string {
   )
   for (const mount of mounts) {
     const mode = mount.readOnly ? 'ro' : 'rw'
-    const status = mount.status === 'ok' ? c.green('ok') : c.red('error')
+    const statusText = mount.status.padEnd(statusWidth)
+    const status = mount.status === 'ok' ? c.green(statusText) : c.red(statusText)
     lines.push(
-      `${mount.name.padEnd(nameWidth)}  ${mode.padEnd(modeWidth)}  ${status.padEnd(statusWidth)}  ${mount.resolvedPath} -> ${mount.targetPath}`,
+      `${mount.name.padEnd(nameWidth)}  ${mode.padEnd(modeWidth)}  ${status}  ${mount.resolvedPath} -> ${mount.targetPath}`,
     )
     if (mount.description !== undefined) {
       lines.push(`${' '.repeat(nameWidth + modeWidth + statusWidth + 6)}${c.dim(mount.description)}`)

@@ -3,7 +3,11 @@ import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import { formatMountList } from './mount'
+
 const CLI_ENTRY = join(import.meta.dir, 'index.ts')
+const ANSI_SEQUENCE = new RegExp(`${String.fromCharCode(27)}\\[[0-9;?]*[a-zA-Z]`, 'g')
+const stripAnsi = (s: string): string => s.replace(ANSI_SEQUENCE, '')
 
 describe('typeclaw mount CLI', () => {
   let cwd: string
@@ -29,6 +33,42 @@ describe('typeclaw mount CLI', () => {
     const exitCode = await proc.exited
     return { exitCode, stdout, stderr }
   }
+
+  test('list output keeps columns aligned when status text is colored', () => {
+    const previousForceColor = process.env.FORCE_COLOR
+    const previousNoColor = process.env.NO_COLOR
+    process.env.FORCE_COLOR = '1'
+    delete process.env.NO_COLOR
+
+    try {
+      const rendered = formatMountList([
+        {
+          name: 'one',
+          path: '/tmp/one',
+          readOnly: false,
+          resolvedPath: '/tmp/one',
+          targetPath: '/agent/mounts/one',
+          status: 'ok',
+        },
+        {
+          name: 'two',
+          path: '/tmp/two',
+          readOnly: false,
+          resolvedPath: '/tmp/two',
+          targetPath: '/agent/mounts/two',
+          status: 'error',
+        },
+      ])
+
+      const rows = stripAnsi(rendered).split('\n').slice(1)
+      expect(rows[0]?.indexOf('/tmp/one')).toBe(rows[1]?.indexOf('/tmp/two'))
+    } finally {
+      if (previousForceColor === undefined) delete process.env.FORCE_COLOR
+      else process.env.FORCE_COLOR = previousForceColor
+      if (previousNoColor === undefined) delete process.env.NO_COLOR
+      else process.env.NO_COLOR = previousNoColor
+    }
+  })
 
   test('add writes a mount and tells the user to restart', async () => {
     await mkdir(join(cwd, 'downloads'))

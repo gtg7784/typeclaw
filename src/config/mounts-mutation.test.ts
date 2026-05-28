@@ -59,6 +59,24 @@ describe('mounts mutation', () => {
     expect(raw.mounts).toBeUndefined()
   })
 
+  test('adds a mount when an unrelated existing mount path is broken', async () => {
+    const hostDir = join(cwd, 'projects')
+    await mkdir(hostDir)
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify({ mounts: [{ name: 'gone', path: join(cwd, 'gone') }] }, null, 2),
+    )
+
+    const result = addMount(cwd, 'projects', hostDir)
+
+    expect(result.ok).toBe(true)
+    const raw = JSON.parse(await readFile(join(cwd, 'typeclaw.json'), 'utf8')) as { mounts?: unknown[] }
+    expect(raw.mounts).toEqual([
+      { name: 'gone', path: join(cwd, 'gone'), readOnly: false },
+      { name: 'projects', path: hostDir, readOnly: false },
+    ])
+  })
+
   test('removes a mount by name', async () => {
     const hostDir = join(cwd, 'projects')
     await mkdir(hostDir)
@@ -68,6 +86,30 @@ describe('mounts mutation', () => {
 
     expect(result.ok).toBe(true)
     expect(listMounts(cwd)).toEqual([])
+  })
+
+  test('removes a mount when an unrelated existing mount path is broken', async () => {
+    const hostDir = join(cwd, 'projects')
+    await mkdir(hostDir)
+    await writeFile(
+      join(cwd, 'typeclaw.json'),
+      JSON.stringify(
+        {
+          mounts: [
+            { name: 'gone', path: join(cwd, 'gone') },
+            { name: 'projects', path: hostDir, readOnly: false },
+          ],
+        },
+        null,
+        2,
+      ),
+    )
+
+    const result = removeMount(cwd, 'projects')
+
+    expect(result.ok).toBe(true)
+    const raw = JSON.parse(await readFile(join(cwd, 'typeclaw.json'), 'utf8')) as { mounts?: unknown[] }
+    expect(raw.mounts).toEqual([{ name: 'gone', path: join(cwd, 'gone'), readOnly: false }])
   })
 
   test('list reports broken mount paths without throwing', async () => {
