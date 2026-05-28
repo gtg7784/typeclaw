@@ -24,6 +24,7 @@ describe('BUNDLED_PLUGINS', () => {
       'agent-browser',
       'explorer',
       'scout',
+      'reviewer',
       'operator',
     ])
   })
