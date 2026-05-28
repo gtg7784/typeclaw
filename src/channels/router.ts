@@ -1808,9 +1808,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const lookupInboundAttachment = (args: ChannelKey & { id: number }): InboundAttachment | null => {
     const live = liveSessions.get(channelKeyId(args))
     if (live === undefined) return null
-    for (const item of [...live.promptQueue, ...live.contextBuffer]) {
-      const found = item.attachments?.find((attachment) => attachment.id === args.id)
-      if (found !== undefined) return found
+    // Walk newest → oldest so that when an id collides across messages
+    // (e.g. two photos in the same session each labelled `#1`) the agent's
+    // `attachment_id: 1` always resolves to the CURRENT inbound's
+    // attachment. promptQueue holds the about-to-be-delivered turn and
+    // is therefore the freshest; within each list, append-order maps to
+    // wall-clock order, so iterating in reverse gives recency.
+    const haystacks: ReadonlyArray<ReadonlyArray<{ attachments?: readonly InboundAttachment[] }>> = [
+      live.promptQueue,
+      live.contextBuffer,
+    ]
+    for (const haystack of haystacks) {
+      for (let i = haystack.length - 1; i >= 0; i--) {
+        const item = haystack[i]
+        const found = item?.attachments?.find((attachment) => attachment.id === args.id)
+        if (found !== undefined) return found
+      }
     }
     return null
   }

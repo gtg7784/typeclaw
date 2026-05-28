@@ -17,8 +17,11 @@ export type ChannelKey = {
 // - `id` is a 1-based index that is stable WITHIN A SINGLE inbound message
 //   and assigned by the adapter classifier. It is NOT globally unique —
 //   different inbounds re-use small ids (1, 2, ...). The router's lookup
-//   API qualifies an id by the inbound's session + chat + author so cross-
-//   message collisions cannot happen.
+//   scopes the search to one (adapter,workspace,chat,thread) session and
+//   returns the MOST RECENT match across that session's promptQueue +
+//   contextBuffer, so within a single turn the agent always resolves
+//   `attachment_id: 1` to the attachment on the current inbound — earlier
+//   uses of id 1 from buffered context cannot intercept the lookup.
 // - `ref` is the opaque platform handle that the adapter's
 //   FetchAttachmentCallback knows how to download (Slack file id, Discord
 //   CDN URL, KakaoCDN URL, Telegram file_id). It is INTENTIONALLY not
