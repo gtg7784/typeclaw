@@ -65,9 +65,16 @@ describe('classifyInbound — drop paths', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe(
-      '[Discord message with attachment: diagram.png (image/png) https://cdn.discordapp.com/attachments/c1/a1/diagram.png]',
-    )
+    expect(verdict.payload.text).toBe('[Discord attachment #1: file image/png name=diagram.png]')
+    expect(verdict.payload.attachments).toEqual([
+      {
+        id: 1,
+        kind: 'file',
+        ref: 'https://cdn.discordapp.com/attachments/c1/a1/diagram.png',
+        filename: 'diagram.png',
+        mimetype: 'image/png',
+      },
+    ])
   })
 
   test('routes sticker-only messages because Discord exposes sticker metadata without MessageContent intent', () => {
@@ -80,7 +87,8 @@ describe('classifyInbound — drop paths', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe('[Discord message with sticker: party parrot]')
+    expect(verdict.payload.text).toBe('[Discord attachment #1: sticker name=party parrot]')
+    expect(verdict.payload.attachments).toEqual([{ id: 1, kind: 'sticker', ref: '', filename: 'party parrot' }])
   })
 
   test('routes embed-only messages with embed metadata when Discord provides it', () => {
@@ -93,7 +101,10 @@ describe('classifyInbound — drop paths', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe('[Discord message with embed: Release notes https://example.com/releases]')
+    expect(verdict.payload.text).toBe('[Discord attachment #1: embed name=Release notes]')
+    expect(verdict.payload.attachments).toEqual([
+      { id: 1, kind: 'embed', ref: 'https://example.com/releases', filename: 'Release notes' },
+    ])
   })
 
   test('appends attachment summary to user content so the agent sees BOTH text and the file when the user typed something alongside an upload', () => {
@@ -114,9 +125,7 @@ describe('classifyInbound — drop paths', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe(
-      'look at this\n[Discord message with attachment: diagram.png (image/png) https://cdn.discordapp.com/attachments/c1/a1/diagram.png]',
-    )
+    expect(verdict.payload.text).toBe('look at this\n[Discord attachment #1: file image/png name=diagram.png]')
   })
 
   test('appends multiple attachments separated by `;` so each file ref reaches the agent', () => {
@@ -145,8 +154,24 @@ describe('classifyInbound — drop paths', () => {
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.text).toBe(
-      'two files\n[Discord message with attachment: one.png (image/png) https://cdn.discordapp.com/.../one.png; attachment: two.txt (text/plain) https://cdn.discordapp.com/.../two.txt]',
+      'two files\n[Discord attachment #1: file image/png name=one.png]\n[Discord attachment #2: file text/plain name=two.txt]',
     )
+    expect(verdict.payload.attachments).toEqual([
+      {
+        id: 1,
+        kind: 'file',
+        ref: 'https://cdn.discordapp.com/.../one.png',
+        filename: 'one.png',
+        mimetype: 'image/png',
+      },
+      {
+        id: 2,
+        kind: 'file',
+        ref: 'https://cdn.discordapp.com/.../two.txt',
+        filename: 'two.txt',
+        mimetype: 'text/plain',
+      },
+    ])
   })
 
   test('drops messages before bot identity is known with reason=pre_connect', () => {
