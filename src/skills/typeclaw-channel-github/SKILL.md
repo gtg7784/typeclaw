@@ -57,7 +57,7 @@ Why delegate: the `reviewer` subagent runs on the `deep` model profile, loads a 
    </review>
    ```
 
-4. **Translate findings into a `gh api` review payload.** Each `<finding>` with a `location="path:line"` becomes one entry in `comments[]`. Compose the inline `body` from the reviewer's `<issue>` + `<evidence>` + `<suggestion>` — preserve the reviewer's wording, do not paraphrase. Findings whose `location` is `general` (no file:line anchor) go into the top-level review `body` instead. Map the reviewer's `<verdict>` to the GitHub `event`:
+4. **Translate findings into a `gh api` review payload.** Each `<finding>` with `severity` of `blocker`, `concern`, or `nit` and a `location="path:line"` becomes one entry in `comments[]`. Compose the inline `body` from the reviewer's `<issue>` + `<evidence>` + `<suggestion>` — preserve the reviewer's wording, do not paraphrase. Findings whose `location` is `general` (no file:line anchor) go into the top-level review `body` instead. **Skip `praise` findings when building `comments[]`** — they are not actionable, and inline praise comments are exactly the noise the reviewer is supposed to filter out at the source; if you want to surface them, weave them into the top-level review `body` alongside the summary. Map the reviewer's `<verdict>` to the GitHub `event`:
 
    | Reviewer verdict  | GitHub `event`    |
    | ----------------- | ----------------- |
@@ -88,7 +88,10 @@ Why delegate: the `reviewer` subagent runs on the `deep` model profile, loads a 
 
 - **Always delegate to the `reviewer` subagent.** Do not perform the review craft yourself. The reviewer is the source of truth for severity, evidence quality, and what counts as a finding. Your job is mechanics: spawn, wait, translate, post.
 - **Trust the verdict.** Use the GitHub `event` mapped from the reviewer's `<verdict>`. Do not upgrade `comment` → `APPROVE` to seem agreeable, and do not downgrade `request-changes` → `COMMENT` to soften the tone. The reviewer chose deliberately.
-- **No findings → no inline review post.** If the reviewer returns zero `<finding>` elements and a verdict of `approve`, post a plain `APPROVE` with the `<summary>` as the review body (no `comments[]` array). If the verdict is `comment` with zero findings, post the summary as a top-level PR comment via `gh api -X POST /repos/.../issues/<N>/comments` instead of submitting an empty review.
+- **No actionable findings → no inline review post.** A finding is "actionable" if its severity is `blocker`, `concern`, or `nit`. If the reviewer returns zero actionable findings:
+  - `approve` verdict → post a plain `APPROVE` with the `<summary>` as the review body (no `comments[]` array).
+  - `comment` verdict → post the summary as a top-level PR comment via `gh api -X POST /repos/.../issues/<N>/comments` instead of submitting an empty review.
+  - `request-changes` verdict → submit `REQUEST_CHANGES` with the `<summary>` as the review body and no `comments[]` array. This combination is rare (the reviewer's contract says `request-changes` requires at least one blocker or load-bearing concern), so if it happens, faithfully encode the verdict and trust the reviewer's reasoning is in the summary.
 - **Preserve the reviewer's wording.** Inline comment bodies should reflect the reviewer's `<issue>`, `<evidence>`, and `<suggestion>` verbatim (modulo markdown formatting). Paraphrasing dilutes the analysis — the deep-model reviewer chose those words on purpose.
 - `line` is a line number **in the file**, not a position in the diff. `side: RIGHT` is the new revision (default for additions); `side: LEFT` is the old revision (use for comments on removed lines).
 - For multi-line comments, also set `start_line` and `start_side` (same semantics).
