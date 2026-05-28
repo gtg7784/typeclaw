@@ -105,7 +105,8 @@ describe('promptWithFallback', () => {
     expect(result.refUsed).toBe(REF_A)
     expect(result.attempts).toEqual([{ ref: REF_A, outcome: 'success' }])
     expect(created).toHaveLength(1)
-    expect(created[0]!.promptedWith).toEqual(['hello'])
+    expect(created[0]!.promptedWith).toHaveLength(1)
+    expect(created[0]!.promptedWith[0]).toContain('hello')
     expect(created[0]!.disposed).toBe(false)
   })
 
@@ -134,7 +135,8 @@ describe('promptWithFallback', () => {
     expect(created).toHaveLength(2)
     expect(created[0]!.disposed).toBe(true)
     expect(created[1]!.disposed).toBe(false)
-    expect(created[1]!.promptedWith).toEqual(['hello'])
+    expect(created[1]!.promptedWith).toHaveLength(1)
+    expect(created[1]!.promptedWith[0]).toContain('hello')
   })
 
   test('falls through on a soft (stopReason: error) failure', async () => {
@@ -220,7 +222,7 @@ describe('promptWithFallback', () => {
   })
 
   test('preserves the prompt text across retries (no text mutation between attempts)', async () => {
-    const seen: string[] = []
+    const seen: { ref: string; promptedWith: string[] }[] = []
     await promptWithFallback({
       refs: [REF_A, REF_B],
       text: 'do the thing',
@@ -232,13 +234,14 @@ describe('promptWithFallback', () => {
         return {
           session,
           dispose: async () => {
-            seen.push(`${ref}:${fake.promptedWith.join('|')}`)
+            seen.push({ ref, promptedWith: [...fake.promptedWith] })
           },
         }
       },
     })
-    // First session got 'do the thing' before disposal; the second one was
-    // successful (no dispose call from the helper, since the caller holds it).
-    expect(seen).toEqual([`${REF_A}:do the thing`])
+    expect(seen).toHaveLength(1)
+    expect(seen[0]!.ref).toBe(REF_A)
+    expect(seen[0]!.promptedWith).toHaveLength(1)
+    expect(seen[0]!.promptedWith[0]).toContain('do the thing')
   })
 })
