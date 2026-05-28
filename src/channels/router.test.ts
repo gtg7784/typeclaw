@@ -1731,6 +1731,68 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(logs.some((m) => m.includes('suppressed kimi_tool_call_leak'))).toBe(false)
   })
 
+  test('suppresses leaked plain-text channel_reply(...) function-call serialization instead of posting it to the channel', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('channel_reply({"text":"hi there"})')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed plain_text_channel_tool_call'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('suppresses leaked plain-text channel_send(...) serialization the same way', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hello' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('channel_send({"adapter":"discord-bot","chat":"c1","text":"hi"})')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed plain_text_channel_tool_call'))).toBe(true)
+  })
+
+  test('still recovers prose that mentions channel_reply in a non-call shape', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'how do I reply?' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('Use the channel_reply tool — pass `text` and I will deliver it for you.')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('channel_reply tool')
+    expect(logs.some((m) => m.includes('suppressed plain_text_channel_tool_call'))).toBe(false)
+  })
+
   test('recovers visible assistant text when no channel tool sent a message', async () => {
     const dir = await tempDir()
     const logs: string[] = []

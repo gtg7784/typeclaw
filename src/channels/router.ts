@@ -1998,6 +1998,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
+    if (isLikelyPlainTextChannelToolCall(assistantText)) {
+      logger.warn(`[channels] ${live.keyId}: suppressed plain_text_channel_tool_call text_len=${assistantText.length}`)
+      return
+    }
+
     // `source` distinguishes the two recovery shapes for log triage:
     //   - 'leaf': the assistant message IS the leaf (existing behavior; model
     //     ended its turn with text but forgot to call channel_reply).
@@ -2958,6 +2963,36 @@ const KIMI_CHANNEL_TOOL_ID_RE = /(?:functions\.)?channel_(?:reply|send):\d+/
 export function isLikelyKimiChannelToolLeak(text: string): boolean {
   if (!containsKimiToolDelimiter(text)) return false
   return KIMI_CHANNEL_TOOL_ID_RE.test(text)
+}
+
+// Detects the *plain-text* shape of a leaked channel-tool invocation — the
+// model serialized the tool call as ordinary prose instead of producing a
+// real tool call. Observed against Kimi-family deployments on KakaoTalk:
+// the entire assistant message body is literally
+//
+//   channel_reply({"text":"<the user-facing greeting the bot meant to send>"})
+//
+// with no Kimi delimiter tokens (`<|tool_call_begin|>` etc.), so
+// `isLikelyKimiChannelToolLeak` cannot catch it. Without a guard the
+// recovery path in `validateChannelTurn` posts this raw function-call
+// serialization straight to the channel, which is exactly what
+// users see in the reported screenshots.
+//
+// Structural-only detection (NOT a substring search): the trimmed text must
+// *start* with `channel_reply(` or `channel_send(`, and that opening paren
+// must enclose at least one `"` (the JSON argument). This deliberately
+// matches the leak shape while letting prose that merely *mentions* the
+// tool name (e.g. "I would normally call channel_reply here but...") reach
+// the user — that false-positive class is already locked in by the
+// `still recovers legit prose that happens to mention "channel_reply"` test.
+//
+// The trailing close paren is NOT required: the model sometimes truncates
+// mid-serialization, and a half-leaked `channel_reply({"text":"..."` is
+// just as user-hostile as the full shape.
+const PLAIN_TEXT_CHANNEL_TOOL_CALL_RE = /^channel_(?:reply|send)\s*\(\s*[^)]*"/
+
+export function isLikelyPlainTextChannelToolCall(text: string): boolean {
+  return PLAIN_TEXT_CHANNEL_TOOL_CALL_RE.test(text.trim())
 }
 
 function describe(err: unknown): string {
