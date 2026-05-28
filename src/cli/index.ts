@@ -33,6 +33,7 @@ const main = defineCommand({
     model: () => import('./model').then((m) => m.modelCommand),
     doctor: () => import('./doctor').then((m) => m.doctorCommand),
     usage: () => import('./usage').then((m) => m.usageCommand),
+    update: () => import('./update').then((m) => m.updateCommand),
     _hostd: () => import('./hostd').then((m) => m.hostdCommand),
   },
 })

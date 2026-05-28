@@ -133,6 +133,17 @@ typeclaw doctor --only docker,config               # narrow to categories
 
 Categories: `docker`, `config`, `secrets`, `network`, `git`, plus per-plugin checks.
 
+## Update
+
+```sh
+typeclaw update                                    # update the globally installed CLI (auto-detect Bun/npm)
+typeclaw update --manager bun                      # force Bun global update
+typeclaw update --manager npm                      # force npm global update
+typeclaw update --dry-run                          # print the updater command without running it
+```
+
+Auto-detection only trusts known global install layouts. Source checkouts and local `node_modules/typeclaw` installs require an explicit `--manager`.
+
 ## Usage
 
 ```sh
