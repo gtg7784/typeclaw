@@ -4,7 +4,7 @@ import { formatCommand, planSelfUpdate, type UpdateManagerSelection } from '@/up
 
 import { c, errorLine, successLine } from './ui'
 
-const MANAGERS = ['auto', 'bun', 'npm'] as const
+const MANAGERS = ['auto', 'bun', 'npm', 'pnpm', 'yarn'] as const
 
 export const updateCommand = defineCommand({
   meta: {
@@ -14,7 +14,7 @@ export const updateCommand = defineCommand({
   args: {
     manager: {
       type: 'string',
-      description: 'package manager to use: auto, bun, or npm',
+      description: 'package manager to use: auto, bun, npm, pnpm, or yarn',
       default: 'auto',
     },
     'dry-run': {
@@ -26,7 +26,7 @@ export const updateCommand = defineCommand({
   async run({ args }) {
     const manager = parseManager(args.manager)
     if (manager === null) {
-      console.error(errorLine(`Invalid --manager=${args.manager}. Expected auto, bun, or npm.`))
+      console.error(errorLine(`Invalid --manager=${args.manager}. Expected auto, bun, npm, pnpm, or yarn.`))
       process.exit(2)
     }
 

@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 
-export type UpdateManager = 'bun' | 'npm'
+export type UpdateManager = 'bun' | 'npm' | 'pnpm' | 'yarn'
 export type UpdateManagerSelection = 'auto' | UpdateManager
 
 export type SelfUpdatePlan =
@@ -18,7 +18,7 @@ export function planSelfUpdate(options: { manager: UpdateManagerSelection; packa
     return {
       ok: false,
       reason:
-        'Cannot auto-detect how TypeClaw was installed from this checkout. Re-run with --manager=bun or --manager=npm if you want to update a global install.',
+        'Cannot auto-detect how TypeClaw was installed from this checkout. Re-run with --manager=bun, --manager=npm, --manager=pnpm, or --manager=yarn if you want to update a global install.',
     }
   }
   return {
@@ -35,6 +35,10 @@ export function commandForManager(manager: UpdateManager): string[] {
       return ['bun', 'update', '-g', 'typeclaw', '--latest']
     case 'npm':
       return ['npm', 'install', '-g', 'typeclaw@latest']
+    case 'pnpm':
+      return ['pnpm', 'add', '-g', 'typeclaw@latest']
+    case 'yarn':
+      return ['yarn', 'global', 'upgrade', 'typeclaw', '--latest']
   }
 }
 
@@ -49,6 +53,7 @@ function detectInstallManager(packageJsonPath: string): UpdateManager | null {
   const nodeModulesIdx = parts.lastIndexOf('node_modules')
   if (packageJson !== 'package.json' || packageName !== 'typeclaw' || nodeModulesIdx === -1) return null
 
+  // Bun global: .bun/install/global/node_modules/typeclaw
   const bunGlobalIdx = parts.lastIndexOf('.bun')
   if (
     bunGlobalIdx !== -1 &&
@@ -58,6 +63,19 @@ function detectInstallManager(packageJsonPath: string): UpdateManager | null {
   ) {
     return 'bun'
   }
+
+  // pnpm shards globals under a numeric major-version segment, e.g.
+  // ~/Library/pnpm/global/5/node_modules or legacy ~/.pnpm-global/5/node_modules.
+  if (nodeModulesIdx >= 2 && /^\d+$/.test(parts[nodeModulesIdx - 1] ?? '')) {
+    const anchor = parts[nodeModulesIdx - 2]
+    if (anchor === 'pnpm-global' || anchor === '.pnpm-global') return 'pnpm'
+    if (anchor === 'global' && parts[nodeModulesIdx - 3] === 'pnpm') return 'pnpm'
+  }
+
+  if (nodeModulesIdx >= 2 && parts[nodeModulesIdx - 1] === 'global' && parts[nodeModulesIdx - 2] === 'yarn') {
+    return 'yarn'
+  }
+
   if (parts[nodeModulesIdx - 1] === 'lib') return 'npm'
   return null
 }
