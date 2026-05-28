@@ -105,6 +105,18 @@ typeclaw tunnel remove <name>
 
 `--for-manual` flags the tunnel as user-owned. `--for-channel <name>` scopes it to an adapter's webhook.
 
+## Mounts
+
+```sh
+typeclaw mount list
+typeclaw mount list --json
+typeclaw mount add downloads ~/Downloads --read-only
+typeclaw mount add work ./workspace --description "local worktree"
+typeclaw mount remove downloads
+```
+
+Mounts expose host directories inside the container at `/agent/mounts/<name>`. Names must be lowercase alphanumeric with `-` or `_`. Adding/removing a mount updates `typeclaw.json`; restart the running agent with `typeclaw restart` for Docker to apply the bind mount.
+
 ## Compose
 
 ```sh
