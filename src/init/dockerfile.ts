@@ -283,13 +283,18 @@ set -eu
 #                           no inbound exposure anyway.
 # link_persistent_home_files symlinks credential files that tools write
 # to $HOME into a bind-mounted location so they survive container
-# restarts. The canonical case is Codex CLI's ~/.codex/auth.json: codex
-# rewrites the file in place to rotate OAuth tokens, and the official
-# CI/CD guidance is to persist auth.json so refresh-token state
-# compounds across runs. The container's $HOME (/root by default) lives
-# on Docker's writable overlay and is wiped on every \`stop\`+\`start\`
-# cycle, so without this symlink the operator would have to re-paste
-# auth.json after every restart.
+# restarts. The container's $HOME (/root by default) lives on Docker's
+# writable overlay and is wiped on every \`stop\`+\`start\` cycle, so
+# without this symlink the operator would have to re-paste credentials
+# after every restart.
+#
+# Two files are linked today, both following the same contract:
+#   - ~/.codex/auth.json — Codex CLI rotates OAuth tokens in place by
+#     rewriting auth.json with refreshed credentials.
+#   - ~/.claude/.credentials.json — Claude Code rotates OAuth tokens in
+#     place by rewriting .credentials.json on every successful refresh
+#     (anthropics/claude-code#53063). Linux/Windows path; macOS uses the
+#     Keychain entry "Claude Code-credentials" with the same JSON shape.
 #
 # The persist root lives under /agent/.typeclaw/home/ (bind-mounted
 # from the agent folder via the -v <cwd>:/agent flag in start.ts).
@@ -329,6 +334,8 @@ link_persistent_home_files() {
   persist_root="\${TYPECLAW_PERSIST_HOME_ROOT:-/agent/.typeclaw/home}"
   mkdir -p "$persist_root/.codex" "$HOME/.codex"
   ln -sfn "$persist_root/.codex/auth.json" "$HOME/.codex/auth.json"
+  mkdir -p "$persist_root/.claude" "$HOME/.claude"
+  ln -sfn "$persist_root/.claude/.credentials.json" "$HOME/.claude/.credentials.json"
 }
 
 start_xvfb() {
