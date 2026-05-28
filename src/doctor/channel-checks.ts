@@ -1,0 +1,308 @@
+import { join } from 'node:path'
+
+import { type AdapterId, type ChannelsConfig } from '@/channels'
+import { loadConfigSync, validateConfig } from '@/config'
+import { readEnvFile } from '@/init'
+import { SecretsBackend } from '@/secrets'
+import { channelFieldDefaultEnv } from '@/secrets/defaults'
+import { resolveSecret } from '@/secrets/resolve'
+
+import type { CheckContext, CheckResult, DoctorCheck } from './types'
+
+// Host-stage channel adapter health checks. These cannot talk to Slack /
+// Discord / Telegram / KakaoTalk / GitHub APIs — that work belongs to the
+// container-stage `start()` preflight on each adapter (see
+// `src/channels/manager.ts` and individual adapters). What doctor CAN do
+// from the host is verify that the credentials the container will look for
+// are actually present and resolvable, so the operator gets a clear,
+// before-`typeclaw start` signal instead of a silent skip in the runtime
+// logs.
+//
+// Every check is gated on `ctx.hasAgentFolder` (typeclaw.json is required to
+// read the channels config) and additionally on the adapter being declared
+// AND enabled in typeclaw.json. A missing or `enabled: false` adapter
+// reports `skipped` so the operator can see the check ran without it
+// turning into noise on minimal setups.
+
+export function buildChannelChecks(): DoctorCheck[] {
+  return [
+    slackBotCredentials(),
+    discordBotCredentials(),
+    telegramBotCredentials(),
+    kakaotalkCredentials(),
+    githubCredentials(),
+    githubWebhookDelivery(),
+  ]
+}
+
+function slackBotCredentials(): DoctorCheck {
+  return {
+    name: 'channel.slack-bot.credentials',
+    category: 'channels',
+    description: 'slack-bot adapter has SLACK_BOT_TOKEN and SLACK_APP_TOKEN',
+    applies: (ctx) => ctx.hasAgentFolder,
+    run: (ctx) => runTokenAdapterCheck(ctx, 'slack-bot', ['SLACK_BOT_TOKEN', 'SLACK_APP_TOKEN']),
+  }
+}
+
+function discordBotCredentials(): DoctorCheck {
+  return {
+    name: 'channel.discord-bot.credentials',
+    category: 'channels',
+    description: 'discord-bot adapter has DISCORD_BOT_TOKEN',
+    applies: (ctx) => ctx.hasAgentFolder,
+    run: (ctx) => runTokenAdapterCheck(ctx, 'discord-bot', ['DISCORD_BOT_TOKEN']),
+  }
+}
+
+function telegramBotCredentials(): DoctorCheck {
+  return {
+    name: 'channel.telegram-bot.credentials',
+    category: 'channels',
+    description: 'telegram-bot adapter has TELEGRAM_BOT_TOKEN',
+    applies: (ctx) => ctx.hasAgentFolder,
+    run: (ctx) => runTokenAdapterCheck(ctx, 'telegram-bot', ['TELEGRAM_BOT_TOKEN']),
+  }
+}
+
+function kakaotalkCredentials(): DoctorCheck {
+  return {
+    name: 'channel.kakaotalk.credentials',
+    category: 'channels',
+    description: 'kakaotalk adapter has at least one account in secrets.json',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const channels = readDeclaredChannels(ctx)
+      if (channels === null) return configInvalidResult()
+      if (!isAdapterActive(channels, 'kakaotalk')) {
+        return { status: 'skipped', message: 'kakaotalk not configured' }
+      }
+      const block = readChannelsSecrets(ctx)?.kakaotalk
+      const accountCount = block?.accounts ? Object.keys(block.accounts).length : 0
+      if (accountCount === 0) {
+        return {
+          status: 'warning',
+          message: 'kakaotalk has no accounts in secrets.json',
+          details: ['Adapter will start but fail authentication and stay disconnected.'],
+          fix: { description: 'Run `typeclaw channel add kakaotalk` to log in an account.' },
+        }
+      }
+      return { status: 'ok', message: `kakaotalk has ${accountCount} account(s)` }
+    },
+  }
+}
+
+function githubCredentials(): DoctorCheck {
+  return {
+    name: 'channel.github.credentials',
+    category: 'channels',
+    description: 'github adapter has auth and webhookSecret in secrets.json',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const channels = readDeclaredChannels(ctx)
+      if (channels === null) return configInvalidResult()
+      if (!isAdapterActive(channels, 'github')) {
+        return { status: 'skipped', message: 'github not configured' }
+      }
+      const block = readChannelsSecrets(ctx)?.github
+      if (!block) {
+        return {
+          status: 'error',
+          message: 'github secrets missing from secrets.json',
+          details: ['Adapter requires both `auth` and `webhookSecret`.'],
+          fix: { description: 'Run `typeclaw channel set github` to configure GitHub auth.' },
+        }
+      }
+      const details: string[] = []
+      const webhookSecret = resolveSecret(block.webhookSecret, undefined, process.env)
+      if (webhookSecret === undefined || webhookSecret === '') {
+        details.push('webhookSecret is unset (resolves to empty string)')
+      }
+      if (block.auth.type === 'pat') {
+        const token = resolveSecret(block.auth.token, undefined, process.env)
+        if (token === undefined || token === '') {
+          details.push('auth.token (PAT) is unset (resolves to empty string)')
+        }
+      } else {
+        const key = resolveSecret(block.auth.privateKey, undefined, process.env)
+        if (key === undefined || key === '') {
+          details.push('auth.privateKey (App) is unset (resolves to empty string)')
+        }
+      }
+      if (details.length > 0) {
+        return {
+          status: 'error',
+          message: 'github credentials present but some fields resolve to empty',
+          details,
+          fix: { description: 'Run `typeclaw channel set github` to repopulate the missing fields.' },
+        }
+      }
+      return {
+        status: 'ok',
+        message: `github ${block.auth.type === 'pat' ? 'PAT' : 'App'} auth + webhookSecret resolved`,
+      }
+    },
+  }
+}
+
+function githubWebhookDelivery(): DoctorCheck {
+  return {
+    name: 'channel.github.webhook-delivery',
+    category: 'channels',
+    description: 'github webhook delivery has a public URL (webhookUrl or tunnel)',
+    applies: (ctx) => ctx.hasAgentFolder,
+    async run(ctx) {
+      const cfg = safeLoadConfig(ctx)
+      if (cfg === null) return configInvalidResult()
+      const github = cfg.channels.github
+      if (github === undefined || github.enabled === false) {
+        return { status: 'skipped', message: 'github not configured' }
+      }
+      const hasWebhookUrl = typeof github.webhookUrl === 'string' && github.webhookUrl.length > 0
+      const hasTunnel = cfg.tunnels.some((t) => t.for.kind === 'channel' && t.for.name === 'github')
+      if (hasWebhookUrl || hasTunnel) {
+        const source = hasWebhookUrl ? 'webhookUrl' : 'tunnel'
+        return { status: 'ok', message: `github webhook delivery configured via ${source}` }
+      }
+      if (github.repos.length === 0) {
+        return {
+          status: 'info',
+          message: 'github has no webhookUrl or tunnel, and no repos to register',
+          details: ['Webhooks will not be auto-registered until either webhookUrl or a tunnel binding is set.'],
+        }
+      }
+      return {
+        status: 'warning',
+        message: `github lists ${github.repos.length} repo(s) but has no public URL to deliver webhooks to`,
+        details: [
+          'Either set `channels.github.webhookUrl` in typeclaw.json,',
+          'or add a `tunnels[]` entry with `for: { kind: "channel", name: "github" }`.',
+        ],
+        fix: {
+          description: 'Configure webhookUrl or a github tunnel; see `typeclaw tunnel add` for managed tunnels.',
+        },
+      }
+    },
+  }
+}
+
+async function runTokenAdapterCheck(
+  ctx: CheckContext,
+  adapter: Extract<AdapterId, 'slack-bot' | 'discord-bot' | 'telegram-bot'>,
+  envNames: readonly string[],
+): Promise<CheckResult> {
+  const channels = readDeclaredChannels(ctx)
+  if (channels === null) return configInvalidResult()
+  if (!isAdapterActive(channels, adapter)) {
+    return { status: 'skipped', message: `${adapter} not configured` }
+  }
+  const dotEnv = safeReadEnvFile(ctx.cwd)
+  const channelSecrets = readChannelsSecrets(ctx)
+  const adapterSecrets = (channelSecrets?.[adapter] ?? {}) as Record<string, unknown>
+  const missing: string[] = []
+  for (const envName of envNames) {
+    if (hasTokenForEnv(adapter, envName, dotEnv, adapterSecrets)) continue
+    missing.push(envName)
+  }
+  if (missing.length > 0) {
+    return {
+      status: 'warning',
+      message: `${adapter} missing credentials: ${missing.join(', ')}`,
+      details: [
+        'Adapter will be skipped at start until credentials are present.',
+        'Resolution order: process.env wins over .env file value over secrets.json value.',
+      ],
+      fix: { description: `Run \`typeclaw channel set ${adapter}\` or add the env vars to .env.` },
+    }
+  }
+  return { status: 'ok', message: `${adapter} credentials present` }
+}
+
+// hasTokenForEnv resolves a single env-var-style credential the same way the
+// runtime does: process.env > .env file > secrets.json (resolved via
+// resolveSecret so an `env`-bound Secret consults the right var). Empty
+// strings are treated as unset, matching `effective` checks in
+// `src/secrets/resolve.ts` and the env-wins policy.
+function hasTokenForEnv(
+  adapter: AdapterId,
+  envName: string,
+  dotEnv: Map<string, string>,
+  adapterSecrets: Record<string, unknown>,
+): boolean {
+  const fromProcess = process.env[envName]
+  if (fromProcess !== undefined && fromProcess !== '') return true
+  const fromDotEnv = dotEnv.get(envName)
+  if (fromDotEnv !== undefined && fromDotEnv !== '') return true
+  const fieldName = fieldNameForEnv(adapter, envName)
+  if (fieldName === undefined) return false
+  const secret = adapterSecrets[fieldName]
+  if (!isSecretShape(secret)) return false
+  const resolved = resolveSecret(secret, envName, process.env)
+  return resolved !== undefined && resolved !== ''
+}
+
+function fieldNameForEnv(adapter: AdapterId, envName: string): string | undefined {
+  // Reverse-lookup using channelFieldDefaultEnv: scan the small set of known
+  // fields per adapter for the one whose default env matches. The set is
+  // tiny (1-2 entries) so the linear scan is fine.
+  const candidates: Record<string, readonly string[]> = {
+    'slack-bot': ['botToken', 'appToken'],
+    'discord-bot': ['token'],
+    'telegram-bot': ['token'],
+  }
+  const fields = candidates[adapter]
+  if (!fields) return undefined
+  for (const field of fields) {
+    if (channelFieldDefaultEnv(adapter, field) === envName) return field
+  }
+  return undefined
+}
+
+function isSecretShape(value: unknown): value is { value?: string; env?: string } {
+  if (typeof value !== 'object' || value === null) return false
+  const obj = value as Record<string, unknown>
+  const hasValue = typeof obj['value'] === 'string'
+  const hasEnv = typeof obj['env'] === 'string'
+  return hasValue || hasEnv
+}
+
+function readDeclaredChannels(ctx: CheckContext): ChannelsConfig | null {
+  const cfg = safeLoadConfig(ctx)
+  return cfg?.channels ?? null
+}
+
+function safeLoadConfig(ctx: CheckContext): ReturnType<typeof loadConfigSync> | null {
+  const result = validateConfig(ctx.cwd)
+  if (!result.ok) return null
+  try {
+    return loadConfigSync(ctx.cwd)
+  } catch {
+    return null
+  }
+}
+
+function safeReadEnvFile(cwd: string): Map<string, string> {
+  try {
+    return readEnvFile(cwd)
+  } catch {
+    return new Map()
+  }
+}
+
+function readChannelsSecrets(ctx: CheckContext): ReturnType<SecretsBackend['tryReadChannelsSync']> {
+  try {
+    return new SecretsBackend(join(ctx.cwd, 'secrets.json')).tryReadChannelsSync()
+  } catch {
+    return null
+  }
+}
+
+function isAdapterActive(channels: ChannelsConfig, adapter: AdapterId): boolean {
+  const slot = channels[adapter]
+  if (slot === undefined) return false
+  return slot.enabled !== false
+}
+
+function configInvalidResult(): CheckResult {
+  return { status: 'skipped', message: 'config invalid (covered by config.valid)' }
+}
