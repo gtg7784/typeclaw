@@ -127,7 +127,7 @@ describe('invokeSubagent', () => {
     })
 
     // then
-    expect(calls.prompt).toEqual(['say hello'])
+    expect(calls.prompt).toEqual([expect.stringContaining('say hello')])
     expect(calls.disposed).toBe(1)
   })
 
@@ -155,7 +155,7 @@ describe('invokeSubagent', () => {
     })
 
     // then
-    expect(calls.prompt).toEqual(['hello Neo'])
+    expect(calls.prompt).toEqual([expect.stringContaining('hello Neo')])
     expect(calls.disposed).toBe(1)
   })
 
@@ -211,8 +211,8 @@ describe('invokeSubagent', () => {
 
     // then
     expect(fakes).toHaveLength(2)
-    expect(fakes[0]!.calls.prompt).toEqual(['first'])
-    expect(fakes[1]!.calls.prompt).toEqual(['second'])
+    expect(fakes[0]!.calls.prompt).toEqual([expect.stringContaining('first')])
+    expect(fakes[1]!.calls.prompt).toEqual([expect.stringContaining('second')])
     expect(fakes[0]!.calls.disposed).toBe(1)
     expect(fakes[1]!.calls.disposed).toBe(1)
   })
@@ -711,7 +711,7 @@ describe('startSubagent', () => {
 
     // then
     expect(result.ok).toBe(true)
-    expect(calls.prompt).toEqual(['hello'])
+    expect(calls.prompt).toEqual([expect.stringContaining('hello')])
     expect(calls.disposed).toBe(1)
   })
 
@@ -884,7 +884,7 @@ describe('startSubagent', () => {
 
     // then
     expect(result).toBeUndefined()
-    expect(calls.prompt).toEqual(['wrapper'])
+    expect(calls.prompt).toEqual([expect.stringContaining('wrapper')])
     expect(calls.disposed).toBe(1)
   })
 })

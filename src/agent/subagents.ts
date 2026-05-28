@@ -7,6 +7,7 @@ import type { Stream, Unsubscribe } from '@/stream'
 import { type AgentSession, createSession } from './index'
 import { subscribeProviderErrors } from './provider-error'
 import type { SessionOrigin } from './session-origin'
+import { renderTurnTimeAnchor } from './system-prompt'
 import type { ToolResultBudget } from './tool-result-budget'
 
 type AgentSessionTools = NonNullable<Parameters<typeof createSession>[0]>['tools']
@@ -226,7 +227,7 @@ export async function invokeSubagent(name: string, options: InvokeSubagentOption
         await hooks.runSessionTurnStart({ ...turnEvent, userPrompt: userPromptForTurn })
       }
       try {
-        await session.prompt(userPromptForTurn)
+        await session.prompt(`${renderTurnTimeAnchor()}\n\n${userPromptForTurn}`)
       } finally {
         if (hooks && turnEvent !== undefined) {
           await hooks.runSessionTurnEnd(turnEvent)
