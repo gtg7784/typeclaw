@@ -2,7 +2,7 @@ import type { SlackFile, SlackSocketModeAppMentionEvent, SlackSocketModeMessageE
 
 import { matchesAnyAlias } from '@/channels/engagement'
 import type { ChannelAdapterConfig } from '@/channels/schema'
-import type { InboundMessage } from '@/channels/types'
+import type { InboundAttachment, InboundMessage } from '@/channels/types'
 
 import { slackTsToMillis } from './slack-bot-time'
 
@@ -61,7 +61,7 @@ export function classifyInbound(
   }
 
   const rawText = event.text ?? ''
-  const text = inboundText(event)
+  const { text, attachments } = splitInbound(event)
   if (text === '') return { kind: 'drop', reason: 'empty_text' }
 
   const isDm = event.channel_type === 'im'
@@ -72,8 +72,8 @@ export function classifyInbound(
   }
 
   // Mention parsing runs against the raw user-typed text only — the
-  // appended `[Slack message with attachment: ...]` summary contains URLs
-  // and ids that must not be misread as mentions or group broadcasts.
+  // appended `[Slack attachment #N: ...]` placeholder contains metadata
+  // that must not be misread as mentions or group broadcasts.
   // Group mentions (`<!here>`, `<!channel>`, `<!everyone>`) are coerced to
   // direct mentions: the user fired a broadcast that explicitly includes the
   // bot, and from the engagement layer's perspective there is no meaningful
@@ -131,6 +131,7 @@ export function classifyInbound(
       chat: event.channel,
       thread,
       text,
+      ...(attachments.length > 0 ? { attachments } : {}),
       externalMessageId: event.ts,
       authorId: event.user,
       authorName: event.user,
@@ -166,19 +167,34 @@ function extractMentionedUserIds(text: string): string[] {
   return Array.from(seen)
 }
 
-function inboundText(event: SlackInboundMessageEvent): string {
+type SplitInbound = { text: string; attachments: InboundAttachment[] }
+
+function splitInbound(event: SlackInboundMessageEvent): SplitInbound {
   const rawText = event.text ?? ''
-  const mediaSummary = summarizeSlackMedia(event)
-  if (mediaSummary.length === 0) return rawText
-  const summary = `[Slack message with ${mediaSummary.join('; ')}]`
-  return rawText === '' ? summary : `${rawText}\n${summary}`
+  const attachments = describeSlackMedia(event)
+  if (attachments.length === 0) return { text: rawText, attachments: [] }
+  const summary = attachments.map(renderPlaceholder).join('\n')
+  const text = rawText === '' ? summary : `${rawText}\n${summary}`
+  return { text, attachments }
 }
 
-function summarizeSlackMedia(event: SlackInboundMessageEvent): string[] {
-  return (event.files ?? []).map(summarizeSlackFile)
+function describeSlackMedia(event: SlackInboundMessageEvent): InboundAttachment[] {
+  return (event.files ?? []).map((file, index) => describeSlackFile(file, index + 1))
 }
 
-function summarizeSlackFile(file: SlackFile): string {
-  const parts: string[] = [`attachment: ${file.name}`, `(${file.mimetype})`, `id=${file.id}`]
-  return parts.join(' ')
+function describeSlackFile(file: SlackFile, id: number): InboundAttachment {
+  return {
+    id,
+    kind: 'file',
+    ref: file.id,
+    filename: file.name,
+    mimetype: file.mimetype,
+  }
+}
+
+function renderPlaceholder(attachment: InboundAttachment): string {
+  const parts: string[] = [`Slack attachment #${attachment.id}: ${attachment.kind}`]
+  if (attachment.mimetype !== undefined) parts.push(attachment.mimetype)
+  if (attachment.filename !== undefined) parts.push(`name=${attachment.filename}`)
+  return `[${parts.join(' ')}]`
 }

@@ -74,7 +74,10 @@ describe('slack-bot classifyInbound — drop paths', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe('[Slack message with attachment: diagram.png (image/png) id=F1]')
+    expect(verdict.payload.text).toBe('[Slack attachment #1: file image/png name=diagram.png]')
+    expect(verdict.payload.attachments).toEqual([
+      { id: 1, kind: 'file', ref: 'F1', filename: 'diagram.png', mimetype: 'image/png' },
+    ])
   })
 
   test('appends attachment summary to user text so the agent sees BOTH text and the file when the user typed something alongside the upload', () => {
@@ -98,7 +101,10 @@ describe('slack-bot classifyInbound — drop paths', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe('look at this\n[Slack message with attachment: diagram.png (image/png) id=F1]')
+    expect(verdict.payload.text).toBe('look at this\n[Slack attachment #1: file image/png name=diagram.png]')
+    expect(verdict.payload.attachments).toEqual([
+      { id: 1, kind: 'file', ref: 'F1', filename: 'diagram.png', mimetype: 'image/png' },
+    ])
   })
 
   test('multiple file uploads each surface as a separate attachment ref so the agent can fetch any of them', () => {
@@ -133,8 +139,12 @@ describe('slack-bot classifyInbound — drop paths', () => {
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
     expect(verdict.payload.text).toBe(
-      '[Slack message with attachment: one.png (image/png) id=F1; attachment: two.txt (text/plain) id=F2]',
+      '[Slack attachment #1: file image/png name=one.png]\n[Slack attachment #2: file text/plain name=two.txt]',
     )
+    expect(verdict.payload.attachments).toEqual([
+      { id: 1, kind: 'file', ref: 'F1', filename: 'one.png', mimetype: 'image/png' },
+      { id: 2, kind: 'file', ref: 'F2', filename: 'two.txt', mimetype: 'text/plain' },
+    ])
   })
 
   test('appended attachment summary does not register `<@…>` ids inside file URLs as bot mentions', () => {
