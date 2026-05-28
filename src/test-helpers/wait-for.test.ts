@@ -61,19 +61,31 @@ describe('expectStable', () => {
 
   test('rejects when predicate becomes truthy mid-duration', async () => {
     // Drive the flip from the polling loop itself rather than a wall-clock
-    // setTimeout — under heavy CI contention (18 parallel workers) a 10ms
-    // timer can be delayed past the 50ms duration, leaving the predicate
-    // falsy and turning the expected rejection into a silent resolve. A
-    // call-counter is deterministic: the third poll flips it, well before
-    // the deadline regardless of scheduler load.
+    // setTimeout, AND flip on call #2 with a wide durationMs budget.
+    //
+    // History: a previous deflake (74be577) used a call-counter that flipped
+    // on call #3 with durationMs=50ms / intervalMs=5ms. That still leaves a
+    // race: `expectStable` checks `Date.now() < deadline` BETWEEN iterations,
+    // so if any of the two intervening sleeps gets delayed past the 50ms
+    // deadline (run #26550782470: failing test took 74ms, sleeps stretched
+    // under 18-worker `bun test --parallel` contention), the loop exits
+    // before call #3 lands and the expected rejection becomes a silent
+    // resolve.
+    //
+    // Flipping on call #2 with durationMs=5000 collapses the race window:
+    // only ONE sleep separates the first falsy call from the truthy one,
+    // and even a 100x scheduler hiccup (500ms sleep) fits well inside the
+    // budget. The test still exercises the same behavior — predicate
+    // becomes truthy mid-duration, rejection fires — without any wall-clock
+    // dependency in the assertion path.
     let calls = 0
     const predicate = () => {
       calls++
-      return calls >= 3
+      return calls >= 2
     }
 
-    await expect(expectStable(predicate, { durationMs: 50, description: 'no-event' })).rejects.toThrow(
-      /no-event became truthy before 50ms elapsed/,
+    await expect(expectStable(predicate, { durationMs: 5000, description: 'no-event' })).rejects.toThrow(
+      /no-event became truthy before 5000ms elapsed/,
     )
   })
 })
