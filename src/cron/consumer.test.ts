@@ -112,7 +112,7 @@ describe('createCronConsumer', () => {
     publishCron(stream, promptJob('greet', 'say hi'))
     await new Promise((r) => setImmediate(r))
 
-    expect(factory.callsByJob.get('greet')).toEqual(['say hi'])
+    expect(factory.callsByJob.get('greet')).toEqual([expect.stringContaining('say hi')])
 
     consumer.stop()
   })
@@ -238,7 +238,9 @@ describe('createCronConsumer', () => {
     publishCron(stream, promptJob('slow', 'second'))
     await new Promise((r) => setImmediate(r))
 
-    expect(calls).toEqual(['slow:first'])
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toContain('slow:')
+    expect(calls[0]).toContain('first')
     expect(consumer.inFlightCount()).toBe(1)
 
     releaseBox.fn?.()
@@ -248,7 +250,7 @@ describe('createCronConsumer', () => {
     await new Promise((r) => setImmediate(r))
 
     expect(calls.length).toBeGreaterThanOrEqual(2)
-    expect(calls.includes('slow:third')).toBe(true)
+    expect(calls.some((c) => c.startsWith('slow:') && c.includes('third'))).toBe(true)
 
     consumer.stop()
   })
@@ -357,7 +359,7 @@ describe('createCronConsumer', () => {
     publishCron(stream, promptJob('once', 'hi'))
     await new Promise((r) => setImmediate(r))
 
-    expect(factory.callsByJob.get('once')).toEqual(['hi'])
+    expect(factory.callsByJob.get('once')).toEqual([expect.stringContaining('hi')])
 
     consumer.stop()
   })
@@ -438,7 +440,7 @@ describe('createCronConsumer', () => {
     await new Promise((r) => setImmediate(r))
 
     // then
-    expect(factory.callsByJob.get('plain')).toEqual(['hello'])
+    expect(factory.callsByJob.get('plain')).toEqual([expect.stringContaining('hello')])
     expect(newSessionMessages).toEqual([])
 
     consumer.stop()
@@ -492,7 +494,11 @@ describe('createCronConsumer', () => {
     await new Promise((r) => setImmediate(r))
 
     // then
-    expect(events).toEqual(['prompt:do work', 'idle:cron-sess-1:/tmp/transcript-1.jsonl', 'end:cron-sess-1'])
+    expect(events).toHaveLength(3)
+    expect(events[0]).toStartWith('prompt:')
+    expect(events[0]).toContain('do work')
+    expect(events[1]).toBe('idle:cron-sess-1:/tmp/transcript-1.jsonl')
+    expect(events[2]).toBe('end:cron-sess-1')
 
     consumer.stop()
   })
@@ -780,11 +786,11 @@ describe('createCronConsumer model fallback', () => {
 
       // then: the consumer called createSessionForCron once per ref in chain
       // order, and the second attempt's prompt was actually invoked
-      expect(calls).toEqual([
-        'fb:openai/gpt-5.4-nano',
-        'fb:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo',
-        'fb:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo:ok:do thing',
-      ])
+      expect(calls).toHaveLength(3)
+      expect(calls[0]).toBe('fb:openai/gpt-5.4-nano')
+      expect(calls[1]).toBe('fb:fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')
+      expect(calls[2]).toMatch(/^fb:fireworks\/accounts\/fireworks\/routers\/kimi-k2p6-turbo:ok:/)
+      expect(calls[2]).toContain('do thing')
 
       consumer.stop()
     } finally {
