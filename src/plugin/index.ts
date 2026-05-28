@@ -76,6 +76,12 @@ export type { LoadPluginEntryFn, ResolvedPlugin } from './loader'
 export { loadPluginEntry, derivePluginNameFromPackage } from './loader'
 export { materializeSkills, type MaterializedSkills, type SkillEntry } from './skills'
 export {
+  createLoadSkillTool,
+  type CreateLoadSkillToolOptions,
+  type LoadableSkill,
+  type LoadSkillArgs,
+} from './load-skill'
+export {
   buildPluginCronGlobalId,
   RESERVED_COMMAND_NAMES,
   validateCommandDeclaration,
