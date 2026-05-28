@@ -3,6 +3,7 @@ import type { Server as BunServer, ServerWebSocket } from 'bun'
 
 import {
   createSessionWithDispose as defaultCreateSessionWithDispose,
+  renderTurnTimeAnchor,
   type AgentSession,
   type CreateSessionOptions,
   type CreateSessionResult,
@@ -711,7 +712,7 @@ export function createServer({
               })
             }
             try {
-              await state.session.prompt(msg.text)
+              await state.session.prompt(`${renderTurnTimeAnchor()}\n\n${msg.text}`)
               send(ws, { type: 'done' })
             } catch (err) {
               const message = err instanceof Error ? err.message : String(err)
@@ -951,7 +952,7 @@ async function drain(ws: Ws, state: SessionState, agentDir: string | undefined, 
 
       await fireTurnStart(item.text)
       try {
-        await state.session.prompt(item.text)
+        await state.session.prompt(`${renderTurnTimeAnchor()}\n\n${item.text}`)
         send(ws, { type: 'done' })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
