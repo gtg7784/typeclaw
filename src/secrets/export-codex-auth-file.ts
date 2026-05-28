@@ -1,6 +1,15 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 
 import { decodeCodexAccessTokenExpiryMs, emitCodexAuthJson } from './codex-auth-json'
 import type { ProviderCredential, Providers } from './schema'
@@ -137,13 +146,31 @@ function readCredentialExpiry(credential: { expires?: unknown; access?: unknown 
 // running typeclaw on a multi-user host. The 0600 chmod after rename is
 // belt-and-suspenders: writeFileSync's `mode` is applied at create time,
 // but umask can mask it down on some filesystems.
+//
+// Symlink preservation: the entrypoint shim
+// (src/init/dockerfile.ts link_persistent_home_files) installs
+// $HOME/.codex/auth.json as a symlink to
+// /agent/.typeclaw/home/.codex/auth.json on every boot. POSIX rename(2)
+// replaces the directory entry at the destination atomically — it does
+// NOT follow symlinks — so a naive `renameSync(tmp, $HOME/.codex/auth.json)`
+// would replace the symlink with a regular file, leaving the persistent
+// path empty. Next boot the shim recreates the symlink (force-removing
+// our file), the persistent path is still empty, and Codex's in-place
+// token refresh is silently lost on every restart.
+//
+// Fix: resolve the symlink target with readlinkSync and rename against
+// the real path so the symlink itself is preserved. The temp file MUST
+// live alongside the real target (same filesystem) because renameSync
+// across filesystems fails with EXDEV — $HOME is the container's
+// overlayfs, but the symlink target is a bind-mounted host path.
 function writeAtomic(targetPath: string, contents: string): void {
-  const dir = dirname(targetPath)
+  const realTarget = resolveSymlinkTarget(targetPath)
+  const dir = dirname(realTarget)
   mkdirSync(dir, { recursive: true, mode: DIR_MODE })
-  const tmp = `${targetPath}.${process.pid}.${Date.now()}.tmp`
+  const tmp = `${realTarget}.${process.pid}.${Date.now()}.tmp`
   writeFileSync(tmp, contents, { encoding: 'utf8', mode: FILE_MODE })
   try {
-    renameSync(tmp, targetPath)
+    renameSync(tmp, realTarget)
   } catch (err) {
     try {
       unlinkSync(tmp)
@@ -156,11 +183,32 @@ function writeAtomic(targetPath: string, contents: string): void {
   // installed by something else stays visible in tests (we WANT to overwrite
   // permissions when we own the file).
   try {
-    statSync(targetPath)
-    chmodSync(targetPath, FILE_MODE)
+    statSync(realTarget)
+    chmodSync(realTarget, FILE_MODE)
   } catch {
     // ignore — file vanished between rename and chmod is benign
   }
+}
+
+// Returns the absolute path renameSync should target. When `path` is a
+// symlink (production: $HOME/.codex/auth.json -> /agent/.typeclaw/home/...),
+// returns the resolved absolute target so we write through the link
+// instead of replacing it. Otherwise (tests, or first boot before the
+// shim installs the symlink — though the shim runs before the agent in
+// production), returns the path unchanged.
+//
+// readlinkSync throws EINVAL when the path exists but isn't a symlink,
+// and ENOENT when nothing is there. Either case → write to the original
+// path; the parent-dir mkdir + atomic rename handle the rest. We don't
+// distinguish errno because both have the same fallback.
+function resolveSymlinkTarget(path: string): string {
+  let link: string
+  try {
+    link = readlinkSync(path)
+  } catch {
+    return path
+  }
+  return isAbsolute(link) ? link : resolve(dirname(path), link)
 }
 
 export type ExportCodexAuthFileForAgentOptions = {

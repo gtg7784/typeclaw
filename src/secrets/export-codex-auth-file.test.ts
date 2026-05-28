@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, lstatSync, mkdirSync, readFileSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -300,6 +300,76 @@ describe('exportCodexAuthFileIfApplicable', () => {
         tokens: { refresh_token: string }
       }
       expect(after.tokens.refresh_token).toBe('r-fallback')
+    })
+  })
+
+  test('preserves the entrypoint shim symlink: writes through the link to the persistent target, not replacing the link', async () => {
+    await withHome((home) => {
+      // given: entrypoint shim has installed a symlink at $HOME/.codex/auth.json
+      // pointing at the persistent host-side path (mimicking
+      // link_persistent_home_files in src/init/dockerfile.ts).
+      const persistRoot = join(home, 'persist', '.codex')
+      mkdirSync(persistRoot, { recursive: true })
+      mkdirSync(join(home, '.codex'), { recursive: true })
+      const symlinkPath = join(home, '.codex', 'auth.json')
+      const persistPath = join(persistRoot, 'auth.json')
+      symlinkSync(persistPath, symlinkPath)
+
+      // when: the runtime exporter fires on a first boot (persist target is
+      // a dangling symlink — file does not exist yet).
+      const result = exportCodexAuthFileIfApplicable({
+        codexCliEnabled: true,
+        providers: oauthProviders({ refresh: 'first-boot-refresh' }),
+        homeDir: home,
+      })
+
+      // then: the symlink at $HOME/.codex/auth.json must still be a symlink
+      // (NOT replaced with a regular file). Without the fix, renameSync
+      // would have replaced the symlink directory entry, leaving the
+      // persistent path untouched and breaking the next-boot re-symlink.
+      expect(result.action).toBe('wrote')
+      expect(lstatSync(symlinkPath).isSymbolicLink()).toBe(true)
+      // and: the credential lands at the persistent target, where the
+      // entrypoint shim's next-boot ln -sfn re-symlinks back to.
+      expect(existsSync(persistPath)).toBe(true)
+      const onDisk = JSON.parse(readFileSync(persistPath, 'utf8')) as {
+        tokens: { refresh_token: string }
+      }
+      expect(onDisk.tokens.refresh_token).toBe('first-boot-refresh')
+    })
+  })
+
+  test('symlink case: newer-wins compare still works because readFileSync follows symlinks', async () => {
+    await withHome((home) => {
+      // given: symlink in place + persistent file already contains a fresher
+      // token (Codex CLI rotated it in-place since the last typeclaw write).
+      const persistRoot = join(home, 'persist', '.codex')
+      mkdirSync(persistRoot, { recursive: true })
+      mkdirSync(join(home, '.codex'), { recursive: true })
+      const symlinkPath = join(home, '.codex', 'auth.json')
+      const persistPath = join(persistRoot, 'auth.json')
+      symlinkSync(persistPath, symlinkPath)
+      const fresherAccess = makeJwt({ exp: 3_000_000_000 })
+      writeFileSync(
+        persistPath,
+        JSON.stringify({ tokens: { access_token: fresherAccess, refresh_token: 'codex-rotated' } }),
+      )
+
+      // when: exporter runs with an older typeclaw-side credential.
+      const result = exportCodexAuthFileIfApplicable({
+        codexCliEnabled: true,
+        providers: oauthProviders({ access: makeJwt({ exp: 1_000_000_000 }), expires: 1_000_000_000_000 }),
+        homeDir: home,
+      })
+
+      // then: skip — the symlink path resolves through to the persistent
+      // file, the newer-wins compare sees codex's later exp, no write.
+      expect(result).toEqual({ action: 'skipped', reason: 'on-disk-is-fresher' })
+      const after = JSON.parse(readFileSync(persistPath, 'utf8')) as {
+        tokens: { refresh_token: string }
+      }
+      expect(after.tokens.refresh_token).toBe('codex-rotated')
+      expect(lstatSync(symlinkPath).isSymbolicLink()).toBe(true)
     })
   })
 })
