@@ -1,4 +1,19 @@
-import { ArrowRight, BookOpen, Check, Container, Github, Sparkles, Star, X } from 'lucide-react'
+import {
+  ArrowRight,
+  BookOpen,
+  Check,
+  Container,
+  Github,
+  Lock,
+  PenTool,
+  Quote,
+  Shield,
+  Sparkles,
+  Star,
+  User,
+  Users,
+  X,
+} from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
 
@@ -7,6 +22,7 @@ import { CHANNELS } from './_components/channel-icons'
 import { CopyButton } from './_components/copy-button'
 import { COMPETITORS, INSTALL_COMMAND, MEMORY_LOOP } from './_components/data'
 import { ThemeToggle } from './_components/theme-toggle'
+import { UseCaseTabs } from './_components/use-case-tabs'
 
 const PLUGIN_CODE = `import { definePlugin } from 'typeclaw'
 
@@ -83,7 +99,7 @@ function SandboxDiagram() {
         <div className="relative w-full max-w-xs">
           <div className="absolute -inset-4 rounded-2xl border-2 border-dashed border-zinc-300 dark:border-white/[0.1]" />
           <div className="absolute -top-3 left-4 bg-white px-2 font-mono text-[10px] tracking-widest text-zinc-400 uppercase dark:bg-zinc-950 dark:text-zinc-600">
-            your host
+            your machine
           </div>
           <div className="relative rounded-xl border border-brand-200 bg-white p-5 shadow-lg dark:border-brand-800/60 dark:bg-zinc-900">
             <div className="absolute -top-3 left-4 inline-flex items-center gap-1.5 rounded-md bg-brand-700 px-2 py-0.5 font-mono text-[10px] tracking-wider text-white uppercase dark:bg-brand-600">
@@ -261,6 +277,44 @@ function FeatureRow({ eyebrow, title, blurb, reverse, visual }: FeatureRowProps)
   )
 }
 
+function PermissionsVisual() {
+  return (
+    <div className="relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-zinc-200 bg-gradient-to-br from-zinc-50 to-white p-8 dark:border-white/[0.08] dark:from-white/[0.03] dark:to-zinc-950">
+      <div className="flex h-full flex-col items-center justify-center gap-4">
+        <div className="flex items-center gap-3 rounded-xl border border-brand-200 bg-white px-5 py-3 shadow-sm dark:border-brand-800/60 dark:bg-zinc-900">
+          <Shield className="size-5 text-brand-600 dark:text-brand-300" strokeWidth={2.4} />
+          <div className="text-sm font-medium text-zinc-800 dark:text-zinc-100">Owner → Full access</div>
+        </div>
+        <div className="flex items-center gap-3 rounded-xl border border-zinc-200 bg-white px-5 py-3 shadow-sm dark:border-white/[0.08] dark:bg-zinc-900">
+          <Lock className="size-5 text-zinc-400 dark:text-zinc-600" strokeWidth={2.4} />
+          <div className="text-sm font-medium text-zinc-800 dark:text-zinc-100">Guest → Read only</div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function Testimonial() {
+  return (
+    <div className="mx-auto max-w-3xl">
+      <div className="relative rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/80 to-white p-10 dark:border-brand-900/40 dark:from-brand-950/40 dark:to-zinc-950">
+        <Quote
+          className="absolute top-6 left-6 size-8 text-brand-200 dark:text-brand-800"
+          strokeWidth={2.4}
+          aria-hidden
+        />
+        <blockquote className="relative pt-8 text-center">
+          <p className="text-xl font-medium leading-relaxed text-zinc-800 dark:text-zinc-100 sm:text-2xl">
+            &ldquo;Last week I told my agent I prefer kebab-case for filenames. Yesterday it suggested a rename without
+            me asking.&rdquo;
+          </p>
+          <footer className="mt-6 text-sm text-zinc-500 dark:text-zinc-500">— A TypeClaw user</footer>
+        </blockquote>
+      </div>
+    </div>
+  )
+}
+
 export default function Home() {
   return (
     <div className="min-h-screen bg-white text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -359,29 +413,45 @@ export default function Home() {
           <ChannelTrust />
         </section>
 
-        <section className="mx-auto max-w-6xl space-y-28 px-6 py-28">
+        <section className="mx-auto max-w-6xl px-6 py-28">
+          <div className="text-center">
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
+              Self-improving
+            </p>
+            <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
+              It remembers. It learns. It gets sharper while you sleep.
+            </h2>
+            <p className="mx-auto mt-4 max-w-2xl text-base leading-relaxed text-zinc-600 dark:text-zinc-400">
+              Every conversation, every command, every insight — your agent watches its own work, then a dreaming
+              subagent distills it into long-term memory and reusable skills. No prompts to write. It just gets better.
+            </p>
+          </div>
+          <div className="mx-auto mt-12 max-w-lg">
+            <div className="rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/80 to-white p-8 dark:border-brand-900/40 dark:from-brand-950/40 dark:to-zinc-950">
+              <MemoryLoopVertical />
+            </div>
+          </div>
+        </section>
+
+        <section className="mx-auto max-w-6xl space-y-24 px-6 py-24">
           <FeatureRow
-            eyebrow="Sandboxed by default"
-            title="Try it without worrying. Bin it without worrying."
-            blurb="Every agent boots in its own Docker container with its own .env, its own mounts, its own port. The host CLI is purely a launcher. Delete the folder, it's gone."
+            eyebrow="Just a folder"
+            title="One folder. One agent. No mess."
+            blurb="Drop it in any folder. One command, and it's alive. Its own .env, its own memory, its own channels. When you're done, delete the folder — it's gone. No global install, no residue."
             visual={<SandboxDiagram />}
           />
           <FeatureRow
-            eyebrow="Plugins as TypeScript"
-            title="No IPC. No FFI. Just imports."
-            blurb="Plugins are plain .ts files. They contribute tools, skills, subagents, channels, commands, typed config — all in the language you already write."
+            eyebrow="Safe by design"
+            title="You're in control. Always."
+            blurb="Owner, trusted, member, guest — role-based permissions gate every action. A Slack stranger can't tell your agent to push to main. You can. The agent knows who's in the room and what they can do."
             reverse
-            visual={<PluginCode />}
+            visual={<PermissionsVisual />}
           />
           <FeatureRow
-            eyebrow="Self-improving"
-            title="It watches its own work. Then it sleeps on it."
-            blurb="A dreaming subagent distills each session into sharded long-term memory and reusable skills. No prompts to write. It gets sharper while you're not looking."
-            visual={
-              <div className="rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/80 to-white p-8 dark:border-brand-900/40 dark:from-brand-950/40 dark:to-zinc-950">
-                <MemoryLoopVertical />
-              </div>
-            }
+            eyebrow="Plugins as imports"
+            title="Teach it something new? Just write TypeScript."
+            blurb="No IPC, no FFI, no weird config files. Plain .ts files that contribute tools, skills, channels, and commands — all in the language you already write."
+            visual={<PluginCode />}
           />
         </section>
 
@@ -395,6 +465,18 @@ export default function Home() {
             </h2>
           </div>
           <AnimatedTerminal variant="glow" />
+        </section>
+
+        <section className="mx-auto max-w-6xl px-6 pb-28">
+          <div className="mb-10 text-center">
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">Use cases</p>
+            <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">For every workflow</h2>
+          </div>
+          <UseCaseTabs />
+        </section>
+
+        <section className="mx-auto max-w-6xl px-6 pb-28">
+          <Testimonial />
         </section>
 
         <section className="mx-auto max-w-6xl px-6 pb-28">
