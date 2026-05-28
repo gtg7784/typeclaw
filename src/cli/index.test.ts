@@ -131,6 +131,29 @@ describe('typeclaw update on host stage', () => {
     expect(stdout.trim()).toBe('bun update -g typeclaw --latest')
   })
 
+  test.concurrent('dry-run renders the pnpm command when --manager=pnpm', async () => {
+    const dir = await mkAgent()
+    const { stdout, stderr, code } = await runCli(['update', '--manager=pnpm', '--dry-run'], dir)
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    expect(stdout.trim()).toBe('pnpm add -g typeclaw@latest')
+  })
+
+  test.concurrent('dry-run renders the yarn command when --manager=yarn', async () => {
+    const dir = await mkAgent()
+    const { stdout, stderr, code } = await runCli(['update', '--manager=yarn', '--dry-run'], dir)
+    expect(code).toBe(0)
+    expect(stderr).toBe('')
+    expect(stdout.trim()).toBe('yarn global upgrade typeclaw --latest')
+  })
+
+  test.concurrent('rejects unknown --manager values with exit code 2', async () => {
+    const dir = await mkAgent()
+    const { stderr, code } = await runCli(['update', '--manager=cargo', '--dry-run'], dir)
+    expect(code).toBe(2)
+    expect(stderr).toContain('Invalid --manager=cargo')
+  })
+
   test.concurrent('auto mode refuses a source checkout because it cannot prove the global manager', async () => {
     const dir = await mkAgent()
     const { stderr, code } = await runCli(['update', '--dry-run'], dir)

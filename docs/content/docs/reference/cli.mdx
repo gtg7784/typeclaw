@@ -136,13 +136,15 @@ Categories: `docker`, `config`, `secrets`, `network`, `git`, plus per-plugin che
 ## Update
 
 ```sh
-typeclaw update                                    # update the globally installed CLI (auto-detect Bun/npm)
+typeclaw update                                    # update the globally installed CLI (auto-detect Bun/npm/pnpm/yarn)
 typeclaw update --manager bun                      # force Bun global update
 typeclaw update --manager npm                      # force npm global update
+typeclaw update --manager pnpm                     # force pnpm global update
+typeclaw update --manager yarn                     # force classic Yarn global update
 typeclaw update --dry-run                          # print the updater command without running it
 ```
 
-Auto-detection only trusts known global install layouts. Source checkouts and local `node_modules/typeclaw` installs require an explicit `--manager`.
+Auto-detection only trusts known global install layouts (Bun's `.bun/install/global`, npm's `lib/node_modules`, pnpm's `pnpm/global/<N>/node_modules` / legacy `pnpm-global/<N>/node_modules`, and classic Yarn's `yarn/global/node_modules`). Source checkouts and local `node_modules/typeclaw` installs require an explicit `--manager`.
 
 ## Usage
 
