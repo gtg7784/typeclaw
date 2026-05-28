@@ -26,7 +26,7 @@ import { getAuthFor } from './auth'
 import { createCompactionSettingsManager } from './compaction'
 import { renderGitNudge } from './git-nudge'
 import type { LiveSubagentRegistry } from './live-subagents'
-import { lookAtTool } from './multimodal'
+import { createChannelLookAtTool, lookAtTool } from './multimodal'
 import {
   buildBuiltinPiToolOverrides,
   resolveBuiltinToolRefs,
@@ -519,9 +519,10 @@ export function buildChannelTools(
     tools.push(
       createChannelFetchAttachmentTool({
         router: channelRouter,
-        origin: { adapter: origin.adapter },
+        origin: channelOrigin,
       }),
     )
+    tools.push(createChannelLookAtTool(channelRouter, channelOrigin))
     if (sessionId !== undefined) {
       tools.push(createSkipResponseTool({ router: channelRouter, sessionId }))
     }
