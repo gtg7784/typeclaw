@@ -2,7 +2,7 @@ import type { KakaoTalkPushMessageEvent } from 'agent-messenger/kakaotalk'
 
 import { matchesAnyAlias } from '@/channels/engagement'
 import type { ChannelAdapterConfig } from '@/channels/schema'
-import type { InboundMessage } from '@/channels/types'
+import type { InboundAttachment, InboundMessage } from '@/channels/types'
 
 export type InboundDropReason = 'self_author' | 'empty_text' | 'unknown_chat' | 'pre_connect' | 'bot_message'
 
@@ -28,6 +28,10 @@ export type KakaoInboundContext = {
   selfUserId: string | null
   lookupChat: KakaoChatLookup
   selfAliases?: readonly string[]
+  // The adapter splits attachment refs out of prompt-visible text before
+  // classification. Keeping them on context makes classifyInbound's payload
+  // construction the single place that stamps InboundMessage fields.
+  attachments?: readonly InboundAttachment[]
 }
 
 export function classifyInbound(
@@ -70,6 +74,9 @@ export function classifyInbound(
       chat: event.chat_id,
       thread: null,
       text,
+      ...(context.attachments !== undefined && context.attachments.length > 0
+        ? { attachments: context.attachments }
+        : {}),
       externalMessageId: event.log_id,
       authorId: String(event.author_id),
       authorName: event.author_name ?? String(event.author_id),

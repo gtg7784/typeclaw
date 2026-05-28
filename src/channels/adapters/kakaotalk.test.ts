@@ -781,7 +781,7 @@ describe('createKakaotalkAdapter — inbound attachments and emoticons', () => {
   // The integration tests below intercept router.route to capture the
   // synthesized InboundMessage payload the adapter actually routes. The
   // mutation check matters here: if a future refactor inlines
-  // event.message back into the handler and drops formatInboundText, the
+  // event.message back into the handler and drops splitInbound, the
   // markRead path keeps working but the agent stops seeing attachments —
   // these assertions are what would catch that regression.
   type RoutedInbound = Parameters<ChannelRouter['route']>[0]
@@ -855,9 +855,10 @@ describe('createKakaotalkAdapter — inbound attachments and emoticons', () => {
     await new Promise((r) => setTimeout(r, 10))
 
     expect(ctx.routed).toHaveLength(1)
-    expect(ctx.routed[0]?.text).toBe(
-      'check this out\n[KakaoTalk message with photo 100x100 (image/jpeg) https://example.com/x.jpg]',
-    )
+    expect(ctx.routed[0]?.text).toBe('check this out\n[KakaoTalk attachment #1: photo 100x100 image/jpeg]')
+    expect(ctx.routed[0]?.attachments).toEqual([
+      { id: 1, kind: 'photo', ref: 'https://example.com/x.jpg', mimetype: 'image/jpeg', width: 100, height: 100 },
+    ])
     expect(ctx.client.markReadCalls[0]?.logId).toBe('L42')
 
     await ctx.stop()
@@ -881,7 +882,8 @@ describe('createKakaotalkAdapter — inbound attachments and emoticons', () => {
     await new Promise((r) => setTimeout(r, 10))
 
     expect(ctx.routed).toHaveLength(1)
-    expect(ctx.routed[0]?.text).toBe('[KakaoTalk message with photo 100x100 (image/jpeg) https://example.com/x.jpg]')
+    expect(ctx.routed[0]?.text).toBe('[KakaoTalk attachment #1: photo 100x100 image/jpeg]')
+    expect(ctx.routed[0]?.attachments?.[0]?.ref).toBe('https://example.com/x.jpg')
 
     await ctx.stop()
   })
@@ -904,7 +906,10 @@ describe('createKakaotalkAdapter — inbound attachments and emoticons', () => {
     await new Promise((r) => setTimeout(r, 10))
 
     expect(ctx.routed).toHaveLength(1)
-    expect(ctx.routed[0]?.text).toBe('[KakaoTalk message with file spec.pdf (application/pdf) size=12345]')
+    expect(ctx.routed[0]?.text).toBe('[KakaoTalk attachment #1: file application/pdf name=spec.pdf size=12345]')
+    expect(ctx.routed[0]?.attachments).toEqual([
+      { id: 1, kind: 'file', ref: '', filename: 'spec.pdf', mimetype: 'application/pdf', sizeBytes: 12345 },
+    ])
 
     await ctx.stop()
   })
@@ -928,9 +933,8 @@ describe('createKakaotalkAdapter — inbound attachments and emoticons', () => {
     await new Promise((r) => setTimeout(r, 10))
 
     expect(ctx.routed).toHaveLength(1)
-    expect(ctx.routed[0]?.text).toBe(
-      '[KakaoTalk message with sticker (sticker) pack=4412724 path=4412724.emot_001.webp]',
-    )
+    expect(ctx.routed[0]?.text).toBe('[KakaoTalk attachment #1: sticker name=4412724.emot_001.webp]')
+    expect(ctx.routed[0]?.attachments).toEqual([{ id: 1, kind: 'sticker', ref: '', filename: '4412724.emot_001.webp' }])
     expect(ctx.routed[0]?.externalMessageId).toBe('L77')
     expect(ctx.routed[0]?.authorId).toBe('111')
     expect(ctx.client.markReadCalls[0]?.logId).toBe('L77')

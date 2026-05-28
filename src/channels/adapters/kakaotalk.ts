@@ -26,9 +26,15 @@ import type {
   OutboundMessage,
   ResolvedChannelNames,
   SendResult,
+  InboundAttachment,
 } from '@/channels/types'
 
-import { emoticonEventToMessageEvent, formatHistoryText, formatInboundText } from './kakaotalk-attachment'
+import {
+  emoticonEventToMessageEvent,
+  splitEmoticonInbound,
+  splitHistoryInbound,
+  splitInbound,
+} from './kakaotalk-attachment'
 import { createKakaoAuthorResolver, type KakaoAuthorResolver } from './kakaotalk-author-resolver'
 import { createKakaoChannelResolver, type KakaoChannelResolver } from './kakaotalk-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
@@ -252,11 +258,13 @@ export function createKakaoHistoryCallback(deps: {
         messages.map(async (m) => {
           const authorId = String(m.author_id)
           const authorName = m.author_name ?? (await authorResolver.resolve(authorId, args.chat)) ?? authorId
+          const { text, attachments } = splitHistoryInbound(m)
           return {
             externalMessageId: m.log_id,
             authorId,
             authorName,
-            text: formatHistoryText(m),
+            text,
+            ...(attachments.length > 0 ? { attachments } : {}),
             ts: m.sent_at * 1000,
             isBot: selfId !== null && authorId === selfId,
             replyToBotMessageId: null,
@@ -331,13 +339,8 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
   const fetchAttachmentCallback = createFetchAttachmentCallback({ logger })
 
   const handleMessageEvent = async (event: KakaoTalkPushMessageEvent): Promise<void> => {
-    // Synthesize the displayed text BEFORE classify so attachments
-    // (photo, file, video, ...) survive classifyInbound's empty_text
-    // drop and reach the agent with a `[KakaoTalk message with ...]`
-    // placeholder. For text-only messages this is a no-op —
-    // formatInboundText returns event.message unchanged. See
-    // kakaotalk-attachment.ts for the per-message-type rules.
-    await processInbound({ ...event, message: formatInboundText(event) })
+    const { text, attachments } = splitInbound(event)
+    await processInbound({ ...event, message: text }, attachments)
   }
 
   const handleEmoticonEvent = async (event: KakaoTalkPushEmoticonEvent): Promise<void> => {
@@ -347,10 +350,14 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
     // self-author / unknown-chat rules apply identically across plain
     // messages and stickers — there is no second classifier to keep in
     // sync.
-    await processInbound(emoticonEventToMessageEvent(event))
+    const { attachments } = splitEmoticonInbound(event)
+    await processInbound(emoticonEventToMessageEvent(event), attachments)
   }
 
-  const processInbound = async (event: KakaoTalkPushMessageEvent): Promise<void> => {
+  const processInbound = async (
+    event: KakaoTalkPushMessageEvent,
+    attachments: readonly InboundAttachment[] = [],
+  ): Promise<void> => {
     inflightInbounds++
     try {
       if (channelResolver.lookupChat(event.chat_id) === null) {
@@ -391,6 +398,7 @@ export function createKakaotalkAdapter(options: KakaotalkAdapterOptions): Kakaot
       const verdict = classifyInbound(event, options.configRef(), {
         selfUserId,
         lookupChat: (id) => channelResolver.lookupChat(id),
+        ...(attachments.length > 0 ? { attachments } : {}),
         ...(options.selfAliasesRef ? { selfAliases: options.selfAliasesRef() } : {}),
       })
       if (verdict.kind === 'drop') {
