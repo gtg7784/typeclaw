@@ -18,6 +18,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        # SSH deploy key (write-enabled) is the only credential allowed to
+        # bypass the `main` branch ruleset (required PR + status check). The
+        # default GITHUB_TOKEN cannot push directly to main, and adding it
+        # to `bypass_actors` is impossible — GitHub Actions itself is not an
+        # installable App. The deploy key, by contrast, is repo-scoped (not
+        # account-scoped like a PAT) and lives in the ruleset's bypass list
+        # via `actor_type: DeployKey`. See:
+        # https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/about-rulesets#bypass
+        #
+        # `actions/checkout` configures the origin remote with this key, so
+        # the `Commit and tag` step below can `git push` over SSH without
+        # any further setup. `persist-credentials: true` (the default) is
+        # required — turning it off strips the auth and the push falls back
+        # to anonymous HTTPS.
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -213,9 +229,15 @@ jobs:
         # on fresh runners where no local tag exists), and `git push
         # --force` on the tag is scoped to the specific tag ref so it
         # cannot rewrite branches or other refs.
+        #
+        # Pushes here use the SSH deploy key configured by `actions/checkout`
+        # above. That key — and only that key — is allowed to bypass the
+        # `main` branch ruleset, so this step would fail with GH013
+        # ("repository rule violations") if anything below tried to push
+        # via the default GITHUB_TOKEN.
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "TypeClaw Release Bot"
+          git config user.email "release@typeclaw.dev"
           git add package.json
           git diff --staged --quiet || git commit -m "${{ inputs.version }}"
           git push origin HEAD
