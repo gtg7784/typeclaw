@@ -53,6 +53,14 @@ export type GithubAdapterOptions = {
   // Test-only: replaces the wall-clock sleep used for the registration
   // delay above. Production leaves it undefined and we use `setTimeout`.
   sleep?: (ms: number) => Promise<void>
+  // How often to proactively refresh the token and update GH_TOKEN
+  // when the adapter is running but has not made an outbound API call
+  // recently. Zero disables the background refresh entirely.
+  // Default: 30 minutes.
+  tokenRefreshIntervalMs?: number
+  // Test-only: replaces `setInterval` so tests can control when the
+  // background refresh fires without waiting on real wall-clock time.
+  setInterval?: (handler: () => void, ms: number) => { clear: () => void }
 }
 
 export type GithubAdapter = {
@@ -68,6 +76,7 @@ const consoleLogger: GithubAdapterLogger = {
 }
 
 const DEFAULT_WEBHOOK_REGISTRATION_DELAY_MS = 2_000
+const DEFAULT_TOKEN_REFRESH_INTERVAL_MS = 30 * 60 * 1000
 
 export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapter {
   const logger = options.logger ?? consoleLogger
@@ -83,6 +92,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   let selfLogin: string | null = null
   let started = false
   let managedHooks: ReadonlyArray<{ repo: string; hookId: number }> = []
+  let tokenRefreshTimer: ReturnType<typeof setInterval> | null = null
   const workspaceByChat = new Map<string, string>()
 
   const rememberWorkspace = (workspace: string, chat: string): void => {
@@ -168,6 +178,18 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       // automatically when within 5 minutes of expiry.
       process.env.GH_TOKEN = await auth.token()
       started = true
+      // Keep GH_TOKEN warm even when the adapter is only receiving inbound
+      // webhooks and not making outbound API calls. This prevents `gh` CLI
+      // calls from the agent from failing with 401 after the token expires.
+      const tokenRefreshIntervalMs = options.tokenRefreshIntervalMs ?? DEFAULT_TOKEN_REFRESH_INTERVAL_MS
+      if (tokenRefreshIntervalMs > 0) {
+        const refresh = () => {
+          tokenFn().catch((err) => {
+            logger.error(`[github] periodic token refresh failed: ${err instanceof Error ? err.message : String(err)}`)
+          })
+        }
+        tokenRefreshTimer = (options.setInterval ?? setInterval)(refresh, tokenRefreshIntervalMs)
+      }
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
       // Best-effort: App-only preflight that compares the installation's granted
       // permissions against the configured eventAllowlist and warns about gaps.
@@ -240,6 +262,10 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         })
         logDeregistrationOutcome(logger, deregistration)
         managedHooks = []
+      }
+      if (tokenRefreshTimer !== null) {
+        ;(options.setInterval ? (timer) => timer.clear() : clearInterval)(tokenRefreshTimer)
+        tokenRefreshTimer = null
       }
       await auth.dispose()
       delete process.env.GH_TOKEN

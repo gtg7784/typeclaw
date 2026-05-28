@@ -835,4 +835,88 @@ describe('createGithubAdapter lifecycle', () => {
     expect(sleepCalls).toBe(0)
     expect(events).toEqual(['hooks-list', 'hooks-create'])
   })
+
+  test('App auth: periodic token refresh keeps GH_TOKEN warm via setInterval', async () => {
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url === 'https://api.github.com/app' && method === 'GET') {
+        return Response.json({ slug: 'typeey-app' })
+      }
+      if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
+        return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
+        return Response.json({
+          permissions: { issues: 'write', pull_requests: 'write', metadata: 'read' },
+          events: ['issues', 'issue_comment', 'pull_request'],
+        })
+      }
+      if (url === 'https://api.github.com/app/installations/99/access_tokens' && method === 'POST') {
+        return Response.json({ token: 'ghs_fresh', expires_at: '2099-01-01T00:00:00Z' })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const refreshHandlers: Array<() => void> = []
+    const fakeInterval = (handler: () => void, _ms: number) => {
+      refreshHandlers.push(handler)
+      return { clear: () => {} }
+    }
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig([], null),
+      secrets: appSecrets(),
+      agentDir: '/tmp/agent',
+      logger: silentLogger(),
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
+      tokenRefreshIntervalMs: 100,
+      setInterval: fakeInterval,
+    })
+
+    await adapter.start()
+    expect(refreshHandlers.length).toBe(1)
+    expect(process.env.GH_TOKEN).toBe('ghs_fresh')
+
+    // Fire the refresh handler manually. tokenFn() is called and returns the
+    // cached token (since the fake token expires in 2099). The handler must
+    // not crash and must keep GH_TOKEN set.
+    refreshHandlers[0]!()
+    await new Promise((r) => setTimeout(r, 10))
+    expect(process.env.GH_TOKEN).toBe('ghs_fresh')
+
+    await adapter.stop()
+    expect(process.env.GH_TOKEN).toBeUndefined()
+  })
+
+  test('tokenRefreshIntervalMs: 0 disables the background refresh', async () => {
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url.endsWith('/user') && method === 'GET') return Response.json({ login: 'bot', id: 1 })
+      return new Response('unexpected', { status: 500 })
+    })
+
+    let setIntervalCalls = 0
+    const fakeInterval = (handler: () => void, _ms: number) => {
+      setIntervalCalls += 1
+      return { clear: () => {} }
+    }
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig([], null),
+      secrets: patSecrets(),
+      agentDir: '/tmp/agent',
+      logger: silentLogger(),
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
+      tokenRefreshIntervalMs: 0,
+      setInterval: fakeInterval,
+    })
+
+    await adapter.start()
+    expect(setIntervalCalls).toBe(0)
+    await adapter.stop()
+  })
 })
