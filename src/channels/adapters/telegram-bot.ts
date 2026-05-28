@@ -279,9 +279,9 @@ type TelegramFileResponse = {
 // Telegram's file download is a two-step protocol: `getFile` returns a
 // short-lived `file_path`, then the file lives at
 // `api.telegram.org/file/bot<TOKEN>/<file_path>`. `ref` here is the
-// `file_id` carried in the inbound classifier's `[Telegram message with
-// document: ... file_id=<id>]` summary; the agent passes it back through
-// the `channel_fetch_attachment` tool.
+// `file_id` carried in structured InboundAttachment.ref. The agent only sees
+// `[Telegram attachment #N: ...]` and passes that id through the
+// `channel_fetch_attachment` tool; the router resolves it to this callback.
 //
 // SSRF boundary: `ref` is `encodeURIComponent`'d into a query parameter
 // of a fixed `api.telegram.org/bot<TOKEN>/getFile?file_id=...` URL, so

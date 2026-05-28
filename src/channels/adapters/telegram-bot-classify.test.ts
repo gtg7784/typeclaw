@@ -218,7 +218,10 @@ describe('telegram-bot classifyInbound — routing', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe('[Telegram message with document: spec.pdf (application/pdf) file_id=AgADXYZ]')
+    expect(verdict.payload.text).toBe('[Telegram attachment #1: file application/pdf name=spec.pdf]')
+    expect(verdict.payload.attachments).toEqual([
+      { id: 1, kind: 'file', ref: 'AgADXYZ', filename: 'spec.pdf', mimetype: 'application/pdf' },
+    ])
   })
 
   test('photo-only messages include the largest photo size and its file_id', () => {
@@ -234,7 +237,8 @@ describe('telegram-bot classifyInbound — routing', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe('[Telegram message with photo: 1280x960 file_id=big]')
+    expect(verdict.payload.text).toBe('[Telegram attachment #1: photo 1280x960]')
+    expect(verdict.payload.attachments).toEqual([{ id: 1, kind: 'photo', ref: 'big', width: 1280, height: 960 }])
   })
 
   test('caption-only messages keep both caption and media summary', () => {
@@ -248,7 +252,8 @@ describe('telegram-bot classifyInbound — routing', () => {
 
     expect(verdict.kind).toBe('route')
     if (verdict.kind !== 'route') throw new Error('expected route')
-    expect(verdict.payload.text).toBe('see attached\n[Telegram message with document: log.txt file_id=AgADABC]')
+    expect(verdict.payload.text).toBe('see attached\n[Telegram attachment #1: file name=log.txt]')
+    expect(verdict.payload.attachments).toEqual([{ id: 1, kind: 'file', ref: 'AgADABC', filename: 'log.txt' }])
   })
 })
 
