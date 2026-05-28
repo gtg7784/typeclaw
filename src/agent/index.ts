@@ -39,7 +39,7 @@ import { loadSelf } from './self'
 import { SESSION_META_CUSTOM_TYPE, sessionMetaPayload } from './session-meta'
 import { renderSessionOrigin, type SessionOrigin, type SessionRoleContext } from './session-origin'
 import type { CreateSessionForSubagent, SubagentRegistry } from './subagents'
-import { DEFAULT_SYSTEM_PROMPT, renderNowBlock, renderRuntimeBlock, SLIM_SYSTEM_PROMPT } from './system-prompt'
+import { DEFAULT_SYSTEM_PROMPT, renderRuntimeBlock, SLIM_SYSTEM_PROMPT } from './system-prompt'
 import {
   createBudgetState,
   type ToolResultBudget,
@@ -665,12 +665,10 @@ export async function createOverrideResourceLoader(
   origin?: SessionOrigin,
   permissions?: PermissionService,
   runtimeVersion?: string,
-  now: Date = new Date(),
 ): Promise<DefaultResourceLoader> {
   const withRuntime =
     runtimeVersion !== undefined ? `${systemPrompt}\n\n${renderRuntimeBlock(runtimeVersion)}` : systemPrompt
-  const withOriginRendered = withOrigin(withRuntime, origin, permissions)
-  const finalPrompt = `${withOriginRendered}\n\n${renderNowBlock(now)}`
+  const finalPrompt = withOrigin(withRuntime, origin, permissions)
   const loader = new DefaultResourceLoader({
     systemPromptOverride: () => finalPrompt,
     appendSystemPromptOverride: () => [],
@@ -691,11 +689,6 @@ export type CreateResourceLoaderOptions = {
   // 'full' to force the heavy prompt even on an unattended origin (rarely
   // useful; mostly an escape hatch for ad-hoc debugging).
   mode?: SystemPromptMode
-  // Wall-clock anchor stamped into the trailing `## Now` block of the
-  // rendered system prompt. Production callers omit this so each session
-  // gets the current time at creation; tests pass a fixed Date to keep
-  // assertions deterministic. See `renderNowBlock` in system-prompt.ts.
-  now?: Date
 }
 
 // Origins where the operator-facing DEFAULT_SYSTEM_PROMPT, git-nudge, and the
@@ -753,7 +746,6 @@ export type SystemPromptComposition = {
   roleContext?: SessionRoleContext
   gitNudge: string
   memorySection: string
-  now?: Date
 }
 
 // Section-order contract for the system prompt. Kept as a pure string→string
@@ -772,12 +764,14 @@ export type SystemPromptComposition = {
 // 3. memorySection — volatile: MEMORY.md grows on every dream cycle and
 //    memory/yyyy-MM-dd.md grows after every channel turn that triggers
 //    memory-logger.
-// 4. now block — most volatile: changes per second. Pinned to the very
-//    end so every byte UP TO this block stays in the provider's cache
-//    prefix; only the trailing ~60 bytes invalidate on each new session.
-//    `now` is optional — when omitted (debug dumps without a fixed clock,
-//    legacy callers) the block is skipped entirely. See `renderNowBlock`
-//    in system-prompt.ts for why this block exists at all.
+//
+// The wall-clock anchor that used to live here as `## Now` moved out
+// entirely. It is now injected into the user turn at each `session.prompt`
+// site via `renderTurnTimeAnchor` (src/agent/system-prompt.ts) so the
+// stamp reflects the moment of THIS turn, not session creation. Per-turn
+// injection costs zero cached bytes — the user turn is the non-cacheable
+// suffix anyway — and removes the staleness failure mode where a session
+// opened Friday answered "today is Friday" on Thursday.
 export function composeSystemPrompt(parts: SystemPromptComposition): string {
   const base = parts.mode === 'slim' ? SLIM_SYSTEM_PROMPT : DEFAULT_SYSTEM_PROMPT
   let prompt = `${base}\n\n${parts.self}`
@@ -792,9 +786,6 @@ export function composeSystemPrompt(parts: SystemPromptComposition): string {
   }
   if (parts.memorySection !== '') {
     prompt = `${prompt}\n\n${parts.memorySection}`
-  }
-  if (parts.now !== undefined) {
-    prompt = `${prompt}\n\n${renderNowBlock(parts.now)}`
   }
   return prompt
 }
@@ -871,7 +862,6 @@ export async function createResourceLoader(options: CreateResourceLoaderOptions 
     ...(roleContext !== undefined ? { roleContext } : {}),
     gitNudge,
     memorySection,
-    now: options.now ?? new Date(),
   })
 
   const additionalSkillPaths = [getBundledSkillsDir()]
