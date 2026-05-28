@@ -258,6 +258,90 @@ describe('createGithubWebhookHandler', () => {
   })
 })
 
+describe('createGithubWebhookHandler — self-author drop', () => {
+  function selfAuthoredHandler(
+    routed: InboundMessage[],
+    overrides: { selfId?: string | null; selfLogin?: string | null } = {},
+  ): (req: Request) => Promise<Response> {
+    return createGithubWebhookHandler({
+      webhookSecret: 'secret',
+      dedup: createDeliveryDedup(),
+      allowlist: () => ['issue_comment.created', 'pull_request_review_comment.created', 'issues.opened'],
+      selfId: () => overrides.selfId ?? '99',
+      selfLogin: () => overrides.selfLogin ?? 'typeclaw-bot',
+      logger,
+      route: (msg) => {
+        routed.push(msg)
+      },
+    })
+  }
+
+  it('drops issue_comment authored by self (matched by id)', async () => {
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed)
+    const payload = issueCommentPayload({ pullRequest: false })
+    ;(payload.comment as Record<string, unknown>).user = { login: 'typeclaw-bot', id: 99, type: 'Bot' }
+    await handler(signedRequest(JSON.stringify(payload), 'issue_comment', 'self-by-id'))
+    expect(routed).toHaveLength(0)
+  })
+
+  it('drops issue_comment authored by self (matched by login when id differs)', async () => {
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed)
+    const payload = issueCommentPayload({ pullRequest: false })
+    // Same login, different id — simulates the issue #452 case where the
+    // id-only guard would have let the webhook through.
+    ;(payload.comment as Record<string, unknown>).user = { login: 'typeclaw-bot', id: 12345, type: 'Bot' }
+    await handler(signedRequest(JSON.stringify(payload), 'issue_comment', 'self-by-login'))
+    expect(routed).toHaveLength(0)
+  })
+
+  it('drops pull_request_review_comment authored by self (matched by login)', async () => {
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed)
+    const payload = reviewCommentPayload()
+    ;(payload.comment as Record<string, unknown>).user = { login: 'typeclaw-bot', id: 54321, type: 'Bot' }
+    await handler(signedRequest(JSON.stringify(payload), 'pull_request_review_comment', 'self-review-by-login'))
+    expect(routed).toHaveLength(0)
+  })
+
+  it('drops issues.opened authored by self (matched by login)', async () => {
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed)
+    const payload = {
+      action: 'opened',
+      repository: repo(),
+      issue: {
+        number: 11,
+        id: 1100,
+        body: 'opened by the bot',
+        created_at: '2026-01-01T00:00:00Z',
+        user: { login: 'typeclaw-bot', id: 12345, type: 'Bot' },
+      },
+    }
+    await handler(signedRequest(JSON.stringify(payload), 'issues', 'self-issue-by-login'))
+    expect(routed).toHaveLength(0)
+  })
+
+  it('routes issue_comment from a different author when neither id nor login matches', async () => {
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed)
+    const body = JSON.stringify(issueCommentPayload({ pullRequest: false }))
+    await handler(signedRequest(body, 'issue_comment', 'other-author'))
+    expect(routed).toHaveLength(1)
+    expect(routed[0]?.authorName).toBe('alice')
+  })
+
+  it('still drops by login when selfId is null (e.g. id getter not yet resolved)', async () => {
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed, { selfId: null })
+    const payload = issueCommentPayload({ pullRequest: false })
+    ;(payload.comment as Record<string, unknown>).user = { login: 'typeclaw-bot', id: 99, type: 'Bot' }
+    await handler(signedRequest(JSON.stringify(payload), 'issue_comment', 'self-id-null'))
+    expect(routed).toHaveLength(0)
+  })
+})
+
 function signedRequest(body: string, event: string, delivery: string): Request {
   const sig = `sha256=${createHmac('sha256', 'secret').update(body).digest('hex')}`
   return new Request('https://example.com/github', {
