@@ -61,6 +61,31 @@ Provider-family defaults override the SDK's reasoning level at session creation:
 | `autoAllowResolvers` | `true`  | Narrowly carve out port 53 to nameservers in `/etc/resolv.conf` so VPC-internal DNS keeps working                                                                  |
 | `allow`              | `[]`    | Explicit IPv4 CIDRs that punch through wholesale                                                                                                                   |
 
+## `mounts`
+
+```json
+{
+  "mounts": [
+    {
+      "name": "downloads",
+      "path": "~/Downloads",
+      "readOnly": true,
+      "description": "files to inspect"
+    }
+  ]
+}
+```
+
+Each mount maps a host directory to `/agent/mounts/<name>` inside the container. `path` accepts absolute paths, relative paths resolved from the agent folder, and `~`/`~/...`. `readOnly` defaults to `false`; use `true` for reference data the agent should inspect but not edit. Mount changes are restart-required because Docker bind mounts are fixed when the container starts.
+
+The CLI can manage this block:
+
+```sh
+typeclaw mount add downloads ~/Downloads --read-only
+typeclaw mount list
+typeclaw mount remove downloads
+```
+
 ## `docker.file`
 
 | Toggle        | Default | Effect                                                  |

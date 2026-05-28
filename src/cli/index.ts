@@ -31,6 +31,7 @@ const main = defineCommand({
     role: () => import('./role').then((m) => m.roleCommand),
     provider: () => import('./provider').then((m) => m.providerCommand),
     model: () => import('./model').then((m) => m.modelCommand),
+    mount: () => import('./mount').then((m) => m.mountCommand),
     doctor: () => import('./doctor').then((m) => m.doctorCommand),
     usage: () => import('./usage').then((m) => m.usageCommand),
     update: () => import('./update').then((m) => m.updateCommand),

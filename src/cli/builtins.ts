@@ -21,6 +21,7 @@ export const BUILTIN_COMMAND_NAMES = [
   'role',
   'provider',
   'model',
+  'mount',
   'doctor',
   'usage',
   'update',
