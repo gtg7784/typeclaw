@@ -136,15 +136,23 @@ Categories: `docker`, `config`, `secrets`, `network`, `git`, plus per-plugin che
 ## Update
 
 ```sh
-typeclaw update                                    # update the globally installed CLI (auto-detect Bun/npm/pnpm/yarn)
-typeclaw update --manager bun                      # force Bun global update
-typeclaw update --manager npm                      # force npm global update
-typeclaw update --manager pnpm                     # force pnpm global update
-typeclaw update --manager yarn                     # force classic Yarn global update
+typeclaw update                                    # update the installed CLI (auto-detect global vs local, Bun/npm/pnpm/yarn)
+typeclaw update --manager bun                      # force Bun (scope is still auto-detected)
+typeclaw update --manager npm                      # force npm (scope is still auto-detected)
+typeclaw update --manager pnpm                     # force pnpm (scope is still auto-detected)
+typeclaw update --manager yarn                     # force classic Yarn (scope is still auto-detected)
 typeclaw update --dry-run                          # print the updater command without running it
 ```
 
-Auto-detection only trusts known global install layouts (Bun's `.bun/install/global`, npm's `lib/node_modules`, pnpm's `pnpm/global/<N>/node_modules` / legacy `pnpm-global/<N>/node_modules`, and classic Yarn's `yarn/global/node_modules`). Source checkouts and local `node_modules/typeclaw` installs require an explicit `--manager`.
+Auto-detection recognizes these layouts:
+
+- **Bun global** (`~/.bun/install/global/node_modules/typeclaw`) → `bun update -g typeclaw --latest`.
+- **npm global** (`.../lib/node_modules/typeclaw`) → `npm install -g typeclaw@latest`.
+- **pnpm global** (`.../pnpm/global/<N>/node_modules/typeclaw`, or legacy `.../{,.}pnpm-global/<N>/node_modules/typeclaw`) → `pnpm add -g typeclaw@latest`.
+- **classic Yarn global** (`.../yarn/global/node_modules/typeclaw`) → `yarn global upgrade typeclaw --latest`.
+- **Local install** (any other `node_modules/typeclaw`) → drops the global flag and runs in the project root that owns the `node_modules/`. The manager is picked from the lockfile next to that root (`bun.lock` / `bun.lockb` → bun, `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn, `package-lock.json` → npm; bun wins ties).
+
+`--manager` always overrides the detected manager. The scope (global or not) still follows the detected install layout, so `--manager=npm` against a local install runs `npm install typeclaw@latest` (no `-g`), not a stealth global update. Source checkouts have no detectable layout and fall back to a global update — pass `--manager` to pick the registry side.
 
 ## Usage
 

@@ -9,7 +9,7 @@ const MANAGERS = ['auto', 'bun', 'npm', 'pnpm', 'yarn'] as const
 export const updateCommand = defineCommand({
   meta: {
     name: 'update',
-    description: 'update the globally installed typeclaw CLI',
+    description: 'update the installed typeclaw CLI (auto-detects global vs local)',
   },
   args: {
     manager: {
@@ -42,8 +42,9 @@ export const updateCommand = defineCommand({
       return
     }
 
-    process.stdout.write(`${c.cyan('Updating TypeClaw with:')} ${rendered}\n`)
-    const exitCode = await runUpdateCommand(plan.command)
+    const scopeLabel = plan.scope === 'global' ? 'global' : `local (${plan.cwd ?? '.'})`
+    process.stdout.write(`${c.cyan(`Updating TypeClaw [${scopeLabel}] with:`)} ${rendered}\n`)
+    const exitCode = await runUpdateCommand(plan.command, plan.cwd)
     if (exitCode !== 0) {
       console.error(errorLine(`Update command exited with code ${exitCode}.`))
       process.exit(exitCode)
@@ -58,7 +59,7 @@ function parseManager(value: string | undefined): UpdateManagerSelection | null 
   return (MANAGERS as readonly string[]).includes(value) ? (value as UpdateManagerSelection) : null
 }
 
-async function runUpdateCommand(command: string[]): Promise<number> {
+async function runUpdateCommand(command: string[], cwd: string | undefined): Promise<number> {
   const bun = (globalThis as { Bun?: { spawn: typeof Bun.spawn } }).Bun
   if (!bun) {
     console.error(errorLine('bun runtime not available'))
@@ -67,6 +68,7 @@ async function runUpdateCommand(command: string[]): Promise<number> {
   try {
     const proc = bun.spawn({
       cmd: command,
+      cwd,
       stdin: 'inherit',
       stdout: 'inherit',
       stderr: 'inherit',
