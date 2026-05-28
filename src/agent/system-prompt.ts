@@ -1,4 +1,4 @@
-import { formatLocalDateTime, resolveLocalTimezoneName } from '@/shared'
+import { formatLocalDateTime, formatLocalWeekday, resolveLocalTimezoneName } from '@/shared'
 
 export const DEFAULT_SYSTEM_PROMPT = `You are a general-purpose AI agent running inside TypeClaw.
 
@@ -153,6 +153,38 @@ export function renderNowBlock(now: Date): string {
   return `## Now
 
 Session started at \`${iso}\` (${zone}). This is a session-creation snapshot, not a live clock — the value above does not advance during this session. If you need the current wall-clock time precisely (e.g. before scheduling a cron, replying with "it's 3pm", or computing a deadline), run \`date\` via bash instead of trusting this stamp; the container's timezone is set to the host's, so \`date\` returns the user's local time.`
+}
+
+// Per-turn wall-clock anchor, intended for prepending to the user message
+// sent to \`session.prompt\`. Distinct from \`renderNowBlock\`, which embeds
+// the same data in the system prompt at session-creation time and goes
+// stale immediately. This helper has no caller in this commit — wiring
+// happens at each \`session.prompt\` site in follow-up commits.
+//
+// Long-lived channel sessions can outlive a session-creation timestamp by
+// days (a session opened Friday and woken Thursday morning reports
+// "today is Friday" because the only dated reference in its context is the
+// stale stamp). The per-turn anchor always reflects the moment the turn is
+// about to be sent, so the model answers "what day is it" against
+// \`new Date()\` rather than against the session-creation snapshot.
+//
+// The user turn is the non-cacheable suffix in every provider's KV cache
+// shape, so per-turn injection invalidates exactly zero cached bytes — the
+// same bytes that would already be re-billed on each turn's user message.
+//
+// The block emits both English and Korean weekday names alongside the ISO
+// timestamp because models replying in a non-English language frequently
+// compute weekday-from-ISO incorrectly; pre-computing the weekday in both
+// candidate reply languages removes that arithmetic step entirely. The
+// framing is a single \`<current-time>\` XML tag for parity with other
+// runtime-injected per-turn blocks the agent already sees
+// (\`<system-reminder>\` etc.), so the model reads it as a structured anchor
+// rather than as content authored by a human in the chat.
+export function renderTurnTimeAnchor(now: Date = new Date()): string {
+  const iso = formatLocalDateTime(now)
+  const zone = resolveLocalTimezoneName()
+  const weekday = formatLocalWeekday(now)
+  return `<current-time>${iso} (${zone}, ${weekday.en} / ${weekday.ko})</current-time>`
 }
 
 // Compact replacement for DEFAULT_SYSTEM_PROMPT, used by non-interactive
