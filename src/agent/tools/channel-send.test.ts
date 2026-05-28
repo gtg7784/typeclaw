@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ChannelRouter } from '@/channels/router'
+import { OUTBOUND_FLOOD_ERROR, type ChannelRouter } from '@/channels/router'
 import type { OutboundMessage, SendResult } from '@/channels/types'
 
 import { TOOL_RESULT_PREFIX } from './channel-reply'
@@ -105,6 +105,22 @@ describe('createChannelSendTool', () => {
     expect(result.details).toEqual({ ok: false, error: 'denied by allow rules' })
     expect(result.content[0]?.type).toBe('text')
     expect((result.content[0] as { text: string }).text).toContain('denied')
+  })
+
+  test('reports outbound flood denial back to the agent without posting', async () => {
+    const tool = createChannelSendTool({
+      router: fakeRouter(async () => ({ ok: false, error: OUTBOUND_FLOOD_ERROR, code: 'outbound-flood' })),
+    })
+    const result = await runTool(tool, {
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      text: 'ㅋ'.repeat(500),
+    })
+    expect(result.details).toEqual({ ok: false, error: OUTBOUND_FLOOD_ERROR })
+    const text = (result.content[0] as { text: string }).text
+    expect(text).toContain('channel_send denied')
+    expect(text).toContain(OUTBOUND_FLOOD_ERROR)
   })
 
   test('first send (count=1) returns the delivery confirmation with echoed text', async () => {
