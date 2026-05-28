@@ -31,10 +31,18 @@ import type {
   ToolResult,
 } from '@/plugin'
 
+import { createLoopGuard, type LoopGuard } from './loop-guard'
 import { checkImageReadRedirect } from './multimodal/read-redirect'
 import type { SessionOrigin } from './session-origin'
 import { webfetchTool } from './tools/webfetch'
 import { websearchTool } from './tools/websearch'
+
+// Process-wide loop guard. State is keyed by sessionId so concurrent sessions
+// don't interfere; the guard's own LRU bound keeps it from growing without
+// limit. Wrappers consult it before invoking the underlying tool so the
+// detector covers every tool category — plugin tools, TypeClaw system tools,
+// and pi-coding-agent builtins — through one chokepoint.
+let sharedLoopGuard: LoopGuard = createLoopGuard()
 
 const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
   Type.Object(
@@ -177,6 +185,11 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
         return errorResult(`blocked: ${blockResult.reason}`)
       }
 
+      const loopDecision = sharedLoopGuard.check(opts.sessionId, opts.toolName, before.args)
+      if (loopDecision.kind === 'block') {
+        return errorResult(loopDecision.message)
+      }
+
       const toolCtx: ToolContext = {
         signal,
         sessionId: opts.sessionId,
@@ -190,6 +203,10 @@ export function wrapPluginTool(tool: Tool<any>, opts: WrapToolOptions): ToolDefi
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
         return errorResult(message)
+      }
+
+      if (loopDecision.kind === 'warn') {
+        result = appendLoopWarning(result, loopDecision.message)
       }
 
       await opts.hooks.runToolAfter({
@@ -227,6 +244,10 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
+      const loopDecision = sharedLoopGuard.check(opts.sessionId, tool.name, mutableArgs)
+      if (loopDecision.kind === 'block') {
+        throw new Error(loopDecision.message)
+      }
       const guardResult = await runFinalWriteGuards({
         tool: tool.name,
         args: mutableArgs,
@@ -245,6 +266,11 @@ export function wrapSystemTool<TParams extends TSchema, TDetails = unknown, TSta
       const hookResult: ToolResult = {
         content: result.content as ContentPart[],
         details: result.details,
+      }
+      if (loopDecision.kind === 'warn') {
+        const warned = appendLoopWarning(hookResult, loopDecision.message)
+        hookResult.content = warned.content
+        hookResult.details = warned.details
       }
       await opts.hooks.runToolAfter({
         tool: tool.name,
@@ -280,6 +306,10 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
+      const loopDecision = sharedLoopGuard.check(opts.sessionId, tool.name, mutableArgs)
+      if (loopDecision.kind === 'block') {
+        throw new Error(loopDecision.message)
+      }
       const guardResult = await runFinalWriteGuards({
         tool: tool.name,
         args: mutableArgs,
@@ -298,6 +328,11 @@ export function wrapSystemAgentTool<TParams extends TSchema, TDetails = unknown>
       const hookResult: ToolResult = {
         content: result.content as ContentPart[],
         details: result.details,
+      }
+      if (loopDecision.kind === 'warn') {
+        const warned = appendLoopWarning(hookResult, loopDecision.message)
+        hookResult.content = warned.content
+        hookResult.details = warned.details
       }
       await opts.hooks.runToolAfter({
         tool: tool.name,
@@ -340,6 +375,10 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
+      const loopDecision = sharedLoopGuard.check(opts.sessionId, tool.name, mutableArgs)
+      if (loopDecision.kind === 'block') {
+        throw new Error(loopDecision.message)
+      }
       const guardResult = await runFinalWriteGuards({
         tool: tool.name,
         args: mutableArgs,
@@ -358,6 +397,11 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       const hookResult: ToolResult = {
         content: result.content as ContentPart[],
         details: result.details,
+      }
+      if (loopDecision.kind === 'warn') {
+        const warned = appendLoopWarning(hookResult, loopDecision.message)
+        hookResult.content = warned.content
+        hookResult.details = warned.details
       }
       await opts.hooks.runToolAfter({
         tool: tool.name,
@@ -379,6 +423,19 @@ export function defaultBuiltinPiAgentTools(): AgentTool<any, any>[] {
 
 export function buildBuiltinPiToolOverrides(opts: WrapSystemToolOptions): ToolDefinition<any, any>[] {
   return defaultBuiltinPiAgentTools().map((tool) => wrapAgentToolAsCustomToolDefinition(tool, opts))
+}
+
+function appendLoopWarning(result: ToolResult, message: string): ToolResult {
+  const content: ContentPart[] = [...(result.content as ContentPart[]), { type: 'text', text: message }]
+  return { content, details: result.details }
+}
+
+// Test-only seam: swaps the shared loop guard for a fresh instance so tests
+// that reuse sessionIds across cases don't see cross-test streak counts.
+// Production code never calls this; the guard's LRU bound handles
+// long-running processes.
+export function __resetSharedLoopGuardForTests(): void {
+  sharedLoopGuard = createLoopGuard()
 }
 
 function errorResult(message: string) {

@@ -11,6 +11,7 @@ import { z } from 'zod'
 import { createHookBus, defineTool, type PluginRegistry } from '@/plugin'
 
 import {
+  __resetSharedLoopGuardForTests,
   buildBuiltinPiToolOverrides,
   defaultBuiltinPiAgentTools,
   wrapAgentToolAsCustomToolDefinition,
@@ -19,6 +20,10 @@ import {
   wrapSystemTool,
   zodToToolParameters,
 } from './plugin-tools'
+
+beforeEach(() => {
+  __resetSharedLoopGuardForTests()
+})
 
 const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
 
@@ -1046,5 +1051,161 @@ describe('setupSession integration: builtin pi tools route through customTools w
     expect(active.has('ls')).toBe(false)
 
     session.dispose()
+  })
+})
+
+describe('loop guard integration', () => {
+  test('appends a soft-warning suffix to a plugin tool result on the third identical call', async () => {
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ q: z.string() }),
+      async execute(args) {
+        return { content: [{ type: 'text', text: `q=${args.q}` }] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'p1',
+      toolName: 'search',
+      agentDir: '/agent',
+      sessionId: 'loop-plugin-1',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+
+    const r1 = (await wrapped.execute('c1', { q: 'a' }, undefined, undefined, {} as never)) as {
+      content: { type: string; text: string }[]
+    }
+    expect(r1.content.length).toBe(1)
+
+    await wrapped.execute('c2', { q: 'a' }, undefined, undefined, {} as never)
+    const r3 = (await wrapped.execute('c3', { q: 'a' }, undefined, undefined, {} as never)) as {
+      content: { type: string; text: string }[]
+    }
+    expect(r3.content.length).toBe(2)
+    expect(r3.content[1]?.text).toContain('loop-guard')
+    expect(r3.content[1]?.text).toContain('search')
+  })
+
+  test('refuses the fifth identical plugin tool call with an error result and never invokes the tool', async () => {
+    const calls: number[] = []
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ q: z.string() }),
+      async execute() {
+        calls.push(1)
+        return { content: [{ type: 'text', text: 'ok' }] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'p1',
+      toolName: 'search',
+      agentDir: '/agent',
+      sessionId: 'loop-plugin-2',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+
+    for (let i = 0; i < 4; i++) {
+      await wrapped.execute(`c${i}`, { q: 'a' }, undefined, undefined, {} as never)
+    }
+    expect(calls.length).toBe(4)
+    const blocked = (await wrapped.execute('c5', { q: 'a' }, undefined, undefined, {} as never)) as {
+      isError?: boolean
+      content: { type: string; text: string }[]
+    }
+    expect(calls.length).toBe(4)
+    expect(blocked.isError).toBe(true)
+    expect(blocked.content[0]?.text).toContain('loop-guard')
+  })
+
+  test('resets the streak when the args change between plugin tool calls', async () => {
+    const calls: string[] = []
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({ q: z.string() }),
+      async execute(args) {
+        calls.push(args.q)
+        return { content: [{ type: 'text', text: args.q }] }
+      },
+    })
+    const wrapped = wrapPluginTool(tool, {
+      pluginName: 'p1',
+      toolName: 'search',
+      agentDir: '/agent',
+      sessionId: 'loop-plugin-3',
+      logger: noopLogger,
+      hooks: createHookBus(),
+    })
+
+    await wrapped.execute('c1', { q: 'a' }, undefined, undefined, {} as never)
+    await wrapped.execute('c2', { q: 'a' }, undefined, undefined, {} as never)
+    await wrapped.execute('c3', { q: 'b' }, undefined, undefined, {} as never)
+    await wrapped.execute('c4', { q: 'b' }, undefined, undefined, {} as never)
+    const r5 = (await wrapped.execute('c5', { q: 'b' }, undefined, undefined, {} as never)) as {
+      isError?: boolean
+      content: { type: string; text: string }[]
+    }
+    expect(r5.isError).not.toBe(true)
+    expect(r5.content[1]?.text).toContain('loop-guard')
+    expect(calls).toEqual(['a', 'a', 'b', 'b', 'b'])
+  })
+
+  test('throws on the fifth identical system tool call so the engine surfaces the loop error', async () => {
+    const calls: number[] = []
+    const tool = definePiTool({
+      name: 'webfetch',
+      label: 'webfetch',
+      description: '',
+      parameters: Type.Object({ url: Type.String() }),
+      async execute() {
+        calls.push(1)
+        return { content: [{ type: 'text', text: 'ok' }], details: undefined }
+      },
+    })
+    const wrapped = wrapSystemTool(tool, { agentDir: '/agent', sessionId: 'loop-sys-1', hooks: createHookBus() })
+
+    for (let i = 0; i < 4; i++) {
+      await wrapped.execute(`c${i}`, { url: 'https://example.com' }, undefined, undefined, {} as never)
+    }
+    expect(calls.length).toBe(4)
+    await expect(
+      wrapped.execute('c5', { url: 'https://example.com' }, undefined, undefined, {} as never),
+    ).rejects.toThrow(/loop-guard/)
+    expect(calls.length).toBe(4)
+  })
+
+  test('keeps loop streaks isolated between sessions', async () => {
+    const calls: { session: string }[] = []
+    const tool = defineTool({
+      description: '',
+      parameters: z.object({}),
+      async execute() {
+        return { content: [{ type: 'text', text: 'ok' }] }
+      },
+    })
+
+    const make = (sessionId: string) => {
+      return wrapPluginTool(tool, {
+        pluginName: 'p1',
+        toolName: 'search',
+        agentDir: '/agent',
+        sessionId,
+        logger: noopLogger,
+        hooks: createHookBus(),
+      })
+    }
+
+    const wA = make('loop-iso-A')
+    const wB = make('loop-iso-B')
+
+    for (let i = 0; i < 4; i++) {
+      await wA.execute(`a${i}`, {}, undefined, undefined, {} as never)
+      calls.push({ session: 'A' })
+    }
+    const aBlocked = (await wA.execute('a5', {}, undefined, undefined, {} as never)) as { isError?: boolean }
+    expect(aBlocked.isError).toBe(true)
+
+    const bFirst = (await wB.execute('b1', {}, undefined, undefined, {} as never)) as { isError?: boolean }
+    expect(bFirst.isError).not.toBe(true)
   })
 })
