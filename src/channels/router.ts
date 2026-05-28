@@ -40,6 +40,7 @@ import type {
   FetchHistoryArgs,
   FetchHistoryResult,
   HistoryCallback,
+  InboundAttachment,
   InboundMessage,
   OutboundCallback,
   OutboundMessage,
@@ -216,6 +217,7 @@ export type ConfigForAdapter = (adapter: ChannelKey['adapter']) => ChannelAdapte
 
 type QueuedInbound = {
   text: string
+  attachments?: readonly InboundAttachment[]
   authorId: string
   authorName: string
   authorIsBot: boolean
@@ -234,6 +236,7 @@ type QueuedInbound = {
 
 type ObservedInbound = {
   text: string
+  attachments?: readonly InboundAttachment[]
   authorId: string
   authorName: string
   authorIsBot: boolean
@@ -447,6 +450,8 @@ export type ChannelRouter = {
   registerFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   unregisterFetchAttachment: (adapter: ChannelKey['adapter'], cb: FetchAttachmentCallback) => void
   fetchAttachment: (adapter: ChannelKey['adapter'], args: FetchAttachmentArgs) => Promise<FetchAttachmentResult>
+  lookupInboundAttachment: (args: ChannelKey & { id: number }) => InboundAttachment | null
+  listInboundAttachmentIds: (args: ChannelKey) => readonly number[]
   // Execute a command by name against an existing live session, bypassing
   // the inbound classifier, engagement gate, debounce, and prompt queue.
   // Used by adapters that receive commands through a native surface
@@ -1635,6 +1640,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const observe = (live: LiveSession, event: InboundMessage): void => {
     live.contextBuffer.push({
       text: event.text,
+      ...(event.attachments !== undefined && event.attachments.length > 0 ? { attachments: event.attachments } : {}),
       authorId: event.authorId,
       authorName: event.authorName,
       authorIsBot: event.authorIsBot,
@@ -1650,6 +1656,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const enqueue = (live: LiveSession, event: InboundMessage): void => {
     live.promptQueue.push({
       text: event.text,
+      ...(event.attachments !== undefined && event.attachments.length > 0 ? { attachments: event.attachments } : {}),
       authorId: event.authorId,
       authorName: event.authorName,
       authorIsBot: event.authorIsBot,
@@ -1796,6 +1803,26 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       lastError = result
     }
     return lastError
+  }
+
+  const lookupInboundAttachment = (args: ChannelKey & { id: number }): InboundAttachment | null => {
+    const live = liveSessions.get(channelKeyId(args))
+    if (live === undefined) return null
+    for (const item of [...live.promptQueue, ...live.contextBuffer]) {
+      const found = item.attachments?.find((attachment) => attachment.id === args.id)
+      if (found !== undefined) return found
+    }
+    return null
+  }
+
+  const listInboundAttachmentIds = (args: ChannelKey): readonly number[] => {
+    const live = liveSessions.get(channelKeyId(args))
+    if (live === undefined) return []
+    const ids = new Set<number>()
+    for (const item of [...live.promptQueue, ...live.contextBuffer]) {
+      for (const attachment of item.attachments ?? []) ids.add(attachment.id)
+    }
+    return Array.from(ids).sort((a, b) => a - b)
   }
 
   const send = async (msg: OutboundMessage, opts?: SendOptions): Promise<SendResult> => {
@@ -2234,6 +2261,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerFetchAttachment,
     unregisterFetchAttachment,
     fetchAttachment,
+    lookupInboundAttachment,
+    listInboundAttachmentIds,
     executeCommand,
     getSelfAliases: computeSelfAliases,
     injectSubagentCompletionReminder,
@@ -2503,18 +2532,20 @@ export type QuoteAnchorCandidate = {
   hadInterveningObserved: boolean
 }
 
-// Strips `[<Adapter> message with ...]` placeholders that adapter
+// Strips both current `[<Adapter> attachment #N: ...]` and legacy
+// `[<Adapter> message with ...]` placeholders that adapter
 // classifiers synthesize for non-text inbounds (KakaoTalk stickers,
 // Slack/Discord/Telegram attachments). The quote anchor is a UX
 // affordance pointing the human at *their words* — quoting a sticker as
-// `> Alice: [KakaoTalk message with sticker (sticker_ani) pack=... path=...]`
+// `> Alice: [KakaoTalk attachment #1: sticker name=...]`
 // is noise, and for mixed inbounds like `사진 [KakaoTalk message with
 // photo 1254x1254 ...]` the human only wrote `사진`, so the placeholder
 // is the wrong thing to surface. The callsite (captureQuoteCandidate)
 // treats an empty residue as "no quote anchor"; mixed inbounds keep the
 // human-written portion. renderQuoteAnchor later collapses whitespace
 // so residual double-spaces from mid-string strips are harmless.
-const CHANNEL_MEDIA_PLACEHOLDER_RE = /\[(?:KakaoTalk|Slack|Discord|Telegram) message with [^\]]*\]/g
+const CHANNEL_MEDIA_PLACEHOLDER_RE =
+  /\[(?:KakaoTalk|Slack|Discord|Telegram) (?:message with|attachment #\d+:) [^\]]*\]/g
 
 export function stripChannelMediaPlaceholders(text: string): string {
   return text
