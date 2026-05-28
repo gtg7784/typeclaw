@@ -13,3 +13,9 @@ export {
   exportCodexAuthFileForAgent,
   exportCodexAuthFileIfApplicable,
 } from './export-codex-auth-file'
+
+export {
+  type ExportClaudeCredentialsFileResult,
+  exportClaudeCredentialsFileForAgent,
+  exportClaudeCredentialsFileIfApplicable,
+} from './export-claude-credentials-file'
