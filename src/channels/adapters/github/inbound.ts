@@ -44,11 +44,17 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
     if (!isGithubEventAllowed(options.allowlist(), event, action)) return ok()
 
     const selfId = options.selfId()
+    const selfLogin = options.selfLogin()
     const author = readAuthor(payload)
-    if (selfId !== null && author !== null && String(author.id) === selfId) return ok()
+    if (author !== null && isSelfAuthor(author, selfId, selfLogin)) {
+      options.logger.info(
+        `[github] dropped self-authored ${event}${action !== null ? `.${action}` : ''} from @${author.login}`,
+      )
+      return ok()
+    }
 
     const teamIsBotMember = await resolveTeamMembership(event, payload, options)
-    const classified = classifyGithubInbound(event, payload, options.selfLogin(), {
+    const classified = classifyGithubInbound(event, payload, selfLogin, {
       teamIsBotMember,
     })
     if (classified === null) return ok()
@@ -364,6 +370,17 @@ function readAuthor(payload: Record<string, unknown>): GithubUser | null {
     if (user !== null) return user
   }
   return null
+}
+
+// Matches by id OR login. Issue #452 captured a self-responding loop where
+// the id-only guard didn't fire and the bot replied to its own comments ~8
+// times in a row. Login is the second line of defense and aligns with the
+// slack/discord/telegram/kakaotalk adapters, which all drop self-authored
+// events at the classifier layer.
+function isSelfAuthor(author: GithubUser, selfId: string | null, selfLogin: string | null): boolean {
+  if (selfId !== null && String(author.id) === selfId) return true
+  if (selfLogin !== null && author.login === selfLogin) return true
+  return false
 }
 
 type GithubUser = { login: string; id: number; type?: string }
