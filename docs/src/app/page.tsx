@@ -1,4 +1,19 @@
-import { ArrowRight, BookOpen, Check, Container, Github, Lock, PenTool, Quote, Shield, Sparkles, Star, User, Users, X } from 'lucide-react'
+import {
+  ArrowRight,
+  BookOpen,
+  Check,
+  Container,
+  Github,
+  Lock,
+  PenTool,
+  Quote,
+  Shield,
+  Sparkles,
+  Star,
+  User,
+  Users,
+  X,
+} from 'lucide-react'
 import Image from 'next/image'
 import Link from 'next/link'
 
@@ -283,14 +298,17 @@ function Testimonial() {
   return (
     <div className="mx-auto max-w-3xl">
       <div className="relative rounded-2xl border border-brand-100 bg-gradient-to-br from-brand-50/80 to-white p-10 dark:border-brand-900/40 dark:from-brand-950/40 dark:to-zinc-950">
-        <Quote className="absolute top-6 left-6 size-8 text-brand-200 dark:text-brand-800" strokeWidth={2.4} aria-hidden />
+        <Quote
+          className="absolute top-6 left-6 size-8 text-brand-200 dark:text-brand-800"
+          strokeWidth={2.4}
+          aria-hidden
+        />
         <blockquote className="relative pt-8 text-center">
           <p className="text-xl font-medium leading-relaxed text-zinc-800 dark:text-zinc-100 sm:text-2xl">
-            &ldquo;Last week I told my agent I prefer kebab-case for filenames. Yesterday it suggested a rename without me asking.&rdquo;
+            &ldquo;Last week I told my agent I prefer kebab-case for filenames. Yesterday it suggested a rename without
+            me asking.&rdquo;
           </p>
-          <footer className="mt-6 text-sm text-zinc-500 dark:text-zinc-500">
-            — A TypeClaw user
-          </footer>
+          <footer className="mt-6 text-sm text-zinc-500 dark:text-zinc-500">— A TypeClaw user</footer>
         </blockquote>
       </div>
     </div>
@@ -451,12 +469,8 @@ export default function Home() {
 
         <section className="mx-auto max-w-6xl px-6 pb-28">
           <div className="mb-10 text-center">
-            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">
-              Use cases
-            </p>
-            <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">
-              For every workflow
-            </h2>
+            <p className="font-mono text-xs tracking-[0.2em] text-brand-700 uppercase dark:text-brand-300">Use cases</p>
+            <h2 className="mt-3 text-balance text-3xl font-semibold tracking-tight sm:text-4xl">For every workflow</h2>
           </div>
           <UseCaseTabs />
         </section>

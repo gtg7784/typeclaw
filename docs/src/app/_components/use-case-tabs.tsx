@@ -1,7 +1,7 @@
 'use client'
 
-import { useState } from 'react'
 import { User, Users, PenTool } from 'lucide-react'
+import { useState } from 'react'
 
 const USE_CASES = [
   {
@@ -51,9 +51,7 @@ export function UseCaseTabs() {
         })}
       </div>
       <div className="mt-6 rounded-2xl border border-zinc-200 bg-white p-8 text-center shadow-sm dark:border-white/[0.08] dark:bg-zinc-950">
-        <p className="mx-auto max-w-lg text-base leading-relaxed text-zinc-600 dark:text-zinc-400">
-          {activeCase.text}
-        </p>
+        <p className="mx-auto max-w-lg text-base leading-relaxed text-zinc-600 dark:text-zinc-400">{activeCase.text}</p>
       </div>
     </div>
   )
