@@ -3,6 +3,7 @@ import type { ImageContent } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
 import { createSessionWithDispose, type SessionOrigin } from '@/agent'
+import { normalizeRef } from '@/agent/tools/normalize-ref'
 import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 
@@ -120,7 +121,7 @@ export function createChannelLookAtTool(router: ChannelRouter, origin: ChannelLo
         )
       }
       const result = await router.fetchAttachment(origin.adapter, {
-        ref: found.ref,
+        ref: normalizeRef(found.ref),
         ...(found.filename !== undefined ? { filename: found.filename } : {}),
       })
       if (!result.ok) return errorResult(result.error, { count: 0, prompt: params.prompt })

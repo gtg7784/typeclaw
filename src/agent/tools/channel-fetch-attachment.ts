@@ -8,6 +8,7 @@ import type { ChannelRouter } from '@/channels/router'
 import type { AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
+import { normalizeRef } from './normalize-ref'
 
 export type ChannelFetchAttachmentOrigin = {
   adapter: AdapterId
@@ -130,14 +131,6 @@ export function createChannelFetchAttachmentTool({
 function errorResult(message: string) {
   const details = { ok: false, error: message }
   return { content: [{ type: 'text' as const, text: `channel_fetch_attachment error: ${message}` }], details }
-}
-
-function normalizeRef(ref: string): string {
-  const trimmed = ref.trim()
-  // New classifiers store bare Slack file ids; keep accepting legacy
-  // persisted refs that still include the old prompt-visible `id=` prefix.
-  if (trimmed.startsWith('id=')) return trimmed.slice(3)
-  return trimmed
 }
 
 const UNSAFE_FILENAME_CHARS = /[^A-Za-z0-9._-]/g
