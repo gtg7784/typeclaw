@@ -60,12 +60,19 @@ describe('expectStable', () => {
   })
 
   test('rejects when predicate becomes truthy mid-duration', async () => {
-    let flipped = false
-    setTimeout(() => {
-      flipped = true
-    }, 10)
+    // Drive the flip from the polling loop itself rather than a wall-clock
+    // setTimeout — under heavy CI contention (18 parallel workers) a 10ms
+    // timer can be delayed past the 50ms duration, leaving the predicate
+    // falsy and turning the expected rejection into a silent resolve. A
+    // call-counter is deterministic: the third poll flips it, well before
+    // the deadline regardless of scheduler load.
+    let calls = 0
+    const predicate = () => {
+      calls++
+      return calls >= 3
+    }
 
-    await expect(expectStable(() => flipped, { durationMs: 50, description: 'no-event' })).rejects.toThrow(
+    await expect(expectStable(predicate, { durationMs: 50, description: 'no-event' })).rejects.toThrow(
       /no-event became truthy before 50ms elapsed/,
     )
   })
