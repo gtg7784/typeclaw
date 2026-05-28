@@ -29,6 +29,8 @@ function fakeRouter(
     registerFetchAttachment: () => {},
     unregisterFetchAttachment: () => {},
     fetchAttachment: async () => ({ ok: false, error: 'no fetchAttachment callback registered for "slack-bot"' }),
+    lookupInboundAttachment: () => null,
+    listInboundAttachmentIds: () => [],
     getSelfAliases: () => [],
     stop: async () => {},
     liveCount: () => 0,
