@@ -43,7 +43,7 @@ import type { CronHandlerContext } from '@/plugin/types'
 import { createContainerBroker, publishForwardResult } from '@/portbroker'
 import { ReloadRegistry } from '@/reload'
 import { createClaimController } from '@/role-claim'
-import { hydrateChannelEnvFromSecrets } from '@/secrets'
+import { exportCodexAuthFileForAgent, hydrateChannelEnvFromSecrets } from '@/secrets'
 import { createServer, type Server } from '@/server'
 import {
   createCommandRunner,
@@ -180,6 +180,19 @@ export async function startAgent({
   // auto-promotion from .env to secrets.json has been removed — env values
   // stay in env, the file stays user-owned. See src/secrets/hydrate.ts.
   hydrateChannelEnvFromSecrets({ agentDir: cwd })
+
+  // When the user has `docker.file.codexCli: true` AND a typeclaw-managed
+  // openai-codex OAuth credential in secrets.json, write ~/.codex/auth.json
+  // so the Codex CLI in the container can run without a second login. The
+  // exporter is failure-tolerant by design: any error (gate miss, fs error,
+  // corrupt file) returns a non-fatal result and the agent boot continues.
+  // See src/secrets/export-codex-auth-file.ts for the newer-wins compare
+  // that prevents clobbering Codex CLI's in-place token refreshes.
+  exportCodexAuthFileForAgent({
+    agentDir: cwd,
+    codexCliEnabled: cwdConfig.docker.file.codexCli,
+    log: (message) => console.warn(message),
+  })
 
   const claimController = createClaimController({
     cwd,
