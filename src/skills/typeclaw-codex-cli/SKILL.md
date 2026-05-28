@@ -38,7 +38,8 @@ If `codex` is installed but no credential is set up, you have to broker the auth
 
 **Decision rule, top to bottom:**
 
-1. **Already authenticated?** Check both env (`env | grep -E '^(OPENAI_API_KEY|CODEX_API_KEY)='`) and on-disk (`test -f ~/.codex/auth.json`). If either resolves, skip auth entirely.
+0. **typeclaw may have already done it for you.** If the agent was initialized with the `openai-codex` provider (the user pasted/ran OAuth into typeclaw itself), typeclaw writes `~/.codex/auth.json` automatically on every container start — provided `docker.file.codexCli: true` is set. Check `test -f ~/.codex/auth.json && jq -e '.tokens.access_token' ~/.codex/auth.json >/dev/null`; if both succeed, skip auth and go straight to delegation. The file is refreshed on every start via the newer-wins compare in `src/secrets/export-codex-auth-file.ts`, so a stale credential gets replaced without user intervention as long as the typeclaw-side credential is fresher.
+1. **Already authenticated some other way?** Check both env (`env | grep -E '^(OPENAI_API_KEY|CODEX_API_KEY)='`) and on-disk (`test -f ~/.codex/auth.json`). If either resolves, skip auth entirely.
 2. **User has an OpenAI API account** (api.openai.com billing, no ChatGPT Plus/Pro subscription) → API key path.
 3. **User has a ChatGPT Plus / Pro / Team / Enterprise subscription and wants to use their subscription credits** → OAuth path via `codex login`.
 4. **User is unsure** → ask which kind of OpenAI account they have. Both paths are equally low-friction. Pick by account shape, not by flow complexity.

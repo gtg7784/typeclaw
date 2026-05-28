@@ -4,6 +4,28 @@ Deep dive for the auth paths. Read it when `SKILL.md`'s "First-time auth (intera
 
 The two paths are intentionally symmetric: in both, the user produces one artifact on their side, pastes it to you, you validate it, you do read-modify-write on `.env` (or write `~/.codex/auth.json`), you offer a restart. Only the credential medium differs.
 
+## Path 0 — typeclaw-managed OAuth (auto-export, no user action)
+
+Before walking the user through either interactive path, check whether typeclaw has already provisioned `~/.codex/auth.json` from its own secrets store. This is the canonical state for users who configured `openai-codex` as their typeclaw model backend during `typeclaw init`:
+
+- `typeclaw init` ran the OAuth flow against pi-ai and wrote the credential to `secrets.json#providers.openai-codex` (shape: `{ type: 'oauth', access, refresh, expires, accountId }`).
+- `docker.file.codexCli: true` is set in `typeclaw.json`, so the Codex CLI is installed in the container.
+- On every `typeclaw start` / `typeclaw restart`, `src/run/index.ts`'s boot sequence calls `exportCodexAuthFileForAgent`, which:
+  - Returns early (zero filesystem touches) if `codexCli` is off or no `openai-codex` credential exists.
+  - Otherwise emits the modern `~/.codex/auth.json` shape (`{ tokens: { access_token, refresh_token, account_id? } }`) — no top-level `expires`, because Codex CLI re-derives expiry from the JWT on every load.
+  - Compares the JWT `exp` claim in the on-disk access token against typeclaw's stored expiry. If the on-disk token is the same or newer (Codex CLI rotated it in-place since the last typeclaw write), the file is left alone — no clobber. If typeclaw's copy is strictly fresher (the user re-pasted OAuth), the file is replaced atomically.
+
+Detection check before launching the interactive flow:
+
+```sh
+test -f ~/.codex/auth.json \
+  && jq -e '.tokens.access_token' ~/.codex/auth.json >/dev/null
+```
+
+If both succeed, the credential is ready; skip Paths A and B and proceed to delegation. If only the first succeeds but the second fails (file exists but no `tokens.access_token`), the file is either an API-key shape (legacy) or corrupt — the runtime exporter's next-start pass will overwrite it from `secrets.json` if typeclaw has a valid OAuth credential, but for the current delegation you can either re-run `typeclaw restart` to force the resync, or fall back to interactive Path A / Path B.
+
+If the user has `docker.file.codexCli: true` but typeclaw was initialized with a non-`openai-codex` model backend (e.g. `anthropic`, `openai`, `fireworks`), Path 0 won't fire — the auto-export's gate-2 returns because `secrets.json#providers.openai-codex` is absent. The user's manually-pasted `~/.codex/auth.json` (if any) is never touched in that case. Fall through to Path A or Path B.
+
 ## Path A — API key (`OPENAI_API_KEY`)
 
 The API key path is direct. Summary:
