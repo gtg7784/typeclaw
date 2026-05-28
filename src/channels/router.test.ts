@@ -5537,3 +5537,25 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     expect(sent[0]?.text).toBe('> <@U_ALICE>: screenshot pls')
   })
 })
+
+describe('ChannelRouter per-turn wall-clock anchor', () => {
+  test('every composed turn carries a leading <current-time> block before any other content', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ externalMessageId: 'engage', text: 'what day is it' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt.startsWith('<current-time>')).toBe(true)
+    const close = prompt.indexOf('</current-time>')
+    expect(close).toBeGreaterThan(-1)
+    const englishDays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+    const koreanDays = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일']
+    const anchor = prompt.slice(0, close + '</current-time>'.length)
+    expect(englishDays.some((d) => anchor.includes(d))).toBe(true)
+    expect(koreanDays.some((d) => anchor.includes(d))).toBe(true)
+    expect(prompt).toContain('what day is it')
+  })
+})
