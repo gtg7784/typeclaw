@@ -240,52 +240,38 @@ describe('createResourceLoader', () => {
     expect(nudgeIdx).toBeLessThan(memoryIdx)
   })
 
-  test('renders a `## Now` wall-clock block stamping a session-creation timestamp the model can read', async () => {
-    const { formatLocalDateTime } = await import('@/shared')
-    const now = new Date('2026-05-22T15:11:00+09:00')
-
-    const loader = await createResourceLoader({ agentDir, now })
-
-    const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).toContain('## Now')
-    expect(prompt).toContain(`Session started at \`${formatLocalDateTime(now)}\``)
-  })
-
-  test('now block names the IANA timezone the process is in (so the agent reports "Asia/Seoul" instead of just "+09:00")', async () => {
-    const now = new Date('2026-05-22T15:11:00+09:00')
-
-    const loader = await createResourceLoader({ agentDir, now })
-
-    const prompt = loader.getSystemPrompt() ?? ''
-    // The IANA zone name in the block must equal what the process Intl resolves
-    // to. We don't pin a specific zone string because CI and dev machines differ;
-    // we pin the contract: zone-in-prompt == Intl.DateTimeFormat zone.
-    const zone = Intl.DateTimeFormat().resolvedOptions().timeZone
-    expect(prompt).toContain(`(${zone})`)
-  })
-
-  test('now block is the VERY LAST section: comes after memory so the cache prefix stays stable across resurrections', async () => {
+  test('system prompt does NOT contain a wall-clock anchor: the per-turn `<current-time>` block lives in the user message instead', async () => {
     await writeFile(join(agentDir, 'MEMORY.md'), 'memory-content-marker')
-    const now = new Date('2026-05-22T15:11:00+09:00')
 
-    const loader = await createResourceLoader({ agentDir, now })
+    const loader = await createResourceLoader({ agentDir })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('## Now')
+    expect(prompt).not.toContain('Session started at')
+    expect(prompt).not.toContain('<current-time>')
+  })
+
+  test('memory section is the trailing cacheable block now that `## Now` is gone (cache-suffix tail invariant)', async () => {
+    await writeFile(join(agentDir, 'MEMORY.md'), 'memory-content-marker')
+
+    const loader = await createResourceLoader({ agentDir })
 
     const prompt = loader.getSystemPrompt() ?? ''
     const memoryIdx = prompt.indexOf('memory-content-marker')
-    const nowIdx = prompt.indexOf('## Now')
     expect(memoryIdx).toBeGreaterThan(-1)
-    expect(nowIdx).toBeGreaterThan(-1)
-    expect(memoryIdx).toBeLessThan(nowIdx)
-    expect(prompt.indexOf('## Now', nowIdx + 1)).toBe(-1)
+    expect(prompt.indexOf('## Session origin', memoryIdx)).toBe(-1)
+    expect(prompt.indexOf('## Your role in this session', memoryIdx)).toBe(-1)
+    expect(prompt.indexOf('TypeClaw runtime version:', memoryIdx)).toBe(-1)
   })
 
-  test('omits the now block when explicit now is undefined AND the loader default is bypassed (composeSystemPrompt level)', () => {
+  test('composeSystemPrompt does not accept or emit a `now` field (removed when the anchor moved to per-turn injection)', () => {
     const prompt = composeSystemPrompt({
       self: '# Identity\n\nfoo',
       gitNudge: '',
       memorySection: '',
     })
     expect(prompt).not.toContain('## Now')
+    expect(prompt).not.toContain('Session started at')
   })
 
   test('memory section is NOT visible to plugin session.prompt hooks (intentional: memory injection is core-owned and runs after all plugin hooks)', async () => {
@@ -921,23 +907,20 @@ describe('composeSystemPrompt slim mode', () => {
 })
 
 describe('createOverrideResourceLoader', () => {
-  test('starts with the override string verbatim (now block is appended below)', async () => {
+  test('starts with the override string verbatim', async () => {
     const loader = await createOverrideResourceLoader('SUBAGENT PROMPT')
 
     const prompt = loader.getSystemPrompt() ?? ''
     expect(prompt.startsWith('SUBAGENT PROMPT')).toBe(true)
   })
 
-  test('appends a `## Now` wall-clock block as the trailing cache-suffix tail', async () => {
-    const now = new Date('2026-05-22T15:11:00+09:00')
-    const loader = await createOverrideResourceLoader('SUBAGENT PROMPT', undefined, undefined, undefined, now)
+  test('does not append a wall-clock anchor: the per-turn `<current-time>` block lives in the user message instead', async () => {
+    const loader = await createOverrideResourceLoader('SUBAGENT PROMPT')
 
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).toContain('## Now')
-    expect(prompt).toContain('Session started at')
-    // The block must be the trailing section so the cache prefix stays
-    // stable across session resurrections (only the ~600-byte tail invalidates).
-    expect(prompt.trimEnd().endsWith("the user's local time.")).toBe(true)
+    expect(prompt).not.toContain('## Now')
+    expect(prompt).not.toContain('Session started at')
+    expect(prompt).not.toContain('<current-time>')
   })
 
   test('does not include the typeclaw default system prompt', async () => {

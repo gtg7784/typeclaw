@@ -3,7 +3,7 @@ import { basename } from 'node:path'
 import type { AssistantMessage } from '@mariozechner/pi-ai'
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
-import { createSession, type AgentSession } from '@/agent'
+import { createSession, renderTurnTimeAnchor, type AgentSession } from '@/agent'
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
@@ -2361,12 +2361,13 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 function composeTurnPrompt(
   observed: readonly ObservedInbound[],
   batch: readonly QueuedInbound[],
-  state: { adapter?: AdapterId; loopGuardActive: boolean; systemReminders?: readonly string[] } = {
+  state: { adapter?: AdapterId; loopGuardActive: boolean; systemReminders?: readonly string[]; now?: Date } = {
     loopGuardActive: false,
   },
 ): string {
   const adapter = state.adapter ?? 'discord-bot'
   const parts: string[] = []
+  parts.push(renderTurnTimeAnchor(state.now), '')
   // System reminders (subagent-completion wakeups today) lead the turn body
   // because they are typically what triggered the drain — when the prompt
   // queue is empty and the only thing in this iteration is a reminder, the

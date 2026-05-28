@@ -1,5 +1,6 @@
 import {
   createSessionWithDispose,
+  renderTurnTimeAnchor,
   type CreateSessionOptions,
   type CreateSessionResult,
   type SessionOrigin,
@@ -392,7 +393,7 @@ export async function runPromptForCommand(args: {
   })
   const detachAbort = bindSignalToSession(args.signal, session)
   try {
-    await session.prompt(args.text)
+    await session.prompt(`${renderTurnTimeAnchor()}\n\n${args.text}`)
     return session.getLastAssistantText() ?? ''
   } finally {
     detachAbort()

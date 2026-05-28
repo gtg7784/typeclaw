@@ -4,6 +4,7 @@ import type { KnownModelRef } from '@/config/providers'
 
 import type { AgentSession } from './index'
 import { subscribeProviderErrors } from './provider-error'
+import { renderTurnTimeAnchor } from './system-prompt'
 
 // Result of a single fallback-aware prompt run.
 // - `refUsed` is the ref whose session ultimately handled the turn.
@@ -88,7 +89,7 @@ export async function promptWithFallback(opts: {
     })
     try {
       try {
-        await session.prompt(opts.text)
+        await session.prompt(`${renderTurnTimeAnchor()}\n\n${opts.text}`)
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err))
         const attempt: FallbackAttempt = { ref, outcome: 'hard', errorMessage: error.message }

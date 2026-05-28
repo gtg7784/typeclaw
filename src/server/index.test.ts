@@ -415,7 +415,7 @@ describe('createServer abort handling (no stream — fallback path)', () => {
 
     ws.send(JSON.stringify({ type: 'prompt', text: 'do thing' }))
     await waitForState(() => session.promptCalls.length > 0)
-    expect(session.promptCalls).toEqual(['do thing'])
+    expect(session.promptCalls).toEqual([expect.stringContaining('do thing')])
     expect(session.abortCalls).toBe(0)
 
     ws.send(JSON.stringify({ type: 'abort' }))
@@ -667,7 +667,9 @@ describe('createServer restart-handoff consumption', () => {
     if (connected.type !== 'connected') throw new Error('unreachable')
     expect(connected.sessionId).toBe(sessionId)
     await waitForState(() => session.promptCalls.length > 0)
-    expect(session.promptCalls).toEqual([' '])
+    expect(session.promptCalls).toHaveLength(1)
+    expect(session.promptCalls[0]).toContain(' ')
+    expect(session.promptCalls[0]).toMatch(/<current-time>.*<\/current-time>/)
 
     ws.close()
   })
@@ -890,13 +892,13 @@ describe('createServer with stream — input queueing bugfix', () => {
     // when
     ws.send(JSON.stringify({ type: 'prompt', text: 'hello' }))
     await waitForState(() => session.promptCalls.length > 0)
-    expect(session.promptCalls).toEqual(['hello'])
+    expect(session.promptCalls).toEqual([expect.stringContaining('hello')])
 
     session.resolvePrompt()
     await waitFor((m) => m.type === 'done')
 
     // then
-    expect(session.promptCalls).toEqual(['hello'])
+    expect(session.promptCalls).toEqual([expect.stringContaining('hello')])
 
     ws.close()
   })
@@ -917,7 +919,7 @@ describe('createServer with stream — input queueing bugfix', () => {
     if (started.type !== 'prompt_started') throw new Error('unreachable')
     expect(started.text).toBe('hi')
     expect(started.messageId).toBeDefined()
-    expect(session.promptCalls).toEqual(['hi'])
+    expect(session.promptCalls).toEqual([expect.stringContaining('hi')])
 
     session.resolvePrompt()
     ws.close()
@@ -938,14 +940,14 @@ describe('createServer with stream — input queueing bugfix', () => {
     await expectStable(() => session.promptCalls.length > 1, { durationMs: 15, description: 'second prompt' })
 
     // then: only the first reached session.prompt — the second is queued
-    expect(session.promptCalls).toEqual(['first'])
+    expect(session.promptCalls).toEqual([expect.stringContaining('first')])
 
     // when: first completes
     session.resolvePrompt()
     await waitForState(() => session.promptCalls.length === 2)
 
     // then: second now reaches session.prompt
-    expect(session.promptCalls).toEqual(['first', 'second'])
+    expect(session.promptCalls).toEqual([expect.stringContaining('first'), expect.stringContaining('second')])
 
     session.resolvePrompt()
     ws.close()
@@ -1024,7 +1026,7 @@ describe('createServer with stream — input queueing bugfix', () => {
     // and: when first completes, second is NOT processed
     session.resolvePrompt()
     await expectStable(() => session.promptCalls.length > 1, { durationMs: 20, description: 'second prompt' })
-    expect(session.promptCalls).toEqual(['first'])
+    expect(session.promptCalls).toEqual([expect.stringContaining('first')])
 
     ws.close()
   })
@@ -1079,16 +1081,16 @@ describe('createServer with stream — input queueing bugfix', () => {
     // when: first prompt starts
     ws.send(JSON.stringify({ type: 'prompt', text: 'first' }))
     await waitForState(() => session.promptCalls.length > 0)
-    expect(session.promptCalls).toEqual(['first'])
+    expect(session.promptCalls).toEqual([expect.stringContaining('first')])
     expect(session.abortCalls).toBe(0)
 
     // when: interrupt-delivery prompt arrives
     ws.send(JSON.stringify({ type: 'prompt', text: 'urgent', delivery: 'interrupt' }))
-    await waitForState(() => session.abortCalls >= 1 && session.promptCalls.includes('urgent'))
+    await waitForState(() => session.abortCalls >= 1 && session.promptCalls.some((p) => p.includes('urgent')))
 
     // then: abort was called, then second prompt was sent
     expect(session.abortCalls).toBeGreaterThanOrEqual(1)
-    expect(session.promptCalls.includes('urgent')).toBe(true)
+    expect(session.promptCalls.some((p) => p.includes('urgent'))).toBe(true)
 
     session.resolvePrompt()
     ws.close()

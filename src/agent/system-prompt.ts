@@ -1,4 +1,4 @@
-import { formatLocalDateTime, resolveLocalTimezoneName } from '@/shared'
+import { formatLocalDateTime, formatLocalWeekday, resolveLocalTimezoneName } from '@/shared'
 
 export const DEFAULT_SYSTEM_PROMPT = `You are a general-purpose AI agent running inside TypeClaw.
 
@@ -125,34 +125,35 @@ export function renderRuntimeBlock(version: string): string {
 TypeClaw runtime version: ${version}.`
 }
 
-// Wall-clock anchor for the agent. Without this, models hallucinate the
-// current time (typically defaulting to a UTC-shaped guess from training
-// data), which surfaces as confidently-wrong replies like "it's 6am" when
-// the actual wall-clock is 15:11 +09:00. The container's clock is correct
-// — `-e TZ=<host-tz>` propagation makes `new Date()` resolve to host local
-// time — but the model never sees that value unless we put it in the
-// prompt.
+// Wall-clock anchor injected into the **user turn**, not the system prompt.
 //
-// Positioned as the very last block of the system prompt (after memory)
-// because it changes on every session creation, which is more frequent
-// than any other section: memory changes per dreaming/memory-logger cycle,
-// gitNudge changes per session, but `now` changes per second. Pinning it
-// to the tail means every byte UP TO this block stays in the provider's
-// cache prefix across session resurrections, and only the trailing ~60
-// bytes invalidate.
+// Why per-turn instead of session-creation: long-lived channel sessions can
+// outlive a session-creation timestamp by days (a session opened Friday and
+// woken Thursday morning happily reports "today is Friday" because the only
+// dated reference in its context is the stale stamp). The per-turn anchor
+// always reflects the moment the turn is about to be sent, so the model
+// answers "what day is it" against `new Date()` rather than against the
+// session-creation snapshot.
 //
-// The model still needs to know this is a session-creation snapshot, not
-// a live clock: long-lived channel sessions can outlive the stamp by
-// hours, and the resource loader is not re-rendered per turn (see the
-// CreateSessionOptions doc at the top of src/agent/index.ts). The prose
-// names the snapshot semantics and tells the model how to get a fresh
-// reading when it matters (run `date` via bash).
-export function renderNowBlock(now: Date): string {
+// Why this still respects the prompt cache: the user turn is the only
+// non-cacheable suffix in every provider's KV cache shape. Putting the
+// anchor here invalidates exactly zero cached bytes — the same bytes that
+// would already be re-billed on each turn's user message — so this is
+// cache-free relative to the previous "## Now" placement.
+//
+// The block emits both English and Korean weekday names alongside the ISO
+// timestamp because models replying in a non-English language frequently
+// compute weekday-from-ISO incorrectly; pre-computing the weekday in both
+// candidate reply languages removes that arithmetic step entirely. The
+// framing is a single `<current-time>` XML tag for parity with other
+// runtime-injected per-turn blocks the agent already sees
+// (`<system-reminder>` etc.), so the model reads it as a structured anchor
+// rather than as content authored by a human in the chat.
+export function renderTurnTimeAnchor(now: Date = new Date()): string {
   const iso = formatLocalDateTime(now)
   const zone = resolveLocalTimezoneName()
-  return `## Now
-
-Session started at \`${iso}\` (${zone}). This is a session-creation snapshot, not a live clock — the value above does not advance during this session. If you need the current wall-clock time precisely (e.g. before scheduling a cron, replying with "it's 3pm", or computing a deadline), run \`date\` via bash instead of trusting this stamp; the container's timezone is set to the host's, so \`date\` returns the user's local time.`
+  const weekday = formatLocalWeekday(now)
+  return `<current-time>${iso} (${zone}, ${weekday.en} / ${weekday.ko})</current-time>`
 }
 
 // Compact replacement for DEFAULT_SYSTEM_PROMPT, used by non-interactive

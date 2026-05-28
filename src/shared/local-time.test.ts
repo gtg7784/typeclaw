@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { formatLocalDate, formatLocalDateTime, resolveLocalTimezoneName } from './local-time'
+import { formatLocalDate, formatLocalDateTime, formatLocalWeekday, resolveLocalTimezoneName } from './local-time'
 
 describe('formatLocalDate', () => {
   test('formats a date as YYYY-MM-DD using local calendar fields', () => {
@@ -51,6 +51,37 @@ describe('formatLocalDateTime', () => {
     const abs = Math.abs(expectedOffsetMinutes)
     const expected = `${sign}${String(Math.floor(abs / 60)).padStart(2, '0')}:${String(abs % 60).padStart(2, '0')}`
     expect(offsetPart).toBe(expected)
+  })
+})
+
+describe('formatLocalWeekday', () => {
+  test('returns matching English + Korean names for every day of the week', () => {
+    const englishDays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+    const koreanDays = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일']
+    for (let dow = 0; dow < 7; dow++) {
+      const d = new Date(2026, 0, 4 + dow, 12, 0, 0)
+      expect(d.getDay()).toBe(dow)
+      const result = formatLocalWeekday(d)
+      expect(result.en).toBe(englishDays[dow]!)
+      expect(result.ko).toBe(koreanDays[dow]!)
+    }
+  })
+
+  test('uses today by default when no date argument is given', () => {
+    const result = formatLocalWeekday()
+    expect(typeof result.en).toBe('string')
+    expect(typeof result.ko).toBe('string')
+    expect(result.en.length).toBeGreaterThan(0)
+    expect(result.ko.length).toBeGreaterThan(0)
+  })
+
+  test('the returned names line up with what `Intl.DateTimeFormat` reports for the runtime locale', () => {
+    const d = new Date(2026, 4, 28, 12, 0, 0)
+
+    const result = formatLocalWeekday(d)
+
+    expect(result.en).toBe(new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(d))
+    expect(result.ko).toBe(new Intl.DateTimeFormat('ko-KR', { weekday: 'long' }).format(d))
   })
 })
 

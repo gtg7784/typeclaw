@@ -2,19 +2,19 @@
 
 import { parseArgs } from 'node:util'
 
-import { composeSystemPrompt, deriveSystemPromptMode, type SystemPromptMode } from '@/agent'
+import { composeSystemPrompt, deriveSystemPromptMode, renderTurnTimeAnchor, type SystemPromptMode } from '@/agent'
 import type { SessionOrigin, SessionRoleContext } from '@/agent/session-origin'
-import { renderNowBlock } from '@/agent/system-prompt'
 
 type OriginKind = 'tui' | 'cron' | 'channel' | 'subagent'
 const ALL_KINDS: readonly OriginKind[] = ['tui', 'cron', 'channel', 'subagent'] as const
 
 const PLACEHOLDER_RUNTIME_VERSION = '1.2.3-debug'
 
-// Fixed wall-clock for the `## Now` block. The dumper needs a deterministic
-// timestamp so successive runs produce byte-identical output (and so the
-// snapshot tests in dump-system-prompt.test.ts don't drift). Production
-// callers always pass the live `new Date()` — see `composeSystemPrompt`.
+// Fixed wall-clock for the per-turn `<current-time>` anchor. The dumper
+// needs a deterministic timestamp so successive runs produce byte-identical
+// output (and so the snapshot tests in dump-system-prompt.test.ts don't
+// drift). Production callers always pass the live `new Date()` — see
+// `renderTurnTimeAnchor` in src/agent/system-prompt.ts.
 const PLACEHOLDER_NOW = new Date('2026-05-22T15:11:00+09:00')
 
 const PLACEHOLDER_SELF = [
@@ -243,14 +243,12 @@ function dumpSubagentOverridePrompt(): DumpResult {
   const fixture = buildFixture('subagent')
   const runtimeBlock = `## Runtime\n\nTypeClaw runtime version: ${PLACEHOLDER_RUNTIME_VERSION}.`
   const originBlock = `## Session origin\n\nYou are a \`${(fixture.origin as { subagent: string }).subagent}\` subagent spawned by parent session\n\`${(fixture.origin as { parentSessionId: string }).parentSessionId}\`. Stay narrowly within the task you were given.\nReturn cleanly when done; do not sprawl into unrelated work.\n\n## Your role in this session\n\nRole: \`${fixture.roleContext.role}\`. Permissions: ${fixture.roleContext.permissions.map((p) => `\`${p}\``).join(', ')}.\n\nThis is the role the runtime resolved at session creation. Tool calls\nand channel admission are gated by these permissions; a \`blocked:\` or\n"denied by permissions" message means the current actor lacks the\npermission the guard was looking for. See the \`typeclaw-permissions\`\nskill for what each role can do and how to grant access.`
-  const nowBlock = renderNowBlock(PLACEHOLDER_NOW)
 
-  const prompt = `${PLACEHOLDER_SUBAGENT_OVERRIDE}\n\n${runtimeBlock}\n\n${originBlock}\n\n${nowBlock}`
+  const prompt = `${PLACEHOLDER_SUBAGENT_OVERRIDE}\n\n${runtimeBlock}\n\n${originBlock}`
   const sections: SectionBreakdown[] = [
     mkSection('Subagent override prompt', PLACEHOLDER_SUBAGENT_OVERRIDE),
     mkSection('Runtime block', runtimeBlock),
     mkSection('Session origin + role', originBlock),
-    mkSection('Now (wall clock)', nowBlock),
   ]
   return {
     prompt,
@@ -273,7 +271,6 @@ function dumpDefaultLoaderPrompt(kind: Exclude<OriginKind, 'subagent'>, options:
     roleContext: fixture.roleContext,
     gitNudge: wantGitNudge ? PLACEHOLDER_GIT_NUDGE : '',
     memorySection: fixture.memory,
-    now: PLACEHOLDER_NOW,
   } as const
 
   const prompt = composeSystemPrompt(parts)
@@ -299,7 +296,6 @@ function dumpDefaultLoaderPrompt(kind: Exclude<OriginKind, 'subagent'>, options:
     sections.push(mkSection('Git nudge', parts.gitNudge))
   }
   sections.push(mkSection('Memory (MEMORY.md + streams)', parts.memorySection))
-  sections.push(mkSection('Now (wall clock)', renderNowBlock(PLACEHOLDER_NOW)))
 
   return {
     prompt,
@@ -405,6 +401,11 @@ function main(): void {
     process.stdout.write(result.prompt)
     process.stdout.write('\n')
   }
+
+  const anchor = renderTurnTimeAnchor(PLACEHOLDER_NOW)
+  const bar = '═'.repeat(78)
+  process.stdout.write(`\n${bar}\n  PER-TURN INJECTION (prepended to every user message)\n${bar}\n\n`)
+  process.stdout.write(`${anchor}\n`)
 }
 
 if (import.meta.main) {
