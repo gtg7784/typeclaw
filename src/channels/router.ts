@@ -30,7 +30,6 @@ import {
   type ChannelSessionRecord,
 } from './persistence'
 import { QUOTED_REPLY_EXCERPT_MAX_CHARS, type AdapterId, type ChannelAdapterConfig } from './schema'
-import { checkSpam } from './spam-filter'
 import type {
   ChannelHistoryMessage,
   ChannelKey,
@@ -1097,7 +1096,6 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const observed: ObservedInbound[] = []
     for (const item of seeded) {
       if (item.kind === 'message') {
-        if (!checkSpam(item.message.text).ok) continue
         observed.push({
           text: item.message.text,
           authorId: item.message.authorId,
@@ -1460,20 +1458,6 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       workspace: event.workspace,
       chat: event.chat,
       thread: event.thread,
-    }
-
-    // Spam filter runs before everything (including claim/permission/command
-    // dispatch) so a flood message can't bypass it by colliding with a claim
-    // prefix or a slash command. We drop silently — same convention as other
-    // pre-route rejections like permission denial — to avoid amplifying the
-    // grief with a chatty error reply.
-    const spam = checkSpam(event.text)
-    if (!spam.ok) {
-      publishInbound(event, 'denied')
-      logger.info(
-        `[channels] ${channelKeyId(key)}: dropped by spam filter author=${event.authorId} id=${event.externalMessageId} reason=${spam.reason} len=${event.text.length}`,
-      )
-      return
     }
 
     // Role-claim intercept runs BEFORE the channel.respond gate so the
