@@ -46,6 +46,7 @@ import type {
   OutboundCallback,
   OutboundMessage,
   ResolvedChannelNames,
+  SendErrorCode,
   SendResult,
   TypingCallback,
 } from './types'
@@ -98,6 +99,23 @@ export const SESSION_GC_INTERVAL_MS = 60 * 1000
 // Enforced inside router.send for `source: 'tool'` callers; system
 // recovery paths (`source: 'system'`) bypass.
 export const MAX_CHANNEL_SENDS_PER_TURN = 10
+// Ceiling on tool-source channel sends that a same-turn router policy DENIED
+// without delivering — `skip-locked`, `turn-cap`, or `duplicate`. Such denials
+// return a soft error and do NOT increment `consecutiveSends`, so a model that
+// ignores the denial and retries never trips `MAX_CHANNEL_SENDS_PER_TURN`.
+// Both production livelocks had this shape: the model alternated a no-op
+// `skip_response` with a denied `channel_reply` (~200-400x in one
+// `session.prompt()`) — the interleaving defeated the byte-identical
+// loop-guard's 5-in-a-row streak, and the denials bypassed the send cap. One
+// turn was all `skip-locked`, the other all `duplicate` (byte-identical text).
+// Past this ceiling we ABORT the run's AbortSignal (`agent.abort()`), which
+// ends the turn on the next assistant stream. We can't just throw: the pi tool
+// executor catches a tool's throw into an error result and the turn continues.
+// Counted per send-target and only when NO concurrent reservation for that
+// target is in flight, so a legitimate parallel send-burst (one winner + many
+// same-tick duplicate/cap denials) is never mistaken for a loop. Reset at turn
+// start alongside `turnSeq`.
+export const MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN = 3
 // Rolling window for outbound send-rate telemetry. 5s matches Discord's
 // rate-limit shape (5 msg / 5 s / channel) and comfortably covers Slack's
 // 1 msg/s sustained. The window is observational; exceeding the burst
@@ -347,6 +365,19 @@ type LiveSession = {
   // regardless of which order the model tried them in. Updated only at
   // turn start; reads against the live counter elsewhere are intentional.
   successfulSendsAtTurnStart: number
+  // Per-send-target count of tool-source sends with a reservation currently
+  // in flight (slot reserved, outbound callback not yet settled). Lets the
+  // policy-denial guard tell a legitimate parallel send-burst (denials that
+  // race a still-in-flight winner) from a sequential retry loop (denials with
+  // nothing in flight). Incremented at reservation, decremented in the
+  // callback-loop `finally` so an adapter throw can't strand a target.
+  inFlightToolSends: Map<string, number>
+  // Per-send-target count of policy-denied tool sends this turn that did NOT
+  // race an in-flight reservation. Drives the throw at
+  // `MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN` that breaks the alternating-tool
+  // livelock the byte-identical loop-guard misses. Reset at turn start and
+  // cleared per-target on a successful delivery to that target.
+  policyDeniedToolSendsThisTurn: Map<string, number>
   // Stamped by `markTurnSkipped` (called from the `skip_response` tool)
   // with the current `turnSeq`. Read at the top of `validateChannelTurn`:
   // if it matches the just-completed turn, recovery is skipped entirely
@@ -1011,6 +1042,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         successfulChannelSends: 0,
         turnSeq: 0,
         successfulSendsAtTurnStart: 0,
+        inFlightToolSends: new Map(),
+        policyDeniedToolSendsThisTurn: new Map(),
         skippedTurn: null,
         pendingQuoteCandidate: null,
         recentEngagedPeerBotTurns: [],
@@ -1370,6 +1403,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const successfulSendsBeforePrompt = live.successfulChannelSends
         live.turnSeq++
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
+        live.policyDeniedToolSendsThisTurn.clear()
         await fireSessionTurnStart(live, text)
         try {
           await live.session.prompt(text)
@@ -1892,19 +1926,52 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     let priorLastSentText: string | undefined
     let reserved = false
     if (live && source === 'tool') {
+      // Every same-turn policy denial (skip-locked / turn-cap / duplicate)
+      // returns a soft error and does NOT increment `consecutiveSends`, so a
+      // model that ignores the denial and retries never trips the send cap. To
+      // bound that loop we route all three through one tally that ABORTS the run
+      // past the ceiling. The discriminator that keeps legitimate parallel
+      // send-bursts soft: a denial only counts when NO reservation for the same
+      // target is in flight. In a `Promise.all` burst the synchronous denials
+      // all race the one in-flight winner, so they don't count; a sequential
+      // retry loop has nothing in flight, so it does. See
+      // `MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN`.
+      //
+      // Why abort, not throw: pi-agent-core's tool executor catches a throw
+      // from a tool's execute() and converts it into an `isError` tool result —
+      // the turn would continue and the model could retry. The only thing that
+      // actually ends an in-flight turn is aborting the run's AbortSignal:
+      // `agent.abort()` flips it synchronously, then the NEXT assistant stream
+      // (after this tool returns) sees the aborted signal and ends the turn with
+      // stopReason 'aborted'. We must NOT call `session.abort()` here — it
+      // `await`s `waitForIdle()`, which would deadlock waiting for the very run
+      // this tool call belongs to. `agent.abort()` is the signal-only,
+      // non-blocking variant. We still return the soft denial for this call.
+      const denyPolicyToolSend = (error: string, code: SendErrorCode): SendResult => {
+        if ((live.inFlightToolSends.get(sendKey) ?? 0) > 0) {
+          return { ok: false, error, code }
+        }
+        const count = (live.policyDeniedToolSendsThisTurn.get(sendKey) ?? 0) + 1
+        live.policyDeniedToolSendsThisTurn.set(sendKey, count)
+        if (count >= MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN) {
+          logger.warn(`[channels] ${live.keyId}: aborting turn — ${count} policy-denied channel sends (last: ${code})`)
+          if (live.session.agent.signal?.aborted !== true) live.session.agent.abort()
+        }
+        return { ok: false, error, code }
+      }
       // Tool-source send after `skip_response` for the same turn is a contract
       // violation: the model already committed to silence. Reject before any
       // state mutation so the model gets a clear error and the channel stays
       // silent. System-source sends (recovery, role-claim) are not affected.
       if (live.skippedTurn !== null && live.skippedTurn.turnSeq === live.turnSeq) {
-        return { ok: false, error: SKIP_RESPONSE_LOCK_ERROR, code: 'skip-locked' }
+        return denyPolicyToolSend(SKIP_RESPONSE_LOCK_ERROR, 'skip-locked')
       }
       const currentCount = live.consecutiveSends.get(sendKey) ?? 0
       if (currentCount >= MAX_CHANNEL_SENDS_PER_TURN) {
-        return { ok: false, error: TURN_CAP_ERROR, code: 'turn-cap' }
+        return denyPolicyToolSend(TURN_CAP_ERROR, 'turn-cap')
       }
       if (text !== undefined && live.lastSentText.get(sendKey) === text) {
-        return { ok: false, error: DUPLICATE_SEND_ERROR, code: 'duplicate' }
+        return denyPolicyToolSend(DUPLICATE_SEND_ERROR, 'duplicate')
       }
       // Reserve the slot before awaiting. If the callback rejects we roll
       // back below; if it succeeds we keep the increment. The slot reserve
@@ -1915,6 +1982,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       priorLastSentText = live.lastSentText.get(sendKey)
       live.consecutiveSends.set(sendKey, currentCount + 1)
       if (text !== undefined) live.lastSentText.set(sendKey, text)
+      live.inFlightToolSends.set(sendKey, (live.inFlightToolSends.get(sendKey) ?? 0) + 1)
       reserved = true
     }
 
@@ -1924,13 +1992,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const snapshot = Array.from(callbacks)
     let lastError: string | undefined
     let delivered = false
-    for (const cb of snapshot) {
-      const result = await cb(msg)
-      if (result.ok) {
-        delivered = true
-        break
+    try {
+      for (const cb of snapshot) {
+        const result = await cb(msg)
+        if (result.ok) {
+          delivered = true
+          break
+        }
+        lastError = result.error
       }
-      lastError = result.error
+    } finally {
+      // Clear the in-flight reservation even if a callback threw, so a flaky
+      // adapter can never strand a target as permanently "in flight" and
+      // disable the policy-denial guard for it.
+      if (live && reserved) {
+        const inFlight = (live.inFlightToolSends.get(sendKey) ?? 1) - 1
+        if (inFlight <= 0) live.inFlightToolSends.delete(sendKey)
+        else live.inFlightToolSends.set(sendKey, inFlight)
+      }
     }
 
     if (!delivered) {
@@ -1950,6 +2029,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     if (live) {
       live.successfulChannelSends++
+      live.policyDeniedToolSendsThisTurn.delete(sendKey)
       // Don't stop the heartbeat here: the agent may still be mid-turn and
       // about to send another reply. drain()'s finally block owns turn-end
       // stop. But Slack's adapter outbound callback explicitly clears
