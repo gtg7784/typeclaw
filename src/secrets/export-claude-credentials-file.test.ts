@@ -105,6 +105,25 @@ describe('exportClaudeCredentialsFileIfApplicable', () => {
     })
   })
 
+  test('CLAUDE_CONFIG_DIR writes .credentials.json there instead of the default ~/.claude path', async () => {
+    await withHome(async (home) => {
+      const configDir = join(home, 'custom-claude-config')
+      const result = exportClaudeCredentialsFileIfApplicable({
+        claudeCodeEnabled: true,
+        providers: oauthProviders({ refresh: 'config-dir-refresh' }),
+        homeDir: home,
+        configDir,
+      })
+      expect(result).toEqual({ action: 'wrote', path: join(configDir, '.credentials.json') })
+      expect(existsSync(join(configDir, '.credentials.json'))).toBe(true)
+      expect(existsSync(join(home, '.claude', '.credentials.json'))).toBe(false)
+      const parsed = JSON.parse(readFileSync(join(configDir, '.credentials.json'), 'utf8')) as {
+        claudeAiOauth: { refreshToken: string }
+      }
+      expect(parsed.claudeAiOauth.refreshToken).toBe('config-dir-refresh')
+    })
+  })
+
   test('writes with 0600 file mode (refresh token is long-lived)', async () => {
     await withHome((home) => {
       exportClaudeCredentialsFileIfApplicable({
@@ -140,6 +159,36 @@ describe('exportClaudeCredentialsFileIfApplicable', () => {
         claudeAiOauth: { refreshToken: string }
       }
       expect(after.claudeAiOauth.refreshToken).toBe('claude-refreshed')
+    })
+  })
+
+  test('existing file with opaque access token and later expiresAt → skip without clobbering rotated refresh token', async () => {
+    await withHome((home) => {
+      mkdirSync(join(home, '.claude'), { recursive: true })
+      writeFileSync(
+        join(home, '.claude', '.credentials.json'),
+        JSON.stringify({
+          claudeAiOauth: {
+            accessToken: 'sk-ant-oat01-rotated',
+            refreshToken: 'sk-ant-ort01-rotated',
+            expiresAt: 2_000_000_000_000,
+          },
+        }),
+      )
+      const result = exportClaudeCredentialsFileIfApplicable({
+        claudeCodeEnabled: true,
+        providers: oauthProviders({
+          access: 'sk-ant-oat01-incoming',
+          refresh: 'sk-ant-ort01-incoming',
+          expires: 1_900_000_000_000,
+        }),
+        homeDir: home,
+      })
+      expect(result).toEqual({ action: 'skipped', reason: 'on-disk-is-fresher' })
+      const after = JSON.parse(readFileSync(join(home, '.claude', '.credentials.json'), 'utf8')) as {
+        claudeAiOauth: { refreshToken: string }
+      }
+      expect(after.claudeAiOauth.refreshToken).toBe('sk-ant-ort01-rotated')
     })
   })
 

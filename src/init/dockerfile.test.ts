@@ -1454,15 +1454,17 @@ describe('network egress entrypoint shim', () => {
     expect(shim).toContain('ln -sfn "$persist_root/.codex/auth.json" "$HOME/.codex/auth.json"')
   })
 
-  test('also symlinks ~/.claude/.credentials.json into /agent/.typeclaw/home/ so Claude Code OAuth credentials survive container restarts', () => {
+  test('also symlinks Claude Code .credentials.json into /agent/.typeclaw/home/ so OAuth credentials survive container restarts', () => {
     const shim = buildEntrypointShim()
     // Claude Code rotates tokens in-place by rewriting .credentials.json on
     // every successful refresh (anthropics/claude-code#53063). Without the
     // symlink, the refreshed credential lands on the container's overlay
     // and is wiped on the next `stop`+`start`. Same persist-root contract
     // as the codex line above.
-    expect(shim).toContain('mkdir -p "$persist_root/.claude" "$HOME/.claude"')
-    expect(shim).toContain('ln -sfn "$persist_root/.claude/.credentials.json" "$HOME/.claude/.credentials.json"')
+    expect(shim).toContain('claude_config_dir="${CLAUDE_CONFIG_DIR:-}"')
+    expect(shim).toContain('claude_config_dir="$HOME/.claude"')
+    expect(shim).toContain('mkdir -p "$persist_root/.claude" "$claude_config_dir"')
+    expect(shim).toContain('ln -sfn "$persist_root/.claude/.credentials.json" "$claude_config_dir/.credentials.json"')
   })
 
   test('uses ln -sfn (idempotent + non-dereferencing) so re-runs across container lives never fail and never recurse into a pre-existing ~/.codex directory', () => {
@@ -1475,10 +1477,18 @@ describe('network egress entrypoint shim', () => {
   test('claude symlink also uses ln -sfn (same idempotency contract as codex)', () => {
     const shim = buildEntrypointShim()
     expect(shim).toMatch(
-      /ln -sfn "\$persist_root\/\.claude\/\.credentials\.json" "\$HOME\/\.claude\/\.credentials\.json"/,
+      /ln -sfn "\$persist_root\/\.claude\/\.credentials\.json" "\$claude_config_dir\/\.credentials\.json"/,
     )
     expect(shim).not.toMatch(/ln -s "\$persist_root\/\.claude\/\.credentials\.json"/)
     expect(shim).not.toMatch(/ln -sf "\$persist_root\/\.claude\/\.credentials\.json"/)
+  })
+
+  test('claude symlink honors CLAUDE_CONFIG_DIR when set', () => {
+    const shim = buildEntrypointShim()
+    const claudeConfigCheckIdx = shim.indexOf('if [ -z "$claude_config_dir" ]; then')
+    const claudeSymlinkIdx = shim.indexOf('"$claude_config_dir/.credentials.json"')
+    expect(claudeConfigCheckIdx).toBeGreaterThan(-1)
+    expect(claudeSymlinkIdx).toBeGreaterThan(claudeConfigCheckIdx)
   })
 
   test('link_persistent_home_files is called before each exec on both network-policy paths (off-path before exec bun; on-path after iptables, before exec setpriv) so the symlink is in place before the agent first reads ~/.codex', () => {

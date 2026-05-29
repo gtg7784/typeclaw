@@ -1,4 +1,9 @@
 import type { DockerfileConfig, DockerfileFeatureToggle } from '@/config/config'
+import {
+  CLAUDE_CREDENTIALS_FILE_NAME,
+  CLAUDE_CREDENTIALS_RELATIVE_PATH,
+  CLAUDE_DEFAULT_CONFIG_DIR_NAME,
+} from '@/secrets/export-claude-credentials-file'
 
 import { GHCR_BASE_IMAGE_REPO } from './cli-version'
 
@@ -291,10 +296,11 @@ set -eu
 # Two files are linked today, both following the same contract:
 #   - ~/.codex/auth.json — Codex CLI rotates OAuth tokens in place by
 #     rewriting auth.json with refreshed credentials.
-#   - ~/.claude/.credentials.json — Claude Code rotates OAuth tokens in
-#     place by rewriting .credentials.json on every successful refresh
-#     (anthropics/claude-code#53063). Linux/Windows path; macOS uses the
-#     Keychain entry "Claude Code-credentials" with the same JSON shape.
+#   - $CLAUDE_CONFIG_DIR/.credentials.json, or ~/.claude/.credentials.json
+#     by default — Claude Code rotates OAuth tokens in place by rewriting
+#     .credentials.json on every successful refresh (anthropics/claude-code
+#     #53063). Linux/Windows path; macOS uses the Keychain entry "Claude
+#     Code-credentials" with the same JSON shape.
 #
 # The persist root lives under /agent/.typeclaw/home/ (bind-mounted
 # from the agent folder via the -v <cwd>:/agent flag in start.ts).
@@ -334,8 +340,12 @@ link_persistent_home_files() {
   persist_root="\${TYPECLAW_PERSIST_HOME_ROOT:-/agent/.typeclaw/home}"
   mkdir -p "$persist_root/.codex" "$HOME/.codex"
   ln -sfn "$persist_root/.codex/auth.json" "$HOME/.codex/auth.json"
-  mkdir -p "$persist_root/.claude" "$HOME/.claude"
-  ln -sfn "$persist_root/.claude/.credentials.json" "$HOME/.claude/.credentials.json"
+  claude_config_dir="\${CLAUDE_CONFIG_DIR:-}"
+  if [ -z "$claude_config_dir" ]; then
+    claude_config_dir="$HOME/${CLAUDE_DEFAULT_CONFIG_DIR_NAME}"
+  fi
+  mkdir -p "$persist_root/${CLAUDE_DEFAULT_CONFIG_DIR_NAME}" "$claude_config_dir"
+  ln -sfn "$persist_root/${CLAUDE_CREDENTIALS_RELATIVE_PATH}" "$claude_config_dir/${CLAUDE_CREDENTIALS_FILE_NAME}"
 }
 
 start_xvfb() {

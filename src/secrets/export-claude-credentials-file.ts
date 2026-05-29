@@ -17,6 +17,9 @@ import { SecretsBackend } from './storage'
 
 const FILE_MODE = 0o600
 const DIR_MODE = 0o700
+export const CLAUDE_CREDENTIALS_FILE_NAME = '.credentials.json'
+export const CLAUDE_DEFAULT_CONFIG_DIR_NAME = '.claude'
+export const CLAUDE_CREDENTIALS_RELATIVE_PATH = join(CLAUDE_DEFAULT_CONFIG_DIR_NAME, CLAUDE_CREDENTIALS_FILE_NAME)
 
 export type ExportClaudeCredentialsFileResult =
   | { action: 'skipped'; reason: SkipReason }
@@ -33,13 +36,15 @@ export type ExportClaudeCredentialsFileOptions = {
   claudeCodeEnabled: boolean
   providers: Providers
   homeDir?: string
+  configDir?: string
   now?: () => number
   log?: (message: string) => void
 }
 
 // Writes typeclaw's anthropic OAuth credential to
-// $HOME/.claude/.credentials.json when it's safe to do so. The Dockerfile
-// entrypoint shim symlinks $HOME/.claude/.credentials.json to
+// $CLAUDE_CONFIG_DIR/.credentials.json (or $HOME/.claude/.credentials.json
+// by default) when it's safe to do so. The Dockerfile entrypoint shim
+// symlinks the same resolved credentials path to
 // /agent/.typeclaw/home/.claude/.credentials.json on every boot, so the
 // write follows the symlink and lands on the persistent host-side path —
 // same contract as exportCodexAuthFile.
@@ -56,7 +61,10 @@ export function exportClaudeCredentialsFileIfApplicable(
   if (credential === undefined) return { action: 'skipped', reason: 'no-anthropic-credential' }
   if (credential.type !== 'oauth') return { action: 'skipped', reason: 'credential-not-oauth' }
 
-  const targetPath = join(options.homeDir ?? homedir(), '.claude', '.credentials.json')
+  const targetPath = resolveClaudeCredentialsPath({
+    ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+    ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
+  })
 
   try {
     const existing = readExisting(targetPath)
@@ -76,6 +84,7 @@ export function exportClaudeCredentialsFileIfApplicable(
 
 type ExistingFile = {
   onDiskAccessToken: string | null
+  onDiskExpiresAt: number | null
   mcpOAuth: unknown
 }
 
@@ -103,15 +112,21 @@ function readExisting(targetPath: string): ExistingFile | null {
   const obj = parsed as Record<string, unknown>
   const claudeBlock = obj['claudeAiOauth']
   let onDiskAccessToken: string | null = null
+  let onDiskExpiresAt: number | null = null
   if (typeof claudeBlock === 'object' && claudeBlock !== null) {
-    const access = (claudeBlock as Record<string, unknown>)['accessToken']
+    const claudeObj = claudeBlock as Record<string, unknown>
+    const access = claudeObj['accessToken']
     if (typeof access === 'string' && access.length > 0) onDiskAccessToken = access
+    const expiresAt = claudeObj['expiresAt']
+    if (typeof expiresAt === 'number' && Number.isFinite(expiresAt) && expiresAt > 0) {
+      onDiskExpiresAt = expiresAt
+    }
   }
-  return { onDiskAccessToken, mcpOAuth: obj['mcpOAuth'] }
+  return { onDiskAccessToken, onDiskExpiresAt, mcpOAuth: obj['mcpOAuth'] }
 }
 
 // Newer-wins: skip the write unless typeclaw's stored credential is
-// strictly fresher than the on-disk JWT. Claude Code rotates tokens
+// strictly fresher than the on-disk expiry. Claude Code rotates tokens
 // in-place (issue #53063 in anthropics/claude-code confirms it rewrites
 // .credentials.json with a fresher accessToken/refreshToken/expiresAt
 // on every successful refresh), so on a restart the file may legitimately
@@ -120,9 +135,9 @@ function readExisting(targetPath: string): ExistingFile | null {
 // Ties skip: when expiries match there's nothing to gain from a write,
 // and avoiding the I/O keeps the steady state at zero churn.
 //
-// existing === null OR existing.onDiskAccessToken === null OR JWT
-// undecodable → return true. That's the "we have a valid credential,
-// the file is unusable, replace it" recovery case.
+// existing === null OR existing.onDiskAccessToken === null OR expiry
+// undecodable from both expiresAt and JWT → return true. That's the "we
+// have a valid credential, the file is unusable, replace it" recovery case.
 function shouldOverwrite(
   existing: ExistingFile | null,
   credential: ProviderCredential & { expires?: unknown; access?: unknown },
@@ -130,10 +145,16 @@ function shouldOverwrite(
 ): boolean {
   if (existing === null) return true
   if (existing.onDiskAccessToken === null) return true
-  const onDiskExpiry = decodeClaudeAccessTokenExpiryMs(existing.onDiskAccessToken)
+  const onDiskExpiry = readOnDiskExpiry(existing)
   if (onDiskExpiry === null) return true
   const credentialExpiry = readCredentialExpiry(credential, now)
   return credentialExpiry > onDiskExpiry
+}
+
+function readOnDiskExpiry(existing: ExistingFile): number | null {
+  if (existing.onDiskExpiresAt !== null) return existing.onDiskExpiresAt
+  if (existing.onDiskAccessToken === null) return null
+  return decodeClaudeAccessTokenExpiryMs(existing.onDiskAccessToken)
 }
 
 // Resolution order for the credential's expiry:
@@ -150,6 +171,18 @@ function readCredentialExpiry(credential: { expires?: unknown; access?: unknown 
     if (fromJwt !== null) return fromJwt
   }
   return now()
+}
+
+export function resolveClaudeCredentialsPath(options: { homeDir?: string; configDir?: string } = {}): string {
+  const configDir = resolveClaudeConfigDir(options.configDir)
+  if (configDir !== null) return join(configDir, CLAUDE_CREDENTIALS_FILE_NAME)
+  return join(options.homeDir ?? homedir(), CLAUDE_CREDENTIALS_RELATIVE_PATH)
+}
+
+function resolveClaudeConfigDir(configDir: string | undefined): string | null {
+  const raw = configDir ?? process.env['CLAUDE_CONFIG_DIR']
+  const trimmed = raw?.trim()
+  return trimmed === undefined || trimmed.length === 0 ? null : trimmed
 }
 
 // Atomic temp-then-rename, mirroring export-codex-auth-file.ts's
@@ -215,6 +248,7 @@ export type ExportClaudeCredentialsFileForAgentOptions = {
   agentDir: string
   claudeCodeEnabled: boolean
   homeDir?: string
+  configDir?: string
   log?: (message: string) => void
 }
 
@@ -239,6 +273,7 @@ export function exportClaudeCredentialsFileForAgent(
     claudeCodeEnabled: options.claudeCodeEnabled,
     providers,
     ...(options.homeDir !== undefined ? { homeDir: options.homeDir } : {}),
+    ...(options.configDir !== undefined ? { configDir: options.configDir } : {}),
     ...(options.log !== undefined ? { log: options.log } : {}),
   })
 }
