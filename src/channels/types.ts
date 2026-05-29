@@ -126,11 +126,28 @@ export type OutboundMessage = {
   // `uploadFile` does not accept a content body or a thread id, see the
   // adapter for the workaround details.
   attachments?: OutboundAttachment[]
-  // Set by the router when an intervening message means this reply should be
-  // anchored to the inbound it answers. Adapters that support a native reply
-  // primitive (e.g. Telegram `reply_to_message_id`) consume it; others ignore
-  // it because the router has already prepended the blockquote fallback.
-  replyTo?: { externalMessageId: string }
+  // Set by the router (native render mode + anchor fired) so an adapter can
+  // reply to the inbound it answers. Telegram/Discord consume `externalMessageId`;
+  // `quote`-mode adapters never see this (the router prepends the blockquote into
+  // `text` instead). `source` lets an adapter whose native primitive can fail at
+  // send time (KakaoTalk: payload built from a source message that may have
+  // scrolled out of history) degrade to the same blockquote fallback.
+  replyTo?: OutboundReplyTo
+}
+
+export type OutboundReplyTo = {
+  externalMessageId: string
+  source?: QuoteAnchorSource
+}
+
+// `adapter` selects the per-platform author-mention syntax in the blockquote
+// fallback. Lives here (not router.ts) so adapters can reconstruct a native
+// reply payload from the same shape the router renders quotes from.
+export type QuoteAnchorSource = {
+  adapter: AdapterId
+  authorId: string
+  authorName: string
+  text: string
 }
 
 export type SendErrorCode =

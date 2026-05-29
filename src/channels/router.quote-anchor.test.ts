@@ -332,14 +332,22 @@ describe('resolveReplyRenderMode', () => {
     expect(resolveReplyRenderMode({ adapter: 'telegram-bot', workspace: 'w', chat: 'c', text: 'hi' })).toBe('native')
   })
 
-  test('Telegram attachment-only degrades to quote (sendDocument has no reply param)', () => {
-    expect(
-      resolveReplyRenderMode({ adapter: 'telegram-bot', workspace: 'w', chat: 'c', attachments: [{ path: '/f.png' }] }),
-    ).toBe('quote')
+  test('Discord and KakaoTalk with text use the native reply primitive', () => {
+    for (const adapter of ['discord-bot', 'kakaotalk'] as const) {
+      expect(resolveReplyRenderMode({ adapter, workspace: 'w', chat: 'c', text: 'hi' })).toBe('native')
+    }
   })
 
-  test('Slack/Discord/KakaoTalk/GitHub fall back to quote', () => {
-    for (const adapter of ['slack-bot', 'discord-bot', 'kakaotalk', 'github'] as const) {
+  test('attachment-only sends degrade to quote on every native adapter (file send has no reply param)', () => {
+    for (const adapter of ['telegram-bot', 'discord-bot', 'kakaotalk'] as const) {
+      expect(resolveReplyRenderMode({ adapter, workspace: 'w', chat: 'c', attachments: [{ path: '/f.png' }] })).toBe(
+        'quote',
+      )
+    }
+  })
+
+  test('Slack and GitHub fall back to quote (no per-message reply primitive)', () => {
+    for (const adapter of ['slack-bot', 'github'] as const) {
       expect(resolveReplyRenderMode({ adapter, workspace: 'w', chat: 'c', text: 'hi' })).toBe('quote')
     }
   })

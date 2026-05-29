@@ -45,6 +45,7 @@ import type {
   InboundMessage,
   OutboundCallback,
   OutboundMessage,
+  QuoteAnchorSource,
   ResolvedChannelNames,
   SendResult,
   TypingCallback,
@@ -1878,7 +1879,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (anchor !== null) {
         msg =
           resolveReplyRenderMode(msg) === 'native'
-            ? { ...msg, replyTo: { externalMessageId: anchor.externalMessageId } }
+            ? { ...msg, replyTo: { externalMessageId: anchor.externalMessageId, source: anchor.source } }
             : { ...msg, text: prependQuoteAnchor(msg.text ?? '', anchor.source) }
       }
       live.pendingQuoteCandidate = null
@@ -2485,12 +2486,7 @@ function formatAuthorLine(
   return `${stamp}${formatAuthorReference(adapter, authorId, authorName)} (${authorName})${tag}: ${text}`
 }
 
-export type QuoteAnchorSource = {
-  adapter: AdapterId
-  authorId: string
-  authorName: string
-  text: string
-}
+export type { QuoteAnchorSource } from './types'
 
 // Picks the right author syntax for the platform so prompts and rendered
 // quote anchors use the same form the user would type in that channel.
@@ -2676,13 +2672,19 @@ export type ReplyRenderMode = 'native' | 'quote'
 // platform reply, or must it degrade to the blockquote fallback? Conditional
 // because native support is not uniform within an adapter — Telegram's
 // `sendMessage` accepts `reply_to_message_id` but `sendDocument` does not, so
-// an attachment-only Telegram reply must quote. Slack/Discord/KakaoTalk have
-// no per-message reply the router can drive through `replyTo` today (Slack's
-// primitive is `thread`, Discord's needs SDK support, KakaoTalk has none), and
-// GitHub's PR-review reply already rides on `thread`, not `replyTo`.
+// an attachment-only Telegram reply must quote; the same text-only restriction
+// holds for Discord (`message_reference` rides on the text send, file uploads
+// land bare) and KakaoTalk. Slack's primitive is `thread`, not a per-message
+// reply, so it stays quote; GitHub's PR-review reply already rides on `thread`.
+//
+// KakaoTalk is `native` here even though its reply payload can fail to resolve
+// at send time — the adapter degrades to the blockquote fallback itself using
+// `replyTo.source`, so the router still routes it down the native branch.
+const NATIVE_REPLY_TEXT_ADAPTERS = new Set<AdapterId>(['telegram-bot', 'discord-bot', 'kakaotalk'])
+
 export function resolveReplyRenderMode(msg: OutboundMessage): ReplyRenderMode {
   const hasText = normalizeSendText(msg.text) !== undefined
-  if (msg.adapter === 'telegram-bot' && hasText) return 'native'
+  if (hasText && NATIVE_REPLY_TEXT_ADAPTERS.has(msg.adapter)) return 'native'
   return 'quote'
 }
 
