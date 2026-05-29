@@ -9,6 +9,7 @@
     "hostd",
     "tunnels",
     "message-stream",
+    "engagement",
     "web-search",
     "xvfb",
     "sandbox"
