@@ -175,6 +175,21 @@ describe('buildChannelChecks', () => {
       const result = await runCheck('channel.discord-bot.credentials', ctxFor(cwd))
       expect(result.status).toBe('warning')
     })
+
+    test('discord-bot passes when secrets.json custom env binding resolves via .env', async () => {
+      const cwd = makeTmpAgentDir({ 'discord-bot': {} })
+      writeChannelsSecrets(cwd, { 'discord-bot': { token: { env: 'MY_DISCORD_TOKEN' } } })
+      writeDotEnv(cwd, { MY_DISCORD_TOKEN: 'd-tok-from-dotenv' })
+      const result = await runCheck('channel.discord-bot.credentials', ctxFor(cwd))
+      expect(result.status).toBe('ok')
+    })
+
+    test('discord-bot warns when custom env binding has no value anywhere', async () => {
+      const cwd = makeTmpAgentDir({ 'discord-bot': {} })
+      writeChannelsSecrets(cwd, { 'discord-bot': { token: { env: 'MY_DISCORD_TOKEN' } } })
+      const result = await runCheck('channel.discord-bot.credentials', ctxFor(cwd))
+      expect(result.status).toBe('warning')
+    })
   })
 
   describe('kakaotalk', () => {
@@ -241,6 +256,19 @@ describe('buildChannelChecks', () => {
       const result = await runCheck('channel.github.credentials', ctxFor(cwd))
       expect(result.status).toBe('ok')
       expect(result.message).toContain('PAT')
+    })
+
+    test('passes when PAT token env binding resolves via .env', async () => {
+      const cwd = makeTmpAgentDir({ github: { webhookUrl: 'https://example.com/hook' } })
+      writeChannelsSecrets(cwd, {
+        github: {
+          auth: { type: 'pat', token: { env: 'MY_GH_TOKEN' } },
+          webhookSecret: { value: 'wh-secret' },
+        },
+      })
+      writeDotEnv(cwd, { MY_GH_TOKEN: 'ghp_from_dotenv' })
+      const result = await runCheck('channel.github.credentials', ctxFor(cwd))
+      expect(result.status).toBe('ok')
     })
 
     test('errors when PAT token resolves empty (env binding to unset var)', async () => {

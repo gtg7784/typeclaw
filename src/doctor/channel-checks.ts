@@ -5,7 +5,6 @@ import { loadConfigSync, validateConfig } from '@/config'
 import { readEnvFile } from '@/init'
 import { SecretsBackend } from '@/secrets'
 import { channelFieldDefaultEnv } from '@/secrets/defaults'
-import { resolveSecret } from '@/secrets/resolve'
 
 import type { CheckContext, CheckResult, DoctorCheck } from './types'
 
@@ -113,18 +112,19 @@ function githubCredentials(): DoctorCheck {
           fix: { description: 'Run `typeclaw channel set github` to configure GitHub auth.' },
         }
       }
+      const dotEnv = safeReadEnvFile(ctx.cwd)
       const details: string[] = []
-      const webhookSecret = resolveSecret(block.webhookSecret, undefined, process.env)
+      const webhookSecret = resolveSecretHostStage(block.webhookSecret, dotEnv)
       if (webhookSecret === undefined || webhookSecret === '') {
         details.push('webhookSecret is unset (resolves to empty string)')
       }
       if (block.auth.type === 'pat') {
-        const token = resolveSecret(block.auth.token, undefined, process.env)
+        const token = resolveSecretHostStage(block.auth.token, dotEnv)
         if (token === undefined || token === '') {
           details.push('auth.token (PAT) is unset (resolves to empty string)')
         }
       } else {
-        const key = resolveSecret(block.auth.privateKey, undefined, process.env)
+        const key = resolveSecretHostStage(block.auth.privateKey, dotEnv)
         if (key === undefined || key === '') {
           details.push('auth.privateKey (App) is unset (resolves to empty string)')
         }
@@ -219,10 +219,8 @@ async function runTokenAdapterCheck(
 }
 
 // hasTokenForEnv resolves a single env-var-style credential the same way the
-// runtime does: process.env > .env file > secrets.json (resolved via
-// resolveSecret so an `env`-bound Secret consults the right var). Empty
-// strings are treated as unset, matching `effective` checks in
-// `src/secrets/resolve.ts` and the env-wins policy.
+// runtime does, plus one host-stage-specific source: process.env > .env file >
+// secrets.json. Empty strings count as unset, matching `src/secrets/resolve.ts`.
 function hasTokenForEnv(
   adapter: AdapterId,
   envName: string,
@@ -237,8 +235,30 @@ function hasTokenForEnv(
   if (fieldName === undefined) return false
   const secret = adapterSecrets[fieldName]
   if (!isSecretShape(secret)) return false
-  const resolved = resolveSecret(secret, envName, process.env)
+  const resolved = resolveSecretHostStage(secret, dotEnv, envName)
   return resolved !== undefined && resolved !== ''
+}
+
+// resolveSecretHostStage mirrors `resolveSecret` precedence but adds a .env
+// lookup before falling through to process.env. Doctor runs on the host and
+// never executes the container, so .env values are not in process.env. For
+// Secrets bound to a custom env var (e.g. `{ env: 'MY_TOKEN' }`), the runtime
+// would resolve via process.env.MY_TOKEN inside the container — on the host
+// that yields undefined even when the value is sitting in .env. So look up
+// the custom env name in the parsed .env map first.
+function resolveSecretHostStage(
+  secret: { value?: string; env?: string },
+  dotEnv: Map<string, string>,
+  defaultEnv?: string,
+): string | undefined {
+  const envName = secret.env ?? defaultEnv
+  if (envName !== undefined) {
+    const fromProcess = process.env[envName]
+    if (fromProcess !== undefined && fromProcess !== '') return fromProcess
+    const fromDotEnv = dotEnv.get(envName)
+    if (fromDotEnv !== undefined && fromDotEnv !== '') return fromDotEnv
+  }
+  return secret.value
 }
 
 function fieldNameForEnv(adapter: AdapterId, envName: string): string | undefined {
