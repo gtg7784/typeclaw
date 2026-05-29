@@ -3,7 +3,7 @@ import { basename } from 'node:path'
 import type { AssistantMessage } from '@mariozechner/pi-ai'
 import { SessionManager } from '@mariozechner/pi-coding-agent'
 
-import { createSession, renderTurnTimeAnchor, type AgentSession } from '@/agent'
+import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSession } from '@/agent'
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
@@ -1427,11 +1427,6 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const batch = live.promptQueue.splice(0, live.promptQueue.length)
         const observed = live.contextBuffer.splice(0, live.contextBuffer.length)
         const reminders = live.pendingSystemReminders.splice(0, live.pendingSystemReminders.length)
-        const text = composeTurnPrompt(observed, batch, {
-          adapter: live.key.adapter,
-          loopGuardActive: live.loopGuardActive,
-          systemReminders: reminders,
-        })
 
         if (batch.length > 0) {
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
@@ -1457,12 +1452,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         }
 
         // Update the live origin holder so this turn's tool.before events
-        // carry the current actor's id. The DefaultResourceLoader still
-        // renders the session-creation origin into the system prompt (v0.2
-        // work to regenerate that per-turn); but permission gating off
-        // `lastInboundAuthorId` happens in the tool layer and now sees the
+        // carry the current actor's id, and resolve the live role from it for
+        // the per-turn <your-role> anchor below. Done BEFORE composeTurnPrompt
+        // so the anchor reflects the speaker of THIS turn, not the session-
+        // creation snapshot the system prompt still renders. Permission gating
+        // off `lastInboundAuthorId` happens in the tool layer and sees the same
         // live value.
         live.originRef.current = buildLiveOrigin(live)
+        const liveRole = permissions.describe(live.originRef.current).role
+
+        const text = composeTurnPrompt(observed, batch, {
+          adapter: live.key.adapter,
+          loopGuardActive: live.loopGuardActive,
+          systemReminders: reminders,
+          role: liveRole,
+        })
 
         // Bracketing logs around the LLM call so a hung prompt() is
         // diagnosable from logs alone (we see prompting without prompted).
@@ -2539,13 +2543,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 function composeTurnPrompt(
   observed: readonly ObservedInbound[],
   batch: readonly QueuedInbound[],
-  state: { adapter?: AdapterId; loopGuardActive: boolean; systemReminders?: readonly string[]; now?: Date } = {
+  state: {
+    adapter?: AdapterId
+    loopGuardActive: boolean
+    systemReminders?: readonly string[]
+    now?: Date
+    role?: string
+  } = {
     loopGuardActive: false,
   },
 ): string {
   const adapter = state.adapter ?? 'discord-bot'
   const parts: string[] = []
   parts.push(renderTurnTimeAnchor(state.now), '')
+  const roleAnchor = state.role !== undefined ? renderTurnRoleAnchor(state.role) : undefined
+  if (roleAnchor !== undefined) parts.push(roleAnchor, '')
   // System reminders (subagent-completion wakeups today) lead the turn body
   // because they are typically what triggered the drain — when the prompt
   // queue is empty and the only thing in this iteration is a reminder, the

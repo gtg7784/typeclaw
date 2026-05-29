@@ -154,6 +154,27 @@ export function renderTurnTimeAnchor(now: Date = new Date()): string {
   return `<current-time>${iso} (${zone}, ${weekday})</current-time>`
 }
 
+// Live role anchor injected into the **user turn**, not the system prompt —
+// same rationale and cache properties as renderTurnTimeAnchor above.
+//
+// The "## Your role in this session" block in the system prompt is a
+// session-CREATION snapshot: in a channel where speakers change turn to turn,
+// it reports the role of whoever first opened the session, not whoever is
+// speaking now. Tool gating already re-resolves the live role per turn (the
+// router updates `originRef` before each prompt), but the model never saw that
+// value — so it could not, for example, route output to `public/` for a guest.
+// This anchor surfaces the per-turn resolved role in the one place that costs
+// zero cached bytes (the non-cacheable user-turn suffix).
+//
+// Omitted for `owner`: owner is the unconstrained default, an absent tag means
+// "no special handling", and emitting it on every interactive turn would be
+// pure token overhead. This mirrors resolveRoleContext skipping the session
+// block for a TUI owner.
+export function renderTurnRoleAnchor(role: string): string | undefined {
+  if (role === 'owner') return undefined
+  return `<your-role>${role}</your-role>`
+}
+
 // Compact replacement for DEFAULT_SYSTEM_PROMPT, used by non-interactive
 // sessions (cron jobs, and default subagents that don't supply their own
 // `systemPromptOverride`). The full prompt is ~2155 tokens of operator-facing

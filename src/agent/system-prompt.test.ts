@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { formatLocalDateTime, resolveLocalTimezoneName } from '@/shared'
 
-import { renderTurnTimeAnchor } from './system-prompt'
+import { renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
 
 describe('renderTurnTimeAnchor', () => {
   test('wraps the ISO timestamp, IANA zone, and weekday in a single <current-time> tag', () => {
@@ -61,5 +61,25 @@ describe('renderTurnTimeAnchor', () => {
     const englishDays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
     const expectedEn = englishDays[now.getDay()]!
     expect(anchor).toContain(expectedEn)
+  })
+})
+
+describe('renderTurnRoleAnchor', () => {
+  test('wraps a non-owner role in a single <your-role> tag', () => {
+    expect(renderTurnRoleAnchor('guest')).toBe('<your-role>guest</your-role>')
+    expect(renderTurnRoleAnchor('member')).toBe('<your-role>member</your-role>')
+    expect(renderTurnRoleAnchor('trusted')).toBe('<your-role>trusted</your-role>')
+  })
+
+  test('omits the tag for owner (the unconstrained default — absent means no special handling)', () => {
+    expect(renderTurnRoleAnchor('owner')).toBeUndefined()
+  })
+
+  test('produces a single-line block with no internal newlines', () => {
+    expect(renderTurnRoleAnchor('guest')).not.toContain('\n')
+  })
+
+  test('passes through a custom role name verbatim', () => {
+    expect(renderTurnRoleAnchor('contributor')).toBe('<your-role>contributor</your-role>')
   })
 })

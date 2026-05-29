@@ -6033,6 +6033,37 @@ describe('ChannelRouter per-turn wall-clock anchor', () => {
   })
 })
 
+describe('ChannelRouter per-turn live role anchor', () => {
+  test('a non-owner turn carries a <your-role> anchor reflecting the resolved role', async () => {
+    const dir = await tempDir()
+    const guestPermissions: PermissionService = {
+      has: () => true,
+      resolveRole: () => 'guest',
+      describe: () => ({ role: 'guest', permissions: [] }),
+      replaceRoles: () => {},
+    }
+    const { router, sessions } = makeRouter(dir, { permissions: guestPermissions })
+
+    await router.route(inbound({ externalMessageId: 'engage', text: 'save me a copy' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt).toContain('<your-role>guest</your-role>')
+    expect(prompt).toContain('save me a copy')
+  })
+
+  test('an owner turn omits the role anchor (unconstrained default)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    await router.route(inbound({ externalMessageId: 'engage', text: 'do the thing' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    const prompt = sessions[0]!.prompts[0]!
+    expect(prompt).not.toContain('<your-role>')
+  })
+})
+
 describe('ChannelRouter post-tool follow-up suppression', () => {
   function afterToolContext(
     toolName: string,
