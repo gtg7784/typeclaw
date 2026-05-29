@@ -379,6 +379,33 @@ describe('streamLive — live session events', () => {
     expect(String((caught as Error).message)).toContain('invalid')
   })
 
+  test('abort while the websocket is still connecting ends the generator (no hang)', async () => {
+    // Regression: pressing esc during `typeclaw inspect`'s live tail froze the
+    // CLI whenever the abort landed before the socket finished opening. The
+    // abort handler closed the socket and woke the generator loop, but the
+    // `await onOpen` gate never settled, so the generator never reached that
+    // loop — it hung forever and the picker never re-opened (terminal frozen
+    // in raw mode). `onOpen` must settle on abort/close, not only open/error.
+    const FakeWS = makeNeverOpeningWebSocket()
+    const ctrl = new AbortController()
+    const gen = streamLive({
+      url: 'ws://unused',
+      sessionId: 'ses_a',
+      signal: ctrl.signal,
+      WebSocketImpl: FakeWS,
+    })
+
+    const drained = (async () => {
+      const events: InspectEvent[] = []
+      for await (const ev of gen) events.push(ev)
+      return events
+    })()
+    queueMicrotask(() => ctrl.abort())
+
+    const events = await drained
+    expect(events).toEqual([])
+  })
+
   test('unknown server message types are ignored without crashing', async () => {
     // Forward-compat: a future server may add new top-level message `type`
     // values. The client must not crash when it sees one — especially since
@@ -449,6 +476,47 @@ function makeFakeWebSocket(scripted: unknown[]): typeof WebSocket {
         })
       }
     }
+
+    close(): void {
+      this.readyState = 3
+      queueMicrotask(() => this.dispatch('close', {}))
+    }
+
+    private dispatch(type: string, event: unknown): void {
+      const set = this.listeners.get(type)
+      if (set === undefined) return
+      for (const fn of set) fn(event)
+    }
+  }
+  return FakeWS as unknown as typeof WebSocket
+}
+
+// Fake WebSocket stuck in CONNECTING: it never fires `open` or `error` on its
+// own, so the only way out of streamLive's connect gate is abort or close().
+function makeNeverOpeningWebSocket(): typeof WebSocket {
+  class FakeWS {
+    readonly url: string
+    readyState = 0
+    private readonly listeners = new Map<string, Set<(e: unknown) => void>>()
+
+    constructor(url: string) {
+      this.url = url
+    }
+
+    addEventListener(type: string, fn: (e: unknown) => void, _opts?: unknown): void {
+      let set = this.listeners.get(type)
+      if (set === undefined) {
+        set = new Set()
+        this.listeners.set(type, set)
+      }
+      set.add(fn)
+    }
+
+    removeEventListener(type: string, fn: (e: unknown) => void): void {
+      this.listeners.get(type)?.delete(fn)
+    }
+
+    send(_data: string): void {}
 
     close(): void {
       this.readyState = 3

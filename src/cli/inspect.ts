@@ -49,31 +49,35 @@ export const inspectCommand = defineCommand({
     const escListener = isJson ? null : createEscListener()
     const liveHint = escListener === null ? undefined : escHintLine(color)
 
-    const result = await runInspectLoop({
-      agentDir: cwd,
-      ...(sessionArg !== undefined ? { sessionIdOrPrefix: sessionArg } : {}),
-      ...(filterArg !== undefined ? { filter: filterArg } : {}),
-      ...(sinceArg !== undefined ? { since: sinceArg } : {}),
-      json: isJson,
-      color,
-      selectSession: (sessions, selectOpts) => {
-        escListener?.pause()
-        return clackSelect(sessions, selectOpts?.initialSessionId).finally(() => {
-          escListener?.resume()
-        })
-      },
-      ...(liveSource !== undefined ? { liveSource } : {}),
-      signal,
-      newEscSignal: () => {
-        if (escListener === null) return new AbortController().signal
-        return escListener.armForStream()
-      },
-      ...(liveHint !== undefined ? { liveHint } : {}),
-      stdout: (line) => process.stdout.write(`${line}\n`),
-      stderr: (line) => process.stderr.write(`${line}\n`),
-    })
-
-    escListener?.stop()
+    // try/finally so a thrown loop never leaves the terminal stuck in raw mode.
+    let result: Awaited<ReturnType<typeof runInspectLoop>>
+    try {
+      result = await runInspectLoop({
+        agentDir: cwd,
+        ...(sessionArg !== undefined ? { sessionIdOrPrefix: sessionArg } : {}),
+        ...(filterArg !== undefined ? { filter: filterArg } : {}),
+        ...(sinceArg !== undefined ? { since: sinceArg } : {}),
+        json: isJson,
+        color,
+        selectSession: (sessions, selectOpts) => {
+          escListener?.pause()
+          return clackSelect(sessions, selectOpts?.initialSessionId).finally(() => {
+            escListener?.resume()
+          })
+        },
+        ...(liveSource !== undefined ? { liveSource } : {}),
+        signal,
+        newEscSignal: () => {
+          if (escListener === null) return new AbortController().signal
+          return escListener.armForStream()
+        },
+        ...(liveHint !== undefined ? { liveHint } : {}),
+        stdout: (line) => process.stdout.write(`${line}\n`),
+        stderr: (line) => process.stderr.write(`${line}\n`),
+      })
+    } finally {
+      escListener?.stop()
+    }
 
     if (!result.ok) {
       process.stderr.write(`${errorLine(result.reason)}\n`)

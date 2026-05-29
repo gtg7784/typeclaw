@@ -63,9 +63,17 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
     }
   })
 
-  const onOpen = new Promise<void>((resolve, reject) => {
-    ws.addEventListener('open', () => resolve(), { once: true })
+  // Settle on open OR on any terminal condition (error/close/abort). Resolving
+  // false here is what unblocks the connect gate when esc aborts mid-connect —
+  // otherwise `await onOpen` would hang forever and freeze the inspect CLI.
+  const onOpen = new Promise<boolean>((resolve, reject) => {
+    ws.addEventListener('open', () => resolve(true), { once: true })
     ws.addEventListener('error', () => reject(new Error('websocket connection failed')), { once: true })
+    ws.addEventListener('close', () => resolve(false), { once: true })
+    if (opts.signal !== undefined) {
+      if (opts.signal.aborted) resolve(false)
+      else opts.signal.addEventListener('abort', () => resolve(false), { once: true })
+    }
   })
   ws.addEventListener('close', () => {
     closed = true
@@ -96,12 +104,14 @@ export async function* streamLive(opts: StreamLiveOptions): AsyncGenerator<Inspe
     }
   }
 
+  let opened: boolean
   try {
-    await onOpen
+    opened = await onOpen
   } catch (err) {
     closed = true
     throw err
   }
+  if (!opened || closed || opts.signal?.aborted === true) return
 
   const subscribe: InspectClientMessage = {
     type: 'subscribe',
