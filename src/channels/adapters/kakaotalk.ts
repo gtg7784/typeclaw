@@ -8,6 +8,7 @@ import {
   type KakaoMember,
   type KakaoMessage,
   type KakaoProfile,
+  type KakaoReplyTarget,
   type KakaoSendResult,
   type KakaoTalkListenerEventMap,
   type KakaoTalkPushEmoticonEvent,
@@ -39,17 +40,6 @@ import { createKakaoAuthorResolver, type KakaoAuthorResolver } from './kakaotalk
 import { createKakaoChannelResolver, type KakaoChannelResolver } from './kakaotalk-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
 import { createFetchAttachmentCallback } from './kakaotalk-fetch-attachment'
-
-// Mirrors the upstream `KakaoReplyTarget` (agent-messenger#204). Declared here
-// rather than imported so the adapter type-checks against the in-repo SDK pin
-// that predates the reply API; the upstream export is structurally identical
-// and supersedes this once the dependency is bumped.
-export type KakaoReplyTarget = {
-  log_id: string
-  author_id: number
-  message: string
-  type: number
-}
 
 // Structural duck-type of the upstream KakaoTalkClient class. The upstream
 // type is a class with private fields, and TypeScript treats those

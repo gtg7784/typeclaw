@@ -16,7 +16,6 @@ import {
   DISCORD_BOT_INTENTS,
   DISCORD_HISTORY_LIMIT_MAX,
   DISCORD_SLASH_COMMAND_NAMES,
-  type DiscordOutboundClient,
 } from './discord-bot'
 import { DISCORD_SLASH_COMMAND_TYPE_CHAT_INPUT } from './discord-bot-slash-commands'
 
@@ -671,7 +670,7 @@ describe('discord-bot createOutboundCallback', () => {
       uploadFile?: 'ok' | 'reject'
     } = {},
   ): {
-    client: DiscordOutboundClient
+    client: Pick<DiscordBotClient, 'sendMessage' | 'uploadFile'>
     sends: SendCall[]
     uploads: UploadCall[]
   } {
@@ -771,8 +770,8 @@ describe('discord-bot createOutboundCallback', () => {
     // given
     const { client, sends, uploads } = makeFakeClient()
     const order: string[] = []
-    const recordingClient: DiscordOutboundClient = {
-      sendMessage: async (...args: Parameters<DiscordOutboundClient['sendMessage']>) => {
+    const recordingClient = {
+      sendMessage: async (...args: Parameters<DiscordBotClient['sendMessage']>) => {
         order.push('send')
         return client.sendMessage(...args)
       },

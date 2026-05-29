@@ -10,6 +10,7 @@ import type {
   KakaoMember,
   KakaoMessage,
   KakaoProfile,
+  KakaoReplyTarget,
   KakaoSendResult,
   KakaoTalkListenerEventMap,
   KakaoTalkPushMessageEvent,
@@ -21,7 +22,6 @@ import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/sche
 import {
   createKakaotalkAdapter,
   createOutboundCallback,
-  type KakaoReplyTarget,
   type KakaoTalkClient,
   type KakaoTalkListener,
 } from './kakaotalk'
