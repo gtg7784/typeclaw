@@ -71,11 +71,20 @@ export function createChannelReplyTool({
           },
         ),
       ),
+      continue: Type.Optional(
+        Type.Boolean({
+          description:
+            'Set `true` ONLY when this reply is a mid-turn status update (e.g. "working on it…") and you still have work to do THIS turn — fetching data, running a tool, spawning a subagent, then replying again. ' +
+            'A normal reply omits this: by default a successful reply ends the turn (no wasted follow-up LLM call). ' +
+            'Do not set it just to seem responsive; only when genuine multi-step work follows in the same turn.',
+        }),
+      ),
     }),
 
     async execute(_toolCallId, params) {
       const text = params.text
       const attachments = params.attachments
+      const keepTurnAlive = params.continue === true
       if ((text === undefined || text === '') && (attachments === undefined || attachments.length === 0)) {
         logger.warn(formatChannelToolFailure('channel_reply', 'missing text and attachments'))
         return {
@@ -130,7 +139,14 @@ export function createChannelReplyTool({
           ),
         )
       }
-      const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
+      // `continue` is read by the router's terminal hook (installChannelReplyTerminalHook),
+      // not by this tool — it suppresses the post-reply abort so a multi-step turn
+      // keeps going. Success-only: a denied reply never ran, so there is no turn to keep.
+      const details: { ok: boolean; error?: string; continue?: boolean } = result.ok
+        ? keepTurnAlive
+          ? { ok: true, continue: true }
+          : { ok: true }
+        : { ok: false, error: result.error }
       // Echo the delivered text back to the model. The adapter classifier
       // drops self-authored messages on the inbound path (`self_author`),
       // so the bot otherwise has ZERO visibility into what it just said —

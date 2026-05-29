@@ -1248,16 +1248,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // tools and `channel_send` must keep the follow-up so genuine multi-step turns
   // continue. A prior non-typeclaw `afterToolCall` (none today) would be
   // composed, not clobbered.
+  //
+  // `channel_reply({ continue: true })` is the explicit opt-out: a mid-turn
+  // status reply ("working on it…") that the model follows with more work this
+  // turn. The tool surfaces that intent as `details.continue === true`, and we
+  // keep the follow-up so the turn proceeds. The kimi 32k loop only recurs when
+  // the model genuinely has nothing left to say after a reply, which `continue`
+  // asserts is not the case; Layer 2's maxTokens cap still bounds any misuse.
   const installChannelReplyTerminalHook = (live: LiveSession): void => {
     const { agent } = live.session
     const prior = agent.afterToolCall
     agent.afterToolCall = async (context, signal) => {
       const result = prior ? await prior(context, signal) : undefined
-      const succeeded =
-        context.toolCall.name === 'channel_reply' &&
-        !context.isError &&
-        (context.result.details as { ok?: unknown } | undefined)?.ok === true
-      if (succeeded && agent.signal?.aborted !== true) {
+      const details = context.result.details as { ok?: unknown; continue?: unknown } | undefined
+      const succeeded = context.toolCall.name === 'channel_reply' && !context.isError && details?.ok === true
+      const keepTurnAlive = details?.continue === true
+      if (succeeded && !keepTurnAlive && agent.signal?.aborted !== true) {
         logger.info(`[channels] ${live.keyId} terminal_after_channel_reply`)
         agent.abort()
       }

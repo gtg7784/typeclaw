@@ -5876,7 +5876,11 @@ describe('ChannelRouter per-turn wall-clock anchor', () => {
 })
 
 describe('ChannelRouter post-tool follow-up suppression', () => {
-  function afterToolContext(toolName: string, result: { ok: boolean }, isError: boolean): AfterToolCallContext {
+  function afterToolContext(
+    toolName: string,
+    result: { ok: boolean; continue?: boolean },
+    isError: boolean,
+  ): AfterToolCallContext {
     const toolResult = {
       content: [{ type: 'text' as const, text: 'ignored' }],
       details: result,
@@ -5908,6 +5912,12 @@ describe('ChannelRouter post-tool follow-up suppression', () => {
 
     // then the run's abort signal is fired — the follow-up stream sees it aborted
     expect(agent.signal.aborted).toBe(true)
+  })
+
+  test('does NOT abort when channel_reply opts out with continue: true', async () => {
+    const agent = await liveAgentAfterRoute(await tempDir())
+    await agent.afterToolCall!(afterToolContext('channel_reply', { ok: true, continue: true }, false))
+    expect(agent.signal.aborted).toBe(false)
   })
 
   test('does NOT abort when channel_reply was rejected (details.ok === false)', async () => {
