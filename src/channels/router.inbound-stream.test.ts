@@ -18,6 +18,10 @@ const baseConfig: ChannelAdapterConfig = {
 }
 
 class FakeSession {
+  agent: { afterToolCall?: unknown; streamFn: unknown; signal?: AbortSignal; abort: () => void } = {
+    streamFn: () => undefined,
+    abort: () => {},
+  }
   prompt = async (): Promise<void> => {}
   abort = async (): Promise<void> => {}
   dispose = (): void => {}

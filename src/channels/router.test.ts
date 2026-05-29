@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, writeFile as writeFileFs } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 
+import type { AfterToolCallContext, AfterToolCallResult, StreamFn } from '@mariozechner/pi-agent-core'
 import type { AssistantMessage } from '@mariozechner/pi-ai'
 import type { SessionEntry } from '@mariozechner/pi-coding-agent'
 
@@ -13,6 +14,7 @@ import type { HookBus, SessionIdleEvent } from '@/plugin'
 
 import { channelsSessionsPath, loadChannelSessions, saveChannelSessions } from './persistence'
 import {
+  CHANNEL_MAX_OUTPUT_TOKENS,
   createChannelRouter,
   DUPLICATE_SEND_ERROR,
   MAX_CHANNEL_SENDS_PER_TURN,
@@ -56,14 +58,32 @@ class FakeSession {
   // non-blocking turn terminator for the policy-denial loop guard. A fresh
   // AbortController is installed at the start of every `prompt()` so each turn
   // gets its own run signal (matching pi's per-run AbortController).
-  public agent = {
-    controller: new AbortController(),
-    get signal(): AbortSignal {
-      return this.controller.signal
-    },
-    abort(): void {
-      this.controller.abort()
-    },
+  public lastStreamMaxTokens: number | undefined
+  public agent: {
+    controller: AbortController
+    readonly signal: AbortSignal
+    abort(): void
+    afterToolCall?: (context: AfterToolCallContext, signal?: AbortSignal) => Promise<AfterToolCallResult | undefined>
+    streamFn: StreamFn
+  }
+
+  constructor() {
+    const recordMaxTokens = (maxTokens: number | undefined): void => {
+      this.lastStreamMaxTokens = maxTokens
+    }
+    this.agent = {
+      controller: new AbortController(),
+      get signal(): AbortSignal {
+        return this.controller.signal
+      },
+      abort(): void {
+        this.controller.abort()
+      },
+      streamFn: ((_model, _context, options) => {
+        recordMaxTokens(options?.maxTokens)
+        return undefined as unknown as ReturnType<StreamFn>
+      }) as StreamFn,
+    }
   }
 
   public sessionManager = {
@@ -5852,5 +5872,97 @@ describe('ChannelRouter per-turn wall-clock anchor', () => {
     const anchor = prompt.slice(0, close + '</current-time>'.length)
     expect(englishDays.some((d) => anchor.includes(d))).toBe(true)
     expect(prompt).toContain('what day is it')
+  })
+})
+
+describe('ChannelRouter post-tool follow-up suppression', () => {
+  function afterToolContext(toolName: string, result: { ok: boolean }, isError: boolean): AfterToolCallContext {
+    const toolResult = {
+      content: [{ type: 'text' as const, text: 'ignored' }],
+      details: result,
+    }
+    return {
+      assistantMessage: assistantMessage('') as AfterToolCallContext['assistantMessage'],
+      toolCall: { type: 'toolCall', id: 'tc1', name: toolName, arguments: {} } as AfterToolCallContext['toolCall'],
+      args: {},
+      result: toolResult as AfterToolCallContext['result'],
+      isError,
+      context: { systemPrompt: '', messages: [], tools: [] },
+    }
+  }
+
+  async function liveAgentAfterRoute(dir: string): Promise<FakeSession['agent']> {
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+    return sessions[0]!.agent
+  }
+
+  test('aborts the run after a successful channel_reply so no post-tool follow-up LLM call runs', async () => {
+    // given a live channel session with the terminal hook installed
+    const agent = await liveAgentAfterRoute(await tempDir())
+    expect(agent.afterToolCall).toBeDefined()
+
+    // when channel_reply succeeds (details.ok === true, not an error)
+    await agent.afterToolCall!(afterToolContext('channel_reply', { ok: true }, false))
+
+    // then the run's abort signal is fired — the follow-up stream sees it aborted
+    expect(agent.signal.aborted).toBe(true)
+  })
+
+  test('does NOT abort when channel_reply was rejected (details.ok === false)', async () => {
+    const agent = await liveAgentAfterRoute(await tempDir())
+    await agent.afterToolCall!(afterToolContext('channel_reply', { ok: false }, false))
+    expect(agent.signal.aborted).toBe(false)
+  })
+
+  test('does NOT abort when channel_reply tool result is an error', async () => {
+    const agent = await liveAgentAfterRoute(await tempDir())
+    await agent.afterToolCall!(afterToolContext('channel_reply', { ok: true }, true))
+    expect(agent.signal.aborted).toBe(false)
+  })
+
+  test('does NOT abort after a read-only tool so genuine multi-step turns continue', async () => {
+    const agent = await liveAgentAfterRoute(await tempDir())
+    await agent.afterToolCall!(afterToolContext('read', { ok: true }, false))
+    expect(agent.signal.aborted).toBe(false)
+  })
+
+  test('does NOT abort after a successful channel_send (only channel_reply is terminal)', async () => {
+    const agent = await liveAgentAfterRoute(await tempDir())
+    await agent.afterToolCall!(afterToolContext('channel_send', { ok: true }, false))
+    expect(agent.signal.aborted).toBe(false)
+  })
+})
+
+describe('ChannelRouter output-token cap', () => {
+  async function invokeStream(session: FakeSession, options: { maxTokens?: number } | undefined): Promise<void> {
+    await session.agent.streamFn(
+      {} as Parameters<StreamFn>[0],
+      { systemPrompt: '', messages: [], tools: [] } as Parameters<StreamFn>[1],
+      options as Parameters<StreamFn>[2],
+    )
+  }
+
+  test('caps output tokens at CHANNEL_MAX_OUTPUT_TOKENS when the caller left maxTokens unset', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await invokeStream(sessions[0]!, undefined)
+
+    expect(sessions[0]!.lastStreamMaxTokens).toBe(CHANNEL_MAX_OUTPUT_TOKENS)
+  })
+
+  test('does not override an explicit per-call maxTokens', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    await invokeStream(sessions[0]!, { maxTokens: 256 })
+
+    expect(sessions[0]!.lastStreamMaxTokens).toBe(256)
   })
 })

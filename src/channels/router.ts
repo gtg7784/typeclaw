@@ -117,6 +117,18 @@ export const MAX_CHANNEL_SENDS_PER_TURN = 10
 // same-tick duplicate/cap denials) is never mistaken for a loop. Reset at turn
 // start alongside `turnSeq`.
 export const MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN = 3
+// Per-request output-token cap for channel sessions, threaded into the agent's
+// stream options to override pi-ai's silent `Math.min(model.maxTokens, 32000)`
+// default (`buildBaseOptions` in @mariozechner/pi-ai). Without it, Fireworks'
+// kimi-k2p6-turbo — which degenerates into single-token repetition on the
+// post-tool follow-up turn — runs the full 32000 tokens (~116s of garbage that
+// never produces a reply) before `stopReason: 'length'`. The terminal-reply
+// hook below removes the turn that triggers this; the cap bounds any other path
+// that still reaches a channel LLM call. 4096 fits a thinking block plus a
+// nontrivial reply (healthy channel turns observed at ~317 output tokens
+// including reasoning). Deliberately NOT lowered in `providers.ts`, where
+// `maxTokens` is the model's true capability that compaction math reads.
+export const CHANNEL_MAX_OUTPUT_TOKENS = 4096
 // Rolling window for outbound send-rate telemetry. 5s matches Discord's
 // rate-limit shape (5 msg / 5 s / channel) and comfortably covers Slack's
 // 1 msg/s sustained. The window is observational; exceeding the burst
@@ -1059,6 +1071,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.error(`[channels] ${live.keyId}: LLM call failed: ${err.message}`)
       })
       live.unsubTypingActivity = subscribeTypingActivity(created.session, live)
+      installChannelReplyTerminalHook(live)
+      installChannelOutputCap(live)
       liveSessions.set(keyId, live)
 
       if (isColdStart) {
@@ -1214,6 +1228,54 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       if (event.type !== 'tool_execution_end') return
       bumpTypingActivity(live)
     })
+  }
+
+  // After a successful `channel_reply`, the model has delivered its user-facing
+  // response and the turn is semantically done. pi-agent-core's loop, however,
+  // unconditionally makes one more LLM call after any tool result (the
+  // "post-tool follow-up") to let multi-step tool chains continue. On a turn
+  // that ended with `channel_reply` there is nothing left to say, and Fireworks'
+  // kimi-k2p6-turbo degenerates that empty follow-up into a 32000-token
+  // repetition loop (see CHANNEL_MAX_OUTPUT_TOKENS). Aborting the run's signal
+  // from `afterToolCall` — which runs during tool execution, before the loop
+  // re-enters the LLM stream — makes the follow-up stream observe an already-
+  // aborted signal and return `stopReason: 'aborted'` without generating. This
+  // is the same `agent.abort()` lever the policy-denied-send cap uses; the
+  // tool's own result is already persisted, so the reply still lands.
+  //
+  // Scope is deliberately narrow: only `channel_reply` (the current-chat user-
+  // facing response), only on success, and only for channel sessions. Read-only
+  // tools and `channel_send` must keep the follow-up so genuine multi-step turns
+  // continue. A prior non-typeclaw `afterToolCall` (none today) would be
+  // composed, not clobbered.
+  const installChannelReplyTerminalHook = (live: LiveSession): void => {
+    const { agent } = live.session
+    const prior = agent.afterToolCall
+    agent.afterToolCall = async (context, signal) => {
+      const result = prior ? await prior(context, signal) : undefined
+      const succeeded =
+        context.toolCall.name === 'channel_reply' &&
+        !context.isError &&
+        (context.result.details as { ok?: unknown } | undefined)?.ok === true
+      if (succeeded && agent.signal?.aborted !== true) {
+        logger.info(`[channels] ${live.keyId} terminal_after_channel_reply`)
+        agent.abort()
+      }
+      return result
+    }
+  }
+
+  // Override pi-ai's hidden `Math.min(model.maxTokens, 32000)` output cap for
+  // channel sessions by threading an explicit `maxTokens` into every stream
+  // call. See CHANNEL_MAX_OUTPUT_TOKENS for why. Composes the existing streamFn
+  // (pi's default `streamSimple` unless a proxy was installed) and only fills
+  // `maxTokens` when the caller left it unset, so an explicit per-call value
+  // still wins.
+  const installChannelOutputCap = (live: LiveSession): void => {
+    const { agent } = live.session
+    const inner = agent.streamFn
+    agent.streamFn = (model, context, options) =>
+      inner(model, context, { ...options, maxTokens: options?.maxTokens ?? CHANNEL_MAX_OUTPUT_TOKENS })
   }
 
   const startTypingHeartbeat = (live: LiveSession): void => {
