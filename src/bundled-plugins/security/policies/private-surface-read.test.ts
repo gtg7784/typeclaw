@@ -69,6 +69,13 @@ describe('private-surface-read guard — false-positive control', () => {
     expect(check('read', { path: 'public/readme.md' })).toBeUndefined()
     expect(check('read', { path: '/agent/node_modules/x/index.js' })).toBeUndefined()
   })
+
+  test('a guest may read, write, and list the public/ zone', () => {
+    expect(check('read', { path: 'public/notes.md' })).toBeUndefined()
+    expect(check('write', { path: 'public/report.md' })).toBeUndefined()
+    expect(check('ls', { path: 'public' })).toBeUndefined()
+    expect(check('ls', { path: '/agent/public' })).toBeUndefined()
+  })
 })
 
 describe('private-surface-read guard — traversal + scope', () => {
