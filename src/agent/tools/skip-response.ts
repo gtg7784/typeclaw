@@ -39,10 +39,13 @@ export type SkipResponseDetails = {
 // `skip_response` is preferred whenever the model has a reason worth
 // recording. See session-origin.ts for the prompt-level decision rule.
 //
-// Order-dependence with `channel_reply`/`channel_send`: once `skip_response`
-// fires in a turn, the router rejects any subsequent tool-source send for
-// the same turn with `SKIP_RESPONSE_LOCK_ERROR`. The model gets a clear
-// error and learns to commit on the next turn instead of mid-turn.
+// Order-dependence with `channel_reply`/`channel_send` is asymmetric:
+//   - skip BEFORE any send → commits to silence; the router rejects any
+//     subsequent tool-source send this turn with `SKIP_RESPONSE_LOCK_ERROR`.
+//   - skip AFTER a send → accepted as a terminal no-op (`recorded-after-send`).
+//     The earlier reply stands; this posts nothing and ends the turn. Rejecting
+//     it (the old behavior) drove a livelock: denied a clean silent exit, the
+//     model re-sent, got re-denied on the next skip, and repeated to the cap.
 export function createSkipResponseTool({
   router,
   sessionId,
@@ -55,12 +58,14 @@ export function createSkipResponseTool({
       'Decline to send a user-facing reply this turn, with a logged reason. Use this ' +
       'instead of narrating "I have nothing to add" / "I will stay quiet" in your visible ' +
       'response. The reason is written to host logs (visible via `typeclaw logs -f`) but ' +
-      'never delivered to the user. The contract is bidirectional: after calling this, any ' +
-      '`channel_reply` / `channel_send` in the same turn will be rejected, AND calling this ' +
-      'after a `channel_reply` / `channel_send` has already landed in this turn will also ' +
-      'be rejected — commit to silence or commit to replying, not both. Decide before you ' +
-      'send, and call this as your terminal tool when you decide to stay silent. Prefer ' +
-      'this over the `NO_REPLY` text sentinel whenever you have a reason worth recording.',
+      'never delivered to the user. If you call this BEFORE sending anything this turn, it ' +
+      'commits you to silence and any later `channel_reply` / `channel_send` in the same ' +
+      'turn is rejected. If you call it AFTER a reply has already landed this turn (e.g. you ' +
+      'posted an ack and now want to wait quietly for a backgrounded subagent), it is ' +
+      'accepted as a terminal no-op: your earlier reply stands, nothing further is sent, and ' +
+      'your turn ends. Either way, call this as your terminal tool when you decide to stop ' +
+      'talking — do NOT keep sending "still working" updates. Prefer this over the ' +
+      '`NO_REPLY` text sentinel whenever you have a reason worth recording.',
     parameters: Type.Object({
       reason: Type.String({
         description:
@@ -85,33 +90,20 @@ export function createSkipResponseTool({
       }
 
       const result = router.markTurnSkipped({ parentSessionId: sessionId, reason })
-      if (result.kind === 'send-already-happened') {
-        // Symmetric counterpart of the send-after-skip lock in `router.send()`.
-        // The model already committed to replying earlier in this turn; calling
-        // skip_response now would land the reply AND claim silence at the same
-        // time, which is the contract violation the lock exists to prevent.
-        // Surface a clear error and refuse to stamp the flag so the rest of
-        // the turn behaves as a normal reply turn.
-        logger.warn(
-          formatChannelToolFailure(
-            'skip_response',
-            `channel send already happened this turn (reason=${JSON.stringify(reason)})`,
-          ),
-        )
-        const details: SkipResponseDetails = {
-          ok: false,
-          suppressed: false,
-          reason,
-          error: 'send-already-happened',
-        }
+      if (result.kind === 'recorded-after-send') {
+        // Reply-first skip: an ack already landed; this just ends the turn
+        // quietly. Not suppressed (the reply stands) and not an error (erroring
+        // here is what drove the historical re-send livelock). Router logged it.
+        const details: SkipResponseDetails = { ok: true, suppressed: false, reason }
         return {
           content: [
             {
               type: 'text' as const,
               text:
-                'skip_response denied: you already sent a channel reply in this turn. ' +
-                'Commit to silence or commit to replying, not both. ' +
-                'End your turn now; the reply you already sent stands.',
+                'skip_response accepted: your earlier channel reply this turn stands, and ' +
+                'no further message will be sent. End your turn now — do not send "still ' +
+                'working" updates while a backgrounded subagent runs; the completion ' +
+                'reminder will wake you when it finishes.',
             },
           ],
           details,

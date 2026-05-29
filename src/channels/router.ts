@@ -498,13 +498,15 @@ export type ChannelRouter = {
   // turn cannot drop a future legitimate reply.
   //
   // Returns:
-  //   - 'recorded'      — the live session was found and the skip was stamped
-  //   - 'send-already-happened' — a tool-source channel send already landed
-  //                       in this turn; the skip is refused (symmetric with
-  //                       the send-after-skip lock in `send()`) so the model
-  //                       cannot land a reply AND claim silence. The flag is
-  //                       NOT stamped, so the turn proceeds as a normal
-  //                       reply turn.
+  //   - 'recorded'      — silence-first: no send had landed this turn, so the
+  //                       skip was stamped and later tool-source sends are
+  //                       locked out via the send-after-skip guard in `send()`
+  //   - 'recorded-after-send' — reply-first: a tool-source channel send already
+  //                       landed this turn and the agent is now going quiet for
+  //                       the rest of it (the normal ack-then-wait pattern). The
+  //                       delivered reply stands; this skip posts nothing and is
+  //                       a terminal no-op. NOT stamped as a skipped turn (a
+  //                       reply already landed), and logged inline by the impl.
   //   - 'no-live-session' — no matching channel session (e.g. tool fired
   //                         outside a channel origin); the tool should
   //                         still log the reason but cannot suppress.
@@ -513,7 +515,7 @@ export type ChannelRouter = {
     reason: string
   }) =>
     | { kind: 'recorded'; keyId: string }
-    | { kind: 'send-already-happened'; keyId: string }
+    | { kind: 'recorded-after-send'; keyId: string }
     | { kind: 'no-live-session' }
   stop: () => Promise<void>
   liveCount: () => number
@@ -2254,13 +2256,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     reason: string
   }):
     | { kind: 'recorded'; keyId: string }
-    | { kind: 'send-already-happened'; keyId: string }
+    | { kind: 'recorded-after-send'; keyId: string }
     | { kind: 'no-live-session' } => {
     for (const live of liveSessions.values()) {
       if (live.destroyed) continue
       if (live.sessionId !== args.parentSessionId) continue
       if (live.successfulChannelSends > live.successfulSendsAtTurnStart) {
-        return { kind: 'send-already-happened', keyId: live.keyId }
+        // Reply-first skip ("acked, now going quiet"): accept as a terminal
+        // no-op, never stamp `skippedTurn`. The delivered reply stands and must
+        // not be suppressed, so stamping (which `validateChannelTurn` reads to
+        // drop the turn) would be wrong; the send-after-skip lock only needs to
+        // arm on the silence-first path. Rejecting this instead deadlocks the
+        // agentic loop: denied a clean silent exit the model re-sends, gets
+        // re-denied, and repeats until the per-turn send cap trips. Logged here
+        // since `validateChannelTurn` won't see a `skippedTurn` for it.
+        logger.info(`[channels] ${live.keyId} skip_after_send reason=${JSON.stringify(args.reason)}`)
+        return { kind: 'recorded-after-send', keyId: live.keyId }
       }
       live.skippedTurn = { turnSeq: live.turnSeq, reason: args.reason }
       return { kind: 'recorded', keyId: live.keyId }

@@ -1517,7 +1517,7 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sent[0]!.text).toBe('system-side message')
   })
 
-  test('skip_response: markTurnSkipped returns send-already-happened when a tool-source send already landed this turn (symmetric with skip-locked)', async () => {
+  test('skip_response: markTurnSkipped after a tool-source send is accepted as a terminal no-op (reply stands)', async () => {
     const dir = await tempDir()
     const logs: string[] = []
     const sent: Array<{ text: string }> = []
@@ -1530,27 +1530,32 @@ describe('ChannelRouter channel-turn protocol', () => {
     await router.route(inbound({ text: 'hi' }))
     let markResult: ReturnType<ChannelRouter['markTurnSkipped']> | undefined
     sessions[0]!.onPrompt = async () => {
-      // given: a tool-source channel send has already landed this turn
+      // given: a tool-source ack has already landed this turn
       const sendResult = await router.send({
         adapter: 'discord-bot',
         workspace: 'g1',
         chat: 'c1',
-        text: 'real reply that committed us',
+        text: 'On it, reviewing…',
       })
       expect(sendResult.ok).toBe(true)
-      // when: the model tries to skip after committing to a reply
-      markResult = router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'changed my mind' })
+      // when: the model then goes quiet (the ack-then-wait pattern)
+      markResult = router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'waiting for reviewer' })
     }
     await router.__testing!.flushDebounce(KEY)
 
-    // then: skip is refused so the reply stands without a contradictory skip log
-    expect(markResult?.kind).toBe('send-already-happened')
+    // then: the skip is accepted as a no-op; the ack stands and is NOT suppressed
+    expect(markResult?.kind).toBe('recorded-after-send')
     expect(sent).toHaveLength(1)
-    expect(sent[0]!.text).toBe('real reply that committed us')
+    expect(sent[0]!.text).toBe('On it, reviewing…')
+    expect(logs.some((m) => m.includes('skip_after_send'))).toBe(true)
     expect(logs.some((m) => m.includes('skipped_by_tool'))).toBe(false)
   })
 
-  test('skip_response: send-already-happened guard resets across turns (next turn can skip cleanly)', async () => {
+  test('skip_response: after a send does NOT drive a re-send livelock (stops at the single ack)', async () => {
+    // Regression for the skip-after-send livelock: a model that acks then tries
+    // to go quiet must NOT be forced to keep sending. Pre-fix, markTurnSkipped
+    // returned 'send-already-happened' and a model that "re-sends only when the
+    // skip is refused" would spam up to the per-turn cap.
     const dir = await tempDir()
     const sent: Array<{ text: string }> = []
     const { router, sessions } = makeRouter(dir)
@@ -1559,25 +1564,54 @@ describe('ChannelRouter channel-turn protocol', () => {
       return { ok: true }
     })
 
-    // Turn 1: reply normally
-    await router.route(inbound({ text: 'turn-1' }))
+    await router.route(inbound({ text: 'please review PR #1' }))
     sessions[0]!.onPrompt = async () => {
-      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'turn-1 reply' })
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'On it' })
+      for (let i = 0; i < MAX_CHANNEL_SENDS_PER_TURN + 5; i++) {
+        const skip = router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'waiting for reviewer' })
+        if (skip.kind === 'recorded-after-send' || skip.kind === 'recorded') break
+        await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: `still working (${i})` })
+      }
     }
     await router.__testing!.flushDebounce(KEY)
-    expect(sent).toHaveLength(1)
 
-    // Turn 2: skip cleanly — the prior turn's send count must NOT block this skip
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('On it')
+  })
+
+  test('skip_response: send-after-skip lock still applies on the silence-first path', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'first' }))
+    sessions[0]!.onPrompt = async () => {
+      // given: silence-first skip with no prior send arms the send lock
+      const r = router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'nothing to add' })
+      expect(r.kind).toBe('recorded')
+      // when: a later tool-source send is attempted in the same turn
+      const send = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'wait, reply' })
+      // then: it is rejected by the skip lock
+      expect(send.ok).toBe(false)
+      expect(send.ok === false ? send.code : '').toBe('skip-locked')
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(sent).toHaveLength(0)
+
+    // next turn with no send: skip still records cleanly (per-turn reset)
     let turn2Result: ReturnType<ChannelRouter['markTurnSkipped']> | undefined
     sessions[0]!.onPrompt = () => {
-      turn2Result = router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'no follow-up needed' })
+      turn2Result = router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'still nothing' })
       sessions[0]!.setAssistantText('')
     }
-    await router.route(inbound({ text: 'turn-2', externalMessageId: 'm2' }))
+    await router.route(inbound({ text: 'second', externalMessageId: 'm2' }))
     await router.__testing!.flushDebounce(KEY)
-
     expect(turn2Result?.kind).toBe('recorded')
-    expect(sent).toHaveLength(1)
+    expect(sent).toHaveLength(0)
   })
 
   test('skip_response: markTurnSkipped returns no-live-session when sessionId does not match any live session', () => {
