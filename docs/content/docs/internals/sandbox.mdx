@@ -10,6 +10,18 @@ The kernel primitive for this is `bwrap(1)` (bubblewrap) — a setuid-less names
 
 This page documents the base layer — the apt package and the `docker run` flag that make bwrap available. The wrapper that consumes them (the `SubagentShared.sandbox` field and the bash-tool execute-time substitution) lives in `src/agent/sandbox/` in a follow-up PR.
 
+## bwrap is a primitive, not a policy
+
+Upstream bubblewrap is explicit: "bubblewrap is not a complete, ready-made sandbox with a specific security policy" and "the level of protection... is entirely determined by the arguments passed to bubblewrap." Treating "we use bwrap" as a security claim is a category error. The boundary lives in the **wrapper invariants** — the exact bwrap argv typeclaw constructs per call. The follow-up wrapper PR will need to maintain at least:
+
+- `--unshare-all` (or an equivalent subset that covers user/pid/mount/net/ipc/uts namespaces).
+- `--clearenv` followed by an explicit `--setenv` allowlist. Inherited env is a vector for `FIREWORKS_API_KEY` / `GH_TOKEN` exfil.
+- `--new-session` (or `--die-with-parent` plus a TIOCSTI seccomp filter) to prevent the contained process from injecting input into the controlling terminal.
+- A minimal mount set. Every bind-mount is a potential write/exec/read vector; everything mounted in can "potentially be used to escalate privileges" (bubblewrap docs).
+- Network policy that matches the subagent's actual need (default to `--unshare-net`; `--share-net` only with an explicit threat-model decision logged in the subagent's source).
+
+This PR enables the primitive. It does not ship any of the invariants above — those are the contract of the follow-up `applySubagentSandbox` helper. Reviewers of the follow-up should audit the argv construction, not just confirm that `bwrap` was invoked.
+
 ## `--security-opt seccomp=unconfined`
 
 `planStart()` in `src/container/start.ts` adds `--security-opt seccomp=unconfined` unconditionally. Without it, Docker's default seccomp profile blocks `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` for non-privileged containers, and bwrap exits at startup with "setting up uid map: Permission denied."
@@ -22,7 +34,9 @@ Looks narrower (one capability vs ~44 syscalls). Is broader in practice. `CAP_SY
 
 ## Why not a custom seccomp profile
 
-It's the narrowest of the three options — Docker default plus `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` allowed, nothing else. It also introduces a security policy file that has to be shipped, distributed, kept in sync with bwrap's evolving needs, and debugged when it silently breaks something. The maintenance cost only earns its keep when TypeClaw goes multi-tenant. Single-tenant deployments don't need the precision; `seccomp=unconfined` is the right cost/benefit point until that changes.
+A profile based on Docker's default plus the namespace/setup syscalls our exact bwrap invocation needs would be narrower than `seccomp=unconfined`. The exact syscall delta is not pinned down in this PR — bwrap also calls `mount`, `pivot_root`, and related namespace-setup syscalls under the user-namespace path, and the full list depends on the specific `--unshare-*` / `--proc` / `--dev` combination the follow-up helper settles on. Trace it under `strace -fc bwrap …` against the helper's argv once it lands and pin the profile to that delta if and when this matters.
+
+The reason we don't do that today is maintenance, not impossibility: a profile file has to be shipped, distributed, kept in sync with bwrap's evolving syscall use, and debugged when it silently breaks something. The cost only earns its keep when typeclaw goes multi-tenant. Single-tenant deployments don't need the precision; `seccomp=unconfined` is the right cost/benefit point until that changes.
 
 ## bwrap in baseline
 
