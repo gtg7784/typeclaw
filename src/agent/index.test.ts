@@ -850,6 +850,27 @@ describe('createResourceLoader', () => {
     expect(prompt).not.toContain('tmux new-session -d')
   })
 
+  test('full prompt carries the Mode C troubleshooting hand-off so a stuck fix-it loop gets delegated to operator instead of burning the main session', async () => {
+    const origin: SessionOrigin = { kind: 'tui', sessionId: 'ses_t' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('**Mode C — Troubleshooting**')
+    expect(prompt).toContain('typeclaw-troubleshooting')
+    expect(prompt).toContain('run_in_background: true')
+  })
+
+  test('slim prompt does NOT carry the Mode C troubleshooting hand-off (full-mode-only budget guard)', async () => {
+    const origin: SessionOrigin = { kind: 'cron', jobId: 'job-1', jobKind: 'prompt' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('**Mode C — Troubleshooting**')
+    expect(prompt).not.toContain('typeclaw-troubleshooting')
+  })
+
   test('full prompt carries the post-hatching file-routing matrix so a tone preference cannot land in AGENTS.md and a process rule cannot land in SOUL.md', async () => {
     // Without these assertions, a future trim of system-prompt.ts could
     // quietly drop the routing matrix and the prompt would still
