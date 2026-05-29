@@ -188,10 +188,12 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
             logger.error(`[github] periodic token refresh failed: ${err instanceof Error ? err.message : String(err)}`)
           })
         }
-        const setIntervalFn = options.setInterval ?? ((handler: () => void, ms: number) => {
-          const timer = setInterval(handler, ms)
-          return { clear: () => clearInterval(timer) }
-        })
+        const setIntervalFn =
+          options.setInterval ??
+          ((handler: () => void, ms: number) => {
+            const timer = setInterval(handler, ms)
+            return { clear: () => clearInterval(timer) }
+          })
         tokenRefreshTimer = setIntervalFn(refresh, tokenRefreshIntervalMs)
       }
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
