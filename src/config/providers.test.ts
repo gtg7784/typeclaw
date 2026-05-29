@@ -115,11 +115,12 @@ describe('listKnownModelRefs', () => {
     expect(refs).toContain('zai-coding/glm-5.1')
   })
 
-  test('includes the current Anthropic GA tier (Haiku 4.5 / Sonnet 4.6 / Opus 4.7)', () => {
+  test('includes the current Anthropic GA tier (Haiku 4.5 / Sonnet 4.6 / Opus 4.7 / Opus 4.8)', () => {
     const refs = listKnownModelRefs()
     expect(refs).toContain('anthropic/claude-haiku-4-5')
     expect(refs).toContain('anthropic/claude-sonnet-4-6')
     expect(refs).toContain('anthropic/claude-opus-4-7')
+    expect(refs).toContain('anthropic/claude-opus-4-8')
   })
 })
 
@@ -130,6 +131,10 @@ describe('providerForModelRef anthropic', () => {
 
   test('routes claude-opus-4-7 to anthropic', () => {
     expect(providerForModelRef('anthropic/claude-opus-4-7')).toBe('anthropic')
+  })
+
+  test('routes claude-opus-4-8 to anthropic', () => {
+    expect(providerForModelRef('anthropic/claude-opus-4-8')).toBe('anthropic')
   })
 })
 
@@ -149,6 +154,7 @@ describe('defaultThinkingLevelForRef', () => {
 
   test('non-OpenAI providers defer to the SDK default (returns undefined)', () => {
     expect(defaultThinkingLevelForRef('anthropic/claude-opus-4-7')).toBeUndefined()
+    expect(defaultThinkingLevelForRef('anthropic/claude-opus-4-8')).toBeUndefined()
     expect(defaultThinkingLevelForRef('anthropic/claude-sonnet-4-6')).toBeUndefined()
     expect(defaultThinkingLevelForRef('anthropic/claude-haiku-4-5')).toBeUndefined()
     expect(defaultThinkingLevelForRef('fireworks/accounts/fireworks/routers/kimi-k2p6-turbo')).toBeUndefined()

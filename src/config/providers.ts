@@ -197,10 +197,11 @@ export const KNOWN_PROVIDERS = {
   // anthropic`) before relying on the env-var path. Same rule applies to any
   // future dual-auth provider — keep the surprise in mind when expanding.
   //
-  // Model lineup is the current GA tier as of 2026-04-16: Opus 4.7 (top,
-  // released Apr 16 2026), Sonnet 4.6 (mid, Feb 5 2026), Haiku 4.5 (fast,
-  // Oct 1 2025). Anthropic's own model overview lists these three as the
-  // current recommended set and flags earlier Opus/Sonnet variants with
+  // Model lineup is the current GA tier as of 2026-05-29: Opus 4.8 (top,
+  // released May 2026), Opus 4.7 (prior top, Apr 16 2026), Sonnet 4.6 (mid,
+  // Feb 5 2026), Haiku 4.5 (fast, Oct 1 2025). Anthropic's own model overview
+  // lists the latest Opus/Sonnet/Haiku as the current recommended set and
+  // flags earlier Opus/Sonnet variants with
   // "Consider migrating to current models." Opus 4 / Sonnet 4 are deprecated
   // (retirement: Jun 15 2026); the 4.5/4.6 alternates remain Active but are
   // not the recommended path.
@@ -267,6 +268,18 @@ export const KNOWN_PROVIDERS = {
       'claude-opus-4-7': {
         id: 'claude-opus-4-7',
         name: 'Claude Opus 4.7',
+        api: 'anthropic-messages',
+        provider: 'anthropic',
+        baseUrl: 'https://api.anthropic.com',
+        reasoning: true,
+        input: ['text', 'image'],
+        cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+        contextWindow: 1000000,
+        maxTokens: 128000,
+      },
+      'claude-opus-4-8': {
+        id: 'claude-opus-4-8',
+        name: 'Claude Opus 4.8',
         api: 'anthropic-messages',
         provider: 'anthropic',
         baseUrl: 'https://api.anthropic.com',
