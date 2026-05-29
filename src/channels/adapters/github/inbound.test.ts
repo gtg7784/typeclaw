@@ -261,12 +261,13 @@ describe('createGithubWebhookHandler', () => {
 describe('createGithubWebhookHandler — self-author drop', () => {
   function selfAuthoredHandler(
     routed: InboundMessage[],
-    overrides: { selfId?: string | null; selfLogin?: string | null } = {},
+    overrides: { selfId?: string | null; selfLogin?: string | null; allowlist?: readonly string[] } = {},
   ): (req: Request) => Promise<Response> {
     return createGithubWebhookHandler({
       webhookSecret: 'secret',
       dedup: createDeliveryDedup(),
-      allowlist: () => ['issue_comment.created', 'pull_request_review_comment.created', 'issues.opened'],
+      allowlist: () =>
+        overrides.allowlist ?? ['issue_comment.created', 'pull_request_review_comment.created', 'issues.opened'],
       selfId: () => overrides.selfId ?? '99',
       selfLogin: () => overrides.selfLogin ?? 'typeclaw-bot',
       logger,
@@ -339,6 +340,97 @@ describe('createGithubWebhookHandler — self-author drop', () => {
     ;(payload.comment as Record<string, unknown>).user = { login: 'typeclaw-bot', id: 99, type: 'Bot' }
     await handler(signedRequest(JSON.stringify(payload), 'issue_comment', 'self-id-null'))
     expect(routed).toHaveLength(0)
+  })
+
+  it('drops pull_request_review authored by self even when the PR was opened by someone else', async () => {
+    // Regression for PR #460: the bot submits a review on alice's PR. The
+    // payload's `pull_request.user` is alice, but `review.user` is the bot.
+    // The drop must read the review author, not the PR author, or the bot
+    // wakes a session on its own review and loops.
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed, {
+      allowlist: ['pull_request_review.submitted'],
+    })
+    const payload = {
+      action: 'submitted',
+      repository: repo(),
+      pull_request: { number: 7, id: 700, user: { login: 'alice', id: 10, type: 'User' } },
+      review: {
+        id: 5001,
+        body: 'looks good',
+        submitted_at: '2026-01-01T00:00:00Z',
+        user: { login: 'typeclaw-bot', id: 99, type: 'Bot' },
+      },
+    }
+    await handler(signedRequest(JSON.stringify(payload), 'pull_request_review', 'self-review-submitted'))
+    expect(routed).toHaveLength(0)
+  })
+
+  it('routes a pull_request_review from another reviewer on the bot-authored PR', async () => {
+    // Guard against over-dropping: the inverse case must still wake the bot.
+    // alice reviews the bot's PR — `pull_request.user` is the bot, but the
+    // review author is alice, so the event must route.
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed, {
+      allowlist: ['pull_request_review.submitted'],
+    })
+    const payload = {
+      action: 'submitted',
+      repository: repo(),
+      pull_request: { number: 7, id: 700, user: { login: 'typeclaw-bot', id: 99, type: 'Bot' } },
+      review: { id: 5002, body: 'please fix', submitted_at: '2026-01-01T00:00:00Z', user: user() },
+    }
+    await handler(signedRequest(JSON.stringify(payload), 'pull_request_review', 'other-review-submitted'))
+    expect(routed).toHaveLength(1)
+    expect(routed[0]?.authorName).toBe('alice')
+  })
+
+  it('drops self-authored events with no enumerated entity via the sender fallback', async () => {
+    const drops: string[] = []
+    const handler = createGithubWebhookHandler({
+      webhookSecret: 'secret',
+      dedup: createDeliveryDedup(),
+      allowlist: () => ['commit_comment'],
+      selfId: () => '99',
+      selfLogin: () => 'typeclaw-bot',
+      logger: { ...logger, info: (m) => drops.push(m) },
+      route: (msg) => {
+        routedSink.push(msg)
+      },
+    })
+    const routedSink: InboundMessage[] = []
+    const payload = {
+      action: 'created',
+      repository: repo(),
+      sender: { login: 'typeclaw-bot', id: 99, type: 'Bot' },
+    }
+    await handler(signedRequest(JSON.stringify(payload), 'commit_comment', 'self-sender-fallback'))
+    expect(routedSink).toHaveLength(0)
+    expect(drops.some((m) => m.includes('dropped self-authored'))).toBe(true)
+  })
+
+  it('drops self-authored events for an unknown event type via the sender fallback', async () => {
+    const drops: string[] = []
+    const routedSink: InboundMessage[] = []
+    const handler = createGithubWebhookHandler({
+      webhookSecret: 'secret',
+      dedup: createDeliveryDedup(),
+      allowlist: () => ['some_future_event'],
+      selfId: () => '99',
+      selfLogin: () => 'typeclaw-bot',
+      logger: { ...logger, info: (m) => drops.push(m) },
+      route: (msg) => {
+        routedSink.push(msg)
+      },
+    })
+    const payload = {
+      action: 'created',
+      repository: repo(),
+      sender: { login: 'typeclaw-bot', id: 99, type: 'Bot' },
+    }
+    await handler(signedRequest(JSON.stringify(payload), 'some_future_event', 'self-unknown-event'))
+    expect(routedSink).toHaveLength(0)
+    expect(drops.some((m) => m.includes('dropped self-authored'))).toBe(true)
   })
 })
 

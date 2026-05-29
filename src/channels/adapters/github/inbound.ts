@@ -45,7 +45,7 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
 
     const selfId = options.selfId()
     const selfLogin = options.selfLogin()
-    const author = readAuthor(payload)
+    const author = readAuthor(event, payload)
     if (author !== null && isSelfAuthor(author, selfId, selfLogin)) {
       options.logger.info(
         `[github] dropped self-authored ${event}${action !== null ? `.${action}` : ''} from @${author.login}`,
@@ -363,13 +363,42 @@ function readRepository(payload: Record<string, unknown>): { owner: string; name
   return { owner: ownerLogin, name }
 }
 
-function readAuthor(payload: Record<string, unknown>): GithubUser | null {
-  const candidates = [payload.comment, payload.issue, payload.pull_request, payload.discussion, payload.review]
-  for (const candidate of candidates) {
+function readAuthor(event: string, payload: Record<string, unknown>): GithubUser | null {
+  for (const candidate of eventAuthorCandidates(event, payload)) {
     const user = readUser(readRecord(candidate)?.user)
     if (user !== null) return user
   }
-  return null
+  // Every GitHub webhook payload carries `sender` — the actor who triggered the
+  // delivery. It is the universal fallback so events not enumerated above (and
+  // any future ones the user adds to eventAllowlist) still drop self-authored
+  // deliveries instead of slipping past the guard.
+  return readUser(payload.sender)
+}
+
+// Maps each event to the entity whose `user` is the true author of THIS event,
+// listed before broader containers. A pull_request_review payload ships both
+// `pull_request` (the PR author) and `review` (the reviewer); the self-author
+// drop must see the reviewer, so `review` must come first. PR #455's flat order
+// (`pull_request` before `review`) made a self-review on someone else's PR
+// resolve to the PR author, slip past the drop, and loop (see PR #460).
+const PRIMARY_AUTHOR_KEYS: Record<string, readonly string[]> = {
+  issue_comment: ['comment'],
+  pull_request_review_comment: ['comment'],
+  discussion_comment: ['comment'],
+  commit_comment: ['comment'],
+  pull_request_review: ['review'],
+  pull_request_review_thread: ['pull_request'],
+  issues: ['issue'],
+  pull_request: ['pull_request'],
+  discussion: ['discussion'],
+  release: ['release'],
+}
+
+const FALLBACK_AUTHOR_KEYS = ['comment', 'review', 'issue', 'pull_request', 'discussion', 'release'] as const
+
+function eventAuthorCandidates(event: string, payload: Record<string, unknown>): unknown[] {
+  const keys = PRIMARY_AUTHOR_KEYS[event] ?? FALLBACK_AUTHOR_KEYS
+  return keys.map((key) => payload[key])
 }
 
 // Matches by id OR login. Issue #452 captured a self-responding loop where
