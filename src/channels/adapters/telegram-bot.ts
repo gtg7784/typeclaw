@@ -251,8 +251,12 @@ export function createOutboundCallback(deps: {
 
     try {
       const rendered = toTelegramMarkdownV2(text)
-      const sendOptions: { message_thread_id?: number; parse_mode: 'MarkdownV2' } = { parse_mode: 'MarkdownV2' }
+      const sendOptions: { message_thread_id?: number; reply_to_message_id?: number; parse_mode: 'MarkdownV2' } = {
+        parse_mode: 'MarkdownV2',
+      }
       if (threadId !== undefined) sendOptions.message_thread_id = threadId
+      const replyToId = parseTelegramMessageId(msg.replyTo?.externalMessageId)
+      if (replyToId !== undefined) sendOptions.reply_to_message_id = replyToId
       const sent = await client.sendMessage(msg.chat, rendered, sendOptions)
       logger.info(`[telegram-bot] sent message_id=${sent.message_id} ${tag}`)
       return { ok: true }
@@ -268,6 +272,12 @@ function parseThreadId(thread: string | null | undefined): number | undefined {
   if (thread === null || thread === undefined || thread === '') return undefined
   const n = Number(thread)
   return Number.isFinite(n) ? n : undefined
+}
+
+function parseTelegramMessageId(id: string | null | undefined): number | undefined {
+  if (id === null || id === undefined || id === '') return undefined
+  const n = Number(id)
+  return Number.isInteger(n) && n > 0 ? n : undefined
 }
 
 type TelegramFileResponse = {

@@ -5,6 +5,7 @@ import {
   decideQuoteAnchor,
   prependQuoteAnchor,
   renderQuoteAnchor,
+  resolveReplyRenderMode,
   stripChannelMediaPlaceholders,
 } from './router'
 import { QUOTED_REPLY_EXCERPT_MAX_CHARS, type ChannelAdapterConfig } from './schema'
@@ -21,6 +22,7 @@ const humanInbound = {
   authorName: 'Alice',
   authorIsBot: false,
   receivedAt: 1000,
+  externalMessageId: 'M_ALICE',
 }
 
 describe('renderQuoteAnchor', () => {
@@ -131,10 +133,18 @@ describe('captureQuoteCandidate', () => {
 
   test('captures the LAST batch entry as primary and stamps the adapter onto source', () => {
     const earlier = { ...humanInbound, authorId: 'U_EARLY', authorName: 'Earlier', text: 'first', receivedAt: 1000 }
-    const later = { ...humanInbound, authorId: 'U_LATE', authorName: 'Later', text: 'second', receivedAt: 2000 }
+    const later = {
+      ...humanInbound,
+      authorId: 'U_LATE',
+      authorName: 'Later',
+      text: 'second',
+      receivedAt: 2000,
+      externalMessageId: 'M_LATE',
+    }
     const result = captureQuoteCandidate('slack-bot', [earlier, later], [])
     expect(result?.source).toEqual({ adapter: 'slack-bot', authorId: 'U_LATE', authorName: 'Later', text: 'second' })
     expect(result?.primaryReceivedAt).toBe(2000)
+    expect(result?.externalMessageId).toBe('M_LATE')
   })
 
   test('flags hadInterveningObserved when a live-observed entry landed at-or-after the primary', () => {
@@ -285,7 +295,10 @@ describe('decideQuoteAnchor', () => {
       [{ receivedAt: humanInbound.receivedAt + 500, source: 'observed' }],
     )!
     const out = decideQuoteAnchor(candidate, humanInbound.receivedAt + 1_000, baseConfig)
-    expect(out).toEqual({ adapter: 'slack-bot', authorId: 'U_ALICE', authorName: 'Alice', text: 'hey there' })
+    expect(out).toEqual({
+      source: { adapter: 'slack-bot', authorId: 'U_ALICE', authorName: 'Alice', text: 'hey there' },
+      externalMessageId: 'M_ALICE',
+    })
   })
 
   test('respects an explicit enabled: false override', () => {
@@ -308,10 +321,26 @@ describe('decideQuoteAnchor', () => {
       [{ receivedAt: humanInbound.receivedAt + 500, source: 'observed' }],
     )!
     expect(decideQuoteAnchor(candidate, humanInbound.receivedAt + 1_000, baseConfig)).toEqual({
-      adapter: 'slack-bot',
-      authorId: 'U_ALICE',
-      authorName: 'Alice',
-      text: 'hey there',
+      source: { adapter: 'slack-bot', authorId: 'U_ALICE', authorName: 'Alice', text: 'hey there' },
+      externalMessageId: 'M_ALICE',
     })
+  })
+})
+
+describe('resolveReplyRenderMode', () => {
+  test('Telegram with text uses the native reply primitive', () => {
+    expect(resolveReplyRenderMode({ adapter: 'telegram-bot', workspace: 'w', chat: 'c', text: 'hi' })).toBe('native')
+  })
+
+  test('Telegram attachment-only degrades to quote (sendDocument has no reply param)', () => {
+    expect(
+      resolveReplyRenderMode({ adapter: 'telegram-bot', workspace: 'w', chat: 'c', attachments: [{ path: '/f.png' }] }),
+    ).toBe('quote')
+  })
+
+  test('Slack/Discord/KakaoTalk/GitHub fall back to quote', () => {
+    for (const adapter of ['slack-bot', 'discord-bot', 'kakaotalk', 'github'] as const) {
+      expect(resolveReplyRenderMode({ adapter, workspace: 'w', chat: 'c', text: 'hi' })).toBe('quote')
+    }
   })
 })

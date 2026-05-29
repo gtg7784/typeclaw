@@ -161,6 +161,34 @@ describe('telegram-bot createOutboundCallback', () => {
     expect(fake.sendMessageCalls[0]?.options).toEqual({ parse_mode: 'MarkdownV2' })
   })
 
+  test('forwards replyTo as reply_to_message_id so the bot uses Telegram native reply', async () => {
+    const fake = fakeClient()
+    const cb = createOutboundCallback({
+      client: fake.client,
+      logger: silentLogger(),
+      formatChannelTag: async () => 'chat=-100123',
+    })
+
+    const result = await cb(buildOutbound({ replyTo: { externalMessageId: '57' } }))
+
+    expect(result.ok).toBe(true)
+    expect(fake.sendMessageCalls[0]?.options).toEqual({ reply_to_message_id: 57, parse_mode: 'MarkdownV2' })
+  })
+
+  test('drops a non-numeric replyTo id rather than passing NaN', async () => {
+    const fake = fakeClient()
+    const cb = createOutboundCallback({
+      client: fake.client,
+      logger: silentLogger(),
+      formatChannelTag: async () => 'chat=-100123',
+    })
+
+    const result = await cb(buildOutbound({ replyTo: { externalMessageId: 'not-a-number' } }))
+
+    expect(result.ok).toBe(true)
+    expect(fake.sendMessageCalls[0]?.options).toEqual({ parse_mode: 'MarkdownV2' })
+  })
+
   test('uploads each attachment via sendDocument BEFORE posting text', async () => {
     const fake = fakeClient()
     const cb = createOutboundCallback({

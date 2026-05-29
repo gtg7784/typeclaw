@@ -35,6 +35,7 @@ import type {
   FetchHistoryArgs,
   HistoryCallback,
   InboundMessage,
+  OutboundMessage,
   SendResult,
 } from './types'
 
@@ -5440,6 +5441,71 @@ describe('ChannelRouter quote-anchor on outbound', () => {
 
     await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'still deploying' })
     expect(sent).toEqual(['> <@U_ALICE>: deploy status?\n\nstill deploying'])
+  })
+
+  test('Telegram: anchors via native replyTo (not a blockquote) when a message intervened', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: OutboundMessage[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('telegram-bot', async (msg) => {
+      sent.push(msg)
+      return { ok: true }
+    })
+
+    await router.route(
+      inbound({
+        adapter: 'telegram-bot',
+        text: 'cron status?',
+        authorId: 'U_ALICE',
+        authorName: 'Alice',
+        externalMessageId: '500',
+      }),
+    )
+    nowRef.value += 100
+    await router.route(
+      inbound({
+        adapter: 'telegram-bot',
+        isBotMention: false,
+        externalMessageId: '501',
+        authorId: 'bob',
+        authorName: 'bob',
+        text: 'unrelated chatter',
+      }),
+    )
+    await router.__testing!.flushDebounce({ adapter: 'telegram-bot', workspace: 'g1', chat: 'c1', thread: null })
+    nowRef.value += 200
+
+    await router.send({ adapter: 'telegram-bot', workspace: 'g1', chat: 'c1', text: 'still blocked' })
+    expect(sent[0]?.replyTo).toEqual({ externalMessageId: '500' })
+    expect(sent[0]?.text).toBe('still blocked')
+  })
+
+  test('Telegram: consecutive reply (nothing intervened) sends plainly — no replyTo, no quote', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: OutboundMessage[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('telegram-bot', async (msg) => {
+      sent.push(msg)
+      return { ok: true }
+    })
+
+    await router.route(
+      inbound({
+        adapter: 'telegram-bot',
+        text: 'cron status?',
+        authorId: 'U_ALICE',
+        authorName: 'Alice',
+        externalMessageId: '500',
+      }),
+    )
+    await router.__testing!.flushDebounce({ adapter: 'telegram-bot', workspace: 'g1', chat: 'c1', thread: null })
+    nowRef.value += 200
+
+    await router.send({ adapter: 'telegram-bot', workspace: 'g1', chat: 'c1', text: 'all good' })
+    expect(sent[0]?.replyTo).toBeUndefined()
+    expect(sent[0]?.text).toBe('all good')
   })
 
   test('anchors only the FIRST send of a multi-part reply; subsequent sends in the same turn are bare', async () => {
