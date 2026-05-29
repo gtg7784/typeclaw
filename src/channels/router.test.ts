@@ -16,6 +16,7 @@ import {
   createChannelRouter,
   DUPLICATE_SEND_ERROR,
   MAX_CHANNEL_SENDS_PER_TURN,
+  MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN,
   MAX_TYPING_HEARTBEAT_MS,
   OUTBOUND_FLOOD_ERROR,
   SEND_RATE_WARN_THRESHOLD,
@@ -50,6 +51,21 @@ class FakeSession {
   public entriesById = new Map<string, SessionEntry>()
   public onPrompt: ((text: string) => void | Promise<void>) | undefined
 
+  // Mirrors the real `AgentSession.agent` surface the router touches:
+  // `agent.abort()` flips `agent.signal.aborted`. The router uses this as the
+  // non-blocking turn terminator for the policy-denial loop guard. A fresh
+  // AbortController is installed at the start of every `prompt()` so each turn
+  // gets its own run signal (matching pi's per-run AbortController).
+  public agent = {
+    controller: new AbortController(),
+    get signal(): AbortSignal {
+      return this.controller.signal
+    },
+    abort(): void {
+      this.controller.abort()
+    },
+  }
+
   public sessionManager = {
     getLeafEntry: (): SessionEntry | undefined => this.leafEntry,
     getEntry: (id: string): SessionEntry | undefined => this.entriesById.get(id),
@@ -59,10 +75,12 @@ class FakeSession {
 
   prompt = async (text: string): Promise<void> => {
     this.prompts.push(text)
+    this.agent.controller = new AbortController()
     await this.onPrompt?.(text)
   }
   abort = async (): Promise<void> => {
     this.aborted++
+    this.agent.abort()
   }
   dispose = (): void => {
     this.disposed++
@@ -1613,6 +1631,122 @@ describe('ChannelRouter channel-turn protocol', () => {
     await router.__testing!.flushDebounce(KEY)
     expect(turn2Result?.kind).toBe('recorded')
     expect(sent).toHaveLength(0)
+  })
+
+  test('policy-denial loop: repeated skip-locked sends (silence-first) abort the run instead of looping', async () => {
+    // Regression for the silence-first livelock: the model skips, then retries
+    // channel_reply with varied text. Each retry is denied `skip-locked` but
+    // never increments the send cap, so pre-fix the loop ran unbounded.
+    //
+    // Production-faithful: a thrown denial would NOT end the turn (pi catches
+    // tool throws into error results), so the router aborts the run's signal
+    // instead. We mirror pi's loop: keep retrying until `agent.signal.aborted`,
+    // exactly as the real agent loop ends the turn on the next stream once the
+    // signal flips.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'just FYI' }))
+    const sendResults: SendResult[] = []
+    sessions[0]!.onPrompt = async () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'nothing to add' })
+      // when: the model ignores the lock and retries SEQUENTIALLY with DIFFERENT
+      // text each time (so the byte-identical loop-guard never fires), stopping
+      // only when the run signal is aborted — as the real agent loop would
+      let i = 0
+      while (!sessions[0]!.agent.signal.aborted && i < 100) {
+        sendResults.push(
+          await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: `attempt ${i}` }),
+        )
+        i++
+      }
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: the run is aborted exactly at the ceiling, every attempt was a soft
+    // skip-locked denial, and nothing was ever delivered to the channel
+    expect(sessions[0]!.agent.signal.aborted).toBe(true)
+    expect(sendResults).toHaveLength(MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN)
+    expect(sendResults.every((r) => r.ok === false && r.code === 'skip-locked')).toBe(true)
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('aborting turn') && m.includes('policy-denied'))).toBe(true)
+  })
+
+  test('policy-denial loop: repeated sequential duplicate sends abort the run (Discord incident)', async () => {
+    // Regression for the Discord livelock: the model delivers a reply, then
+    // re-sends the SAME text on each later iteration. Each is denied `duplicate`
+    // (a no-op skip_response interleaves, so the loop-guard's consecutive-streak
+    // never fires) and never increments the send cap. The first delivery resets
+    // the per-target counter, so the SEQUENTIAL retries that follow must still
+    // accumulate and abort the run.
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'hi' }))
+    const dupResults: SendResult[] = []
+    sessions[0]!.onPrompt = async () => {
+      // given: a first reply lands (resets the per-target denial counter)
+      const first = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'same text' })
+      expect(first.ok).toBe(true)
+      // when: the model re-sends the identical text until the run is aborted
+      let i = 0
+      while (!sessions[0]!.agent.signal.aborted && i < 100) {
+        dupResults.push(await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'same text' }))
+        i++
+      }
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then: duplicates are soft until the ceiling aborts the run; only the
+    // single first reply was ever delivered
+    expect(sessions[0]!.agent.signal.aborted).toBe(true)
+    expect(dupResults).toHaveLength(MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN)
+    expect(dupResults.every((r) => r.ok === false && r.code === 'duplicate')).toBe(true)
+    expect(sent).toEqual([{ text: 'same text' }])
+    expect(logs.some((m) => m.includes('aborting turn') && m.includes('policy-denied'))).toBe(true)
+  })
+
+  test('policy-denial loop: counter resets per turn (denials below the ceiling do not throw, next turn replies)', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    // turn 1: skip, then deny just below the ceiling (no throw, no delivery)
+    await router.route(inbound({ text: 'first' }))
+    sessions[0]!.onPrompt = async () => {
+      router.markTurnSkipped({ parentSessionId: 'ses_fake_1', reason: 'nothing' })
+      for (let i = 0; i < MAX_POLICY_DENIED_CHANNEL_SENDS_PER_TURN - 1; i++) {
+        await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: `x${i}` })
+      }
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(sent).toHaveLength(0)
+
+    // turn 2: a fresh turn — the counter reset means a normal reply lands
+    sessions[0]!.onPrompt = async () => {
+      const r = await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'real reply' })
+      expect(r.ok).toBe(true)
+    }
+    await router.route(inbound({ text: 'second', externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('real reply')
   })
 
   test('skip_response: markTurnSkipped returns no-live-session when sessionId does not match any live session', () => {
