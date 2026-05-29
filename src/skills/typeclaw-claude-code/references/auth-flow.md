@@ -4,6 +4,41 @@ Deep dive for the auth paths. Read it when `SKILL.md`'s "First-time auth (intera
 
 The two paths are intentionally symmetric: in both, the user produces one string on their side, pastes it to you, you validate it, you do read-modify-write on `.env`, you offer a restart. Only the credential differs.
 
+## Path 0 — auto-export from typeclaw's anthropic OAuth credential
+
+If the user has already configured an `anthropic` OAuth credential in typeclaw (via `typeclaw provider add anthropic` or the init wizard) AND `docker.file.claudeCode: true`, the agent boot in `src/run/index.ts` auto-emits the credential to `~/.claude/.credentials.json` before `claude` ever runs. The destination matches Claude Code's documented Linux/Windows credential path; macOS uses the Keychain entry `"Claude Code-credentials"` with the same JSON shape, which typeclaw does not target (typeclaw runs Claude Code inside a Linux container).
+
+The on-disk shape:
+
+```json
+{
+  "claudeAiOauth": {
+    "accessToken": "sk-ant-oat01-...",
+    "refreshToken": "sk-ant-ort01-...",
+    "expiresAt": 1730000000000,
+    "scopes": ["user:inference", "user:profile", "user:sessions:claude_code", "user:mcp_servers"],
+    "subscriptionType": "max"
+  }
+}
+```
+
+Field names are camelCase and `expiresAt` is **milliseconds** since epoch (not seconds, not ISO).
+
+### Newer-wins on every boot
+
+The exporter compares typeclaw's stored `expires` against the JWT `exp` claim embedded in the on-disk `accessToken`. Strictly fresher wins; ties skip. Claude Code rotates tokens in place by rewriting `.credentials.json` on every successful refresh (anthropics/claude-code#53063), so on a restart the on-disk file may legitimately be ahead of `secrets.json` and must not be clobbered. The persistent-`$HOME` symlink the entrypoint shim installs (`~/.claude/.credentials.json` → `/agent/.typeclaw/home/.claude/.credentials.json`) is what makes the in-place refresh survive `stop`+`start`.
+
+If `.credentials.json` already carries an `mcpOAuth` block (MCP server OAuth state), the exporter preserves it on overwrite. Only the `claudeAiOauth` block is rewritten.
+
+### When Path 0 does NOT fire
+
+- `docker.file.claudeCode: false` — the install layer is off, no point exporting.
+- `secrets.json#providers.anthropic` is absent — nothing to export.
+- The stored credential is api-key shape — Claude Code reads API keys from `ANTHROPIC_API_KEY` env, not from `.credentials.json`. Fall back to Path A.
+- The on-disk JWT `exp` is already fresher — Claude Code refreshed in-place, skip.
+
+In each of those cases the agent boots without touching the file and Path A or Path B applies. The exporter is failure-tolerant: any error (read, write, fs guard) is logged via `console.warn` and the boot continues — Claude Code will then surface the missing credential on first invocation, which is the existing fallback.
+
 ## Path A — API key (recap)
 
 The API key path lives entirely in `SKILL.md` because there's nothing to elaborate. Summary:

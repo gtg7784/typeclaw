@@ -43,7 +43,11 @@ import type { CronHandlerContext } from '@/plugin/types'
 import { createContainerBroker, publishForwardResult } from '@/portbroker'
 import { ReloadRegistry } from '@/reload'
 import { createClaimController } from '@/role-claim'
-import { exportCodexAuthFileForAgent, hydrateChannelEnvFromSecrets } from '@/secrets'
+import {
+  exportClaudeCredentialsFileForAgent,
+  exportCodexAuthFileForAgent,
+  hydrateChannelEnvFromSecrets,
+} from '@/secrets'
 import { createServer, type Server } from '@/server'
 import {
   createCommandRunner,
@@ -191,6 +195,19 @@ export async function startAgent({
   exportCodexAuthFileForAgent({
     agentDir: cwd,
     codexCliEnabled: cwdConfig.docker.file.codexCli,
+    log: (message) => console.warn(message),
+  })
+
+  // Same shape as the codex exporter above, gated on `docker.file.claudeCode`
+  // and `secrets.json#providers.anthropic`. Writes ~/.claude/.credentials.json
+  // so the Claude Code CLI in the container can run without the user pasting
+  // a CLAUDE_CODE_OAUTH_TOKEN. See src/secrets/export-claude-credentials-
+  // file.ts for the newer-wins compare that prevents clobbering Claude
+  // Code's in-place token refreshes, and the read-merge-write that preserves
+  // any mcpOAuth state in the file.
+  exportClaudeCredentialsFileForAgent({
+    agentDir: cwd,
+    claudeCodeEnabled: cwdConfig.docker.file.claudeCode,
     log: (message) => console.warn(message),
   })
 

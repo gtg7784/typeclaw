@@ -13,3 +13,13 @@ export {
   exportCodexAuthFileForAgent,
   exportCodexAuthFileIfApplicable,
 } from './export-codex-auth-file'
+
+export {
+  CLAUDE_CREDENTIALS_FILE_NAME,
+  CLAUDE_CREDENTIALS_RELATIVE_PATH,
+  CLAUDE_DEFAULT_CONFIG_DIR_NAME,
+  type ExportClaudeCredentialsFileResult,
+  exportClaudeCredentialsFileForAgent,
+  exportClaudeCredentialsFileIfApplicable,
+  resolveClaudeCredentialsPath,
+} from './export-claude-credentials-file'

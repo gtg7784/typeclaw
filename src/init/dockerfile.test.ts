@@ -1454,11 +1454,41 @@ describe('network egress entrypoint shim', () => {
     expect(shim).toContain('ln -sfn "$persist_root/.codex/auth.json" "$HOME/.codex/auth.json"')
   })
 
+  test('also symlinks Claude Code .credentials.json into /agent/.typeclaw/home/ so OAuth credentials survive container restarts', () => {
+    const shim = buildEntrypointShim()
+    // Claude Code rotates tokens in-place by rewriting .credentials.json on
+    // every successful refresh (anthropics/claude-code#53063). Without the
+    // symlink, the refreshed credential lands on the container's overlay
+    // and is wiped on the next `stop`+`start`. Same persist-root contract
+    // as the codex line above.
+    expect(shim).toContain('claude_config_dir="${CLAUDE_CONFIG_DIR:-}"')
+    expect(shim).toContain('claude_config_dir="$HOME/.claude"')
+    expect(shim).toContain('mkdir -p "$persist_root/.claude" "$claude_config_dir"')
+    expect(shim).toContain('ln -sfn "$persist_root/.claude/.credentials.json" "$claude_config_dir/.credentials.json"')
+  })
+
   test('uses ln -sfn (idempotent + non-dereferencing) so re-runs across container lives never fail and never recurse into a pre-existing ~/.codex directory', () => {
     const shim = buildEntrypointShim()
     expect(shim).toMatch(/ln -sfn "\$persist_root\/\.codex\/auth\.json" "\$HOME\/\.codex\/auth\.json"/)
     expect(shim).not.toMatch(/ln -s "\$persist_root\/\.codex\/auth\.json"/)
     expect(shim).not.toMatch(/ln -sf "\$persist_root\/\.codex\/auth\.json"/)
+  })
+
+  test('claude symlink also uses ln -sfn (same idempotency contract as codex)', () => {
+    const shim = buildEntrypointShim()
+    expect(shim).toMatch(
+      /ln -sfn "\$persist_root\/\.claude\/\.credentials\.json" "\$claude_config_dir\/\.credentials\.json"/,
+    )
+    expect(shim).not.toMatch(/ln -s "\$persist_root\/\.claude\/\.credentials\.json"/)
+    expect(shim).not.toMatch(/ln -sf "\$persist_root\/\.claude\/\.credentials\.json"/)
+  })
+
+  test('claude symlink honors CLAUDE_CONFIG_DIR when set', () => {
+    const shim = buildEntrypointShim()
+    const claudeConfigCheckIdx = shim.indexOf('if [ -z "$claude_config_dir" ]; then')
+    const claudeSymlinkIdx = shim.indexOf('"$claude_config_dir/.credentials.json"')
+    expect(claudeConfigCheckIdx).toBeGreaterThan(-1)
+    expect(claudeSymlinkIdx).toBeGreaterThan(claudeConfigCheckIdx)
   })
 
   test('link_persistent_home_files is called before each exec on both network-policy paths (off-path before exec bun; on-path after iptables, before exec setpriv) so the symlink is in place before the agent first reads ~/.codex', () => {
@@ -1626,6 +1656,12 @@ exec "$@"
     expect(linkStat.isSymbolicLink()).toBe(true)
     expect(readlinkSync(linkPath)).toBe(join(persistRoot, '.codex', 'auth.json'))
     expect(statSync(join(persistRoot, '.codex')).isDirectory()).toBe(true)
+
+    const claudeLinkPath = join(fakeHome, '.claude', '.credentials.json')
+    const claudeLinkStat = lstatSync(claudeLinkPath)
+    expect(claudeLinkStat.isSymbolicLink()).toBe(true)
+    expect(readlinkSync(claudeLinkPath)).toBe(join(persistRoot, '.claude', '.credentials.json'))
+    expect(statSync(join(persistRoot, '.claude')).isDirectory()).toBe(true)
   })
 
   test('off-path: link_persistent_home_files is idempotent — running the shim twice does not error and leaves the same symlink in place (ln -sfn replaces atomically)', async () => {
@@ -1662,6 +1698,10 @@ exec "$@"
     const linkPath = join(fakeHome, '.codex', 'auth.json')
     expect(lstatSync(linkPath).isSymbolicLink()).toBe(true)
     expect(readlinkSync(linkPath)).toBe(join(persistRoot, '.codex', 'auth.json'))
+
+    const claudeLinkPath = join(fakeHome, '.claude', '.credentials.json')
+    expect(lstatSync(claudeLinkPath).isSymbolicLink()).toBe(true)
+    expect(readlinkSync(claudeLinkPath)).toBe(join(persistRoot, '.claude', '.credentials.json'))
   })
 
   test('off-path: when Xvfb is not on PATH (docker.file.xvfb=false equivalent), the shim execs the agent directly without spawning anything or exporting DISPLAY', async () => {

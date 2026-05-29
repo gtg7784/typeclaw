@@ -36,10 +36,11 @@ If `claude` is installed but no credential is set up, you have to broker the aut
 
 **Decision rule, top to bottom:**
 
-1. **Already authenticated?** Run `env | grep -E '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)='` — if either is present, skip auth entirely.
-2. **User has an Anthropic Console workspace** (API billing, no subscription) → API key path.
-3. **User has a Claude Pro/Max/Team/Enterprise subscription** → OAuth token path.
-4. **User is unsure** → ask which kind of Claude account they have. Both paths are now equally low-friction (one user action each — paste an API key, or run one command on their machine and paste the result), so the old "prefer API key when unsure" bias is gone. Pick by account shape, not by flow complexity.
+1. **`~/.claude/.credentials.json` already populated?** When typeclaw is configured with an `anthropic` OAuth credential (via `typeclaw provider add anthropic` or the init wizard) AND `docker.file.claudeCode: true`, the agent boot auto-emits the credential to `~/.claude/.credentials.json`. Check with `test -s ~/.claude/.credentials.json && jq -e '.claudeAiOauth.accessToken' ~/.claude/.credentials.json` — if it returns a string, Claude Code reads it on its own with no env var needed. Skip auth entirely.
+2. **Already authenticated via env?** Run `env | grep -E '^(ANTHROPIC_API_KEY|CLAUDE_CODE_OAUTH_TOKEN)='` — if either is present, skip auth entirely.
+3. **User has an Anthropic Console workspace** (API billing, no subscription) → API key path.
+4. **User has a Claude Pro/Max/Team/Enterprise subscription** → OAuth token path.
+5. **User is unsure** → ask which kind of Claude account they have. Both paths are now equally low-friction (one user action each — paste an API key, or run one command on their machine and paste the result), so the old "prefer API key when unsure" bias is gone. Pick by account shape, not by flow complexity.
 
 Both paths converge on the same final steps: read `.env`, merge one new `KEY=value` line, write back with the `nonWorkspaceWrite` guard ack, verify, and prompt the user to restart the container. Only the credential differs.
 
