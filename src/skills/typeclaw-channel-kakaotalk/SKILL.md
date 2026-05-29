@@ -11,14 +11,16 @@ This means **you are messaging as a person, not as a bot.** Other participants s
 
 ## What KakaoTalk does NOT support
 
-If you produce any of the following, KakaoTalk will render it literally and the recipient will see the raw markup:
+KakaoTalk renders messages as plain text — it has no rich-text formatting. **Write plain text from the start.** The adapter strips common markdown as a safety net before sending (so an accidental `**bold**` won't leak literal asterisks), but treat that as a last-resort guard, not a license to write markdown: the strip removes _markers_, it cannot make formatting-dependent layouts like tables readable. Compose for a plain-text surface and you control the result; lean on the stripper and you get whatever falls out.
 
-- **Bold / italic / strikethrough** — `**bold**` shows as `**bold**`. Drop the asterisks; emphasize with word choice or capitalization (sparingly).
-- **Headings** — `# H1`, `## H2`, `### H3` all render as raw `#` characters.
-- **Tables** — pipe-delimited tables become a wall of `|` characters. Use bullet lists or short prose paragraphs instead.
-- **Code fences** — ``` blocks render as raw backticks. For short snippets, paste the code inline. For long snippets, summarize and offer to send it via another channel.
-- **Inline code** — `` `foo` `` renders as `` `foo` ``. Just write `foo`.
-- **Links with display text** — `[label](url)` becomes the literal string. Send the bare URL on its own; the KakaoTalk client will auto-link it.
+Specifically, do not rely on any of the following — write the plain-text equivalent yourself:
+
+- **Bold / italic / strikethrough** — emphasize with word choice or capitalization (sparingly), not `**asterisks**`.
+- **Headings** — `# H1`, `## H2`, `### H3` carry no visual weight here. Use a short label line or just lead with the point.
+- **Tables** — the stripper cannot rescue a pipe-delimited table; it would collapse into an unreadable line. Use bullet lists or short prose paragraphs instead.
+- **Code fences** — for short snippets, paste the code inline as plain text. For long snippets, summarize and offer to send it via another channel.
+- **Inline code** — just write `foo`, no backticks.
+- **Links with display text** — send the bare URL on its own line; the KakaoTalk client auto-links it. (A `[label](url)` that slips through is reduced to `label (url)`, but a bare URL reads cleaner.)
 - **Mentions** — there is no `@user` syntax that the protocol surfaces. Address people by name in the message body.
 - **Threads / replies-with-quote** — every message is a top-level chat post. There is no per-message reply UI.
 - **Outbound stickers / emoticons** — the KakaoTalk sticker store requires desktop-app purchase flows that the SDK does not replicate. Inbound stickers ARE surfaced (see below), but you cannot send one. If the user asks for a sticker, acknowledge the limit and offer text.
@@ -106,4 +108,4 @@ The adapter drops every inbound where `event.author_id` equals the logged-in acc
 
 ## When you cannot answer in KakaoTalk
 
-If the user asks you to do something the adapter cannot do (render markdown, post in a thread, send a sticker), say so plainly. Files are fine — those go through `attachments[]` as described above — but markdown rendering, threading, and stickers are real limits. Acknowledge the limit instead of silently dropping the request.
+If the user asks you to do something the adapter cannot do (post in a thread, send a sticker, render a real table), say so plainly. Files are fine — those go through `attachments[]` as described above — but threading, stickers, and rich formatting are real limits. Markdown markers you emit get stripped to plain text automatically, so a stray `**` won't leak; the limit is that nothing renders as formatting, not that it crashes. Acknowledge the limit instead of silently dropping the request.
