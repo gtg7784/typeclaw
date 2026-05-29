@@ -224,6 +224,7 @@ describe('streamLive — live session events', () => {
         target: { kind: 'broadcast' },
         payload: {
           kind: 'channel-inbound',
+          sessionId: 'ses_anything',
           adapter: 'slack',
           workspace: 'acme',
           chat: 'C12345',
@@ -280,6 +281,7 @@ describe('streamLive — live session events', () => {
       target: { kind: 'broadcast' },
       payload: {
         kind: 'channel-inbound',
+        sessionId: 'ses_anything',
         adapter: 'discord',
         workspace: '9999',
         chat: '8888',

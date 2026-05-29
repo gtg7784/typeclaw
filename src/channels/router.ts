@@ -1461,13 +1461,21 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }, wait)
   }
 
-  const publishInbound = (event: InboundMessage, decision: 'engage' | 'observe' | 'denied' | 'claim'): void => {
+  const publishInbound = (
+    event: InboundMessage,
+    decision: 'engage' | 'observe' | 'denied' | 'claim',
+    // Undefined before a session exists (denied/claim intercepts). Carried so a
+    // session-scoped `typeclaw inspect` only sees its own session's inbounds —
+    // the broadcast otherwise fans out to every inspect client.
+    sessionId?: string,
+  ): void => {
     if (stream === undefined) return
     try {
       stream.publish({
         target: { kind: 'broadcast' },
         payload: {
           kind: 'channel-inbound',
+          ...(sessionId !== undefined ? { sessionId } : {}),
           adapter: event.adapter,
           workspace: event.workspace,
           chat: event.chat,
@@ -1604,7 +1612,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     })
 
     if (decision === 'observe') {
-      publishInbound(event, 'observe')
+      publishInbound(event, 'observe', live.sessionId)
       // Log every observe so an unanswered mention is diagnosable from logs
       // alone instead of "routed but no prompting" silence. The bracketed
       // shape mirrors `prompting batch=` so log scraping can pair them.
@@ -1613,7 +1621,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
-    publishInbound(event, 'engage')
+    publishInbound(event, 'engage', live.sessionId)
 
     updateLoopGuard(live, event)
 

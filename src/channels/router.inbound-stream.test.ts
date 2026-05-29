@@ -99,6 +99,7 @@ describe('router publishes channel-inbound broadcasts', () => {
     expect(p.authorId).toBe('alice')
     expect(p.text).toBe('hey @bot help me')
     expect(p.isBotMention).toBe(true)
+    expect(p.sessionId).toBe('ses_1')
   })
 
   test('denied inbound publishes with decision=denied (still visible in inspect)', async () => {
@@ -122,6 +123,7 @@ describe('router publishes channel-inbound broadcasts', () => {
     expect(captured).toHaveLength(1)
     const p = captured[0]!.payload as Record<string, unknown>
     expect(p.decision).toBe('denied')
+    expect(p.sessionId).toBeUndefined()
   })
 
   test('observed inbound publishes with decision=observe', async () => {
