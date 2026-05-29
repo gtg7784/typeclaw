@@ -112,7 +112,7 @@ describe('buildDockerfile feature toggles', () => {
         }),
       ),
     )
-    expect(pkgs).toEqual(['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux'])
+    expect(pkgs).toEqual(['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux', 'bubblewrap'])
   })
 
   test('xvfb: true (the default) adds xvfb to the toggle apt package list, after the baseline packages', () => {
@@ -1050,7 +1050,7 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
     const match = base.match(/apt-get install -y --no-install-recommends \\\n\s+([^\n]+?) \\\n/)
     if (!match || !match[1]) throw new Error('main apt-get install line not found in base Dockerfile')
     const pkgs = match[1].split(/\s+/).filter(Boolean)
-    expect(pkgs).toEqual(['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux'])
+    expect(pkgs).toEqual(['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux', 'bubblewrap'])
   })
 
   test('base Dockerfile uses the same BuildKit syntax pragma and base image as the per-agent Dockerfile so layer caching across the two is possible', () => {

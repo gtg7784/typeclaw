@@ -464,12 +464,29 @@ export async function planStart({
   // misattribute to bot detection. 2g matches the Playwright/Puppeteer
   // canonical recommendation and is a memory cap, not an allocation (only
   // used pages count against the host).
+  // `seccomp=unconfined` lets `bwrap(1)` (installed in baseline; see
+  // BASELINE_APT_PACKAGES in src/init/dockerfile.ts) create user/pid/mount
+  // namespaces from inside the container. Docker's default seccomp profile
+  // rejects `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` for
+  // non-privileged containers, which is the right default for multi-tenant
+  // hosts (Kubernetes nodes, CI runners) but wrong for typeclaw: the outer
+  // container is a single-tenant trust boundary — the user trusts everything
+  // inside it equally, the .env and agent folder are already mounted in —
+  // so the multi-tenant protections seccomp adds are not load-bearing for
+  // typeclaw's threat model. The per-tool sandbox bwrap builds for subagents
+  // IS the real boundary against prompt-injected commands; that boundary is
+  // what `--security-opt seccomp=unconfined` exists to enable. See
+  // `docs/internals/sandbox.mdx` for the full rationale including why
+  // `--cap-add=SYS_ADMIN` was rejected as an alternative (narrower in
+  // syscalls but strictly worse in capability semantics).
   const runArgs = [
     'run',
     '-d',
     '--name',
     containerName,
     '--shm-size=2g',
+    '--security-opt',
+    'seccomp=unconfined',
     '-p',
     `${publishHost}:${hostPort}:${CONTAINER_PORT}`,
   ]
