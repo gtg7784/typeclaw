@@ -128,6 +128,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     allowlist: () => options.configRef().eventAllowlist,
     selfId: () => selfId,
     selfLogin: () => selfLogin,
+    authType: () => options.secrets.auth.type,
     isBotInTeam,
     logger,
     route: (message) => {
