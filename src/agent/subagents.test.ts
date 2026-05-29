@@ -359,6 +359,51 @@ describe('createSubagentConsumer', () => {
     consumer.stop()
   })
 
+  test('preserves a system spawnedByOrigin through JSON parse (not dropped to guest)', async () => {
+    // given: a streamed spawn whose spawnedByOrigin is a system origin —
+    // exactly how the memory plugin's spawn reaches a stream consumer once
+    // serialized. Regression guard for SESSION_ORIGIN_KINDS dropping 'system'.
+    const stream = createStream()
+    const captured: { spawnedByOrigin?: unknown }[] = []
+    // No custom handler: only the session path threads spawnedByOrigin into
+    // createSessionForSubagent. A handler-based subagent never sees the origin.
+    const registry = {
+      'memory-logger': {
+        systemPrompt: 'X',
+        payloadSchema: z.object({ agentDir: z.string() }),
+      } satisfies Subagent<{ agentDir: string }>,
+    }
+    const consumer = createSubagentConsumer({
+      stream,
+      getRegistry: () => registry,
+      agentDir: '/agent',
+      createSessionForSubagent: async (_subagent, options) => {
+        captured.push({ spawnedByOrigin: options?.spawnedByOrigin })
+        return fakeAgentSession([])
+      },
+      logger: silent,
+    })
+    consumer.start()
+
+    // when
+    const systemOrigin = { kind: 'system', component: 'memory-logger' }
+    stream.publish({
+      target: {
+        kind: 'new-session',
+        subagent: 'memory-logger',
+        spawnedByOriginJson: JSON.stringify(systemOrigin),
+      },
+      payload: { agentDir: '/agent' },
+    })
+    await new Promise((r) => setImmediate(r))
+
+    // then: the system origin survived parsing and reached the spawn
+    expect(captured).toHaveLength(1)
+    expect(captured[0]!.spawnedByOrigin).toEqual(systemOrigin)
+
+    consumer.stop()
+  })
+
   test('warns and ignores messages for unregistered subagent names', async () => {
     // given
     const stream = createStream()

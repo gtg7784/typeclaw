@@ -455,7 +455,12 @@ function parseSpawnedByOriginJson(
   return parsed
 }
 
-const SESSION_ORIGIN_KINDS = new Set(['tui', 'cron', 'channel', 'subagent'])
+// Must list EVERY SessionOrigin discriminator. `system` is included so a
+// streamed memory/backup spawn (whose spawnedByOrigin is serialized to JSON
+// and re-parsed here) keeps its owner-resolving origin instead of being
+// dropped and silently demoted to guest — the exact regression the system
+// origin exists to prevent. Keep in sync with the SessionOrigin union.
+const SESSION_ORIGIN_KINDS = new Set(['tui', 'cron', 'channel', 'subagent', 'system'])
 function isSessionOriginShape(value: unknown): value is SessionOrigin {
   if (value === null || typeof value !== 'object') return false
   const kind = (value as { kind?: unknown }).kind
