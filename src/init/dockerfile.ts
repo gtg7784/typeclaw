@@ -33,7 +33,27 @@ export type BuildDockerfileOptions = {
 // self-heals: it spawns Xvfb (and exports DISPLAY) if the binary is on
 // PATH, and execs the agent directly otherwise. See APT_FEATURES.xvfb
 // below and `buildEntrypointShim`.
-const BASELINE_APT_PACKAGES = ['git', 'ca-certificates', 'curl', 'gnupg', 'iptables', 'util-linux'] as const
+// `bubblewrap` ships the `bwrap(1)` setuid-less namespace sandboxer. It is
+// included in baseline (not behind a toggle) because per-tool sandboxing of
+// subagent bash calls is a runtime concern resolved by the agent, not by the
+// agent author. See `src/agent/sandbox/` (added in a follow-up PR) for the
+// invocation, and `docs/internals/sandbox.mdx` for why bwrap is the right
+// shape for per-call isolation inside an already-containerized agent. The
+// outer container's `--security-opt seccomp=unconfined` (added in the same
+// commit as this line; see `src/container/start.ts:planStart`) is what lets
+// bwrap create user/pid/mount namespaces from inside Docker. Without that
+// flag the seccomp default profile blocks `unshare(CLONE_NEWUSER)` and bwrap
+// fails at startup. The two changes are load-bearing together — do not drop
+// one without the other.
+const BASELINE_APT_PACKAGES = [
+  'git',
+  'ca-certificates',
+  'curl',
+  'gnupg',
+  'iptables',
+  'util-linux',
+  'bubblewrap',
+] as const
 
 // curl-impersonate is the only currently-working way to query DuckDuckGo from
 // a non-browser client on residential IPs in 2026. DDG fingerprints incoming

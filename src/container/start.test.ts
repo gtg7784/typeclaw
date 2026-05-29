@@ -139,6 +139,18 @@ describe('planStart', () => {
     expect(plan.runArgs).toContain('--shm-size=2g')
   })
 
+  test('sets --security-opt seccomp=unconfined unconditionally so bwrap can create user namespaces for per-tool sandboxing', async () => {
+    await writeDockerfile(root)
+    await writePackageJson(root, { typeclaw: '^0.1.0' })
+
+    const plan = await planStart({ cwd: root, hostPort: 8973, imageExists: true })
+
+    const idx = plan.runArgs.indexOf('--security-opt')
+    expect(idx).toBeGreaterThan(-1)
+    expect(plan.runArgs[idx + 1]).toBe('seccomp=unconfined')
+    expect(idx).toBeLessThan(plan.runArgs.indexOf(plan.imageTag))
+  })
+
   test('can publish the TUI websocket port on all host interfaces', async () => {
     await writeDockerfile(root)
     await writePackageJson(root, { typeclaw: '^0.1.0' })
