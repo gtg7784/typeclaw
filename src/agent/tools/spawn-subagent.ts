@@ -103,6 +103,7 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
       if (params.description !== undefined) payload.description = params.description
 
       const startedAt = now()
+      const spawnedByRole = permissions?.resolveRole(origin)
       const { handle, completion } = startSubagent(subagentName, {
         registry,
         createSessionForSubagent,
@@ -110,6 +111,7 @@ export function createSpawnSubagentTool(options: CreateSpawnSubagentToolOptions)
         userPrompt: params.prompt,
         payload: subagent.payloadSchema ? payload : undefined,
         parentSessionId,
+        ...(spawnedByRole !== undefined ? { spawnedByRole } : {}),
         ...(origin !== undefined ? { spawnedByOrigin: origin } : {}),
         taskId,
       })
