@@ -856,7 +856,7 @@ describe('createResourceLoader', () => {
     const loader = await createResourceLoader({ agentDir, origin })
 
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).toContain('**Mode C — Troubleshooting**')
+    expect(prompt).toContain('**Mode C — Troubleshooting.**')
     expect(prompt).toContain('typeclaw-troubleshooting')
     expect(prompt).toContain('run_in_background: true')
   })
@@ -867,7 +867,7 @@ describe('createResourceLoader', () => {
     const loader = await createResourceLoader({ agentDir, origin })
 
     const prompt = loader.getSystemPrompt() ?? ''
-    expect(prompt).not.toContain('**Mode C — Troubleshooting**')
+    expect(prompt).not.toContain('**Mode C — Troubleshooting.**')
     expect(prompt).not.toContain('typeclaw-troubleshooting')
   })
 
