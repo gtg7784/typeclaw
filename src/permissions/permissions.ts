@@ -110,6 +110,13 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
   function resolveRole(origin: SessionOrigin | undefined): string {
     if (origin === undefined) return 'guest'
 
+    // Runtime-owned infrastructure (memory, backup) acts on the operator's
+    // behalf over operator-owned state. It is constructed only by runtime/
+    // bundled code — inbound channel/cron content cannot produce this kind —
+    // so resolving it to owner is not a laundering vector. See the `system`
+    // origin doc in session-origin.ts.
+    if (origin.kind === 'system') return 'owner'
+
     if (origin.kind === 'cron') {
       const role = origin.scheduledByRole
       if (role !== undefined && byName.has(role)) return role

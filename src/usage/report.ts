@@ -140,6 +140,8 @@ function renderOriginLabel(kind: OriginKind, ctx: RenderCtx): string {
       return `${color('green', '#', ctx)} ${'channel'}`
     case 'subagent':
       return `${color('yellow', '↳', ctx)} ${'subagent'}`
+    case 'system':
+      return `${color('blue', '⚙', ctx)} ${'system'}`
     case 'unknown':
       return `${dim('?', ctx)} ${dim('unknown', ctx)}`
   }
@@ -211,6 +213,8 @@ function originGlyphOnly(kind: OriginKind, ctx: RenderCtx): string {
       return color('green', '#', ctx)
     case 'subagent':
       return color('yellow', '↳', ctx)
+    case 'system':
+      return color('blue', '⚙', ctx)
     case 'unknown':
       return dim('?', ctx)
   }

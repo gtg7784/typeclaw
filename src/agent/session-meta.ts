@@ -28,10 +28,12 @@ export type MinimalSessionOrigin =
       thread: string | null
     }
   | { kind: 'subagent'; subagent: string; parentSessionId: string }
+  | { kind: 'system'; component: string }
 
 // Reduce a full SessionOrigin to the minimum projection persisted to disk.
-// Drops participant lists, membership counts, recursive provenance, and
-// author identifiers — none of which `typeclaw usage` reads, and all of
+// Drops participant lists, membership counts, recursive provenance (including
+// the system origin's `triggeredBy`, which can carry channel author identity),
+// and author identifiers — none of which `typeclaw usage` reads, and all of
 // which would otherwise land in git history when sessions/ is auto-backed-up.
 // Kept as a separate function so the boundary between "data the LLM sees in
 // the system prompt" (full origin) and "data persisted for usage reporting"
@@ -58,5 +60,7 @@ function minimalOrigin(origin: SessionOrigin): MinimalSessionOrigin {
       }
     case 'subagent':
       return { kind: 'subagent', subagent: origin.subagent, parentSessionId: origin.parentSessionId }
+    case 'system':
+      return { kind: 'system', component: origin.component }
   }
 }

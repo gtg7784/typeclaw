@@ -48,6 +48,23 @@ export type SessionOrigin =
       spawnedByRole?: string
       spawnedByOrigin?: SessionOrigin
     }
+  // Runtime-owned infrastructure operating over TypeClaw's own state (memory
+  // logging/retrieval, backup), NOT user-delegated work. It resolves to `owner`
+  // because it acts on the operator's behalf over operator-owned files, with no
+  // single user session to inherit authority from — inheriting the triggering
+  // turn's role (e.g. a guest channel turn) would wrongly classify TypeClaw
+  // infrastructure as the guest actor and block its legitimate sessions//memory/
+  // access. `triggeredBy` keeps honest provenance — "a guest turn triggered the
+  // memory-logger" — without the synthetic-TUI lie. This kind is only ever
+  // constructed by runtime/bundled code; inbound channel/cron content can never
+  // produce it (those origins come from the runtime, not from message text), so
+  // it is not a role-laundering vector.
+  | {
+      kind: 'system'
+      component: string
+      reason?: string
+      triggeredBy?: SessionOrigin
+    }
 
 export const PARTICIPANTS_TOP_K = 10
 export const PARTICIPANTS_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000
@@ -118,6 +135,8 @@ export function renderSessionOrigin(
       return withRoleContext(renderChannelOrigin(origin, now), roleContext)
     case 'subagent':
       return withRoleContext(renderSubagentOrigin(origin), roleContext)
+    case 'system':
+      return withRoleContext(renderSystemOrigin(origin), roleContext)
   }
 }
 
@@ -165,6 +184,34 @@ function renderCronOrigin(origin: { jobId: string; jobKind: 'prompt' | 'exec' | 
     "the prompt has everything you should need. If you can't proceed, log",
     'your blockers and exit.',
   ].join('\n')
+}
+
+function renderSystemOrigin(origin: { component: string; reason?: string; triggeredBy?: SessionOrigin }): string {
+  const lines = [
+    '## Session origin',
+    '',
+    `You are the \`${origin.component}\` system process — TypeClaw-owned`,
+    "infrastructure operating over the agent folder on the operator's behalf,",
+    'not a user-delegated task. Do exactly the job described and exit.',
+  ]
+  if (origin.reason !== undefined) lines.push('', `Reason: ${origin.reason}`)
+  if (origin.triggeredBy !== undefined) lines.push('', `Triggered by: ${describeTrigger(origin.triggeredBy)}`)
+  return lines.join('\n')
+}
+
+function describeTrigger(origin: SessionOrigin): string {
+  switch (origin.kind) {
+    case 'tui':
+      return 'a TUI session'
+    case 'cron':
+      return `cron job \`${origin.jobId}\``
+    case 'channel':
+      return `a ${getPlatformInfo(origin.adapter).displayName} channel turn`
+    case 'subagent':
+      return `the \`${origin.subagent}\` subagent`
+    case 'system':
+      return `the \`${origin.component}\` system process`
+  }
 }
 
 function renderSubagentOrigin(origin: { subagent: string; parentSessionId: string }): string {

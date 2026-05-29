@@ -35,6 +35,18 @@ describe('resolveHiddenPaths — builtin tiers', () => {
     expect(files).toEqual([])
   })
 
+  test('system origin hides nothing even when triggered by a guest channel turn', () => {
+    const svc = createPermissionService()
+    const origin: SessionOrigin = {
+      kind: 'system',
+      component: 'memory-logger',
+      triggeredBy: { kind: 'channel', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: null },
+    }
+    const { dirs, files } = resolveHiddenPaths(svc, origin, AGENT)
+    expect(dirs).toEqual([])
+    expect(files).toEqual([])
+  })
+
   test('member sees private surface but hides the secret files', () => {
     const svc = createPermissionService()
     const { dirs, files } = resolveHiddenPaths(svc, spawnedBy('member'), AGENT)

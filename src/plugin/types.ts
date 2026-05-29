@@ -250,6 +250,18 @@ export type SpawnSubagentOptions = {
   // `spawnedByOrigin: event.origin`. The runtime resolves `spawnedByRole`
   // from the origin via the PermissionService, so the spawning session's
   // role is inherited rather than forged from outside.
+  //
+  // TRUST MODEL: `spawnedByOrigin` accepts any SessionOrigin, including
+  // `{ kind: 'system' }`, which resolves to owner. That is intentional and
+  // not an escalation path: a plugin is a full-trust, in-process module with
+  // no sandbox (see AGENTS.md / docs/internals/skills) — it can already do
+  // anything the runtime can, so minting a system origin grants it nothing it
+  // lacks. The anti-forgery guarantee this API preserves is narrower and
+  // unaffected: inbound channel/cron CONTENT can never reach owner, because
+  // those origins are constructed by the runtime from the transport, never
+  // from message text, and a content-driven turn cannot produce a `system`
+  // origin. Bundled infra (memory, backup) uses `system` to act on the
+  // operator's own state; third-party plugins should pass `event.origin`.
   parentSessionId?: string
   spawnedByOrigin?: SessionOrigin
 }

@@ -43,6 +43,20 @@ describe('PermissionService — defaults', () => {
     expect(svc.has(undefined, 'channel.respond')).toBe(false)
   })
 
+  test('system origin → owner (runtime infrastructure acts on operator behalf)', () => {
+    const svc = createPermissionService({ pluginPermissions: PLUGIN_PERMS })
+    expect(svc.resolveRole({ kind: 'system', component: 'memory-logger' })).toBe('owner')
+    // A guest-triggered system process still resolves to owner — the
+    // triggering origin does not demote it.
+    expect(
+      svc.resolveRole({
+        kind: 'system',
+        component: 'memory-logger',
+        triggeredBy: { kind: 'channel', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: null },
+      }),
+    ).toBe('owner')
+  })
+
   test('tui origin → owner via built-in match', () => {
     const svc = createPermissionService({ pluginPermissions: PLUGIN_PERMS })
     expect(svc.resolveRole(tui)).toBe('owner')

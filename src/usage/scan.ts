@@ -6,7 +6,7 @@ import { join } from 'node:path'
 // before origin stamping landed AND sessions whose session-meta line is
 // malformed or missing — surfacing them under one explicit label is more
 // honest than silently dropping them.
-export const ORIGIN_KINDS = ['tui', 'cron', 'channel', 'subagent', 'unknown'] as const
+export const ORIGIN_KINDS = ['tui', 'cron', 'channel', 'subagent', 'system', 'unknown'] as const
 export type OriginKind = (typeof ORIGIN_KINDS)[number]
 
 // Narrow projection: session files can grow into tens of MB on long-lived

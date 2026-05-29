@@ -20,6 +20,8 @@ export function originLabel(origin: MinimalSessionOrigin): string {
       return `Subagent ${origin.subagent} ← ${shortSessionId(origin.parentSessionId)}`
     case 'channel':
       return channelLabel(origin)
+    case 'system':
+      return `System ${origin.component}`
   }
 }
 
