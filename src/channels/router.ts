@@ -2199,9 +2199,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
-    // `source` distinguishes the two recovery shapes for log triage:
-    //   - 'leaf': the assistant message IS the leaf (existing behavior; model
-    //     ended its turn with text but forgot to call channel_reply).
+    // `source` distinguishes the three recovery shapes for log triage:
+    //   - 'leaf': the assistant message IS the leaf with stopReason 'stop'
+    //     (existing behavior; model ended its turn with text but forgot to
+    //     call channel_reply).
+    //   - 'mid-turn': the assistant message IS the leaf with stopReason
+    //     'toolUse'; the model narrated a reply, committed to a tool plan, and
+    //     the turn ended before a follow-up that would have called a channel
+    //     tool was persisted. The narration is the only user-facing text.
     //   - 'pre-tool': the leaf is a toolResult (or other non-assistant entry)
     //     and the assistant message lives upstream in the branch. This is the
     //     Kimi-on-Fireworks `kimi-k2p6-turbo` failure mode where the post-tool
@@ -3001,13 +3006,27 @@ async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): 
 // assistant message — i.e., text the user should see but didn't, because the
 // model failed to call `channel_reply`/`channel_send` before its turn ended.
 //
-// Two recovery shapes:
+// Three recovery shapes:
 //
 //   - source: 'leaf'
 //     The leaf entry IS an assistant message with `stopReason === 'stop'`.
 //     The model finished its turn with visible text but never called a channel
 //     tool. Pre-existing behavior; this is what the historical
 //     `latestAssistantText` covered.
+//
+//   - source: 'mid-turn'
+//     The leaf IS an assistant message with `stopReason === 'toolUse'` that
+//     carries visible text. The model narrated a user-facing reply ("on it,
+//     bumping to 16x now") AND committed to a tool plan in the same message,
+//     but the turn ended before any follow-up assistant message that would
+//     have called `channel_reply` was persisted — the upstream pi-agent-core
+//     loop's post-tool follow-up never landed, or the run was aborted
+//     mid-loop. The model treated its visible prose as ambient narration; in
+//     a channel session that prose is dead text. Recovers it so the user gets
+//     the reply the model thought it had already given. Observed against
+//     Fireworks' `kimi-k2p6-turbo` on KakaoTalk: the agent posted speed-change
+//     status as narration, kept taking screenshots, and the user saw nothing.
+//     This is the leaf-is-assistant twin of the 'pre-tool' shape below.
 //
 //   - source: 'pre-tool'
 //     The leaf is a `toolResult` and the immediately-prior assistant message
@@ -3020,22 +3039,34 @@ async function raceWithTimeout<T>(work: Promise<T>, ms: number, label: string): 
 //
 // Returns null when no recovery is appropriate:
 //   - No leaf, no messages in branch, branch is malformed
-//   - Leaf is an assistant with non-'stop' stopReason (e.g. mid-stream error)
+//   - Leaf is an assistant with `stopReason` of 'length' / 'error' / 'aborted'
 //     and is NOT preceded by a toolResult pattern — we don't recover partial
 //     errored output because it's typically a truncation, not a deliberate
-//     reply
+//     reply. Only 'stop' (turn-complete) and 'toolUse' (committed to a tool
+//     plan, prose stranded) signal text the model meant for the user.
 //   - Leaf is a user/system message (model hasn't responded yet)
 //
 // `visibleAssistantText` returning '' (empty string) is a valid recovery
 // target — the caller's downstream guards (`endsWithNoReplySignal('')` returns
 // true) handle the no-content case explicitly via the `no_reply` log.
-function recoverableAssistantText(session: AgentSession): { text: string; source: 'leaf' | 'pre-tool' } | null {
+function recoverableAssistantText(
+  session: AgentSession,
+): { text: string; source: 'leaf' | 'mid-turn' | 'pre-tool' } | null {
   const leaf = session.sessionManager.getLeafEntry()
   if (!leaf) return null
 
   if (leaf.type === 'message' && leaf.message.role === 'assistant') {
-    if (leaf.message.stopReason !== 'stop') return null
-    return { text: visibleAssistantText(leaf.message), source: 'leaf' }
+    if (leaf.message.stopReason === 'stop') {
+      return { text: visibleAssistantText(leaf.message), source: 'leaf' }
+    }
+    // The model committed to a tool plan but its visible prose never reached
+    // the channel and no follow-up message that would have called a channel
+    // tool was persisted. Recover the stranded prose. Other non-'stop' stop
+    // reasons (length/error/aborted) are truncations, not deliberate replies.
+    if (leaf.message.stopReason === 'toolUse') {
+      return { text: visibleAssistantText(leaf.message), source: 'mid-turn' }
+    }
+    return null
   }
 
   // Pre-tool recovery: the leaf must be a toolResult message, and walking
