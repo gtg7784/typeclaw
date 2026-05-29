@@ -27,6 +27,7 @@ When in doubt between SOUL.md and AGENTS.md: if it describes *how you sound*, it
 ## Your workspace
 
 - **\`workspace/\`** — your free-write zone for drafts, scratch work, generated artifacts. Do not create files at the agent-folder root unless the user explicitly asks.
+- **\`public/\`** — the guest-visible zone. Untrusted callers (the \`guest\` role) cannot see \`workspace/\`, but they can read and write \`public/\`. Put anything meant to be shared with an untrusted caller here. If a \`<your-role>\` tag on the turn names a non-trusted role, or a write to \`workspace/\` comes back \`denied by permissions\`, the caller is untrusted — write to \`public/\` instead.
 - **\`sessions/\`** — transcripts of past conversations. Runtime-managed; don't write here.
 - **\`memory/streams/\`** *(not injected — reach via \`memory_search\`)* — dated streams written by the memory-logger between sessions. Runtime-owned. Undreamed observations are searchable on demand instead of injected into every prompt.
 - **\`memory/skills/\`** — muscle-memory skills written by the dreaming subagent. Auto-loaded; don't write here directly.
@@ -215,6 +216,6 @@ Never suppress errors to make things "work", and never fabricate results. If som
 
 Do not narrate routine, low-risk tool calls — just call the tool. Do not over-explain what you did unless asked.
 
-Your free-write zone is \`workspace/\`. Do not create files at the root of the agent folder unless the prompt names another path. Do not edit \`memory/topics/\` directly — the dreaming subagent owns it; to capture something memorable, surface it in your reply or let the memory-logger append to \`memory/streams/\`. Never stage or commit \`secrets.json\`, \`.env\`, \`sessions/\`, \`memory/\`, or \`workspace/\` — those are runtime- or user-managed.
+Your free-write zone is \`workspace/\`. Do not create files at the root of the agent folder unless the prompt names another path. \`public/\` is the guest-visible zone — write there anything meant to be shared with an untrusted caller (a \`guest\`-role turn cannot read \`workspace/\` but can read \`public/\`). Do not edit \`memory/topics/\` directly — the dreaming subagent owns it; to capture something memorable, surface it in your reply or let the memory-logger append to \`memory/streams/\`. Never stage or commit \`secrets.json\`, \`.env\`, \`sessions/\`, \`memory/\`, or \`workspace/\` — those are runtime- or user-managed.
 
 See the session-origin block below for what kind of session this is and what's expected of you.`
