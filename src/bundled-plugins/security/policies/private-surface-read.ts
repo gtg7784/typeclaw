@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs'
 import path from 'node:path'
 
 import type { HiddenPaths } from '@/sandbox'
@@ -96,18 +97,59 @@ function walk(value: unknown, out: string[]): void {
 // exact equality; hidden directories match the dir itself or anything under it,
 // using a trailing slash so `workspace` does not also match a sibling
 // `workspace-notes`.
+//
+// Symlink defense: lexical path.resolve is NOT enough. A restricted role can
+// plant `public/leak -> ../.env` (or `-> ../memory`) via sandboxed bash, then
+// read it back through a non-bash tool whose path lexically lands in the
+// guest-visible `public/`. So we resolve the candidate's REAL path
+// (realpathRealIntendedPath follows symlinks on every existing path component)
+// before matching. Both sides are realpath'd because agentDir itself may sit
+// under a symlink (e.g. /tmp -> /private/tmp on macOS); comparing a real
+// candidate against a lexical deny-list would never match.
 function matchHidden(
   candidate: string,
   agentDir: string,
   deniedDirs: string[],
   deniedFiles: string[],
 ): string | undefined {
-  const resolved = path.resolve(agentDir, candidate)
+  const resolved = realpathRealIntendedPath(path.resolve(agentDir, candidate))
   for (const file of deniedFiles) {
-    if (resolved === file) return file
+    if (resolved === realpathRealIntendedPath(file)) return file
   }
   for (const dir of deniedDirs) {
-    if (resolved === dir || resolved.startsWith(`${dir}/`)) return dir
+    const realDir = realpathRealIntendedPath(dir)
+    if (resolved === realDir || resolved.startsWith(`${realDir}/`)) return dir
   }
   return undefined
+}
+
+// Resolves symlinks on the longest existing prefix of an absolute path, then
+// re-appends the non-existent tail. A bare realpathSync throws on a path that
+// does not exist yet (a write target, or a read of a not-yet-created file), so
+// we walk up to the nearest existing ancestor, realpath THAT (collapsing any
+// symlinked component including a planted symlink), and rejoin the remainder.
+// This catches `public/leak/x` where `public/leak` is a symlink into a hidden
+// dir even though `public/leak/x` itself does not exist. Sync (realpathSync)
+// keeps the guard synchronous so the security tool.before check array stays
+// non-async; the cost is one syscall per existing component, negligible at the
+// tool-call boundary. Sync mirror of resolveRealIntendedPath in the guard
+// plugin's non-workspace-write policy.
+function realpathRealIntendedPath(absolutePath: string): string {
+  const pending: string[] = []
+  let current = absolutePath
+  while (true) {
+    try {
+      return path.join(realpathSync.native(current), ...pending.reverse())
+    } catch (err) {
+      if (!isNotFoundError(err)) throw err
+    }
+    const parent = path.dirname(current)
+    if (parent === current) return absolutePath
+    pending.push(path.basename(current))
+    current = parent
+  }
+}
+
+function isNotFoundError(err: unknown): boolean {
+  return err instanceof Error && 'code' in err && err.code === 'ENOENT'
 }
