@@ -826,6 +826,38 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('completion `<system-reminder>`')
     expect(prompt).toContain('Surface the result via `channel_reply`')
   })
+
+  test('full prompt carries the post-hatching file-routing matrix so a tone preference cannot land in AGENTS.md and a process rule cannot land in SOUL.md', async () => {
+    // Without these assertions, a future trim of system-prompt.ts could
+    // quietly drop the routing matrix and the prompt would still
+    // type-check, render, and pass every other test — but the agent
+    // would lose the steady-state guidance for which file owns what.
+    const origin: SessionOrigin = { kind: 'tui', sessionId: 'ses_t' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('role, function, scope of work')
+    expect(prompt).toContain('voice, tone, register')
+    expect(prompt).toContain('facts about the user')
+    expect(prompt).toContain('working conventions, repeatable procedures')
+    expect(prompt).toContain('how you sound')
+    expect(prompt).toContain('how you work')
+    expect(prompt).toContain('Edit discipline')
+    expect(prompt).toContain('SOUL.md should stay short')
+    expect(prompt).toContain("a single off-day request isn't a durable change")
+  })
+
+  test('slim prompt does NOT carry the post-hatching routing matrix (cron/subagent budget guard against copy-paste regression)', async () => {
+    const origin: SessionOrigin = { kind: 'cron', jobId: 'job-1', jobKind: 'prompt' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('role, function, scope of work')
+    expect(prompt).not.toContain('how you sound')
+    expect(prompt).not.toContain('Edit discipline')
+  })
 })
 
 describe('deriveSystemPromptMode', () => {
