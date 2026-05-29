@@ -15,7 +15,7 @@ import {
 } from 'agent-messenger/kakaotalk'
 import type { KakaoAccountCredentials, KakaoConfig, PendingLoginState } from 'agent-messenger/kakaotalk'
 
-import type { ChannelRouter } from '@/channels/router'
+import { prependQuoteAnchor, type ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig } from '@/channels/schema'
 import type {
   ChannelHistoryMessage,
@@ -40,6 +40,17 @@ import { createKakaoChannelResolver, type KakaoChannelResolver } from './kakaota
 import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
 import { createFetchAttachmentCallback } from './kakaotalk-fetch-attachment'
 
+// Mirrors the upstream `KakaoReplyTarget` (agent-messenger#204). Declared here
+// rather than imported so the adapter type-checks against the in-repo SDK pin
+// that predates the reply API; the upstream export is structurally identical
+// and supersedes this once the dependency is bumped.
+export type KakaoReplyTarget = {
+  log_id: string
+  author_id: number
+  message: string
+  type: number
+}
+
 // Structural duck-type of the upstream KakaoTalkClient class. The upstream
 // type is a class with private fields, and TypeScript treats those
 // nominally — test fakes that match the public surface get rejected.
@@ -53,7 +64,7 @@ export interface KakaoTalkClient {
   ): Promise<this>
   getChats(options?: { all?: boolean; search?: string }): Promise<KakaoChat[]>
   getMessages(chatId: string, options?: { count?: number; from?: string }): Promise<KakaoMessage[]>
-  sendMessage(chatId: string, text: string): Promise<KakaoSendResult>
+  sendMessage(chatId: string, text: string, options?: { replyTo?: KakaoReplyTarget }): Promise<KakaoSendResult>
   sendAttachment(
     chatId: string,
     data: Uint8Array | Buffer,
@@ -160,6 +171,11 @@ export type KakaotalkAdapter = {
 
 export const KAKAO_HISTORY_LIMIT_MAX = 200
 
+// How far back to scan for a reply target's source message. Matches the upstream
+// CLI's window; an anchored reply targets the message just answered, so the
+// target is almost always near the head of this window.
+const KAKAO_REPLY_LOOKUP_COUNT = 100
+
 function formatLabel(name: string | undefined, id: string, prefix = ''): string {
   if (name === undefined || name === '' || name === id) return id
   return `${prefix}${name}(${id})`
@@ -171,7 +187,7 @@ async function readAttachmentBuffer(path: string): Promise<Buffer> {
 }
 
 export function createOutboundCallback(deps: {
-  client: Pick<KakaoTalkClient, 'sendMessage' | 'sendAttachment'>
+  client: Pick<KakaoTalkClient, 'sendMessage' | 'sendAttachment' | 'getMessages'>
   logger: KakaotalkAdapterLogger
   formatChannelTag: (workspace: string, chat: string) => Promise<string>
   readFile?: (path: string) => Promise<Buffer>
@@ -221,8 +237,26 @@ export function createOutboundCallback(deps: {
     }
 
     if (text !== '') {
+      // KakaoTalk's native reply payload is built from the *source* message
+      // (author, original text, type), which the SDK does not derive from a
+      // bare log_id — we resolve it from recent history. If that lookup can't
+      // find the target (scrolled past the window, or the fetch failed), we
+      // degrade to the same blockquote anchor the router uses for quote-mode
+      // adapters, so the reply still visibly references the right message.
+      let outboundText = text
+      let replyTarget: KakaoReplyTarget | undefined
+      if (msg.replyTo !== undefined) {
+        replyTarget = await resolveKakaoReplyTarget(client, msg.chat, msg.replyTo.externalMessageId, logger)
+        if (replyTarget === undefined && msg.replyTo.source !== undefined) {
+          outboundText = prependQuoteAnchor(text, msg.replyTo.source)
+        }
+      }
       try {
-        const result = await client.sendMessage(msg.chat, text)
+        const result = await client.sendMessage(
+          msg.chat,
+          outboundText,
+          replyTarget !== undefined ? { replyTo: replyTarget } : undefined,
+        )
         if (!result.success) {
           logger.error(`[kakaotalk] sendMessage status_code=${result.status_code} ${tag}`)
           return { ok: false, error: `kakaotalk send failed with status ${result.status_code}` }
@@ -236,6 +270,30 @@ export function createOutboundCallback(deps: {
     }
 
     return { ok: true }
+  }
+}
+
+// KakaoTalk replies need the full source message, not just its log_id. Resolve
+// it from the chat's recent history (matching the upstream CLI's approach).
+// Returns undefined when the target isn't in the fetched window or the fetch
+// throws — the caller degrades to the blockquote fallback in that case.
+async function resolveKakaoReplyTarget(
+  client: Pick<KakaoTalkClient, 'getMessages'>,
+  chatId: string,
+  externalMessageId: string,
+  logger: KakaotalkAdapterLogger,
+): Promise<KakaoReplyTarget | undefined> {
+  try {
+    const messages = await client.getMessages(chatId, { count: KAKAO_REPLY_LOOKUP_COUNT })
+    const target = messages.find((m) => m.log_id === externalMessageId)
+    if (target === undefined) {
+      logger.warn(`[kakaotalk] reply target log_id=${externalMessageId} not in last ${KAKAO_REPLY_LOOKUP_COUNT}`)
+      return undefined
+    }
+    return { log_id: target.log_id, author_id: target.author_id, message: target.message, type: target.type }
+  } catch (err) {
+    logger.warn(`[kakaotalk] reply target lookup failed: ${describe(err)}`)
+    return undefined
   }
 }
 
