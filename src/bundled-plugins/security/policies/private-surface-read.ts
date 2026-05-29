@@ -96,6 +96,14 @@ const NON_PATH_KEYS = new Set([
   // grep tool: a glob like `workspace/*.md` is a filter pattern, not the
   // search root (that is `path`), so it must not resolve-match a hidden dir.
   'glob',
+  // channel_send/channel_reply attachments[].filename and
+  // channel_fetch_attachment.filename: display-only metadata (defaults to the
+  // basename of the real `path`), never the file location the guard cares
+  // about — `attachments[].path` carries that and is NOT exempted. Without
+  // this, an attachment named e.g. "memory" is blocked even when its path is a
+  // safe `public/...`. Verified across the tool surface: no tool uses
+  // `filename` as a path argument.
+  'filename',
 ])
 
 // Recursively collects strings that could be paths, skipping values under

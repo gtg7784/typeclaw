@@ -88,6 +88,25 @@ describe('private-surface-read guard — free-text field scoping (no false posit
     expect(check('some_new_plugin_tool', { srcPath: 'memory/x' })?.block).toBe(true)
     expect(check('some_new_plugin_tool', { nested: { target: 'workspace/y' } })?.block).toBe(true)
   })
+
+  test('does not block an attachment display filename that equals a hidden-dir name', () => {
+    expect(
+      check('channel_send', {
+        text: 'see attached',
+        attachments: [{ path: 'public/report.pdf', filename: 'memory' }],
+      }),
+    ).toBeUndefined()
+    expect(check('channel_reply', { attachments: [{ path: 'public/x.md', filename: 'sessions' }] })).toBeUndefined()
+    expect(check('channel_fetch_attachment', { attachment_id: 1, filename: 'workspace' })).toBeUndefined()
+  })
+
+  test('STILL blocks a hidden attachments[].path even when filename is exempt', () => {
+    expect(
+      check('channel_send', {
+        attachments: [{ path: 'memory/leak.md', filename: 'report.pdf' }],
+      })?.block,
+    ).toBe(true)
+  })
 })
 
 describe('private-surface-read guard — false-positive control', () => {
