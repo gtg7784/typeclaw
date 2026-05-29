@@ -101,6 +101,10 @@ export type InspectFramePayload =
   // text — no batching, no compose-prompt wrapping.
   | {
       kind: 'channel_inbound'
+      // Channel session this inbound belongs to. Absent for denied/claim
+      // intercepts that fire before a session exists. The inspect server drops
+      // frames whose sessionId does not match the watched session.
+      sessionId?: string
       adapter: string
       workspace: string
       chat: string

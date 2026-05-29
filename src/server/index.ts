@@ -1119,9 +1119,13 @@ function handleInspectMessage(
   ws.data.unsubBroadcast?.()
   ws.data.unsubCron?.()
 
+  const watchedSessionId = msg.sessionId
+
   if (stream !== undefined && typeof msg.sinceMs === 'number') {
     for (const event of stream.scan({ sinceTs: msg.sinceMs, target: { kind: 'broadcast' } })) {
-      sendInspect(ws, { type: 'frame', ts: event.ts, payload: broadcastEventToFrame(event) })
+      const payload = broadcastEventToFrame(event)
+      if (!inspectFrameMatchesSession(payload, watchedSessionId)) continue
+      sendInspect(ws, { type: 'frame', ts: event.ts, payload })
     }
     for (const event of stream.scan({ sinceTs: msg.sinceMs, target: { kind: 'cron' } })) {
       sendInspect(ws, {
@@ -1143,7 +1147,9 @@ function handleInspectMessage(
 
   if (stream !== undefined) {
     ws.data.unsubBroadcast = stream.subscribe({ target: { kind: 'broadcast' } }, (event) => {
-      sendInspect(ws, { type: 'frame', ts: event.ts, payload: broadcastEventToFrame(event) })
+      const payload = broadcastEventToFrame(event)
+      if (!inspectFrameMatchesSession(payload, watchedSessionId)) return
+      sendInspect(ws, { type: 'frame', ts: event.ts, payload })
     })
     ws.data.unsubCron = stream.subscribe({ target: { kind: 'cron' } }, (event) => {
       sendInspect(ws, {
@@ -1171,6 +1177,15 @@ function broadcastEventToFrame(event: StreamMessage): InspectFramePayload {
   }
 }
 
+// Channel inbounds are published as global broadcasts, so every inspect client
+// receives every session's inbounds. Drop the ones that don't belong to the
+// session being watched. Non-inbound broadcasts (subagent completions, cron,
+// tunnels) stay global — they carry no session identity here.
+function inspectFrameMatchesSession(payload: InspectFramePayload, watchedSessionId: string): boolean {
+  if (payload.kind !== 'channel_inbound') return true
+  return payload.sessionId === watchedSessionId
+}
+
 function readChannelInboundBroadcast(payload: unknown): InspectFramePayload | null {
   if (typeof payload !== 'object' || payload === null) return null
   const p = payload as Record<string, unknown>
@@ -1191,6 +1206,7 @@ function readChannelInboundBroadcast(payload: unknown): InspectFramePayload | nu
   if (decision !== 'engage' && decision !== 'observe' && decision !== 'denied' && decision !== 'claim') return null
   return {
     kind: 'channel_inbound',
+    ...(typeof p.sessionId === 'string' ? { sessionId: p.sessionId } : {}),
     adapter: p.adapter,
     workspace: p.workspace,
     chat: p.chat,

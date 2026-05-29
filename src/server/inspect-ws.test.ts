@@ -238,6 +238,51 @@ describe('/inspect WS handler', () => {
     ws.close()
   })
 
+  test('channel inbounds from a different session are not forwarded; the watched session is', async () => {
+    const stream = createStream()
+    const { url } = await startServer({ stream })
+    const { ws, waitFor, received } = await connectInspect(url)
+    ws.send(JSON.stringify({ type: 'subscribe', sessionId: 'ses_watched' }))
+    await waitFor((m) => m.type === 'subscribed')
+
+    const inbound = (sessionId: string, text: string): void => {
+      stream.publish({
+        target: { kind: 'broadcast' },
+        payload: {
+          kind: 'channel-inbound',
+          sessionId,
+          adapter: 'slack',
+          workspace: 'acme',
+          chat: 'C1',
+          thread: null,
+          authorId: 'U1',
+          authorName: 'alice',
+          authorIsBot: false,
+          isDm: false,
+          isBotMention: true,
+          text,
+          externalMessageId: 'm1',
+          ts: 1_700_000_000_000,
+          decision: 'engage',
+        },
+      })
+    }
+
+    inbound('ses_other', 'leaked from another session')
+    inbound('ses_watched', 'belongs here')
+
+    const frame = await waitFor((m) => m.type === 'frame' && m.payload.kind === 'channel_inbound')
+    if (frame.type !== 'frame' || frame.payload.kind !== 'channel_inbound') throw new Error('unreachable')
+    expect(frame.payload.text).toBe('belongs here')
+
+    const leaked = received.some(
+      (m) =>
+        m.type === 'frame' && m.payload.kind === 'channel_inbound' && m.payload.text === 'leaked from another session',
+    )
+    expect(leaked).toBe(false)
+    ws.close()
+  })
+
   test('Stream cron events forward as cron-fire frames with the jobId surfaced', async () => {
     const stream = createStream()
     const { url } = await startServer({ stream })
