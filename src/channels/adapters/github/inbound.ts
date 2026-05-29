@@ -381,15 +381,25 @@ function readAuthor(event: string, payload: Record<string, unknown>): GithubUser
 // drop must see the reviewer, so `review` must come first. PR #455's flat order
 // (`pull_request` before `review`) made a self-review on someone else's PR
 // resolve to the PR author, slip past the drop, and loop (see PR #460).
+//
+// `pull_request` and `pull_request_review_thread` carry only the `pull_request`
+// container, whose `user` is the PR OPENER — not the actor of this delivery.
+// For these events the self-author question is "who triggered the action?"
+// (review_requested, edited, reopened, resolved, …), which is always
+// `payload.sender`, never the opener. Mapping them to `[]` makes readAuthor
+// skip the opener and fall through to the `sender` fallback. PR #462's
+// `['pull_request']` resolved to the opener, so a human action on a
+// bot-opened PR matched the bot and was wrongly dropped (the inbound landed
+// as awareness-only "Recent context" and the agent never replied).
 const PRIMARY_AUTHOR_KEYS: Record<string, readonly string[]> = {
   issue_comment: ['comment'],
   pull_request_review_comment: ['comment'],
   discussion_comment: ['comment'],
   commit_comment: ['comment'],
   pull_request_review: ['review'],
-  pull_request_review_thread: ['pull_request'],
+  pull_request_review_thread: [],
   issues: ['issue'],
-  pull_request: ['pull_request'],
+  pull_request: [],
   discussion: ['discussion'],
   release: ['release'],
 }

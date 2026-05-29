@@ -432,6 +432,80 @@ describe('createGithubWebhookHandler — self-author drop', () => {
     expect(routedSink).toHaveLength(0)
     expect(drops.some((m) => m.includes('dropped self-authored'))).toBe(true)
   })
+
+  it('routes a pull_request action from a human on a bot-opened PR', async () => {
+    // Regression for the over-drop on `pull_request` events: PR #462 resolved
+    // the author from `pull_request.user` (the OPENER), so a human action on a
+    // bot-opened PR matched the bot by login and was wrongly dropped — the
+    // comment landed as awareness-only "Recent context" and the agent never
+    // replied. The self-author identity for a `pull_request` action is the
+    // ACTOR (`sender`), not the opener.
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed, {
+      allowlist: ['pull_request.review_requested'],
+    })
+    const payload = {
+      action: 'review_requested',
+      repository: repo(),
+      sender: { login: 'alice', id: 10, type: 'User' },
+      requested_reviewer: { login: 'typeclaw-bot', id: 99, type: 'User' },
+      pull_request: {
+        number: 7,
+        id: 700,
+        title: 'Add feature',
+        user: { login: 'typeclaw-bot', id: 99, type: 'Bot' },
+        head: { ref: 'feat-branch' },
+        base: { ref: 'main' },
+      },
+    }
+    await handler(signedRequest(JSON.stringify(payload), 'pull_request', 'human-action-bot-pr'))
+    expect(routed).toHaveLength(1)
+    expect(routed[0]?.authorName).toBe('alice')
+  })
+
+  it('drops a pull_request action the bot itself triggered on its own PR', async () => {
+    // Self-loop guard must still fire: the bot requesting a review on its own
+    // PR is `sender = bot`, and that delivery must not wake a session.
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed, {
+      allowlist: ['pull_request.review_requested'],
+    })
+    const payload = {
+      action: 'review_requested',
+      repository: repo(),
+      sender: { login: 'typeclaw-bot', id: 99, type: 'Bot' },
+      requested_reviewer: { login: 'someone-else', id: 20, type: 'User' },
+      pull_request: {
+        number: 7,
+        id: 700,
+        title: 'Add feature',
+        user: { login: 'typeclaw-bot', id: 99, type: 'Bot' },
+        head: { ref: 'feat-branch' },
+        base: { ref: 'main' },
+      },
+    }
+    await handler(signedRequest(JSON.stringify(payload), 'pull_request', 'bot-action-own-pr'))
+    expect(routed).toHaveLength(0)
+  })
+
+  it('drops a pull_request_review_thread the bot itself resolved', async () => {
+    // pull_request_review_thread carries only the `pull_request` container
+    // (opener), so the self-author identity must come from `sender`. A bot
+    // resolving its own review thread must not wake a session.
+    const routed: InboundMessage[] = []
+    const handler = selfAuthoredHandler(routed, {
+      allowlist: ['pull_request_review_thread.resolved'],
+    })
+    const payload = {
+      action: 'resolved',
+      repository: repo(),
+      sender: { login: 'typeclaw-bot', id: 99, type: 'Bot' },
+      pull_request: { number: 7, id: 700, user: { login: 'alice', id: 10, type: 'User' } },
+      thread: { id: 333 },
+    }
+    await handler(signedRequest(JSON.stringify(payload), 'pull_request_review_thread', 'bot-thread-resolved'))
+    expect(routed).toHaveLength(0)
+  })
 })
 
 function signedRequest(body: string, event: string, delivery: string): Request {
