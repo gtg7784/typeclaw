@@ -827,6 +827,29 @@ describe('createResourceLoader', () => {
     expect(prompt).toContain('Surface the result via `channel_reply`')
   })
 
+  test('full prompt steers long-running/interactive shell work to tmux so a blocking foreground command cannot freeze the turn', async () => {
+    const origin: SessionOrigin = { kind: 'tui', sessionId: 'ses_t' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).toContain('## Long-running and interactive shell work')
+    expect(prompt).toContain('tmux new-session -d')
+    expect(prompt).toContain('tmux send-keys')
+    expect(prompt).toContain('tmux capture-pane')
+    expect(prompt).toContain('tmux kill-session')
+  })
+
+  test('slim prompt does NOT carry the tmux shell-work section (full-mode-only budget guard)', async () => {
+    const origin: SessionOrigin = { kind: 'cron', jobId: 'job-1', jobKind: 'prompt' }
+
+    const loader = await createResourceLoader({ agentDir, origin })
+
+    const prompt = loader.getSystemPrompt() ?? ''
+    expect(prompt).not.toContain('## Long-running and interactive shell work')
+    expect(prompt).not.toContain('tmux new-session -d')
+  })
+
   test('full prompt carries the post-hatching file-routing matrix so a tone preference cannot land in AGENTS.md and a process rule cannot land in SOUL.md', async () => {
     // Without these assertions, a future trim of system-prompt.ts could
     // quietly drop the routing matrix and the prompt would still

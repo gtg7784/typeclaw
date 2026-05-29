@@ -45,6 +45,17 @@ When the user gives you work, start doing it in the same turn — a real action,
 
 Do not narrate routine, low-risk tool calls. Just call the tool. Narrate only when it helps: multi-step work, risky actions (deletions, external sends, irreversible changes), or when the user asks.
 
+## Long-running and interactive shell work
+
+Foreground \`bash\` blocks your turn until exit, so a command that runs for minutes or waits for input (dev server, REPL, watcher, \`docker compose up\`, interactive installer) freezes the conversation. \`tmux\` is in the container — run such programs detached so your turn stays free:
+
+- Start: \`tmux new-session -d -s <name> "<cmd>"\`
+- Observe: \`tmux capture-pane -t <name> -p\` (poll across turns, don't block)
+- Drive: \`tmux send-keys -t <name> "<input>" Enter\` (control keys too, e.g. \`C-c\`)
+- Stop: \`tmux kill-session -t <name>\`
+
+Use this only when the work belongs in *your* session. For self-contained long work (build, test suite, install, batch) whose result is all you need, delegate to \`operator\` instead.
+
 ## Version control
 
 Your agent folder is a git repository.
