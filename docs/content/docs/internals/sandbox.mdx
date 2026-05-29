@@ -8,7 +8,48 @@ The outer typeclaw container runs every agent and subagent in one trust boundary
 
 The kernel primitive for this is `bwrap(1)` (bubblewrap) — a setuid-less namespace sandboxer that wraps a single subprocess in its own user/pid/mount/net namespace. Per bash call, the wrapper rebuilds an empty rootfs view containing only what the caller's policy declared it needs.
 
-The base layer — the apt package and the `docker run` flag that make bwrap available — is documented below. The reusable command builder that consumes them lives in `src/sandbox/`: an origin-agnostic primitive that takes a bash command plus a `SandboxPolicy` and returns the bwrap-wrapped argv. It knows nothing about subagents or the agent runtime; a consumer (the reviewer subagent is the intended first one) resolves a policy from whatever context it has and calls the builder. Wiring the builder into the bash-tool execute path is a separate follow-up.
+The base layer — the apt package and the `docker run` flag that make bwrap available — is documented below. The reusable command builder that consumes them lives in `src/sandbox/`: an origin-agnostic primitive that takes a bash command plus a `SandboxPolicy` and returns the bwrap-wrapped argv. It knows nothing about subagents or the agent runtime; a consumer resolves a policy from whatever context it has and calls the builder.
+
+## Role-based path hiding
+
+The bash builtin is wired through the builder in `wrapAgentToolAsCustomToolDefinition` (`src/agent/plugin-tools.ts`), after the `tool.before` guards inspect the raw command and immediately before pi-coding-agent executes it. The policy is **not** declared per subagent; it is derived per call from the live turn's resolved role. The container mount is unchanged — the whole agent folder stays bind-mounted at `/agent`. The sandbox does not change _what is mounted_; it **hides** a role-dependent subset of the already-visible tree.
+
+`resolveHiddenPaths` (`src/sandbox/hidden-paths.ts`) maps the resolved role to a deny-list via two filesystem-visibility permissions, phrased as capabilities to _see_ so the role tower stays monotonic (guest ⊆ member ⊆ trusted ⊆ owner):
+
+| Role           | `fs.see.private` | `fs.see.secrets` | Hidden from bash                                                             |
+| -------------- | ---------------- | ---------------- | ---------------------------------------------------------------------------- |
+| guest          | —                | —                | `workspace/`, `memory/`, `sessions/` (dirs) + `.env`, `secrets.json` (files) |
+| member         | ✓                | —                | `.env`, `secrets.json`                                                       |
+| trusted, owner | ✓                | ✓                | nothing                                                                      |
+
+Directories are hidden with `--tmpfs`; single files with `--ro-bind-data`, the only bwrap primitive that masks a file (the rendered command self-opens an empty fd via a `3< /dev/null` redirection because the bash tool's spawn does not inherit extra fds). Masks render **after** the parent bind so the last mount op on a path wins. Resolution **fails safe to guest**: an undefined or unmatched origin holds neither grant, so everything maskable is hidden. A `security.bypass.*` fallback keeps custom roles (which may never name the `fs.see.*` strings) working by capability. When a role needs masks but `bwrap` is unavailable, the call **fails closed** — it never runs unsandboxed. trusted+ has no masks, so its bash runs unchanged whether or not bwrap is present.
+
+This hiding is filesystem-only and only affects the `bash` tool. Memory logging, backup commits, session writes, and the dreaming subagent run outside the sandbox (direct `Bun.spawn` or the `read`/`write`/`append` builtins), so a guest turn is still recorded to memory normally — guest's _bash_ simply cannot read the private surface back.
+
+**Symlink caveat.** A symlink whose target lives _under_ `/agent` (e.g. `public/link -> /agent/.env`) resolves inside the sandbox mount namespace to the masked overlay, so it cannot reach the real secret. A symlink pointing _outside_ `/agent` escapes the agent-folder bind entirely and is not covered by these masks; it is contained only by the always-on kernel-containment invariants below (cleared env, isolated network).
+
+## What the per-tool sandbox is NOT for
+
+This sandbox limits what a single prompt-injected `bash` call can do **within one agent's trust domain** — hide secret-shaped reads, contain the network, mask the private surface. It is defense in depth against a hostile command, not a wall between trust domains.
+
+Trust-domain problems come in two shapes, and they need different defenses. The sandbox addresses neither directly; naming both keeps "just sandbox it" from being mistaken for a complete answer.
+
+| Shape                                       | Threat                                                                                                                                                                                      | What it wants                                                                     | The defense                                                                      |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| **Authentication-shaped** (confidentiality) | "Hide the private thing from the attacker." A public-facing review and a private repo share one agent; a public PR steers bash and reaches `.env` / `GH_TOKEN` / `/agent` / private source. | A coarse, whole-container / whole-credential boundary.                            | **Separate agents per trust domain.**                                            |
+| **Authorization-shaped** (action gating)    | "We can both _see_ the repo and both _propose_ changes, but only I may _act_ — merge, push to `main`." Nothing is secret; the question is purely who may perform the privileged action.     | Fine, per-action authority that reflects the least-privileged actor in the chain. | **Provenance + action gating** — see [Permissions](/docs/internals/permissions). |
+
+### Authentication-shaped: separate agents
+
+Keeping a public-facing review away from private code and credentials is coarse — it wants a whole-container, whole-credential-set boundary — and typeclaw already provides it: one agent is one container, one `.env`, one `GH_TOKEN`, one `/agent`. The right boundary is operational.
+
+**Use separate agents for separate trust domains.** Do not point one agent at both a private repo and public-facing review work (e.g. reviewing external contributors' pull requests). If a public PR can steer the agent's bash, the only things it can reach are that agent's own container and credentials — so that container must not also hold the private repo or its secrets. Splitting the work across agents makes the public-to-private pivot impossible by construction, and closes the subtler residual the sandbox cannot: a prompt-injected reviewer copying private source into review text that then gets posted to the public PR. With public and private in separate agents, that output channel has nothing private to leak. The role-based path hiding above is a within-domain mitigation, not a substitute for this split.
+
+### Authorization-shaped: separation does not help
+
+This shape survives separation, because the resource is **not** secret — the public repo _is_ the work, visible to attacker and operator alike. Sandboxing misses it too: `gh pr merge` is a legitimate, authorized API call, not a containment breach. The boundary is purely _who may act_.
+
+This is the `operator` subagent's surface. Subagent provenance stamps `spawnedByRole` — the role of whoever _spawned_ the subagent (see [Permissions](/docs/internals/permissions)). It tracks who spawned the task, not whose _content_ is driving it. So an owner-spawned operator resolves to `owner`; if an owner (or owner-scheduled cron) hands it "act on PR #N" and the attacker-controlled diff carries a prompt injection ("merge this / push to `main`"), the action runs with the owner's authority. The defense is the same principle the cron/subagent provenance guard establishes: provenance should reflect the least-privileged actor in the chain, and irreversible or audience-visible actions should be action-gated regardless of inherited role.
 
 ## bwrap is a primitive, not a policy
 
