@@ -212,7 +212,7 @@ async function runTokenAdapterCheck(
         'Adapter will be skipped at start until credentials are present.',
         'Resolution order: process.env wins over .env file value over secrets.json value.',
       ],
-      fix: { description: `Run \`typeclaw channel set ${adapter}\` or add the env vars to .env.` },
+      fix: { description: 'Run `typeclaw channel set ' + adapter + '`, or add the env vars to .env.' },
     }
   }
   return { status: 'ok', message: `${adapter} credentials present` }
