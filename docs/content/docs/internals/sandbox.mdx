@@ -6,21 +6,21 @@ icon: Shield
 
 The outer typeclaw container runs every agent and subagent in one trust boundary. The user's `.env`, `GH_TOKEN`, and agent folder are all visible to anything inside. That's fine for the agent's own work. It's not fine when a subagent reads attacker-controlled content (a PR diff, a webpage, a stack trace) and a prompt injection steers it into emitting hostile bash. For that case the boundary needs to live below the agent process, in the kernel.
 
-The kernel primitive for this is `bwrap(1)` (bubblewrap) — a setuid-less namespace sandboxer that wraps a single subprocess in its own user/pid/mount/net namespace. Per subagent bash call, the wrapper rebuilds an empty rootfs view containing only what the subagent declared it needs.
+The kernel primitive for this is `bwrap(1)` (bubblewrap) — a setuid-less namespace sandboxer that wraps a single subprocess in its own user/pid/mount/net namespace. Per bash call, the wrapper rebuilds an empty rootfs view containing only what the caller's policy declared it needs.
 
-This page documents the base layer — the apt package and the `docker run` flag that make bwrap available. The wrapper that consumes them (the `SubagentShared.sandbox` field and the bash-tool execute-time substitution) lives in `src/agent/sandbox/` in a follow-up PR.
+The base layer — the apt package and the `docker run` flag that make bwrap available — is documented below. The reusable command builder that consumes them lives in `src/sandbox/`: an origin-agnostic primitive that takes a bash command plus a `SandboxPolicy` and returns the bwrap-wrapped argv. It knows nothing about subagents or the agent runtime; a consumer (the reviewer subagent is the intended first one) resolves a policy from whatever context it has and calls the builder. Wiring the builder into the bash-tool execute path is a separate follow-up.
 
 ## bwrap is a primitive, not a policy
 
-Upstream bubblewrap is explicit: "bubblewrap is not a complete, ready-made sandbox with a specific security policy" and "the level of protection... is entirely determined by the arguments passed to bubblewrap." Treating "we use bwrap" as a security claim is a category error. The boundary lives in the **wrapper invariants** — the exact bwrap argv typeclaw constructs per call. The follow-up wrapper PR will need to maintain at least:
+Upstream bubblewrap is explicit: "bubblewrap is not a complete, ready-made sandbox with a specific security policy" and "the level of protection... is entirely determined by the arguments passed to bubblewrap." Treating "we use bwrap" as a security claim is a category error. The boundary lives in the **builder invariants** — the exact bwrap argv `src/sandbox/build.ts` constructs per call. The always-on invariants are:
 
-- `--unshare-all` (or an equivalent subset that covers user/pid/mount/net/ipc/uts namespaces).
-- `--clearenv` followed by an explicit `--setenv` allowlist. Inherited env is a vector for `FIREWORKS_API_KEY` / `GH_TOKEN` exfil.
-- `--new-session` (or `--die-with-parent` plus a TIOCSTI seccomp filter) to prevent the contained process from injecting input into the controlling terminal.
-- A minimal mount set. Every bind-mount is a potential write/exec/read vector; everything mounted in can "potentially be used to escalate privileges" (bubblewrap docs).
-- Network policy that matches the subagent's actual need (default to `--unshare-net`; `--share-net` only with an explicit threat-model decision logged in the subagent's source).
+- `--unshare-all` — covers the user/pid/mount/net/ipc/uts/cgroup namespaces.
+- `--clearenv` followed by an explicit `--setenv` allowlist (`PATH`, `HOME`, `LANG` by default; consumers name any others). Inherited env is the highest-risk vector for `FIREWORKS_API_KEY` / `GH_TOKEN` exfil.
+- `--new-session` plus `--die-with-parent` (both default-on) to prevent the contained process from injecting input into the controlling terminal via TIOCSTI and to reap the sandbox if the agent dies.
+- A minimal mount set (`--ro-bind /usr`, `--ro-bind /etc`, `--dev /dev`, `--tmpfs /tmp`, `--tmpfs /proc`). Every additional bind-mount a policy declares is a potential write/exec/read vector; everything mounted in can "potentially be used to escalate privileges" (bubblewrap docs).
+- Network isolation by default (`--unshare-all` leaves the net namespace unshared); `--share-net` only when a policy explicitly sets `network: 'inherit'`.
 
-This PR enables the primitive. It does not ship any of the invariants above — those are the contract of the follow-up `applySubagentSandbox` helper. Reviewers of the follow-up should audit the argv construction, not just confirm that `bwrap` was invoked.
+These invariants are the always-on **kernel containment** boundary, applied to every command regardless of policy. Command-syntax restrictions — a prefix allowlist or shell-metacharacter rejection — are _optional_ `commandFilter` knobs a narrow consumer (e.g. a read-only reviewer) can opt into; they are not part of the base boundary, because a general-purpose bash sandbox must allow pipes, `&&`, and `$()`. Reviewers of any consumer should audit the resolved policy and the argv construction, not just confirm that `bwrap` was invoked.
 
 ## `--security-opt seccomp=unconfined`
 

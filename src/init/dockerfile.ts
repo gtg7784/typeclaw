@@ -40,9 +40,9 @@ export type BuildDockerfileOptions = {
 // below and `buildEntrypointShim`.
 // `bubblewrap` ships the `bwrap(1)` setuid-less namespace sandboxer. It is
 // included in baseline (not behind a toggle) because per-tool sandboxing of
-// subagent bash calls is a runtime concern resolved by the agent, not by the
-// agent author. See `src/agent/sandbox/` (added in a follow-up PR) for the
-// invocation, and `docs/internals/sandbox.mdx` for why bwrap is the right
+// agent bash calls is a runtime concern resolved by the agent, not by the
+// agent author. See `src/sandbox/` for the bwrap command builder, and
+// `docs/internals/sandbox.mdx` for why bwrap is the right
 // shape for per-call isolation inside an already-containerized agent. The
 // outer container's `--security-opt seccomp=unconfined` (added in the same
 // commit as this line; see `src/container/start.ts:planStart`) is what lets
