@@ -11,7 +11,7 @@ import { ADAPTER_IDS, type AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
 import { renderOutboundEcho, TOOL_RESULT_PREFIX } from './channel-reply'
-import { fenceRuntimeNotice } from './runtime-notice'
+import { fenceRuntimeNotice, fenceToolResult } from './runtime-notice'
 
 export type ChannelSendOrigin = {
   adapter: AdapterId
@@ -154,12 +154,13 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
         )
       }
       const details: { ok: boolean; error?: string } = result.ok ? { ok: true } : { ok: false, error: result.error }
-      const echo = renderOutboundEcho(bodyText, attachments)
-      const baseText = result.ok
-        ? `posted to ${params.adapter}:${params.workspace}/${params.chat}: ${echo}`
-        : `channel_send denied: ${result.error}`
-      const hints: string[] = []
+      // Success wraps the echoed sent text in the strong SYSTEM MESSAGE fence;
+      // denials keep the lighter prefix. See channel-reply.ts for the full
+      // rationale (PR #481 self-reply loop).
       if (result.ok) {
+        const echo = renderOutboundEcho(bodyText, attachments)
+        const receipt = `posted to ${params.adapter}:${params.workspace}/${params.chat}: ${echo}`
+        const hints: string[] = []
         const consecutive = consecutiveSendHint(
           router.getConsecutiveSendCount({
             adapter,
@@ -177,10 +178,14 @@ export function createChannelSendTool({ router, origin, logger = consoleChannelL
           thread: params.thread,
         })
         if (threadMismatch) hints.push(threadMismatch)
+
+        return {
+          content: [{ type: 'text' as const, text: `${fenceToolResult(receipt)}${hints.join('')}` }],
+          details,
+        }
       }
-      const body = hints.length > 0 ? `${baseText}${hints.join('')}` : baseText
       return {
-        content: [{ type: 'text' as const, text: `${TOOL_RESULT_PREFIX}${body}` }],
+        content: [{ type: 'text' as const, text: `${TOOL_RESULT_PREFIX}channel_send denied: ${result.error}` }],
         details,
       }
     },

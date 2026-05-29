@@ -10,7 +10,7 @@ import {
 import type { AdapterId } from '@/channels/schema'
 
 import { type ChannelToolLogger, consoleChannelLogger, formatChannelToolFailure } from './channel-log'
-import { fenceRuntimeNotice } from './runtime-notice'
+import { fenceRuntimeNotice, fenceToolResult } from './runtime-notice'
 
 export type ChannelReplyOrigin = {
   adapter: AdapterId
@@ -138,34 +138,37 @@ export function createChannelReplyTool({
       // Without this echo, a model that splits a multi-part reply has no
       // way to tell "did I already send part 1?" from "I haven't started
       // yet", and routinely re-sends near-duplicates within the same turn
-      // (observed in production: two consecutive identical
-      // greeting messages to one prompt).
+      // (observed in production: two consecutive identical greeting messages
+      // to one prompt).
       //
-      // We deliberately do NOT cap sends-per-turn here. A complex user
-      // request legitimately needs split replies, and a hard cap would
-      // mutilate that. The fix is to give the model honest feedback —
-      // show it what it sent, let it decide whether to continue.
-      // Truncate past 500 chars so a long reply doesn't double the prompt
-      // size on every subsequent iteration; the prefix is enough to detect
-      // duplication, and the full text is recoverable from the session
-      // JSONL if needed.
-      const echo = renderOutboundEcho(text, attachments)
-      const baseText = result.ok
-        ? `posted to ${origin.adapter}:${origin.workspace}/${origin.chat}: ${echo}`
-        : `channel_reply denied: ${result.error}`
-      const hint = result.ok
-        ? consecutiveSendHint(
-            router.getConsecutiveSendCount({
-              adapter: origin.adapter,
-              workspace: origin.workspace,
-              chat: origin.chat,
-              thread: origin.thread,
-            }),
-          )
-        : ''
-      const body = hint ? `${baseText}${hint}` : baseText
+      // The echo is the model's OWN words, which is uniquely seductive to
+      // "reply" to, so on the success path we wrap the whole result in the
+      // strong SYSTEM MESSAGE fence (`fenceToolResult`) rather than the weak
+      // `[system: tool result...]` prefix — the prefix did not stop Kimi from
+      // answering its own echo and looping (PR #481). Denials carry no echoed
+      // prose (just machine error text), so they keep the lighter prefix.
+      if (result.ok) {
+        const echo = renderOutboundEcho(text, attachments)
+        const receipt = `posted to ${origin.adapter}:${origin.workspace}/${origin.chat}: ${echo}`
+        const hint = consecutiveSendHint(
+          router.getConsecutiveSendCount({
+            adapter: origin.adapter,
+            workspace: origin.workspace,
+            chat: origin.chat,
+            thread: origin.thread,
+          }),
+        )
+        // Keep fenceToolResult here — do NOT "unify" the success branch back to
+        // TOOL_RESULT_PREFIX to match the denial branch below. The prefix is
+        // intentionally weaker and is safe ONLY because denials carry no echoed
+        // prose; the success result does, and the weak prefix let Kimi loop.
+        return {
+          content: [{ type: 'text' as const, text: `${fenceToolResult(receipt)}${hint}` }],
+          details,
+        }
+      }
       return {
-        content: [{ type: 'text' as const, text: `${TOOL_RESULT_PREFIX}${body}` }],
+        content: [{ type: 'text' as const, text: `${TOOL_RESULT_PREFIX}channel_reply denied: ${result.error}` }],
         details,
       }
     },
@@ -188,6 +191,13 @@ export function renderEcho(text: string): string {
   return `${JSON.stringify(text.slice(0, ECHO_MAX_CHARS))}... (${text.length} chars total)`
 }
 
+// DO NOT remove this echo or replace it with a hash/length-only "receipt" to
+// stop the self-reply loop (PR #481). That trade was tried and rejected: the
+// echo is the model's only view of what it already said (the inbound path
+// drops self-authored messages), so without the FULL text a split reply
+// re-sends near-duplicates — the exact bug 58c62c1 added the echo to fix, and
+// a fingerprint cannot catch paraphrased near-dupes. The loop is solved by
+// FENCING this echo (see fenceToolResult call site below), not by removing it.
 export function renderOutboundEcho(
   text: string | undefined,
   attachments: ReadonlyArray<{ path: string; filename?: string }> | undefined,

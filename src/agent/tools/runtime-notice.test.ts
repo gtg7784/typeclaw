@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { fenceRuntimeNotice } from './runtime-notice'
+import { fenceRuntimeNotice, fenceToolResult } from './runtime-notice'
 
 describe('fenceRuntimeNotice', () => {
   test('wraps body in canonical SYSTEM MESSAGE framing with horizontal-rule fences', () => {
@@ -33,5 +33,30 @@ describe('fenceRuntimeNotice', () => {
     expect(out.split('---').length).toBe(3)
     expect(out.indexOf('**[SYSTEM MESSAGE')).toBeGreaterThan(out.indexOf('---'))
     expect(out.lastIndexOf('---')).toBeGreaterThan(out.indexOf('Do not acknowledge'))
+  })
+})
+
+describe('fenceToolResult', () => {
+  test('begins with the fence opener so no echoed prose can lead the result', () => {
+    const out = fenceToolResult('posted to slack-bot:T0/C0: "You\'re welcome!"')
+
+    expect(out.startsWith('---\n**[SYSTEM MESSAGE — not from a human]**')).toBe(true)
+  })
+
+  test('places the receipt inside the fence and labels it as the model\u2019s own output', () => {
+    const receipt = 'posted to slack-bot:T0/C0: "thanks!"'
+    const out = fenceToolResult(receipt)
+
+    expect(out).toContain(receipt)
+    expect(out.indexOf(receipt)).toBeGreaterThan(out.indexOf('**[SYSTEM MESSAGE'))
+    expect(out).toContain('your OWN already-delivered message')
+    expect(out).toContain('Do not acknowledge or reply to it')
+  })
+
+  test('closes with a horizontal-rule fence (three rules total, like the loop-guard block)', () => {
+    const out = fenceToolResult('any receipt')
+
+    expect(out.split('---').length).toBe(3)
+    expect(out.trimEnd().endsWith('---')).toBe(true)
   })
 })
