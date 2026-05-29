@@ -50,6 +50,21 @@ describe('dumpSystemPrompt', () => {
     expect(out).toContain('## Uncommitted changes at session start')
   })
 
+  test.each(fullKinds)(
+    '%s origin carries the tmux long-running/interactive shell-work guidance inside the base prompt',
+    (kind) => {
+      const out = dumpSystemPrompt(kind)
+
+      expect(out).toContain('## Long-running and interactive shell work')
+      // Lives in the cacheable base-prompt prefix, ahead of the identity block.
+      expect(out.indexOf('## Long-running and interactive shell work')).toBeLessThan(out.indexOf('## IDENTITY.md'))
+    },
+  )
+
+  test('cron origin omits the tmux shell-work guidance (slim base prompt)', () => {
+    expect(dumpSystemPrompt('cron')).not.toContain('## Long-running and interactive shell work')
+  })
+
   test('cron origin uses the slim base prompt and omits git nudge', () => {
     const out = dumpSystemPrompt('cron')
 
