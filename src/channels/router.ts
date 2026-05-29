@@ -1875,7 +1875,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (live && source === 'tool' && live.pendingQuoteCandidate !== null) {
       const quoteCandidate = refreshQuoteCandidate(live.pendingQuoteCandidate, live.contextBuffer)
       const anchor = decideQuoteAnchor(quoteCandidate, now(), options.configForAdapter(msg.adapter))
-      if (anchor !== null) msg = { ...msg, text: prependQuoteAnchor(msg.text ?? '', anchor) }
+      if (anchor !== null) {
+        msg =
+          resolveReplyRenderMode(msg) === 'native'
+            ? { ...msg, replyTo: { externalMessageId: anchor.externalMessageId } }
+            : { ...msg, text: prependQuoteAnchor(msg.text ?? '', anchor.source) }
+      }
       live.pendingQuoteCandidate = null
     }
     const text = normalizeSendText(msg.text)
@@ -2557,6 +2562,7 @@ type QuoteAnchorBatchEntry = {
   authorName: string
   authorIsBot: boolean
   receivedAt: number
+  externalMessageId: string
 }
 
 type QuoteAnchorObservedEntry = {
@@ -2566,8 +2572,16 @@ type QuoteAnchorObservedEntry = {
 
 export type QuoteAnchorCandidate = {
   source: QuoteAnchorSource
+  // Native id of the primary inbound, so a native-reply adapter can point at
+  // the exact message; the blockquote fallback ignores it.
+  externalMessageId: string
   primaryReceivedAt: number
   hadInterveningObserved: boolean
+}
+
+export type QuoteAnchorTarget = {
+  source: QuoteAnchorSource
+  externalMessageId: string
 }
 
 // Strips both current `[<Adapter> attachment #N: ...]` and legacy
@@ -2620,6 +2634,7 @@ export function captureQuoteCandidate(
   if (cleaned === '') return null
   return {
     source: { adapter, authorId: primary.authorId, authorName: primary.authorName, text: cleaned },
+    externalMessageId: primary.externalMessageId,
     primaryReceivedAt: primary.receivedAt,
     hadInterveningObserved: hasInterveningObserved(primary.receivedAt, observed),
   }
@@ -2647,12 +2662,28 @@ export function decideQuoteAnchor(
   candidate: QuoteAnchorCandidate | null,
   _nowMs: number,
   adapterConfig: ChannelAdapterConfig | undefined,
-): QuoteAnchorSource | null {
+): QuoteAnchorTarget | null {
   if (candidate === null) return null
   const config = adapterConfig?.quotedReply
   if (config !== undefined && config.enabled === false) return null
   if (!candidate.hadInterveningObserved) return null
-  return candidate.source
+  return { source: candidate.source, externalMessageId: candidate.externalMessageId }
+}
+
+export type ReplyRenderMode = 'native' | 'quote'
+
+// Per-adapter, per-shape decision: can this exact outbound carry a native
+// platform reply, or must it degrade to the blockquote fallback? Conditional
+// because native support is not uniform within an adapter — Telegram's
+// `sendMessage` accepts `reply_to_message_id` but `sendDocument` does not, so
+// an attachment-only Telegram reply must quote. Slack/Discord/KakaoTalk have
+// no per-message reply the router can drive through `replyTo` today (Slack's
+// primitive is `thread`, Discord's needs SDK support, KakaoTalk has none), and
+// GitHub's PR-review reply already rides on `thread`, not `replyTo`.
+export function resolveReplyRenderMode(msg: OutboundMessage): ReplyRenderMode {
+  const hasText = normalizeSendText(msg.text) !== undefined
+  if (msg.adapter === 'telegram-bot' && hasText) return 'native'
+  return 'quote'
 }
 
 type Sliced = { kind: 'message'; message: ChannelHistoryMessage } | { kind: 'elision'; elidedCount: number }

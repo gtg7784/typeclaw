@@ -126,6 +126,11 @@ export type OutboundMessage = {
   // `uploadFile` does not accept a content body or a thread id, see the
   // adapter for the workaround details.
   attachments?: OutboundAttachment[]
+  // Set by the router when an intervening message means this reply should be
+  // anchored to the inbound it answers. Adapters that support a native reply
+  // primitive (e.g. Telegram `reply_to_message_id`) consume it; others ignore
+  // it because the router has already prepended the blockquote fallback.
+  replyTo?: { externalMessageId: string }
 }
 
 export type SendErrorCode =
