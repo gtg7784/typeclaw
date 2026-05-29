@@ -25,11 +25,13 @@ describe('built-in role contract (role-tower model: owner=high, trusted=medium, 
     expect(BUILTIN_ROLES.owner.permissions).toContain('subagent.spawn.operator')
   })
 
-  test('trusted has empty default match and core perms + bypass.low + bypass.medium + subagent perms + operator-specific spawn', () => {
+  test('trusted has empty default match and core perms + fs.see.private + fs.see.secrets + bypass.low + bypass.medium + subagent perms + operator-specific spawn', () => {
     expect(BUILTIN_ROLES.trusted.match).toEqual([])
     expect([...BUILTIN_ROLES.trusted.permissions].sort()).toEqual([
       'channel.respond',
       'cron.schedule',
+      'fs.see.private',
+      'fs.see.secrets',
       'security.bypass.low',
       'security.bypass.medium',
       'subagent.cancel',
@@ -43,15 +45,26 @@ describe('built-in role contract (role-tower model: owner=high, trusted=medium, 
     expect([...BUILTIN_ROLES.trusted.permissions]).not.toContain('security.bypass.high')
   })
 
-  test('member has empty default match and channel.respond + bypass.low + subagent perms (no operator-specific spawn)', () => {
+  test('member has empty default match and channel.respond + fs.see.private + bypass.low + subagent perms (no operator-specific spawn, no fs.see.secrets)', () => {
     expect(BUILTIN_ROLES.member.match).toEqual([])
     expect([...BUILTIN_ROLES.member.permissions].sort()).toEqual([
       'channel.respond',
+      'fs.see.private',
       'security.bypass.low',
       'subagent.cancel',
       'subagent.output',
       'subagent.spawn',
     ])
+  })
+
+  test('member carries fs.see.private but NOT fs.see.secrets (private working surface, never credentials)', () => {
+    expect([...BUILTIN_ROLES.member.permissions]).toContain('fs.see.private')
+    expect([...BUILTIN_ROLES.member.permissions]).not.toContain('fs.see.secrets')
+  })
+
+  test('guest carries neither fs.see grant (locked-down floor; bash sees neither private surface nor secrets)', () => {
+    expect([...BUILTIN_ROLES.guest.permissions]).not.toContain('fs.see.private')
+    expect([...BUILTIN_ROLES.guest.permissions]).not.toContain('fs.see.secrets')
   })
 
   test('member does NOT carry the operator-specific spawn permission (write-capable subagents are owner+trusted only)', () => {

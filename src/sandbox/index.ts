@@ -1,5 +1,6 @@
 export { buildSandboxedCommand, type SandboxedCommand } from './build'
-export { ensureBwrapAvailable } from './availability'
+export { ensureBwrapAvailable, _resetBwrapAvailabilityCacheForTests } from './availability'
+export { resolveHiddenPaths, type HiddenPaths } from './hidden-paths'
 export { formatCommand, shellQuote } from './quote'
 export { SandboxPolicyError, SandboxUnavailableError } from './errors'
 export {

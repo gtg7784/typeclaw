@@ -8,7 +8,9 @@ import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
 import { Type } from '@sinclair/typebox'
 import { z } from 'zod'
 
+import { createPermissionService } from '@/permissions/permissions'
 import { createHookBus, defineTool, type PluginRegistry } from '@/plugin'
+import { _resetBwrapAvailabilityCacheForTests } from '@/sandbox'
 
 import {
   __resetSharedLoopGuardForTests,
@@ -20,6 +22,7 @@ import {
   wrapSystemTool,
   zodToToolParameters,
 } from './plugin-tools'
+import type { SessionOrigin } from './session-origin'
 
 beforeEach(() => {
   __resetSharedLoopGuardForTests()
@@ -864,6 +867,68 @@ describe('wrapAgentToolAsCustomToolDefinition (pi customTools override path)', (
       expect(ack).toBeDefined()
       expect(ack?.additionalProperties).toBe(false)
     }
+  })
+})
+
+describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hiding)', () => {
+  beforeEach(() => {
+    _resetBwrapAvailabilityCacheForTests()
+  })
+
+  function fakeBash(record: { command?: string }) {
+    return {
+      name: 'bash',
+      label: 'bash',
+      description: '',
+      parameters: Type.Object({ command: Type.String() }),
+      async execute(_id: string, params: { command: string }) {
+        record.command = params.command
+        return { content: [{ type: 'text' as const, text: 'ran' }], details: undefined }
+      },
+    }
+  }
+
+  const tui: SessionOrigin = { kind: 'tui', sessionId: 's' }
+  const guest: SessionOrigin = { kind: 'subagent', subagent: 'x', parentSessionId: 'p', spawnedByRole: 'guest' }
+
+  test('trusted+ (tui→owner) has no masks, so bash runs unchanged even without bwrap', async () => {
+    const record: { command?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+      agentDir: '/agent',
+      sessionId: 's',
+      hooks: createHookBus(),
+      getOrigin: () => tui,
+      permissions: createPermissionService(),
+    })
+    await wrapped.execute('c', { command: 'echo hi' }, undefined, undefined, {} as never)
+    expect(record.command).toBe('echo hi')
+  })
+
+  test('guest needs masks; with bwrap unavailable the call fails closed and the underlying bash never runs', async () => {
+    const record: { command?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+      agentDir: '/agent',
+      sessionId: 's',
+      hooks: createHookBus(),
+      getOrigin: () => guest,
+      permissions: createPermissionService(),
+    })
+    await expect(
+      wrapped.execute('c', { command: 'cat /agent/.env' }, undefined, undefined, {} as never),
+    ).rejects.toThrow()
+    expect(record.command).toBeUndefined()
+  })
+
+  test('without a permission service bash is never rewritten (escape hatch for unwired sessions)', async () => {
+    const record: { command?: string } = {}
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+      agentDir: '/agent',
+      sessionId: 's',
+      hooks: createHookBus(),
+      getOrigin: () => guest,
+    })
+    await wrapped.execute('c', { command: 'echo hi' }, undefined, undefined, {} as never)
+    expect(record.command).toBe('echo hi')
   })
 })
 

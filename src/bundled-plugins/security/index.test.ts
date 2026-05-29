@@ -209,9 +209,14 @@ describe('security plugin wiring', () => {
         hookContext('/agent'),
       ),
     ).toBeUndefined()
+    // secretExfilRead ack is exercised against a path OUTSIDE the agent dir
+    // (~/.ssh/id_rsa). An in-agent secret like .env is now ALSO covered by the
+    // non-ackable privateSurfaceRead guard for restricted roles, so acking
+    // secretExfilRead alone no longer lets a guest read it — see the dedicated
+    // assertion below.
     expect(
       await hook(
-        toolEvent('read', { path: '.env', acknowledgeGuards: { secretExfilRead: true } }),
+        toolEvent('read', { path: '~/.ssh/id_rsa', acknowledgeGuards: { secretExfilRead: true } }),
         hookContext('/agent'),
       ),
     ).toBeUndefined()
@@ -230,6 +235,22 @@ describe('security plugin wiring', () => {
         hookContext('/agent'),
       ),
     ).toBeUndefined()
+  })
+
+  test('acking secretExfilRead does NOT let a restricted role read an in-agent secret (privateSurfaceRead backstops it)', async () => {
+    const hook = await toolBeforeHook()
+    const result = await hook(
+      toolEvent('read', { path: '.env', acknowledgeGuards: { secretExfilRead: true } }),
+      hookContext('/agent'),
+    )
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain('privateSurfaceRead')
+  })
+
+  test('privateSurfaceRead also blocks edit/write of an in-agent secret (tools secretExfilRead never covered)', async () => {
+    const hook = await toolBeforeHook()
+    expect((await hook(toolEvent('edit', { path: '.env' }), hookContext('/agent')))?.block).toBe(true)
+    expect((await hook(toolEvent('write', { path: 'secrets.json' }), hookContext('/agent')))?.block).toBe(true)
   })
 
   test('first match wins (bash env is blocked before any other check would matter)', async () => {

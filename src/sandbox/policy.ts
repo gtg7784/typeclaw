@@ -23,10 +23,25 @@ export type SandboxProcessPolicy = {
   dieWithParent?: boolean
 }
 
+// Role-derived deny-list overlaid on top of an already-visible tree. dirs are
+// hidden with an empty tmpfs; files are hidden with --ro-bind-data, the only
+// bwrap primitive that masks a single FILE (--tmpfs is dir-only). --ro-bind-data
+// reads its empty content from a file descriptor, and the bash tool spawns with
+// stdio ["ignore","pipe","pipe"] — no inherited extra fds — so the rendered
+// commandString self-opens fd MASK_DATA_FD via a `<fd>< /dev/null` redirection
+// appended after `bash -c <command>`. Masks MUST render after the broad parent
+// mounts: bwrap applies mount ops in command-line order and the last op on a
+// path wins, so a mask emitted before its parent bind would be re-exposed.
+export type SandboxMaskPolicy = {
+  dirs?: string[]
+  files?: string[]
+}
+
 export type SandboxPolicy = {
   bwrapPath?: string
   cwd?: string
   mounts?: SandboxMount[]
+  masks?: SandboxMaskPolicy
   network?: SandboxNetwork
   env?: SandboxEnvPolicy
   commandFilter?: SandboxCommandFilter

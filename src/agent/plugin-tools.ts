@@ -20,6 +20,7 @@ import {
   checkNonWorkspaceWriteGuard,
   checkSkillAuthoringGuard,
 } from '@/bundled-plugins/guard/policy'
+import type { PermissionService } from '@/permissions/permissions'
 import type {
   BuiltinToolRef,
   ContentPart,
@@ -30,6 +31,7 @@ import type {
   ToolContext,
   ToolResult,
 } from '@/plugin'
+import { buildSandboxedCommand, ensureBwrapAvailable, resolveHiddenPaths } from '@/sandbox'
 
 import { createLoopGuard, type LoopGuard } from './loop-guard'
 import { checkImageReadRedirect } from './multimodal/read-redirect'
@@ -134,6 +136,11 @@ export type WrapSystemToolOptions = {
   sessionId: string
   hooks: HookBus
   getOrigin?: () => SessionOrigin | undefined
+  // When present, the bash builtin is rewritten through the per-tool bwrap
+  // sandbox with role-derived path masks. Absent (or no masks for the role)
+  // runs bash unchanged — preserving today's behavior for trusted+ and for
+  // sessions wired without a permission service (e.g. tests).
+  permissions?: PermissionService
 }
 
 // Zod 4 emits a top-level `"$schema": "https://json-schema.org/draft/2020-12/schema"`
@@ -393,6 +400,10 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       }
       stripGuardAcknowledgements(mutableArgs)
 
+      if (tool.name === 'bash' && opts.permissions !== undefined) {
+        await applyBashSandbox(mutableArgs, opts.permissions, liveOrigin, opts.agentDir)
+      }
+
       const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate)
       const hookResult: ToolResult = {
         content: result.content as ContentPart[],
@@ -423,6 +434,33 @@ export function defaultBuiltinPiAgentTools(): AgentTool<any, any>[] {
 
 export function buildBuiltinPiToolOverrides(opts: WrapSystemToolOptions): ToolDefinition<any, any>[] {
   return defaultBuiltinPiAgentTools().map((tool) => wrapAgentToolAsCustomToolDefinition(tool, opts))
+}
+
+// Rewrites mutableArgs.command in place so the bash builtin runs inside bwrap
+// with role-derived path masks. A role that sees everything (trusted+) yields
+// no masks and runs unchanged. When masks ARE needed but bwrap is unavailable
+// we throw rather than run unsandboxed — fail closed, never leak the masked
+// surface. Runs after the tool.before guards have inspected the raw command.
+async function applyBashSandbox(
+  mutableArgs: Record<string, unknown>,
+  permissions: PermissionService,
+  origin: SessionOrigin | undefined,
+  agentDir: string,
+): Promise<void> {
+  const command = mutableArgs.command
+  if (typeof command !== 'string') return
+
+  const { dirs, files } = resolveHiddenPaths(permissions, origin, agentDir)
+  if (dirs.length === 0 && files.length === 0) return
+
+  await ensureBwrapAvailable()
+  const { commandString } = buildSandboxedCommand(command, {
+    mounts: [{ type: 'bind', source: agentDir, dest: agentDir }],
+    masks: { dirs, files },
+    network: 'inherit',
+    cwd: agentDir,
+  })
+  mutableArgs.command = commandString
 }
 
 function appendLoopWarning(result: ToolResult, message: string): ToolResult {
