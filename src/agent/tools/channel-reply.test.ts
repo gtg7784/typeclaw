@@ -338,6 +338,44 @@ describe('createChannelReplyTool', () => {
     expect(tool.description).toContain('default way to respond')
   })
 
+  describe('continue flag (mid-turn status reply)', () => {
+    test('surfaces continue: true in details so the router keeps the turn alive', async () => {
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async () => ({ ok: true })),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, { text: 'working on it…', continue: true })
+      expect(result.details).toEqual({ ok: true, continue: true })
+    })
+
+    test('omits continue from details by default so the reply stays terminal', async () => {
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async () => ({ ok: true })),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, { text: 'done' })
+      expect(result.details).toEqual({ ok: true })
+    })
+
+    test('continue: false stays terminal (only true keeps the turn alive)', async () => {
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async () => ({ ok: true })),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, { text: 'done', continue: false })
+      expect(result.details).toEqual({ ok: true })
+    })
+
+    test('a denied reply never carries continue (no turn to keep alive)', async () => {
+      const tool = createChannelReplyTool({
+        router: fakeRouter(async () => ({ ok: false, error: 'denied by allow rules' })),
+        origin: slackThreadOrigin,
+      })
+      const result = await runTool(tool, { text: 'nope', continue: true })
+      expect(result.details).toEqual({ ok: false, error: 'denied by allow rules' })
+    })
+  })
+
   describe('attachments', () => {
     test('forwards attachments and text to router.send', async () => {
       const calls: OutboundMessage[] = []

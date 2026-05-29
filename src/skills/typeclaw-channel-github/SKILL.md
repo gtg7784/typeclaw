@@ -9,6 +9,10 @@ GitHub renders normal Markdown in issues, PRs, discussions, and review comments.
 - There is no typing indicator.
 - For PR review threads, keep `thread` set to reply in-place. Omit `thread` for a top-level PR/issue comment.
 
+## Mid-turn status replies need `continue: true`
+
+A successful `channel_reply` ends your turn by default — the runtime stops the model right after the reply lands. That is correct for a final answer, but it will **silently truncate** a turn that still has work to do. If you post a status line like "Reviewing now, I'll be back with findings" and then expect to keep working (fetch the diff, spawn the reviewer, post the review) in the **same** turn, you must call `channel_reply({ text: "…", continue: true })`. Without `continue: true`, the turn ends at that status reply and the review never runs. Reserve `continue: true` for genuine multi-step turns; the final reply that wraps up the turn omits it.
+
 ## Opening new issues and PRs
 
 The `gh` CLI is pre-authenticated via `GH_TOKEN` (injected by the adapter at startup). Use it to open new issues or PRs:
@@ -38,6 +42,8 @@ Why delegate: the `reviewer` subagent runs on the `deep` model profile, loads a 
    ```
 
 2. **Spawn the `reviewer` subagent with the PR target.** Use `run_in_background: true` so you stay responsive while the deep model works. Pass the PR URL (or `owner/repo#N`) plus any context the requester gave you (focus areas, specific files, etc.) so the reviewer knows what the requester cares about.
+
+   If you post an "on it" acknowledgement before fetching the diff or spawning the reviewer, it **must** be `channel_reply({ text: "…", continue: true })` — a bare reply ends the turn and the review never starts (see "Mid-turn status replies need `continue: true`" above).
 
    The reviewer will fetch the diff itself (`gh pr diff`, `gh api /repos/.../pulls/<n>`), load the matching skill (`code-review` for a code PR; `general` for a mixed-format change), and return a `<review>` block.
 
