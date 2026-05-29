@@ -39,6 +39,7 @@ import { createKakaoAuthorResolver, type KakaoAuthorResolver } from './kakaotalk
 import { createKakaoChannelResolver, type KakaoChannelResolver } from './kakaotalk-channel-resolver'
 import { classifyInbound, type InboundDropReason } from './kakaotalk-classify'
 import { createFetchAttachmentCallback } from './kakaotalk-fetch-attachment'
+import { toKakaoPlainText } from './kakaotalk-format'
 
 // Structural duck-type of the upstream KakaoTalkClient class. The upstream
 // type is a class with private fields, and TypeScript treats those
@@ -182,7 +183,7 @@ export function createOutboundCallback(deps: {
     if (msg.adapter !== 'kakaotalk') {
       return { ok: false, error: `unknown adapter: ${msg.adapter}` }
     }
-    const text = msg.text ?? ''
+    const text = toKakaoPlainText(msg.text ?? '')
     const attachments = msg.attachments ?? []
     if (text === '' && attachments.length === 0) {
       return { ok: false, error: 'message has neither text nor attachments' }

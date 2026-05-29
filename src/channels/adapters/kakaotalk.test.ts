@@ -330,6 +330,34 @@ describe('createKakaotalkAdapter — outbound', () => {
     await router.stop()
   })
 
+  test('strips Markdown formatting before sending (KakaoTalk has no rich text)', async () => {
+    const client = new FakeClient()
+    const listener = new FakeListener()
+    const router = createChannelRouter({ agentDir, configForAdapter: () => adapterCfg() })
+    const adapter = createKakaotalkAdapter({
+      router,
+      configRef: () => adapterCfg(),
+      client,
+      listenerFactory: () => listener,
+    })
+    await adapter.start()
+    listener.emit('connected', { userId: '999' })
+
+    const result = await router.send({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-dm',
+      chat: '111',
+      text: '고쳐진 것\n1. **JSON 노출** — `formatAuthorLine` 추가됨',
+    })
+    expect(result.ok).toBe(true)
+    expect(client.sendMessageCalls).toEqual([
+      { chatId: '111', text: '고쳐진 것\n1. JSON 노출 — formatAuthorLine 추가됨' },
+    ])
+
+    await adapter.stop()
+    await router.stop()
+  })
+
   test('uploads attachments via sendAttachment when present (no text)', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'kakao-att-'))
     const filepath = join(dir, 'photo.jpg')
