@@ -1,4 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { realpathSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import path from 'node:path'
 
 import type { HiddenPaths } from '@/sandbox'
 
@@ -105,5 +109,65 @@ describe('private-surface-read guard — traversal + scope', () => {
 
   test('bash is never blocked here (its access is contained by the bwrap sandbox)', () => {
     expect(check('bash', { command: 'cat workspace/notes.md' })).toBeUndefined()
+  })
+})
+
+describe('private-surface-read guard — symlink bypass defense', () => {
+  // Real filesystem: the bug is that lexical path.resolve does not follow
+  // symlinks. A guest plants public/leak -> ../<hidden> via sandboxed bash,
+  // then reads it back through a non-bash tool whose path lexically lands in
+  // guest-visible public/. The guard must realpath the candidate and catch it.
+  function makeAgentWithSymlinks(): { agentDir: string; hidden: HiddenPaths } {
+    const agentDir = realpathSync(mkdtempSync(path.join(tmpdir(), 'typeclaw-symlink-guard-')))
+    for (const dir of ['workspace', 'memory', 'sessions', 'public']) {
+      mkdirSync(path.join(agentDir, dir), { recursive: true })
+    }
+    writeFileSync(path.join(agentDir, '.env'), 'SECRET=1')
+    writeFileSync(path.join(agentDir, 'memory', 'topic.md'), 'private')
+    symlinkSync(path.join(agentDir, '.env'), path.join(agentDir, 'public', 'env-link'))
+    symlinkSync(path.join(agentDir, 'memory'), path.join(agentDir, 'public', 'mem-link'))
+    return {
+      agentDir,
+      hidden: {
+        dirs: ['workspace', 'memory', 'sessions'].map((d) => path.join(agentDir, d)),
+        files: ['.env', 'secrets.json'].map((f) => path.join(agentDir, f)),
+      },
+    }
+  }
+
+  test('blocks a non-bash read of a public/ symlink pointing at a hidden FILE', () => {
+    const { agentDir, hidden } = makeAgentWithSymlinks()
+    const result = checkPrivateSurfaceReadGuard({ tool: 'read', args: { path: 'public/env-link' }, agentDir, hidden })
+    expect(result?.block).toBe(true)
+  })
+
+  test('blocks a non-bash read THROUGH a public/ symlink pointing at a hidden DIR', () => {
+    const { agentDir, hidden } = makeAgentWithSymlinks()
+    // public/mem-link -> memory/, so public/mem-link/topic.md resolves into memory/
+    const result = checkPrivateSurfaceReadGuard({
+      tool: 'read',
+      args: { path: 'public/mem-link/topic.md' },
+      agentDir,
+      hidden,
+    })
+    expect(result?.block).toBe(true)
+  })
+
+  test('blocks the symlink via a NESTED arg shape (look_at images[].path)', () => {
+    const { agentDir, hidden } = makeAgentWithSymlinks()
+    const result = checkPrivateSurfaceReadGuard({
+      tool: 'look_at',
+      args: { images: [{ path: 'public/env-link' }] },
+      agentDir,
+      hidden,
+    })
+    expect(result?.block).toBe(true)
+  })
+
+  test('still ALLOWS a genuine non-symlink file inside public/', () => {
+    const { agentDir, hidden } = makeAgentWithSymlinks()
+    writeFileSync(path.join(agentDir, 'public', 'real.md'), 'shareable')
+    const result = checkPrivateSurfaceReadGuard({ tool: 'read', args: { path: 'public/real.md' }, agentDir, hidden })
+    expect(result).toBeUndefined()
   })
 })
