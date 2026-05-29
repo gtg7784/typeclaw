@@ -63,15 +63,49 @@ export function checkPrivateSurfaceReadGuard(options: {
   return undefined
 }
 
-// Recursively collects every string in args. Matching is left to matchHidden,
-// which resolves each string against agentDir and only fires on one that lands
-// inside a hidden directory — so the decision is "does this resolve under a
-// secret dir", not a guess about whether the string was "meant" as a path.
-// Fail-closed by design: a bare arg value equal to a hidden dir name (e.g.
-// "memory") is treated as that directory and blocked, because the alternative
-// — letting `grep <pat> workspace` through — is exactly the bypass this guard
-// exists to stop. Multi-word prose ("about memory and workspace") resolves to a
-// path that is NOT a hidden dir, so it passes.
+// Free-text field names whose values are prose/queries/patterns, NOT paths.
+// Scanning them caused false positives: a guest's `channel_reply({ text:
+// "the memory leak" })`, `websearch({ query: "workspace setup" })`, or
+// `grep({ pattern: "sessions" })` all resolve to a bare hidden-dir name and
+// were wrongly blocked. The value here is a DENYLIST OF KEY NAMES, not a tool
+// whitelist: an unknown field on an unknown tool is still scanned (fail-closed
+// for new path-bearing readers), we only skip values whose KEY is a known
+// free-text field. `command` is included because bash (the only tool with it)
+// is already exempt via UNSCANNED_TOOLS and its access is bwrap-contained.
+const NON_PATH_KEYS = new Set([
+  'text',
+  'query',
+  'pattern',
+  'prompt',
+  'selector',
+  'url',
+  'message',
+  'body',
+  'content',
+  'command',
+  'reason',
+  'subject',
+  'description',
+  'title',
+  'name',
+  // edit tool: replacement text is free-form and may quote a hidden path.
+  'oldText',
+  'newText',
+  // memory append tool: fragment topic is free text.
+  'topic',
+  // grep tool: a glob like `workspace/*.md` is a filter pattern, not the
+  // search root (that is `path`), so it must not resolve-match a hidden dir.
+  'glob',
+])
+
+// Recursively collects strings that could be paths, skipping values under
+// NON_PATH_KEYS. Matching is left to matchHidden, which realpath-resolves each
+// candidate against agentDir and only fires on one that lands inside a hidden
+// directory. Fail-closed by design: a bare path-bearing value equal to a hidden
+// dir name (e.g. `path: "memory"`) is still blocked. Top-level strings and
+// array elements carry no key, so they are always scanned (an array of paths
+// like attachments[].path is collected even though the array key itself —
+// `attachments` — is not in NON_PATH_KEYS).
 function collectPathCandidates(value: unknown): string[] {
   const out: string[] = []
   walk(value, out)
@@ -88,7 +122,10 @@ function walk(value: unknown, out: string[]): void {
     return
   }
   if (value !== null && typeof value === 'object') {
-    for (const item of Object.values(value)) walk(item, out)
+    for (const [key, item] of Object.entries(value)) {
+      if (NON_PATH_KEYS.has(key)) continue
+      walk(item, out)
+    }
   }
 }
 

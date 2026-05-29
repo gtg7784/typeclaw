@@ -58,6 +58,38 @@ describe('private-surface-read guard — fail-closed across ALL tools (not a whi
   })
 })
 
+describe('private-surface-read guard — free-text field scoping (no false positives)', () => {
+  test('does not block a bare hidden-dir NAME in a free-text field', () => {
+    expect(check('channel_reply', { text: 'memory' })).toBeUndefined()
+    expect(check('websearch', { query: 'workspace' })).toBeUndefined()
+    expect(check('grep', { pattern: 'sessions', path: 'public' })).toBeUndefined()
+    expect(check('look_at_channel_attachment', { prompt: 'sessions' })).toBeUndefined()
+  })
+
+  test('does not block a path-LIKE value in a free-text field', () => {
+    expect(check('channel_reply', { text: 'see workspace/notes.md for details' })).toBeUndefined()
+    expect(check('grep', { pattern: 'memory/topics', path: 'public' })).toBeUndefined()
+    expect(check('grep', { pattern: 'token', path: 'public', glob: 'workspace/*.md' })).toBeUndefined()
+    expect(check('edit', { path: 'public/x.md', edits: [{ oldText: 'workspace/a', newText: 'memory/b' }] })).toBe(
+      undefined,
+    )
+    expect(check('append', { topic: 'workspace', body: 'about memory' })).toBeUndefined()
+  })
+
+  test('STILL blocks a hidden path in a genuine path field (scoping did not open a hole)', () => {
+    expect(check('read', { path: 'memory' })?.block).toBe(true)
+    expect(check('read', { path: 'workspace/notes.md' })?.block).toBe(true)
+    expect(check('grep', { pattern: 'token', path: 'sessions' })?.block).toBe(true)
+    expect(check('look_at', { images: [{ path: 'memory/x.png' }] })?.block).toBe(true)
+    expect(check('channel_send', { text: 'memory', attachments: [{ path: 'sessions/s.jsonl' }] })?.block).toBe(true)
+  })
+
+  test('fail-closed: an UNKNOWN key on an unknown tool is still scanned', () => {
+    expect(check('some_new_plugin_tool', { srcPath: 'memory/x' })?.block).toBe(true)
+    expect(check('some_new_plugin_tool', { nested: { target: 'workspace/y' } })?.block).toBe(true)
+  })
+})
+
 describe('private-surface-read guard — false-positive control', () => {
   test('does not block prose args that merely mention a dir name without a separator', () => {
     expect(check('channel_send', { text: 'tell me about the workspace and memory' })).toBeUndefined()
