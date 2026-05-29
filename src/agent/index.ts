@@ -712,6 +712,7 @@ export function deriveSystemPromptMode(origin: SessionOrigin | undefined): Syste
       return 'full'
     case 'cron':
     case 'subagent':
+    case 'system':
       return 'slim'
     default: {
       const _exhaustive: never = origin

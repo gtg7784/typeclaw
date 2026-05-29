@@ -29,6 +29,17 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('Stay narrowly within')
   })
 
+  test('system origin names the component and shows honest trigger provenance (not a fake TUI)', () => {
+    const out = renderSessionOrigin({
+      kind: 'system',
+      component: 'memory-logger',
+      triggeredBy: { kind: 'channel', adapter: 'slack-bot', workspace: 'T0', chat: 'C0', thread: null },
+    })
+    expect(out).toContain('`memory-logger` system process')
+    expect(out).toContain('Triggered by: a Slack channel turn')
+    expect(out).not.toContain('TUI session that the operator')
+  })
+
   test('channel origin shows the addressing fields and points at channel_reply by default', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
