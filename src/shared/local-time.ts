@@ -37,34 +37,26 @@ export function resolveLocalTimezoneName(): string {
   }
 }
 
-// English + Korean weekday name pair for a given Date. The per-turn time
-// anchor renders both so the model has the answer to "what day is it"
-// without computing weekday-from-ISO-date — a step LLMs get wrong often
-// enough to matter, especially when answering in a non-English language.
-// Pre-computing in both candidate reply languages removes the arithmetic
-// step entirely instead of trusting the model to do it correctly each
-// turn.
+// English weekday name for a given Date. The per-turn time anchor renders
+// it so the model has the answer to "what day is it" without computing
+// weekday-from-ISO-date — a step LLMs get wrong often enough to matter.
+// Pre-computing the weekday removes the arithmetic step entirely instead
+// of trusting the model to do it correctly each turn. English only:
+// TypeClaw's users are global, so a single canonical language keeps the
+// anchor compact and lets each agent's SOUL.md decide its reply language.
 //
-// Uses Intl.DateTimeFormat with explicit locales. No `timeZone` option:
+// Uses Intl.DateTimeFormat with an explicit locale. No `timeZone` option:
 // the container's local clock is already host-local (the entrypoint
 // propagates TZ via `-e TZ=<host-tz>`), so the runtime's default zone is
-// the one the user sees. Both locales fall back to the hand-rolled
-// 7-entry lookup if Intl throws (no-tzdata, locked-down sandbox) — the
-// fallback names stay readable and never make the prefix empty.
+// the one the user sees. Falls back to the hand-rolled 7-entry lookup if
+// Intl throws (no-tzdata, locked-down sandbox) — the fallback names stay
+// readable and never make the prefix empty.
 const WEEKDAYS_EN = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'] as const
-const WEEKDAYS_KO = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일'] as const
 
-export type LocalWeekday = { en: string; ko: string }
-
-export function formatLocalWeekday(date: Date = new Date()): LocalWeekday {
-  const dow = date.getDay()
-  const fallback: LocalWeekday = { en: WEEKDAYS_EN[dow]!, ko: WEEKDAYS_KO[dow]! }
+export function formatLocalWeekday(date: Date = new Date()): string {
   try {
-    return {
-      en: new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(date),
-      ko: new Intl.DateTimeFormat('ko-KR', { weekday: 'long' }).format(date),
-    }
+    return new Intl.DateTimeFormat('en-US', { weekday: 'long' }).format(date)
   } catch {
-    return fallback
+    return WEEKDAYS_EN[date.getDay()]!
   }
 }

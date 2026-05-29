@@ -151,19 +151,20 @@ TypeClaw runtime version: ${version}.`
 // would already be re-billed on each turn's user message — so this is
 // cache-free relative to the previous "## Now" placement.
 //
-// The block emits both English and Korean weekday names alongside the ISO
-// timestamp because models replying in a non-English language frequently
-// compute weekday-from-ISO incorrectly; pre-computing the weekday in both
-// candidate reply languages removes that arithmetic step entirely. The
-// framing is a single `<current-time>` XML tag for parity with other
-// runtime-injected per-turn blocks the agent already sees
-// (`<system-reminder>` etc.), so the model reads it as a structured anchor
-// rather than as content authored by a human in the chat.
+// The block emits the English weekday name alongside the ISO timestamp
+// because models frequently compute weekday-from-ISO incorrectly;
+// pre-computing it removes that arithmetic step entirely. English only:
+// TypeClaw's users are global, so the anchor uses one canonical language
+// and leaves reply language to each agent's SOUL.md. The framing is a
+// single `<current-time>` XML tag for parity with other runtime-injected
+// per-turn blocks the agent already sees (`<system-reminder>` etc.), so
+// the model reads it as a structured anchor rather than as content
+// authored by a human in the chat.
 export function renderTurnTimeAnchor(now: Date = new Date()): string {
   const iso = formatLocalDateTime(now)
   const zone = resolveLocalTimezoneName()
   const weekday = formatLocalWeekday(now)
-  return `<current-time>${iso} (${zone}, ${weekday.en} / ${weekday.ko})</current-time>`
+  return `<current-time>${iso} (${zone}, ${weekday})</current-time>`
 }
 
 // Compact replacement for DEFAULT_SYSTEM_PROMPT, used by non-interactive

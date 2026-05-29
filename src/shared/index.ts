@@ -24,10 +24,4 @@ export {
   type TunnelSnapshot,
 } from './protocol'
 
-export {
-  formatLocalDate,
-  formatLocalDateTime,
-  formatLocalWeekday,
-  type LocalWeekday,
-  resolveLocalTimezoneName,
-} from './local-time'
+export { formatLocalDate, formatLocalDateTime, formatLocalWeekday, resolveLocalTimezoneName } from './local-time'

@@ -5849,10 +5849,8 @@ describe('ChannelRouter per-turn wall-clock anchor', () => {
     const close = prompt.indexOf('</current-time>')
     expect(close).toBeGreaterThan(-1)
     const englishDays = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
-    const koreanDays = ['일요일', '월요일', '화요일', '수요일', '목요일', '금요일', '토요일']
     const anchor = prompt.slice(0, close + '</current-time>'.length)
     expect(englishDays.some((d) => anchor.includes(d))).toBe(true)
-    expect(koreanDays.some((d) => anchor.includes(d))).toBe(true)
     expect(prompt).toContain('what day is it')
   })
 })
