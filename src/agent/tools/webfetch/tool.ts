@@ -24,6 +24,7 @@ export const webfetchTool = defineTool({
   description:
     'Fetch a single HTTP(S) URL and return the body, optionally compacted by a strategy. ' +
     'Use this when the user references a specific URL or when websearch surfaced a result you need to read in full. ' +
+    'PREFER delegating to the `scout` subagent by default: spawn it whenever you expect more than one fetch, an "across multiple sources" task, or any search-then-fetch loop. Scout runs the noisy fetching in its own context window and returns a distilled, citation-backed answer, keeping bulky page bodies out of yours. Only call this tool directly for a single known URL whose content you will cite immediately. ' +
     'Outbound requests impersonate Chrome 136 at the TLS, HTTP/2, and header layers ' +
     '(via curl-impersonate), which helps with TLS/header fingerprint gates on sites behind Cloudflare/Akamai. ' +
     'It does NOT solve JavaScript challenges, behavioural fingerprinting (mouse/scroll/timing), interactive CAPTCHAs, ' +
