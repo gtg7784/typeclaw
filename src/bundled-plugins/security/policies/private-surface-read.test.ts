@@ -69,7 +69,6 @@ describe('private-surface-read guard — free-text field scoping (no false posit
   test('does not block a path-LIKE value in a free-text field', () => {
     expect(check('channel_reply', { text: 'see workspace/notes.md for details' })).toBeUndefined()
     expect(check('grep', { pattern: 'memory/topics', path: 'public' })).toBeUndefined()
-    expect(check('grep', { pattern: 'token', path: 'public', glob: 'workspace/*.md' })).toBeUndefined()
     expect(check('edit', { path: 'public/x.md', edits: [{ oldText: 'workspace/a', newText: 'memory/b' }] })).toBe(
       undefined,
     )
@@ -106,6 +105,34 @@ describe('private-surface-read guard — free-text field scoping (no false posit
         attachments: [{ path: 'memory/leak.md', filename: 'report.pdf' }],
       })?.block,
     ).toBe(true)
+  })
+})
+
+describe('private-surface-read guard — grep/find glob path-filters are scanned', () => {
+  test('blocks a grep glob that reaches a hidden subtree (non-hidden search root)', () => {
+    expect(check('grep', { pattern: 'x', path: '.', glob: 'workspace/**' })?.block).toBe(true)
+    expect(check('grep', { pattern: 'x', glob: 'memory/**' })?.block).toBe(true)
+    expect(check('grep', { pattern: 'x', path: 'public', glob: 'sessions/*.jsonl' })?.block).toBe(true)
+    expect(check('grep', { pattern: 'x', path: 'public', glob: 'workspace/*.md' })?.block).toBe(true)
+  })
+
+  test('blocks a find pattern that reaches a hidden subtree (find.pattern is a glob)', () => {
+    expect(check('find', { path: '.', pattern: 'workspace/**' })?.block).toBe(true)
+    expect(check('find', { pattern: 'memory/**' })?.block).toBe(true)
+  })
+
+  test('allows a grep glob that does not select a hidden subtree (no false positive)', () => {
+    expect(check('grep', { pattern: 'token', path: 'public', glob: '*.ts' })).toBeUndefined()
+    expect(check('grep', { pattern: 'token', path: 'public', glob: '**/*.spec.ts' })).toBeUndefined()
+  })
+
+  test('grep.pattern (a regex, not a path) is still exempt from scanning', () => {
+    expect(check('grep', { pattern: 'sessions' })).toBeUndefined()
+    expect(check('grep', { pattern: 'memory', path: 'public' })).toBeUndefined()
+  })
+
+  test('a future tool with a pattern key is NOT exempt (fail-closed)', () => {
+    expect(check('some_search_tool', { pattern: 'workspace/x' })?.block).toBe(true)
   })
 })
 

@@ -48,7 +48,7 @@ export function checkPrivateSurfaceReadGuard(options: {
   const deniedFiles = hidden.files
   if (deniedDirs.length === 0 && deniedFiles.length === 0) return undefined
 
-  for (const candidate of collectPathCandidates(args)) {
+  for (const candidate of collectPathCandidates(args, tool)) {
     const hit = matchHidden(candidate, agentDir, deniedDirs, deniedFiles)
     if (hit !== undefined) {
       return {
@@ -63,19 +63,21 @@ export function checkPrivateSurfaceReadGuard(options: {
   return undefined
 }
 
-// Free-text field names whose values are prose/queries/patterns, NOT paths.
-// Scanning them caused false positives: a guest's `channel_reply({ text:
-// "the memory leak" })`, `websearch({ query: "workspace setup" })`, or
-// `grep({ pattern: "sessions" })` all resolve to a bare hidden-dir name and
-// were wrongly blocked. The value here is a DENYLIST OF KEY NAMES, not a tool
-// whitelist: an unknown field on an unknown tool is still scanned (fail-closed
-// for new path-bearing readers), we only skip values whose KEY is a known
-// free-text field. `command` is included because bash (the only tool with it)
-// is already exempt via UNSCANNED_TOOLS and its access is bwrap-contained.
+// Field names whose values are ALWAYS free text (prose/queries/ids), NEVER a
+// filesystem path, for EVERY tool. Scanning them caused false positives: a
+// guest's `channel_reply({ text: "the memory leak" })` or `websearch({ query:
+// "workspace setup" })` resolve to a bare hidden-dir name and were wrongly
+// blocked. This is a DENYLIST OF KEY NAMES, not a tool whitelist: an unknown
+// field on an unknown tool is still scanned (fail-closed for new path-bearing
+// readers); we only skip values whose KEY is universally free text. `command`
+// is here because bash (its only user) is already exempt via UNSCANNED_TOOLS.
+//
+// `glob` and `pattern` are deliberately ABSENT — they are tool-dependent (a
+// glob/path-filter in grep/find, a regex only in grep) and handled by
+// FREE_TEXT_KEYS_BY_TOOL below.
 const NON_PATH_KEYS = new Set([
   'text',
   'query',
-  'pattern',
   'prompt',
   'selector',
   'url',
@@ -93,46 +95,59 @@ const NON_PATH_KEYS = new Set([
   'newText',
   // memory append tool: fragment topic is free text.
   'topic',
-  // grep tool: a glob like `workspace/*.md` is a filter pattern, not the
-  // search root (that is `path`), so it must not resolve-match a hidden dir.
-  'glob',
   // channel_send/channel_reply attachments[].filename and
   // channel_fetch_attachment.filename: display-only metadata (defaults to the
   // basename of the real `path`), never the file location the guard cares
-  // about — `attachments[].path` carries that and is NOT exempted. Without
-  // this, an attachment named e.g. "memory" is blocked even when its path is a
-  // safe `public/...`. Verified across the tool surface: no tool uses
-  // `filename` as a path argument.
+  // about — `attachments[].path` carries that and is NOT exempted.
   'filename',
 ])
 
-// Recursively collects strings that could be paths, skipping values under
-// NON_PATH_KEYS. Matching is left to matchHidden, which realpath-resolves each
-// candidate against agentDir and only fires on one that lands inside a hidden
-// directory. Fail-closed by design: a bare path-bearing value equal to a hidden
-// dir name (e.g. `path: "memory"`) is still blocked. Top-level strings and
-// array elements carry no key, so they are always scanned (an array of paths
-// like attachments[].path is collected even though the array key itself —
-// `attachments` — is not in NON_PATH_KEYS).
-function collectPathCandidates(value: unknown): string[] {
+// Keys that are free text in SPECIFIC tools but path-bearing in others, so a
+// global denylist would either over-block or open a bypass. Scoped per tool:
+//   - grep.pattern  : a regex/search string (e.g. "sessions"), NOT a path.
+// Notably NOT listed (and therefore SCANNED):
+//   - grep.glob / find.pattern : both are glob path-filters resolved RELATIVE
+//     to the search root, so `grep({ path: '.', glob: 'workspace/**' })` and
+//     `find({ path: '.', pattern: 'workspace/**' })` reach a hidden subtree.
+//     Exempting them let the only hidden-identifying arg through (the bypass a
+//     review caught). They have no false-positive risk: path.resolve treats
+//     glob metacharacters as literal, so `*.ts` -> `/agent/*.ts` (passes) while
+//     `workspace/**` -> `/agent/workspace/**` (correctly blocked).
+// Fail-closed: only the listed tool's listed key is exempted; an unknown tool
+// (or grep gaining a new key) scans everything.
+const FREE_TEXT_KEYS_BY_TOOL: Record<string, ReadonlySet<string>> = {
+  grep: new Set(['pattern']),
+}
+
+// Recursively collects strings that could be paths, skipping values under a
+// universally-free-text key or a tool-scoped free-text key. matchHidden then
+// realpath-resolves each candidate and fires only on one landing inside a
+// hidden directory. Fail-closed by design: a bare path-bearing value equal to a
+// hidden dir name (e.g. `path: "memory"`) is still blocked. `underExempt`
+// propagates so nested values under an exempt key (e.g. a structured pattern)
+// stay exempt; top-level strings and array elements carry no key and are always
+// scanned (so attachments[].path is collected).
+function collectPathCandidates(value: unknown, tool: string): string[] {
   const out: string[] = []
-  walk(value, out)
+  walk(value, out, tool, false)
   return out
 }
 
-function walk(value: unknown, out: string[]): void {
+function walk(value: unknown, out: string[], tool: string, underExempt: boolean): void {
   if (typeof value === 'string') {
+    if (underExempt) return
     out.push(value)
     return
   }
   if (Array.isArray(value)) {
-    for (const item of value) walk(item, out)
+    for (const item of value) walk(item, out, tool, underExempt)
     return
   }
   if (value !== null && typeof value === 'object') {
+    const toolFreeText = FREE_TEXT_KEYS_BY_TOOL[tool]
     for (const [key, item] of Object.entries(value)) {
-      if (NON_PATH_KEYS.has(key)) continue
-      walk(item, out)
+      const keyIsExempt = NON_PATH_KEYS.has(key) || (toolFreeText?.has(key) ?? false)
+      walk(item, out, tool, underExempt || keyIsExempt)
     }
   }
 }
