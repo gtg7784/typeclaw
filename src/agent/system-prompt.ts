@@ -27,6 +27,7 @@ When in doubt between SOUL.md and AGENTS.md: if it describes *how you sound*, it
 ## Your workspace
 
 - **\`workspace/\`** — your free-write zone for drafts, scratch work, generated artifacts. Do not create files at the agent-folder root unless the user explicitly asks.
+- **\`public/\`** — the guest-visible zone. Untrusted callers (the \`guest\` role) cannot see \`workspace/\`, but they can read and write \`public/\`. Put anything meant to be shared with an untrusted caller here. If a \`<your-role>\` tag on the turn names a non-trusted role, or a write to \`workspace/\` comes back \`denied by permissions\`, the caller is untrusted — write to \`public/\` instead.
 - **\`sessions/\`** — transcripts of past conversations. Runtime-managed; don't write here.
 - **\`memory/streams/\`** *(not injected — reach via \`memory_search\`)* — dated streams written by the memory-logger between sessions. Runtime-owned. Undreamed observations are searchable on demand instead of injected into every prompt.
 - **\`memory/skills/\`** — muscle-memory skills written by the dreaming subagent. Auto-loaded; don't write here directly.
@@ -154,6 +155,27 @@ export function renderTurnTimeAnchor(now: Date = new Date()): string {
   return `<current-time>${iso} (${zone}, ${weekday})</current-time>`
 }
 
+// Live role anchor injected into the **user turn**, not the system prompt —
+// same rationale and cache properties as renderTurnTimeAnchor above.
+//
+// The "## Your role in this session" block in the system prompt is a
+// session-CREATION snapshot: in a channel where speakers change turn to turn,
+// it reports the role of whoever first opened the session, not whoever is
+// speaking now. Tool gating already re-resolves the live role per turn (the
+// router updates `originRef` before each prompt), but the model never saw that
+// value — so it could not, for example, route output to `public/` for a guest.
+// This anchor surfaces the per-turn resolved role in the one place that costs
+// zero cached bytes (the non-cacheable user-turn suffix).
+//
+// Omitted for `owner`: owner is the unconstrained default, an absent tag means
+// "no special handling", and emitting it on every interactive turn would be
+// pure token overhead. This mirrors resolveRoleContext skipping the session
+// block for a TUI owner.
+export function renderTurnRoleAnchor(role: string): string | undefined {
+  if (role === 'owner') return undefined
+  return `<your-role>${role}</your-role>`
+}
+
 // Compact replacement for DEFAULT_SYSTEM_PROMPT, used by non-interactive
 // sessions (cron jobs, and default subagents that don't supply their own
 // `systemPromptOverride`). The full prompt is ~2155 tokens of operator-facing
@@ -194,6 +216,6 @@ Never suppress errors to make things "work", and never fabricate results. If som
 
 Do not narrate routine, low-risk tool calls — just call the tool. Do not over-explain what you did unless asked.
 
-Your free-write zone is \`workspace/\`. Do not create files at the root of the agent folder unless the prompt names another path. Do not edit \`memory/topics/\` directly — the dreaming subagent owns it; to capture something memorable, surface it in your reply or let the memory-logger append to \`memory/streams/\`. Never stage or commit \`secrets.json\`, \`.env\`, \`sessions/\`, \`memory/\`, or \`workspace/\` — those are runtime- or user-managed.
+Your free-write zone is \`workspace/\`. Do not create files at the root of the agent folder unless the prompt names another path. \`public/\` is the guest-visible zone — write there anything meant to be shared with an untrusted caller (a \`guest\`-role turn cannot read \`workspace/\` but can read \`public/\`). Do not edit \`memory/topics/\` directly — the dreaming subagent owns it; to capture something memorable, surface it in your reply or let the memory-logger append to \`memory/streams/\`. Never stage or commit \`secrets.json\`, \`.env\`, \`sessions/\`, \`memory/\`, or \`workspace/\` — those are runtime- or user-managed.
 
 See the session-origin block below for what kind of session this is and what's expected of you.`

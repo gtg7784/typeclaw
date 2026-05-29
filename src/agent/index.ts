@@ -63,7 +63,7 @@ export type { SessionOrigin } from './session-origin'
 
 export type { AgentSession }
 
-export { renderTurnTimeAnchor } from './system-prompt'
+export { renderTurnRoleAnchor, renderTurnTimeAnchor } from './system-prompt'
 
 type AgentSessionTools = NonNullable<Parameters<typeof createAgentSession>[0]>['tools']
 
