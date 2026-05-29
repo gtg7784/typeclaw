@@ -48,6 +48,12 @@ describe('resolveHiddenPaths — builtin tiers', () => {
     expect(dirs).toEqual(['/agent/workspace', '/agent/memory', '/agent/sessions'])
     expect(files).toEqual(['/agent/.env', '/agent/secrets.json'])
   })
+
+  test('guest never hides public/ — it is the guest-visible zone', () => {
+    const svc = createPermissionService()
+    const { dirs } = resolveHiddenPaths(svc, spawnedBy('guest'), AGENT)
+    expect(dirs).not.toContain('/agent/public')
+  })
 })
 
 describe('resolveHiddenPaths — fail-safe', () => {

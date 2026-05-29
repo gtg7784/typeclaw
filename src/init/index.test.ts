@@ -752,7 +752,7 @@ describe('scaffold', () => {
   test('creates expected directories', async () => {
     await scaffold(root)
 
-    for (const dir of ['workspace', 'sessions', '.agents/skills', 'mounts', 'packages']) {
+    for (const dir of ['workspace', 'public', 'sessions', '.agents/skills', 'mounts', 'packages']) {
       const path = join(root, dir)
       expect(existsSync(path)).toBe(true)
       expect(statSync(path).isDirectory()).toBe(true)
@@ -763,6 +763,14 @@ describe('scaffold', () => {
     await scaffold(root)
 
     const gitkeep = join(root, 'packages', '.gitkeep')
+    expect(existsSync(gitkeep)).toBe(true)
+    expect(await readFile(gitkeep, 'utf8')).toBe('')
+  })
+
+  test('writes public/.gitkeep so the empty guest-visible zone survives the initial git commit', async () => {
+    await scaffold(root)
+
+    const gitkeep = join(root, 'public', '.gitkeep')
     expect(existsSync(gitkeep)).toBe(true)
     expect(await readFile(gitkeep, 'utf8')).toBe('')
   })
