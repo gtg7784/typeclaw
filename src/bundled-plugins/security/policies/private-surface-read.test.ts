@@ -77,9 +77,18 @@ describe('private-surface-read guard — traversal + scope', () => {
     expect(check('read', { path: './workspace/./x' })?.block).toBe(true)
   })
 
-  test('does NOT cover the secret files (owned by the secretExfilRead guard)', () => {
-    expect(check('read', { path: '/agent/.env' })).toBeUndefined()
-    expect(check('read', { path: '/agent/secrets.json' })).toBeUndefined()
+  test('covers the secret files across ALL tools (one deny-list, not delegated to secretExfilRead)', () => {
+    expect(check('read', { path: '/agent/.env' })?.block).toBe(true)
+    expect(check('read', { path: '.env' })?.block).toBe(true)
+    expect(check('edit', { path: '/agent/.env' })?.block).toBe(true)
+    expect(check('write', { path: 'secrets.json' })?.block).toBe(true)
+    expect(check('look_at', { images: [{ path: '/agent/secrets.json' }] })?.block).toBe(true)
+    expect(check('channel_send', { attachments: [{ path: '/agent/.env' }] })?.block).toBe(true)
+  })
+
+  test('a secret file matches exactly, not by prefix (.env does not block .envrc-style siblings)', () => {
+    expect(check('read', { path: '/agent/.environment' })).toBeUndefined()
+    expect(check('read', { path: '/agent/secrets.json.bak' })).toBeUndefined()
   })
 
   test('empty deny-list (trusted+) is a no-op for every tool', () => {
