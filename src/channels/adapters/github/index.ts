@@ -92,7 +92,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   let selfLogin: string | null = null
   let started = false
   let managedHooks: ReadonlyArray<{ repo: string; hookId: number }> = []
-  let tokenRefreshTimer: ReturnType<typeof setInterval> | null = null
+  let tokenRefreshTimer: { clear: () => void } | null = null
   const workspaceByChat = new Map<string, string>()
 
   const rememberWorkspace = (workspace: string, chat: string): void => {
@@ -188,7 +188,11 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
             logger.error(`[github] periodic token refresh failed: ${err instanceof Error ? err.message : String(err)}`)
           })
         }
-        tokenRefreshTimer = (options.setInterval ?? setInterval)(refresh, tokenRefreshIntervalMs)
+        const setIntervalFn = options.setInterval ?? ((handler: () => void, ms: number) => {
+          const timer = setInterval(handler, ms)
+          return { clear: () => clearInterval(timer) }
+        })
+        tokenRefreshTimer = setIntervalFn(refresh, tokenRefreshIntervalMs)
       }
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
       // Best-effort: App-only preflight that compares the installation's granted
@@ -264,7 +268,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         managedHooks = []
       }
       if (tokenRefreshTimer !== null) {
-        ;(options.setInterval ? (timer) => timer.clear() : clearInterval)(tokenRefreshTimer)
+        tokenRefreshTimer.clear()
         tokenRefreshTimer = null
       }
       await auth.dispose()
