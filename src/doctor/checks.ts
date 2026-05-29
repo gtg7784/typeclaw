@@ -21,6 +21,7 @@ import { buildDockerfile, DOCKERFILE } from '@/init/dockerfile'
 import { detectMissingDeps } from '@/init/ensure-deps'
 import { buildGitignore, GITIGNORE_FILE } from '@/init/gitignore'
 
+import { buildChannelChecks } from './channel-checks'
 import type { DoctorCheck } from './types'
 
 export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): DoctorCheck[] {
@@ -40,6 +41,7 @@ export function buildStaticChecks(opts: { dockerExec?: DockerExec } = {}): Docto
     hostdRegistration(),
     containerState(dockerExec),
     containerHostPort(),
+    ...buildChannelChecks(),
   ]
 }
 
