@@ -23,7 +23,7 @@ import { installGithubWebhooksEagerly, type EagerGithubWebhookInstallResult } fr
 import { buildGitignore, GITIGNORE_FILE } from './gitignore'
 import { buildHatchingPrompt } from './hatching'
 import type { OAuthLoginRunner, OAuthLoginResult } from './oauth-login'
-import { GITKEEP_FILE, PACKAGES_DIR } from './paths'
+import { GITKEEP_FILE, PACKAGES_DIR, PUBLIC_DIR } from './paths'
 import { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
 
 export { type InstallResult, type InstallRunner, runBunInstall } from './run-bun-install'
@@ -31,7 +31,7 @@ export { type InstallResult, type InstallRunner, runBunInstall } from './run-bun
 export type { EagerGithubWebhookInstallResult } from './github-webhook-install'
 export { formatEagerGithubWebhookInstallResult, installGithubWebhooksEagerly } from './github-webhook-install'
 
-export { GITKEEP_FILE, PACKAGES_DIR } from './paths'
+export { GITKEEP_FILE, PACKAGES_DIR, PUBLIC_DIR } from './paths'
 
 export { appendOrReplaceEnvKey, hasEnvKey, readEnvFile } from './env-file'
 
@@ -55,7 +55,15 @@ const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'] as con
 // stay in `workspace/`. The directory is scaffolded empty so the layout is
 // discoverable on day one; a `.gitkeep` is written below so it survives the
 // initial commit.
-const DIRECTORIES = ['workspace', 'sessions', '.agents/skills', 'mounts', 'packages'] as const
+//
+// `public/` is a top-level sibling, NOT `workspace/public/`, on purpose:
+// role-based path hiding (src/sandbox/hidden-paths.ts) masks `workspace/` from
+// the guest tier but never masks `public/`, so `public/` is the one place a
+// guest turn can read and write. `workspace/` is an arbitrary free-write zone
+// with no reserved subdir names; a magic `workspace/public/` would silently
+// expose any subdir an agent happened to name `public`. A root sibling keeps
+// the deny-list flat (no carve-out) and the public/private split legible.
+const DIRECTORIES = ['workspace', 'public', 'sessions', '.agents/skills', 'mounts', 'packages'] as const
 
 export type GitInitResult = { ok: true; skipped: boolean } | { ok: false; reason: string }
 export type DockerAssetsResult = { ok: true; devMode: boolean } | { ok: false; reason: string }
@@ -552,12 +560,14 @@ export type ScaffoldOptions = {
 export async function scaffold(root: string, options: ScaffoldOptions = {}): Promise<void> {
   await Promise.all(DIRECTORIES.map((dir) => mkdir(join(root, dir), { recursive: true })))
 
-  // git does not track empty directories, so without this file the `packages/`
-  // workspace root would silently disappear from the initial commit and confuse
-  // the agent (its workspaces glob would resolve to nothing). The other
-  // DIRECTORIES are either gitignored (workspace, sessions, mounts) or
-  // immediately populated, so packages/ is the only one that needs this.
-  await writeFile(join(root, PACKAGES_DIR, GITKEEP_FILE), '', { flag: 'wx' }).catch(ignoreExists)
+  // git does not track empty directories, so without these files the empty
+  // `packages/` (a bun workspace root) and `public/` (the guest-visible zone)
+  // would silently disappear from the initial commit. The other DIRECTORIES are
+  // either gitignored (workspace, sessions, mounts) or immediately populated.
+  await Promise.all([
+    writeFile(join(root, PACKAGES_DIR, GITKEEP_FILE), '', { flag: 'wx' }).catch(ignoreExists),
+    writeFile(join(root, PUBLIC_DIR, GITKEEP_FILE), '', { flag: 'wx' }).catch(ignoreExists),
+  ])
 
   // Only fields without sensible defaults elsewhere are emitted. Everything
   // with a schema-provided default (e.g. `network.blockInternal`, `mounts`,
