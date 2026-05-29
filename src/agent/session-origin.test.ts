@@ -100,8 +100,21 @@ describe('renderSessionOrigin', () => {
     expect(out).toMatch(/One substantive reply per inbound/i)
     expect(out).toMatch(/needs more than one\s+tool call.*ack first.*keep working.*then send\s+the answer/is)
     expect(out).toMatch(/ack is not your reply/i)
-    expect(out).toMatch(/Once the answer lands, end your turn/i)
+    expect(out).toMatch(/Once the answer\s+lands, end your turn/i)
     expect(out).toMatch(/rephrase, restate/i)
+  })
+
+  test('channel origin tells the model that plain-text narration is invisible and must go through channel_reply', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    })
+    expect(out).toMatch(/Every user-facing sentence goes through `channel_reply`/i)
+    expect(out).toMatch(/Narrating in\s+plain text.*does NOT reach the\s+user/is)
+    expect(out).toMatch(/This includes acks/i)
   })
 
   // Regression for the Huxley Slack channel incident on 2026-05-26

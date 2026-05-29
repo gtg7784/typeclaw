@@ -117,6 +117,17 @@ class FakeSession {
     this.leafEntry = messageEntry(assistantMessage(text))
   }
 
+  setAssistantMidTurn(text: string, stopReason: AssistantMessage['stopReason'] = 'toolUse'): void {
+    this.leafEntry = messageEntry({
+      ...assistantMessage(text),
+      content: [
+        { type: 'text', text },
+        { type: 'toolCall', id: 't0', name: 'bash', arguments: {} },
+      ],
+      stopReason,
+    })
+  }
+
   setAssistantMessage(message: AssistantMessage): void {
     this.leafEntry = messageEntry(message)
   }
@@ -2003,6 +2014,153 @@ describe('ChannelRouter channel-turn protocol', () => {
     expect(sent).toEqual([{ chat: 'c1', thread: null, text: 'hi from invisible assistant text' }])
     expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(true)
     expect(logs.some((m) => m.includes('blocked assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  // Regression for the Kimi-on-Fireworks `kimi-k2p6-turbo` KakaoTalk silence
+  // bug: the model narrated a user-facing reply ("16x now") AND committed to a
+  // tool plan in the same message (stopReason='toolUse'), then the turn ended
+  // before any follow-up message that would have called channel_reply was
+  // persisted. The leaf is the assistant message itself, not a toolResult, so
+  // 'pre-tool' recovery does not apply. Without 'mid-turn' recovery the prose
+  // is silently dropped and the user sees nothing.
+  test('mid-turn recovery: recovers prose when leaf is a toolUse assistant with no follow-up', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '16배속 가자' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantMidTurn('16배속으로 실행 중! 잠깐 기다렸다가 스크린샷 찍어볼게요!')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(
+      logs.some((m) => m.includes('recovering assistant_text_without_channel_tool') && m.includes('source=mid-turn')),
+    ).toBe(true)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('16배속으로 실행 중! 잠깐 기다렸다가 스크린샷 찍어볼게요!')
+  })
+
+  test('mid-turn recovery: applies the NO_REPLY guard to recovered prose', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'check something' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantMidTurn("Nothing to add here. I'll end with NO_REPLY")
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('no_reply'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('mid-turn recovery: applies the Kimi tool-call leak guard to recovered prose', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'check something' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantMidTurn(
+        'channel_reply:0<|tool_call_argument_begin|>{"text": "hi there"}<|tool_calls_section_end|>',
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed kimi_tool_call_leak'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  test('mid-turn recovery: applies the upstream empty-response sentinel guard to recovered prose', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'check something' }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantMidTurn(
+        "(Empty response: {'content': [{'type': 'thinking', 'thinking': 'no need', " +
+          "'signature': 'EpQCCkYI...'}], 'stop_reason': 'end_turn', 'model': 'claude-opus-4-5'})",
+      )
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((m) => m.includes('suppressed upstream_empty_response_sentinel'))).toBe(true)
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+  })
+
+  // The leaf-assistant branch recovers ONLY 'stop' and 'toolUse'. length /
+  // error / aborted carry visible text too, but it's a truncation or an
+  // errored partial, not a deliberate reply — recovering it would post broken
+  // output. This is the load-bearing scoping of the mid-turn fix.
+  for (const stopReason of ['length', 'error', 'aborted'] as const) {
+    test(`mid-turn recovery: does NOT recover a leaf assistant with stopReason='${stopReason}'`, async () => {
+      const dir = await tempDir()
+      const logs: string[] = []
+      const sent: Array<{ text: string }> = []
+      const { router, sessions } = makeRouter(dir, { logs })
+      router.registerOutbound('discord-bot', async (msg) => {
+        sent.push({ text: msg.text ?? '' })
+        return { ok: true }
+      })
+
+      await router.route(inbound({ text: 'check something' }))
+      sessions[0]!.onPrompt = () => {
+        sessions[0]!.setAssistantMidTurn('partial truncated output that must not be posted', stopReason)
+      }
+      await router.__testing!.flushDebounce(KEY)
+
+      expect(sent).toHaveLength(0)
+      expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
+      expect(logs.some((m) => m.includes('no recoverable assistant text in branch'))).toBe(true)
+    })
+  }
+
+  test('mid-turn recovery: does NOT fire when the model successfully replied (channel send happened)', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: 'say hi' }))
+    sessions[0]!.onPrompt = async () => {
+      sessions[0]!.setAssistantMidTurn('narration that should not be recovered')
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'real reply' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toBe('real reply')
+    expect(logs.some((m) => m.includes('recovering assistant_text_without_channel_tool'))).toBe(false)
   })
 
   test('logs recovery send failures without crashing the drain loop', async () => {
