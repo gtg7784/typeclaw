@@ -1,4 +1,5 @@
 import { definePlugin } from '@/plugin'
+import { resolveHiddenPaths } from '@/sandbox'
 
 import { HIGH_TIER_PER_GUARD_PERMISSIONS, SECURITY_PERMISSIONS, SEVERITY_PERMISSION } from './permissions'
 import type { SecurityPermission, SecuritySeverity } from './permissions'
@@ -11,6 +12,7 @@ import {
   recordGitRemoteTaintIfAny,
 } from './policies/git-exfil'
 import { GUARD_OUTBOUND_SECRET_SEVERITY, checkOutboundSecretGuard } from './policies/outbound-secret-scan'
+import { checkPrivateSurfaceReadGuard } from './policies/private-surface-read'
 import { applyPromptInjectionDefense } from './policies/prompt-injection'
 import { clearSessionTaints } from './policies/remote-taint-state'
 import { GUARD_ROLE_PROMOTION_SEVERITY, checkRolePromotionGuard } from './policies/role-promotion'
@@ -161,6 +163,16 @@ export default definePlugin({
                 SECURITY_PERMISSIONS.bypassSecretExfilRead,
                 GUARD_SECRET_EXFIL_READ_SEVERITY,
               ),
+          // Role-derived, not severity-bypassed: resolveHiddenPaths already
+          // returns an empty deny-list for roles that may see the surface, so
+          // there is no canBypass wrapper. Mirrors the bash sandbox masks onto
+          // the non-bash read/grep/find/ls/edit/write builtins.
+          checkPrivateSurfaceReadGuard({
+            tool: event.tool,
+            args: event.args,
+            agentDir: ctx.agentDir,
+            hidden: resolveHiddenPaths(ctx.permissions, event.origin, ctx.agentDir),
+          }),
           canBypass(GUARD_SSRF_SEVERITY, SECURITY_PERMISSIONS.bypassSsrf)
             ? undefined
             : withPermissionHint(
