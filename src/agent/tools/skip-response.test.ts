@@ -109,28 +109,27 @@ describe('createSkipResponseTool', () => {
     expect(warns.some((w) => w.includes('empty reason'))).toBe(true)
   })
 
-  test('send-already-happened: tool refuses, returns ok=false with structured error, logs the violation', async () => {
-    const { logger, warns } = memoryLogger()
+  test('recorded-after-send: tool accepts as a terminal no-op (reply stands, nothing more sent)', async () => {
+    const markCalls: Array<{ parentSessionId: string; reason: string }> = []
     const tool = createSkipResponseTool({
       router: fakeRouter({
-        markResult: { kind: 'send-already-happened', keyId: 'discord-bot:g1:c1' },
+        markCalls,
+        markResult: { kind: 'recorded-after-send', keyId: 'discord-bot:g1:c1' },
       }),
       sessionId: 'ses_abc',
-      logger,
     })
-    const result = await runTool(tool, { reason: 'changed my mind' })
+    const result = await runTool(tool, { reason: 'waiting for reviewer subagent' })
 
     expect(result.details).toMatchObject({
-      ok: false,
+      ok: true,
       suppressed: false,
-      reason: 'changed my mind',
-      error: 'send-already-happened',
+      reason: 'waiting for reviewer subagent',
     })
+    expect(result.details.error).toBeUndefined()
     const body = result.content[0]?.type === 'text' ? result.content[0].text : ''
-    expect(body).toContain('skip_response denied')
-    expect(body).toContain('already sent a channel reply')
-    expect(body).toContain('Commit to silence or commit to replying, not both')
-    expect(warns.some((w) => w.includes('channel send already happened this turn'))).toBe(true)
+    expect(body).toContain('skip_response accepted')
+    expect(body).toContain('End your turn now')
+    expect(markCalls).toHaveLength(1)
   })
 
   test('no live session: tool still returns ok but suppressed=false and logs a warning', async () => {
