@@ -161,7 +161,10 @@ export function createEscListener(onSigint: () => void, input: RawInput = proces
     } catch {
       /* terminal already torn down */
     }
-    stdin.pause()
+    // Do NOT pause stdin here: this teardown hands control to the clack picker,
+    // and under Bun clack does not reliably re-flow a previously paused
+    // process.stdin, so its keypresses never arrive and arrow keys echo as raw
+    // bytes. Leaving the stream flowing lets clack own raw mode during the picker.
     ctrl.clearPending()
   }
 

@@ -83,4 +83,27 @@ describe('createEscListener wiring', () => {
     expect(order).toEqual(['listen', 'resume'])
     listener.stop()
   })
+
+  test('pause() hands stdin to the picker: raw mode off, listener detached, stream still flowing', () => {
+    // given: an armed listener (raw mode on, our data handler attached)
+    const tty = new FakeTty()
+    let sigints = 0
+    const listener = createEscListener(() => {
+      sigints += 1
+    }, tty as never)!
+    listener.armForStream()
+    expect(tty.rawMode).toBe(true)
+    expect(tty.listenerCount('data')).toBe(1)
+    // when: the picker takes over and we pause the listener
+    listener.pause()
+    // then: raw mode is released and our handler is gone so clack can own input,
+    //       but the stream is NOT paused — otherwise clack never receives bytes
+    expect(tty.rawMode).toBe(false)
+    expect(tty.listenerCount('data')).toBe(0)
+    expect(tty.resumed).toBe(true)
+    // and: bytes arriving while the picker owns input never reach our callback
+    tty.feed([0x03])
+    expect(sigints).toBe(0)
+    listener.stop()
+  })
 })
