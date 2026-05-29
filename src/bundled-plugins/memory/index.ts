@@ -6,7 +6,7 @@ import { CronExpressionParser } from 'cron-parser'
 import { z } from 'zod'
 
 import type { SessionOrigin } from '@/agent/session-origin'
-import { definePlugin } from '@/plugin'
+import { definePlugin, type SpawnSubagentOptions } from '@/plugin'
 import { formatLocalDate } from '@/shared'
 
 import { createDreamingSubagent, type DreamingPayload } from './dreaming'
@@ -205,9 +205,20 @@ export default definePlugin({
         ...(last.origin !== undefined ? { origin: last.origin } : {}),
         ...(streamLineCursor !== undefined ? { streamLineCursor } : {}),
       }
-      const spawnOptions = {
+      // Execution authority is `system` (resolves to owner), NOT the
+      // triggering turn's role: memory-logging is TypeClaw infrastructure over
+      // operator-owned sessions//memory/, so a guest channel turn that triggers
+      // it must not demote the logger to guest and get its transcript read
+      // blocked by privateSurfaceRead. The triggering origin is preserved two
+      // ways: `triggeredBy` for audit provenance, and `payload.origin` for
+      // content provenance (memory extraction/retrieval channel-safety).
+      const spawnOptions: SpawnSubagentOptions = {
         parentSessionId: sessionId,
-        ...(last.origin !== undefined ? { spawnedByOrigin: last.origin } : {}),
+        spawnedByOrigin: {
+          kind: 'system',
+          component: 'memory-logger',
+          ...(last.origin !== undefined ? { triggeredBy: last.origin } : {}),
+        },
       }
       const next = spawnChain
         .catch(() => undefined)
@@ -280,10 +291,18 @@ export default definePlugin({
         cacheFilePath,
         ...(event.origin !== undefined ? { origin: event.origin } : {}),
       }
-      await ctx.spawnSubagent('memory-retrieval', payload, {
+      // System authority, not the triggering turn's role — see the
+      // memory-logger spawn above. memory-retrieval writes
+      // memory/.retrieval-cache/, which a guest-demoted role cannot.
+      const retrievalSpawnOptions: SpawnSubagentOptions = {
         parentSessionId: event.sessionId,
-        ...(event.origin !== undefined ? { spawnedByOrigin: event.origin } : {}),
-      })
+        spawnedByOrigin: {
+          kind: 'system',
+          component: 'memory-retrieval',
+          ...(event.origin !== undefined ? { triggeredBy: event.origin } : {}),
+        },
+      }
+      await ctx.spawnSubagent('memory-retrieval', payload, retrievalSpawnOptions)
     }
 
     // Subagents are constructed at boot here (rather than imported as constants)

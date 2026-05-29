@@ -294,7 +294,13 @@ describe('session.turn.start hook', () => {
       cacheFilePath: join(agentDir, 'memory', '.retrieval-cache', 'ses_parent.md'),
       origin,
     })
-    expect(spawned[0]!.options).toEqual({ parentSessionId: 'ses_parent', spawnedByOrigin: origin })
+    // Execution authority is `system` (→ owner), with the triggering origin
+    // preserved as `triggeredBy` for audit. Content provenance stays in the
+    // payload `origin` above.
+    expect(spawned[0]!.options).toEqual({
+      parentSessionId: 'ses_parent',
+      spawnedByOrigin: { kind: 'system', component: 'memory-retrieval', triggeredBy: origin },
+    })
   })
 
   test('passes the actual user text, not the assembling system prompt (the bug session.prompt produced)', async () => {
