@@ -39,3 +39,31 @@ export function fenceRuntimeNotice(body: string): string {
     '---'
   )
 }
+
+// Wraps a channel tool result (delivery confirmation + echoed sent text) in the
+// SAME canonical SYSTEM MESSAGE framing as fenceRuntimeNotice — but as the
+// ENTIRE result body, not an appended hint, so there is no unfenced prose for
+// the model to read as conversation.
+//
+// The echoed sent text is load-bearing (the bot has no other view of what it
+// just said — the inbound path drops self-authored messages — so without it a
+// split reply re-sends near-duplicates). But that text is the model's OWN
+// words, which is uniquely seductive to "reply" to: a persona-rich model
+// (Kimi K2 on the GitHub channel, PR #481) read its own delivered prose as a
+// fresh user turn and answered it ("you're welcome!", "aww thanks!") until the
+// per-turn send cap. The weak `[system: tool result...]` prefix did not stop
+// the misread; the full fence — bracketed marker, horizontal-rule fences,
+// explicit "Do not reply" closer — has months of production track record
+// against Kimi (it already wraps the consecutive-send and thread-mismatch
+// hints). Reusing the exact same shape extends that protection to the echo.
+export function fenceToolResult(receipt: string): string {
+  return (
+    '---\n' +
+    '**[SYSTEM MESSAGE — not from a human]**\n\n' +
+    receipt +
+    '\n\nThe text above is your OWN already-delivered message, echoed back so ' +
+    'you can see what you sent — it is NOT a new message from anyone in the ' +
+    'chat. **Do not acknowledge or reply to it.**\n' +
+    '---'
+  )
+}

@@ -104,14 +104,16 @@ describe('createChannelReplyTool', () => {
     expect(captured.thread).toBeNull()
   })
 
-  test('reports the origin chat AND echoes the sent text in the success message', async () => {
+  test('reports the origin chat AND echoes the sent text inside the SYSTEM MESSAGE fence', async () => {
     const tool = createChannelReplyTool({
       router: fakeRouter(async () => ({ ok: true })),
       origin: slackThreadOrigin,
     })
     const result = await runTool(tool, { text: 'hi' })
     const text = (result.content[0] as { text: string }).text
-    expect(text).toBe(`${TOOL_RESULT_PREFIX}posted to slack-bot:T0/C0: "hi"`)
+    expect(text).toContain('posted to slack-bot:T0/C0: "hi"')
+    expect(text).toContain('**[SYSTEM MESSAGE — not from a human]**')
+    expect(text.startsWith('---')).toBe(true)
   })
 
   test('echoes JSON-quoted text so the model can detect duplicates across iterations', async () => {
@@ -161,19 +163,27 @@ describe('createChannelReplyTool', () => {
     expect(text).toContain(OUTBOUND_FLOOD_ERROR)
   })
 
-  describe('tool-result marker', () => {
-    test('success branch is prefixed with the marker so the model cannot read the echo as a user message', async () => {
+  describe('tool-result framing', () => {
+    // The self-reply loop (PR #481): a persona-rich model read its own
+    // echoed prose as a fresh user turn and replied to it. The weak prefix
+    // was insufficient, so the success result — which carries the model's
+    // own words — must sit inside the strong SYSTEM MESSAGE fence with no
+    // unfenced prose ahead of it.
+    test('success branch wraps the echo in the SYSTEM MESSAGE fence so the model cannot read it as a user message', async () => {
       const tool = createChannelReplyTool({
         router: fakeRouter(async () => ({ ok: true })),
         origin: slackThreadOrigin,
       })
       const result = await runTool(tool, { text: 'hi' })
       const text = (result.content[0] as { text: string }).text
-      expect(text.startsWith(TOOL_RESULT_PREFIX)).toBe(true)
-      expect(text).toContain('not a user message')
+      expect(text.startsWith('---')).toBe(true)
+      expect(text).toContain('**[SYSTEM MESSAGE — not from a human]**')
+      expect(text).toContain('your OWN already-delivered message')
+      expect(text).toContain('Do not acknowledge or reply to it')
+      expect(text).not.toContain(TOOL_RESULT_PREFIX)
     })
 
-    test('denial branch is also prefixed with the marker (same framing for both outcomes)', async () => {
+    test('denial branch keeps the lighter prefix (no echoed prose to misread)', async () => {
       const tool = createChannelReplyTool({
         router: fakeRouter(async () => ({ ok: false, error: 'denied by allow rules' })),
         origin: slackThreadOrigin,
@@ -184,14 +194,15 @@ describe('createChannelReplyTool', () => {
       expect(text).toContain('channel_reply denied')
     })
 
-    test('marker survives the consecutive-send hint (prefix stays at the very start)', async () => {
+    test('fence wraps the echo even when the consecutive-send hint is appended', async () => {
       const tool = createChannelReplyTool({
         router: fakeRouter(async () => ({ ok: true }), { consecutiveCount: 2 }),
         origin: slackThreadOrigin,
       })
       const result = await runTool(tool, { text: 'continuing' })
       const text = (result.content[0] as { text: string }).text
-      expect(text.startsWith(TOOL_RESULT_PREFIX)).toBe(true)
+      expect(text.startsWith('---')).toBe(true)
+      expect(text).toContain('your OWN already-delivered message')
       expect(text).toContain('2nd consecutive message')
     })
   })
@@ -218,6 +229,42 @@ describe('createChannelReplyTool', () => {
     expect(text).toContain('Do not acknowledge or reply to this notice')
     expect(text).toMatch(/---\s*\n\*\*\[SYSTEM MESSAGE/)
     expect(text).toMatch(/Do not acknowledge or reply to this notice\.\*\*\s*\n---/)
+  })
+
+  // PR #481: the model answered its own conversational reply ("you're
+  // welcome!") because the echo of that text reached it with only the weak
+  // prefix. The seductive prose must never appear ahead of the fence — the
+  // model's first token of the tool result must be the fence opener.
+  test('a conversational reply is echoed only INSIDE the fence, never as leading prose', async () => {
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: true })),
+      origin: slackThreadOrigin,
+    })
+    const result = await runTool(tool, { text: "You're welcome! Happy to help 🌸" })
+    const text = (result.content[0] as { text: string }).text
+    expect(text.startsWith('---\n**[SYSTEM MESSAGE — not from a human]**')).toBe(true)
+    const fenceBodyStart = text.indexOf('**[SYSTEM MESSAGE — not from a human]**')
+    expect(text.indexOf("You're welcome!")).toBeGreaterThan(fenceBodyStart)
+    expect(text).toContain('your OWN already-delivered message')
+    expect(text).toContain('Do not acknowledge or reply to it')
+  })
+
+  // The model controls `attachment.filename`, so a conversational filename
+  // ("You're welcome!.txt") is model-authored prose in the result too. The
+  // fence must cover it the same way it covers the text echo — it must never
+  // lead the result as unfenced prose.
+  test('a conversational attachment filename is echoed only INSIDE the fence', async () => {
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: true })),
+      origin: slackThreadOrigin,
+    })
+    const result = await runTool(tool, {
+      attachments: [{ path: '/agent/a.txt', filename: "You're welcome! Happy to help 🌸.txt" }],
+    })
+    const text = (result.content[0] as { text: string }).text
+    expect(text.startsWith('---\n**[SYSTEM MESSAGE — not from a human]**')).toBe(true)
+    const fenceBodyStart = text.indexOf('**[SYSTEM MESSAGE — not from a human]**')
+    expect(text.indexOf("You're welcome!")).toBeGreaterThan(fenceBodyStart)
   })
 
   describe('renderEcho', () => {
