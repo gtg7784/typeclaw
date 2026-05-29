@@ -45,8 +45,12 @@ export const inspectCommand = defineCommand({
 
     const isJson = args.json === true
     const liveSource = isJson ? undefined : await buildLiveSource(cwd)
-    const signal = installSigintAbort()
-    const escListener = isJson ? null : createEscListener()
+    const signalCtrl = installSigintAbort()
+    const signal = signalCtrl.signal
+    // Raw-mode Ctrl-C arrives as byte 0x03 and must abort the exit controller
+    // directly: under Bun a self-issued process.kill(SIGINT) does not reliably
+    // re-enter our process.once('SIGINT') handler, so the live tail never exits.
+    const escListener = isJson ? null : createEscListener(() => signalCtrl.abort())
     const liveHint = escListener === null ? undefined : escHintLine(color)
 
     // try/finally so a thrown loop never leaves the terminal stuck in raw mode.
@@ -108,14 +112,14 @@ async function buildLiveSource(cwd: string): Promise<LiveSourceFactory | undefin
     })
 }
 
-function installSigintAbort(): AbortSignal {
+function installSigintAbort(): AbortController {
   const ctrl = new AbortController()
   const onSig = (): void => {
     ctrl.abort()
   }
   process.once('SIGINT', onSig)
   process.once('SIGTERM', onSig)
-  return ctrl.signal
+  return ctrl
 }
 
 type EscListener = {
@@ -125,8 +129,10 @@ type EscListener = {
   stop: () => void
 }
 
-function createEscListener(): EscListener | null {
-  const stdin = process.stdin
+type RawInput = Pick<NodeJS.ReadStream, 'isTTY' | 'setRawMode' | 'resume' | 'pause' | 'on' | 'off'>
+
+export function createEscListener(onSigint: () => void, input: RawInput = process.stdin): EscListener | null {
+  const stdin = input
   if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') return null
 
   const ctrl = createEscController({ debounceMs: ESC_LISTEN_DELAY_MS })
@@ -134,15 +140,17 @@ function createEscListener(): EscListener | null {
 
   const onData = (chunk: Buffer): void => {
     const { sigint } = ctrl.onChunk(chunk)
-    if (sigint) process.kill(process.pid, 'SIGINT')
+    if (sigint) onSigint()
   }
 
   const start = (): void => {
     if (active) return
     active = true
     stdin.setRawMode(true)
-    stdin.resume()
+    // Attach the data handler before resume() so no raw-mode keystroke can slip
+    // through between resuming the stream and registering the listener.
     stdin.on('data', onData)
+    stdin.resume()
   }
   const stop = (): void => {
     if (!active) return
