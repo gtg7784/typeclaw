@@ -1119,12 +1119,10 @@ function handleInspectMessage(
   ws.data.unsubBroadcast?.()
   ws.data.unsubCron?.()
 
-  const watchedSessionId = msg.sessionId
-
   if (stream !== undefined && typeof msg.sinceMs === 'number') {
     for (const event of stream.scan({ sinceTs: msg.sinceMs, target: { kind: 'broadcast' } })) {
       const payload = broadcastEventToFrame(event)
-      if (!inspectFrameMatchesSession(payload, watchedSessionId)) continue
+      if (!isFrameForWatchedSession(payload, msg.sessionId)) continue
       sendInspect(ws, { type: 'frame', ts: event.ts, payload })
     }
     for (const event of stream.scan({ sinceTs: msg.sinceMs, target: { kind: 'cron' } })) {
@@ -1148,7 +1146,7 @@ function handleInspectMessage(
   if (stream !== undefined) {
     ws.data.unsubBroadcast = stream.subscribe({ target: { kind: 'broadcast' } }, (event) => {
       const payload = broadcastEventToFrame(event)
-      if (!inspectFrameMatchesSession(payload, watchedSessionId)) return
+      if (!isFrameForWatchedSession(payload, msg.sessionId)) return
       sendInspect(ws, { type: 'frame', ts: event.ts, payload })
     })
     ws.data.unsubCron = stream.subscribe({ target: { kind: 'cron' } }, (event) => {
@@ -1181,7 +1179,7 @@ function broadcastEventToFrame(event: StreamMessage): InspectFramePayload {
 // receives every session's inbounds. Drop the ones that don't belong to the
 // session being watched. Non-inbound broadcasts (subagent completions, cron,
 // tunnels) stay global — they carry no session identity here.
-function inspectFrameMatchesSession(payload: InspectFramePayload, watchedSessionId: string): boolean {
+function isFrameForWatchedSession(payload: InspectFramePayload, watchedSessionId: string): boolean {
   if (payload.kind !== 'channel_inbound') return true
   return payload.sessionId === watchedSessionId
 }

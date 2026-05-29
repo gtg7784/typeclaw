@@ -283,6 +283,49 @@ describe('/inspect WS handler', () => {
     ws.close()
   })
 
+  test('sinceMs backfill drops channel inbounds from other sessions; the watched session is backfilled', async () => {
+    const stream = createStream()
+    const t0 = Date.now()
+    const inbound = (sessionId: string, text: string): void => {
+      stream.publish({
+        target: { kind: 'broadcast' },
+        payload: {
+          kind: 'channel-inbound',
+          sessionId,
+          adapter: 'slack',
+          workspace: 'acme',
+          chat: 'C1',
+          thread: null,
+          authorId: 'U1',
+          authorName: 'alice',
+          authorIsBot: false,
+          isDm: false,
+          isBotMention: true,
+          text,
+          externalMessageId: 'm1',
+          ts: 1_700_000_000_000,
+          decision: 'engage',
+        },
+      })
+    }
+    inbound('ses_other', 'leaked from another session')
+    inbound('ses_watched', 'belongs here')
+
+    const { url } = await startServer({ stream })
+    const { ws, waitFor, received } = await connectInspect(url)
+    ws.send(JSON.stringify({ type: 'subscribe', sessionId: 'ses_watched', sinceMs: t0 - 1 }))
+    await waitFor((m) => m.type === 'subscribed')
+
+    const inbounds = received.filter(
+      (m): m is Extract<InspectServerMessage, { type: 'frame' }> =>
+        m.type === 'frame' && m.payload.kind === 'channel_inbound',
+    )
+    expect(inbounds).toHaveLength(1)
+    if (inbounds[0]?.payload.kind !== 'channel_inbound') throw new Error('unreachable')
+    expect(inbounds[0].payload.text).toBe('belongs here')
+    ws.close()
+  })
+
   test('Stream cron events forward as cron-fire frames with the jobId surfaced', async () => {
     const stream = createStream()
     const { url } = await startServer({ stream })
