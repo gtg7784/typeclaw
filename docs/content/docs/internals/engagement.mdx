@@ -1,0 +1,90 @@
+---
+title: Engagement
+description: The four-way inbound decision, the observe context buffer, the suppressor ladder, and the peer-bot loop guard
+icon: MessagesSquare
+---
+
+`src/channels/router.ts` decides, for every admitted inbound message, whether the agent wakes up and replies. The decision logic lives in `src/channels/engagement.ts` (`decideEngagement`); the router wires it to the prompt queue, the context buffer, and the inbound broadcast. This page documents the runtime concept — the operator-facing config knobs (`trigger`, `stickiness`, `alias`) are in the [channel-adapters reference](/docs/reference/channel-adapters) and the `typeclaw-config` skill.
+
+## The four-way decision
+
+Every inbound that survives the `channel.respond` permission gate is tagged with one of four decisions. The router publishes the tag on a `channel-inbound` broadcast event (`publishInbound`, `router.ts`); `typeclaw inspect` renders it as a colored `[...]` prefix (`src/inspect/render.ts`).
+
+| Decision  | Meaning                                                      | Inspect color |
+| --------- | ------------------------------------------------------------ | ------------- |
+| `engage`  | Reply — message enters `promptQueue`, the drain loop prompts | green         |
+| `observe` | Don't reply, but remember — message enters `contextBuffer`   | dim           |
+| `denied`  | Blocked by the `channel.respond` permission gate             | red           |
+| `claim`   | A `claim-…` role-claim code; handled before engagement       | magenta       |
+
+`denied` and `claim` are decided in `route()` _before_ engagement runs. `decideEngagement` itself only ever returns the narrower `EngagementDecision = 'engage' | 'observe'` — that is the union to extend if you add a wake-up reason. The wider four-way `InboundDecision` (`src/inspect/types.ts`) is the broadcast/protocol surface; both unions are currently spelled inline in `engagement.ts`, `inspect/types.ts`, `shared/protocol.ts`, `router.ts`, and `server/index.ts`. Adding a fifth decision means touching all five.
+
+## The engage ladder
+
+`decideEngagement` is a priority ladder. The first matching rule wins; falling off the bottom yields `observe`.
+
+1. **Explicit triggers** (config `trigger`): `dm`, `mention` (platform `<@id>`), `reply` to a bot message. Any one engages.
+2. **Sticky credit**: if `stickiness` is on and the author holds an unexpired credit in the `StickyLedger`, engage and consume it. Credits are granted to the authors a bot reply targets (`grantStickyForReplyTargets`), so a back-and-forth stays engaged without re-mentioning.
+3. **Alias match**: the message text contains the agent's name or a configured `alias` in plain text (case-insensitive substring, no word boundaries). `basename(agentDir)` is an implicit alias. **Not** suppressed by `mentionsOthers` — addressing two bots by name in one message engages both, each on its own alias.
+4. **Suppressors** (see below) — if any fires, return `observe` even though the solo-human fallback would otherwise engage.
+5. **Solo-human fallback**: if the channel currently holds at most one distinct **human** participant and the author isn't a bot, engage. Reverts to strict the moment a second human posts. This makes a one-human dev channel work without an `@mention` on every line.
+6. **Default**: `observe`.
+
+## Suppressors
+
+The suppressors exist to keep the bot out of conversations clearly aimed elsewhere, _before_ the permissive solo-human fallback can fire. Each is populated by the adapter classifiers and flips the fallback off for one message without changing channel state. Explicit triggers (1–3 above) are unaffected — they engage even when the message also tags a third party.
+
+- **`mentionsOthers`** — the message tags at least one other user and none of the mentions resolve to us.
+- **`replyToOtherMessageId !== null && !botInThread`** — the message is a reply to a message we didn't author, and we haven't sent into this thread yet. `botInThread` (router: `live.successfulChannelSends > 0` or a bot-authored buffered message) is the escape hatch: Slack's `parent_user_id` is the **thread root** author, so a thread a human starts by @-mentioning the bot would otherwise drop every follow-up reply once the bot is in it.
+- **`textTargetsAnyPeerBot`** — the message's text contains a known peer bot's observed display name. Each bot configures only its own aliases, so peer names come from `participants[]` (set once a peer has spoken); a never-seen peer's first addressing slips through, then is caught forever.
+
+### Peer-bot philosophy (do not relitigate)
+
+Peer bots remain reachable through the **same** triggers as humans (mention / reply / dm / sticky). They are _not_ downgraded to mention-only, and there is no `peerBotTriggers` knob. Bot-to-bot conversation is a first-class use case here. What peer bots do **not** get is the solo-human fallback — that courtesy is for humans who don't want to type `@bot` in their own channel. Letting peer bots ride the fallback produced multi-turn bot-to-bot introductions after a single human "얘들아". The fix was to close the fallback for bots, not to firewall bots behind explicit mentions. The full rationale is pinned in the comment block above the suppressors in `engagement.ts`.
+
+## Membership and the human count
+
+The solo-human fallback counts humans. Persisted `participants[]` (speakers seen in the last ~7 days) is the baseline; `resolveEffectiveHumans` (`engagement.ts`) reconciles it with a `MembershipCount` from the adapter's member API (`src/channels/membership.ts`):
+
+- A **fresh, complete** read (`!truncated && now - fetchedAt < MEMBERSHIP_FRESHNESS_MS`, 60s) is ground truth — it sees lurkers and prunes leavers.
+- A **truncated or stale** read is a quieting hint only: `max(persistedHumans, membership.humans)` avoids under-counting active humans.
+
+The router invalidates and warms the membership cache when a previously-unseen author posts, so the _next_ turn sees fresh data while the current turn still gets a fast answer.
+
+## observe: watch but remember
+
+`observe` is not a dead end. When the router gets `observe` (`route()`):
+
+1. **Broadcast + log.** `publishInbound(event, 'observe')` emits the inbound event; the router logs `observed id=…` so an unanswered mention is diagnosable from logs alone (the bracketed shape mirrors `prompting batch=` for log scraping).
+2. **Buffer.** `observe(live, event)` pushes the message into `live.contextBuffer` (an `ObservedInbound`), capped at `CONTEXT_BUFFER_SIZE` (20) by trimming the oldest.
+
+The buffer is consumed by four readers:
+
+- **Next engaged turn.** `drain()` splices the entire buffer alongside the prompt batch into `composeTurnPrompt`, which renders it under `## Recent context (not addressed to you, for awareness only)` — distinct from `## Current message(s) (addressed to you)`. So when the bot finally engages, it catches up on everything it silently watched.
+- **Attachment resolution.** `resolveInboundAttachment` / `listInboundAttachmentIds` walk `promptQueue` **and** `contextBuffer`, newest-first, so an observed photo is still referenceable by `attachment_id`.
+- **Quote anchoring.** A tool send refreshes its quote candidate against `contextBuffer` to detect channel chatter that landed between the inbound and the reply (`refreshQuoteCandidate`). See [channel-adapters](/docs/reference/channel-adapters) for the user-visible blockquote behavior.
+- **`botInThread`.** `hasBotParticipated` scans the buffer for a bot-authored message to decide the `replyToOtherMessageId` suppressor.
+
+Cold-start prefetch seeds the same buffer (`source: 'prefetch'`), and may exceed the cap on the one-shot seed; subsequent `observe()` calls trim back to 20.
+
+### Known asymmetry
+
+The `contextBuffer` only flushes inside `drain()`, which only runs on an `engage`. A channel the bot perpetually observes (a busy multi-human room it's never addressed in) trims **by count only**, never by age. There is no staleness gate on flush, so the first engage after a long observe-only stretch can inject up-to-20 stale messages as "recent context." Prefetch is bounded by recency; runtime observation is bounded only by count. Whether this matters is a product call — noted here so a future maintainer doesn't assume the buffer is time-bounded.
+
+## Peer-bot loop guard
+
+Distinct from the per-session [tool loop guard](/docs/internals/message-stream) (`src/agent/loop-guard.ts`, byte-identical tool calls). The channel-level guard (`updateLoopGuard`, `router.ts`) counts **engaged peer-bot turns since the last human**:
+
+- Any human inbound resets the counters and clears `loopGuardActive`.
+- A peer-bot engage increments `consecutiveEngagedPeerBotTurns` and pushes onto a sliding `PEER_BOT_TURNS_WINDOW_MS` (60s) window.
+- Tripping `MAX_CONSECUTIVE_PEER_BOT_TURNS_SINCE_HUMAN` (5) **or** `MAX_PEER_BOT_TURNS_IN_WINDOW` (5 in 60s) sets `loopGuardActive`.
+
+When active, `composeTurnPrompt` prepends a fenced `**[SYSTEM MESSAGE — not from a human]**` block telling the model it may reply `NO_REPLY` to stay silent. The notice lives in the user-turn suffix (not the system prompt) so it stays cache-neutral, and clears automatically once a human posts.
+
+## Rules of thumb
+
+- **`decideEngagement` is pure.** Inputs in, `engage`/`observe` out. No I/O, no side effects — the router owns buffering, broadcasting, and membership warming.
+- **The fix for over/under-engagement is `trigger` + `alias`, not new gates.** The `trigger` set already applies symmetrically to humans and bots. Don't add bot-only suppression knobs.
+- **`observe` is logged and broadcast on every hit.** An "unanswered mention" is always diagnosable from `typeclaw inspect` or the container logs — never silent.
+- **Observed messages re-enter the next turn.** Treat the context buffer as "what the agent saw while quiet," not as discarded traffic.
+- **Two loop guards, two layers.** Tool-call loops are per-session in `src/agent/`; peer-bot engage loops are per-channel in the router. Don't conflate them.
