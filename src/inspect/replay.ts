@@ -137,7 +137,12 @@ function* assistantEvents(
     }
   }
   if (typeof message.errorMessage === 'string' && message.errorMessage !== '') {
-    yield { cat: 'error', ts, message: message.errorMessage }
+    yield {
+      cat: 'error',
+      ts,
+      message: message.errorMessage,
+      ...(typeof message.stopReason === 'string' ? { stopReason: message.stopReason } : {}),
+    }
   }
   const usage = readUsage(message.usage)
   if (usage !== null && (usage.totalTokens > 0 || typeof message.stopReason === 'string')) {

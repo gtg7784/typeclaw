@@ -37,7 +37,10 @@ export type InspectEvent =
       isError?: boolean
       durationMs?: number
     }
-  | { cat: 'error'; ts: number; message: string }
+  // `stopReason` is the upstream-reported reason for the failed/aborted turn
+  // (e.g. 'error', 'aborted'). An 'aborted' stopReason is a user cancel, not a
+  // provider failure, and is rendered distinctly (see render.ts).
+  | { cat: 'error'; ts: number; message: string; stopReason?: string }
   | {
       cat: 'done'
       ts: number

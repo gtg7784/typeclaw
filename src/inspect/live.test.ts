@@ -135,6 +135,42 @@ describe('streamLive — live session events', () => {
     expect(assist.model).toBe('m')
   })
 
+  test('aborted message_end surfaces an error event carrying stopReason', async () => {
+    const registry = new LiveSessionRegistry()
+    const session = createFakeAgent()
+    registry.register({ sessionId: 'ses_a', session })
+    const { url } = await startServer({ registry })
+
+    const ctrl = new AbortController()
+    const subscribed = Promise.withResolvers<void>()
+    const gen = streamLive({
+      url,
+      sessionId: 'ses_a',
+      signal: ctrl.signal,
+      onSubscribed: () => subscribed.resolve(),
+    })
+
+    void subscribed.promise.then(() => {
+      session.emit({
+        type: 'message_end',
+        message: {
+          role: 'assistant',
+          content: [],
+          stopReason: 'aborted',
+          errorMessage: 'Request was aborted.',
+          usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
+        },
+      })
+    })
+
+    const events = await collectN(gen, 1)
+    ctrl.abort()
+    const ev = events[0]!
+    if (ev.cat !== 'error') throw new Error('expected error')
+    expect(ev.message).toBe('Request was aborted.')
+    expect(ev.stopReason).toBe('aborted')
+  })
+
   test('thinking_delta events accumulate until thinking_end then emit one thinking event', async () => {
     const registry = new LiveSessionRegistry()
     const session = createFakeAgent()

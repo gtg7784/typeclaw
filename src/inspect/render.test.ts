@@ -83,6 +83,26 @@ describe('renderEvent (plain, no color)', () => {
     expect(stripTime(renderEvent(ev, PLAIN))).toBe('HH:MM:SS  error      provider returned 503')
   })
 
+  test('error event appends stopReason when present and not an abort', () => {
+    const ev: InspectEvent = {
+      cat: 'error',
+      ts: dateMs('15:08:46'),
+      message: 'provider returned 503',
+      stopReason: 'error',
+    }
+    expect(stripTime(renderEvent(ev, PLAIN))).toBe('HH:MM:SS  error      provider returned 503 (stop=error)')
+  })
+
+  test('aborted turn renders an abort tag, not error, and omits the stop suffix', () => {
+    const ev: InspectEvent = {
+      cat: 'error',
+      ts: dateMs('15:08:46'),
+      message: 'Request was aborted.',
+      stopReason: 'aborted',
+    }
+    expect(stripTime(renderEvent(ev, PLAIN))).toBe('HH:MM:SS  abort      Request was aborted.')
+  })
+
   test('thinking event renders with think tag and the reasoning text', () => {
     const ev: InspectEvent = {
       cat: 'thinking',

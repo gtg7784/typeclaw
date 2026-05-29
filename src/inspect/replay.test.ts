@@ -248,6 +248,30 @@ describe('replayLines', () => {
     expect(errorEvent.message).toBe('provider returned 503')
   })
 
+  test('assistant errorMessage carries stopReason onto the error event', async () => {
+    const events = await collect(
+      replayLines(
+        asLines([
+          JSON.stringify({
+            type: 'message',
+            message: {
+              role: 'assistant',
+              content: [],
+              stopReason: 'aborted',
+              errorMessage: 'Request was aborted.',
+              usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { total: 0 } },
+              timestamp: 5000,
+            },
+          }),
+        ]),
+      ),
+    )
+    const errorEvent = events.find((e) => e.cat === 'error')
+    expect(errorEvent).toBeDefined()
+    if (errorEvent?.cat !== 'error') throw new Error('unreachable')
+    expect(errorEvent.stopReason).toBe('aborted')
+  })
+
   test('assistant thinking content block yields a thinking event ordered before text and tool calls', async () => {
     const events = await collect(
       replayLines(

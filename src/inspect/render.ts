@@ -39,6 +39,7 @@ function renderTag(event: InspectEvent, opts: RenderOptions): string {
     case 'tool':
       return tint(opts, 'yellow', padEnd(event.phase === 'start' ? 'tool ▸' : 'tool ◂', 9))
     case 'error':
+      if (event.stopReason === 'aborted') return tint(opts, 'yellow', padEnd('abort', 9))
       return tint(opts, 'red', padEnd('error', 9))
     case 'done':
       return tint(opts, 'gray', padEnd('done', 9))
@@ -73,8 +74,13 @@ function renderBody(event: InspectEvent, opts: RenderOptions): string {
       const result = renderResult(event.result, opts.maxTextLength ?? DEFAULT_MAX_TEXT)
       return `${event.name} → ${status}${result ? ` ${result}` : ''} (${dur})`
     }
-    case 'error':
-      return tint(opts, 'red', truncate(singleLine(event.message), opts.maxTextLength ?? DEFAULT_MAX_TEXT))
+    case 'error': {
+      const aborted = event.stopReason === 'aborted'
+      const text = truncate(singleLine(event.message), opts.maxTextLength ?? DEFAULT_MAX_TEXT)
+      const suffix =
+        event.stopReason !== undefined && !aborted ? ` ${tint(opts, 'dim', `(stop=${event.stopReason})`)}` : ''
+      return `${tint(opts, aborted ? 'yellow' : 'red', text)}${suffix}`
+    }
     case 'done':
       return renderDone(event, opts)
     case 'broadcast':
