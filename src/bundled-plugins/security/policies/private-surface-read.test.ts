@@ -58,6 +58,84 @@ describe('private-surface-read guard — fail-closed across ALL tools (not a whi
   })
 })
 
+describe('private-surface-read guard — free-text field scoping (no false positives)', () => {
+  test('does not block a bare hidden-dir NAME in a free-text field', () => {
+    expect(check('channel_reply', { text: 'memory' })).toBeUndefined()
+    expect(check('websearch', { query: 'workspace' })).toBeUndefined()
+    expect(check('grep', { pattern: 'sessions', path: 'public' })).toBeUndefined()
+    expect(check('look_at_channel_attachment', { prompt: 'sessions' })).toBeUndefined()
+  })
+
+  test('does not block a path-LIKE value in a free-text field', () => {
+    expect(check('channel_reply', { text: 'see workspace/notes.md for details' })).toBeUndefined()
+    expect(check('grep', { pattern: 'memory/topics', path: 'public' })).toBeUndefined()
+    expect(check('edit', { path: 'public/x.md', edits: [{ oldText: 'workspace/a', newText: 'memory/b' }] })).toBe(
+      undefined,
+    )
+    expect(check('append', { topic: 'workspace', body: 'about memory' })).toBeUndefined()
+  })
+
+  test('STILL blocks a hidden path in a genuine path field (scoping did not open a hole)', () => {
+    expect(check('read', { path: 'memory' })?.block).toBe(true)
+    expect(check('read', { path: 'workspace/notes.md' })?.block).toBe(true)
+    expect(check('grep', { pattern: 'token', path: 'sessions' })?.block).toBe(true)
+    expect(check('look_at', { images: [{ path: 'memory/x.png' }] })?.block).toBe(true)
+    expect(check('channel_send', { text: 'memory', attachments: [{ path: 'sessions/s.jsonl' }] })?.block).toBe(true)
+  })
+
+  test('fail-closed: an UNKNOWN key on an unknown tool is still scanned', () => {
+    expect(check('some_new_plugin_tool', { srcPath: 'memory/x' })?.block).toBe(true)
+    expect(check('some_new_plugin_tool', { nested: { target: 'workspace/y' } })?.block).toBe(true)
+  })
+
+  test('does not block an attachment display filename that equals a hidden-dir name', () => {
+    expect(
+      check('channel_send', {
+        text: 'see attached',
+        attachments: [{ path: 'public/report.pdf', filename: 'memory' }],
+      }),
+    ).toBeUndefined()
+    expect(check('channel_reply', { attachments: [{ path: 'public/x.md', filename: 'sessions' }] })).toBeUndefined()
+    expect(check('channel_fetch_attachment', { attachment_id: 1, filename: 'workspace' })).toBeUndefined()
+  })
+
+  test('STILL blocks a hidden attachments[].path even when filename is exempt', () => {
+    expect(
+      check('channel_send', {
+        attachments: [{ path: 'memory/leak.md', filename: 'report.pdf' }],
+      })?.block,
+    ).toBe(true)
+  })
+})
+
+describe('private-surface-read guard — grep/find glob path-filters are scanned', () => {
+  test('blocks a grep glob that reaches a hidden subtree (non-hidden search root)', () => {
+    expect(check('grep', { pattern: 'x', path: '.', glob: 'workspace/**' })?.block).toBe(true)
+    expect(check('grep', { pattern: 'x', glob: 'memory/**' })?.block).toBe(true)
+    expect(check('grep', { pattern: 'x', path: 'public', glob: 'sessions/*.jsonl' })?.block).toBe(true)
+    expect(check('grep', { pattern: 'x', path: 'public', glob: 'workspace/*.md' })?.block).toBe(true)
+  })
+
+  test('blocks a find pattern that reaches a hidden subtree (find.pattern is a glob)', () => {
+    expect(check('find', { path: '.', pattern: 'workspace/**' })?.block).toBe(true)
+    expect(check('find', { pattern: 'memory/**' })?.block).toBe(true)
+  })
+
+  test('allows a grep glob that does not select a hidden subtree (no false positive)', () => {
+    expect(check('grep', { pattern: 'token', path: 'public', glob: '*.ts' })).toBeUndefined()
+    expect(check('grep', { pattern: 'token', path: 'public', glob: '**/*.spec.ts' })).toBeUndefined()
+  })
+
+  test('grep.pattern (a regex, not a path) is still exempt from scanning', () => {
+    expect(check('grep', { pattern: 'sessions' })).toBeUndefined()
+    expect(check('grep', { pattern: 'memory', path: 'public' })).toBeUndefined()
+  })
+
+  test('a future tool with a pattern key is NOT exempt (fail-closed)', () => {
+    expect(check('some_search_tool', { pattern: 'workspace/x' })?.block).toBe(true)
+  })
+})
+
 describe('private-surface-read guard — false-positive control', () => {
   test('does not block prose args that merely mention a dir name without a separator', () => {
     expect(check('channel_send', { text: 'tell me about the workspace and memory' })).toBeUndefined()
