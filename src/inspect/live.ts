@@ -239,7 +239,12 @@ function messageEndToEvents(
       return event
     }
     if (payload.errorMessage !== undefined) {
-      return { cat: 'error', ts, message: payload.errorMessage }
+      return {
+        cat: 'error',
+        ts,
+        message: payload.errorMessage,
+        ...(payload.stopReason !== undefined ? { stopReason: payload.stopReason } : {}),
+      }
     }
     if (payload.usage !== undefined && (payload.usage.totalTokens > 0 || payload.stopReason !== undefined)) {
       return {
