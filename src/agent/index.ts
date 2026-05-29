@@ -335,6 +335,7 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
           sessionId: options.plugins.sessionId,
           hooks: options.plugins.hooks,
           getOrigin,
+          ...(options.permissions ? { permissions: options.permissions } : {}),
         })
       : []
   const wrappedCustomSystemTools = wrapSystemTools(customSystemTools, options.plugins, getOrigin)
