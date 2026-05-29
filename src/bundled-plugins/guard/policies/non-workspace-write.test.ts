@@ -19,6 +19,19 @@ describe('non-workspace-write guard policy', () => {
     expect(result).toBeUndefined()
   })
 
+  test('allows unacknowledged writes to public/ (the guest-visible zone)', async () => {
+    const agentDir = await makeAgentDir()
+
+    const result = await checkNonWorkspaceWriteGuard({
+      tool: 'write',
+      args: { path: 'public/report.md', content: 'shared' },
+      agentDir,
+      origin: { kind: 'tui', sessionId: 's1' },
+    })
+
+    expect(result).toBeUndefined()
+  })
+
   test('blocks main-agent writes to the retrieval cache file', async () => {
     const agentDir = await makeAgentDir()
 
