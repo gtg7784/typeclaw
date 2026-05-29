@@ -16,6 +16,13 @@ export const CORE_PERMISSIONS = {
   subagentCancel: 'subagent.cancel',
   subagentOutput: 'subagent.output',
   subagentSpawnOperator: 'subagent.spawn.operator',
+  // Phrased as capabilities to SEE, not to hide, so the role tower stays
+  // monotonic (a higher tier sees a strict superset of a lower tier) and the
+  // empty-permission guest is the fail-safe floor. resolveHiddenPaths masks
+  // whatever the resolved role lacks: fsSeePrivate gates workspace/+memory/+
+  // sessions/, fsSeeSecrets gates .env+secrets.json.
+  fsSeePrivate: 'fs.see.private',
+  fsSeeSecrets: 'fs.see.secrets',
 } as const
 
 // Sentinel that `expandOwnerWildcard` swaps for the concrete union of
@@ -61,6 +68,8 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentCancel,
       CORE_PERMISSIONS.subagentOutput,
       CORE_PERMISSIONS.subagentSpawnOperator,
+      CORE_PERMISSIONS.fsSeePrivate,
+      CORE_PERMISSIONS.fsSeeSecrets,
       'security.bypass.low',
       'security.bypass.medium',
       'security.bypass.high',
@@ -76,6 +85,8 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentCancel,
       CORE_PERMISSIONS.subagentOutput,
       CORE_PERMISSIONS.subagentSpawnOperator,
+      CORE_PERMISSIONS.fsSeePrivate,
+      CORE_PERMISSIONS.fsSeeSecrets,
       'security.bypass.low',
       'security.bypass.medium',
     ],
@@ -87,6 +98,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
       CORE_PERMISSIONS.subagentSpawn,
       CORE_PERMISSIONS.subagentCancel,
       CORE_PERMISSIONS.subagentOutput,
+      CORE_PERMISSIONS.fsSeePrivate,
       'security.bypass.low',
     ],
   },
