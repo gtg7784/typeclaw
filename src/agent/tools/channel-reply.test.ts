@@ -249,6 +249,24 @@ describe('createChannelReplyTool', () => {
     expect(text).toContain('Do not acknowledge or reply to it')
   })
 
+  // The model controls `attachment.filename`, so a conversational filename
+  // ("You're welcome!.txt") is model-authored prose in the result too. The
+  // fence must cover it the same way it covers the text echo — it must never
+  // lead the result as unfenced prose.
+  test('a conversational attachment filename is echoed only INSIDE the fence', async () => {
+    const tool = createChannelReplyTool({
+      router: fakeRouter(async () => ({ ok: true })),
+      origin: slackThreadOrigin,
+    })
+    const result = await runTool(tool, {
+      attachments: [{ path: '/agent/a.txt', filename: "You're welcome! Happy to help 🌸.txt" }],
+    })
+    const text = (result.content[0] as { text: string }).text
+    expect(text.startsWith('---\n**[SYSTEM MESSAGE — not from a human]**')).toBe(true)
+    const fenceBodyStart = text.indexOf('**[SYSTEM MESSAGE — not from a human]**')
+    expect(text.indexOf("You're welcome!")).toBeGreaterThan(fenceBodyStart)
+  })
+
   describe('renderEcho', () => {
     test('JSON-quotes short text', () => {
       expect(renderEcho('hi')).toBe('"hi"')
