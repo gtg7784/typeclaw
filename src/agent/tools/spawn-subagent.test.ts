@@ -6,7 +6,12 @@ import { createStream } from '@/stream'
 import type { AgentSession } from '../index'
 import { LiveSubagentRegistry } from '../live-subagents'
 import type { SessionOrigin } from '../session-origin'
-import type { CreateSessionForSubagent, Subagent, SubagentRegistry } from '../subagents'
+import type {
+  CreateSessionForSubagent,
+  CreateSessionForSubagentOptions,
+  Subagent,
+  SubagentRegistry,
+} from '../subagents'
 import { createSpawnSubagentTool } from './spawn-subagent'
 
 const ctx = {} as Parameters<ReturnType<typeof createSpawnSubagentTool>['execute']>[4]
@@ -453,5 +458,51 @@ describe('createSpawnSubagentTool — concurrency', () => {
     resolveA()
     resolveB()
     await new Promise((r) => setImmediate(r))
+  })
+})
+
+describe('createSpawnSubagentTool — role inheritance', () => {
+  function permService(role: string): PermissionService {
+    return {
+      has: () => true,
+      resolveRole: () => role,
+      describe: () => ({ role, permissions: ['subagent.spawn'] }),
+      replaceRoles: () => {},
+    }
+  }
+
+  test('forwards the parent origin role (resolved via permissions) as spawnedByRole', async () => {
+    const session = stubSession()
+    let capturedOptions: CreateSessionForSubagentOptions | undefined
+    const { tool } = fixedSpawn({
+      createSession: async (_subagent, options) => {
+        capturedOptions = options
+        return session
+      },
+      permissions: permService('owner'),
+    })
+
+    const result = await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
+
+    const details = result.details as { ok: boolean }
+    expect(details.ok).toBe(true)
+    expect(capturedOptions?.spawnedByRole).toBe('owner')
+  })
+
+  test('does not forge a role when no permission service is wired', async () => {
+    const session = stubSession()
+    let capturedOptions: CreateSessionForSubagentOptions | undefined
+    const { tool } = fixedSpawn({
+      createSession: async (_subagent, options) => {
+        capturedOptions = options
+        return session
+      },
+    })
+
+    const result = await tool.execute('call_1', { subagent_type: 'explorer', prompt: 'q' }, undefined, undefined, ctx)
+
+    const details = result.details as { ok: boolean }
+    expect(details.ok).toBe(true)
+    expect(capturedOptions?.spawnedByRole).toBeUndefined()
   })
 })
