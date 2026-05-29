@@ -156,6 +156,45 @@ describe('buildSandboxedCommand mounts', () => {
   })
 })
 
+describe('buildSandboxedCommand masks', () => {
+  test('hides a directory with --tmpfs', () => {
+    const argv = argvOf('true', { masks: { dirs: ['/agent/workspace'] } })
+    expect(argv.join(' ')).toContain('--tmpfs /agent/workspace')
+  })
+
+  test('hides a file with --ro-bind-data over fd 3', () => {
+    const argv = argvOf('true', { masks: { files: ['/agent/.env'] } })
+    expect(argv.join(' ')).toContain('--ro-bind-data 3 /agent/.env')
+  })
+
+  test('appends a `3< /dev/null` redirect to commandString when files are masked', () => {
+    const { commandString } = buildSandboxedCommand('true', { masks: { files: ['/agent/.env'] } })
+    expect(commandString.endsWith('3</dev/null')).toBe(true)
+  })
+
+  test('does NOT append the mask-fd redirect when only dirs are masked', () => {
+    const { commandString } = buildSandboxedCommand('true', { masks: { dirs: ['/agent/workspace'] } })
+    expect(commandString).not.toContain('3</dev/null')
+  })
+
+  test('renders all masks AFTER the broad parent bind so the last op wins', () => {
+    const argv = argvOf('true', {
+      mounts: [{ type: 'bind', source: '/agent', dest: '/agent' }],
+      masks: { dirs: ['/agent/workspace'], files: ['/agent/.env'] },
+    })
+    const parentBindDest = argv.indexOf('/agent')
+    const dirMask = argv.indexOf('/agent/workspace')
+    const fileMask = argv.indexOf('/agent/.env')
+    expect(parentBindDest).toBeLessThan(dirMask)
+    expect(parentBindDest).toBeLessThan(fileMask)
+  })
+
+  test('emits nothing when masks are empty', () => {
+    const argv = argvOf('true', { masks: { dirs: [], files: [] } })
+    expect(argv).not.toContain('--ro-bind-data')
+  })
+})
+
 describe('buildSandboxedCommand proc strategy', () => {
   test("omits the /proc tmpfs for proc: 'none'", () => {
     const argv = argvOf('true', { proc: 'none' })

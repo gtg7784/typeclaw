@@ -13,6 +13,11 @@ export type SandboxedCommand = {
   commandString: string
 }
 
+// Fixed fd the rendered commandString opens to /dev/null for --ro-bind-data
+// file masks. 3 is the first fd above stdio; the bash tool's spawn does not
+// inherit it, so the redirect is part of the command string itself.
+const MASK_DATA_FD = 3
+
 // Pure: no I/O, no bwrap availability probe (that is `ensureBwrapAvailable`'s
 // job). Given a bash command and a policy, returns the bwrap-wrapped argv plus
 // a shell-quoted rendering of it. Knows nothing about subagents, origins, or
@@ -24,7 +29,9 @@ export function buildSandboxedCommand(command: string, policy: SandboxPolicy = {
     applyCommandFilter(command, policy.commandFilter)
   }
   const argv = buildArgv(command, policy)
-  return { argv, commandString: formatCommand(argv) }
+  const needsMaskFd = (policy.masks?.files?.length ?? 0) > 0
+  const commandString = needsMaskFd ? `${formatCommand(argv)} ${MASK_DATA_FD}</dev/null` : formatCommand(argv)
+  return { argv, commandString }
 }
 
 function buildArgv(command: string, policy: SandboxPolicy): string[] {
@@ -70,12 +77,23 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
     appendMount(argv, mount)
   }
 
+  appendMasks(argv, policy)
+
   if (policy.cwd !== undefined) {
     argv.push('--chdir', policy.cwd)
   }
 
   argv.push('bash', '-c', command)
   return argv
+}
+
+function appendMasks(argv: string[], policy: SandboxPolicy): void {
+  for (const dir of policy.masks?.dirs ?? []) {
+    argv.push('--tmpfs', dir)
+  }
+  for (const file of policy.masks?.files ?? []) {
+    argv.push('--ro-bind-data', String(MASK_DATA_FD), file)
+  }
 }
 
 function appendMount(argv: string[], mount: SandboxMount): void {
