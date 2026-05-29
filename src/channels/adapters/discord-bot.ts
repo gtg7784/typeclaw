@@ -3,6 +3,7 @@ import {
   DiscordIntent,
   type DiscordGatewayInteractionEvent,
   type DiscordGatewayMessageCreateEvent,
+  type DiscordMessage,
 } from 'agent-messenger/discordbot'
 
 import {
@@ -349,8 +350,22 @@ function clampLimit(requested: number, max: number): number {
 // the upload error (the file the agent wanted to share is the load-bearing
 // part of the message). The text post is best-effort and only attempted
 // after every upload succeeds.
+// Structural client surface for the outbound path. Typed locally (not
+// `Pick<DiscordBotClient, ...>`) so the `reply_to` send option can be expressed
+// against the agent-messenger version that adds it (PR agent-messenger#205)
+// without the in-repo SDK pin having to ship it first; the real client
+// satisfies this shape once that release lands.
+export type DiscordOutboundClient = {
+  sendMessage(
+    channelId: string,
+    content: string,
+    options?: { thread_id?: string; reply_to?: string },
+  ): Promise<DiscordMessage>
+  uploadFile: DiscordBotClient['uploadFile']
+}
+
 export function createOutboundCallback(deps: {
-  client: Pick<DiscordBotClient, 'sendMessage' | 'uploadFile'>
+  client: DiscordOutboundClient
   logger: DiscordBotAdapterLogger
   formatChannelTag: (workspace: string, chat: string) => Promise<string>
   resolvePath?: (path: string) => string
@@ -393,7 +408,14 @@ export function createOutboundCallback(deps: {
     }
 
     try {
-      const sent = await client.sendMessage(msg.chat, text, msg.thread ? { thread_id: msg.thread } : undefined)
+      const sendOptions: { thread_id?: string; reply_to?: string } = {}
+      if (msg.thread) sendOptions.thread_id = msg.thread
+      if (msg.replyTo?.externalMessageId) sendOptions.reply_to = msg.replyTo.externalMessageId
+      const sent = await client.sendMessage(
+        msg.chat,
+        text,
+        Object.keys(sendOptions).length > 0 ? sendOptions : undefined,
+      )
       logger.info(`[discord-bot] sent id=${sent.id} ${tag}`)
       return { ok: true }
     } catch (err) {
