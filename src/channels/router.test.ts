@@ -268,6 +268,7 @@ async function waitForPersistedLastInboundAt(agentDir: string, expected: number)
 }
 
 const KEY: ChannelKey = { adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null }
+const SLACK_KEY: ChannelKey = { adapter: 'slack-bot', workspace: 'g1', chat: 'c1', thread: null }
 
 describe('ChannelRouter session lifecycle', () => {
   test('creates a session on first inbound and reuses it on second', async () => {
@@ -5520,20 +5521,23 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     expect(sent).toEqual(['yes I am here'])
   })
 
-  test('prepends a quote when an observed message landed between inbound and reply, even within the threshold', async () => {
+  test('prepends a quote on a quote-mode adapter when an observed message landed between inbound and reply, even within the threshold', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1_000_000 }
     const sent: string[] = []
     const { router } = makeRouter(dir, { nowRef })
-    router.registerOutbound('discord-bot', async (msg) => {
+    router.registerOutbound('slack-bot', async (msg) => {
       sent.push(msg.text ?? '')
       return { ok: true }
     })
 
-    await router.route(inbound({ text: 'cron status?', authorId: 'U_ALICE', authorName: 'Alice' }))
+    await router.route(
+      inbound({ adapter: 'slack-bot', text: 'cron status?', authorId: 'U_ALICE', authorName: 'Alice' }),
+    )
     nowRef.value += 100
     await router.route(
       inbound({
+        adapter: 'slack-bot',
         isBotMention: false,
         externalMessageId: 'm-observed',
         authorId: 'bob',
@@ -5541,29 +5545,32 @@ describe('ChannelRouter quote-anchor on outbound', () => {
         text: 'unrelated chatter',
       }),
     )
-    await router.__testing!.flushDebounce(KEY)
+    await router.__testing!.flushDebounce(SLACK_KEY)
     nowRef.value += 200
 
-    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'still blocked' })
+    await router.send({ adapter: 'slack-bot', workspace: 'g1', chat: 'c1', text: 'still blocked' })
     expect(sent[0]).toContain('> <@U_ALICE>: cron status?')
     expect(sent[0]).toContain('still blocked')
   })
 
-  test('prepends a quote when an observed message lands after prompt drain but before outbound reply', async () => {
+  test('prepends a quote on a quote-mode adapter when an observed message lands after prompt drain but before outbound reply', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1_000_000 }
     const sent: string[] = []
     const { router } = makeRouter(dir, { nowRef })
-    router.registerOutbound('discord-bot', async (msg) => {
+    router.registerOutbound('slack-bot', async (msg) => {
       sent.push(msg.text ?? '')
       return { ok: true }
     })
 
-    await router.route(inbound({ text: 'deploy status?', authorId: 'U_ALICE', authorName: 'Alice' }))
-    await router.__testing!.flushDebounce(KEY)
+    await router.route(
+      inbound({ adapter: 'slack-bot', text: 'deploy status?', authorId: 'U_ALICE', authorName: 'Alice' }),
+    )
+    await router.__testing!.flushDebounce(SLACK_KEY)
     nowRef.value += 100
     await router.route(
       inbound({
+        adapter: 'slack-bot',
         isBotMention: false,
         externalMessageId: 'm-observed-after-drain',
         authorId: 'bob',
@@ -5573,7 +5580,7 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     )
     nowRef.value += 200
 
-    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'still deploying' })
+    await router.send({ adapter: 'slack-bot', workspace: 'g1', chat: 'c1', text: 'still deploying' })
     expect(sent).toEqual(['> <@U_ALICE>: deploy status?\n\nstill deploying'])
   })
 
@@ -5611,7 +5618,10 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     nowRef.value += 200
 
     await router.send({ adapter: 'telegram-bot', workspace: 'g1', chat: 'c1', text: 'still blocked' })
-    expect(sent[0]?.replyTo).toEqual({ externalMessageId: '500' })
+    expect(sent[0]?.replyTo).toEqual({
+      externalMessageId: '500',
+      source: { adapter: 'telegram-bot', authorId: 'U_ALICE', authorName: 'Alice', text: 'cron status?' },
+    })
     expect(sent[0]?.text).toBe('still blocked')
   })
 
@@ -5642,20 +5652,55 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     expect(sent[0]?.text).toBe('all good')
   })
 
+  test('Discord: anchors via native replyTo (not a blockquote) when a message intervened', async () => {
+    const dir = await tempDir()
+    const nowRef = { value: 1_000_000 }
+    const sent: OutboundMessage[] = []
+    const { router } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push(msg)
+      return { ok: true }
+    })
+
+    await router.route(
+      inbound({ text: 'cron status?', authorId: 'U_ALICE', authorName: 'Alice', externalMessageId: 'd-500' }),
+    )
+    nowRef.value += 100
+    await router.route(
+      inbound({
+        isBotMention: false,
+        externalMessageId: 'd-501',
+        authorId: 'bob',
+        authorName: 'bob',
+        text: 'unrelated chatter',
+      }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value += 200
+
+    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'still blocked' })
+    expect(sent[0]?.replyTo?.externalMessageId).toBe('d-500')
+    expect(sent[0]?.text).toBe('still blocked')
+    expect(sent[0]?.text).not.toContain('>')
+  })
+
   test('anchors only the FIRST send of a multi-part reply; subsequent sends in the same turn are bare', async () => {
     const dir = await tempDir()
     const nowRef = { value: 1_000_000 }
     const sent: string[] = []
     const { router } = makeRouter(dir, { nowRef })
-    router.registerOutbound('discord-bot', async (msg) => {
+    router.registerOutbound('slack-bot', async (msg) => {
       sent.push(msg.text ?? '')
       return { ok: true }
     })
 
-    await router.route(inbound({ text: 'walk me through it', authorId: 'U_ALICE', authorName: 'Alice' }))
+    await router.route(
+      inbound({ adapter: 'slack-bot', text: 'walk me through it', authorId: 'U_ALICE', authorName: 'Alice' }),
+    )
     nowRef.value += 100
     await router.route(
       inbound({
+        adapter: 'slack-bot',
         isBotMention: false,
         externalMessageId: 'm-observed',
         authorId: 'bob',
@@ -5663,12 +5708,12 @@ describe('ChannelRouter quote-anchor on outbound', () => {
         text: 'following along',
       }),
     )
-    await router.__testing!.flushDebounce(KEY)
+    await router.__testing!.flushDebounce(SLACK_KEY)
     nowRef.value += 60_000
 
-    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'first chunk' })
-    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'second chunk' })
-    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'third chunk' })
+    await router.send({ adapter: 'slack-bot', workspace: 'g1', chat: 'c1', text: 'first chunk' })
+    await router.send({ adapter: 'slack-bot', workspace: 'g1', chat: 'c1', text: 'second chunk' })
+    await router.send({ adapter: 'slack-bot', workspace: 'g1', chat: 'c1', text: 'third chunk' })
     expect(sent).toEqual(['> <@U_ALICE>: walk me through it\n\nfirst chunk', 'second chunk', 'third chunk'])
   })
 
@@ -5677,15 +5722,24 @@ describe('ChannelRouter quote-anchor on outbound', () => {
     const nowRef = { value: 1_000_000 }
     const sent: string[] = []
     const { router } = makeRouter(dir, { nowRef })
-    router.registerOutbound('discord-bot', async (msg) => {
+    router.registerOutbound('slack-bot', async (msg) => {
       sent.push(msg.text ?? '')
       return { ok: true }
     })
 
-    await router.route(inbound({ text: 'turn one', authorId: 'U_ALICE', authorName: 'Alice', externalMessageId: 'm1' }))
+    await router.route(
+      inbound({
+        adapter: 'slack-bot',
+        text: 'turn one',
+        authorId: 'U_ALICE',
+        authorName: 'Alice',
+        externalMessageId: 'm1',
+      }),
+    )
     nowRef.value += 100
     await router.route(
       inbound({
+        adapter: 'slack-bot',
         isBotMention: false,
         externalMessageId: 'm1-observed',
         authorId: 'bob',
@@ -5693,14 +5747,23 @@ describe('ChannelRouter quote-anchor on outbound', () => {
         text: 'turn one chatter',
       }),
     )
-    await router.__testing!.flushDebounce(KEY)
+    await router.__testing!.flushDebounce(SLACK_KEY)
     nowRef.value += 60_000
-    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply one' })
+    await router.send({ adapter: 'slack-bot', workspace: 'g1', chat: 'c1', text: 'reply one' })
 
-    await router.route(inbound({ text: 'turn two', authorId: 'U_ALICE', authorName: 'Alice', externalMessageId: 'm2' }))
+    await router.route(
+      inbound({
+        adapter: 'slack-bot',
+        text: 'turn two',
+        authorId: 'U_ALICE',
+        authorName: 'Alice',
+        externalMessageId: 'm2',
+      }),
+    )
     nowRef.value += 100
     await router.route(
       inbound({
+        adapter: 'slack-bot',
         isBotMention: false,
         externalMessageId: 'm2-observed',
         authorId: 'bob',
@@ -5708,9 +5771,9 @@ describe('ChannelRouter quote-anchor on outbound', () => {
         text: 'turn two chatter',
       }),
     )
-    await router.__testing!.flushDebounce(KEY)
+    await router.__testing!.flushDebounce(SLACK_KEY)
     nowRef.value += 60_000
-    await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply two' })
+    await router.send({ adapter: 'slack-bot', workspace: 'g1', chat: 'c1', text: 'reply two' })
 
     expect(sent[0]).toBe('> <@U_ALICE>: turn one\n\nreply one')
     expect(sent[1]).toBe('> <@U_ALICE>: turn two\n\nreply two')

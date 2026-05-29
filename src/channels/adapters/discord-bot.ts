@@ -393,7 +393,14 @@ export function createOutboundCallback(deps: {
     }
 
     try {
-      const sent = await client.sendMessage(msg.chat, text, msg.thread ? { thread_id: msg.thread } : undefined)
+      const sendOptions: { thread_id?: string; reply_to?: string } = {}
+      if (msg.thread) sendOptions.thread_id = msg.thread
+      if (msg.replyTo?.externalMessageId) sendOptions.reply_to = msg.replyTo.externalMessageId
+      const sent = await client.sendMessage(
+        msg.chat,
+        text,
+        Object.keys(sendOptions).length > 0 ? sendOptions : undefined,
+      )
       logger.info(`[discord-bot] sent id=${sent.id} ${tag}`)
       return { ok: true }
     } catch (err) {

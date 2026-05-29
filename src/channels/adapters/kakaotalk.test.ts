@@ -10,6 +10,7 @@ import type {
   KakaoMember,
   KakaoMessage,
   KakaoProfile,
+  KakaoReplyTarget,
   KakaoSendResult,
   KakaoTalkListenerEventMap,
   KakaoTalkPushMessageEvent,
@@ -18,7 +19,12 @@ import type {
 import { createChannelRouter, type ChannelRouter } from '@/channels/router'
 import { defaultHistoryConfig, type ChannelAdapterConfig } from '@/channels/schema'
 
-import { createKakaotalkAdapter, type KakaoTalkClient, type KakaoTalkListener } from './kakaotalk'
+import {
+  createKakaotalkAdapter,
+  createOutboundCallback,
+  type KakaoTalkClient,
+  type KakaoTalkListener,
+} from './kakaotalk'
 
 type EventKey = keyof KakaoTalkListenerEventMap
 
@@ -67,8 +73,10 @@ function isAttachmentInputArray(
 
 class FakeClient implements KakaoTalkClient {
   loginCalls = 0
-  sendMessageCalls: Array<{ chatId: string; text: string }> = []
+  sendMessageCalls: Array<{ chatId: string; text: string; replyTo?: KakaoReplyTarget }> = []
   getMessagesCalls: Array<{ chatId: string; opts?: { count?: number; from?: string } }> = []
+  getMessagesResult: KakaoMessage[] = []
+  getMessagesError: Error | null = null
   getMembersCalls: string[] = []
   closed = false
   profileResult: KakaoProfile = {
@@ -99,11 +107,16 @@ class FakeClient implements KakaoTalkClient {
 
   async getMessages(chatId: string, opts?: { count?: number; from?: string }): Promise<KakaoMessage[]> {
     this.getMessagesCalls.push({ chatId, ...(opts !== undefined ? { opts } : {}) })
-    return []
+    if (this.getMessagesError !== null) throw this.getMessagesError
+    return this.getMessagesResult
   }
 
-  async sendMessage(chatId: string, text: string): Promise<KakaoSendResult> {
-    this.sendMessageCalls.push({ chatId, text })
+  async sendMessage(chatId: string, text: string, options?: { replyTo?: KakaoReplyTarget }): Promise<KakaoSendResult> {
+    this.sendMessageCalls.push({
+      chatId,
+      text,
+      ...(options?.replyTo !== undefined ? { replyTo: options.replyTo } : {}),
+    })
     return this.sendResult
   }
 
@@ -458,6 +471,110 @@ describe('createKakaotalkAdapter — outbound', () => {
 
     await adapter.stop()
     await router.stop()
+  })
+})
+
+describe('createOutboundCallback — native reply', () => {
+  const noopLogger = { info: () => {}, warn: () => {}, error: () => {} }
+  const formatChannelTag = async () => 'tag'
+  const kakaoMessage = (over: Partial<KakaoMessage>): KakaoMessage => ({
+    log_id: 'L0',
+    type: 1,
+    author_id: 0,
+    author_name: null,
+    message: '',
+    attachment: null,
+    sent_at: 0,
+    ...over,
+  })
+  const replySource = { adapter: 'kakaotalk' as const, authorId: '7', authorName: 'Alice', text: 'original?' }
+
+  test('resolves the reply target from history and sends a native reply (no blockquote)', async () => {
+    const client = new FakeClient()
+    client.getMessagesResult = [
+      kakaoMessage({ log_id: '500', author_id: 7, message: 'original?', type: 1 }),
+      kakaoMessage({ log_id: '501', author_id: 3, message: 'noise', type: 1 }),
+    ]
+    const cb = createOutboundCallback({ client, logger: noopLogger, formatChannelTag })
+
+    const result = await cb({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-dm',
+      chat: '111',
+      text: 'replying',
+      replyTo: { externalMessageId: '500', source: replySource },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(client.getMessagesCalls).toEqual([{ chatId: '111', opts: { count: 100 } }])
+    expect(client.sendMessageCalls).toEqual([
+      { chatId: '111', text: 'replying', replyTo: { log_id: '500', author_id: 7, message: 'original?', type: 1 } },
+    ])
+  })
+
+  test('mirrors the source message type into the reply target (non-text source)', async () => {
+    const client = new FakeClient()
+    client.getMessagesResult = [kakaoMessage({ log_id: '500', author_id: 7, message: 'photo', type: 2 })]
+    const cb = createOutboundCallback({ client, logger: noopLogger, formatChannelTag })
+
+    await cb({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-dm',
+      chat: '111',
+      text: 'nice pic',
+      replyTo: { externalMessageId: '500', source: replySource },
+    })
+
+    expect(client.sendMessageCalls[0]?.replyTo?.type).toBe(2)
+  })
+
+  test('degrades to a blockquote fallback when the target is not in recent history', async () => {
+    const client = new FakeClient()
+    client.getMessagesResult = [kakaoMessage({ log_id: '999', message: 'someone else' })]
+    const cb = createOutboundCallback({ client, logger: noopLogger, formatChannelTag })
+
+    const result = await cb({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-dm',
+      chat: '111',
+      text: 'replying',
+      replyTo: { externalMessageId: '500', source: replySource },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(client.sendMessageCalls).toHaveLength(1)
+    const call = client.sendMessageCalls[0]!
+    expect(call.replyTo).toBeUndefined()
+    expect(call.text).toContain('> Alice: original?')
+    expect(call.text).toContain('replying')
+  })
+
+  test('degrades to a blockquote fallback when the history fetch throws', async () => {
+    const client = new FakeClient()
+    client.getMessagesError = new Error('network down')
+    const cb = createOutboundCallback({ client, logger: noopLogger, formatChannelTag })
+
+    const result = await cb({
+      adapter: 'kakaotalk',
+      workspace: '@kakao-dm',
+      chat: '111',
+      text: 'replying',
+      replyTo: { externalMessageId: '500', source: replySource },
+    })
+
+    expect(result.ok).toBe(true)
+    expect(client.sendMessageCalls[0]?.replyTo).toBeUndefined()
+    expect(client.sendMessageCalls[0]?.text).toContain('> Alice: original?')
+  })
+
+  test('sends plainly when there is no replyTo (no history lookup)', async () => {
+    const client = new FakeClient()
+    const cb = createOutboundCallback({ client, logger: noopLogger, formatChannelTag })
+
+    await cb({ adapter: 'kakaotalk', workspace: '@kakao-dm', chat: '111', text: 'hello' })
+
+    expect(client.getMessagesCalls).toHaveLength(0)
+    expect(client.sendMessageCalls).toEqual([{ chatId: '111', text: 'hello' }])
   })
 })
 

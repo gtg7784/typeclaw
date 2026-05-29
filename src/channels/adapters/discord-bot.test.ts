@@ -661,7 +661,7 @@ describe('createDiscordHistoryCallback', () => {
 })
 
 describe('discord-bot createOutboundCallback', () => {
-  type SendCall = { chat: string; content: string; options?: { thread_id?: string } }
+  type SendCall = { chat: string; content: string; options?: { thread_id?: string; reply_to?: string } }
   type UploadCall = { chat: string; path: string }
 
   function makeFakeClient(
@@ -736,6 +736,20 @@ describe('discord-bot createOutboundCallback', () => {
     const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
     await cb(makeMsg({ text: 'hello', thread: 't1' }))
     expect(sends).toEqual([{ chat: 'c1', content: 'hello', options: { thread_id: 't1' } }])
+  })
+
+  test('forwards replyTo.externalMessageId as the reply_to send option (native reply)', async () => {
+    const { client, sends } = makeFakeClient()
+    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    await cb(makeMsg({ text: 'on it', replyTo: { externalMessageId: 'parent-9' } }))
+    expect(sends).toEqual([{ chat: 'c1', content: 'on it', options: { reply_to: 'parent-9' } }])
+  })
+
+  test('combines thread_id and reply_to when both apply', async () => {
+    const { client, sends } = makeFakeClient()
+    const cb = createOutboundCallback({ client, logger: silentLogger(), formatChannelTag: tag })
+    await cb(makeMsg({ text: 'on it', thread: 't1', replyTo: { externalMessageId: 'parent-9' } }))
+    expect(sends).toEqual([{ chat: 'c1', content: 'on it', options: { thread_id: 't1', reply_to: 'parent-9' } }])
   })
 
   test('attachments-only post uploads each file with no follow-up sendMessage', async () => {
