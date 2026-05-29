@@ -97,6 +97,7 @@ The agent folder is bind-mounted at `/agent`. The container's entrypoint is:
 - **`validateConfig` is the single host-side gate.** Every host path that consumes `typeclaw.json` goes through it before doing anything destructive. It also walks `config.mounts` and runs `validateMount` (existence, readability, writability). New host-side callers route through `validateConfig`, not `loadConfigSync`.
 - **`typeclaw.json#port` is preferred, not guaranteed.** `start` allocates a free port via `net.createServer().listen(...)` and falls back to ephemeral. The container's internal port is fixed (`CONTAINER_PORT`, `src/container/port.ts`). Mapping is asymmetric: `-p ${hostPort}:${CONTAINER_PORT}`. Docker is the runtime authority — `typeclaw tui`/`reload` use `docker port <container> 8973/tcp`. `typeclaw run` MUST default `--port` to `CONTAINER_PORT`, never to `config.port`.
 - **Containers run WITHOUT `--rm`.** Load-bearing for debuggability: a crashed container's logs must survive past exit. `typeclaw stop` does `docker stop` + `docker rm`; `start`'s preflight force-removes stale corpses. Do not "modernize" this back.
+- **Containers run with `--security-opt seccomp=unconfined`.** Required so `bwrap` (in baseline apt) can create user/pid/mount namespaces from inside Docker — the per-tool sandbox for subagent bash calls depends on it. The outer container is a single-tenant trust boundary, so seccomp's multi-tenant protections are not load-bearing for typeclaw's threat model; the inner bwrap sandbox is what matters for subagent isolation. See [/docs/internals/sandbox](https://typeclaw.dev/docs/internals/sandbox). Do not "harden" this back without first replacing the inner sandbox path with an equivalent boundary.
 
 ## Testing Philosophy
 
@@ -158,5 +159,6 @@ The architecture reference lives in the published docs under [Internals](https:/
 | `src/stream/` targets, subagent dispatch, cron split, TUI wire-protocol                       | [/docs/internals/message-stream](https://typeclaw.dev/docs/internals/message-stream) |
 | `websearch` tool, `curl-impersonate` pin, DDG failure modes                                   | [/docs/internals/web-search](https://typeclaw.dev/docs/internals/web-search)         |
 | Xvfb, NET_ADMIN drop, persistent-`$HOME` overlay, agent-browser headed-mode wrapper           | [/docs/internals/xvfb](https://typeclaw.dev/docs/internals/xvfb)                     |
+| `bwrap` per-tool sandbox, `seccomp=unconfined` rationale, OrbStack `/proc` workaround         | [/docs/internals/sandbox](https://typeclaw.dev/docs/internals/sandbox)               |
 
 The source for these pages is `docs/content/docs/internals/*.mdx` in this repo. Edit there when subsystem behavior changes — the published site rebuilds from the same files.

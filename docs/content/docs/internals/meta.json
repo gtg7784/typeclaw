@@ -1,5 +1,16 @@
 {
   "title": "Internals",
   "icon": "Wrench",
-  "pages": ["index", "skills", "secrets", "permissions", "hostd", "tunnels", "message-stream", "web-search", "xvfb"]
+  "pages": [
+    "index",
+    "skills",
+    "secrets",
+    "permissions",
+    "hostd",
+    "tunnels",
+    "message-stream",
+    "web-search",
+    "xvfb",
+    "sandbox"
+  ]
 }

@@ -1,0 +1,35 @@
+---
+title: Per-tool sandbox (bwrap)
+description: Why the outer container runs with seccomp=unconfined, how bwrap is the real boundary against prompt-injected subagent bash calls, and the OrbStack /proc workaround
+icon: Shield
+---
+
+The outer typeclaw container runs every agent and subagent in one trust boundary. The user's `.env`, `GH_TOKEN`, and agent folder are all visible to anything inside. That's fine for the agent's own work. It's not fine when a subagent reads attacker-controlled content (a PR diff, a webpage, a stack trace) and a prompt injection steers it into emitting hostile bash. For that case the boundary needs to live below the agent process, in the kernel.
+
+The kernel primitive for this is `bwrap(1)` (bubblewrap) — a setuid-less namespace sandboxer that wraps a single subprocess in its own user/pid/mount/net namespace. Per subagent bash call, the wrapper rebuilds an empty rootfs view containing only what the subagent declared it needs.
+
+This page documents the base layer — the apt package and the `docker run` flag that make bwrap available. The wrapper that consumes them (the `SubagentShared.sandbox` field and the bash-tool execute-time substitution) lives in `src/agent/sandbox/` in a follow-up PR.
+
+## `--security-opt seccomp=unconfined`
+
+`planStart()` in `src/container/start.ts` adds `--security-opt seccomp=unconfined` unconditionally. Without it, Docker's default seccomp profile blocks `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` for non-privileged containers, and bwrap exits at startup with "setting up uid map: Permission denied."
+
+The default profile is calibrated for multi-tenant container hosts — Kubernetes nodes, CI runners — where seccomp is one of several boundaries protecting tenant isolation. TypeClaw is single-tenant. The user owns the host, the agent folder is bind-mounted in, the secrets are in the env. The blast radius of an attacker already executing code inside the container is dominated by what they can do with those existing reads, not by the syscalls seccomp blocks. Dropping the filter loses the wrong thing from the wrong threat model.
+
+## Why not `--cap-add=SYS_ADMIN` instead
+
+Looks narrower (one capability vs ~44 syscalls). Is broader in practice. `CAP_SYS_ADMIN` is called "the new root" because it grants ~38 distinct privileges: `mount`, `swapon`, `sethostname`, namespace ops, `bpf`, `perf_event_open`, more. With it the outer container can `mount --bind / /proc/$$/root` and escape its own filesystem view. With `seccomp=unconfined` alone, it can _call_ `mount(2)` but the kernel rejects it for lack of `CAP_SYS_ADMIN`. The textbook "more caps is worse than more syscalls allowed" applies.
+
+## Why not a custom seccomp profile
+
+It's the narrowest of the three options — Docker default plus `unshare(CLONE_NEWUSER)` and `clone(CLONE_NEWUSER)` allowed, nothing else. It also introduces a security policy file that has to be shipped, distributed, kept in sync with bwrap's evolving needs, and debugged when it silently breaks something. The maintenance cost only earns its keep when TypeClaw goes multi-tenant. Single-tenant deployments don't need the precision; `seccomp=unconfined` is the right cost/benefit point until that changes.
+
+## bwrap in baseline
+
+`BASELINE_APT_PACKAGES` in `src/init/dockerfile.ts` includes `bubblewrap` (~132KB). Per-tool sandboxing is a runtime concern decided by the agent, not by the agent author, so it ships unconditionally rather than behind a `docker.file.bwrap` toggle. The flag pair (`seccomp=unconfined` on `docker run` + `bubblewrap` in baseline) is load-bearing together — dropping either breaks the sandbox with no test signal beyond the bwrap helper failing at runtime.
+
+## OrbStack `/proc` quirk
+
+OrbStack's hardened VM kernel blocks `mount("proc", ...)` from user namespaces regardless of caps. Bare-metal Linux and Docker Desktop allow it; OrbStack does not. The sandbox helper sidesteps this with `--tmpfs /proc` instead of `--proc /proc`: the sandbox gets an empty `/proc`, which breaks `ps`/`top`/anything reading `/proc/cpuinfo`, but does not break `git`/`bash`/`curl`/`gh` — the actual sandboxed-subagent workload. The `--dev-bind /proc /proc` alternative was rejected because it leaks the outer container's `/proc/N/environ` (including `FIREWORKS_API_KEY`) into the sandbox via cross-namespace `/proc` reads.
+
+The `--tmpfs /proc` choice works on every host (OrbStack, Docker Desktop, Linux), so the sandbox helper does not need to probe at runtime. The cost of giving up `ps` for read-only subagents is zero.
