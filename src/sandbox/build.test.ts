@@ -41,10 +41,14 @@ describe('buildSandboxedCommand base argv', () => {
     expect(argv).toContain('--tmpfs')
   })
 
-  test('binds the dynamic-loader dirs with --ro-bind-try so bash can exec on both arches', () => {
+  test('binds the usr-merge root symlinks with --ro-bind-try so loaders and shebangs resolve on both arches', () => {
     const joined = argvOf('true').join(' ')
+    // loaders: ELF PT_INTERP paths (/lib/ld-*, /lib64/ld-*) the kernel resolves without PATH
     expect(joined).toContain('--ro-bind-try /lib /lib')
     expect(joined).toContain('--ro-bind-try /lib64 /lib64')
+    // shebangs: literal #!/bin/sh and #!/bin/bash interpreter paths that skip PATH
+    expect(joined).toContain('--ro-bind-try /bin /bin')
+    expect(joined).toContain('--ro-bind-try /sbin /sbin')
   })
 
   test('uses --tmpfs /proc and never --proc or --dev-bind for /proc', () => {
