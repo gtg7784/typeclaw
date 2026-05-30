@@ -164,6 +164,19 @@ export const SESSION_FRESHNESS_TTL_MS = 5 * 60 * 1000
 // instead of awaiting the same dead promise forever.
 export const ENSURE_LIVE_TIMEOUT_MS = 30_000
 
+// Thrown by ensureLive() when a teardown (roles reload or shutdown) raced
+// ahead of an in-flight creation. route() has no special handling — it
+// propagates to the adapter's outer catch, dropping this one inbound. The
+// next inbound creates a fresh, post-reload session, which is the intended
+// outcome: a message that arrived mid-reload is cheap to drop, far cheaper
+// than answering it through a session built with the stale role.
+export class StaleLiveSessionError extends Error {
+  constructor(keyId: string) {
+    super(`[channels] ${keyId}: live session creation raced a teardown; discarded`)
+    this.name = 'StaleLiveSessionError'
+  }
+}
+
 // Per-callback ceilings inside the ensureLive chain. The outer watchdog
 // catches the worst case, but per-step timeouts give better log
 // attribution (which step hung) AND graceful degradation: a hung name
@@ -562,6 +575,7 @@ export type ChannelRouter = {
     | { kind: 'recorded-after-send'; keyId: string }
     | { kind: 'no-live-session' }
   stop: () => Promise<void>
+  tearDownAllLive: () => Promise<void>
   liveCount: () => number
   __testing?: {
     flushDebounce: (key: ChannelKey) => Promise<void>
@@ -691,6 +705,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const stream = options.stream
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
+  // Bumped by tearDownAllLive() and stop() before they tear sessions down. An
+  // in-flight ensureLive() captures the value at creation start and re-checks
+  // it right before installing into liveSessions; if it changed, a teardown
+  // raced ahead of this creation (e.g. a roles.match reload), so the session
+  // was built with stale role context and must self-dispose instead of
+  // installing — otherwise it would reintroduce the very staleness the
+  // teardown was meant to clear.
+  let liveGeneration = 0
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
@@ -909,6 +931,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const inFlight = creating.get(keyId)
     if (inFlight) return inFlight
 
+    const generation = liveGeneration
+
     const promise = (async () => {
       await ensureLoaded()
       const record = mappings ? findRecord(mappings, key) : undefined
@@ -1073,6 +1097,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.unsubTypingActivity = subscribeTypingActivity(created.session, live)
       installChannelReplyTerminalHook(live)
       installChannelOutputCap(live)
+
+      // A teardown (roles reload / shutdown) ran while this session was being
+      // built, so it carries stale role context. Dispose it instead of
+      // installing — installing here is the exact window the race exploits.
+      if (generation !== liveGeneration) {
+        logger.info(
+          `[channels] ${keyId}: discarding session created across a teardown (gen ${generation} → ${liveGeneration})`,
+        )
+        await tearDownLive(live)
+        throw new StaleLiveSessionError(keyId)
+      }
       liveSessions.set(keyId, live)
 
       if (isColdStart) {
@@ -2334,6 +2369,27 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const stop = async (): Promise<void> => {
     if (gcTimer) clearInterval(gcTimer)
     gcTimer = null
+    liveGeneration++
+    const all = Array.from(liveSessions.values())
+    liveSessions.clear()
+    for (const live of all) {
+      await tearDownLive(live)
+    }
+  }
+
+  // Drops every in-memory session but KEEPS the on-disk records, so the next
+  // inbound per channel rehydrates the same transcript through a fresh
+  // createSession() — which re-renders the frozen system-prompt role block.
+  // This is how a `roles.<name>.match` reload reaches live channel sessions.
+  // Unlike stop() it leaves the GC timer running; unlike stale-rollover it
+  // keeps the sessionId, so history survives.
+  //
+  // Bumping liveGeneration BEFORE the snapshot is what makes this race-free:
+  // a session mid-creation (in `creating` but not yet in `liveSessions`) won't
+  // appear in the snapshot below, but it captured the old generation and will
+  // self-dispose at its install guard instead of resurrecting stale role state.
+  const tearDownAllLive = async (): Promise<void> => {
+    liveGeneration++
     const all = Array.from(liveSessions.values())
     liveSessions.clear()
     for (const live of all) {
@@ -2476,6 +2532,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     injectSubagentCompletionReminder,
     markTurnSkipped,
     stop,
+    tearDownAllLive,
     liveCount: () => liveSessions.size,
     __testing: {
       flushDebounce: async (key: ChannelKey) => {

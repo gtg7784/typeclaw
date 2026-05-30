@@ -79,6 +79,55 @@ describe('config reload: roles split between match (applied) and permissions (re
     ).toBe(true)
   })
 
+  test('roles.<name>.match change → onRolesChanged fired so live channel sessions are recreated', async () => {
+    const cwd = freshAgentDir({
+      model: 'openai/gpt-5.4-mini',
+      roles: { owner: { match: ['tui'] } },
+    })
+    reloadConfig(cwd)
+
+    const permissions = createPermissionService({ roles: { owner: { match: [{ kind: 'tui' }] } } })
+    let recreated = 0
+
+    writeFileSync(
+      join(cwd, 'typeclaw.json'),
+      `${JSON.stringify(
+        { model: 'openai/gpt-5.4-mini', roles: { owner: { match: ['tui', 'slack:T0123 author:U_ME'] } } },
+        null,
+        2,
+      )}\n`,
+    )
+
+    const reloadable = createConfigReloadable({
+      cwd,
+      permissions,
+      onRolesChanged: () => {
+        recreated++
+      },
+    })
+    const result = await reloadable.reload()
+
+    expect(result.ok).toBe(true)
+    expect(recreated).toBe(1)
+  })
+
+  test('reload with no role.match change → onRolesChanged not fired', async () => {
+    const cwd = freshAgentDir({ model: 'openai/gpt-5.4-mini', roles: { owner: { match: ['tui'] } } })
+    reloadConfig(cwd)
+
+    let recreated = 0
+    const reloadable = createConfigReloadable({
+      cwd,
+      onRolesChanged: () => {
+        recreated++
+      },
+    })
+    const result = await reloadable.reload()
+
+    expect(result.ok).toBe(true)
+    expect(recreated).toBe(0)
+  })
+
   test('changing roles.<name>.permissions → reported as restart-required', async () => {
     const cwd = freshAgentDir({
       model: 'openai/gpt-5.4-mini',

@@ -150,6 +150,7 @@ export async function startAgent({
     createConfigReloadable({
       cwd,
       permissions: pluginsLoaded.permissions,
+      onRolesChanged: () => channelManager.router.tearDownAllLive(),
       skipMountValidation: containerName !== undefined,
     }),
   )

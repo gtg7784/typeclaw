@@ -11,6 +11,10 @@ export type CreateConfigReloadableOptions = {
   // hand-edits) take effect without a container restart. `roles.<name>.permissions`
   // changes still require a restart — see FIELD_EFFECTS in config.ts.
   permissions?: PermissionService
+  // Fired after replaceRoles when a `roles.<name>.match` edit is applied. The
+  // run stage wires this to the channel router so live sessions are recreated
+  // and pick up the new role in their (otherwise frozen) system prompt.
+  onRolesChanged?: () => void | Promise<void>
   // Skip the mount-path accessibility check inside validateConfig. Mount paths
   // in typeclaw.json are host paths — they don't resolve inside the container,
   // so the check would always fail on any agent that declares mounts. `mounts`
@@ -22,18 +26,20 @@ export type CreateConfigReloadableOptions = {
 export function createConfigReloadable({
   cwd,
   permissions,
+  onRolesChanged,
   skipMountValidation = false,
 }: CreateConfigReloadableOptions): Reloadable {
   return {
     scope: 'config',
     description: 'typeclaw.json runtime config',
-    reload: async () => doReload(cwd, permissions, skipMountValidation),
+    reload: async () => doReload(cwd, permissions, onRolesChanged, skipMountValidation),
   }
 }
 
 async function doReload(
   cwd: string,
   permissions: PermissionService | undefined,
+  onRolesChanged: (() => void | Promise<void>) | undefined,
   skipMountValidation: boolean,
 ): Promise<ReloadResult> {
   // Mount accessibility belongs to the validation surface, not loadConfigSync —
@@ -59,8 +65,9 @@ async function doReload(
     return { scope: 'config', ok: false, reason: message }
   }
 
-  if (permissions !== undefined && diff.applied.some((c) => c.path === 'roles.match')) {
-    permissions.replaceRoles(getConfig().roles)
+  if (diff.applied.some((c) => c.path === 'roles.match')) {
+    permissions?.replaceRoles(getConfig().roles)
+    await onRolesChanged?.()
   }
 
   return {
