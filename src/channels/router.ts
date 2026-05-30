@@ -562,6 +562,7 @@ export type ChannelRouter = {
     | { kind: 'recorded-after-send'; keyId: string }
     | { kind: 'no-live-session' }
   stop: () => Promise<void>
+  tearDownAllLive: () => Promise<void>
   liveCount: () => number
   __testing?: {
     flushDebounce: (key: ChannelKey) => Promise<void>
@@ -2341,6 +2342,20 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  // Drops every in-memory session but KEEPS the on-disk records, so the next
+  // inbound per channel rehydrates the same transcript through a fresh
+  // createSession() — which re-renders the frozen system-prompt role block.
+  // This is how a `roles.<name>.match` reload reaches live channel sessions.
+  // Unlike stop() it leaves the GC timer running; unlike stale-rollover it
+  // keeps the sessionId, so history survives.
+  const tearDownAllLive = async (): Promise<void> => {
+    const all = Array.from(liveSessions.values())
+    liveSessions.clear()
+    for (const live of all) {
+      await tearDownLive(live)
+    }
+  }
+
   const executeCommand = async (
     key: ChannelKey,
     name: string,
@@ -2476,6 +2491,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     injectSubagentCompletionReminder,
     markTurnSkipped,
     stop,
+    tearDownAllLive,
     liveCount: () => liveSessions.size,
     __testing: {
       flushDebounce: async (key: ChannelKey) => {
