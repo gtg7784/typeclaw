@@ -1004,29 +1004,27 @@ describe('scaffold', () => {
     expect(cfg.channels).toEqual({ 'discord-bot': {} })
   })
 
-  // A freshly-hatched agent with no roles config silently drops every inbound
-  // chat message because no role's match[] covers the channel session, so the
-  // origin resolves to `guest` (no channel.respond). `roles.member.match: ["*"]`
-  // grants the built-in `member` role (which already carries channel.respond)
-  // to any channel origin, so the agent talks out of the box. The owner-claim
-  // flow is then a privilege upgrade (cron, security bypass) for one human,
-  // not a precondition for the agent to speak at all.
-  test('writes roles.member.match: ["*"] when any chat adapter is selected (so freshly hatched agents respond)', async () => {
+  // Scoped-by-default: a freshly-hatched chat agent seeds NO member match, so
+  // every inbound author resolves to `guest` and is dropped until the operator
+  // claims `owner` (runOwnerClaim) and explicitly grants others. This makes the
+  // owner-claim flow a precondition for the agent to speak — surfaced by the
+  // mute-until-claimed warning — rather than letting any stranger drive it.
+  test('seeds NO member match when a chat adapter is selected (scoped-by-default)', async () => {
     await scaffold(root, { withSlack: true })
 
     const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
       roles?: { member?: { match?: string[] } }
     }
-    expect(cfg.roles?.member?.match).toEqual(['*'])
+    expect(cfg.roles?.member?.match).toBeUndefined()
   })
 
-  test('writes roles.member.match: ["*"] exactly once when multiple chat adapters are selected', async () => {
+  test('seeds NO member match even when multiple chat adapters are selected', async () => {
     await scaffold(root, { withDiscord: true, withSlack: true, withTelegram: true, withKakaotalk: true })
 
     const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as {
       roles?: { member?: { match?: string[] } }
     }
-    expect(cfg.roles?.member?.match).toEqual(['*'])
+    expect(cfg.roles?.member).toBeUndefined()
   })
 
   test('omits roles block entirely when no chat adapter is selected (greenfield is silent until configured)', async () => {

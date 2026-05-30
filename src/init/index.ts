@@ -39,14 +39,6 @@ const CONFIG_FILE = 'typeclaw.json'
 const CRON_FILE = 'cron.json'
 const PACKAGE_FILE = 'package.json'
 
-// Seeded into `typeclaw.json#roles.member.match[]` whenever a chat adapter
-// (slack-bot, discord-bot, telegram-bot, kakaotalk) is wired. The "*" rule
-// matches every channel session on every platform, so the built-in `member`
-// role (which already carries `channel.respond`) covers any inbound the
-// router sees. Without this, freshly-hatched agents silently drop every
-// chat message — see scaffold() and ensureDefaultChatMemberMatch() below.
-const DEFAULT_CHAT_MEMBER_MATCH_RULE = '*'
-
 const MARKDOWN_FILES = ['AGENTS.md', 'IDENTITY.md', 'SOUL.md', 'USER.md'] as const
 
 // `packages/` is a bun workspace root (see `workspaces` in buildPackageJson).
@@ -586,11 +578,11 @@ export async function scaffold(root: string, options: ScaffoldOptions = {}): Pro
   if (options.withTelegram) channels['telegram-bot'] = {}
   if (options.withKakaotalk) channels.kakaotalk = {}
   if (Object.keys(channels).length > 0) config.channels = channels
-  // See DEFAULT_CHAT_MEMBER_MATCH_RULE for why this is here. GitHub is wired
-  // separately (writeGithubChannelForInit) and seeds per-repo member.match
-  // entries instead of the wildcard, so a github-only init stays scoped to
-  // the repos the operator opted in to.
-  if (Object.keys(channels).length > 0) config.roles = { member: { match: [DEFAULT_CHAT_MEMBER_MATCH_RULE] } }
+  // No default `member` match is seeded. A fresh chat agent starts with every
+  // inbound author resolving to `guest` (dropped) until the operator claims
+  // `owner` (runOwnerClaim, post-hatch) and explicitly grants others. GitHub is
+  // wired separately and seeds per-repo `member.match` entries scoped to the
+  // opted-in repos. See runOwnerClaim for the mute-until-claimed warning.
   await writeFile(join(root, CONFIG_FILE), `${JSON.stringify(config, null, 2)}\n`)
 
   const cron = {
@@ -1046,8 +1038,6 @@ export async function runAddChannel(options: AddChannelOptions): Promise<void> {
   if (options.channel === 'github') {
     await appendGithubMatchRules(options.cwd, options.repos)
     await maybeInstallGithubWebhooks(options, emit)
-  } else {
-    await ensureDefaultChatMemberMatch(options.cwd)
   }
 
   // Commit the typeclaw.json change so the agent folder isn't silently
@@ -1324,24 +1314,6 @@ async function appendGithubMatchRules(cwd: string, repos: readonly string[]): Pr
   const merged = new Set(existing)
   for (const repo of repos) merged.add(`github:${repo}`)
   member.match = Array.from(merged)
-  roles.member = member
-  parsed.roles = roles
-  await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`)
-}
-
-// Chat-adapter counterpart of appendGithubMatchRules. See
-// DEFAULT_CHAT_MEMBER_MATCH_RULE for the rationale. Set-union semantics: re-
-// running `typeclaw channel add` for additional chat adapters is a no-op on
-// the match list, and any pre-existing rules the operator hand-authored
-// (e.g. owner-claim's per-author entry on `owner`) are left intact.
-async function ensureDefaultChatMemberMatch(cwd: string): Promise<void> {
-  const path = join(cwd, CONFIG_FILE)
-  const parsed = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>
-  const roles = isObjectRecord(parsed.roles) ? { ...parsed.roles } : {}
-  const member = isObjectRecord(roles.member) ? { ...roles.member } : {}
-  const existing = Array.isArray(member.match) ? member.match.filter((v): v is string => typeof v === 'string') : []
-  if (existing.includes(DEFAULT_CHAT_MEMBER_MATCH_RULE)) return
-  member.match = [...existing, DEFAULT_CHAT_MEMBER_MATCH_RULE]
   roles.member = member
   parsed.roles = roles
   await writeFile(path, `${JSON.stringify(parsed, null, 2)}\n`)
