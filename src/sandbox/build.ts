@@ -65,17 +65,37 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
 
   argv.push('--ro-bind', '/usr', '/usr', '--ro-bind', '/etc', '/etc', '--dev', '/dev', '--tmpfs', '/tmp')
 
-  // bash's ELF interpreter (the dynamic loader) is named by an absolute path
-  // baked into PT_INTERP — /lib/ld-linux-aarch64.so.1 (arm64) or
-  // /lib64/ld-linux-x86-64.so.2 (amd64). On the usr-merged Debian base those
-  // /lib /lib64 entries are root-level symlinks into /usr/lib that --ro-bind
-  // /usr does NOT recreate, so without these binds the kernel can't find the
-  // loader and bwrap reports it as "execvp bash: No such file or directory"
-  // (the missing file is the loader, not bash). --ro-bind-try, not --ro-bind:
-  // arm64 oven/bun:1-slim ships /lib but no /lib64, and a hard bind of an
-  // absent source aborts bwrap. -try keeps this builder pure (no host probe)
-  // while binding each only when present, correct on both arches.
-  argv.push('--ro-bind-try', '/lib', '/lib', '--ro-bind-try', '/lib64', '/lib64')
+  // Recreate the usr-merge root symlinks that --ro-bind /usr does NOT bring
+  // along. On the Debian base (oven/bun:1-slim) /bin /sbin /lib /lib64 are
+  // root-level symlinks into /usr; binding /usr exposes /usr/bin etc. but the
+  // root entries themselves are absent in the sandbox. That breaks every
+  // ABSOLUTE-path reference the kernel resolves WITHOUT consulting PATH:
+  //   - ELF interpreter (the dynamic loader) baked into PT_INTERP:
+  //     /lib/ld-linux-aarch64.so.1 (arm64) or /lib64/ld-linux-x86-64.so.2
+  //     (amd64). Missing it makes bwrap report "execvp bash: No such file or
+  //     directory" — the missing file is the loader, not bash.
+  //   - shebang lines: /bin/sh and /bin/bash are the most common interpreters
+  //     on earth; a script with "#!/bin/sh" fails "cannot execute: required
+  //     file not found" without /bin, even though /usr/bin/sh exists, because
+  //     the shebang path is literal and skips PATH.
+  // --ro-bind-try, not --ro-bind: the set is arch- and base-dependent (arm64
+  // oven/bun:1-slim ships /lib but no /lib64), and a hard bind of an absent
+  // source aborts bwrap. -try binds each only when present, keeping this
+  // builder pure (no host filesystem probe) and correct across arches/bases.
+  argv.push(
+    '--ro-bind-try',
+    '/bin',
+    '/bin',
+    '--ro-bind-try',
+    '/sbin',
+    '/sbin',
+    '--ro-bind-try',
+    '/lib',
+    '/lib',
+    '--ro-bind-try',
+    '/lib64',
+    '/lib64',
+  )
 
   if ((policy.proc ?? 'tmpfs') === 'tmpfs') {
     // --tmpfs /proc, never --proc /proc (OrbStack's kernel blocks
