@@ -55,7 +55,13 @@ typeclaw channel add github          # PAT or GitHub App; pairs with a tunnel
 typeclaw channel add kakaotalk       # email + password, encrypted at rest
 ```
 
-Discord needs one extra step the portal doesn't surface well: after you paste the bot token, `channel add discord-bot` prints a `https://discord.com/oauth2/authorize?...` URL with the right scopes (`bot` + `applications.commands`) and permission bitfield pre-filled. Open it, pick a server, click Authorize — the bot can't receive anything until it's in at least one guild.
+Discord needs one extra step the portal doesn't surface well: after you paste the bot token, `channel add discord-bot` prints a `https://discord.com/oauth2/authorize?...` URL with the right scopes (`bot` + `applications.commands`) and the recommended permission bitfield (`permissions=277025508416`) pre-filled. That integer grants exactly what the adapter exercises — Add Reactions, View Channel, Send Messages, Embed Links, Attach Files, Read Message History, Use Application Commands, and Send Messages in Threads — and nothing more. Open it, pick a server, click Authorize — the bot can't receive anything until it's in at least one guild.
+
+If you'd rather build the URL yourself, swap your application ID (the bot user's snowflake, shown in the Discord developer portal) into this template:
+
+```
+https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=277025508416
+```
 
 GitHub needs a public URL for webhook delivery. The CLI offers to create a Cloudflare Quick tunnel during `channel add` — that path is covered in [Expose a port](/docs/guides/first-tunnel).
 
