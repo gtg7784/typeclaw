@@ -63,7 +63,11 @@ Why delegate: the `reviewer` subagent runs on the `deep` model profile, loads a 
    </review>
    ```
 
-4. **Translate findings into a `gh api` review payload.** Each `<finding>` with `severity` of `blocker`, `concern`, or `nit` and a `location="path:line"` becomes one entry in `comments[]`. Compose the inline `body` from the reviewer's `<issue>` + `<evidence>` + `<suggestion>` — preserve the reviewer's wording, do not paraphrase. Findings whose `location` is `general` (no file:line anchor) go into the top-level review `body` instead. **Skip `praise` findings when building `comments[]`** — they are not actionable, and inline praise comments are exactly the noise the reviewer is supposed to filter out at the source; if you want to surface them, weave them into the top-level review `body` alongside the summary. Map the reviewer's `<verdict>` to the GitHub `event`:
+4. **Translate findings into a `gh api` review payload.** Each `<finding>` with `severity` of `blocker`, `concern`, or `nit` and a `location="path:line"` becomes one entry in `comments[]`. Compose the inline `body` from the reviewer's `<issue>` + `<evidence>` + `<suggestion>` — preserve the reviewer's wording, do not paraphrase. Findings whose `location` is `general` (no file:line anchor) go into the top-level review `body` instead. **Skip `praise` findings when building `comments[]`** — they are not actionable, and inline praise comments are exactly the noise the reviewer is supposed to filter out at the source; if you want to surface them, weave them into the top-level review `body` alongside the summary.
+
+   **The verdict and the inline comments are independent. The verdict sets only the `event` field; it never decides whether you post `comments[]`.** Whenever there is at least one actionable finding (`blocker`/`concern`/`nit`) with a `location="path:line"`, you MUST submit a formal review via `POST /pulls/<N>/reviews` carrying those findings in `comments[]` — including when the verdict is `approve`. An `approve` with three nits is still a formal `APPROVE` review with three inline comments, **not** a plain approval and **not** a flattened summary posted as a top-level comment. Collapsing inline findings into a single `channel_reply` or issue comment loses the line anchors the reviewer worked to produce — that is the exact failure mode this step exists to prevent.
+
+   Map the reviewer's `<verdict>` to the GitHub `event`:
 
    | Reviewer verdict  | GitHub `event`    |
    | ----------------- | ----------------- |
@@ -88,13 +92,21 @@ Why delegate: the `reviewer` subagent runs on the `deep` model profile, loads a 
 
    **Always use `--input -` with a quoted heredoc (`<<'JSON'`) for review bodies.** Do **not** use `-f body=...` or `-F 'comments[][body]=...'`: those go through shell argument parsing, so backticks (\`) trigger command substitution and have to be backslash-escaped, which leaks the literal `\` into the rendered comment. The quoted heredoc passes the JSON through untouched — backticks, newlines, and `${...}` all survive verbatim. The same applies to any other `gh api` POST whose body contains backticks, embedded newlines, or shell metacharacters.
 
-5. **Post a one-line summary with `channel_reply`** so the conversation has a human-readable trace pointing at the review (e.g., "Posted review on PR #N: <verdict>, N findings.").
+5. **Verify the review actually landed before announcing it.** The `gh api` call can fail silently from the model's perspective — a permission denial, a bad `line` anchor, or a malformed payload returns an error you must not paper over. After submitting, confirm the review exists:
+
+   ```sh
+   gh api /repos/owner/repo/pulls/<N>/reviews --jq '.[-1] | {id, state, user: .user.login}'
+   ```
+
+   The returned `id`/`state` is your proof the formal review posted. If the call errored or the review is absent, do **not** fall back to a top-level `channel_reply` that _claims_ a review was posted — fix the payload (most often a `line` that isn't part of the diff; re-anchor it or move that finding to the top-level `body`) and resubmit. A trace reply that says "Posted review" when no review exists is worse than silence.
+
+6. **Then post a one-line summary with `channel_reply`** so the conversation has a human-readable trace pointing at the review (e.g., "Posted review on PR #N: <verdict>, N findings."). This reply is secondary — it points _at_ the formal review, it never substitutes for it. Post it only after step 5 confirmed the review exists.
 
 ### Rules
 
 - **Always delegate to the `reviewer` subagent.** Do not perform the review craft yourself. The reviewer is the source of truth for severity, evidence quality, and what counts as a finding. Your job is mechanics: spawn, wait, translate, post.
 - **Trust the verdict.** Use the GitHub `event` mapped from the reviewer's `<verdict>`. Do not upgrade `comment` → `APPROVE` to seem agreeable, and do not downgrade `request-changes` → `COMMENT` to soften the tone. The reviewer chose deliberately.
-- **No actionable findings → no inline review post.** A finding is "actionable" if its severity is `blocker`, `concern`, or `nit`. If the reviewer returns zero actionable findings:
+- **No actionable findings → no inline review post.** A finding is "actionable" if its severity is `blocker`, `concern`, or `nit`. This branch applies **only when the actionable count is exactly zero** — if there is even one actionable finding with a line anchor, follow step 4 and submit a formal review with `comments[]` regardless of verdict. When the reviewer returns zero actionable findings:
   - `approve` verdict → post a plain `APPROVE` with the `<summary>` as the review body (no `comments[]` array).
   - `comment` verdict → post the summary as a top-level PR comment via `gh api -X POST /repos/.../issues/<N>/comments` instead of submitting an empty review.
   - `request-changes` verdict → submit `REQUEST_CHANGES` with the `<summary>` as the review body and no `comments[]` array. This combination is rare (the reviewer's contract says `request-changes` requires at least one blocker or load-bearing concern), so if it happens, faithfully encode the verdict and trust the reviewer's reasoning is in the summary.
