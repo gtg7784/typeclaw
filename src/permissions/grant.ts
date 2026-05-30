@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { BUILTIN_ROLES, isBuiltinRoleName } from './builtins'
 import { parseMatchRule } from './match-rule'
 
 // Appends `rule` to `typeclaw.json#roles.<name>.match`, creating the role
@@ -23,15 +24,89 @@ export type GrantOptions = {
   matchRule: string
 }
 
+export type GrantPermissionOptions = {
+  cwd: string
+  roleName: string
+  permission: string
+}
+
 export function grantRole(opts: GrantOptions): GrantResult {
   const validation = parseMatchRule(opts.matchRule)
   if (!validation.ok) {
     return { ok: false, reason: `invalid match rule '${opts.matchRule}': ${validation.error}` }
   }
 
-  const path = join(opts.cwd, CONFIG_FILE)
+  const loaded = loadConfigObject(opts.cwd, opts.roleName)
+  if (!loaded.ok) return loaded
+
+  const { obj, roles, role } = loaded
+  const existingMatch = Array.isArray(role.match) ? [...(role.match as unknown[])] : []
+
+  // Dedup by exact string equality — match rules canonicalize during load,
+  // and a literal duplicate in the file is a noise source the schema doesn't
+  // currently dedupe for us.
+  if (existingMatch.includes(opts.matchRule)) {
+    return { ok: true, added: false }
+  }
+
+  role.match = [...existingMatch, opts.matchRule]
+  roles[opts.roleName] = role
+  obj.roles = roles
+
+  return writeConfigObject(opts.cwd, obj)
+}
+
+// Appends `permission` to `typeclaw.json#roles.<name>.permissions`. For a
+// built-in role with no explicit `permissions[]`, the runtime treats the
+// field as "use built-in defaults" (see resolveOne in permissions.ts), so a
+// naive write of `[permission]` would NARROW the role to a single capability,
+// silently dropping its defaults. We materialize the current effective set
+// (explicit field if present, else the built-in default list) and append to
+// THAT, preserving every existing capability. Idempotent: a permission the
+// role already holds is a no-op.
+//
+// NOTE: `roles.permissions` is `restart-required` (FIELD_EFFECTS); the write
+// lands on disk but does not take effect until the next container restart.
+// Callers must surface that to the operator.
+export function grantRolePermission(opts: GrantPermissionOptions): GrantResult {
+  const loaded = loadConfigObject(opts.cwd, opts.roleName)
+  if (!loaded.ok) return loaded
+
+  const { obj, roles, role } = loaded
+  const effective = effectivePermissions(opts.roleName, role)
+
+  if (effective.includes(opts.permission)) {
+    return { ok: true, added: false }
+  }
+
+  role.permissions = [...effective, opts.permission]
+  roles[opts.roleName] = role
+  obj.roles = roles
+
+  return writeConfigObject(opts.cwd, obj)
+}
+
+function effectivePermissions(roleName: string, role: Record<string, unknown>): string[] {
+  if (Array.isArray(role.permissions)) {
+    return role.permissions.filter((p): p is string => typeof p === 'string')
+  }
+  if (isBuiltinRoleName(roleName)) {
+    return [...BUILTIN_ROLES[roleName].permissions]
+  }
+  return []
+}
+
+type LoadedConfig = {
+  ok: true
+  obj: Record<string, unknown>
+  roles: Record<string, unknown>
+  role: Record<string, unknown>
+}
+
+function loadConfigObject(cwd: string, roleName: string): LoadedConfig | { ok: false; reason: string } {
+  const path = join(cwd, CONFIG_FILE)
   if (!existsSync(path)) {
-    return { ok: false, reason: `${CONFIG_FILE} not found at ${opts.cwd}` }
+    return { ok: false, reason: `${CONFIG_FILE} not found at ${cwd}` }
   }
 
   let raw: string
@@ -54,26 +129,17 @@ export function grantRole(opts: GrantOptions): GrantResult {
 
   const obj = json as Record<string, unknown>
   const roles = isPlainObject(obj.roles) ? { ...obj.roles } : {}
-  const role = isPlainObject(roles[opts.roleName]) ? { ...(roles[opts.roleName] as Record<string, unknown>) } : {}
-  const existingMatch = Array.isArray(role.match) ? [...(role.match as unknown[])] : []
+  const role = isPlainObject(roles[roleName]) ? { ...(roles[roleName] as Record<string, unknown>) } : {}
+  return { ok: true, obj, roles, role }
+}
 
-  // Dedup by exact string equality — match rules canonicalize during load,
-  // and a literal duplicate in the file is a noise source the schema doesn't
-  // currently dedupe for us.
-  if (existingMatch.includes(opts.matchRule)) {
-    return { ok: true, added: false }
-  }
-
-  role.match = [...existingMatch, opts.matchRule]
-  roles[opts.roleName] = role
-  obj.roles = roles
-
+function writeConfigObject(cwd: string, obj: Record<string, unknown>): GrantResult {
+  const path = join(cwd, CONFIG_FILE)
   try {
     writeAtomic(path, `${JSON.stringify(obj, null, 2)}\n`)
   } catch (error) {
     return { ok: false, reason: `failed to write ${CONFIG_FILE}: ${describeError(error)}` }
   }
-
   return { ok: true, added: true }
 }
 

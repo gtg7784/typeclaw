@@ -79,3 +79,13 @@ function matchesBucket(
   if (platform === 'telegram') return origin.workspace === 'dm' || origin.workspace.startsWith('@')
   return false
 }
+
+// True only for a 1:1 direct-message channel origin (a two-participant
+// conversation: the principal + the bot). Reuses the same per-adapter
+// workspace markers as the `dm` match-rule bucket. A DM is the only channel
+// shape with no third-party content buffered into a turn, so role-grant tools
+// treat an owner/trusted DM as injection-equivalent to the TUI; group/open
+// channels never qualify.
+export function isDmChannelOrigin(origin: { adapter: AdapterId; workspace: string }): boolean {
+  return matchesBucket('dm', { kind: 'channel', adapter: origin.adapter, workspace: origin.workspace, chat: '' })
+}
