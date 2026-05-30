@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -156,5 +157,104 @@ describe('grantRolePermission', () => {
     const config = readConfig(dir) as { roles: { member: { permissions?: string[] } } }
     // no narrowing write happened; the file role still has no explicit permissions[]
     expect(config.roles.member.permissions).toBeUndefined()
+  })
+})
+
+async function runGit(cwd: string, args: string[]): Promise<string> {
+  const proc = Bun.spawn({ cmd: ['git', ...args], cwd, stdout: 'pipe', stderr: 'pipe' })
+  await proc.exited
+  return (await new Response(proc.stdout).text()).trim()
+}
+
+async function gitInit(cwd: string): Promise<void> {
+  for (const cmd of [
+    ['init', '-b', 'main'],
+    ['config', 'user.name', 'Test User'],
+    ['config', 'user.email', 'test@example.com'],
+  ]) {
+    const proc = Bun.spawn({ cmd: ['git', ...cmd], cwd, stdout: 'pipe', stderr: 'pipe' })
+    await proc.exited
+  }
+}
+
+async function seedGitRepo(dir: string, config: unknown): Promise<void> {
+  await gitInit(dir)
+  await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify(config, null, 2)}\n`)
+  await runGit(dir, ['add', 'typeclaw.json'])
+  await runGit(dir, ['commit', '-m', 'initial'])
+}
+
+describe('grantRole git commit', () => {
+  test('commits typeclaw.json after a successful grant', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-grant-commit-'))
+    try {
+      // given: a git repo with an owner role and no match rules
+      await seedGitRepo(dir, { roles: { owner: { match: [] } } })
+
+      // when: a claim grants a match rule
+      const result = grantRole({ cwd: dir, roleName: 'owner', matchRule: 'slack:* author:U123' })
+
+      // then: the grant succeeded and HEAD is a scoped typeclaw.json commit
+      expect(result).toEqual({ ok: true, added: true })
+      expect(await runGit(dir, ['log', '-1', '--format=%s'])).toBe('typeclaw.json: grant owner role')
+      expect(await runGit(dir, ['show', '--name-only', '--format=', 'HEAD'])).toBe('typeclaw.json')
+      const committed = JSON.parse(await runGit(dir, ['show', 'HEAD:typeclaw.json']))
+      expect(committed.roles.owner.match).toEqual(['slack:* author:U123'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('uses the role name in the commit subject', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-grant-commit-role-'))
+    try {
+      await seedGitRepo(dir, { roles: { trusted: { match: [] } } })
+
+      grantRole({ cwd: dir, roleName: 'trusted', matchRule: 'discord:* author:42' })
+
+      expect(await runGit(dir, ['log', '-1', '--format=%s'])).toBe('typeclaw.json: grant trusted role')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('does not commit when the rule already exists (idempotent no-op)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-grant-commit-dedup-'))
+    try {
+      // given: the match rule is already on file
+      await seedGitRepo(dir, { roles: { owner: { match: ['slack:* author:U123'] } } })
+      const head = await runGit(dir, ['rev-parse', 'HEAD'])
+
+      // when: the same rule is granted again
+      const result = grantRole({ cwd: dir, roleName: 'owner', matchRule: 'slack:* author:U123' })
+
+      // then: no write, no new commit
+      expect(result).toEqual({ ok: true, added: false })
+      expect(await runGit(dir, ['rev-parse', 'HEAD'])).toBe(head)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('commits only typeclaw.json, leaving other dirty files untouched', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'typeclaw-grant-commit-scope-'))
+    try {
+      // given: an unrelated tracked file the user is mid-editing
+      await gitInit(dir)
+      await writeFile(join(dir, 'typeclaw.json'), `${JSON.stringify({ roles: { owner: { match: [] } } }, null, 2)}\n`)
+      await writeFile(join(dir, 'AGENTS.md'), 'original\n')
+      await runGit(dir, ['add', '.'])
+      await runGit(dir, ['commit', '-m', 'initial'])
+      await writeFile(join(dir, 'AGENTS.md'), 'user wip\n')
+
+      // when: a grant commits
+      grantRole({ cwd: dir, roleName: 'owner', matchRule: 'slack:* author:U123' })
+
+      // then: the commit holds only typeclaw.json; AGENTS.md stays dirty
+      expect(await runGit(dir, ['show', '--name-only', '--format=', 'HEAD'])).toBe('typeclaw.json')
+      expect(await runGit(dir, ['show', 'HEAD:AGENTS.md'])).toBe('original')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })

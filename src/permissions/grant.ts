@@ -1,6 +1,8 @@
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { commitSystemFileSync } from '@/git/system-commit'
+
 import { BUILTIN_ROLES, isBuiltinRoleName } from './builtins'
 import { parseMatchRule } from './match-rule'
 
@@ -53,7 +55,15 @@ export function grantRole(opts: GrantOptions): GrantResult {
   roles[opts.roleName] = role
   obj.roles = roles
 
-  return writeConfigObject(opts.cwd, obj)
+  const written = writeConfigObject(opts.cwd, obj)
+  if (!written.ok) return written
+
+  // Best-effort commit so a claimed role survives a fresh clone/rebuild — a
+  // failing commit leaves the on-disk grant intact (history, not correctness).
+  // Subject stays neutral: every grantRole caller hits this, not just claim.
+  commitSystemFileSync(opts.cwd, CONFIG_FILE, `${CONFIG_FILE}: grant ${opts.roleName} role`)
+
+  return written
 }
 
 // Appends `permission` to `typeclaw.json#roles.<name>.permissions`. For a
