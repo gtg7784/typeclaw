@@ -44,4 +44,24 @@ describe('reloadAfterClaim', () => {
     expect(out.ok).toBe(false)
     if (!out.ok) expect(out.reason).toBe('boom')
   })
+
+  it('reports failure when the server returns a failed scope', async () => {
+    const out = await reloadAfterClaim({
+      url: 'ws://127.0.0.1:9999',
+      reload: async () => [{ scope: 'config', ok: false, reason: 'invalid typeclaw.json' }],
+    })
+
+    expect(out.ok).toBe(false)
+    if (!out.ok) expect(out.reason).toBe('config: invalid typeclaw.json')
+  })
+
+  it('reports failure when no scope responds', async () => {
+    const out = await reloadAfterClaim({
+      url: 'ws://127.0.0.1:9999',
+      reload: async () => [],
+    })
+
+    expect(out.ok).toBe(false)
+    if (!out.ok) expect(out.reason).toBe('no reloadable config scope responded')
+  })
 })
