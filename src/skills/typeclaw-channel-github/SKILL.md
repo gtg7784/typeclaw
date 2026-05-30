@@ -100,7 +100,7 @@ Why delegate: the `reviewer` subagent runs on the `deep` model profile, loads a 
 
    The returned `id`/`state` is your proof the formal review posted. If the call errored or the review is absent, do **not** fall back to a top-level `channel_reply` that _claims_ a review was posted — fix the payload (most often a `line` that isn't part of the diff; re-anchor it or move that finding to the top-level `body`) and resubmit. A trace reply that says "Posted review" when no review exists is worse than silence.
 
-6. **Then post a one-line summary with `channel_reply`** so the conversation has a human-readable trace pointing at the review (e.g., "Posted review on PR #N: <verdict>, N findings."). This reply is secondary — it points _at_ the formal review, it never substitutes for it. Post it only after step 5 confirmed the review exists.
+6. **End the turn with `skip_response`, not a trace reply.** The formal review from step 4 already landed _in this PR_ — it carries the summary, the verdict, and the inline comments. A `channel_reply` here does **not** go to a separate operator channel; on GitHub it posts another public comment on the same PR. A one-line "Posted review on PR #N: …" narrated into the PR thread is meta-commentary addressed to a phantom operator, and it reads absurdly next to the review it claims to point at. So once step 5 confirms the review exists, call `skip_response({ reason: "review posted via gh api" })` to close the turn silently. Only fall back to `channel_reply` when there was **no** formal review to post — the zero-actionable-findings branches in Rules below already use `channel_reply`/issue comments _as_ the substantive reply.
 
 ### Rules
 

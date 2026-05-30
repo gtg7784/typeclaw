@@ -288,6 +288,22 @@ function renderChannelOrigin(
     'is a tool call. Plain-text output is invisible.',
   ]
 
+  // GitHub has no separate "chat" surface — channel_reply IS a public comment
+  // on this PR/issue. Without saying so, models default to the Slack-style
+  // two-surface split and post operator-facing meta-commentary ("Posted review
+  // result for PR #511") straight into the PR thread, where it reads absurdly.
+  if (origin.adapter === 'github') {
+    lines.push(
+      '',
+      '**`channel_reply` posts a public comment directly on this PR/issue.** It',
+      'is not a side-report to an operator — the reply lands in this exact',
+      'thread, read by everyone on the PR. Write the substance for that',
+      'audience: post the answer (or review summary) itself, never a status',
+      'line about having posted it elsewhere. A narrated "Posted review result',
+      'for PR #N: …" inside the PR is exactly the failure to avoid.',
+    )
+  }
+
   const conversationLine = renderConversationLine(origin)
   if (conversationLine !== null) lines.push('', conversationLine)
 
