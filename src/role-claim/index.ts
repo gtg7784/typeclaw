@@ -10,6 +10,7 @@ export {
   type CreateClaimControllerOptions,
 } from './controller'
 export { formatClaimMatchRule, type PartialChannelOrigin } from './match-rule'
+export { reloadAfterClaim, type ReloadAfterClaimOptions, type ReloadAfterClaimResult } from './reload-after-claim'
 export {
   createPendingClaimRegistry,
   type ClaimResult,

@@ -3,7 +3,7 @@ import { defineCommand } from 'citty'
 
 import { requireContainerRunning, resolveHostPort, resolveTuiToken } from '@/container'
 import { findAgentDir } from '@/init'
-import { runClaimSession } from '@/role-claim'
+import { reloadAfterClaim, runClaimSession } from '@/role-claim'
 
 import { c, errorLine } from './ui'
 
@@ -76,6 +76,15 @@ const claimSub = defineCommand({
 
     if (result.kind === 'completed') {
       s.stop(c.green(`Paired as ${result.payload.role}.`))
+      s.start('Reloading config so the new match rule takes effect...')
+      const reloaded = await reloadAfterClaim({ url })
+      if (reloaded.ok) {
+        s.stop(c.green('Config reloaded.'))
+      } else {
+        // The role is already persisted; a reload failure is non-fatal.
+        s.stop(c.yellow(`Config reload failed: ${reloaded.reason}`))
+        console.log(c.dim('Run `typeclaw reload` manually to apply the new match rule.'))
+      }
       outro(`Match rule added: ${c.bold(result.payload.matchRule)}`)
       return
     }
