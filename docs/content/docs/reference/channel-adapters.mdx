@@ -74,3 +74,9 @@ When the agent's first send of a turn lands later than `quotedReply.queueDelayMs
 | `telegram-bot` | long polling means no public URL, but only one process can poll a given bot token at a time                                                                                                                                                                                                                                            |
 | `github`       | adapter restarts on tunnel URL change and re-registers the webhook automatically                                                                                                                                                                                                                                                       |
 | `kakaotalk`    | LOCO clients hold the current token in a closure; token renewal triggers a container restart via the host daemon                                                                                                                                                                                                                       |
+
+To invite the `discord-bot` by hand, substitute your application ID into:
+
+```
+https://discord.com/oauth2/authorize?client_id=YOUR_APP_ID&scope=bot+applications.commands&permissions=277025508416
+```
