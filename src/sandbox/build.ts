@@ -65,6 +65,18 @@ function buildArgv(command: string, policy: SandboxPolicy): string[] {
 
   argv.push('--ro-bind', '/usr', '/usr', '--ro-bind', '/etc', '/etc', '--dev', '/dev', '--tmpfs', '/tmp')
 
+  // bash's ELF interpreter (the dynamic loader) is named by an absolute path
+  // baked into PT_INTERP — /lib/ld-linux-aarch64.so.1 (arm64) or
+  // /lib64/ld-linux-x86-64.so.2 (amd64). On the usr-merged Debian base those
+  // /lib /lib64 entries are root-level symlinks into /usr/lib that --ro-bind
+  // /usr does NOT recreate, so without these binds the kernel can't find the
+  // loader and bwrap reports it as "execvp bash: No such file or directory"
+  // (the missing file is the loader, not bash). --ro-bind-try, not --ro-bind:
+  // arm64 oven/bun:1-slim ships /lib but no /lib64, and a hard bind of an
+  // absent source aborts bwrap. -try keeps this builder pure (no host probe)
+  // while binding each only when present, correct on both arches.
+  argv.push('--ro-bind-try', '/lib', '/lib', '--ro-bind-try', '/lib64', '/lib64')
+
   if ((policy.proc ?? 'tmpfs') === 'tmpfs') {
     // --tmpfs /proc, never --proc /proc (OrbStack's kernel blocks
     // mount("proc",...) from user namespaces) and never --dev-bind /proc /proc
