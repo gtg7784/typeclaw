@@ -27,6 +27,7 @@ import {
   SESSION_FRESHNESS_TTL_MS,
   SESSION_IDLE_MS,
   sliceHeadTail,
+  StaleLiveSessionError,
   TURN_CAP_ERROR,
   type ChannelRouter,
   type ClaimHandler,
@@ -802,6 +803,52 @@ describe('ChannelRouter ensureLive watchdog', () => {
     // evicted on timeout) and the second call succeeded into a live session
     expect(callCount).toBe(2)
     expect(router.liveCount()).toBe(1)
+  })
+
+  test('tearDownAllLive() during an in-flight creation discards the stale session instead of installing it', async () => {
+    // given a factory whose first creation blocks until we release it, so we can
+    // run tearDownAllLive() (the roles-reload teardown) in the exact window
+    // between creation start and the liveSessions.set install
+    const dir = await tempDir()
+    let callCount = 0
+    let releaseFirst: (() => void) | undefined
+    const firstBlocked = new Promise<void>((resolve) => {
+      releaseFirst = resolve
+    })
+    const router = createChannelRouter({
+      agentDir: dir,
+      configForAdapter: () => baseConfig,
+      createSessionForChannel: async () => {
+        callCount++
+        if (callCount === 1) await firstBlocked
+        const fake = new FakeSession()
+        return {
+          session: fake as unknown as AgentSession,
+          sessionId: `ses_race_${callCount}`,
+          dispose: async () => {
+            fake.dispose()
+          },
+        }
+      },
+    })
+
+    // when the first inbound starts creating (and blocks), a roles reload tears
+    // down all live sessions, then the blocked creation is released
+    const routePromise = router.route(inbound())
+    await new Promise((r) => setTimeout(r, 10))
+    await router.tearDownAllLive()
+    releaseFirst!()
+
+    // then the in-flight creation self-disposes (route rejects) and nothing was
+    // installed — the stale-role session never becomes live
+    await expect(routePromise).rejects.toBeInstanceOf(StaleLiveSessionError)
+    expect(router.liveCount()).toBe(0)
+
+    // and a fresh post-reload inbound creates a new live session normally
+    await router.route(inbound({ externalMessageId: 'm2' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(router.liveCount()).toBe(1)
+    expect(callCount).toBe(2)
   })
 })
 
