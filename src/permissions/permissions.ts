@@ -141,6 +141,15 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
 
   return {
     has(origin, permission) {
+      // Fail-safe floor: an undefined origin holds nothing, regardless of
+      // role permissions. Previously this floor was implicit in `guest`
+      // being empty; now `guest` is grantable (an operator may grant it
+      // `channel.respond`), so the floor must live on the no-actor input
+      // instead. Keeps every downstream `has(maybeUndefined, ...)` check
+      // (bypass tiers, fs.see.*, subagent spawn) closed even after a guest
+      // grant. resolveRole/describe still report 'guest' for audit/display;
+      // only authorization is forced closed.
+      if (origin === undefined) return false
       const roleName = resolveRole(origin)
       const role = byName.get(roleName)
       if (!role) return false

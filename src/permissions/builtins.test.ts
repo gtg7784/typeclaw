@@ -34,6 +34,7 @@ describe('built-in role contract (role-tower model: owner=high, trusted=medium, 
       'fs.see.secrets',
       'security.bypass.low',
       'security.bypass.medium',
+      'session.control',
       'subagent.cancel',
       'subagent.output',
       'subagent.spawn',
@@ -51,6 +52,7 @@ describe('built-in role contract (role-tower model: owner=high, trusted=medium, 
       'channel.respond',
       'fs.see.private',
       'security.bypass.low',
+      'session.control',
       'subagent.cancel',
       'subagent.output',
       'subagent.spawn',
@@ -65,6 +67,13 @@ describe('built-in role contract (role-tower model: owner=high, trusted=medium, 
   test('guest carries neither fs.see grant (locked-down floor; bash sees neither private surface nor secrets)', () => {
     expect([...BUILTIN_ROLES.guest.permissions]).not.toContain('fs.see.private')
     expect([...BUILTIN_ROLES.guest.permissions]).not.toContain('fs.see.secrets')
+  })
+
+  test('session.control is owner+trusted+member but NOT guest (a respond-capable guest cannot /stop other turns)', () => {
+    expect([...BUILTIN_ROLES.owner.permissions]).toContain('session.control')
+    expect([...BUILTIN_ROLES.trusted.permissions]).toContain('session.control')
+    expect([...BUILTIN_ROLES.member.permissions]).toContain('session.control')
+    expect([...BUILTIN_ROLES.guest.permissions]).not.toContain('session.control')
   })
 
   test('member does NOT carry the operator-specific spawn permission (write-capable subagents are owner+trusted only)', () => {

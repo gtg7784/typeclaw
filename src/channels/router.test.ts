@@ -5124,6 +5124,67 @@ describe('ChannelRouter channel.respond gate', () => {
     expect(sessions[0]!.prompts).toHaveLength(1)
   })
 
+  test('respond-capable author WITHOUT session.control cannot /stop via text prefix', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    // guest-shaped: channel.respond granted (can drive turns) but no
+    // session.control, so /stop must be refused.
+    const permissions = buildPermissions({
+      alice: ['channel.respond', 'session.control'],
+      stranger: ['channel.respond'],
+    })
+    const { router, sessions } = makeRouter(dir, { permissions, logs })
+
+    // given: alice (full control) starts a live session
+    await router.route(inbound({ authorId: 'alice', externalMessageId: 'm-alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions).toHaveLength(1)
+
+    // when: stranger (respond but no control) types /stop
+    await router.route(inbound({ authorId: 'stranger', text: '/stop', externalMessageId: 'm-stop' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    // then: the command is refused and the session is not aborted
+    expect(sessions[0]!.aborted).toBe(0)
+    expect(logs.some((l) => l.includes('session.control') && l.includes('author=stranger'))).toBe(true)
+  })
+
+  test('author WITH session.control can /stop via text prefix', async () => {
+    const dir = await tempDir()
+    const permissions = buildPermissions({ alice: ['channel.respond', 'session.control'] })
+    const { router, sessions } = makeRouter(dir, { permissions })
+
+    await router.route(inbound({ authorId: 'alice', externalMessageId: 'm-alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions).toHaveLength(1)
+
+    await router.route(inbound({ authorId: 'alice', text: '/stop', externalMessageId: 'm-stop' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(sessions[0]!.aborted).toBe(1)
+  })
+
+  test('native executeCommand gates on session.control, not channel.respond', async () => {
+    const dir = await tempDir()
+    const permissions = buildPermissions({
+      alice: ['channel.respond', 'session.control'],
+      stranger: ['channel.respond'],
+    })
+    const { router, sessions } = makeRouter(dir, { permissions })
+
+    await router.route(inbound({ authorId: 'alice', externalMessageId: 'm-alice' }))
+    await router.__testing!.flushDebounce(KEY)
+    expect(sessions).toHaveLength(1)
+
+    const denied = await router.executeCommand(KEY, 'stop', { invokerId: 'stranger' })
+    expect(denied).toEqual({ kind: 'permission-denied' })
+    expect(sessions[0]!.aborted).toBe(0)
+
+    const allowed = await router.executeCommand(KEY, 'stop', { invokerId: 'alice' })
+    expect(allowed).toEqual({ kind: 'handled', name: 'stop' })
+    expect(sessions[0]!.aborted).toBe(1)
+  })
+
   test('deny-all permissions service drops every inbound', async () => {
     const dir = await tempDir()
     const permissions: PermissionService = {

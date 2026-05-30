@@ -1632,6 +1632,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.info(`[channels] ${keyId}: ignoring unknown command /${parsedCommand.name}`)
         return
       }
+      if (isSessionControlDenied(event)) {
+        logger.info(
+          `[channels] ${keyId}: denied command /${parsedCommand.name} by permissions (session.control) author=${event.authorId}`,
+        )
+        return
+      }
       const existingLive = liveSessions.get(keyId)
       if (!existingLive || existingLive.destroyed) {
         logger.info(`[channels] ${keyId}: ignoring command /${parsedCommand.name} with no live session`)
@@ -1714,17 +1720,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     scheduleDebouncedDrain(live)
   }
 
-  const isChannelRespondDenied = (event: InboundMessage): boolean => {
-    const partial: SessionOrigin = {
-      kind: 'channel',
-      adapter: event.adapter,
-      workspace: event.workspace,
-      chat: event.chat,
-      thread: event.thread,
-      lastInboundAuthorId: event.authorId,
-    }
-    return !permissions.has(partial, CORE_PERMISSIONS.channelRespond)
-  }
+  const inboundAuthorOrigin = (event: InboundMessage): SessionOrigin => ({
+    kind: 'channel',
+    adapter: event.adapter,
+    workspace: event.workspace,
+    chat: event.chat,
+    thread: event.thread,
+    lastInboundAuthorId: event.authorId,
+  })
+
+  const isChannelRespondDenied = (event: InboundMessage): boolean =>
+    !permissions.has(inboundAuthorOrigin(event), CORE_PERMISSIONS.channelRespond)
+
+  // Gated separately from channelRespond so a respond-capable guest (an
+  // operator can grant guest channelRespond for masked stranger turns)
+  // cannot /stop another speaker's in-flight turn. session.control is
+  // member-and-up by default.
+  const isSessionControlDenied = (event: InboundMessage): boolean =>
+    !permissions.has(inboundAuthorOrigin(event), CORE_PERMISSIONS.sessionControl)
 
   const updateLoopGuard = (live: LiveSession, event: InboundMessage): void => {
     if (!event.authorIsBot) {
@@ -2350,11 +2363,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (!commands.has(lowered)) {
       return { kind: 'unknown-command', name: lowered }
     }
-    // Permission gate runs BEFORE the live-session lookup so a guest user
-    // invoking /stop on a non-existent session gets 'permission-denied'
-    // (consistent answer regardless of session state) rather than leaking
-    // session presence via the 'no-live-session' vs 'permission-denied'
-    // distinction.
+    // Gates on session.control (not channel.respond) so a respond-capable
+    // guest cannot abort another speaker's turn. Runs BEFORE the live-session
+    // lookup so an unauthorized invoker gets 'permission-denied' regardless of
+    // session state, rather than leaking session presence via the
+    // 'no-live-session' vs 'permission-denied' distinction.
     const partial: SessionOrigin = {
       kind: 'channel',
       adapter: key.adapter,
@@ -2363,7 +2376,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       thread: key.thread,
       lastInboundAuthorId: options.invokerId,
     }
-    if (!permissions.has(partial, CORE_PERMISSIONS.channelRespond)) {
+    if (!permissions.has(partial, CORE_PERMISSIONS.sessionControl)) {
       return { kind: 'permission-denied' }
     }
     const resolved = resolveLiveSessionForCommand(liveSessions, key)
