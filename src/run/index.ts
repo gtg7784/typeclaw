@@ -245,6 +245,7 @@ export async function startAgent({
       getChannelRouter: () => channelManager.router,
       rehydrateCapOptions: resolveCapOptionsFromConfig(pluginConfigsByName['tool-result-cap']),
       permissions: pluginsLoaded.permissions,
+      rolesProvider: () => getConfig().roles,
       liveSubagentRegistry,
       liveSessionRegistry,
       subagentRegistry: pluginRuntime.get().subagents,

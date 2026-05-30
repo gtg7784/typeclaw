@@ -9,7 +9,7 @@ import { loadMemory } from '@/bundled-plugins/memory/load-memory'
 import type { ChannelRouter } from '@/channels/router'
 import { getConfig, resolveModel, resolveProfile } from '@/config'
 import { defaultThinkingLevelForRef, providerForModelRef, type KnownModelRef } from '@/config/providers'
-import type { PermissionService } from '@/permissions'
+import type { PermissionService, RolesConfig } from '@/permissions'
 import type {
   BuiltinToolRef,
   HookBus,
@@ -50,6 +50,7 @@ import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachme
 import { createChannelHistoryTool } from './tools/channel-history'
 import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
+import { createGrantRoleTool } from './tools/grant-role'
 import { createRestartTool } from './tools/restart'
 import { createSkipResponseTool } from './tools/skip-response'
 import { createSpawnSubagentTool } from './tools/spawn-subagent'
@@ -141,6 +142,10 @@ export type CreateSessionOptions = {
   // prompt is not regenerated; see `typeclaw-permissions` skill for how the
   // agent should interpret the snapshot on later turns.
   permissions?: PermissionService
+  // Live roles snapshot for the grant_role tool's hot-reload after a match
+  // grant. Production threads `() => getConfig().roles`; omitted when no
+  // grant_role tool is wired (the tool requires permissions too).
+  rolesProvider?: () => RolesConfig | undefined
   // Model profile name. Resolved against `config.models` to pick the concrete
   // model ref this session binds to. Unknown profile names fall back to
   // `default` with a one-time console warning. Omitted → `default`. Threaded
@@ -321,6 +326,12 @@ export async function createSessionWithDispose(options: CreateSessionOptions = {
               getOrigin,
               permissions: options.permissions,
               stream: options.stream,
+            }),
+            ...buildRoleGrantTools({
+              agentDir: options.plugins?.agentDir,
+              getOrigin,
+              permissions: options.permissions,
+              rolesProvider: options.rolesProvider,
             }),
           ]
   // Hook coverage for pi's builtin coding tools (read/bash/edit/write/grep/
@@ -573,6 +584,25 @@ export function buildSubagentOrchestrationTools(opts: {
       liveRegistry: opts.liveRegistry,
       getOrigin: opts.getOrigin,
       ...(opts.permissions ? { permissions: opts.permissions } : {}),
+    }),
+  ]
+}
+
+export function buildRoleGrantTools(opts: {
+  agentDir: string | undefined
+  getOrigin: () => SessionOrigin | undefined
+  permissions: PermissionService | undefined
+  rolesProvider: (() => RolesConfig | undefined) | undefined
+}): ToolDefinition[] {
+  if (opts.agentDir === undefined || opts.permissions === undefined || opts.rolesProvider === undefined) {
+    return []
+  }
+  return [
+    createGrantRoleTool({
+      agentDir: opts.agentDir,
+      getOrigin: opts.getOrigin,
+      permissions: opts.permissions,
+      rolesProvider: opts.rolesProvider,
     }),
   ]
 }
