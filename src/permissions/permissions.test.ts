@@ -43,6 +43,20 @@ describe('PermissionService — defaults', () => {
     expect(svc.has(undefined, 'channel.respond')).toBe(false)
   })
 
+  test('undefined origin holds NOTHING even after guest is granted that permission (the fail-safe floor)', () => {
+    // guest is now a grantable role; an operator may open it channel.respond.
+    // The floor must live on the undefined origin, not on guest being empty —
+    // so has(undefined, ...) stays false regardless of what guest carries.
+    const roles = parseRoles({ guest: { match: ['slack:*'], permissions: ['channel.respond'] } })
+    const svc = createPermissionService({ roles })
+    // sanity: a matched guest origin DOES get the granted permission
+    expect(svc.has(slackStrangerChat, 'channel.respond')).toBe(true)
+    // but the undefined origin is closed regardless
+    expect(svc.has(undefined, 'channel.respond')).toBe(false)
+    // resolveRole/describe still report guest for audit; only has() is forced closed
+    expect(svc.resolveRole(undefined)).toBe('guest')
+  })
+
   test('system origin → owner (runtime infrastructure acts on operator behalf)', () => {
     const svc = createPermissionService({ pluginPermissions: PLUGIN_PERMS })
     expect(svc.resolveRole({ kind: 'system', component: 'memory-logger' })).toBe('owner')

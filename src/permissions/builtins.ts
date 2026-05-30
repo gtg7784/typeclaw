@@ -10,6 +10,12 @@ export const BUILTIN_ROLE_NAMES: readonly BuiltinRoleName[] = ['owner', 'trusted
 // set at boot via expandOwnerWildcard.
 export const CORE_PERMISSIONS = {
   channelRespond: 'channel.respond',
+  // Distinct from channelRespond so a respond-capable guest cannot abort
+  // other speakers' sessions. The /stop command (both the text-prefix and
+  // native-slash paths in the router) gates on this, not on channelRespond:
+  // an operator may grant guest channelRespond to let strangers drive masked
+  // turns, but session lifecycle control stays member-and-up.
+  sessionControl: 'session.control',
   cronSchedule: 'cron.schedule',
   cronModify: 'cron.modify',
   subagentSpawn: 'subagent.spawn',
@@ -17,10 +23,11 @@ export const CORE_PERMISSIONS = {
   subagentOutput: 'subagent.output',
   subagentSpawnOperator: 'subagent.spawn.operator',
   // Phrased as capabilities to SEE, not to hide, so the role tower stays
-  // monotonic (a higher tier sees a strict superset of a lower tier) and the
-  // empty-permission guest is the fail-safe floor. resolveHiddenPaths masks
-  // whatever the resolved role lacks: fsSeePrivate gates workspace/+memory/+
-  // sessions/, fsSeeSecrets gates .env+secrets.json.
+  // monotonic (a higher tier sees a strict superset of a lower tier).
+  // resolveHiddenPaths masks whatever the resolved role lacks: fsSeePrivate
+  // gates workspace/+memory/+sessions/, fsSeeSecrets gates .env+secrets.json.
+  // The fail-safe floor is the undefined origin (see has() in
+  // permissions.ts), not the guest role, which is now grantable.
   fsSeePrivate: 'fs.see.private',
   fsSeeSecrets: 'fs.see.secrets',
 } as const
@@ -62,6 +69,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
     match: [{ kind: 'tui' }],
     permissions: [
       CORE_PERMISSIONS.channelRespond,
+      CORE_PERMISSIONS.sessionControl,
       CORE_PERMISSIONS.cronSchedule,
       CORE_PERMISSIONS.cronModify,
       CORE_PERMISSIONS.subagentSpawn,
@@ -80,6 +88,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
     match: [],
     permissions: [
       CORE_PERMISSIONS.channelRespond,
+      CORE_PERMISSIONS.sessionControl,
       CORE_PERMISSIONS.cronSchedule,
       CORE_PERMISSIONS.subagentSpawn,
       CORE_PERMISSIONS.subagentCancel,
@@ -95,6 +104,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
     match: [],
     permissions: [
       CORE_PERMISSIONS.channelRespond,
+      CORE_PERMISSIONS.sessionControl,
       CORE_PERMISSIONS.subagentSpawn,
       CORE_PERMISSIONS.subagentCancel,
       CORE_PERMISSIONS.subagentOutput,
