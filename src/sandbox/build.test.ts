@@ -41,6 +41,12 @@ describe('buildSandboxedCommand base argv', () => {
     expect(argv).toContain('--tmpfs')
   })
 
+  test('binds the dynamic-loader dirs with --ro-bind-try so bash can exec on both arches', () => {
+    const joined = argvOf('true').join(' ')
+    expect(joined).toContain('--ro-bind-try /lib /lib')
+    expect(joined).toContain('--ro-bind-try /lib64 /lib64')
+  })
+
   test('uses --tmpfs /proc and never --proc or --dev-bind for /proc', () => {
     const argv = argvOf('true')
     const joined = argv.join(' ')
