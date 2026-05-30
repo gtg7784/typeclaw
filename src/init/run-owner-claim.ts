@@ -43,7 +43,7 @@ export async function runOwnerClaim({ url, configuredChannels }: RunOwnerClaimOp
     initialValue: true,
   })
   if (isCancel(proceed) || proceed === false) {
-    log.info(`Skipping. Run ${c.bold('typeclaw role claim')} later when you're ready.`)
+    warnMuteUntilClaimed()
     return
   }
 
@@ -78,9 +78,27 @@ export async function runOwnerClaim({ url, configuredChannels }: RunOwnerClaimOp
   }
   if (result.kind === 'error') {
     s.stop(c.red(`Claim failed: ${result.payload.reason}`))
-    log.info(`You can retry with ${c.bold('typeclaw role claim')} anytime.`)
+    warnMuteUntilClaimed()
     return
   }
   s.stop(c.yellow(`Claim timed out — no DM received within the window.`))
-  log.info(`Run ${c.bold('typeclaw role claim')} when you're ready.`)
+  warnMuteUntilClaimed()
+}
+
+// Printed on every path that finishes init WITHOUT a successful owner claim.
+// Since the scoped-by-default change removed the `member: ["*"]` seeding, an
+// unclaimed chat agent resolves every inbound to `guest` and drops it — the
+// agent answers no one. This is a footgun unless the operator is told plainly,
+// so the warning is loud and names the exact recovery command.
+function warnMuteUntilClaimed(): void {
+  note(
+    [
+      `Your agent will respond to ${c.bold('no one')} until you claim the owner role —`,
+      `every inbound message is currently dropped.`,
+      '',
+      `Run ${c.bold('typeclaw role claim')} to pair yourself, then grant others`,
+      `with the agent (ask it: "respond to <user>") or by editing typeclaw.json#roles.`,
+    ].join('\n'),
+    c.yellow('Heads up: agent is muted'),
+  )
 }

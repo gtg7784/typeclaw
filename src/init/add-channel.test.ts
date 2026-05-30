@@ -217,22 +217,22 @@ describe('runAddChannel', () => {
     expect(after.idleMs).toBe(60_000)
   })
 
-  test('writes roles.member.match: ["*"] when adding a chat adapter to a freshly scaffolded folder', async () => {
+  test('does NOT seed a member match when adding a chat adapter (scoped-by-default; owner claim grants access)', async () => {
     await runAddChannel({ cwd: root, channel: 'slack-bot', slackBotToken: 'xoxb', slackAppToken: 'xapp' })
 
     const cfg = (await readConfig()) as { roles?: { member?: { match?: string[] } } }
-    expect(cfg.roles?.member?.match).toEqual(['*'])
+    expect(cfg.roles?.member?.match).toBeUndefined()
   })
 
-  test('does not duplicate the "*" entry when a second chat adapter is added later', async () => {
+  test('does not seed member match across multiple chat adapters', async () => {
     await runAddChannel({ cwd: root, channel: 'slack-bot', slackBotToken: 'xoxb', slackAppToken: 'xapp' })
     await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-x' })
 
     const cfg = (await readConfig()) as { roles?: { member?: { match?: string[] } } }
-    expect(cfg.roles?.member?.match).toEqual(['*'])
+    expect(cfg.roles?.member?.match).toBeUndefined()
   })
 
-  test('preserves existing roles.member.match entries (set-union semantics, no clobber)', async () => {
+  test('leaves an operator-authored member.match untouched (no wildcard appended)', async () => {
     const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
     cfg.roles = { member: { match: ['slack:T0123 author:U_EXISTING'] } }
     await writeFile(join(root, 'typeclaw.json'), `${JSON.stringify(cfg, null, 2)}\n`)
@@ -240,10 +240,10 @@ describe('runAddChannel', () => {
     await runAddChannel({ cwd: root, channel: 'discord-bot', discordBotToken: 'discord-x' })
 
     const after = (await readConfig()) as { roles?: { member?: { match?: string[] } } }
-    expect(after.roles?.member?.match).toEqual(['slack:T0123 author:U_EXISTING', '*'])
+    expect(after.roles?.member?.match).toEqual(['slack:T0123 author:U_EXISTING'])
   })
 
-  test('preserves existing roles.owner block (does not overwrite when adding a channel)', async () => {
+  test('preserves existing roles.owner block and adds no member wildcard when adding a channel', async () => {
     const cfg = JSON.parse(await readFile(join(root, 'typeclaw.json'), 'utf8')) as Record<string, unknown>
     cfg.roles = { owner: { match: ['slack:@dm author:U_ME'] } }
     await writeFile(join(root, 'typeclaw.json'), `${JSON.stringify(cfg, null, 2)}\n`)
@@ -254,7 +254,7 @@ describe('runAddChannel', () => {
       roles?: { owner?: { match?: string[] }; member?: { match?: string[] } }
     }
     expect(after.roles?.owner?.match).toEqual(['slack:@dm author:U_ME'])
-    expect(after.roles?.member?.match).toEqual(['*'])
+    expect(after.roles?.member?.match).toBeUndefined()
   })
 
   test('rejects re-adding an already-configured channel', async () => {
