@@ -3,7 +3,8 @@ import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { grantRole } from './grant'
+import { BUILTIN_ROLES } from './builtins'
+import { grantRole, grantRolePermission } from './grant'
 
 function freshAgentDir(initialConfig: Record<string, unknown> = {}): string {
   const dir = mkdtempSync(join(tmpdir(), 'typeclaw-grant-test-'))
@@ -104,5 +105,56 @@ describe('grantRole', () => {
     expect(config.channels).toEqual({ 'slack-bot': {} })
     expect(config.roles.owner?.match).toEqual(['tui', 'slack:T0123 author:U_ME'])
     expect(config.roles.member?.match).toEqual(['slack:T0123'])
+  })
+})
+
+describe('grantRolePermission', () => {
+  test('granting a permission to a built-in role with NO explicit permissions materializes defaults + new perm (does NOT narrow)', () => {
+    // given: guest has no explicit permissions[] in the file (uses defaults)
+    const dir = freshAgentDir({ roles: { guest: { match: ['discord:*'] } } })
+
+    // when: an operator grants guest channel.respond
+    const result = grantRolePermission({ cwd: dir, roleName: 'guest', permission: 'channel.respond' })
+    expect(result).toEqual({ ok: true, added: true })
+
+    // then: the written set is guest's built-in defaults (empty) + the new perm,
+    // NOT a narrowing to some other shape; match is preserved
+    const config = readConfig(dir) as { roles: { guest: { match: string[]; permissions: string[] } } }
+    expect(config.roles.guest.permissions).toEqual([...BUILTIN_ROLES.guest.permissions, 'channel.respond'])
+    expect(config.roles.guest.match).toEqual(['discord:*'])
+  })
+
+  test('granting to a built-in role preserves its FULL default capability set (member is not narrowed to one perm)', () => {
+    const dir = freshAgentDir({ roles: { member: { match: ['slack:T0123'] } } })
+
+    grantRolePermission({ cwd: dir, roleName: 'member', permission: 'cron.schedule' })
+
+    const config = readConfig(dir) as { roles: { member: { permissions: string[] } } }
+    // every built-in member default must survive the grant
+    for (const p of BUILTIN_ROLES.member.permissions) {
+      expect(config.roles.member.permissions).toContain(p)
+    }
+    expect(config.roles.member.permissions).toContain('cron.schedule')
+  })
+
+  test('appends to an explicit permissions[] without clobbering it', () => {
+    const dir = freshAgentDir({
+      roles: { guest: { match: ['discord:*'], permissions: ['channel.respond'] } },
+    })
+    grantRolePermission({ cwd: dir, roleName: 'guest', permission: 'fs.see.private' })
+
+    const config = readConfig(dir) as { roles: { guest: { permissions: string[] } } }
+    expect(config.roles.guest.permissions).toEqual(['channel.respond', 'fs.see.private'])
+  })
+
+  test('idempotent: granting a permission the role already effectively holds is a no-op', () => {
+    // member's defaults already include channel.respond
+    const dir = freshAgentDir({ roles: { member: { match: ['slack:T0123'] } } })
+    const result = grantRolePermission({ cwd: dir, roleName: 'member', permission: 'channel.respond' })
+    expect(result).toEqual({ ok: true, added: false })
+
+    const config = readConfig(dir) as { roles: { member: { permissions?: string[] } } }
+    // no narrowing write happened; the file role still has no explicit permissions[]
+    expect(config.roles.member.permissions).toBeUndefined()
   })
 })
