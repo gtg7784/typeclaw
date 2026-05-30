@@ -20,11 +20,16 @@ export type CreateGrantRoleToolOptions = {
   agentDir: string
   getOrigin: () => SessionOrigin | undefined
   permissions: PermissionService
-  // Live roles snapshot used to hot-reload match-grants after writing. A
-  // permission-grant is restart-required, so reloading it has no runtime
-  // effect, but we reload anyway so a same-session subsequent match-grant
-  // sees a consistent table.
-  rolesProvider: () => RolesConfig | undefined
+  // Re-reads roles FROM DISK and returns the fresh set, for hot-reloading a
+  // match-grant after grantRole writes typeclaw.json. Must NOT read an
+  // in-memory config snapshot: grantRole writes the file directly, so a
+  // snapshot taken before the live config pointer is reloaded would be stale
+  // and replaceRoles would reapply the pre-grant table. Production wires this
+  // to reloadConfig(agentDir) + getConfig().roles, matching the config
+  // reloadable. A permission-grant is restart-required, so the reload has no
+  // runtime effect for it, but we reload anyway to keep a same-session
+  // subsequent match-grant reading a consistent table.
+  reloadRoles: () => RolesConfig | undefined
 }
 
 // Roles this tool may target, lowest to highest. `guest` is a valid target
@@ -56,7 +61,7 @@ function isSinglePrincipalOrigin(origin: SessionOrigin | undefined): boolean {
 }
 
 export function createGrantRoleTool(options: CreateGrantRoleToolOptions) {
-  const { agentDir, getOrigin, permissions, rolesProvider } = options
+  const { agentDir, getOrigin, permissions, reloadRoles } = options
 
   return defineTool({
     name: 'grant_role',
@@ -171,7 +176,7 @@ export function createGrantRoleTool(options: CreateGrantRoleToolOptions) {
 
   function reload(): void {
     try {
-      permissions.replaceRoles(rolesProvider())
+      permissions.replaceRoles(reloadRoles())
     } catch {
       // Best-effort hot-reload of match-grants. A failure here does not undo
       // the on-disk write; the next config reload / restart picks it up.

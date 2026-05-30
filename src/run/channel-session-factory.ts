@@ -47,9 +47,10 @@ export type BuildChannelSessionFactoryDeps = {
   // the production wiring can plumb in pluginsLoaded.permissions while tests
   // (or stand-alone callers) keep the previous no-annotation behavior.
   permissions?: PermissionService
-  // Live roles snapshot for the grant_role tool's hot-reload. Forwarded to
-  // createSession; the tool only mounts when permissions is also present.
-  rolesProvider?: () => RolesConfig | undefined
+  // Re-reads roles from disk for the grant_role tool's hot-reload (reload then
+  // read, not an in-memory snapshot). Forwarded to createSession; the tool only
+  // mounts when permissions is also present.
+  reloadRoles?: () => RolesConfig | undefined
   // Test seam: lets a fake stand in for the agent session creator so tests
   // can assert exactly which CreateSessionOptions the factory builds without
   // needing a live LLM, plugin runtime, or session manager on disk.
@@ -127,7 +128,7 @@ export function buildChannelSessionFactory(deps: BuildChannelSessionFactoryDeps)
       ...(deps.containerName !== undefined ? { containerName: deps.containerName } : {}),
       ...(deps.runtimeVersion !== undefined ? { runtimeVersion: deps.runtimeVersion } : {}),
       ...(deps.permissions !== undefined ? { permissions: deps.permissions } : {}),
-      ...(deps.rolesProvider !== undefined ? { rolesProvider: deps.rolesProvider } : {}),
+      ...(deps.reloadRoles !== undefined ? { reloadRoles: deps.reloadRoles } : {}),
       ...(deps.liveSubagentRegistry !== undefined ? { liveSubagentRegistry: deps.liveSubagentRegistry } : {}),
       ...(deps.subagentRegistry !== undefined ? { subagentRegistry: deps.subagentRegistry } : {}),
       ...(deps.getCreateSessionForSubagent !== undefined

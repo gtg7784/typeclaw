@@ -24,7 +24,7 @@ import {
   type SubagentCompletionBridge,
 } from '@/channels'
 import { createTunnelBridge, type TunnelBridge } from '@/channels/tunnel-bridge'
-import { createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync } from '@/config'
+import { createConfigReloadable, getConfig, loadConfigSync, loadPluginConfigsSync, reloadConfig } from '@/config'
 import {
   type CronConsumer,
   type CronJob,
@@ -245,7 +245,7 @@ export async function startAgent({
       getChannelRouter: () => channelManager.router,
       rehydrateCapOptions: resolveCapOptionsFromConfig(pluginConfigsByName['tool-result-cap']),
       permissions: pluginsLoaded.permissions,
-      rolesProvider: () => getConfig().roles,
+      reloadRoles: () => reloadRolesFromDisk(cwd),
       liveSubagentRegistry,
       liveSessionRegistry,
       subagentRegistry: pluginRuntime.get().subagents,
@@ -688,6 +688,21 @@ async function disposeMaterializedSkills(pluginRuntime: PluginRuntime): Promise<
   const current = pluginRuntime.get().materializedSkills
   const all = current ? [...pending, current] : pending
   await Promise.allSettled(all.map((m) => m.dispose()))
+}
+
+// grant_role's hot-reload hook: reload the live config FROM DISK (grantRole
+// wrote typeclaw.json directly, bypassing the in-memory snapshot) and return
+// the fresh roles for permissions.replaceRoles. Mirrors the config reloadable's
+// reload-then-read order. Falls back to the current snapshot if the just-written
+// file fails to parse — the on-disk write still stands and the next reload picks
+// it up; replaceRoles with stale roles is no worse than not reloading.
+function reloadRolesFromDisk(cwd: string): ReturnType<typeof getConfig>['roles'] {
+  try {
+    reloadConfig(cwd)
+  } catch {
+    // keep the current pointer; see above
+  }
+  return getConfig().roles
 }
 
 async function startScheduler({

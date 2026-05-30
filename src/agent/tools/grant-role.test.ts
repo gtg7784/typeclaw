@@ -60,8 +60,14 @@ function makeTool(dir: string, origin: SessionOrigin | undefined) {
     agentDir: dir,
     getOrigin: () => origin,
     permissions,
-    rolesProvider: () => ROLES,
+    // Mirror production: re-read roles FROM the just-written file, not a
+    // static snapshot, so the test exercises the real disk-fresh contract.
+    reloadRoles: () => readRolesFromDisk(dir),
   })
+}
+
+function readRolesFromDisk(dir: string): RolesConfig | undefined {
+  return (JSON.parse(readFileSync(join(dir, 'typeclaw.json'), 'utf8')) as { roles?: RolesConfig }).roles
 }
 
 async function run(tool: ReturnType<typeof createGrantRoleTool>, params: Record<string, unknown>) {
@@ -173,5 +179,37 @@ describe('grant_role — argument validation', () => {
     const details = await run(makeTool(dir, OWNER_DM), { role: 'member', match: 'team:T0123' })
     expect(details.ok).toBe(false)
     if (!details.ok) expect(details.error).toContain('Invalid match rule')
+  })
+})
+
+describe('grant_role — hot-reload reads the post-grant state', () => {
+  test('replaceRoles receives the freshly-written roles, not a stale snapshot', async () => {
+    const dir = freshAgentDir()
+    let replacedWith: Record<string, { match?: string[] }> | undefined
+    const permissions = createPermissionService({ roles: ROLES })
+    const spied: typeof permissions = {
+      ...permissions,
+      replaceRoles: (roles) => {
+        replacedWith = roles as unknown as Record<string, { match?: string[] }> | undefined
+      },
+    }
+    const tool = createGrantRoleTool({
+      agentDir: dir,
+      getOrigin: () => OWNER_DM,
+      permissions: spied,
+      reloadRoles: () => readRolesFromDisk(dir),
+    })
+
+    await tool.execute(
+      'call_1',
+      { role: 'member', match: 'slack:T0123 author:U_WIFE' } as never,
+      undefined,
+      undefined,
+      ctx,
+    )
+
+    // the value handed to replaceRoles must reflect the grant that just landed
+    // on disk — the bug was reading an in-memory snapshot taken before the write
+    expect(replacedWith?.member?.match).toContain('slack:T0123 author:U_WIFE')
   })
 })
