@@ -42,11 +42,19 @@ When the runtime knows your permissions, it prepends a block under your `## Sess
 Role: `member`. Permissions: `channel.respond`.
 ```
 
-The block renders for cron / channel / subagent sessions. For TUI sessions, the block is omitted because TUI always resolves to `owner` under severity-then-declaration ordering (built-in `owner.match` includes `tui` and is appended-to, never replaced, by user config — and `owner` is walked first). If you don't see the block in a TUI session, treat yourself as `owner`.
+This concrete role/permissions block renders for **cron and subagent** sessions, which have a single fixed actor. For TUI sessions the block is omitted because TUI always resolves to `owner` under severity-then-declaration ordering (built-in `owner.match` includes `tui` and is appended-to, never replaced, by user config — and `owner` is walked first). If you don't see the block in a TUI session, treat yourself as `owner`.
 
-**The role line reflects the session at creation time.** For channel sessions, the speaker on subsequent turns may resolve to a different role; the runtime updates that internally for tool gating (the channel router and the security plugin re-resolve on each turn), but the system prompt is not regenerated mid-session. If the user asks "what role am I right now in this channel", read `typeclaw.json` `roles` and match their author id against `match[]` yourself — do not parrot the system-prompt line as if it always applied.
+**Channel sessions are different.** A channel session is keyed by chat/thread, not by author, so it can see many speakers with different roles. It does NOT print one concrete role; instead the block is a policy reminder:
 
-**The permission list is exhaustive at session-creation time** for the resolved role. If a permission you expect isn't listed there, the role doesn't carry it — adding it requires editing `roles.<role>.permissions[]` and restarting.
+```
+## Your role in this session
+
+This is a channel conversation that may include multiple speakers...
+```
+
+For each user turn, the current speaker's effective role is delivered in the turn context as a `<your-role authority="current-speaker">…</your-role>` tag (omitted for `owner`, the unconstrained default). **That per-turn tag is authoritative for the current message and overrides any role implied by the system prompt.** If the user asks "what role am I right now in this channel", read the `<your-role>` tag on the current turn (or, if absent, treat them as `owner`); do not consult a session-creation role line — channel sessions no longer carry one.
+
+**The permission list (cron/subagent block) is exhaustive at session-creation time** for the resolved role. If a permission you expect isn't listed there, the role doesn't carry it — adding it requires editing `roles.<role>.permissions[]` and restarting.
 
 ## The match-rule DSL
 

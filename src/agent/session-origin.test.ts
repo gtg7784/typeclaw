@@ -559,7 +559,7 @@ describe('renderSessionOrigin', () => {
     expect(out.indexOf('## Session origin')).toBeLessThan(out.indexOf('## Your role in this session'))
   })
 
-  test('channel origin appends the role block under the existing channel content', () => {
+  test('channel origin renders the multi-speaker policy block, not the opener’s concrete role', () => {
     const out = renderSessionOrigin(
       {
         kind: 'channel',
@@ -574,9 +574,26 @@ describe('renderSessionOrigin', () => {
 
     expect(out).toContain('## Session origin')
     expect(out).toContain('## Your role in this session')
-    expect(out).toContain('`member`')
-    expect(out).toContain('`channel.respond`')
+    expect(out).toContain('multiple speakers')
+    expect(out).toContain('<your-role>')
     expect(out.indexOf('Be concise')).toBeLessThan(out.indexOf('## Your role in this session'))
+  })
+
+  test('channel role policy does NOT leak the opener’s concrete role or permission list', () => {
+    const out = renderSessionOrigin(
+      {
+        kind: 'channel',
+        adapter: 'slack-bot',
+        workspace: 'T0123',
+        chat: 'C0ABCDE',
+        thread: null,
+      },
+      undefined,
+      { role: 'owner', permissions: ['channel.respond', 'cron.schedule', 'security.bypass.secretExfilBash'] },
+    )
+
+    expect(out).not.toContain('Role: `owner`')
+    expect(out).not.toContain('`security.bypass.secretExfilBash`')
   })
 
   test('subagent origin appends the role block', () => {
@@ -590,18 +607,11 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('`owner`')
   })
 
-  test('role block renders "none" when the resolved role has no permissions (guest)', () => {
-    const out = renderSessionOrigin(
-      {
-        kind: 'channel',
-        adapter: 'discord-bot',
-        workspace: '111',
-        chat: '222',
-        thread: null,
-      },
-      undefined,
-      { role: 'guest', permissions: [] },
-    )
+  test('non-channel role block renders "none" when the resolved role has no permissions (guest)', () => {
+    const out = renderSessionOrigin({ kind: 'cron', jobId: 'job-9', jobKind: 'prompt' }, undefined, {
+      role: 'guest',
+      permissions: [],
+    })
 
     expect(out).toContain('Role: `guest`. Permissions: none.')
   })

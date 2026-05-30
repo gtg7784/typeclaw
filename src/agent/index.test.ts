@@ -578,7 +578,7 @@ describe('createResourceLoader', () => {
     expect(capturedOrigin).toEqual(origin)
   })
 
-  test('renders the role/permissions block when a PermissionService is provided for a channel session', async () => {
+  test('renders the multi-speaker role policy (not the opener’s concrete role) for a channel session', async () => {
     // given: a permission service with an author-scoped member rule
     const { createPermissionService } = await import('@/permissions')
     const permissions = createPermissionService({
@@ -604,8 +604,8 @@ describe('createResourceLoader', () => {
     // then
     const prompt = loader.getSystemPrompt() ?? ''
     expect(prompt).toContain('## Your role in this session')
-    expect(prompt).toContain('`member`')
-    expect(prompt).toContain('`channel.respond`')
+    expect(prompt).toContain('multiple speakers')
+    expect(prompt).not.toContain('Role: `member`')
   })
 
   test('omits the role block when permissions is not provided (preserves prior behavior)', async () => {
