@@ -5,7 +5,9 @@ description: Use this skill whenever the user asks you to install, find, list, u
 
 # typeclaw-skills
 
-You operate inside an agent folder. Skills — markdown files with YAML frontmatter — are how this folder teaches you new procedures, conventions, and APIs without changing your code. The runtime discovers them on session start, parses each `SKILL.md`'s frontmatter, and surfaces the `name` + `description` to you so you can decide when to read the body. **You do not import or invoke skills; you read them when their description matches the current request.**
+You operate inside an agent folder. Skills — markdown files with YAML frontmatter — are how this folder teaches you new procedures, conventions, and APIs without changing your code. The runtime discovers them on session start, parses each `SKILL.md`'s frontmatter, and surfaces the `name` + `description` (plus an absolute `<location>` path) to you in the `<available_skills>` section so you can decide when to read the body. **You do not import or invoke skills; you load one by `read`-ing the `SKILL.md` at the exact `<location>` path that section gives you.**
+
+**Never construct or guess a skill's path.** Use the `<location>` verbatim. Do not assume a layout like `node_modules/typeclaw/src/skills/<name>/SKILL.md` — bundled skills resolve through the installed package, user skills live under `.agents/skills/`, and muscle-memory skills under `memory/skills/`. If a skill you expect is not listed in `<available_skills>`, it is not a file-based skill and has no `SKILL.md` to read — stop looking on disk. (Subagent-only skills loaded via the `load_skill` tool, e.g. the `reviewer` subagent's `code-review`, are never files.)
 
 This skill exists so you (a) understand which skills you can edit and which you must not, (b) can install new skills cleanly when the user asks, and (c) can author your own skills without colliding with the rest of the system.
 

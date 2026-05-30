@@ -4,7 +4,7 @@ description: Four loading sources, naming rules, and why descriptions are trigge
 icon: BookOpen
 ---
 
-Skills are markdown files with `name` + `description` frontmatter, loaded on demand via the `skill` tool. Four sources, each with a different owner:
+Skills are markdown files with `name` + `description` frontmatter, surfaced to the agent in the `<available_skills>` system-prompt section. The agent loads one on demand by `read`-ing the `SKILL.md` at the `<location>` path that section advertises — there is no dedicated `skill` tool. (The `load_skill` tool is a separate, subagent-only mechanism for in-memory `LoadableSkill`s; see [Subagent skills](#subagent-skills-load_skill).) Four sources, each with a different owner:
 
 | Source                 | Path                                        | Owner             | When to add                                                                                                                 |
 | ---------------------- | ------------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------------------------------------- |
@@ -28,3 +28,15 @@ The LLM picks skills by description. Name the failure modes, platforms, and verb
 ## Skills are lazy
 
 Adding one costs zero tokens until loaded. Right home for platform-specific guidance and large runbooks. **Do not** copy skill content into tool descriptions — those reload into every tool-call prefix, which is exactly the cost model skills avoid.
+
+## How the agent loads a skill
+
+The four sources above are all **file-based**: the upstream `DefaultResourceLoader` walks `additionalSkillPaths` (`src/agent/index.ts`), parses each `SKILL.md` frontmatter, and renders `name` + `description` + an absolute `<location>` into the `<available_skills>` block. The system prompt instructs the agent to **`read` the `<location>` path** when a description matches — the body loads only then.
+
+The agent must use the exact `<location>` path verbatim. It must **not** construct or guess skill paths (e.g. `node_modules/typeclaw/src/skills/<name>/SKILL.md`): muscle-memory and user skills live under the agent dir, the bundled path resolves through the installed package, and a guessed path that doesn't exist is the most common skill-load failure. If a skill you expect isn't listed in `<available_skills>`, it isn't file-based — don't go hunting for its `SKILL.md` on disk.
+
+## Subagent skills (`load_skill`)
+
+Subagents bypass the file-based resource loader entirely, so the startup discovery path is unavailable to them. A plugin can instead hand a subagent a typed `load_skill` tool via `createLoadSkillTool` (`src/plugin/load-skill.ts`), passing in-memory `LoadableSkill` objects (`name` / `description` / `content`). The tool's `name` parameter is a Zod enum of the supplied skill names, so the subagent picks from a fixed menu — it can't read a `SKILL.md` off disk.
+
+This is distinct from the main-agent flow: `load_skill` returns a `content` string the plugin embedded at build time, not a discovered file. The only bundled consumer is the `reviewer` subagent (`src/bundled-plugins/reviewer/`), whose `code-review` and `general` skills are `LoadableSkill`s — there is no `code-review/SKILL.md` anywhere in the tree.
