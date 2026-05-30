@@ -252,16 +252,18 @@ export function printSlackAppManifestSetup(output: NodeJS.WritableStream = proce
 // the exact permission bitfield the adapter uses. No-ops when the token isn't
 // parseable as a Discord bot token so we never block onboarding on best-effort
 // guidance.
-export function printDiscordInviteHint(token: string): void {
+export function printDiscordInviteHint(token: string, output: NodeJS.WritableStream = process.stdout): void {
   const appId = deriveAppIdFromBotToken(token)
   if (appId === null) return
+  // URL stays OUT of note(): clack wraps long lines with a `│` gutter that
+  // corrupts copy-pasted URLs. Same fix as src/cli/oauth-callbacks.ts.
   note(
     [
-      buildDiscordInviteUrl(appId),
-      '',
-      'Open it, pick a server, click Authorize.',
+      'Open the URL below, pick a server, click Authorize.',
       "The bot won't receive messages until it's in at least one server.",
     ].join('\n'),
     'Invite the bot to a server',
   )
+  output.write(`${buildDiscordInviteUrl(appId)}\n`)
+  output.write('\n')
 }

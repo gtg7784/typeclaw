@@ -5,6 +5,7 @@ import {
   done,
   errorLine,
   link,
+  printDiscordInviteHint,
   printSlackAppManifestSetup,
   renderStartSuccess,
   SLACK_APP_MANIFEST,
@@ -461,5 +462,50 @@ describe('printSlackAppManifestSetup', () => {
     const stop = SLACK_APP_MANIFEST.features.slash_commands.find((c) => c.command === '/stop')
     expect(stop).toBeDefined()
     expect(stop!.url).toContain('example.invalid')
+  })
+})
+
+describe('printDiscordInviteHint', () => {
+  const ANSI = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, 'g')
+
+  function captureStdout<T>(fn: () => T): { result: T; output: string } {
+    const original = process.stdout.write.bind(process.stdout)
+    let buf = ''
+    process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+      buf += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8')
+      return true
+    }) as typeof process.stdout.write
+    try {
+      const result = fn()
+      return { result, output: buf.replace(ANSI, '') }
+    } finally {
+      process.stdout.write = original
+    }
+  }
+
+  function tokenForAppId(appId: string): string {
+    const head = Buffer.from(appId, 'utf-8').toString('base64').replace(/=+$/, '')
+    return `${head}.G49NjP.pD8PLpKp-Xx8sr-8m1DCxSPTJZdcpcJZOExc1c`
+  }
+
+  test('emits the invite URL on its own flush-left line so it copy-pastes cleanly', () => {
+    const { output } = captureStdout(() =>
+      withNoColor(() => printDiscordInviteHint(tokenForAppId('968556348390391859'))),
+    )
+
+    const urlLine = output.split('\n').find((line) => line.includes('discord.com/oauth2/authorize'))
+    expect(urlLine).toBeDefined()
+    // flush-left: the URL line carries no clack box gutter that would corrupt a copy
+    expect(urlLine!.startsWith('│')).toBe(false)
+    expect(urlLine!.startsWith('|')).toBe(false)
+    expect(urlLine).toContain('client_id=968556348390391859')
+
+    expect(output).toContain('Invite the bot to a server')
+    expect(output).toContain('pick a server')
+  })
+
+  test('writes nothing when the token is not a parseable Discord bot token', () => {
+    const { output } = captureStdout(() => withNoColor(() => printDiscordInviteHint('not-a-token')))
+    expect(output).toBe('')
   })
 })
