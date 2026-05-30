@@ -6048,7 +6048,7 @@ describe('ChannelRouter per-turn live role anchor', () => {
     await router.__testing!.flushDebounce(KEY)
 
     const prompt = sessions[0]!.prompts[0]!
-    expect(prompt).toContain('<your-role>guest</your-role>')
+    expect(prompt).toContain('<your-role authority="current-speaker">guest</your-role>')
     expect(prompt).toContain('save me a copy')
   })
 

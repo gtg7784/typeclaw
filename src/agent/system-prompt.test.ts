@@ -65,10 +65,18 @@ describe('renderTurnTimeAnchor', () => {
 })
 
 describe('renderTurnRoleAnchor', () => {
-  test('wraps a non-owner role in a single <your-role> tag', () => {
-    expect(renderTurnRoleAnchor('guest')).toBe('<your-role>guest</your-role>')
-    expect(renderTurnRoleAnchor('member')).toBe('<your-role>member</your-role>')
-    expect(renderTurnRoleAnchor('trusted')).toBe('<your-role>trusted</your-role>')
+  test('wraps a non-owner role in an authoritative <your-role> tag with override instruction', () => {
+    expect(renderTurnRoleAnchor('guest')).toBe(
+      '<your-role authority="current-speaker">guest</your-role> (authoritative for this message; overrides any role implied by the system prompt)',
+    )
+    expect(renderTurnRoleAnchor('member')).toContain('<your-role authority="current-speaker">member</your-role>')
+    expect(renderTurnRoleAnchor('trusted')).toContain('<your-role authority="current-speaker">trusted</your-role>')
+  })
+
+  test('marks the per-turn role as authoritative so it overrides the cached system-prompt role block', () => {
+    const anchor = renderTurnRoleAnchor('guest')!
+    expect(anchor).toContain('authoritative')
+    expect(anchor).toContain('overrides')
   })
 
   test('omits the tag for owner (the unconstrained default — absent means no special handling)', () => {
@@ -80,6 +88,8 @@ describe('renderTurnRoleAnchor', () => {
   })
 
   test('passes through a custom role name verbatim', () => {
-    expect(renderTurnRoleAnchor('contributor')).toBe('<your-role>contributor</your-role>')
+    expect(renderTurnRoleAnchor('contributor')).toContain(
+      '<your-role authority="current-speaker">contributor</your-role>',
+    )
   })
 })

@@ -111,11 +111,12 @@ function getPlatformInfo(adapter: AdapterId): PlatformInfo {
 // TUI is always `owner` by construction — annotating it would add noise to
 // every interactive session for zero new information.
 //
-// For channel sessions this is a session-creation snapshot. The router
-// re-resolves per-turn for tool gating, but the system prompt is not
-// regenerated mid-session; the role line is accurate at admission and the
-// `typeclaw-permissions` skill spells out how to interpret it on later
-// turns when a different speaker may have spoken last.
+// Channel origins do NOT render this concrete role. A channel session is
+// keyed by chat/thread, so the opener's role is wrong for every later
+// speaker and printing their permission list leaks it into shared context.
+// Channel origins render renderChannelRolePolicy() instead, and the
+// authoritative per-turn role rides in the non-cacheable `<your-role>`
+// turn anchor (renderTurnRoleAnchor in system-prompt.ts).
 export type SessionRoleContext = {
   role: string
   permissions: readonly string[]
@@ -128,21 +129,22 @@ export function renderSessionOrigin(
 ): string {
   switch (origin.kind) {
     case 'tui':
-      return withRoleContext(renderTuiOrigin(), roleContext)
+      return withRoleContext(renderTuiOrigin(), roleContext, origin.kind)
     case 'cron':
-      return withRoleContext(renderCronOrigin(origin), roleContext)
+      return withRoleContext(renderCronOrigin(origin), roleContext, origin.kind)
     case 'channel':
-      return withRoleContext(renderChannelOrigin(origin, now), roleContext)
+      return withRoleContext(renderChannelOrigin(origin, now), roleContext, origin.kind)
     case 'subagent':
-      return withRoleContext(renderSubagentOrigin(origin), roleContext)
+      return withRoleContext(renderSubagentOrigin(origin), roleContext, origin.kind)
     case 'system':
-      return withRoleContext(renderSystemOrigin(origin), roleContext)
+      return withRoleContext(renderSystemOrigin(origin), roleContext, origin.kind)
   }
 }
 
-function withRoleContext(block: string, ctx: SessionRoleContext | undefined): string {
+function withRoleContext(block: string, ctx: SessionRoleContext | undefined, kind: SessionOrigin['kind']): string {
   if (ctx === undefined) return block
-  return `${block}\n\n${renderRoleContext(ctx)}`
+  const roleBlock = kind === 'channel' ? renderChannelRolePolicy() : renderRoleContext(ctx)
+  return `${block}\n\n${roleBlock}`
 }
 
 function renderRoleContext(ctx: SessionRoleContext): string {
@@ -157,6 +159,30 @@ function renderRoleContext(ctx: SessionRoleContext): string {
     '"denied by permissions" message means the current actor lacks the',
     'permission the guard was looking for. See the `typeclaw-permissions`',
     'skill for what each role can do and how to grant access.',
+  ].join('\n')
+}
+
+// Channel sessions are keyed by chat/thread, not by author: one session can see
+// many speakers with different roles. Rendering the opener's concrete role here
+// would (1) be wrong for every later speaker and (2) leak the opener's full
+// permission list into shared context. So channel origins get a cache-stable
+// policy instead of a resolved identity; the authoritative per-turn role rides
+// in the non-cacheable `<your-role>` turn anchor.
+function renderChannelRolePolicy(): string {
+  return [
+    '## Your role in this session',
+    '',
+    'This is a channel conversation that may include multiple speakers. Do not',
+    'assume one speaker’s role applies to later messages. For each user turn the',
+    'current speaker’s effective role is provided in the turn context as a',
+    '`<your-role>` tag; that per-turn role is authoritative for the current',
+    'message and overrides any role implied by session-opening context. An absent',
+    '`<your-role>` tag means the current speaker is the unconstrained default.',
+    '',
+    'Tool calls and channel admission are gated by the current speaker’s',
+    'permissions; a `blocked:` or "denied by permissions" message means that',
+    'speaker lacks the permission the guard wanted. See the',
+    '`typeclaw-permissions` skill for what each role can do.',
   ].join('\n')
 }
 

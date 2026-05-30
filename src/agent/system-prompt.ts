@@ -173,7 +173,7 @@ export function renderTurnTimeAnchor(now: Date = new Date()): string {
 // block for a TUI owner.
 export function renderTurnRoleAnchor(role: string): string | undefined {
   if (role === 'owner') return undefined
-  return `<your-role>${role}</your-role>`
+  return `<your-role authority="current-speaker">${role}</your-role> (authoritative for this message; overrides any role implied by the system prompt)`
 }
 
 // Compact replacement for DEFAULT_SYSTEM_PROMPT, used by non-interactive
