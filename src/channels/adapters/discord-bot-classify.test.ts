@@ -183,6 +183,70 @@ describe('classifyInbound — drop paths', () => {
   })
 })
 
+describe('classifyInbound — thread-created system message', () => {
+  test('drops the parent-channel THREAD_CREATED notice (ref points at the new thread, no message_id)', () => {
+    const event = buildEvent({
+      channel_id: 'parent-c1',
+      content: 'my new thread name',
+      message_reference: { channel_id: 'thread-t1', guild_id: 'g1' },
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict).toEqual({ kind: 'drop', reason: 'thread_created_system' })
+  })
+
+  test('routes the in-thread THREAD_STARTER_MESSAGE (ref points at parent but carries the original message_id)', () => {
+    const event = buildEvent({
+      channel_id: 'thread-t1',
+      content: 'first message in the thread',
+      message_reference: { message_id: 'original-m1', channel_id: 'parent-c1', guild_id: 'g1' },
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+    if (verdict.kind !== 'route') throw new Error('expected route')
+    expect(verdict.payload.chat).toBe('thread-t1')
+  })
+
+  test('routes a normal same-channel reply (ref.channel_id === event.channel_id)', () => {
+    const event = buildEvent({
+      channel_id: 'c1',
+      content: 'replying here',
+      message_reference: { message_id: 'parent-1', channel_id: 'c1' },
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+  })
+
+  test('routes a cross-channel reference that still carries a message_id (forward/crosspost, not a thread notice)', () => {
+    const event = buildEvent({
+      channel_id: 'c1',
+      content: 'forwarded from elsewhere',
+      message_reference: { message_id: 'src-9', channel_id: 'other-c2', guild_id: 'g1' },
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+  })
+
+  test('does not treat a cross-GUILD reference without message_id as a thread notice', () => {
+    const event = buildEvent({
+      channel_id: 'c1',
+      content: 'unusual cross-guild reference',
+      message_reference: { channel_id: 'other-c2', guild_id: 'other-guild' },
+    })
+
+    const verdict = classifyInbound(event, baseConfig, BOT_USER_ID)
+
+    expect(verdict.kind).toBe('route')
+  })
+})
+
 describe('classifyInbound — peer-bot routing', () => {
   test('routes a peer bot message with authorIsBot=true', () => {
     const event = buildEvent({

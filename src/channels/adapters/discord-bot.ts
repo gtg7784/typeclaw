@@ -763,6 +763,7 @@ function dropHint(reason: InboundDropReason): string {
       return ' (enable MESSAGE CONTENT INTENT in Discord Developer Portal and restart)'
     case 'pre_connect':
     case 'self_author':
+    case 'thread_created_system':
       return ''
   }
 }
