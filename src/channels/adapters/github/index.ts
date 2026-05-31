@@ -225,6 +225,9 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         })
       } else if (repos.length > 0) {
         const legacyProviderHostSuffix = detectLegacyProviderHostSuffix(effectiveUrl)
+        logger.info(
+          `[github] registering webhook for ${repos.length} repo(s) [${repos.join(', ')}] -> ${effectiveUrl} (events: ${cfg.eventAllowlist.join(', ')})`,
+        )
         if (webhookRegistrationDelayMs > 0) {
           logger.info(
             `[github] waiting ${webhookRegistrationDelayMs}ms before registering webhook so the Cloudflare edge can warm up`,
