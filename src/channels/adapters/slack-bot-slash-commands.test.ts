@@ -2,7 +2,12 @@ import { describe, expect, test } from 'bun:test'
 
 import type { SlackSocketModeSlashCommandArgs } from 'agent-messenger/slackbot'
 
-import { buildSlashAckPayload, parseSlashCommand } from './slack-bot-slash-commands'
+import {
+  buildSlashAckPayload,
+  parseSlashCommand,
+  parseThreadCommand,
+  type ThreadCommandInput,
+} from './slack-bot-slash-commands'
 
 type Body = SlackSocketModeSlashCommandArgs['body']
 
@@ -84,6 +89,82 @@ describe('parseSlashCommand', () => {
     expect(result.kind).toBe('parsed')
     if (result.kind !== 'parsed') return
     expect(result.command.key.thread).toBe(null)
+  })
+})
+
+describe('parseThreadCommand', () => {
+  const known = new Set(['stop'])
+
+  function input(over: Partial<ThreadCommandInput> = {}): ThreadCommandInput {
+    return {
+      text: '!stop',
+      channel: 'C-general',
+      threadTs: '1700.0001',
+      isDm: false,
+      teamId: 'T-acme',
+      invokerId: 'U-alice',
+      ...over,
+    }
+  }
+
+  test('parses !stop in a thread into a thread-targeted ChannelKey', () => {
+    const result = parseThreadCommand(input(), known)
+    expect(result.kind).toBe('parsed')
+    if (result.kind !== 'parsed') return
+    expect(result.command).toEqual({
+      name: 'stop',
+      key: { adapter: 'slack-bot', workspace: 'T-acme', chat: 'C-general', thread: '1700.0001' },
+      invokerId: 'U-alice',
+    })
+  })
+
+  test('top-level (no thread) !stop builds a thread:null key', () => {
+    const result = parseThreadCommand(input({ threadTs: null }), known)
+    expect(result.kind).toBe('parsed')
+    if (result.kind !== 'parsed') return
+    expect(result.command.key.thread).toBe(null)
+  })
+
+  test('DM context maps workspace to @dm', () => {
+    const result = parseThreadCommand(input({ isDm: true, channel: 'D-bob' }), known)
+    expect(result.kind).toBe('parsed')
+    if (result.kind !== 'parsed') return
+    expect(result.command.key.workspace).toBe('@dm')
+    expect(result.command.key.chat).toBe('D-bob')
+  })
+
+  test('lowercases the command name (!STOP)', () => {
+    const result = parseThreadCommand(input({ text: '!STOP' }), known)
+    expect(result.kind).toBe('parsed')
+    if (result.kind !== 'parsed') return
+    expect(result.command.name).toBe('stop')
+  })
+
+  test('accepts trailing args after the command (!stop now please)', () => {
+    const result = parseThreadCommand(input({ text: '!stop now please' }), known)
+    expect(result.kind).toBe('parsed')
+    if (result.kind !== 'parsed') return
+    expect(result.command.name).toBe('stop')
+  })
+
+  test('tolerates leading whitespace before the prefix', () => {
+    const result = parseThreadCommand(input({ text: '  !stop' }), known)
+    expect(result.kind).toBe('parsed')
+  })
+
+  test('ignores messages without the ! prefix', () => {
+    const result = parseThreadCommand(input({ text: 'stop the turn' }), known)
+    expect(result).toEqual({ kind: 'ignore', reason: 'no-prefix' })
+  })
+
+  test('ignores a ! message whose first token is not a known command (!nice work)', () => {
+    const result = parseThreadCommand(input({ text: '!nice work' }), known)
+    expect(result).toEqual({ kind: 'ignore', reason: 'unknown-command' })
+  })
+
+  test('ignores a bare ! with no token', () => {
+    const result = parseThreadCommand(input({ text: '! stop' }), known)
+    expect(result).toEqual({ kind: 'ignore', reason: 'unknown-command' })
   })
 })
 

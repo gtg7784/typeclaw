@@ -12,12 +12,14 @@ import {
   createSlackMembershipResolver,
   createSlackTypingTracker,
   createSlashCommandHandler,
+  createThreadCommandHandler,
   createTypingCallback,
   promoteAppMentionToMessage,
   SLACK_HISTORY_LIMIT_MAX,
   SLACK_SLASH_COMMAND_NAMES,
 } from './slack-bot'
 import { classifyInbound, type SlackInboundAppMentionEvent } from './slack-bot-classify'
+import { createSlackDedupe } from './slack-bot-dedupe'
 
 describe('slack-bot createTypingCallback', () => {
   type SetStatusCall = { channel: string; threadTs: string; status: string }
@@ -1467,5 +1469,223 @@ describe('createSlashCommandHandler', () => {
     await done
 
     expect(events).toEqual(['router-call', 'ack-sent', 'channel-tag-resolved'])
+  })
+})
+
+describe('createThreadCommandHandler', () => {
+  type RouterCall = { key: ChannelKey; name: string; invokerId: string }
+  type RouterResult =
+    | { kind: 'handled'; name: string }
+    | { kind: 'no-live-session' }
+    | { kind: 'permission-denied' }
+    | { kind: 'ambiguous'; matchCount: number }
+    | { kind: 'unknown-command'; name: string }
+  type ReplyCall = { chat: string; thread: string | null; text: string }
+
+  function setup(over?: {
+    routerImpl?: (key: ChannelKey, name: string, invokerId: string) => Promise<RouterResult>
+    postReplyImpl?: (args: ReplyCall) => Promise<void>
+  }): {
+    handler: ReturnType<typeof createThreadCommandHandler>
+    routerCalls: RouterCall[]
+    replies: ReplyCall[]
+    logs: { info: string[]; warn: string[]; error: string[] }
+  } {
+    const routerCalls: RouterCall[] = []
+    const replies: ReplyCall[] = []
+    const logs = { info: [] as string[], warn: [] as string[], error: [] as string[] }
+    const handler = createThreadCommandHandler({
+      router: {
+        executeCommand: async (key, name, options) => {
+          routerCalls.push({ key, name, invokerId: options.invokerId })
+          return (over?.routerImpl ?? (async () => ({ kind: 'handled', name: 'stop' }) as RouterResult))(
+            key,
+            name,
+            options.invokerId,
+          )
+        },
+      },
+      knownCommandNames: SLACK_SLASH_COMMAND_NAMES,
+      postReply: async (args) => {
+        replies.push(args)
+        if (over?.postReplyImpl) await over.postReplyImpl(args)
+      },
+      logger: {
+        info: (m) => logs.info.push(m),
+        warn: (m) => logs.warn.push(m),
+        error: (m) => logs.error.push(m),
+      },
+    })
+    return { handler, routerCalls, replies, logs }
+  }
+
+  const baseInput = {
+    text: '!stop',
+    channel: 'C-general',
+    threadTs: '1700.0001',
+    isDm: false,
+    teamId: 'T-acme',
+    invokerId: 'U-alice',
+  }
+
+  // Default reserve: always wins. Tracks call count so tests can assert the
+  // handler reserves only for recognised commands.
+  function makeReserve(result = true): { reserve: () => boolean; calls: () => number } {
+    let calls = 0
+    return {
+      reserve: () => {
+        calls++
+        return result
+      },
+      calls: () => calls,
+    }
+  }
+
+  test('!stop in a thread executes with a thread-targeted key and replies into the thread', async () => {
+    const { handler, routerCalls, replies } = setup()
+
+    const outcome = await handler(baseInput, makeReserve().reserve)
+
+    expect(outcome).toEqual({ kind: 'executed' })
+    expect(routerCalls).toEqual([
+      {
+        key: { adapter: 'slack-bot', workspace: 'T-acme', chat: 'C-general', thread: '1700.0001' },
+        name: 'stop',
+        invokerId: 'U-alice',
+      },
+    ])
+    expect(replies).toHaveLength(1)
+    expect(replies[0]!.chat).toBe('C-general')
+    expect(replies[0]!.thread).toBe('1700.0001')
+    expect(replies[0]!.text).toContain('Stopped')
+  })
+
+  test('non-! message passes through as not-a-command without reserving', async () => {
+    const { handler, routerCalls, replies } = setup()
+    const r = makeReserve()
+
+    const outcome = await handler({ ...baseInput, text: 'stop the turn please' }, r.reserve)
+
+    expect(outcome).toEqual({ kind: 'not-a-command' })
+    expect(routerCalls).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+    expect(r.calls()).toBe(0)
+  })
+
+  test('!unknown (not a known command) passes through as not-a-command without reserving', async () => {
+    const { handler, routerCalls, replies } = setup()
+    const r = makeReserve()
+
+    const outcome = await handler({ ...baseInput, text: '!nice work everyone' }, r.reserve)
+
+    expect(outcome).toEqual({ kind: 'not-a-command' })
+    expect(routerCalls).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+    expect(r.calls()).toBe(0)
+  })
+
+  test('a lost reserve race short-circuits to duplicate (no router call, no reply)', async () => {
+    const { handler, routerCalls, replies } = setup()
+
+    const outcome = await handler(baseInput, makeReserve(false).reserve)
+
+    expect(outcome).toEqual({ kind: 'duplicate' })
+    expect(routerCalls).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+  })
+
+  test('reserve fires before the router await (sync reservation closes the race)', async () => {
+    const order: string[] = []
+    const { handler } = setup({
+      routerImpl: async () => {
+        order.push('execute')
+        return { kind: 'handled', name: 'stop' }
+      },
+    })
+    const reserve = (): boolean => {
+      order.push('reserve')
+      return true
+    }
+
+    await handler(baseInput, reserve)
+
+    expect(order).toEqual(['reserve', 'execute'])
+  })
+
+  test('permission-denied result maps to the permission-denied reply', async () => {
+    const { handler, replies } = setup({ routerImpl: async () => ({ kind: 'permission-denied' }) })
+
+    await handler(baseInput, makeReserve().reserve)
+
+    expect(replies[0]!.text).toContain('permission')
+  })
+
+  test('top-level !stop (no thread) targets a thread:null key', async () => {
+    const { handler, routerCalls } = setup()
+
+    await handler({ ...baseInput, threadTs: null }, makeReserve().reserve)
+
+    expect(routerCalls[0]!.key.thread).toBe(null)
+  })
+
+  test('executeCommand exception is caught and replies with the failure text', async () => {
+    const { handler, replies, logs } = setup({
+      routerImpl: async () => {
+        throw new Error('boom')
+      },
+    })
+
+    const outcome = await handler(baseInput, makeReserve().reserve)
+
+    expect(outcome).toEqual({ kind: 'executed' })
+    expect(replies[0]!.text).toContain('internal error')
+    expect(logs.error.some((l) => l.includes('boom'))).toBe(true)
+  })
+
+  test('a failing reply post is swallowed (still returns executed)', async () => {
+    const { handler, logs } = setup({
+      postReplyImpl: async () => {
+        throw new Error('slack down')
+      },
+    })
+
+    const outcome = await handler(baseInput, makeReserve().reserve)
+
+    expect(outcome).toEqual({ kind: 'executed' })
+    expect(logs.warn.some((l) => l.includes('reply post failed'))).toBe(true)
+  })
+
+  test('two concurrent duplicate deliveries through a real dedupe execute exactly once', async () => {
+    let executions = 0
+    let releaseRouter: (() => void) | undefined
+    const routerGate = new Promise<void>((resolve) => {
+      releaseRouter = resolve
+    })
+    const { handler } = setup({
+      routerImpl: async () => {
+        executions++
+        await routerGate
+        return { kind: 'handled', name: 'stop' }
+      },
+    })
+
+    const dedupe = createSlackDedupe()
+    const event = { channel: 'C-general', ts: '1700.0001', client_msg_id: 'cmid-1' }
+    const reserve = (): boolean => {
+      if (dedupe.check(event) !== null) return false
+      dedupe.mark(event)
+      return true
+    }
+
+    // Both deliveries start before the router resolves, mirroring the message +
+    // app_mention double-delivery interleaving.
+    const first = handler(baseInput, reserve)
+    const second = handler(baseInput, reserve)
+    releaseRouter!()
+    const [a, b] = await Promise.all([first, second])
+
+    const kinds = [a.kind, b.kind].sort()
+    expect(kinds).toEqual(['duplicate', 'executed'])
+    expect(executions).toBe(1)
   })
 })

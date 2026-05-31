@@ -35,12 +35,11 @@ import {
 import { createSlackDedupe } from './slack-bot-dedupe'
 import {
   buildSlashAckPayload,
+  commandResultReply,
   parseSlashCommand,
-  SLACK_SLASH_REPLY_ABORTED,
-  SLACK_SLASH_REPLY_AMBIGUOUS,
+  parseThreadCommand,
   SLACK_SLASH_REPLY_FAILED,
-  SLACK_SLASH_REPLY_NO_LIVE_SESSION,
-  SLACK_SLASH_REPLY_PERMISSION_DENIED,
+  type ThreadCommandInput,
 } from './slack-bot-slash-commands'
 import { slackTsToMillis } from './slack-bot-time'
 
@@ -124,16 +123,7 @@ export function createSlashCommandHandler(
       return
     }
 
-    const replyContent =
-      result.kind === 'handled'
-        ? SLACK_SLASH_REPLY_ABORTED
-        : result.kind === 'no-live-session'
-          ? SLACK_SLASH_REPLY_NO_LIVE_SESSION
-          : result.kind === 'permission-denied'
-            ? SLACK_SLASH_REPLY_PERMISSION_DENIED
-            : result.kind === 'ambiguous'
-              ? SLACK_SLASH_REPLY_AMBIGUOUS
-              : SLACK_SLASH_REPLY_FAILED
+    const replyContent = commandResultReply(result)
 
     // Final ack on the happy path: own try/catch so a thrown ack here does
     // NOT cascade into the error-path ack above (which would violate the
@@ -155,6 +145,67 @@ export function createSlashCommandHandler(
         `[slack-bot] slash /${command.name} result=${result.kind} (channel-tag resolution failed: ${describe(err)})`,
       )
     }
+  }
+}
+
+export type ThreadCommandReplyPoster = (args: { chat: string; thread: string | null; text: string }) => Promise<void>
+
+export type ThreadCommandHandlerDeps = {
+  router: Pick<ChannelRouter, 'executeCommand'>
+  knownCommandNames: ReadonlySet<string>
+  postReply: ThreadCommandReplyPoster
+  logger: SlackBotAdapterLoggerLike
+}
+
+export type ThreadCommandOutcome = { kind: 'not-a-command' } | { kind: 'duplicate' } | { kind: 'executed' }
+
+// Synchronous reservation: the adapter marks the dedupe ring inside this hook,
+// which the handler calls before its first `await`. Two duplicate Slack
+// deliveries can both clear `dedupe.check()` on the same JS tick; whichever
+// reserves first wins and returns `true`, the loser returns `false` and aborts
+// — so a control command never runs twice across the check→execute window.
+export type ThreadCommandReserve = () => boolean
+
+// Routes a `!cmd` thread message through the SAME router.executeCommand path as
+// native slashes, then posts the outcome back into the thread. Returns
+// 'not-a-command' (caller proceeds with normal classify/route), 'duplicate'
+// (a racing delivery already reserved this event — caller stops silently), or
+// 'executed' (command handled — caller stops; it is not agent input).
+export function createThreadCommandHandler(
+  deps: ThreadCommandHandlerDeps,
+): (input: ThreadCommandInput, reserve: ThreadCommandReserve) => Promise<ThreadCommandOutcome> {
+  return async (input, reserve) => {
+    const parsed = parseThreadCommand(input, deps.knownCommandNames)
+    if (parsed.kind === 'ignore') {
+      return { kind: 'not-a-command' }
+    }
+    // Reserve synchronously, before any await, to close the check→execute race.
+    if (!reserve()) {
+      return { kind: 'duplicate' }
+    }
+    const { command } = parsed
+    deps.logger.info(
+      `[slack-bot] thread-command !${command.name} invoker=${command.invokerId} team=${command.key.workspace} channel=${command.key.chat} thread=${command.key.thread ?? '(none)'}`,
+    )
+
+    let reply: string
+    try {
+      const result = await deps.router.executeCommand(command.key, command.name, {
+        invokerId: command.invokerId,
+      })
+      reply = commandResultReply(result)
+      deps.logger.info(`[slack-bot] thread-command !${command.name} result=${result.kind}`)
+    } catch (err) {
+      deps.logger.error(`[slack-bot] thread-command !${command.name} failed: ${describe(err)}`)
+      reply = SLACK_SLASH_REPLY_FAILED
+    }
+
+    try {
+      await deps.postReply({ chat: input.channel, thread: input.threadTs, text: reply })
+    } catch (err) {
+      deps.logger.warn(`[slack-bot] thread-command reply post failed: ${describe(err)}`)
+    }
+    return { kind: 'executed' }
   }
 }
 
@@ -783,6 +834,24 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
     formatChannelTag,
   })
 
+  const handleThreadCommand = createThreadCommandHandler({
+    router: options.router,
+    knownCommandNames: SLACK_SLASH_COMMAND_NAMES,
+    logger,
+    postReply: async ({ chat, thread, text }) => {
+      const result = await outboundCallback({
+        adapter: 'slack-bot',
+        workspace: teamId ?? 'unknown',
+        chat,
+        ...(thread !== null ? { thread } : {}),
+        text,
+      })
+      if (!result.ok) {
+        throw new Error(result.error)
+      }
+    },
+  })
+
   const handleMessageEvent = async (
     event: SlackInboundMessageEvent,
     source: 'message' | 'app_mention',
@@ -811,6 +880,38 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
           `[slack-bot] dropped ts=${event.ts} reason=duplicate_delivery (source=${source}, matched=${dedupeMatch})`,
         )
         return
+      }
+
+      // Intercept `!cmd` thread-message commands BEFORE classifyInbound. A
+      // command is control traffic — neither dropped nor routed to the agent —
+      // so it must short-circuit here. Bypassing classifyInbound also bypasses
+      // its self_author / no_user drops, so we replicate those guards: never
+      // execute a command from our own message (echo loop) or a userless
+      // system event. The `reserve` closure marks dedupe synchronously the
+      // instant the command is recognised (before the router await), closing
+      // the check→execute race for duplicate deliveries.
+      if (event.user !== undefined && event.user !== '' && (botUserId === null || event.user !== botUserId)) {
+        const reserve = (): boolean => {
+          if (dedupe.check(event) !== null) return false
+          dedupe.mark(event)
+          return true
+        }
+        const outcome = await handleThreadCommand(
+          {
+            text: event.text ?? '',
+            channel: event.channel,
+            threadTs: event.thread_ts ?? null,
+            isDm: event.channel_type === 'im',
+            teamId,
+            invokerId: event.user,
+          },
+          reserve,
+        )
+        if (outcome.kind === 'executed') return
+        if (outcome.kind === 'duplicate') {
+          logger.info(`[slack-bot] dropped ts=${event.ts} reason=duplicate_delivery (thread-command race)`)
+          return
+        }
       }
 
       const verdict = classifyInbound(event, options.configRef(), {
