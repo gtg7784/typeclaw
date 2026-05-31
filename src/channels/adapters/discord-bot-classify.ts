@@ -12,6 +12,7 @@ export type InboundDropReason =
   | 'self_author' // event.author.id === botUserId; we never route our own messages back to ourselves
   | 'empty_content' // SDK delivered content: '' — usually missing MessageContent intent
   | 'pre_connect' // bot identity is not known yet, so mention/self/reply classification cannot be trusted
+  | 'thread_created_system' // Discord's THREAD_CREATED system notice posted to the PARENT channel when a public thread is created from a message
 
 export type InboundClassification =
   | { kind: 'drop'; reason: InboundDropReason }
@@ -37,6 +38,10 @@ export function classifyInbound(
   }
   const { text, attachments } = splitInbound(event)
   if (text === '') return { kind: 'drop', reason: 'empty_content' }
+
+  if (isThreadCreatedSystemMessage(event)) {
+    return { kind: 'drop', reason: 'thread_created_system' }
+  }
 
   const isDm = event.guild_id === undefined
   const workspace = isDm ? '@dm' : event.guild_id!
@@ -106,6 +111,24 @@ export function classifyInbound(
 // mechanism that drives the "Replying to @user" header in the client).
 function isReplyToBot(event: DiscordGatewayMessageCreateEvent, botUserId: string): boolean {
   return (event.mentions ?? []).some((m) => m.id === botUserId)
+}
+
+// Creating a public thread from a message fires TWO MESSAGE_CREATE events: a
+// THREAD_CREATED notice in the parent channel (content = thread name) and a
+// THREAD_STARTER_MESSAGE inside the thread. Each opens its own router session,
+// so the agent replies twice. The numeric Discord message type (18) that would
+// filter this cleanly is destroyed by the agent-messenger listener (it does
+// `{ ...d, type: t }`, overwriting `d.type` with the dispatch name), so we
+// fingerprint the notice by its reference instead: it points at a DIFFERENT
+// channel (the new thread) with no source `message_id`. The message_id-absent
+// check is load-bearing — it spares normal cross-channel replies and the
+// in-thread starter, both of which DO carry a message_id.
+function isThreadCreatedSystemMessage(event: DiscordGatewayMessageCreateEvent): boolean {
+  const ref = event.message_reference
+  if (ref?.channel_id === undefined) return false
+  if (ref.channel_id === event.channel_id) return false
+  if (ref.message_id !== undefined) return false
+  return ref.guild_id === undefined || event.guild_id === undefined || ref.guild_id === event.guild_id
 }
 
 type SplitInbound = { text: string; attachments: InboundAttachment[] }
