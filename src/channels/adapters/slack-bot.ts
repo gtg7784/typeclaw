@@ -39,6 +39,7 @@ import {
   parseSlashCommand,
   parseThreadCommand,
   SLACK_SLASH_REPLY_FAILED,
+  type ThreadCommandInput,
 } from './slack-bot-slash-commands'
 import { slackTsToMillis } from './slack-bot-time'
 
@@ -156,26 +157,31 @@ export type ThreadCommandHandlerDeps = {
   logger: SlackBotAdapterLoggerLike
 }
 
-export type ThreadCommandOutcome = { kind: 'not-a-command' } | { kind: 'executed' }
+export type ThreadCommandOutcome = { kind: 'not-a-command' } | { kind: 'duplicate' } | { kind: 'executed' }
+
+// Synchronous reservation: the adapter marks the dedupe ring inside this hook,
+// which the handler calls before its first `await`. Two duplicate Slack
+// deliveries can both clear `dedupe.check()` on the same JS tick; whichever
+// reserves first wins and returns `true`, the loser returns `false` and aborts
+// — so a control command never runs twice across the check→execute window.
+export type ThreadCommandReserve = () => boolean
 
 // Routes a `!cmd` thread message through the SAME router.executeCommand path as
 // native slashes, then posts the outcome back into the thread. Returns
-// 'not-a-command' (so the caller proceeds with normal classify/route) or
-// 'executed' (so the caller stops — the command was handled, not agent input).
+// 'not-a-command' (caller proceeds with normal classify/route), 'duplicate'
+// (a racing delivery already reserved this event — caller stops silently), or
+// 'executed' (command handled — caller stops; it is not agent input).
 export function createThreadCommandHandler(
   deps: ThreadCommandHandlerDeps,
-): (input: {
-  text: string
-  channel: string
-  threadTs: string | null
-  isDm: boolean
-  teamId: string
-  invokerId: string
-}) => Promise<ThreadCommandOutcome> {
-  return async (input) => {
+): (input: ThreadCommandInput, reserve: ThreadCommandReserve) => Promise<ThreadCommandOutcome> {
+  return async (input, reserve) => {
     const parsed = parseThreadCommand(input, deps.knownCommandNames)
     if (parsed.kind === 'ignore') {
       return { kind: 'not-a-command' }
+    }
+    // Reserve synchronously, before any await, to close the check→execute race.
+    if (!reserve()) {
+      return { kind: 'duplicate' }
     }
     const { command } = parsed
     deps.logger.info(
@@ -881,19 +887,29 @@ export function createSlackBotAdapter(options: SlackBotAdapterOptions): SlackBot
       // so it must short-circuit here. Bypassing classifyInbound also bypasses
       // its self_author / no_user drops, so we replicate those guards: never
       // execute a command from our own message (echo loop) or a userless
-      // system event. Mark dedupe on execution so a Slack redelivery doesn't
-      // fire the command twice.
+      // system event. The `reserve` closure marks dedupe synchronously the
+      // instant the command is recognised (before the router await), closing
+      // the check→execute race for duplicate deliveries.
       if (event.user !== undefined && event.user !== '' && (botUserId === null || event.user !== botUserId)) {
-        const outcome = await handleThreadCommand({
-          text: event.text ?? '',
-          channel: event.channel,
-          threadTs: event.thread_ts ?? null,
-          isDm: event.channel_type === 'im',
-          teamId,
-          invokerId: event.user,
-        })
-        if (outcome.kind === 'executed') {
+        const reserve = (): boolean => {
+          if (dedupe.check(event) !== null) return false
           dedupe.mark(event)
+          return true
+        }
+        const outcome = await handleThreadCommand(
+          {
+            text: event.text ?? '',
+            channel: event.channel,
+            threadTs: event.thread_ts ?? null,
+            isDm: event.channel_type === 'im',
+            teamId,
+            invokerId: event.user,
+          },
+          reserve,
+        )
+        if (outcome.kind === 'executed') return
+        if (outcome.kind === 'duplicate') {
+          logger.info(`[slack-bot] dropped ts=${event.ts} reason=duplicate_delivery (thread-command race)`)
           return
         }
       }
