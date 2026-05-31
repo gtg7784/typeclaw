@@ -176,17 +176,18 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         throw err
       }
       started = true
-      // GH_TOKEN is a single process-wide env var the container's `gh` CLI
-      // reads, but a GitHub App spanning multiple owners has no single correct
-      // token. Seed/refresh it only when exactly one repo is configured (PAT,
-      // or App with one unambiguous installation). With multiple repos we skip
-      // the global seed: ad-hoc `gh` calls must target a specific repo, and the
-      // adapter's own API calls always resolve a repo-scoped token via authToken.
-      const ghTokenRepo = ghTokenSeedRepo(options.configRef().repos ?? [])
-      const seedGhToken = async (): Promise<void> => {
-        process.env.GH_TOKEN = await auth.token(ghTokenRepo === null ? undefined : { repoSlug: ghTokenRepo })
-      }
-      if (ghTokenRepo !== null || options.secrets.auth.type === 'pat') {
+      // GitHub Apps install per owner, so the single process-wide GH_TOKEN is
+      // unambiguous whenever every configured repo shares one owner (one
+      // installation) — regardless of repo count. Only repos spanning >1 owner
+      // are ambiguous; that case skips the global seed (authToken still resolves
+      // a repo-scoped token per call). Keying off owner count, not repo count,
+      // is the fix for single-owner/multi-repo Apps that the old gate skipped.
+      const ghTokenContext = ghTokenSeedContext(options.secrets.auth.type, options.configRef().repos ?? [])
+      if (ghTokenContext !== null) {
+        const seedContext = ghTokenContext
+        const seedGhToken = async (): Promise<void> => {
+          process.env.GH_TOKEN = await auth.token(seedContext)
+        }
         await seedGhToken()
         const tokenRefreshIntervalMs = options.tokenRefreshIntervalMs ?? DEFAULT_TOKEN_REFRESH_INTERVAL_MS
         if (tokenRefreshIntervalMs > 0) {
@@ -207,7 +208,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         }
       } else {
         logger.info(
-          '[github] multiple repos configured across possibly-different owners; GH_TOKEN not seeded globally. ' +
+          '[github] repos span multiple owners (multiple App installations); GH_TOKEN not seeded globally. ' +
             'Ad-hoc `gh` commands should set a repo-scoped token explicitly.',
         )
       }
@@ -427,11 +428,15 @@ function logDeregistrationOutcome(
   }
 }
 
-// Two repos under the same owner share an installation and could in principle
-// share a global GH_TOKEN, but the marginal value doesn't justify the special
-// case — only a single configured repo yields an unambiguous seed.
-function ghTokenSeedRepo(repos: readonly string[]): string | null {
-  return repos.length === 1 ? (repos[0] ?? null) : null
+// Returns the context for seeding GH_TOKEN, or null to skip. null only when an
+// App's repos span multiple owners (multiple installations); single-owner Apps
+// seed owner-scoped, sole-installation and PAT seed context-free (undefined).
+function ghTokenSeedContext(authType: 'pat' | 'app', repos: readonly string[]): GithubAuthContext | undefined | null {
+  if (authType === 'pat') return undefined
+  const owners = new Set(repos.map((repo) => repo.split('/')[0]).filter((owner) => owner !== undefined && owner !== ''))
+  if (owners.size === 0) return undefined
+  if (owners.size > 1) return null
+  return { owner: [...owners][0] }
 }
 
 function defaultSleep(ms: number): Promise<void> {
