@@ -1,5 +1,6 @@
 import type { SlackSocketModeSlashCommandArgs } from 'agent-messenger/slackbot'
 
+import type { ExecuteCommandResult } from '@/channels/router'
 import type { ChannelKey } from '@/channels/types'
 
 // Slack channel ids: 'C' = public, 'G' = private/legacy multi-party DM,
@@ -64,13 +65,87 @@ export function parseSlashCommand(
   }
 }
 
+// Slack blocks native slash commands inside threads ("/stop is not supported
+// in threads. Sorry!"), so the only way to abort a thread-scoped turn from
+// inside that thread is a normal message. We recognise a leading `!` as an
+// alternate command prefix and route it through the same router.executeCommand
+// path as native slashes. The guard is strict: only a first token that resolves
+// to a known command name is rewritten, so casual messages like "!nice work"
+// pass through untouched as regular agent input.
+//
+// Unlike native slash payloads (which never carry a thread and rely on the
+// router's workspace+chat fallback), a thread message carries `thread_ts`,
+// letting us target the exact thread session and skip the ambiguous-match case
+// entirely.
+export const THREAD_COMMAND_PREFIX = '!'
+
+export type ThreadCommandInput = {
+  text: string
+  channel: string
+  threadTs: string | null
+  isDm: boolean
+  teamId: string
+  invokerId: string
+}
+
+export type ParseThreadCommandResult =
+  | { kind: 'parsed'; command: ParsedSlackSlashCommand }
+  | { kind: 'ignore'; reason: 'no-prefix' | 'unknown-command' }
+
+// Both ignore reasons (`no-prefix`, `unknown-command`) are non-fatal: the
+// caller lets the message flow through as ordinary agent input.
+export function parseThreadCommand(
+  input: ThreadCommandInput,
+  knownCommands: ReadonlySet<string>,
+): ParseThreadCommandResult {
+  const trimmed = input.text.trimStart()
+  if (!trimmed.startsWith(THREAD_COMMAND_PREFIX)) {
+    return { kind: 'ignore', reason: 'no-prefix' }
+  }
+  const firstToken = trimmed.slice(THREAD_COMMAND_PREFIX.length).split(/\s/, 1)[0] ?? ''
+  const name = firstToken.toLowerCase()
+  if (name === '' || !knownCommands.has(name)) {
+    return { kind: 'ignore', reason: 'unknown-command' }
+  }
+
+  const workspace = input.isDm ? '@dm' : input.teamId
+  return {
+    kind: 'parsed',
+    command: {
+      name,
+      key: { adapter: 'slack-bot', workspace, chat: input.channel, thread: input.threadTs },
+      invokerId: input.invokerId,
+    },
+  }
+}
+
 export const SLACK_SLASH_REPLY_ABORTED = 'Stopped the current turn.'
 export const SLACK_SLASH_REPLY_NO_LIVE_SESSION = 'Nothing to stop — no active turn in this channel.'
 export const SLACK_SLASH_REPLY_FAILED = 'Could not stop the current turn (internal error).'
 export const SLACK_SLASH_REPLY_PERMISSION_DENIED =
   'You do not have permission to stop the current turn in this channel.'
+// Native slash commands cannot be invoked from a thread, so the only way to
+// disambiguate is the `!stop` thread-message fallback — advise that, not the
+// impossible `/stop`-in-thread.
 export const SLACK_SLASH_REPLY_AMBIGUOUS =
-  'Multiple active turns in this channel. Reply `/stop` from inside the specific thread you want to stop.'
+  'Multiple active turns in this channel. Reply `!stop` inside the specific thread you want to stop.'
+
+// Single outcome→reply mapping shared by the native-slash (ack payload) and
+// `!cmd` thread (postMessage) delivery paths so the two never drift.
+export function commandResultReply(result: ExecuteCommandResult): string {
+  switch (result.kind) {
+    case 'handled':
+      return SLACK_SLASH_REPLY_ABORTED
+    case 'no-live-session':
+      return SLACK_SLASH_REPLY_NO_LIVE_SESSION
+    case 'permission-denied':
+      return SLACK_SLASH_REPLY_PERMISSION_DENIED
+    case 'ambiguous':
+      return SLACK_SLASH_REPLY_AMBIGUOUS
+    case 'unknown-command':
+      return SLACK_SLASH_REPLY_FAILED
+  }
+}
 
 // Slack's ack callback accepts an optional response payload that becomes
 // the user-visible reply. `response_type: 'ephemeral'` keeps the reply

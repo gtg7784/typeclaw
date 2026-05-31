@@ -12,6 +12,7 @@ import {
   createSlackMembershipResolver,
   createSlackTypingTracker,
   createSlashCommandHandler,
+  createThreadCommandHandler,
   createTypingCallback,
   promoteAppMentionToMessage,
   SLACK_HISTORY_LIMIT_MAX,
@@ -1467,5 +1468,144 @@ describe('createSlashCommandHandler', () => {
     await done
 
     expect(events).toEqual(['router-call', 'ack-sent', 'channel-tag-resolved'])
+  })
+})
+
+describe('createThreadCommandHandler', () => {
+  type RouterCall = { key: ChannelKey; name: string; invokerId: string }
+  type RouterResult =
+    | { kind: 'handled'; name: string }
+    | { kind: 'no-live-session' }
+    | { kind: 'permission-denied' }
+    | { kind: 'ambiguous'; matchCount: number }
+    | { kind: 'unknown-command'; name: string }
+  type ReplyCall = { chat: string; thread: string | null; text: string }
+
+  function setup(over?: {
+    routerImpl?: (key: ChannelKey, name: string, invokerId: string) => Promise<RouterResult>
+    postReplyImpl?: (args: ReplyCall) => Promise<void>
+  }): {
+    handler: ReturnType<typeof createThreadCommandHandler>
+    routerCalls: RouterCall[]
+    replies: ReplyCall[]
+    logs: { info: string[]; warn: string[]; error: string[] }
+  } {
+    const routerCalls: RouterCall[] = []
+    const replies: ReplyCall[] = []
+    const logs = { info: [] as string[], warn: [] as string[], error: [] as string[] }
+    const handler = createThreadCommandHandler({
+      router: {
+        executeCommand: async (key, name, options) => {
+          routerCalls.push({ key, name, invokerId: options.invokerId })
+          return (over?.routerImpl ?? (async () => ({ kind: 'handled', name: 'stop' }) as RouterResult))(
+            key,
+            name,
+            options.invokerId,
+          )
+        },
+      },
+      knownCommandNames: SLACK_SLASH_COMMAND_NAMES,
+      postReply: async (args) => {
+        replies.push(args)
+        if (over?.postReplyImpl) await over.postReplyImpl(args)
+      },
+      logger: {
+        info: (m) => logs.info.push(m),
+        warn: (m) => logs.warn.push(m),
+        error: (m) => logs.error.push(m),
+      },
+    })
+    return { handler, routerCalls, replies, logs }
+  }
+
+  const baseInput = {
+    text: '!stop',
+    channel: 'C-general',
+    threadTs: '1700.0001',
+    isDm: false,
+    teamId: 'T-acme',
+    invokerId: 'U-alice',
+  }
+
+  test('!stop in a thread executes with a thread-targeted key and replies into the thread', async () => {
+    const { handler, routerCalls, replies } = setup()
+
+    const outcome = await handler(baseInput)
+
+    expect(outcome).toEqual({ kind: 'executed' })
+    expect(routerCalls).toEqual([
+      {
+        key: { adapter: 'slack-bot', workspace: 'T-acme', chat: 'C-general', thread: '1700.0001' },
+        name: 'stop',
+        invokerId: 'U-alice',
+      },
+    ])
+    expect(replies).toHaveLength(1)
+    expect(replies[0]!.chat).toBe('C-general')
+    expect(replies[0]!.thread).toBe('1700.0001')
+    expect(replies[0]!.text).toContain('Stopped')
+  })
+
+  test('non-! message passes through as not-a-command (no router call, no reply)', async () => {
+    const { handler, routerCalls, replies } = setup()
+
+    const outcome = await handler({ ...baseInput, text: 'stop the turn please' })
+
+    expect(outcome).toEqual({ kind: 'not-a-command' })
+    expect(routerCalls).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+  })
+
+  test('!unknown (not a known command) passes through as not-a-command', async () => {
+    const { handler, routerCalls, replies } = setup()
+
+    const outcome = await handler({ ...baseInput, text: '!nice work everyone' })
+
+    expect(outcome).toEqual({ kind: 'not-a-command' })
+    expect(routerCalls).toHaveLength(0)
+    expect(replies).toHaveLength(0)
+  })
+
+  test('permission-denied result maps to the permission-denied reply', async () => {
+    const { handler, replies } = setup({ routerImpl: async () => ({ kind: 'permission-denied' }) })
+
+    await handler(baseInput)
+
+    expect(replies[0]!.text).toContain('permission')
+  })
+
+  test('top-level !stop (no thread) targets a thread:null key', async () => {
+    const { handler, routerCalls } = setup()
+
+    await handler({ ...baseInput, threadTs: null })
+
+    expect(routerCalls[0]!.key.thread).toBe(null)
+  })
+
+  test('executeCommand exception is caught and replies with the failure text', async () => {
+    const { handler, replies, logs } = setup({
+      routerImpl: async () => {
+        throw new Error('boom')
+      },
+    })
+
+    const outcome = await handler(baseInput)
+
+    expect(outcome).toEqual({ kind: 'executed' })
+    expect(replies[0]!.text).toContain('internal error')
+    expect(logs.error.some((l) => l.includes('boom'))).toBe(true)
+  })
+
+  test('a failing reply post is swallowed (still returns executed)', async () => {
+    const { handler, logs } = setup({
+      postReplyImpl: async () => {
+        throw new Error('slack down')
+      },
+    })
+
+    const outcome = await handler(baseInput)
+
+    expect(outcome).toEqual({ kind: 'executed' })
+    expect(logs.warn.some((l) => l.includes('reply post failed'))).toBe(true)
   })
 })
