@@ -13,6 +13,7 @@ import {
   loadConfigSyncOrDefaults,
   loadPluginConfigsSync,
   migrateLegacyConfigShape,
+  mcpServerSchema,
   mountSchema,
   resolveProfile,
   validateConfig,
@@ -175,6 +176,82 @@ describe('configSchema', () => {
       mounts: [{ name: 'src', path: '~/src', description: 'monorepo' }],
     })
     expect(parsed.mounts[0]?.description).toBe('monorepo')
+  })
+})
+
+describe('mcpServerSchema', () => {
+  test('accepts a stdio server config', () => {
+    const parsed = mcpServerSchema.parse({
+      name: 'filesystem',
+      command: 'bunx',
+      args: ['@modelcontextprotocol/server-filesystem'],
+    })
+    expect(parsed).toEqual({
+      name: 'filesystem',
+      command: 'bunx',
+      args: ['@modelcontextprotocol/server-filesystem'],
+      env: {},
+    })
+  })
+
+  test('accepts an http server config', () => {
+    const parsed = mcpServerSchema.parse({ name: 'remote-docs', url: 'https://mcp.example.com/mcp' })
+    expect(parsed).toEqual({ name: 'remote-docs', args: [], url: 'https://mcp.example.com/mcp', env: {} })
+  })
+
+  test('rejects a server with both command and url', () => {
+    expect(() =>
+      mcpServerSchema.parse({ name: 'mixed', command: 'server', url: 'https://mcp.example.com/mcp' }),
+    ).toThrow(/either stdio \(command\) or http \(url\)/)
+  })
+
+  test('rejects a server with neither command nor url', () => {
+    expect(() => mcpServerSchema.parse({ name: 'missing-transport' })).toThrow(
+      /either stdio \(command\) or http \(url\)/,
+    )
+  })
+
+  test('normalises env string shorthand and env-object secrets', () => {
+    const parsed = mcpServerSchema.parse({
+      name: 'with-env',
+      command: 'server',
+      env: {
+        INLINE_TOKEN: 'test-token',
+        API_KEY: { env: 'MCP_API_KEY' },
+      },
+    })
+
+    expect(parsed.env).toEqual({
+      INLINE_TOKEN: { value: 'test-token' },
+      API_KEY: { env: 'MCP_API_KEY' },
+    })
+  })
+
+  test('rejects names outside the mount namespace pattern', () => {
+    expect(() => mcpServerSchema.parse({ name: 'BadName', command: 'server' })).toThrow(/MCP server name/)
+    expect(() => mcpServerSchema.parse({ name: '-bad', command: 'server' })).toThrow(/MCP server name/)
+  })
+})
+
+describe('configSchema mcpServers field', () => {
+  test('defaults to [] when omitted', () => {
+    const parsed = configSchema.parse({ models: { default: VALID_MODEL } })
+    expect(parsed.mcpServers).toEqual([])
+  })
+
+  test('accepts stdio and http server declarations', () => {
+    const parsed = configSchema.parse({
+      models: { default: VALID_MODEL },
+      mcpServers: [
+        { name: 'filesystem', command: 'bunx', args: ['@modelcontextprotocol/server-filesystem'] },
+        { name: 'remote-docs', url: 'https://mcp.example.com/mcp' },
+      ],
+    })
+
+    expect(parsed.mcpServers).toEqual([
+      { name: 'filesystem', command: 'bunx', args: ['@modelcontextprotocol/server-filesystem'], env: {} },
+      { name: 'remote-docs', args: [], url: 'https://mcp.example.com/mcp', env: {} },
+    ])
   })
 })
 

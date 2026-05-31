@@ -8,6 +8,7 @@ import { z } from 'zod'
 import { channelsSchema } from '@/channels/schema'
 import { commitSystemFileSync } from '@/git/system-commit'
 import { rolesConfigSchema } from '@/permissions/schema'
+import { secretFieldSchema } from '@/secrets/resolve'
 
 import {
   DEFAULT_MODEL_REF,
@@ -38,6 +39,25 @@ export const mountSchema = z.object({
 })
 
 export type Mount = z.infer<typeof mountSchema>
+
+// MCP servers are keyed by the same shell/disk-safe namespace as mounts because
+// the name becomes the tool namespace exposed to the agent. The transport is an
+// XOR on purpose: stdio servers are child processes (`command` + `args` + env),
+// while Streamable HTTP servers are remote endpoints (`url`); accepting both
+// would make ownership, lifetime, and credential injection ambiguous at boot.
+export const mcpServerSchema = z
+  .object({
+    name: z.string().regex(MOUNT_NAME_PATTERN, 'MCP server name must be lowercase alphanumeric with - or _'),
+    command: z.string().min(1).optional(),
+    args: z.array(z.string()).default([]),
+    url: z.string().url().optional(),
+    env: z.record(z.string(), secretFieldSchema).default({}),
+  })
+  .refine((server) => (server.command !== undefined) !== (server.url !== undefined), {
+    message: 'MCP server must be either stdio (command) or http (url), not both or neither',
+  })
+
+export type McpServer = z.infer<typeof mcpServerSchema>
 
 const portNumber = z.number().int().min(1).max(65535)
 
@@ -391,6 +411,7 @@ export const configSchema = z
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.
     mounts: z.array(mountSchema).default([]),
+    mcpServers: z.array(mcpServerSchema).default([]),
     plugins: z.array(z.string().min(1)).default([]),
     // Additional names the agent answers to in channel engagement, on top
     // of `basename(agentDir)` which is always implicit. Each entry is a
@@ -538,6 +559,7 @@ export const FIELD_EFFECTS: Record<string, FieldEffect> = {
   models: 'applied',
   port: 'restart-required',
   mounts: 'restart-required',
+  mcpServers: 'restart-required',
   plugins: 'restart-required',
   alias: 'applied',
   channels: 'applied',
