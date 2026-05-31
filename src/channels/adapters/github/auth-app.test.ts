@@ -32,14 +32,14 @@ describe('AppAuthStrategy', () => {
     const strategy = new AppAuthStrategy({
       appId: 12345,
       privateKey: { value: privateKeyPem },
-      installationId: 67890,
-      fetchImpl: fakeFetch(async (_url, init) => {
+      fetchImpl: fakeFetch(async (url, init) => {
+        if (String(url).endsWith('/installation')) return Response.json({ id: 67890 })
         jwt = bearerToken(init)
         return Response.json({ token: 'installation-token', expires_at: '2026-05-18T13:00:00Z' })
       }),
     })
 
-    await strategy.token()
+    await strategy.token({ repoSlug: 'acme/api' })
 
     const decoded = decodeJwt(jwt)
     expect(decoded.header).toEqual({ alg: 'RS256', typ: 'JWT' })
@@ -47,22 +47,55 @@ describe('AppAuthStrategy', () => {
     expect(verifyJwtSignature(jwt)).toBe(true)
   })
 
-  it('mints and caches installation tokens for configured installations', async () => {
+  it('resolves a repo installation, then mints and caches its token', async () => {
     const calls: string[] = []
     const strategy = new AppAuthStrategy({
       appId: 1,
       privateKey: { value: privateKeyPem },
-      installationId: 99,
       fetchImpl: fakeFetch(async (url) => {
         calls.push(String(url))
+        if (String(url).endsWith('/installation')) return Response.json({ id: 99 })
         return Response.json({ token: 'cached-token', expires_at: '2026-05-18T13:00:00Z' })
       }),
     })
 
-    await expect(strategy.token()).resolves.toBe('cached-token')
-    await expect(strategy.token()).resolves.toBe('cached-token')
+    await expect(strategy.token({ repoSlug: 'acme/api' })).resolves.toBe('cached-token')
+    await expect(strategy.token({ repoSlug: 'acme/api' })).resolves.toBe('cached-token')
 
-    expect(calls).toEqual(['https://api.github.com/app/installations/99/access_tokens'])
+    expect(calls).toEqual([
+      'https://api.github.com/repos/acme/api/installation',
+      'https://api.github.com/app/installations/99/access_tokens',
+    ])
+  })
+
+  it('mints separate tokens for repos under different installations', async () => {
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: privateKeyPem },
+      fetchImpl: fakeFetch(async (url) => {
+        const s = String(url)
+        if (s.endsWith('/repos/acme/api/installation')) return Response.json({ id: 11 })
+        if (s.endsWith('/repos/personal/blog/installation')) return Response.json({ id: 22 })
+        if (s.includes('/app/installations/11/'))
+          return Response.json({ token: 'acme-token', expires_at: '2026-05-18T13:00:00Z' })
+        return Response.json({ token: 'personal-token', expires_at: '2026-05-18T13:00:00Z' })
+      }),
+    })
+
+    await expect(strategy.token({ repoSlug: 'acme/api' })).resolves.toBe('acme-token')
+    await expect(strategy.token({ repoSlug: 'personal/blog' })).resolves.toBe('personal-token')
+  })
+
+  it('throws a clear error when the app is not installed for a repo', async () => {
+    const strategy = new AppAuthStrategy({
+      appId: 1,
+      privateKey: { value: privateKeyPem },
+      fetchImpl: fakeFetch(async () => new Response('Not Found', { status: 404 })),
+    })
+
+    await expect(strategy.token({ repoSlug: 'stranger/repo' })).rejects.toThrow(
+      /not installed for stranger\/repo or lacks access/i,
+    )
   })
 
   it('refreshes cached installation tokens inside the five-minute boundary', async () => {
@@ -70,16 +103,16 @@ describe('AppAuthStrategy', () => {
     const strategy = new AppAuthStrategy({
       appId: 1,
       privateKey: { value: privateKeyPem },
-      installationId: 99,
-      fetchImpl: fakeFetch(async () =>
-        Response.json({ token: tokens.shift() ?? 'extra-token', expires_at: '2026-05-18T13:00:00Z' }),
-      ),
+      fetchImpl: fakeFetch(async (url) => {
+        if (String(url).endsWith('/installation')) return Response.json({ id: 99 })
+        return Response.json({ token: tokens.shift() ?? 'extra-token', expires_at: '2026-05-18T13:00:00Z' })
+      }),
     })
 
-    await expect(strategy.token()).resolves.toBe('first-token')
+    await expect(strategy.token({ repoSlug: 'acme/api' })).resolves.toBe('first-token')
     Date.now = () => Date.parse('2026-05-18T12:56:00Z')
 
-    await expect(strategy.token()).resolves.toBe('second-token')
+    await expect(strategy.token({ repoSlug: 'acme/api' })).resolves.toBe('second-token')
   })
 
   it('auto-discovers a single installation id', async () => {
@@ -119,7 +152,7 @@ describe('AppAuthStrategy', () => {
       fetchImpl: fakeFetch(async () => Response.json([{ id: 11 }, { id: 22 }])),
     })
 
-    await expect(strategy.token()).rejects.toThrow(/multiple installations \(11, 22\)/i)
+    await expect(strategy.token()).rejects.toThrow(/multiple installations \(11, 22\).*repo must be specified/i)
   })
 
   it('accepts PKCS#1 RSA private keys (the format GitHub hands out by default)', async () => {
@@ -127,14 +160,14 @@ describe('AppAuthStrategy', () => {
     const strategy = new AppAuthStrategy({
       appId: 12345,
       privateKey: { value: privateKeyPkcs1Pem },
-      installationId: 67890,
-      fetchImpl: fakeFetch(async (_url, init) => {
+      fetchImpl: fakeFetch(async (url, init) => {
+        if (String(url).endsWith('/installation')) return Response.json({ id: 67890 })
         jwt = bearerToken(init)
         return Response.json({ token: 'installation-token', expires_at: '2026-05-18T13:00:00Z' })
       }),
     })
 
-    await strategy.token()
+    await strategy.token({ repoSlug: 'acme/api' })
 
     expect(privateKeyPkcs1Pem).toContain('-----BEGIN RSA PRIVATE KEY-----')
     expect(verifyJwtSignature(jwt)).toBe(true)
@@ -149,7 +182,6 @@ describe('AppAuthStrategy', () => {
     const strategy = new AppAuthStrategy({
       appId: 1,
       privateKey: { value: encryptedPem },
-      installationId: 99,
       fetchImpl: fakeFetch(async () => new Response('unreachable', { status: 500 })),
     })
 
@@ -160,7 +192,6 @@ describe('AppAuthStrategy', () => {
     const strategy = new AppAuthStrategy({
       appId: 1,
       privateKey: { value: '-----BEGIN RSA PRIVATE KEY-----\nnot-base64\n-----END RSA PRIVATE KEY-----\n' },
-      installationId: 99,
       fetchImpl: fakeFetch(async () => new Response('unreachable', { status: 500 })),
     })
 
@@ -220,9 +251,9 @@ describe('AppAuthStrategy', () => {
     const strategy = new AppAuthStrategy({
       appId: 1,
       privateKey: { value: privateKeyPem },
-      installationId: 99,
       fetchImpl: fakeFetch(async (url) => {
         calls.push(String(url))
+        if (String(url).endsWith('/installation')) return Response.json({ id: 99 })
         return Response.json({
           permissions: { issues: 'write', metadata: 'read' },
           events: ['issues', 'issue_comment'],
@@ -230,29 +261,32 @@ describe('AppAuthStrategy', () => {
       }),
     })
 
-    const grants = await strategy.getInstallationGrants()
+    const grants = await strategy.getInstallationGrants({ repoSlug: 'acme/api' })
 
     expect(grants).toEqual({
       permissions: { issues: 'write', metadata: 'read' },
       events: ['issues', 'issue_comment'],
     })
-    expect(calls).toEqual(['https://api.github.com/app/installations/99'])
+    expect(calls).toEqual([
+      'https://api.github.com/repos/acme/api/installation',
+      'https://api.github.com/app/installations/99',
+    ])
   })
 
   it('filters unknown permission levels and non-string events out of the grants', async () => {
     const strategy = new AppAuthStrategy({
       appId: 1,
       privateKey: { value: privateKeyPem },
-      installationId: 99,
-      fetchImpl: fakeFetch(async () =>
-        Response.json({
+      fetchImpl: fakeFetch(async (url) => {
+        if (String(url).endsWith('/installation')) return Response.json({ id: 99 })
+        return Response.json({
           permissions: { issues: 'write', metadata: 'read', mystery: 'banana' },
           events: ['issues', 42, null],
-        }),
-      ),
+        })
+      }),
     })
 
-    const grants = await strategy.getInstallationGrants()
+    const grants = await strategy.getInstallationGrants({ repoSlug: 'acme/api' })
 
     expect(grants.permissions).toEqual({ issues: 'write', metadata: 'read' })
     expect(grants.events).toEqual(['issues'])
@@ -262,11 +296,15 @@ describe('AppAuthStrategy', () => {
     const strategy = new AppAuthStrategy({
       appId: 1,
       privateKey: { value: privateKeyPem },
-      installationId: 99,
-      fetchImpl: fakeFetch(async () => new Response('boom', { status: 500 })),
+      fetchImpl: fakeFetch(async (url) => {
+        if (String(url).endsWith('/installation')) return Response.json({ id: 99 })
+        return new Response('boom', { status: 500 })
+      }),
     })
 
-    await expect(strategy.getInstallationGrants()).rejects.toThrow(/installation fetch failed: 500/i)
+    await expect(strategy.getInstallationGrants({ repoSlug: 'acme/api' })).rejects.toThrow(
+      /installation fetch failed: 500/i,
+    )
   })
 })
 

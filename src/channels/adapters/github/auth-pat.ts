@@ -1,6 +1,6 @@
 import { resolveSecret, type Secret } from '@/secrets/resolve'
 
-import type { GithubAuthStrategy, GithubSelfUser } from './auth'
+import type { GithubAuthContext, GithubAuthStrategy, GithubSelfUser } from './auth'
 
 export const GITHUB_API_BASE = 'https://api.github.com'
 
@@ -15,11 +15,11 @@ export class PatAuthStrategy implements GithubAuthStrategy {
     this.fetchImpl = options.fetchImpl ?? fetch
   }
 
-  async token(): Promise<string> {
+  async token(_context?: GithubAuthContext): Promise<string> {
     return this._token
   }
 
-  async authHeaders(): Promise<HeadersInit> {
+  async authHeaders(_context?: GithubAuthContext): Promise<HeadersInit> {
     return githubJsonHeaders(this._token)
   }
 

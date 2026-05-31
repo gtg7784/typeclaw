@@ -150,6 +150,67 @@ describe('registerGithubWebhooks', () => {
     expect(good?.action).toBe('created')
   })
 
+  test('resolves a separate token per repo so multi-owner repos use the right installation', async () => {
+    const tokenByRepo: Record<string, string> = { 'acme/api': 'tok-acme', 'personal/blog': 'tok-personal' }
+    const bearerByRepo: Record<string, string | null> = {}
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const method = init?.method ?? 'GET'
+      const repo = /\/repos\/([^/]+\/[^/]+)\/hooks/.exec(url)?.[1] ?? ''
+      const auth = new Headers(init?.headers).get('authorization')
+      if (method === 'GET') {
+        bearerByRepo[repo] = auth
+        return new Response(JSON.stringify([]), { status: 200 })
+      }
+      return new Response(JSON.stringify({ id: 1 }), { status: 201 })
+    }) as unknown as typeof fetch
+
+    const result = await registerGithubWebhooks(
+      baseOpts({
+        fetchImpl,
+        repos: ['acme/api', 'personal/blog'],
+        token: async (repoSlug: string) => tokenByRepo[repoSlug] ?? 'unknown',
+      }),
+    )
+
+    expect(result.repos.every((r) => r.action === 'created')).toBe(true)
+    expect(bearerByRepo['acme/api']).toBe('Bearer tok-acme')
+    expect(bearerByRepo['personal/blog']).toBe('Bearer tok-personal')
+  })
+
+  test('isolates a per-repo token-resolution failure to that repo only', async () => {
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      const method = init?.method ?? 'GET'
+      if (url.includes('/repos/good/repo/hooks') && method === 'GET') {
+        return new Response(JSON.stringify([]), { status: 200 })
+      }
+      if (url.endsWith('/repos/good/repo/hooks') && method === 'POST') {
+        return new Response(JSON.stringify({ id: 9 }), { status: 201 })
+      }
+      return new Response('', { status: 500 })
+    }) as unknown as typeof fetch
+
+    const result = await registerGithubWebhooks(
+      baseOpts({
+        fetchImpl,
+        repos: ['stranger/repo', 'good/repo'],
+        token: async (repoSlug: string) => {
+          if (repoSlug === 'stranger/repo') throw new Error('App is not installed for stranger/repo')
+          return 'tok-good'
+        },
+      }),
+    )
+
+    const stranger = result.repos.find((r) => r.repo === 'stranger/repo')
+    const good = result.repos.find((r) => r.repo === 'good/repo')
+    expect(stranger?.action).toBe('failed')
+    expect((stranger as Extract<WebhookRegistrationResult['repos'][number], { action: 'failed' }>).error).toContain(
+      'not installed',
+    )
+    expect(good?.action).toBe('created')
+  })
+
   test('reduces dotted event.action names to coarse event names for the hook config', async () => {
     const { fetch: fetchImpl, calls } = makeFetch(({ url, init }) => {
       if (url.includes('/repos/acme/widgets/hooks') && (init?.method ?? 'GET') === 'GET') {
