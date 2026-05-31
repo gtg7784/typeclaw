@@ -4,13 +4,13 @@ description: Built-in adapters, auth shapes, capabilities
 icon: Inbox
 ---
 
-| Adapter        | Auth                                                                                 | Transport        | Public URL? | Notes                                                  |
-| -------------- | ------------------------------------------------------------------------------------ | ---------------- | ----------- | ------------------------------------------------------ |
-| `slack-bot`    | bot token + app token                                                                | Socket Mode      | no          | standard intent-shaped wiring                          |
-| `discord-bot`  | bot token                                                                            | gateway intents  | no          |                                                        |
-| `telegram-bot` | bot token                                                                            | long polling     | no          |                                                        |
-| `github`       | fine-grained PAT, or GitHub App (`appId` + `privateKey` + optional `installationId`) | webhook delivery | yes         | pairs with a tunnel for inbound webhooks               |
-| `kakaotalk`    | sub-device login (email + password, stored encrypted)                                | LOCO protocol    | no          | survives 7-day token expiry via host-side renewal cron |
+| Adapter        | Auth                                                                                           | Transport        | Public URL? | Notes                                                  |
+| -------------- | ---------------------------------------------------------------------------------------------- | ---------------- | ----------- | ------------------------------------------------------ |
+| `slack-bot`    | bot token + app token                                                                          | Socket Mode      | no          | standard intent-shaped wiring                          |
+| `discord-bot`  | bot token                                                                                      | gateway intents  | no          |                                                        |
+| `telegram-bot` | bot token                                                                                      | long polling     | no          |                                                        |
+| `github`       | fine-grained PAT, or GitHub App (`appId` + `privateKey`; installations auto-resolved per repo) | webhook delivery | yes         | pairs with a tunnel for inbound webhooks               |
+| `kakaotalk`    | sub-device login (email + password, stored encrypted)                                          | LOCO protocol    | no          | survives 7-day token expiry via host-side renewal cron |
 
 ## `channels.<adapter>` shape
 
