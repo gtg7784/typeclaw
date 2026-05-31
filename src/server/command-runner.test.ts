@@ -97,6 +97,7 @@ function makeRunner(commands: RegisteredCommand[]) {
     containerName: 'test-agent',
     outbound,
     sessionFactory,
+    channelRouter: undefined,
   })
   return { runner, frames, decodeStdout, agentDir }
 }
@@ -407,6 +408,7 @@ describe('CommandRunner', () => {
       containerName: 'test-agent',
       outbound,
       sessionFactory,
+      channelRouter: undefined,
     })
     runner.start({ callId: 'sub-1', name: 'parent', args: undefined }, null)
     await waitForExit(frames, 'sub-1')
@@ -724,5 +726,46 @@ describe('runPromptForCommand', () => {
       })
     }
     expect(new Set(seen).size).toBe(3)
+  })
+
+  // Regression guard: cron-handler / plugin-command ctx.prompt sessions used to
+  // be created without channelRouter, so buildChannelTools emitted no
+  // channel_send. A handler told to post to a channel then had no tool and
+  // burned a runaway bash loop trying to find one. The router must reach
+  // createSessionWithDispose.
+  test('forwards channelRouter to createSessionWithDispose so channel_send is wired', async () => {
+    const { sessionFactory, agentDir } = makeSessionFactoryForTest()
+    const runtime = makeRuntime([])
+    const sentinelRouter = { __sentinel: 'router' } as unknown as Parameters<
+      typeof runPromptForCommand
+    >[0]['channelRouter']
+    let captured: { channelRouter?: unknown } | undefined
+    const fakeCreate = async (options: unknown): Promise<{ session: object; dispose: () => Promise<void> }> => {
+      captured = options as typeof captured
+      const session = {
+        prompt: async () => {},
+        getLastAssistantText: () => 'ok',
+        dispose: () => {},
+        abort: async () => {},
+      }
+      return { session: session as object, dispose: async () => {} }
+    }
+
+    await runPromptForCommand({
+      text: 'post to channel',
+      origin: { kind: 'cron', jobId: 'test', jobKind: 'handler', scheduledByOrigin: { kind: 'config-file' } },
+      runtime,
+      agentDir,
+      permissions: noopPermissionService,
+      signal: new AbortController().signal,
+      runtimeVersion: '0.0.0-test',
+      containerName: 'test-agent',
+      sessionFactory,
+      channelRouter: sentinelRouter,
+      _createSession: fakeCreate as Parameters<typeof runPromptForCommand>[0]['_createSession'],
+    })
+
+    expect(captured).toBeDefined()
+    expect(captured!.channelRouter).toBe(sentinelRouter)
   })
 })

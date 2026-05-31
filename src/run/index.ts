@@ -371,6 +371,7 @@ export async function startAgent({
             runtimeVersion: runtimeVersionOpt.runtimeVersion,
             containerName: containerNameOpt.containerName,
             sessionFactory,
+            channelRouter: channelManager.router,
           }),
         subagent: (subName: string, payload?: unknown) =>
           dispatchSpawnSubagent(subName, payload, {
@@ -585,6 +586,7 @@ export async function startAgent({
       containerName,
       outbound,
       sessionFactory,
+      channelRouter: channelManager.router,
     })
 
   const server = createServer({

@@ -5,6 +5,7 @@ import {
   type CreateSessionResult,
   type SessionOrigin,
 } from '@/agent'
+import type { ChannelRouter } from '@/channels/router'
 import type { PermissionService } from '@/permissions'
 import type {
   CommandExecResult,
@@ -44,6 +45,14 @@ export type CommandRunnerOptions = {
   // `SessionManager.inMemory()` and never persist usage — see
   // `runPromptForCommand` below.
   sessionFactory: SessionFactory
+  // Channel router threaded into every `ctx.prompt` session so the model can
+  // call `channel_send`. Without this, `buildChannelTools` (src/agent/index.ts)
+  // receives `undefined` and emits no channel tools — a plugin command or cron
+  // handler told to post to a channel then has no tool to do it and falls back
+  // to flailing bash loops. The cron `prompt` path already passes
+  // `channelManager.router` via `createSessionForCron`; this is the matching
+  // wire for the handler/command path.
+  channelRouter: ChannelRouter | undefined
 }
 
 type CommandHandle = {
@@ -182,6 +191,7 @@ export function createCommandRunner(opts: CommandRunnerOptions): CommandRunner {
               permissions: opts.permissions,
               signal: abortController.signal,
               sessionFactory: opts.sessionFactory,
+              channelRouter: opts.channelRouter,
             }),
           subagent: (subName, payload) =>
             opts.spawnSubagent(subName, payload, {
@@ -363,6 +373,9 @@ export async function runPromptForCommand(args: {
   // cron `prompt` path uses in src/run/index.ts. Passing in-memory here
   // regresses `typeclaw usage` (see CommandRunnerOptions.sessionFactory).
   sessionFactory: SessionFactory
+  // See CommandRunnerOptions.channelRouter. Threaded to createSessionWithDispose
+  // so the spawned session exposes `channel_send`.
+  channelRouter?: ChannelRouter
   // Test seam for the agent-session boundary. Production passes the real
   // `createSessionWithDispose`; tests inject a fake to verify wiring
   // (specifically: the sessionManager handed off must be persisted, not
@@ -388,6 +401,7 @@ export async function runPromptForCommand(args: {
       sessionId,
       agentDir: args.agentDir,
     },
+    ...(args.channelRouter !== undefined ? { channelRouter: args.channelRouter } : {}),
     ...(args.runtimeVersion !== undefined ? { runtimeVersion: args.runtimeVersion } : {}),
     ...(args.containerName !== undefined ? { containerName: args.containerName } : {}),
   })
