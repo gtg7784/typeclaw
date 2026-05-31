@@ -10,7 +10,9 @@ TypeClaw gates every privileged action through a per-actor permission service. T
 - **Roles** bundle permissions and match rules. Defined in `typeclaw.json#roles`.
 - **Permissions** are namespaced strings (`channel.respond`, `cron.schedule`, `security.bypass.gitExfil`).
 
-The first role whose `match[]` rules match the incoming session wins. The fallback is the built-in `guest` role, which has no permissions. There's no "default user" — unknown authors get `guest`, and `guest` can't even talk.
+Role resolution is **not** raw declaration order. The resolver walks a fixed precedence: `owner` first, then `trusted`, then your custom roles in **reverse** declaration order (later declarations win), then `member`, then `guest`. The first role in that walk whose `match[]` covers the origin wins. Pinning the built-in tower (`owner` > `trusted` > … > `member` > `guest`) ahead of user-declared rules is load-bearing: it closes a footgun where a broad `member.match` (e.g. `["*"]`) declared before `owner.match` would otherwise capture the owner's own session and demote it — and the `rolePromotion` guard would then make that un-fixable from inside the demoted session. The fallback is the built-in `guest` role, which has no permissions by default. There's no "default user" — unknown authors get `guest`, and `guest` can't even talk unless an operator explicitly grants it `channel.respond`.
+
+Because `guest` is now grantable, the hard fail-safe floor is **not** the `guest` role but the **undefined origin**: a call with no resolvable actor holds nothing, no matter what `guest` was granted. And `session.control` is split out from `channel.respond` for the same reason — an operator can let a `guest` _talk_ (`channel.respond`) without letting it _abort other speakers' sessions_ (`/stop` gates on `session.control`, which stays `member`-and-up by default).
 
 ## Why match rules instead of stored user records
 
@@ -18,7 +20,7 @@ The naive design has a user table — an admin adds people, the agent recognizes
 
 Match rules are declarative. You say "anyone in this Slack workspace acting as this author ID is owner" once, in `typeclaw.json`, and the rule applies forever. No user record to forget to delete when someone leaves the team. No drift between "who the admin thinks is allowed" and "who the agent actually responds to."
 
-The trade is upfront: writing match rules by hand is annoying. TypeClaw's claim flow (`typeclaw role claim`) makes the common case painless — the agent prints a one-time code, you DM it from the account you want to pair, and the resulting rule is appended to `typeclaw.json` automatically.
+The trade is upfront: writing match rules by hand is annoying. Two flows make the common case painless. The CLI **claim flow** (`typeclaw role claim`) pairs the _current_ author — the agent prints a one-time code, you DM it from the account you want to pair, and the resulting rule is appended to `typeclaw.json` automatically (and the live config is reloaded, so it takes effect without a restart). The conversational **`grant_role` tool** lets an already-`owner`/`trusted` operator grant _any_ author or capability mid-conversation from the TUI or a 1:1 DM, bounded by a tier ceiling and "grant only what you hold." See [/reference/permissions#runtime-role-grants](/docs/reference/permissions) for the full gate list.
 
 ## Why provenance for cron and subagents
 
@@ -33,12 +35,14 @@ This closes a laundering attack: a `guest`-resolving channel session that asks t
 
 The bundled `security` plugin guards every privileged tool call. Each guard has a severity tier, and roles bypass tiers in a strict tower:
 
-- **`high` — audience-leak.** Bypass sends data to a third-party audience outside the operator's control loop. Examples: outbound channel message with secrets, `git push` to an unfamiliar remote, role/cron promotion. **`owner` bypasses.** `trusted`, `member`, `guest` do not.
-- **`medium` — silent-attack.** Bypass produces attacker-favorable state in model context without immediate operator visibility. Examples: `bash env`, `read .env`, IMDS SSRF, `session_search` returning secret-shaped hits. **`owner` and `trusted` bypass.** `member`, `guest` do not.
+- **`high` — audience-leak.** Bypass sends data to a third-party audience outside the operator's control loop. Examples: outbound channel message with secrets, a `git push` after a mid-session `git remote set-url` to an attacker URL (`gitRemoteTainted`). **`owner` bypasses.** `trusted`, `member`, `guest` do not.
+- **`medium` — silent-attack.** Bypass produces attacker-favorable state in operator-reviewable surface without immediate audience-leak. Examples: `bash env`, `read .env`, IMDS SSRF, `session_search` returning secret-shaped hits, `git push` to an unfamiliar remote, and role/cron promotion (the privileged write is force-committed and visible in `git log` before it takes effect). **`owner` and `trusted` bypass.** `member`, `guest` do not.
 - **`low` — noisy, immediately recoverable.** Reserved tier with no current inhabitants today. **`owner`, `trusted`, and `member` bypass.**
 
 `tool.before` accepts EITHER the tier permission (`security.bypass.low|medium|high`) OR the per-guard permission (`security.bypass.gitExfil`). The tier route is the default ("owner bypasses everything high-and-below"); the per-guard route is for narrow opt-ins or opt-outs.
 
 The motivating case is owner-in-public-channel. An operator with full owner privileges might run the agent from a Slack channel that also matches their owner role, and ask the agent to "post deploy status to #general" — the agent might then silently include a stack-trace `Bearer ghp_…` line. The defense is **operator scoping**: keep `roles.owner.match[]` narrow (the default is `{ kind: 'tui' }`, TUI-only, where a human is present). Configs that widen owner to a channel author re-open audience-leak for that author and should strip `security.bypass.high` from `roles.owner.permissions[]` for those origins.
+
+The flip side is the chat-agent default: a freshly `init`ed agent seeds **no** `member` match rule (no `member: ["*"]` wildcard), so every inbound author resolves to `guest` and is dropped until you claim `owner` and explicitly grant others. The agent is muted until you pair it — `typeclaw init` warns about this if you skip the owner-claim step.
 
 For the operational walkthrough see [Lock down a public channel](/docs/guides/lock-down-a-public-channel). For the full tier inventory and per-guard list see [/reference/permissions](/docs/reference/permissions).

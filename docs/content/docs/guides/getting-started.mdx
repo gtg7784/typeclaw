@@ -26,7 +26,7 @@ mkdir my-agent && cd my-agent
 typeclaw init
 ```
 
-`init` is an interactive wizard. It writes `typeclaw.json`, a managed `.env`, a `Dockerfile`, a `package.json` with `typeclaw` as a dependency, and a few placeholder folders (`workspace/`, `sessions/`, `memory/`). It can also wire your first LLM provider during setup — say yes when it asks.
+`init` is an interactive wizard. It writes `typeclaw.json`, a managed `.env`, a `Dockerfile`, a `package.json` with `typeclaw` as a dependency, and a few placeholder folders (`workspace/` for free-write, `public/` for guest-visible output, `sessions/`, `.agents/skills/`, `mounts/`, `packages/`). It can also wire your first LLM provider during setup — say yes when it asks.
 
 If you skipped the provider question (or want to add another later):
 

@@ -57,6 +57,8 @@ typeclaw role list                                 # show declared roles + match
 
 `--ttl` (default 600000 ms) controls how long the claim code stays valid. Drop `--channel` to listen on every wired adapter.
 
+A successful claim appends the match rule to `typeclaw.json` **and reloads the running agent's config automatically** — no `typeclaw reload` needed for the new role to take effect. The reload is best-effort: the role is already persisted, so if the reload fails the CLI says so and you can run `typeclaw reload` by hand. To grant a role to someone _other_ than the current author, or to add a capability to a role, an `owner`/`trusted` user can also ask the agent directly via the `grant_role` tool from the TUI or a 1:1 DM ([/reference/permissions#runtime-role-grants](/docs/reference/permissions)).
+
 ## Channels
 
 ```sh

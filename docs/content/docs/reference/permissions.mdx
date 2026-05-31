@@ -10,27 +10,33 @@ The mental model is at [/concepts/permissions-model](/docs/concepts/permissions-
 
 Roles form a strict tower: each role bypasses every guard at its tier and below.
 
-| Role      | Default `match[]`   | Tier bypass cap | Default `permissions[]`                                                                                                                                                                                                                                    |
-| --------- | ------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `owner`   | `[{ kind: 'tui' }]` | `high`          | `channel.respond`, `cron.schedule`, `cron.modify`, `subagent.*`, `fs.see.private`, `fs.see.secrets`, `security.bypass.low`, `security.bypass.medium`, `security.bypass.high`, plus every plugin-contributed `security.bypass.<guard>` (wildcard expansion) |
-| `trusted` | `[]`                | `medium`        | `channel.respond`, `cron.schedule`, `subagent.*`, `fs.see.private`, `fs.see.secrets`, `security.bypass.low`, `security.bypass.medium`                                                                                                                      |
-| `member`  | `[]`                | `low`           | `channel.respond`, `subagent.spawn`, `subagent.cancel`, `subagent.output`, `fs.see.private`, `security.bypass.low`                                                                                                                                         |
-| `guest`   | `[]` (fallback)     | (none)          | (none)                                                                                                                                                                                                                                                     |
+| Role      | Default `match[]`   | Tier bypass cap | Default `permissions[]`                                                                                                                                                                                                                                                                                                                            |
+| --------- | ------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`   | `[{ kind: 'tui' }]` | `high`          | `channel.respond`, `session.control`, `cron.schedule`, `cron.modify`, `subagent.spawn`, `subagent.cancel`, `subagent.output`, `subagent.spawn.operator`, `fs.see.private`, `fs.see.secrets`, `security.bypass.low`, `security.bypass.medium`, `security.bypass.high`, plus every plugin-contributed `security.bypass.<guard>` (wildcard expansion) |
+| `trusted` | `[]`                | `medium`        | `channel.respond`, `session.control`, `cron.schedule`, `subagent.spawn`, `subagent.cancel`, `subagent.output`, `subagent.spawn.operator`, `fs.see.private`, `fs.see.secrets`, `security.bypass.low`, `security.bypass.medium`                                                                                                                      |
+| `member`  | `[]`                | `low`           | `channel.respond`, `session.control`, `subagent.spawn`, `subagent.cancel`, `subagent.output`, `fs.see.private`, `security.bypass.low`                                                                                                                                                                                                              |
+| `guest`   | `[]` (fallback)     | (none)          | (none)                                                                                                                                                                                                                                                                                                                                             |
 
 User-declared `permissions[]` **replaces** the built-in list. `"permissions": []` means no permissions, including no `channel.respond`.
 
 The audience-leak defense (owner-in-public-channel) moved from the language default to operator config: scope `roles.owner.match[]` tightly. Default match is TUI-only, where a human is present. Configs that widen owner to a channel author re-open audience-leak for that author and should remove `security.bypass.high` (and the wildcard sentinel) from `roles.owner.permissions[]` for those origins.
+
+`guest` carries no permissions by default, but it _is_ grantable — an operator may add `channel.respond` to `guest` to let strangers drive masked turns. The hard fail-safe floor is therefore **not** the `guest` role but the **undefined origin**: a call with no resolvable actor holds nothing, regardless of what `guest` is granted. `session.control` is split out from `channel.respond` for exactly this reason — a respond-capable `guest` can talk but cannot abort other speakers' sessions (`/stop` gates on `session.control`, which stays `member`-and-up by default).
+
+You don't have to hand-edit `typeclaw.json#roles` to grant a role. From the TUI or a 1:1 DM, an `owner` or `trusted` user can ask the agent to grant roles conversationally via the `grant_role` tool — see [Runtime role grants](#runtime-role-grants) below.
 
 ## Core permissions
 
 | Permission                | Granted by default to      | Effect                                                                                                                                |
 | ------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `channel.respond`         | `owner`/`trusted`/`member` | gate on the channel router; without it, inbound messages are dropped before session creation                                          |
+| `session.control`         | `owner`/`trusted`/`member` | control session lifecycle, e.g. `/stop`; split from `channel.respond` so a respond-only `guest` can't abort other speakers' sessions  |
 | `cron.schedule`           | `owner`/`trusted`          | allow scheduling new cron jobs at runtime                                                                                             |
 | `cron.modify`             | `owner`                    | allow editing existing cron jobs                                                                                                      |
 | `subagent.spawn`          | `owner`/`trusted`/`member` | allow spawning subagents                                                                                                              |
 | `subagent.cancel`         | `owner`/`trusted`/`member` | allow cancelling in-flight subagents                                                                                                  |
-| `subagent.*`              | `owner`/`trusted`          | covers all `subagent.*` permissions (wildcard expansion)                                                                              |
+| `subagent.output`         | `owner`/`trusted`/`member` | allow reading subagent output                                                                                                         |
+| `subagent.spawn.operator` | `owner`/`trusted`          | allow spawning write-capable (operator) subagents                                                                                     |
 | `fs.see.private`          | `owner`/`trusted`/`member` | see the private working surface (`workspace/`, `memory/`, `sessions/`); without it those dirs are hidden from bash and the file tools |
 | `fs.see.secrets`          | `owner`/`trusted`          | see the credential files (`.env`, `secrets.json`); without it they are masked                                                         |
 | `security.bypass.low`     | `owner`/`trusted`/`member` | tier-wide bypass for low-severity guards                                                                                              |
@@ -46,29 +52,46 @@ Plugin-contributed permissions live under the plugin's namespace (`<plugin>.<ver
 
 Audience-leak severity. Bypass sends data to a third-party audience outside the operator's control loop. **`owner` bypasses high** by default under the role-tower model; `trusted` and `member` do not. The owner-in-public-channel defense lives in `roles.owner.match[]` discipline (default: TUI-only).
 
-| Guard              | Per-guard permission               | Blocks                                                                                  |
-| ------------------ | ---------------------------------- | --------------------------------------------------------------------------------------- |
-| `outboundSecret`   | `security.bypass.outboundSecret`   | outbound channel message containing a secret-shaped string                              |
-| `systemPromptLeak` | `security.bypass.systemPromptLeak` | outbound message echoing the system prompt                                              |
-| `gitExfil`         | `security.bypass.gitExfil`         | `git push` to an unfamiliar remote                                                      |
-| `gitRemoteTainted` | `security.bypass.gitRemoteTainted` | push after a same-session `git remote set-url`                                          |
-| `rolePromotion`    | `security.bypass.rolePromotion`    | `write`/`edit` to `typeclaw.json` that widens role privileges or adds a privileged role |
-| `cronPromotion`    | `security.bypass.cronPromotion`    | `write`/`edit` to `cron.json` adding new jobs or changing `scheduledByRole`             |
+| Guard              | Per-guard permission               | Blocks                                                     |
+| ------------------ | ---------------------------------- | ---------------------------------------------------------- |
+| `outboundSecret`   | `security.bypass.outboundSecret`   | outbound channel message containing a secret-shaped string |
+| `systemPromptLeak` | `security.bypass.systemPromptLeak` | outbound message echoing the system prompt                 |
+| `gitRemoteTainted` | `security.bypass.gitRemoteTainted` | push after a same-session `git remote set-url`             |
 
 ## Security guards — `medium` tier
 
-Silent-attack severity. Bypass produces attacker-favorable state in model context without immediate operator visibility. `owner` and `trusted` bypass by default; `member` does not.
+Silent-attack severity. Bypass produces attacker-favorable state in operator-reviewable surface without immediate audience-leak. `owner` and `trusted` bypass by default; `member` does not.
 
-| Guard                  | Per-guard permission                   | Blocks                                                          |
-| ---------------------- | -------------------------------------- | --------------------------------------------------------------- |
-| `secretExfilBash`      | `security.bypass.secretExfilBash`      | `bash env`, `bash printenv`, etc.                               |
-| `secretExfilRead`      | `security.bypass.secretExfilRead`      | `read .env`, `read secrets.json`, etc.                          |
-| `ssrf`                 | `security.bypass.ssrf`                 | `curl http://169.254.169.254/...` and other IMDS / SSRF targets |
-| `sessionSearchSecrets` | `security.bypass.sessionSearchSecrets` | `session_search` query returning secret-shaped hits             |
+| Guard                  | Per-guard permission                   | Blocks                                                                                                                                                       |
+| ---------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `secretExfilBash`      | `security.bypass.secretExfilBash`      | `bash env`, `bash printenv`, etc.                                                                                                                            |
+| `secretExfilRead`      | `security.bypass.secretExfilRead`      | `read .env`, `read secrets.json`, etc.                                                                                                                       |
+| `ssrf`                 | `security.bypass.ssrf`                 | `curl http://169.254.169.254/...` and other IMDS / SSRF targets                                                                                              |
+| `sessionSearchSecrets` | `security.bypass.sessionSearchSecrets` | `session_search` query returning secret-shaped hits                                                                                                          |
+| `gitExfil`             | `security.bypass.gitExfil`             | `git push` to an unfamiliar remote (a clean operator-configured remote is not a leak; the retarget-and-push breach is gated by `gitRemoteTainted` at `high`) |
+| `rolePromotion`        | `security.bypass.rolePromotion`        | `write`/`edit` to `typeclaw.json` that widens role privileges or adds a privileged role                                                                      |
+| `cronPromotion`        | `security.bypass.cronPromotion`        | `write`/`edit` to `cron.json` adding new jobs or changing `scheduledByRole`                                                                                  |
 
 ## Security guards — `low` tier
 
 Reserved tier. No inhabitants today. Exists so `member`'s `bypass.low` grant has a forward-compatible home when a future guard ships at low. `owner`, `trusted`, and `member` all carry `bypass.low` by default.
+
+## Runtime role grants
+
+The agent ships a `grant_role` tool so an operator can edit `typeclaw.json#roles` by conversation instead of hand-editing the file. It does one of two things per call:
+
+- **Match grant** — assigns an author/scope to a role, e.g. `grant member the match rule slack:T0123 author:U_X`. Takes effect immediately (the live permission table is hot-reloaded) and the change is committed to `typeclaw.json`.
+- **Permission grant** — adds a capability to a role, e.g. `grant guest channel.respond`. Written to `typeclaw.json` but **restart-required**: it lands on disk and takes effect on the next `typeclaw restart`.
+
+Gates, all enforced at the tool boundary:
+
+- **Origin** — callable only from the TUI or a **1:1 DM**. A group/open channel turn is refused, because it mixes in other participants' messages (the confused-deputy / prompt-injection surface that could trick a trusted turn into rewriting the access-control table).
+- **Caller role** — the caller must resolve to `owner` or `trusted`. `member` and `guest` cannot grant.
+- **Tier ceiling** — a caller cannot grant a role _above_ its own. A `trusted` caller can grant `trusted`/`member`/`guest`; only `owner` can grant `owner`.
+- **Grant only what you hold** — for permission grants, the caller can only confer a capability it itself possesses.
+- **No `security.bypass.*`** — bypass permissions disable guards rather than enable a feature; `grant_role` refuses them. They remain a deliberate hand-edit gated by the `rolePromotion` guard.
+
+This is the conversational counterpart to the CLI `typeclaw role claim` flow ([/reference/cli#roles](/docs/reference/cli)): `role claim` pairs the _current_ author via a one-time code, while `grant_role` lets an already-trusted operator grant _any_ author or capability mid-conversation.
 
 ## Acceptance logic
 
