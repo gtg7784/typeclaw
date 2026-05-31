@@ -49,7 +49,6 @@ const githubAppAuthSchema = z.object({
   type: z.literal('app'),
   appId: z.number().int().positive(),
   privateKey: secretFieldSchema,
-  installationId: z.number().int().positive().optional(),
 })
 
 const githubChannelSchema = z.object({
