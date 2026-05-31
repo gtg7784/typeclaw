@@ -842,7 +842,6 @@ async function promptGithubAppAuth(): Promise<{
   type: 'app'
   appId: number
   privateKey: string
-  installationId?: number
 }> {
   const appId = await text({
     message: 'GitHub App ID',
@@ -857,21 +856,10 @@ async function promptGithubAppAuth(): Promise<{
     cancel('Aborted.')
     process.exit(0)
   }
-  const installationId = await text({
-    message: 'Installation ID (optional; leave blank to auto-discover)',
-    validate: (value) =>
-      value === undefined || value === '' ? undefined : validatePositiveInteger(value, 'Installation ID is required'),
-  })
-  if (isCancel(installationId)) {
-    cancel('Aborted.')
-    process.exit(0)
-  }
-  const parsedInstallationId = installationId === '' ? undefined : Number(installationId)
   return {
     type: 'app',
     appId: Number(appId),
     privateKey,
-    ...(parsedInstallationId !== undefined ? { installationId: parsedInstallationId } : {}),
   }
 }
 

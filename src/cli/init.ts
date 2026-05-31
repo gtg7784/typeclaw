@@ -1293,7 +1293,6 @@ async function promptGithubAppAuth(): Promise<{
   type: 'app'
   appId: number
   privateKey: string
-  installationId?: number
 } | null> {
   const appId = await text({
     message: 'GitHub App ID',
@@ -1302,18 +1301,10 @@ async function promptGithubAppAuth(): Promise<{
   if (isCancel(appId)) return null
   const privateKey = await promptPrivateKeyPem('GitHub App private key PEM, escaped PEM, or path to .pem file')
   if (privateKey === CANCEL_SYMBOL) return null
-  const installationId = await text({
-    message: 'Installation ID (optional; leave blank to auto-discover)',
-    validate: (v) =>
-      v === undefined || v === '' ? undefined : validatePositiveInteger(v, 'Installation ID is required'),
-  })
-  if (isCancel(installationId)) return null
-  const parsedInstallationId = installationId === '' ? undefined : Number(installationId)
   return {
     type: 'app',
     appId: Number(appId),
     privateKey,
-    ...(parsedInstallationId !== undefined ? { installationId: parsedInstallationId } : {}),
   }
 }
 
