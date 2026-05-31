@@ -188,6 +188,7 @@ describe('mcpServerSchema', () => {
     })
     expect(parsed).toEqual({
       name: 'filesystem',
+      enabled: true,
       command: 'bunx',
       args: ['@modelcontextprotocol/server-filesystem'],
       env: {},
@@ -196,7 +197,31 @@ describe('mcpServerSchema', () => {
 
   test('accepts an http server config', () => {
     const parsed = mcpServerSchema.parse({ name: 'remote-docs', url: 'https://mcp.example.com/mcp' })
-    expect(parsed).toEqual({ name: 'remote-docs', args: [], url: 'https://mcp.example.com/mcp', env: {} })
+    expect(parsed).toEqual({
+      name: 'remote-docs',
+      enabled: true,
+      args: [],
+      url: 'https://mcp.example.com/mcp',
+      env: {},
+    })
+  })
+
+  test('defaults enabled to true when omitted', () => {
+    const parsed = mcpServerSchema.parse({ name: 'default-on', command: 'server' })
+
+    expect(parsed.enabled).toBe(true)
+  })
+
+  test('preserves enabled: false', () => {
+    const parsed = mcpServerSchema.parse({ name: 'disabled', enabled: false, command: 'server' })
+
+    expect(parsed.enabled).toBe(false)
+  })
+
+  test('preserves explicit enabled: true', () => {
+    const parsed = mcpServerSchema.parse({ name: 'explicitly-on', enabled: true, command: 'server' })
+
+    expect(parsed.enabled).toBe(true)
   })
 
   test('preserves explicit request timeout', () => {
@@ -306,8 +331,14 @@ describe('configSchema mcpServers field', () => {
     })
 
     expect(parsed.mcpServers).toEqual([
-      { name: 'filesystem', command: 'bunx', args: ['@modelcontextprotocol/server-filesystem'], env: {} },
-      { name: 'remote-docs', args: [], url: 'https://mcp.example.com/mcp', env: {} },
+      {
+        name: 'filesystem',
+        enabled: true,
+        command: 'bunx',
+        args: ['@modelcontextprotocol/server-filesystem'],
+        env: {},
+      },
+      { name: 'remote-docs', enabled: true, args: [], url: 'https://mcp.example.com/mcp', env: {} },
     ])
   })
 
