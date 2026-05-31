@@ -69,6 +69,7 @@ export function createMcpManager(
         return {
           name: server.name,
           connected: connections.has(server.name),
+          ...(server.description === undefined ? {} : { description: server.description }),
           ...(toolCount === undefined ? {} : { toolCount }),
         }
       })
