@@ -281,7 +281,6 @@ describe('setGithubSecrets', () => {
         type: 'app',
         appId: 1234,
         privateKey: '-----BEGIN PRIVATE KEY-----\nold-key\n-----END PRIVATE KEY-----',
-        installationId: 9999,
       },
     })
   }
@@ -310,7 +309,7 @@ describe('setGithubSecrets', () => {
     expect(gh.webhookSecret).toEqual({ value: 'wh-old' })
   })
 
-  test('rotates the App private key while preserving appId and installationId from disk', async () => {
+  test('rotates the App private key while preserving appId from disk', async () => {
     await seedAppGithub()
 
     const result = await setGithubSecrets(root, {
@@ -324,7 +323,6 @@ describe('setGithubSecrets', () => {
       type: 'app',
       appId: 1234,
       privateKey: { value: '-----BEGIN PRIVATE KEY-----\nrotated\n-----END PRIVATE KEY-----' },
-      installationId: 9999,
     })
   })
 
@@ -344,29 +342,6 @@ describe('setGithubSecrets', () => {
   })
 
   test('switches auth from pat to app and replaces the entire auth block', async () => {
-    await seedPatGithub()
-
-    const result = await setGithubSecrets(root, {
-      auth: {
-        type: 'app',
-        appId: 4242,
-        privateKey: '-----BEGIN PRIVATE KEY-----\nswitched\n-----END PRIVATE KEY-----',
-        installationId: 7777,
-      },
-    })
-
-    expect(result).toEqual({ ok: true })
-    const secrets = await readSecrets()
-    const gh = secrets.channels?.github as Record<string, unknown>
-    expect(gh.auth).toEqual({
-      type: 'app',
-      appId: 4242,
-      privateKey: { value: '-----BEGIN PRIVATE KEY-----\nswitched\n-----END PRIVATE KEY-----' },
-      installationId: 7777,
-    })
-  })
-
-  test('switches auth from pat to app without an installationId when omitted', async () => {
     await seedPatGithub()
 
     const result = await setGithubSecrets(root, {
@@ -503,7 +478,6 @@ describe('setGithubSecrets', () => {
         type: 'app',
         appId: 1234,
         privateKey: { value: '-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----', env: 'CUSTOM_GH_APP_KEY' },
-        installationId: 9999,
       },
       webhookSecret: { value: 'wh-old' },
     }
@@ -523,7 +497,6 @@ describe('setGithubSecrets', () => {
         value: '-----BEGIN PRIVATE KEY-----\nrotated\n-----END PRIVATE KEY-----',
         env: 'CUSTOM_GH_APP_KEY',
       },
-      installationId: 9999,
     })
   })
 

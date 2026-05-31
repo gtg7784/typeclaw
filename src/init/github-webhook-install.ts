@@ -57,7 +57,7 @@ export async function installGithubWebhooksEagerly(
 
   try {
     const result = await registerGithubWebhooks({
-      token: () => strategy.token(),
+      token: (repoSlug: string) => strategy.token({ repoSlug }),
       webhookUrl,
       webhookSecret: options.webhookSecret,
       repos: options.repos,
@@ -86,7 +86,6 @@ function authToSecretBlock(auth: GithubInitCredentials['auth']) {
     type: 'app' as const,
     appId: auth.appId,
     privateKey: { value: auth.privateKey },
-    ...(auth.installationId !== undefined ? { installationId: auth.installationId } : {}),
   }
 }
 

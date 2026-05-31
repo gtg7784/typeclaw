@@ -1,7 +1,10 @@
 import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 
 export type RegisterGithubWebhooksOptions = {
-  token: () => Promise<string>
+  // Resolves an installation token scoped to the given "owner/name" repo. A
+  // single GitHub App may span multiple owners (separate installations), so
+  // each repo's hook must be created/listed with that repo's own token.
+  token: (repoSlug: string) => Promise<string>
   webhookUrl: string
   webhookSecret: string
   repos: readonly string[]
@@ -51,22 +54,22 @@ export async function registerGithubWebhooks(
   options: RegisterGithubWebhooksOptions,
 ): Promise<WebhookRegistrationResult> {
   const fetchImpl = options.fetchImpl ?? fetch
-  let token: string
-  try {
-    token = await options.token()
-  } catch (err) {
-    const error = describe(err)
-    return { repos: options.repos.map((repo) => ({ repo, action: 'failed' as const, error })) }
-  }
   const repos: WebhookRepoResult[] = []
   for (const repo of options.repos) {
+    let token: string
+    try {
+      token = await options.token(repo)
+    } catch (err) {
+      repos.push({ repo, action: 'failed', error: describe(err) })
+      continue
+    }
     repos.push(await registerOne(fetchImpl, token, repo, options))
   }
   return { repos }
 }
 
 export type DeregisterGithubWebhooksOptions = {
-  token: () => Promise<string>
+  token: (repoSlug: string) => Promise<string>
   hooks: ReadonlyArray<{ repo: string; hookId: number }>
   fetchImpl?: typeof fetch
 }
@@ -79,15 +82,15 @@ export async function deregisterGithubWebhooks(
   options: DeregisterGithubWebhooksOptions,
 ): Promise<WebhookDeregistrationResult> {
   const fetchImpl = options.fetchImpl ?? fetch
-  let token: string
-  try {
-    token = await options.token()
-  } catch (err) {
-    const error = describe(err)
-    return { hooks: options.hooks.map((h) => ({ ...h, action: 'failed', error })) }
-  }
   const hooks: WebhookDeregistrationResult['hooks'] = []
   for (const hook of options.hooks) {
+    let token: string
+    try {
+      token = await options.token(hook.repo)
+    } catch (err) {
+      hooks.push({ ...hook, action: 'failed', error: describe(err) })
+      continue
+    }
     hooks.push(await deleteOne(fetchImpl, token, hook))
   }
   return { hooks }

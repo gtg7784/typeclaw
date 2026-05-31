@@ -2,33 +2,43 @@ import { createPrivateKey } from 'node:crypto'
 
 import { resolveSecret, type Secret } from '@/secrets/resolve'
 
-import type { GithubAuthStrategy, GithubInstallationGrants, GithubSelfUser } from './auth'
+import type { GithubAuthContext, GithubAuthStrategy, GithubInstallationGrants, GithubSelfUser } from './auth'
 import { GITHUB_API_BASE, githubJsonHeaders, githubPublicHeaders } from './auth-pat'
+
+type TokenCacheEntry = { value: string; expiresAt: number }
 
 export class AppAuthStrategy implements GithubAuthStrategy {
   private readonly appId: number
   private readonly privateKeyPem: string
-  private readonly installationId: number | null
   private readonly fetchImpl: typeof fetch
-  private cachedToken: { value: string; expiresAt: number } | null = null
-  private resolvedInstallationId: number | null = null
+  // Keyed by installation id: a single App may span multiple owners, each a
+  // separate installation with its own short-lived token.
+  private readonly tokenCache = new Map<number, TokenCacheEntry>()
+  private readonly repoInstallationCache = new Map<string, number>()
+  private soleInstallationId: number | null = null
   private _selfUser: GithubSelfUser | null = null
 
-  constructor(options: { appId: number; privateKey: Secret; installationId?: number; fetchImpl?: typeof fetch }) {
+  constructor(options: { appId: number; privateKey: Secret; fetchImpl?: typeof fetch }) {
     const privateKeyPem = resolveSecret(options.privateKey, undefined, process.env)
     if (privateKeyPem === undefined || privateKeyPem.trim() === '') throw new Error('GitHub App private key is missing')
     this.appId = options.appId
     this.privateKeyPem = privateKeyPem
-    this.installationId = options.installationId ?? null
     this.fetchImpl = options.fetchImpl ?? fetch
   }
 
-  async token(): Promise<string> {
-    if (this.cachedToken && Date.now() < this.cachedToken.expiresAt - 5 * 60 * 1000) {
-      return this.cachedToken.value
-    }
+  async token(context?: GithubAuthContext): Promise<string> {
     const jwt = await this.mintJwt()
-    const installId = await this.resolveInstallationId(jwt)
+    const installId = await this.resolveInstallationId(jwt, context)
+    return this.installationToken(jwt, installId)
+  }
+
+  async authHeaders(context?: GithubAuthContext): Promise<HeadersInit> {
+    return githubJsonHeaders(await this.token(context))
+  }
+
+  private async installationToken(jwt: string, installId: number): Promise<string> {
+    const cached = this.tokenCache.get(installId)
+    if (cached && Date.now() < cached.expiresAt - 5 * 60 * 1000) return cached.value
     const response = await this.fetchImpl(`${GITHUB_API_BASE}/app/installations/${installId}/access_tokens`, {
       method: 'POST',
       headers: githubJsonHeaders(jwt),
@@ -37,12 +47,8 @@ export class AppAuthStrategy implements GithubAuthStrategy {
     const raw = (await response.json()) as { token?: unknown; expires_at?: unknown }
     if (typeof raw.token !== 'string') throw new Error('GitHub App token response missing token')
     const expiresAt = typeof raw.expires_at === 'string' ? Date.parse(raw.expires_at) : Date.now() + 60 * 60 * 1000
-    this.cachedToken = { value: raw.token, expiresAt }
+    this.tokenCache.set(installId, { value: raw.token, expiresAt })
     return raw.token
-  }
-
-  async authHeaders(): Promise<HeadersInit> {
-    return githubJsonHeaders(await this.token())
   }
 
   async getSelf(): Promise<GithubSelfUser> {
@@ -69,9 +75,9 @@ export class AppAuthStrategy implements GithubAuthStrategy {
     return this._selfUser
   }
 
-  async getInstallationGrants(): Promise<GithubInstallationGrants> {
+  async getInstallationGrants(context?: GithubAuthContext): Promise<GithubInstallationGrants> {
     const jwt = await this.mintJwt()
-    const installId = await this.resolveInstallationId(jwt)
+    const installId = await this.resolveInstallationId(jwt, context)
     const response = await this.fetchImpl(`${GITHUB_API_BASE}/app/installations/${installId}`, {
       headers: githubJsonHeaders(jwt),
     })
@@ -88,7 +94,8 @@ export class AppAuthStrategy implements GithubAuthStrategy {
   }
 
   async dispose(): Promise<void> {
-    this.cachedToken = null
+    this.tokenCache.clear()
+    this.repoInstallationCache.clear()
   }
 
   private async mintJwt(): Promise<string> {
@@ -107,24 +114,40 @@ export class AppAuthStrategy implements GithubAuthStrategy {
     return `${signingInput}.${base64url(Buffer.from(signature))}`
   }
 
-  private async resolveInstallationId(jwt: string): Promise<number> {
-    if (this.resolvedInstallationId !== null) return this.resolvedInstallationId
-    if (this.installationId !== null) {
-      this.resolvedInstallationId = this.installationId
-      return this.installationId
+  private async resolveInstallationId(jwt: string, context?: GithubAuthContext): Promise<number> {
+    if (context?.repoSlug !== undefined && context.repoSlug !== '') {
+      return this.resolveInstallationByEndpoint(jwt, `repos/${context.repoSlug}/installation`, context.repoSlug)
     }
+    if (context?.owner !== undefined && context.owner !== '') {
+      return this.resolveInstallationByEndpoint(jwt, `orgs/${context.owner}/installation`, context.owner)
+    }
+    if (this.soleInstallationId !== null) return this.soleInstallationId
     const response = await this.fetchImpl(`${GITHUB_API_BASE}/app/installations`, { headers: githubJsonHeaders(jwt) })
     if (!response.ok) throw new Error(`GitHub App installations fetch failed: ${response.status}`)
     const list = (await response.json()) as Array<{ id?: unknown }>
     if (list.length === 0) throw new Error('GitHub App has no installations')
     if (list.length > 1) {
       const ids = list.map((installation) => installation.id).join(', ')
-      throw new Error(`GitHub App has multiple installations (${ids}); set installationId in secrets.json`)
+      throw new Error(`GitHub App has multiple installations (${ids}); a repo must be specified to select one`)
     }
     const id = list[0]?.id
     if (typeof id !== 'number') throw new Error('GitHub App installation missing id')
-    this.resolvedInstallationId = id
+    this.soleInstallationId = id
     return id
+  }
+
+  private async resolveInstallationByEndpoint(jwt: string, path: string, target: string): Promise<number> {
+    const cached = this.repoInstallationCache.get(target)
+    if (cached !== undefined) return cached
+    const response = await this.fetchImpl(`${GITHUB_API_BASE}/${path}`, { headers: githubJsonHeaders(jwt) })
+    if (response.status === 404) {
+      throw new Error(`GitHub App is not installed for ${target} or lacks access to that repository`)
+    }
+    if (!response.ok) throw new Error(`GitHub App installation lookup for ${target} failed: ${response.status}`)
+    const raw = (await response.json()) as { id?: unknown }
+    if (typeof raw.id !== 'number') throw new Error(`GitHub App installation for ${target} missing id`)
+    this.repoInstallationCache.set(target, raw.id)
+    return raw.id
   }
 }
 

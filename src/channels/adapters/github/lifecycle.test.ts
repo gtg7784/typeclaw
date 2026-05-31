@@ -16,7 +16,6 @@ function appSecrets(): GithubSecretsBlock {
     auth: {
       type: 'app',
       appId: 12345,
-      installationId: 99,
       privateKey: { value: APP_PRIVATE_KEY_PEM },
     },
     webhookSecret: { value: 'wh-secret' },
@@ -664,6 +663,9 @@ describe('createGithubAdapter lifecycle', () => {
       if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
         return Response.json({ id: 42, login: 'typeey-app[bot]' })
       }
+      if (url === 'https://api.github.com/app/installations' && method === 'GET') {
+        return Response.json([{ id: 99 }])
+      }
       if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
         return Response.json({
           permissions: { metadata: 'read', repository_hooks: 'write' },
@@ -708,6 +710,9 @@ describe('createGithubAdapter lifecycle', () => {
       }
       if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
         return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      if (url === 'https://api.github.com/app/installations' && method === 'GET') {
+        return Response.json([{ id: 99 }])
       }
       if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
         return Response.json({
@@ -772,6 +777,9 @@ describe('createGithubAdapter lifecycle', () => {
       if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
         return Response.json({ id: 42, login: 'typeey-app[bot]' })
       }
+      if (url === 'https://api.github.com/app/installations' && method === 'GET') {
+        return Response.json([{ id: 99 }])
+      }
       if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
         return new Response('boom', { status: 500 })
       }
@@ -796,7 +804,7 @@ describe('createGithubAdapter lifecycle', () => {
     await expect(adapter.start()).resolves.toBeUndefined()
     await adapter.stop()
 
-    expect(logger.messages.find((m) => m.startsWith('warn:[github] permission preflight skipped:'))).toBeDefined()
+    expect(logger.messages.find((m) => m.startsWith('warn:[github] permission preflight skipped'))).toBeDefined()
   })
 
   test('start() sleeps webhookRegistrationDelayMs before calling the GitHub hooks API', async () => {
@@ -873,13 +881,16 @@ describe('createGithubAdapter lifecycle', () => {
     expect(events).toEqual(['hooks-list', 'hooks-create'])
   })
 
-  test('App auth: periodic token refresh keeps GH_TOKEN warm via setInterval', async () => {
+  test('App auth: single-repo periodic token refresh keeps GH_TOKEN warm via setInterval', async () => {
     const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
       if (url === 'https://api.github.com/app' && method === 'GET') {
         return Response.json({ slug: 'typeey-app' })
       }
       if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
         return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      if (url === 'https://api.github.com/repos/acme/widgets/installation' && method === 'GET') {
+        return Response.json({ id: 99 })
       }
       if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
         return Response.json({
@@ -889,6 +900,10 @@ describe('createGithubAdapter lifecycle', () => {
       }
       if (url === 'https://api.github.com/app/installations/99/access_tokens' && method === 'POST') {
         return Response.json({ token: 'ghs_fresh', expires_at: '2099-01-01T00:00:00Z' })
+      }
+      if (url.includes('/repos/acme/widgets/hooks')) {
+        if (method === 'GET') return Response.json([])
+        if (method === 'POST') return Response.json({ id: 7 }, { status: 201 })
       }
       return new Response('unexpected', { status: 500 })
     })
@@ -901,7 +916,7 @@ describe('createGithubAdapter lifecycle', () => {
 
     const adapter = createGithubAdapter({
       router: freshRouter(),
-      configRef: () => githubConfig([], null),
+      configRef: () => githubConfig(['acme/widgets']),
       secrets: appSecrets(),
       agentDir: '/tmp/agent',
       logger: silentLogger(),

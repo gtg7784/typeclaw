@@ -61,6 +61,24 @@ describe('parseSecretsFile (v2 envelope)', () => {
     expect(result.file.channels['discord-bot']).toEqual({ token: { env: 'CUSTOM_DISCORD' } })
   })
 
+  test('migrates legacy github App auth by stripping the removed installationId field', () => {
+    const result = parseSecretsFile({
+      version: 2,
+      channels: {
+        github: {
+          auth: { type: 'app', appId: 123, privateKey: { value: 'pk' }, installationId: 9999 },
+          webhookSecret: { value: 'wh' },
+        },
+      },
+    })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const github = result.file.channels.github as { auth: Record<string, unknown> }
+    expect(github.auth).toEqual({ type: 'app', appId: 123, privateKey: { value: 'pk' } })
+    expect('installationId' in github.auth).toBe(false)
+  })
+
   test('accepts channels.kakaotalk credential block', () => {
     const result = parseSecretsFile({
       version: 2,

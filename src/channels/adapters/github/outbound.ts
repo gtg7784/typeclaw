@@ -1,5 +1,6 @@
 import type { OutboundCallback, OutboundMessage, SendResult } from '@/channels/types'
 
+import type { GithubAuthContext } from './auth'
 import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 import {
   buildOutboundPermissionGuidance,
@@ -11,7 +12,7 @@ import {
 export type GithubOutboundLogger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void }
 
 export function createGithubOutboundCallback(deps: {
-  token: () => Promise<string>
+  token: (context?: GithubAuthContext) => Promise<string>
   authType: GithubAuthType
   logger: GithubOutboundLogger
   fetchImpl?: typeof fetch
@@ -28,9 +29,12 @@ export function createGithubOutboundCallback(deps: {
     const target = parseChat(msg.chat)
     if (target === null) return { ok: false, error: `invalid GitHub chat: ${msg.chat}` }
 
+    const token = () => deps.token({ repoSlug: msg.workspace })
+
     if (target.kind === 'discussion') {
       return await postDiscussionComment({
         ...deps,
+        token,
         fetchImpl,
         repo,
         discussionNumber: target.number,
@@ -44,7 +48,7 @@ export function createGithubOutboundCallback(deps: {
       : `${GITHUB_API_BASE}/repos/${repo.owner}/${repo.name}/issues/${target.number}/comments`
     return await postJson(
       fetchImpl,
-      await deps.token(),
+      await token(),
       endpoint,
       { body },
       {

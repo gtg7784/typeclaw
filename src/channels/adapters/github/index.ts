@@ -3,7 +3,7 @@ import type { ChannelAdapterConfig, GithubAdapterConfig } from '@/channels/schem
 import { resolveSecret } from '@/secrets/resolve'
 import type { GithubSecretsBlock } from '@/secrets/schema'
 
-import { buildAuthStrategy } from './auth'
+import { buildAuthStrategy, type GithubAuthContext } from './auth'
 import { createGithubChannelNameResolver } from './channel-resolver'
 import { createDeliveryDedup } from './dedup'
 import { findPermissionGaps } from './event-permissions'
@@ -99,29 +99,30 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     workspaceByChat.set(chat, workspace)
   }
 
-  const tokenFn = async () => {
-    const t = await auth.token()
-    process.env.GH_TOKEN = t
-    return t
-  }
+  // Repo/owner-aware token resolver. A single GitHub App can span multiple
+  // installations (one per owner); each consumer passes its repo/owner so the
+  // right installation token is minted. Unlike the old single-token path, this
+  // does NOT mutate process.env.GH_TOKEN — that global is seeded separately and
+  // only when exactly one installation applies (see seedGhTokenIfSingle).
+  const authToken = (context?: GithubAuthContext) => auth.token(context)
   const outbound = createGithubOutboundCallback({
-    token: tokenFn,
+    token: authToken,
     authType: options.secrets.auth.type,
     logger,
     fetchImpl,
   })
   const history = createGithubHistoryCallback({
-    token: tokenFn,
+    token: authToken,
     fetchImpl,
     workspaceForChat: (chat) => workspaceByChat.get(chat) ?? null,
   })
-  const membership = createGithubMembershipResolver({ token: tokenFn, fetchImpl })
-  const channelNameResolver = createGithubChannelNameResolver({ token: tokenFn, fetchImpl })
+  const membership = createGithubMembershipResolver({ token: authToken, fetchImpl })
+  const channelNameResolver = createGithubChannelNameResolver({ token: authToken, fetchImpl })
   const fetchAttachment = createGithubFetchAttachmentCallback()
   // No-op typing callback: GitHub has no typing indicator API.
   const typing = async (): Promise<void> => {}
   const dedup = createDeliveryDedup()
-  const isBotInTeam = createTeamMembershipChecker({ token: tokenFn, fetchImpl })
+  const isBotInTeam = createTeamMembershipChecker({ token: authToken, fetchImpl })
   const handler = createGithubWebhookHandler({
     webhookSecret,
     dedup,
@@ -174,35 +175,48 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         selfLogin = null
         throw err
       }
-      // Seed GH_TOKEN so `gh` CLI calls in the container are pre-authenticated.
-      // tokenFn keeps it current on every adapter API call; App tokens refresh
-      // automatically when within 5 minutes of expiry.
-      process.env.GH_TOKEN = await auth.token()
       started = true
-      // Keep GH_TOKEN warm even when the adapter is only receiving inbound
-      // webhooks and not making outbound API calls. This prevents `gh` CLI
-      // calls from the agent from failing with 401 after the token expires.
-      const tokenRefreshIntervalMs = options.tokenRefreshIntervalMs ?? DEFAULT_TOKEN_REFRESH_INTERVAL_MS
-      if (tokenRefreshIntervalMs > 0) {
-        const refresh = () => {
-          tokenFn().catch((err) => {
-            logger.error(`[github] periodic token refresh failed: ${err instanceof Error ? err.message : String(err)}`)
-          })
+      // GH_TOKEN is a single process-wide env var the container's `gh` CLI
+      // reads, but a GitHub App spanning multiple owners has no single correct
+      // token. Seed/refresh it only when exactly one repo is configured (PAT,
+      // or App with one unambiguous installation). With multiple repos we skip
+      // the global seed: ad-hoc `gh` calls must target a specific repo, and the
+      // adapter's own API calls always resolve a repo-scoped token via authToken.
+      const ghTokenRepo = ghTokenSeedRepo(options.configRef().repos ?? [])
+      const seedGhToken = async (): Promise<void> => {
+        process.env.GH_TOKEN = await auth.token(ghTokenRepo === null ? undefined : { repoSlug: ghTokenRepo })
+      }
+      if (ghTokenRepo !== null || options.secrets.auth.type === 'pat') {
+        await seedGhToken()
+        const tokenRefreshIntervalMs = options.tokenRefreshIntervalMs ?? DEFAULT_TOKEN_REFRESH_INTERVAL_MS
+        if (tokenRefreshIntervalMs > 0) {
+          const refresh = () => {
+            seedGhToken().catch((err) => {
+              logger.error(
+                `[github] periodic token refresh failed: ${err instanceof Error ? err.message : String(err)}`,
+              )
+            })
+          }
+          const setIntervalFn =
+            options.setInterval ??
+            ((handler: () => void, ms: number) => {
+              const timer = setInterval(handler, ms)
+              return { clear: () => clearInterval(timer) }
+            })
+          tokenRefreshTimer = setIntervalFn(refresh, tokenRefreshIntervalMs)
         }
-        const setIntervalFn =
-          options.setInterval ??
-          ((handler: () => void, ms: number) => {
-            const timer = setInterval(handler, ms)
-            return { clear: () => clearInterval(timer) }
-          })
-        tokenRefreshTimer = setIntervalFn(refresh, tokenRefreshIntervalMs)
+      } else {
+        logger.info(
+          '[github] multiple repos configured across possibly-different owners; GH_TOKEN not seeded globally. ' +
+            'Ad-hoc `gh` commands should set a repo-scoped token explicitly.',
+        )
       }
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
       // Best-effort: App-only preflight that compares the installation's granted
       // permissions against the configured eventAllowlist and warns about gaps.
       // Catches the most common misconfiguration (App installed with the default
       // metadata-only permission set) before any event fires a 403.
-      await runAppPermissionPreflight(logger, auth, options.configRef().eventAllowlist)
+      await runAppPermissionPreflight(logger, auth, options.configRef().eventAllowlist, options.configRef().repos ?? [])
       // Repository webhook registration is best-effort: failures are logged
       // per-repo, the adapter stays up. A misconfigured PAT or App that
       // can't manage hooks must not prevent the adapter from accepting
@@ -235,7 +249,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           await sleep(webhookRegistrationDelayMs)
         }
         const registration = await registerGithubWebhooks({
-          token: tokenFn,
+          token: (repoSlug: string) => auth.token({ repoSlug }),
           webhookUrl: effectiveUrl,
           webhookSecret,
           repos,
@@ -266,7 +280,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       // last to clear the cached App-installation token.
       if (managedHooks.length > 0) {
         const deregistration = await deregisterGithubWebhooks({
-          token: tokenFn,
+          token: (repoSlug: string) => auth.token({ repoSlug }),
           hooks: managedHooks,
           fetchImpl,
         })
@@ -370,18 +384,36 @@ async function runAppPermissionPreflight(
   logger: GithubAdapterLogger,
   auth: ReturnType<typeof buildAuthStrategy>,
   eventAllowlist: readonly string[],
+  repos: readonly string[],
 ): Promise<void> {
   if (auth.getInstallationGrants === undefined) return
-  let grants
-  try {
-    grants = await auth.getInstallationGrants()
-  } catch (err) {
-    logger.warn(`[github] permission preflight skipped: ${err instanceof Error ? err.message : String(err)}`)
-    return
+  const getGrants = (context: GithubAuthContext | undefined) => auth.getInstallationGrants?.(context)
+  // One grants check per distinct owner: installations are owner-scoped, so
+  // repos sharing an owner share an installation. The first repo per owner is
+  // the resolution key. With no repos, fall back to a single context-free check.
+  const reposByOwner = new Map<string, string>()
+  for (const repo of repos) {
+    const owner = repo.split('/')[0]
+    if (owner !== undefined && owner !== '' && !reposByOwner.has(owner)) reposByOwner.set(owner, repo)
   }
-  const gaps = findPermissionGaps(eventAllowlist, grants.permissions)
-  if (gaps.length === 0) return
-  logger.warn(buildAppPermissionPreflightGuidance(gaps))
+  const contexts: Array<{ label: string; context: { repoSlug: string } | undefined }> =
+    reposByOwner.size === 0
+      ? [{ label: 'app', context: undefined }]
+      : [...reposByOwner.values()].map((repo) => ({ label: repo, context: { repoSlug: repo } }))
+  for (const { label, context } of contexts) {
+    let grants
+    try {
+      grants = await getGrants(context)
+    } catch (err) {
+      logger.warn(
+        `[github] permission preflight skipped for ${label}: ${err instanceof Error ? err.message : String(err)}`,
+      )
+      continue
+    }
+    if (grants === undefined) continue
+    const gaps = findPermissionGaps(eventAllowlist, grants.permissions)
+    if (gaps.length > 0) logger.warn(buildAppPermissionPreflightGuidance(gaps))
+  }
 }
 
 function logDeregistrationOutcome(
@@ -393,6 +425,13 @@ function logDeregistrationOutcome(
     else if (h.action === 'missing') logger.info(`[github] webhook ${h.hookId} on ${h.repo} already gone`)
     else logger.warn(`[github] webhook detach failed for ${h.repo}#${h.hookId}: ${h.error ?? 'unknown error'}`)
   }
+}
+
+// Two repos under the same owner share an installation and could in principle
+// share a global GH_TOKEN, but the marginal value doesn't justify the special
+// case — only a single configured repo yields an unambiguous seed.
+function ghTokenSeedRepo(repos: readonly string[]): string | null {
+  return repos.length === 1 ? (repos[0] ?? null) : null
 }
 
 function defaultSleep(ms: number): Promise<void> {

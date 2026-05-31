@@ -1,10 +1,11 @@
 import type { ChannelHistoryMessage, FetchHistoryArgs, FetchHistoryResult, HistoryCallback } from '@/channels/types'
 
+import type { GithubAuthContext } from './auth'
 import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
 import { parseChat, parseRepo } from './outbound'
 
 export function createGithubHistoryCallback(options: {
-  token: () => Promise<string>
+  token: (context?: GithubAuthContext) => Promise<string>
   workspaceForChat: (chat: string) => string | null
   fetchImpl?: typeof fetch
 }): HistoryCallback {
@@ -26,7 +27,7 @@ export function createGithubHistoryCallback(options: {
       const response = await fetchImpl(
         `${endpoint}?per_page=${Math.min(Math.max(args.limit, 1), 100)}&direction=desc${cursor}`,
         {
-          headers: githubJsonHeaders(await options.token()),
+          headers: githubJsonHeaders(await options.token({ repoSlug: workspace })),
         },
       )
       if (!response.ok) return { ok: false, error: `GitHub history ${response.status}` }

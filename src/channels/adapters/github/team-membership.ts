@@ -7,12 +7,14 @@
 // request rebuilds it). Errors fall closed (return false): we'd rather drop
 // a real review request than wake the agent on a team the bot isn't in.
 
+import type { GithubAuthContext } from './auth'
+
 const ACTIVE_MEMBERSHIP_STATE = 'active'
 
 export type TeamMembershipChecker = (input: { org: string; slug: string; login: string }) => Promise<boolean>
 
 export function createTeamMembershipChecker(options: {
-  token: () => Promise<string>
+  token: (context?: GithubAuthContext) => Promise<string>
   fetchImpl?: typeof fetch
 }): TeamMembershipChecker {
   const fetchImpl = options.fetchImpl ?? fetch
@@ -23,7 +25,7 @@ export function createTeamMembershipChecker(options: {
     const cached = cache.get(key)
     if (cached !== undefined) return cached
 
-    const result = await lookup(fetchImpl, await options.token(), org, slug, login)
+    const result = await lookup(fetchImpl, await options.token({ owner: org }), org, slug, login)
     cache.set(key, result)
     return result
   }

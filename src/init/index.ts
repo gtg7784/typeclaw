@@ -94,7 +94,7 @@ export type GithubInitCredentials = {
   hostname?: string
   tokenEnv?: string
   repos: string[]
-  auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
+  auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string }
 }
 
 export type GithubTunnelProvider = 'cloudflare-quick' | 'cloudflare-named' | 'external' | 'none'
@@ -998,7 +998,7 @@ export type AddChannelOptions = {
       hostname?: string
       tokenEnv?: string
       repos: string[]
-      auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string; installationId?: number }
+      auth: { type: 'pat'; pat: string } | { type: 'app'; appId: number; privateKey: string }
       fetchImpl?: typeof fetch
     }
 )
@@ -1263,9 +1263,6 @@ async function writeGithubChannelForInit(cwd: string, credentials: GithubInitCre
             type: 'app',
             appId: credentials.auth.appId,
             privateKey: { value: credentials.auth.privateKey } satisfies Secret,
-            ...(credentials.auth.installationId !== undefined
-              ? { installationId: credentials.auth.installationId }
-              : {}),
           },
     webhookSecret: { value: credentials.webhookSecret } satisfies Secret,
   }
@@ -1298,7 +1295,6 @@ async function appendGithubSecrets(
             type: 'app',
             appId: options.auth.appId,
             privateKey: { value: options.auth.privateKey } satisfies Secret,
-            ...(options.auth.installationId !== undefined ? { installationId: options.auth.installationId } : {}),
           },
     webhookSecret: { value: options.webhookSecret } satisfies Secret,
   }
@@ -1461,13 +1457,13 @@ export async function setChannelSecrets(
 // previous auth type, since the two shapes share no fields beyond `type`).
 export type GithubCredentialPatch = {
   webhookSecret?: string
-  auth?: { type: 'pat'; pat: string } | { type: 'app'; privateKey: string; appId?: number; installationId?: number }
+  auth?: { type: 'pat'; pat: string } | { type: 'app'; privateKey: string; appId?: number }
 }
 
 // Update one or more credential fields on an already-configured GitHub
 // channel. Like setChannelSecrets, refuses when secrets.json has no
 // existing github entry. Supports both same-type rotation (preserves env
-// bindings, carries appId/installationId forward when not supplied) and
+// bindings, carries appId forward when not supplied) and
 // auth-type switching (replaces the entire auth block — see
 // `GithubCredentialPatch` above).
 export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch): Promise<SetChannelTokensResult> {
@@ -1503,7 +1499,6 @@ export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch
       } else {
         const existingApp = isSameType && isObjectRecord(existingAuth) ? (existingAuth as Record<string, unknown>) : {}
         const appId = patch.auth.appId ?? (existingApp.appId as number | undefined)
-        const installationId = patch.auth.installationId ?? (existingApp.installationId as number | undefined)
         if (typeof appId !== 'number') {
           return {
             result: {
@@ -1518,7 +1513,6 @@ export async function setGithubSecrets(cwd: string, patch: GithubCredentialPatch
           type: 'app',
           appId,
           privateKey: rotatedSecret(existingApp.privateKey, patch.auth.privateKey),
-          ...(installationId !== undefined ? { installationId } : {}),
         }
       }
     }
