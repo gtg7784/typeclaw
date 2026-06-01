@@ -3,12 +3,10 @@ import { basename } from 'node:path'
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
+import { requestContainerRestart } from '@/agent/restart'
 import { writeRestartHandoff } from '@/agent/restart-handoff'
-import { send, sendHttp } from '@/hostd/client'
-import { containerSocketPath } from '@/hostd/paths'
 import type { Stream } from '@/stream'
 
-const ACK_TIMEOUT_MS = 5_000
 const EXIT_DELAY_MS = 500
 
 export type CreateRestartToolOptions = {
@@ -80,9 +78,6 @@ export function createRestartTool({
   originatingSessionFile,
 }: CreateRestartToolOptions) {
   const doExit = exit ?? ((code: number) => process.exit(code))
-  const httpUrl = hostdUrl ?? process.env.TYPECLAW_HOSTD_URL
-  const ackBudget = ackTimeoutMs ?? ACK_TIMEOUT_MS
-  const httpToken = hostdToken ?? process.env.TYPECLAW_HOSTD_TOKEN
 
   return defineTool({
     name: 'restart',
@@ -109,15 +104,18 @@ export function createRestartTool({
     }),
     async execute(_toolCallId, params) {
       const build = params.build === true
-      const request = { kind: 'restart' as const, containerName, build }
-      const reply =
-        httpUrl && httpToken
-          ? await sendHttp(request, { timeoutMs: ackBudget, url: httpUrl, token: httpToken })
-          : await send(request, { timeoutMs: ackBudget, socket: socketPath ?? containerSocketPath() })
-      if (!reply.ok) {
-        const details: RestartToolDetails = { ok: false, containerName, reason: reply.reason }
+      const result = await requestContainerRestart({
+        containerName,
+        build,
+        ...(socketPath !== undefined ? { socketPath } : {}),
+        ...(hostdUrl !== undefined ? { hostdUrl } : {}),
+        ...(hostdToken !== undefined ? { hostdToken } : {}),
+        ...(ackTimeoutMs !== undefined ? { ackTimeoutMs } : {}),
+      })
+      if (!result.ok) {
+        const details: RestartToolDetails = { ok: false, containerName, reason: result.reason }
         return {
-          content: [{ type: 'text' as const, text: `restart denied: ${reply.reason}` }],
+          content: [{ type: 'text' as const, text: `restart denied: ${result.reason}` }],
           details,
         }
       }
@@ -127,7 +125,7 @@ export function createRestartTool({
       // synchronous (broker.ts deliver()) and SessionManager.appendCustomMessageEntry
       // does a synchronous JSONL write, so the fan-out completes inside this
       // tick — well before the EXIT_DELAY_MS timer fires.
-      const restartedAt = new Date().toISOString()
+      const restartedAt = result.restartedAt
       const broadcast: ContainerRestartingBroadcast = {
         kind: 'container-restarting',
         restartedAt,
