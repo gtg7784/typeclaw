@@ -47,13 +47,23 @@ export async function requestContainerRestart({
   if (!reply.ok) return { ok: false, containerName, reason: reply.reason }
 
   const restartTimestamp = restartedAt ?? new Date().toISOString()
+  // Post-ACK: hostd has committed the restart, so a handoff-write failure must
+  // never demote it to a failure — that would render a false error in the TUI
+  // and swallow the accepted response. The handoff is a best-effort resume hint
+  // only; a missing one just cold-starts the rebooted container without the
+  // "I'm back" greeting. writeRestartHandoff swallows its own errors today, but
+  // guard here too so this contract survives the writer being changed later.
   if (agentDir !== undefined && originatingSessionId !== undefined && originatingSessionFile !== undefined) {
-    await writeRestartHandoff(agentDir, {
-      schemaVersion: 1,
-      restartedAt: restartTimestamp,
-      originatingSessionId,
-      originatingSessionFile: basename(originatingSessionFile),
-    })
+    try {
+      await writeRestartHandoff(agentDir, {
+        schemaVersion: 1,
+        restartedAt: restartTimestamp,
+        originatingSessionId,
+        originatingSessionFile: basename(originatingSessionFile),
+      })
+    } catch {
+      // intentional swallow — see the post-ACK rationale above
+    }
   }
 
   return { ok: true, containerName, restartedAt: restartTimestamp }

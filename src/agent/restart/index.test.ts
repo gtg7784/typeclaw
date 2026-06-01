@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -123,6 +123,34 @@ describe('requestContainerRestart', () => {
       originatingSessionId: 'ses-origin',
       originatingSessionFile: 'ses-origin.jsonl',
     })
+  })
+
+  test('still succeeds when the handoff write fails after hostd accepts', async () => {
+    // given: hostd has accepted, but the handoff target is unwritable because a
+    // regular file occupies the agent dir, so mkdir of `.typeclaw` will throw
+    server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ ok: true, result: { containerName: 'coder', scheduled: true } })
+      },
+    })
+    const fileAsAgentDir = join(agentDir, 'not-a-dir')
+    await writeFile(fileAsAgentDir, 'x', 'utf8')
+
+    // when
+    const result = await requestContainerRestart({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      hostdToken: 'secret',
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      agentDir: fileAsAgentDir,
+      originatingSessionId: 'ses-origin',
+      originatingSessionFile: '/tmp/sessions/ses-origin.jsonl',
+      restartedAt: '2026-01-02T03:04:05.000Z',
+    })
+
+    // then: the already-committed restart is not demoted to a failure
+    expect(result).toEqual({ ok: true, containerName: 'coder', restartedAt: '2026-01-02T03:04:05.000Z' })
   })
 
   test('forwards build:true in the RPC body', async () => {
