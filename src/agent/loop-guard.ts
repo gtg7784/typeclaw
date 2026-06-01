@@ -31,10 +31,24 @@ export const WINDOW_SOFT_WARN = 4
 export const WINDOW_HARD_BLOCK = 6
 
 // Tools whose first path-like argument identifies the target. Their windowed
-// signature drops numeric range args so paging one file does not masquerade as
-// progress. Non-path tools keep their full argument signature.
-const PATH_COARSENED_TOOLS = new Set(['read', 'write', 'edit', 'grep', 'ls', 'find', 'glob'])
+// signature keys on that path alone so paging one file with drifting
+// offset/limit collapses to a single signature. Two classes, because the
+// builtins differ in whether the path is required:
+//
+//   - REQUIRED-path tools (read/write/edit): path is mandatory. Coarsen only
+//     when a path key is present; an absent path is malformed input, not a
+//     default, so we must NOT collapse such calls to a shared target.
+//   - DEFAULT-path tools (grep/find/ls): path is OPTIONAL and defaults to the
+//     cwd ("."). Omitting the path and varying only non-target args (pattern,
+//     limit) still hits the same directory, so an omitted/empty path coarsens
+//     to `${tool}#path:.` — otherwise those calls would evade the detector.
+//
+// `glob` is intentionally absent: pi-coding-agent has no `glob` builtin (the
+// glob-pattern arg lives inside grep/find), so listing it here matched nothing.
+const REQUIRED_PATH_TOOLS = new Set(['read', 'write', 'edit'])
+const DEFAULT_PATH_TOOLS = new Set(['grep', 'find', 'ls'])
 const PATH_ARG_KEYS = ['path', 'file', 'filePath', 'filename']
+const DEFAULT_PATH_TARGET = '.'
 
 const MAX_SESSIONS = 256
 
@@ -248,15 +262,21 @@ function makeCallSignature(tool: string, args: unknown): string {
 }
 
 // Coarsened signature for windowed detection: path-bearing tools key on their
-// target path alone so re-reading one file with drifting offset/limit collapses
-// to a single signature. All other tools fall back to the exact signature.
+// target path alone so re-reading one target with drifting non-path args
+// collapses to a single signature. All other tools fall back to the exact
+// signature.
 function makeWindowSignature(tool: string, args: unknown): string {
-  if (PATH_COARSENED_TOOLS.has(tool) && args !== null && typeof args === 'object') {
+  const isRequiredPath = REQUIRED_PATH_TOOLS.has(tool)
+  const isDefaultPath = DEFAULT_PATH_TOOLS.has(tool)
+  if ((isRequiredPath || isDefaultPath) && args !== null && typeof args === 'object') {
     const record = args as Record<string, unknown>
     for (const key of PATH_ARG_KEYS) {
       const value = record[key]
       if (typeof value === 'string' && value.length > 0) return `${tool}#path:${value}`
     }
+    // No explicit path. For default-path tools the effective target is the cwd,
+    // so coarsen to it; for required-path tools we leave the call uncoarsened.
+    if (isDefaultPath) return `${tool}#path:${DEFAULT_PATH_TARGET}`
   }
   return makeCallSignature(tool, args)
 }

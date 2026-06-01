@@ -290,4 +290,69 @@ describe('createLoopGuard — windowed multi-signature detection', () => {
     expect(() => createLoopGuard({ windowSize: 1 })).toThrow()
     expect(() => createLoopGuard({ windowSize: 4, windowHardBlock: 5 })).toThrow()
   })
+
+  // grep/find/ls have an OPTIONAL path that defaults to cwd. Omitting it and
+  // varying only non-target args (pattern/limit) still hits the same directory,
+  // so those calls must coarsen to a single default-target signature.
+  for (const tool of ['grep', 'find', 'ls'] as const) {
+    test(`coarsens omitted-path ${tool} calls to the default target so non-target args cannot evade the guard`, () => {
+      const guard = createLoopGuard({
+        ...noConsecutive,
+        windowSize: 16,
+        windowSoftWarn: 4,
+        windowHardBlock: 6,
+      })
+      const varyingArgs = [
+        { pattern: 'a*' },
+        { pattern: 'b*', limit: 10 },
+        { pattern: 'c*' },
+        { pattern: 'd*', limit: 50 },
+        { pattern: 'e*' },
+        { pattern: 'f*', limit: 5 },
+      ]
+      let last: ReturnType<typeof guard.check> = { kind: 'ok' }
+      for (const args of varyingArgs) last = guard.check('s1', tool, args)
+      expect(last.kind).toBe('block')
+      if (last.kind === 'block') expect(last.reason).toBe('windowed')
+    })
+
+    test(`treats an empty-string path for ${tool} the same as an omitted path`, () => {
+      const guard = createLoopGuard({
+        ...noConsecutive,
+        windowSize: 16,
+        windowSoftWarn: 4,
+        windowHardBlock: 6,
+      })
+      let last: ReturnType<typeof guard.check> = { kind: 'ok' }
+      for (let i = 0; i < 6; i++) last = guard.check('s1', tool, { path: '', pattern: `p${i}*` })
+      expect(last.kind).toBe('block')
+    })
+
+    test(`does not flag omitted-path ${tool} calls against genuinely distinct explicit targets`, () => {
+      const guard = createLoopGuard({
+        ...noConsecutive,
+        windowSize: 16,
+        windowSoftWarn: 4,
+        windowHardBlock: 6,
+      })
+      const dirs = ['src', 'test', 'docs', 'scripts', 'lib', 'bin']
+      for (const path of dirs) {
+        expect(guard.check('s1', tool, { path, pattern: 'x*' }).kind).toBe('ok')
+      }
+    })
+  }
+
+  // read/write/edit require an explicit path, so absence is malformed input, not
+  // a cwd default — they must NOT be coarsened to a shared default target.
+  test('does not coarsen required-path tools (read) to a default target', () => {
+    const guard = createLoopGuard({
+      ...noConsecutive,
+      windowSize: 16,
+      windowSoftWarn: 4,
+      windowHardBlock: 6,
+    })
+    for (let i = 0; i < 8; i++) {
+      expect(guard.check('s1', 'read', { offset: i, limit: 100 }).kind).toBe('ok')
+    }
+  })
 })
