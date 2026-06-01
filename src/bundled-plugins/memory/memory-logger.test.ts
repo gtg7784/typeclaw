@@ -224,6 +224,26 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toMatch(/never write the same watermark id|advance the watermark|move forward each run/)
   })
+
+  test('defines an explicit stop trigger for when reads are exhausted', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/end of (the )?(file|transcript)|reached the end|no (more|further) (content|lines|entries)/)
+    expect(lower).toMatch(/stop reading|do not (call )?`?read`? again|stop calling read/)
+  })
+
+  test('forbids re-reading the same offset when a read returns nothing new', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/empty|nothing new|no new (content|lines|entries)|same (chunk|content|slice|offset)/)
+    expect(lower).toMatch(/do not re-?read|do not retry|do not repeat the (same )?read|never re-?read/)
+  })
+
+  test('bounds total read calls so a finite transcript cannot loop indefinitely', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/find_entry.*totalLines|totallines.*find_entry|total line count/)
+    expect(lower).toMatch(
+      /once you (have )?(read|reach).*totallines|when .*offset.*exceed|past.*totallines|beyond.*last line/,
+    )
+  })
 })
 
 describe('memoryLoggerSubagent', () => {

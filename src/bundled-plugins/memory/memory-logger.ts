@@ -81,8 +81,10 @@ Session transcripts are JSONL files where each line is an entry with an \`id\` f
 Typical flow with a watermark:
 
 1. \`find_entry(path=<transcript>, entryId=<watermark>)\` → returns \`line=N, totalLines=T, offset=N+1\`.
-2. \`read(path=<transcript>, offset=N+1)\` → returns the chunk starting AT the first unread entry. Repeat with the next offset until the read tool's continuation notice stops appearing.
+2. \`read(path=<transcript>, offset=N+1)\` → returns the chunk starting AT the first unread entry. Repeat with the next offset until you reach the end of the file. \`find_entry\` already told you \`totalLines=T\`: once a \`read\` has returned line T (or the read tool reports no continuation), you have reached the end of the transcript. Stop reading.
 3. As you read, track the most recent \`id\` you see. That is your new watermark value — pass it as \`latestEntryId\` on the final \`append\` call, or to the watermark-advance tool when there are zero fragments.
+
+**Reading is bounded — a finite transcript takes a finite number of reads.** \`find_entry\` gives you \`totalLines=T\` up front, so you always know the last line. Each \`read\` returns a slice and an offset to continue; advance the offset forward each time. Once you have read line T, or a \`read\` returns no new content (an empty chunk, or the same slice you already saw, or no continuation offset), you are at the end. Do NOT re-read the same offset, and do NOT keep calling \`read\` hoping more will appear — nothing more will. A read that returns nothing new is the end-of-file signal, not a transient error to retry. Re-reading past the end produces no new information and wastes the entire run; treat the first no-new-content read as "done reading" and move to your fragment decision.
 
 Never write the same watermark id you were given as input. If the transcript has no new entries past the watermark, evaluate the entries you can see, then advance the watermark to the latest \`id\` in the transcript (which is on line \`totalLines\` from \`find_entry\`'s reply). The whole point of the watermark is to move forward each run.
 
@@ -202,7 +204,9 @@ When you evaluated the transcript but found nothing worth a fragment, call the w
 
 # Stopping
 
-When you're done, simply stop. There is no completion message to emit.`
+You are done the moment BOTH are true: (1) you have read to the end of the transcript (reached \`totalLines\` from \`find_entry\`, or a \`read\` returned no new content), and (2) you have either written your fragment(s) with the final \`latestEntryId\`, or advanced the watermark for the zero-fragment case. When both hold, simply stop. There is no completion message to emit.
+
+Do not loop. If you notice you have called \`read\` more than a handful of times on the same file, or a \`read\` returned nothing new, you are already at the end — stop reading immediately and proceed to your fragment decision. A transcript has a fixed length; re-reading it cannot surface content that is not there. The single most expensive failure mode for this subagent is re-reading the same file in a cycle instead of recognizing end-of-file and stopping.`
 
 function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, watermark: string | null): string {
   const lines: string[] = [
