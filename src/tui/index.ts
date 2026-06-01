@@ -11,19 +11,25 @@ export type TerminalFactory = () => Terminal
 
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 30_000
 
-// Bare slash-command names (no leading `/`) the TUI intercepts client-side and
-// turns into a clean process exit. The hatching ritual tells the agent to point
-// users at `/quit` (see src/init/hatching.ts); without an intercept the literal
-// text would be shipped to the LLM as a chat message. Grammar (case-insensitive,
-// whitespace-tolerant, `//foo` escapes to a literal prompt) comes from
-// `parseCommand` in src/commands so channel and TUI slash commands stay
-// consistent. Arguments after the name disqualify the match: `/quit me a story`
-// is a real prompt, not a command.
+// Bare slash-command names (no leading `/`) the TUI intercepts client-side.
+// The hatching ritual tells the agent to point users at `/quit` (see
+// src/init/hatching.ts); without an intercept the literal text would be shipped
+// to the LLM as a chat message. Grammar (case-insensitive, whitespace-tolerant,
+// `//foo` escapes to a literal prompt) comes from `parseCommand` in
+// src/commands so channel and TUI slash commands stay consistent. Arguments
+// after the name disqualify the match: `/quit me a story` is a real prompt, not
+// a command.
 const QUIT_COMMAND_NAMES: ReadonlySet<string> = new Set(['quit', 'exit'])
+const TUI_COMMAND_NAMES: ReadonlySet<TuiCommandName> = new Set(['quit', 'reload', 'restart'])
 
-function isQuitCommand(text: string): boolean {
+type TuiCommandName = 'quit' | 'reload' | 'restart'
+
+function parseBareTuiCommand(text: string): TuiCommandName | null {
   const parsed = parseCommand(text)
-  return parsed !== null && parsed.args.length === 0 && QUIT_COMMAND_NAMES.has(parsed.name)
+  if (parsed === null || parsed.args.length > 0) return null
+  if (QUIT_COMMAND_NAMES.has(parsed.name)) return 'quit'
+  if (TUI_COMMAND_NAMES.has(parsed.name as TuiCommandName)) return parsed.name as TuiCommandName
+  return null
 }
 
 export type VersionMismatch = { expected: string; actual: string }
@@ -203,6 +209,25 @@ export function createTui({
           updateQueuePanel(msg.pending)
           break
         }
+        case 'reload_result': {
+          for (const result of msg.results) {
+            const text = result.ok
+              ? `${colors.green('●')} ${colors.bold(`[${result.scope}]`)} ${result.summary}`
+              : `${colors.red('●')} ${colors.bold(`[${result.scope}]`)} ${result.reason}`
+            appendHistory(new Text(text, 0, 0))
+          }
+          tui.requestRender()
+          break
+        }
+        case 'restart_result': {
+          const text =
+            msg.status === 'accepted'
+              ? colors.green(colors.dim(msg.message ?? 'restart scheduled; reconnecting when the new container is up'))
+              : colors.red(`restart failed: ${msg.error ?? 'unknown error'}`)
+          appendHistory(new Text(text, 0, 0))
+          tui.requestRender()
+          break
+        }
       }
     })
 
@@ -220,6 +245,25 @@ export function createTui({
       return new Promise<void>((resolve) => {
         onReplyDone = resolve
       })
+    }
+
+    function runTuiCommand(command: TuiCommandName): boolean {
+      if (command === 'quit') {
+        shutdown(0)
+        return true
+      }
+      if (command === 'reload') {
+        client.send({ type: 'reload' })
+        appendHistory(new Text(colors.dim('reloading...'), 0, 0))
+        tui.requestRender()
+        return true
+      }
+      client.send({ type: 'restart' })
+      appendHistory(
+        new Text(colors.yellow(colors.dim('restart requested... reconnecting when the new container is up')), 0, 0),
+      )
+      tui.requestRender()
+      return true
     }
 
     // Esc aborts an in-flight reply. The Editor does not bind Esc, so a
@@ -252,8 +296,13 @@ export function createTui({
 
     editor.onSubmit = (text) => {
       if (text.trim().length === 0) return
-      if (isQuitCommand(text)) {
-        shutdown(0)
+      const command = parseBareTuiCommand(text)
+      if (command !== null) {
+        if (command !== 'quit') {
+          editor.setText('')
+          editor.addToHistory(text)
+        }
+        runTuiCommand(command)
         return
       }
       editor.setText('')
@@ -275,13 +324,16 @@ export function createTui({
 
     if (initialPrompt) {
       // initialPrompt bypasses editor.onSubmit, so the quit intercept above
-      // would never run. Guard the same way so `typeclaw tui /quit` exits
-      // instead of leaking the command into the agent's chat context.
-      if (isQuitCommand(initialPrompt)) {
-        shutdown(0)
-        return { lostConnection: false }
+      // would never run. Guard the same way so `typeclaw tui /quit` exits —
+      // and `/reload` / `/restart` stay websocket control frames — instead of
+      // leaking the command into the agent's chat context.
+      const command = parseBareTuiCommand(initialPrompt)
+      if (command !== null) {
+        runTuiCommand(command)
+        if (command === 'quit') return { lostConnection: false }
+      } else {
+        await send(initialPrompt)
       }
-      await send(initialPrompt)
     }
 
     const lostConnection = await closed

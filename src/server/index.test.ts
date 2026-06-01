@@ -130,6 +130,7 @@ async function startWithSession(
     commandRunnerFactory?: (outbound: CommandOutbound) => CommandRunner
     tunnelManager?: TunnelManager
     runtimeVersion?: string
+    containerName?: string
   } = {},
 ): Promise<{ url: string }> {
   const pluginRuntime =
@@ -147,6 +148,7 @@ async function startWithSession(
     ...(extra.commandRunnerFactory ? { commandRunnerFactory: extra.commandRunnerFactory } : {}),
     ...(extra.tunnelManager ? { tunnelManager: extra.tunnelManager } : {}),
     ...(extra.runtimeVersion !== undefined ? { runtimeVersion: extra.runtimeVersion } : {}),
+    ...(extra.containerName !== undefined ? { containerName: extra.containerName } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
@@ -434,6 +436,72 @@ describe('createServer abort handling (no stream — fallback path)', () => {
     await waitForState(() => session.abortCalls > 0)
     expect(session.abortCalls).toBe(1)
     ws.close()
+  })
+})
+
+describe('createServer restart handling', () => {
+  test('reports restart unavailable when no container name is configured', async () => {
+    // given
+    const session = createFakeSession()
+    const { url } = await startWithSession(session)
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.send(JSON.stringify({ type: 'restart' }))
+
+    // then
+    await expect(waitFor((m) => m.type === 'restart_result')).resolves.toEqual({
+      type: 'restart_result',
+      status: 'failed',
+      error: 'restart unavailable: no container name configured',
+    })
+    ws.close()
+  })
+
+  test('accepts restart when hostd ACKs the container restart RPC', async () => {
+    // given
+    const requests: Array<{ auth: string | null; body: unknown }> = []
+    const hostd = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        requests.push({ auth: req.headers.get('authorization'), body: await req.json() })
+        return Response.json({ ok: true, result: { containerName: 'coder', scheduled: true } })
+      },
+    })
+    const oldUrl = process.env.TYPECLAW_HOSTD_URL
+    const oldToken = process.env.TYPECLAW_HOSTD_TOKEN
+    process.env.TYPECLAW_HOSTD_URL = `http://127.0.0.1:${hostd.port}`
+    process.env.TYPECLAW_HOSTD_TOKEN = 'secret'
+    try {
+      const session = createFakeSession()
+      const { url } = await startWithSession(session, { containerName: 'coder' })
+      const { ws, waitFor } = await connect(url)
+      await waitFor((m) => m.type === 'connected')
+
+      // when
+      ws.send(JSON.stringify({ type: 'restart' }))
+
+      // then
+      await expect(waitFor((m) => m.type === 'restart_result')).resolves.toEqual({
+        type: 'restart_result',
+        status: 'accepted',
+        message: 'restart scheduled; reconnecting when the new container is up',
+      })
+      expect(requests).toEqual([
+        {
+          auth: 'Bearer secret',
+          body: { kind: 'restart', containerName: 'coder', build: false },
+        },
+      ])
+      ws.close()
+    } finally {
+      if (oldUrl === undefined) delete process.env.TYPECLAW_HOSTD_URL
+      else process.env.TYPECLAW_HOSTD_URL = oldUrl
+      if (oldToken === undefined) delete process.env.TYPECLAW_HOSTD_TOKEN
+      else process.env.TYPECLAW_HOSTD_TOKEN = oldToken
+      hostd.stop(true)
+    }
   })
 })
 

@@ -130,6 +130,7 @@ export type InspectServerMessage =
 export type ClientMessage =
   | { type: 'prompt'; text: string; delivery?: PromptDelivery }
   | { type: 'reload'; scope?: string }
+  | { type: 'restart' }
   | { type: 'abort' }
   | { type: 'queue_cancel'; messageId: string }
   | { type: 'doctor'; requestId: DoctorRequestId }
@@ -213,6 +214,7 @@ export type ServerMessage =
   | { type: 'done' }
   | { type: 'error'; message: string }
   | { type: 'reload_result'; results: ReloadResultPayload[] }
+  | { type: 'restart_result'; status: 'accepted' | 'failed'; message?: string; error?: string }
   | { type: 'notification'; payload: unknown; replyTo?: string; meta?: Record<string, string> }
   | { type: 'queue_state'; pending: QueueStateItem[] }
   | { type: 'prompt_started'; messageId: string; text: string }

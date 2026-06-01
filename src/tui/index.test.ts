@@ -480,6 +480,176 @@ describe('createTui', () => {
     expect(client.sent).toEqual([])
   })
 
+  test('/reload sends a reload frame and renders reload results without exiting', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-slash-reload' })
+    let exitCode: number | undefined
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: (code) => {
+        exitCode = code
+      },
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    for (const ch of '/reload') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+    client.emit({
+      type: 'reload_result',
+      results: [
+        { scope: 'cron', ok: true, summary: 'loaded 1 job' },
+        { scope: 'channels', ok: false, reason: 'bad config' },
+      ],
+    })
+    await flush()
+
+    // then
+    expect(exitCode).toBeUndefined()
+    expect(client.sent).toEqual([{ type: 'reload' }])
+    expect(client.sent.some((msg) => msg.type === 'prompt')).toBe(false)
+    const visible = terminal.visible()
+    expect(visible).toContain('reloading...')
+    expect(visible).toContain('● [cron] loaded 1 job')
+    expect(visible).toContain('● [channels] bad config')
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('/reload with args and //reload are sent as normal prompts', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-slash-reload-literal' })
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    for (const ch of '/reload with args') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+    for (const ch of '//reload') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+
+    // then
+    expect(client.sent).toContainEqual({ type: 'prompt', text: '/reload with args' })
+    expect(client.sent).toContainEqual({ type: 'prompt', text: '//reload' })
+    expect(client.sent.some((msg) => msg.type === 'reload')).toBe(false)
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('/restart sends a restart frame and renders accepted and failed results without exiting', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-slash-restart' })
+    let exitCode: number | undefined
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+      exit: (code) => {
+        exitCode = code
+      },
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    for (const ch of '/restart') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+    client.emit({
+      type: 'restart_result',
+      status: 'accepted',
+      message: 'restart scheduled; reconnecting when the new container is up',
+    })
+    await flush()
+    client.emit({ type: 'restart_result', status: 'failed', error: 'denied' })
+    await flush()
+
+    // then
+    expect(exitCode).toBeUndefined()
+    expect(client.sent).toEqual([{ type: 'restart' }])
+    expect(client.sent.some((msg) => msg.type === 'prompt')).toBe(false)
+    const visible = terminal.visible()
+    expect(visible).toContain('restart requested... reconnecting when the new container is up')
+    expect(visible).toContain('restart scheduled; reconnecting when the new container is up')
+    expect(visible).toContain('restart failed: denied')
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('reload and restart command matching is case-insensitive and tolerates surrounding whitespace', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-slash-reload-restart-case' })
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // when
+    for (const ch of '  /RELOAD  ') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+    for (const ch of '  /ReStArT  ') terminal.feed(ch)
+    terminal.feed('\r')
+    await flush()
+
+    // then
+    expect(client.sent).toEqual([{ type: 'reload' }, { type: 'restart' }])
+
+    client.triggerClose()
+    await runPromise
+  })
+
+  test('initialPrompt of /restart sends a restart frame instead of a prompt', async () => {
+    // given
+    const terminal = new FakeTerminal()
+    const client = fakeClient()
+    client.emit({ type: 'connected', sessionId: 'sid-initial-restart' })
+
+    const tui = createTui({
+      url: 'ws://ignored',
+      initialPrompt: '/restart',
+      createClient: async () => client,
+      createTerminal: () => terminal,
+    })
+    const runPromise = tui.run()
+    await flush()
+
+    // then
+    expect(client.sent).toEqual([{ type: 'restart' }])
+
+    client.triggerClose()
+    await runPromise
+  })
+
   test('does not send abort when Esc is pressed with no reply in flight', async () => {
     // given: connect, finish initial prompt, then idle
     const terminal = new FakeTerminal()
