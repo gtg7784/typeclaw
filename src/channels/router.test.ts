@@ -39,8 +39,10 @@ import type {
   FetchHistoryArgs,
   HistoryCallback,
   InboundMessage,
+  RemoveReactionRequest,
   OutboundMessage,
   ReactionRequest,
+  ReactionRef,
   SendResult,
 } from './types'
 
@@ -1436,6 +1438,207 @@ describe('ChannelRouter auto-react on engage', () => {
     })
 
     expect(result).toEqual({ ok: false, error: 'reaction api exploded', code: 'transient' })
+  })
+})
+
+describe('ChannelRouter drop-eyes-after-reply', () => {
+  const TARGET_REF: ReactionRef = { adapter: 'discord-bot', value: 'msg-ref' }
+  const INSTANCE_REF: ReactionRef = { adapter: 'discord-bot', value: 'reaction-instance' }
+
+  test('removes the engage-added eyes reaction after a successful reply', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const removed: RemoveReactionRequest[] = []
+    router.registerReaction('discord-bot', async () => ({ ok: true, reactionRef: INSTANCE_REF }))
+    router.registerRemoveReaction('discord-bot', async (req) => {
+      removed.push(req)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: TARGET_REF }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    await waitFor(() => removed.length === 1)
+    expect(removed[0]).toMatchObject({ adapter: 'discord-bot', chat: 'c1', reactionRef: INSTANCE_REF })
+  })
+
+  test('removes every engage reaction when multiple inbounds coalesce into one turn', async () => {
+    // given two inbounds debounced into a single turn, each with its own :eyes:
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const instanceFor: Record<string, ReactionRef> = {
+      'msg-a': { adapter: 'discord-bot', value: 'instance-a' },
+      'msg-b': { adapter: 'discord-bot', value: 'instance-b' },
+    }
+    const removed: RemoveReactionRequest[] = []
+    router.registerReaction('discord-bot', async (req) => ({
+      ok: true,
+      reactionRef: instanceFor[req.reactionRef.value]!,
+    }))
+    router.registerRemoveReaction('discord-bot', async (req) => {
+      removed.push(req)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    // when both arrive before the debounce flush, then the agent replies once
+    await router.route(inbound({ reactionRef: { adapter: 'discord-bot', value: 'msg-a' } }))
+    await router.route(inbound({ reactionRef: { adapter: 'discord-bot', value: 'msg-b' } }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then both engage reactions are removed, not just the last inbound's
+    await waitFor(() => removed.length === 2)
+    expect(removed.map((r) => r.reactionRef.value).sort()).toEqual(['instance-a', 'instance-b'])
+  })
+
+  test('keeps the engage reaction when the turn sends no reply', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const removed: RemoveReactionRequest[] = []
+    router.registerReaction('discord-bot', async () => ({ ok: true, reactionRef: INSTANCE_REF }))
+    router.registerRemoveReaction('discord-bot', async (req) => {
+      removed.push(req)
+      return { ok: true }
+    })
+
+    await router.route(inbound({ reactionRef: TARGET_REF }))
+    sessions[0]!.onPrompt = () => {
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(removed).toHaveLength(0)
+  })
+
+  test('orders removal after the in-flight add resolves', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const removed: RemoveReactionRequest[] = []
+    let resolveAdd: ((ref: ReactionRef) => void) | undefined
+    router.registerReaction(
+      'discord-bot',
+      async () =>
+        await new Promise((resolve: (result: { ok: true; reactionRef: ReactionRef }) => void) => {
+          resolveAdd = (ref) => resolve({ ok: true, reactionRef: ref })
+        }),
+    )
+    router.registerRemoveReaction('discord-bot', async (req) => {
+      removed.push(req)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: TARGET_REF }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+    expect(removed).toHaveLength(0)
+
+    resolveAdd!(INSTANCE_REF)
+    await waitFor(() => removed.length === 1)
+    expect(removed[0]!.reactionRef).toEqual(INSTANCE_REF)
+  })
+
+  test('does not remove when add succeeds without a removable instance ref', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    let removed = false
+    router.registerReaction('discord-bot', async () => ({ ok: true }))
+    router.registerRemoveReaction('discord-bot', async () => {
+      removed = true
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: TARGET_REF }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(removed).toBe(false)
+  })
+
+  test('does not remove when add fails unsupported', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    let removed = false
+    router.registerReaction('discord-bot', async () => ({ ok: false, error: 'nope', code: 'unsupported' }))
+    router.registerRemoveReaction('discord-bot', async () => {
+      removed = true
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: TARGET_REF }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(removed).toBe(false)
+  })
+
+  test('treats not-found and unsupported removal failures as non-noisy', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const { router, sessions } = makeRouter(dir, { logs })
+    router.registerReaction('discord-bot', async () => ({ ok: true, reactionRef: INSTANCE_REF }))
+    router.registerRemoveReaction('discord-bot', async () => ({ ok: false, error: 'already gone', code: 'not-found' }))
+    router.registerRemoveReaction('discord-bot', async () => ({ ok: false, error: 'unsupported', code: 'unsupported' }))
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    await router.route(inbound({ reactionRef: TARGET_REF }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+    await waitFor(() => logs.some((m) => m.includes('prompted elapsed_ms')))
+
+    expect(logs.some((m) => m.includes('engage-unreact'))).toBe(false)
+  })
+
+  test('removeReaction dispatcher mirrors react() unsupported and transient behavior', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const noCallback = await router.removeReaction({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      reactionRef: INSTANCE_REF,
+    })
+    expect(noCallback).toEqual({
+      ok: false,
+      error: 'adapter "discord-bot" does not support reaction removal',
+      code: 'unsupported',
+    })
+
+    router.registerRemoveReaction('discord-bot', async () => {
+      throw new Error('remove api exploded')
+    })
+    const mismatch = await router.removeReaction({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      reactionRef: { adapter: 'slack-bot', value: 'x' },
+    })
+    expect(mismatch).toEqual({ ok: false, error: 'reaction ref adapter mismatch', code: 'unsupported' })
+
+    const thrown = await router.removeReaction({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      reactionRef: INSTANCE_REF,
+    })
+    expect(thrown).toEqual({ ok: false, error: 'remove api exploded', code: 'transient' })
   })
 })
 

@@ -132,11 +132,26 @@ export type ReactionRequest = {
   emoji: string
 }
 
+export type RemoveReactionRequest = {
+  adapter: AdapterId
+  workspace: string
+  chat: string
+  thread?: string | null
+  // Per-reaction-instance ref returned by ReactionResult.reactionRef from the
+  // add request, not the inbound message target ref used by ReactionRequest.
+  reactionRef: ReactionRef
+}
+
 export type ReactionErrorCode = 'permission-denied' | 'not-found' | 'unsupported' | 'rate-limited' | 'transient'
 
-export type ReactionResult = { ok: true } | { ok: false; error: string; code?: ReactionErrorCode }
+export type ReactionResult =
+  // Optional success ref identifies THIS created reaction instance for later
+  // removal, not the original message target. Adapters that cannot remove omit it.
+  { ok: true; reactionRef?: ReactionRef } | { ok: false; error: string; code?: ReactionErrorCode }
 
 export type ReactionCallback = (req: ReactionRequest) => Promise<ReactionResult>
+
+export type RemoveReactionCallback = (req: RemoveReactionRequest) => Promise<ReactionResult>
 
 // File on disk that the agent wants to attach to an outbound message. The
 // agent runs inside a container with /agent bind-mounted from the host;

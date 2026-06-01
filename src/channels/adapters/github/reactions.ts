@@ -1,4 +1,10 @@
-import type { ReactionCallback, ReactionErrorCode, ReactionRef, ReactionResult } from '@/channels/types'
+import type {
+  RemoveReactionCallback,
+  ReactionCallback,
+  ReactionErrorCode,
+  ReactionRef,
+  ReactionResult,
+} from '@/channels/types'
 
 import type { GithubAuthContext } from './auth'
 import { GITHUB_API_BASE, githubJsonHeaders } from './auth-pat'
@@ -21,6 +27,11 @@ export type GithubReactionTarget =
   | { kind: 'issue-comment'; owner: string; repo: string; commentId: number }
   | { kind: 'pr-review-comment'; owner: string; repo: string; commentId: number }
 
+export type GithubReactionRemovalTarget =
+  | { kind: 'issue'; owner: string; repo: string; issueNumber: number; reactionId: number }
+  | { kind: 'issue-comment'; owner: string; repo: string; commentId: number; reactionId: number }
+  | { kind: 'pr-review-comment'; owner: string; repo: string; commentId: number; reactionId: number }
+
 export function encodeGithubReactionRef(target: GithubReactionTarget): ReactionRef {
   return { adapter: 'github', value: JSON.stringify(target) }
 }
@@ -35,6 +46,7 @@ export function decodeGithubReactionRef(ref: ReactionRef): GithubReactionTarget 
   }
   if (typeof parsed !== 'object' || parsed === null) return null
   const t = parsed as Record<string, unknown>
+  if (t.op !== undefined) return null
   const owner = typeof t.owner === 'string' ? t.owner : null
   const repo = typeof t.repo === 'string' ? t.repo : null
   if (owner === null || repo === null) return null
@@ -43,6 +55,32 @@ export function decodeGithubReactionRef(ref: ReactionRef): GithubReactionTarget 
   }
   if ((t.kind === 'issue-comment' || t.kind === 'pr-review-comment') && typeof t.commentId === 'number') {
     return { kind: t.kind, owner, repo, commentId: t.commentId }
+  }
+  return null
+}
+
+export function encodeGithubRemovalRef(target: GithubReactionRemovalTarget): ReactionRef {
+  return { adapter: 'github', value: JSON.stringify({ op: 'remove', ...target }) }
+}
+
+export function decodeGithubRemovalRef(ref: ReactionRef): GithubReactionRemovalTarget | null {
+  if (ref.adapter !== 'github') return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(ref.value)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const t = parsed as Record<string, unknown>
+  const owner = typeof t.owner === 'string' ? t.owner : null
+  const repo = typeof t.repo === 'string' ? t.repo : null
+  if (t.op !== 'remove' || owner === null || repo === null || typeof t.reactionId !== 'number') return null
+  if (t.kind === 'issue' && typeof t.issueNumber === 'number') {
+    return { kind: 'issue', owner, repo, issueNumber: t.issueNumber, reactionId: t.reactionId }
+  }
+  if ((t.kind === 'issue-comment' || t.kind === 'pr-review-comment') && typeof t.commentId === 'number') {
+    return { kind: t.kind, owner, repo, commentId: t.commentId, reactionId: t.reactionId }
   }
   return null
 }
@@ -82,8 +120,35 @@ export function createGithubReactionCallback(deps: {
     const endpoint = reactionEndpoint(target)
     const endpointKind: OutboundEndpointKind =
       target.kind === 'pr-review-comment' ? 'pr-review-comment-reaction' : 'issue-reaction'
-    return await postReaction(fetchImpl, await deps.token({ repoSlug: `${target.owner}/${target.repo}` }), endpoint, {
-      content,
+    return await postReaction(
+      fetchImpl,
+      await deps.token({ repoSlug: `${target.owner}/${target.repo}` }),
+      endpoint,
+      target,
+      {
+        content,
+        authType: deps.authType,
+        endpointKind,
+      },
+    )
+  }
+}
+
+export function createGithubRemoveReactionCallback(deps: {
+  token: (context?: GithubAuthContext) => Promise<string>
+  authType: GithubAuthType
+  fetchImpl?: typeof fetch
+}): RemoveReactionCallback {
+  const fetchImpl = deps.fetchImpl ?? fetch
+  return async (req): Promise<ReactionResult> => {
+    if (req.adapter !== 'github') return { ok: false, error: `unknown adapter: ${req.adapter}`, code: 'unsupported' }
+    const target = decodeGithubRemovalRef(req.reactionRef)
+    if (target === null) return { ok: false, error: 'unparseable github reaction removal ref', code: 'unsupported' }
+
+    const endpoint = removeReactionEndpoint(target)
+    const endpointKind: OutboundEndpointKind =
+      target.kind === 'pr-review-comment' ? 'pr-review-comment-reaction' : 'issue-reaction'
+    return await deleteReaction(fetchImpl, await deps.token({ repoSlug: `${target.owner}/${target.repo}` }), endpoint, {
       authType: deps.authType,
       endpointKind,
     })
@@ -102,10 +167,23 @@ function reactionEndpoint(target: GithubReactionTarget): string {
   }
 }
 
+function removeReactionEndpoint(target: GithubReactionRemovalTarget): string {
+  const base = `${GITHUB_API_BASE}/repos/${target.owner}/${target.repo}`
+  switch (target.kind) {
+    case 'issue':
+      return `${base}/issues/${target.issueNumber}/reactions/${target.reactionId}`
+    case 'issue-comment':
+      return `${base}/issues/comments/${target.commentId}/reactions/${target.reactionId}`
+    case 'pr-review-comment':
+      return `${base}/pulls/comments/${target.commentId}/reactions/${target.reactionId}`
+  }
+}
+
 async function postReaction(
   fetchImpl: typeof fetch,
   token: string,
   url: string,
+  target: GithubReactionTarget,
   options: { content: string; authType: GithubAuthType; endpointKind: OutboundEndpointKind },
 ): Promise<ReactionResult> {
   let response: Response
@@ -121,7 +199,11 @@ async function postReaction(
   // 201 = reaction created, 200 = the actor already left this same reaction.
   // Both are success: an :eyes: that's already there is the desired end state,
   // so a duplicate webhook delivery (or a retried engage) must not surface an error.
-  if (response.status === 200 || response.status === 201) return { ok: true }
+  if (response.status === 200 || response.status === 201) {
+    const reactionId = await readReactionId(response)
+    if (reactionId === null) return { ok: true }
+    return { ok: true, reactionRef: encodeGithubRemovalRef(removalTargetFor(target, reactionId)) }
+  }
   const text = await response.text().catch(() => '')
   const baseError = `GitHub API ${response.status}${text !== '' ? `: ${text}` : ''}`
   if (isOutboundPermissionDenial(response.status, text)) {
@@ -132,6 +214,58 @@ async function postReaction(
     }
   }
   return { ok: false, error: baseError, code: classifyStatus(response.status) }
+}
+
+async function deleteReaction(
+  fetchImpl: typeof fetch,
+  token: string,
+  url: string,
+  options: { authType: GithubAuthType; endpointKind: OutboundEndpointKind },
+): Promise<ReactionResult> {
+  let response: Response
+  try {
+    response = await fetchImpl(url, {
+      method: 'DELETE',
+      headers: githubJsonHeaders(token),
+    })
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err), code: 'transient' }
+  }
+  if (response.status === 204) return { ok: true }
+  const text = await response.text().catch(() => '')
+  const baseError = `GitHub API ${response.status}${text !== '' ? `: ${text}` : ''}`
+  if (isOutboundPermissionDenial(response.status, text)) {
+    return {
+      ok: false,
+      error: `${baseError}${buildOutboundPermissionGuidance({ authType: options.authType, endpointKind: options.endpointKind })}`,
+      code: 'permission-denied',
+    }
+  }
+  return { ok: false, error: baseError, code: classifyStatus(response.status) }
+}
+
+function removalTargetFor(target: GithubReactionTarget, reactionId: number): GithubReactionRemovalTarget {
+  switch (target.kind) {
+    case 'issue':
+      return { kind: 'issue', owner: target.owner, repo: target.repo, issueNumber: target.issueNumber, reactionId }
+    case 'issue-comment':
+      return { kind: 'issue-comment', owner: target.owner, repo: target.repo, commentId: target.commentId, reactionId }
+    case 'pr-review-comment':
+      return {
+        kind: 'pr-review-comment',
+        owner: target.owner,
+        repo: target.repo,
+        commentId: target.commentId,
+        reactionId,
+      }
+  }
+}
+
+async function readReactionId(response: Response): Promise<number | null> {
+  const body = await response.json().catch(() => null)
+  if (typeof body !== 'object' || body === null) return null
+  const id = (body as Record<string, unknown>).id
+  return typeof id === 'number' ? id : null
 }
 
 function classifyStatus(status: number): ReactionErrorCode {
