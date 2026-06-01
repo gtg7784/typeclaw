@@ -42,6 +42,21 @@ describe('checkGraphqlAuthNudge', () => {
     expect(textOf(result)).toContain(GRAPHQL_AUTH_NUDGE_TAG)
   })
 
+  test('does not fire when the invocation already carries -R (permission denial, not missing hint)', () => {
+    delete process.env.GH_TOKEN
+    const dashR = bashResult('gh api graphql -R acme/widgets -f query=...\ngh: Resource not accessible by integration')
+    const longRepo = bashResult('gh api graphql --repo acme/widgets -f query=...\nHTTP 401: Bad credentials')
+    const eqRepo = bashResult('gh api graphql --repo=acme/widgets -f query=...\nHTTP 401: Bad credentials')
+
+    checkGraphqlAuthNudge({ tool: 'bash', result: dashR })
+    checkGraphqlAuthNudge({ tool: 'bash', result: longRepo })
+    checkGraphqlAuthNudge({ tool: 'bash', result: eqRepo })
+
+    expect(textOf(dashR)).not.toContain(GRAPHQL_AUTH_NUDGE_TAG)
+    expect(textOf(longRepo)).not.toContain(GRAPHQL_AUTH_NUDGE_TAG)
+    expect(textOf(eqRepo)).not.toContain(GRAPHQL_AUTH_NUDGE_TAG)
+  })
+
   test('does not fire when a token is seeded (graphql already authenticates)', () => {
     process.env.GH_TOKEN = 'ghs_seeded'
     const result = bashResult('gh api graphql -f query=...\nHTTP 401: Bad credentials')

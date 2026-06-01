@@ -15,8 +15,13 @@ const NUDGE_TEXT =
 
 // The shell strips quotes/escapes, so we match the raw `gh ... graphql` substring
 // rather than parse — the nudge is advisory, so a loose match is acceptable and a
-// false positive only appends a hint to an unrelated failure.
-const GRAPHQL_INVOCATION = /\bgh\b[^\n]*\bapi\b[^\n]*\bgraphql\b/
+// false positive only appends a hint to an unrelated failure. Captured through to
+// end of line so we can inspect the SAME invocation's flags (see hasRepoFlag).
+const GRAPHQL_INVOCATION = /\bgh\b[^\n]*\bapi\b[^\n]*\bgraphql\b[^\n]*/
+
+// `-R foo`, `-R=foo`, `--repo foo`, `--repo=foo`. Word-boundary anchored so a
+// path or token merely containing "repo" does not count as a repo hint.
+const REPO_FLAG = /(?:^|\s)(?:-R|--repo)(?:[=\s]|$)/
 
 // Concrete auth-rejection strings only — gh / the API emit these when the
 // request itself was rejected for auth. Deliberately excludes resolution
@@ -42,9 +47,16 @@ export function checkGraphqlAuthNudge(options: { tool: string; result: ToolResul
   if (tokenClass !== 'none') return
 
   const text = collectText(options.result.content)
-  if (!GRAPHQL_INVOCATION.test(text)) return
+  const invocation = GRAPHQL_INVOCATION.exec(text)
+  if (invocation === null) return
   if (!AUTH_FAILURE_SIGNATURES.some((sig) => text.includes(sig))) return
   if (text.includes(GRAPHQL_AUTH_NUDGE_TAG)) return
+
+  // The nudge's only message is "add the repo hint". If the failing invocation
+  // already carries -R/--repo, the hint is present and the failure is an
+  // authorization/permission denial (e.g. the App token lacks a scope), not a
+  // missing-repo one — so "re-run with -R" would be misleading, repeated advice.
+  if (REPO_FLAG.test(invocation[0])) return
 
   appendAdviceToContent(options.result.content, NUDGE_TEXT)
 }
