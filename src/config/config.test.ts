@@ -199,6 +199,12 @@ describe('mcpServerSchema', () => {
     expect(parsed).toEqual({ name: 'remote-docs', args: [], url: 'https://mcp.example.com/mcp', env: {} })
   })
 
+  test('preserves explicit request timeout', () => {
+    const parsed = mcpServerSchema.parse({ name: 'with-timeout', timeoutMs: 1234, command: 'server' })
+
+    expect(parsed.timeoutMs).toBe(1234)
+  })
+
   test('rejects a server with both command and url', () => {
     expect(() =>
       mcpServerSchema.parse({ name: 'mixed', command: 'server', url: 'https://mcp.example.com/mcp' }),
@@ -230,6 +236,14 @@ describe('mcpServerSchema', () => {
   test('rejects names outside the mount namespace pattern', () => {
     expect(() => mcpServerSchema.parse({ name: 'BadName', command: 'server' })).toThrow(/MCP server name/)
     expect(() => mcpServerSchema.parse({ name: '-bad', command: 'server' })).toThrow(/MCP server name/)
+  })
+
+  test('rejects double underscore names because the sequence separates MCP tool namespaces', () => {
+    expect(() => mcpServerSchema.parse({ name: 'bad__server', command: 'server' })).toThrow(/must not contain '__'/)
+  })
+
+  test('allows single underscores in server names', () => {
+    expect(() => mcpServerSchema.parse({ name: 'good_server', command: 'server' })).not.toThrow()
   })
 })
 
