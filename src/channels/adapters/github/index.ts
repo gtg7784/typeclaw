@@ -19,7 +19,7 @@ import {
   buildPermissionGuidance,
   parseListHooksPermissionStatus,
 } from './permission-guidance'
-import { createGithubReactionCallback } from './reactions'
+import { createGithubReactionCallback, createGithubRemoveReactionCallback } from './reactions'
 import { createTeamMembershipChecker } from './team-membership'
 import { deregisterGithubWebhooks, registerGithubWebhooks, type WebhookRegistrationResult } from './webhook-register'
 
@@ -125,6 +125,11 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     authType: options.secrets.auth.type,
     fetchImpl,
   })
+  const removeReaction = createGithubRemoveReactionCallback({
+    token: authToken,
+    authType: options.secrets.auth.type,
+    fetchImpl,
+  })
   const history = createGithubHistoryCallback({
     token: authToken,
     fetchImpl,
@@ -168,6 +173,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       // is fully wired before any webhook can arrive.
       options.router.registerOutbound('github', outbound)
       options.router.registerReaction('github', reaction)
+      options.router.registerRemoveReaction('github', removeReaction)
       options.router.registerTyping('github', typing)
       options.router.registerHistory('github', history)
       options.router.registerMembership('github', membership)
@@ -180,6 +186,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         // and the manager can report the failure cleanly.
         options.router.unregisterOutbound('github', outbound)
         options.router.unregisterReaction('github', reaction)
+        options.router.unregisterRemoveReaction('github', removeReaction)
         options.router.unregisterTyping('github', typing)
         options.router.unregisterHistory('github', history)
         options.router.unregisterMembership('github', membership)
@@ -301,6 +308,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       started = false
       options.router.unregisterOutbound('github', outbound)
       options.router.unregisterReaction('github', reaction)
+      options.router.unregisterRemoveReaction('github', removeReaction)
       options.router.unregisterTyping('github', typing)
       options.router.unregisterHistory('github', history)
       options.router.unregisterMembership('github', membership)
