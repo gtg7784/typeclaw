@@ -3,6 +3,7 @@ import { SessionManager } from '@mariozechner/pi-coding-agent'
 import { createSession, createSessionWithDispose } from '@/agent'
 import { LiveSessionRegistry } from '@/agent/live-sessions'
 import { LiveSubagentRegistry } from '@/agent/live-subagents'
+import { requestContainerRestart } from '@/agent/restart'
 import type { SessionOrigin } from '@/agent/session-origin'
 import {
   awaitWithSubagentTimeout,
@@ -43,7 +44,7 @@ import { loadPlugins, type LoadPluginsResult, pluginCronJobs, type PluginRegistr
 import { createPluginLogger } from '@/plugin/context'
 import type { CronHandlerContext } from '@/plugin/types'
 import { createContainerBroker, publishForwardResult } from '@/portbroker'
-import { ReloadRegistry } from '@/reload'
+import { formatChannelReloadSummary, ReloadRegistry } from '@/reload'
 import { createClaimController } from '@/role-claim'
 import {
   exportClaudeCredentialsFileForAgent,
@@ -271,6 +272,23 @@ export async function startAgent({
     claimHandler: claimController.claimHandler,
     githubTokenBridge,
     stream,
+    onReload: async () => {
+      const { results } = await reloadRegistry.reloadAll()
+      return formatChannelReloadSummary(results)
+    },
+    ...(containerName !== undefined
+      ? {
+          onRestart: async (): Promise<string> => {
+            // No originatingSessionId/stream/handoff: a channel-invoked restart
+            // must not write a resume hint or fire the "I'm back" broadcast that
+            // a TUI restart does (issue #291 scoping — only TUI origins resume).
+            const result = await requestContainerRestart({ containerName })
+            return result.ok
+              ? 'Restart scheduled; the container will bounce shortly.'
+              : `Restart denied: ${result.reason}`
+          },
+        }
+      : {}),
   })
 
   const createSessionForSubagent: import('@/agent/subagents').CreateSessionForSubagent = async (

@@ -209,6 +209,8 @@ function makeRouter(
     permissions?: PermissionService
     claimHandler?: ClaimHandler
     hooks?: HookBus
+    onReload?: () => Promise<string>
+    onRestart?: () => Promise<string>
   } = {},
 ): { router: ChannelRouter; sessions: FakeSession[]; origins: SessionOrigin[] } {
   const sessions: FakeSession[] = options.sessions ?? []
@@ -220,6 +222,8 @@ function makeRouter(
     ...(options.configuredAliases !== undefined ? { configuredAliases: options.configuredAliases } : {}),
     ...(options.ensureLiveTimeoutMs !== undefined ? { ensureLiveTimeoutMs: options.ensureLiveTimeoutMs } : {}),
     ...(options.claimHandler !== undefined ? { claimHandler: options.claimHandler } : {}),
+    ...(options.onReload !== undefined ? { onReload: options.onReload } : {}),
+    ...(options.onRestart !== undefined ? { onRestart: options.onRestart } : {}),
     permissions: options.permissions ?? grantAllPermissions,
     now: () => nowRef.value,
     logger: {
@@ -5829,6 +5833,153 @@ describe('ChannelRouter channel.respond gate', () => {
 
     expect(sessions).toHaveLength(0)
     expect(router.liveCount()).toBe(0)
+  })
+})
+
+describe('ChannelRouter /reload and /restart (session.admin gate)', () => {
+  type PermissionTable = Record<string, readonly string[]>
+
+  const buildPermissions = (table: PermissionTable, fallback: readonly string[] = []): PermissionService => ({
+    has: (origin, permission) => {
+      if (origin === undefined || origin.kind !== 'channel') return fallback.includes(permission)
+      const authorId = origin.lastInboundAuthorId ?? '*'
+      const grants = table[authorId] ?? fallback
+      return grants.includes(permission)
+    },
+    resolveRole: () => 'guest',
+    compareRoleSeverity: () => undefined,
+    describe: () => ({ role: 'guest', permissions: [] }),
+    replaceRoles: () => {},
+  })
+
+  const captureOutbound = (router: ChannelRouter): Array<{ text: string }> => {
+    const sent: Array<{ text: string }> = []
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+    return sent
+  }
+
+  test('commands are unregistered (unknown) when onReload/onRestart are not wired', async () => {
+    const dir = await tempDir()
+    const permissions = buildPermissions({ owner: ['channel.respond', 'session.admin'] })
+    const { router } = makeRouter(dir, { permissions })
+    const sent = captureOutbound(router)
+
+    await router.route(inbound({ authorId: 'owner', text: '/reload', externalMessageId: 'm-r' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    // Unknown command → no reply, treated as a no-op (not an admin action).
+    expect(sent).toHaveLength(0)
+    expect(await router.executeCommand(KEY, 'reload', { invokerId: 'owner' })).toEqual({
+      kind: 'unknown-command',
+      name: 'reload',
+    })
+  })
+
+  test('/help lists reload and restart when wired', async () => {
+    const dir = await tempDir()
+    const permissions = buildPermissions({ owner: ['channel.respond', 'session.admin'] })
+    const { router } = makeRouter(dir, {
+      permissions,
+      onReload: async () => 'reloaded',
+      onRestart: async () => 'restarting',
+    })
+    const sent = captureOutbound(router)
+
+    await router.route(inbound({ authorId: 'owner', text: '/help', externalMessageId: 'm-h' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('/reload')
+    expect(sent[0]!.text).toContain('/restart')
+  })
+
+  test('admin author can /reload via text prefix and gets the callback summary', async () => {
+    const dir = await tempDir()
+    let calls = 0
+    const permissions = buildPermissions({ owner: ['channel.respond', 'session.admin'] })
+    const { router } = makeRouter(dir, {
+      permissions,
+      onReload: async () => {
+        calls++
+        return 'Reloaded 1 subsystem(s).'
+      },
+    })
+    const sent = captureOutbound(router)
+
+    await router.route(inbound({ authorId: 'owner', text: '/reload', externalMessageId: 'm-r' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(calls).toBe(1)
+    expect(sent).toEqual([{ text: 'Reloaded 1 subsystem(s).' }])
+  })
+
+  test('respond-capable author WITHOUT session.admin cannot /reload via text prefix', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    let calls = 0
+    // member-shaped: has channel.respond + session.control but NOT session.admin.
+    const permissions = buildPermissions({
+      member: ['channel.respond', 'session.control'],
+    })
+    const { router } = makeRouter(dir, {
+      permissions,
+      logs,
+      onReload: async () => {
+        calls++
+        return 'reloaded'
+      },
+    })
+    const sent = captureOutbound(router)
+
+    await router.route(inbound({ authorId: 'member', text: '/reload', externalMessageId: 'm-r' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(calls).toBe(0)
+    expect(sent).toHaveLength(0)
+    expect(logs.some((l) => l.includes('session.admin') && l.includes('author=member'))).toBe(true)
+  })
+
+  test('native executeCommand /restart gates on session.admin', async () => {
+    const dir = await tempDir()
+    let calls = 0
+    const permissions = buildPermissions({
+      owner: ['channel.respond', 'session.admin'],
+      member: ['channel.respond', 'session.control'],
+    })
+    const { router } = makeRouter(dir, {
+      permissions,
+      onRestart: async () => {
+        calls++
+        return 'Restart scheduled.'
+      },
+    })
+
+    const denied = await router.executeCommand(KEY, 'restart', { invokerId: 'member' })
+    expect(denied).toEqual({ kind: 'permission-denied' })
+    expect(calls).toBe(0)
+
+    const allowed = await router.executeCommand(KEY, 'restart', { invokerId: 'owner' })
+    expect(allowed).toEqual({ kind: 'handled', name: 'restart', reply: 'Restart scheduled.' })
+    expect(calls).toBe(1)
+  })
+
+  test('/reload and /restart do not require a live session', async () => {
+    const dir = await tempDir()
+    const permissions = buildPermissions({ owner: ['channel.respond', 'session.admin'] })
+    const { router } = makeRouter(dir, {
+      permissions,
+      onReload: async () => 'reloaded',
+      onRestart: async () => 'restarting',
+    })
+
+    expect(router.liveCount()).toBe(0)
+    const reload = await router.executeCommand(KEY, 'reload', { invokerId: 'owner' })
+    expect(reload).toEqual({ kind: 'handled', name: 'reload', reply: 'reloaded' })
+    const restart = await router.executeCommand(KEY, 'restart', { invokerId: 'owner' })
+    expect(restart).toEqual({ kind: 'handled', name: 'restart', reply: 'restarting' })
   })
 })
 

@@ -89,6 +89,12 @@ export type ChannelManagerOptions = {
   // per-repo App token minter here on start (App auth only) so plugin hooks
   // can resolve a token for ad-hoc `gh` commands. Tests omit it.
   githubTokenBridge?: GithubTokenBridge
+  // Forwarded to the router as the /reload and /restart command handlers.
+  // Production wiring (src/run/index.ts) supplies the reload-registry and
+  // container-restart bindings; tests omit them so the commands stay
+  // unregistered. See CreateChannelRouterOptions.onReload/onRestart.
+  onReload?: () => Promise<string>
+  onRestart?: () => Promise<string>
 }
 
 export type ChannelManager = {
@@ -125,6 +131,8 @@ export function createChannelManager(options: ChannelManagerOptions): ChannelMan
     ...(options.permissions ? { permissions: options.permissions } : {}),
     ...(options.claimHandler ? { claimHandler: options.claimHandler } : {}),
     ...(options.stream ? { stream: options.stream } : {}),
+    ...(options.onReload ? { onReload: options.onReload } : {}),
+    ...(options.onRestart ? { onRestart: options.onRestart } : {}),
   })
   const createDiscordAdapter = options.createDiscordAdapter ?? createDiscordBotAdapter
   const createGithub = options.createGithubAdapter ?? createGithubAdapter
