@@ -7,6 +7,7 @@ import {
   done,
   errorLine,
   link,
+  prepareStdinForClack,
   printDiscordInviteHint,
   printSlackAppManifestSetup,
   renderStartSuccess,
@@ -349,6 +350,68 @@ describe('spinner', () => {
       s.start('working...')
       s.error('boom')
     }).not.toThrow()
+  })
+})
+
+describe('prepareStdinForClack', () => {
+  type FakeStdin = {
+    isTTY: boolean
+    setRawMode?: (value: boolean) => void
+    rawModeCalls: boolean[]
+    resumed: number
+    resume: () => void
+  }
+
+  function fakeStdin(opts: { isTTY: boolean; hasSetRawMode?: boolean; rawModeThrows?: boolean }): FakeStdin {
+    const s: FakeStdin = {
+      isTTY: opts.isTTY,
+      rawModeCalls: [],
+      resumed: 0,
+      resume() {
+        this.resumed += 1
+      },
+    }
+    if (opts.hasSetRawMode !== false) {
+      s.setRawMode = (value: boolean): void => {
+        s.rawModeCalls.push(value)
+        if (opts.rawModeThrows === true) throw new Error('terminal torn down')
+      }
+    }
+    return s
+  }
+
+  test('resumes stdin so a clack picker receives bytes over an SSH pseudo-TTY', () => {
+    // given: a TTY that has never been resumed (the first-picker state over SSH)
+    const stdin = fakeStdin({ isTTY: true })
+    // when: handing stdin to clack
+    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)
+    // then: the stream is resumed so clack's keypress listener gets input
+    expect(stdin.resumed).toBe(1)
+  })
+
+  test('clears stale raw mode before the picker takes over', () => {
+    const stdin = fakeStdin({ isTTY: true })
+    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)
+    expect(stdin.rawModeCalls).toEqual([false])
+  })
+
+  test('is a no-op on a non-TTY stdin (piped/redirected input)', () => {
+    const stdin = fakeStdin({ isTTY: false })
+    prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)
+    expect(stdin.resumed).toBe(0)
+    expect(stdin.rawModeCalls).toEqual([])
+  })
+
+  test('still resumes when setRawMode throws (terminal already torn down)', () => {
+    const stdin = fakeStdin({ isTTY: true, rawModeThrows: true })
+    expect(() => prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)).not.toThrow()
+    expect(stdin.resumed).toBe(1)
+  })
+
+  test('resumes even when setRawMode is unavailable on the stream', () => {
+    const stdin = fakeStdin({ isTTY: true, hasSetRawMode: false })
+    expect(() => prepareStdinForClack(stdin as unknown as NodeJS.ReadStream)).not.toThrow()
+    expect(stdin.resumed).toBe(1)
   })
 })
 
