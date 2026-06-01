@@ -198,55 +198,35 @@ describe('classifyGithubInbound', () => {
   })
 
   describe('pull_request.opened', () => {
-    it('treats an opened PR as a review request in App mode', () => {
+    it('lands an opened PR as awareness-only context in App mode, not a review request', () => {
+      // Reviews fire only on review_requested now — including for an App, via
+      // its decoy reviewer (see the decoy-reviewer describe above). An opened
+      // PR is plain context regardless of auth, so the agent does not review
+      // every PR the moment it opens.
       const msg = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot', { authType: 'app' })
-      expect(msg?.chat).toBe('pr:7')
-      expect(msg?.thread).toBe(null)
-      expect(msg?.text).toContain('@alice')
-      expect(msg?.text).toContain('requested your review on PR #7')
-      expect(msg?.text).toContain('feat-branch → main')
-      expect(msg?.text).toContain('Please review the changes line-by-line')
-      expect(msg?.isBotMention).toBe(true)
-      expect(msg?.authorName).toBe('alice')
-    })
-
-    it('does NOT treat an opened PR as a review request in PAT mode', () => {
-      // A PAT-backed bot is a real user that can be added to requested_reviewers,
-      // so it waits for the explicit review_requested event instead of reviewing
-      // every opened PR. The opened event lands as awareness-only context.
-      const msg = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot', { authType: 'pat' })
       expect(msg?.chat).toBe('pr:7')
       expect(msg?.text).not.toContain('requested your review')
       expect(msg?.text).not.toContain('Please review the changes line-by-line')
       expect(msg?.isBotMention).toBe(false)
     })
 
-    it('does NOT treat an opened PR as a review request when authType is unset', () => {
+    it('lands an opened PR as awareness-only context in PAT mode', () => {
+      const msg = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot', { authType: 'pat' })
+      expect(msg?.chat).toBe('pr:7')
+      expect(msg?.text).not.toContain('requested your review')
+      expect(msg?.isBotMention).toBe(false)
+    })
+
+    it('lands an opened PR as awareness-only context when authType is unset', () => {
       const msg = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot')
       expect(msg?.text).not.toContain('requested your review')
-    })
-
-    it('drops a bot-opened PR in App mode (self-loop guard)', () => {
-      const payload = openedPayload()
-      ;(payload.sender as Record<string, unknown>).login = 'typeclaw-bot'
-      const msg = classifyGithubInbound('pull_request', payload, 'typeclaw-bot', { authType: 'app' })
-      expect(msg).toBe(null)
-    })
-
-    it('mints distinct externalMessageIds for opened vs a later review_requested on the same PR', () => {
-      const opened = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot', { authType: 'app' })
-      const requested = classifyGithubInbound(
-        'pull_request',
-        reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' }),
-        'typeclaw-bot',
-      )
-      expect(opened?.externalMessageId).not.toBe(requested?.externalMessageId)
+      expect(msg?.isBotMention).toBe(false)
     })
   })
 })
 
-describe('createGithubWebhookHandler — pull_request.opened auth gating', () => {
-  it('routes an opened PR as a review request when authType is app', async () => {
+describe('createGithubWebhookHandler — pull_request.opened lands as context', () => {
+  it('routes an opened PR as awareness-only context in App mode', async () => {
     const routed: InboundMessage[] = []
     const handler = createGithubWebhookHandler({
       webhookSecret: 'secret',
@@ -263,11 +243,11 @@ describe('createGithubWebhookHandler — pull_request.opened auth gating', () =>
 
     await handler(signedRequest(JSON.stringify(openedPayload()), 'pull_request', 'opened-app'))
     expect(routed).toHaveLength(1)
-    expect(routed[0]?.text).toContain('requested your review on PR #7')
-    expect(routed[0]?.isBotMention).toBe(true)
+    expect(routed[0]?.text).not.toContain('requested your review')
+    expect(routed[0]?.isBotMention).toBe(false)
   })
 
-  it('routes an opened PR as awareness-only context when authType is pat', async () => {
+  it('routes an opened PR as awareness-only context in PAT mode', async () => {
     const routed: InboundMessage[] = []
     const handler = createGithubWebhookHandler({
       webhookSecret: 'secret',
