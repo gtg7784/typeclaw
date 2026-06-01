@@ -459,14 +459,14 @@ export function createSlackMembershipResolver(deps: {
     }
 
     let bots = 0
-    let humans = 0
+    const humanMemberIds: string[] = []
     for (const userId of members.value.members ?? []) {
       const cached = userBotCache.get(userId)
       const isBot = cached ?? (await resolveSlackUserIsBot(fetchFn, deps.token, userId, deps.logger, userBotCache))
       if (isBot) bots++
-      else humans++
+      else humanMemberIds.push(userId)
     }
-    return { humans, bots, fetchedAt: now(), truncated: false }
+    return { humans: humanMemberIds.length, bots, fetchedAt: now(), truncated: false, humanMemberIds }
   }
 }
 

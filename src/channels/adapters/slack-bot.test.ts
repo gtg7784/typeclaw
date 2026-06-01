@@ -364,6 +364,7 @@ describe('createSlackMembershipResolver', () => {
       bots: 1,
       fetchedAt: 20,
       truncated: false,
+      humanMemberIds: ['U1', 'U2'],
     })
     expect(calls.map((c) => c.url)).toEqual([
       'https://slack.com/api/conversations.info',

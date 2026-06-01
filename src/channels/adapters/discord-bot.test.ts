@@ -191,6 +191,7 @@ describe('createDiscordMembershipResolver', () => {
       bots: 1,
       fetchedAt: 100,
       truncated: false,
+      humanMemberIds: ['u1', 'u2'],
     })
     expect(calls[0]!.url).toBe('https://discord.com/api/v10/guilds/g1/preview')
     expect(calls[1]!.url).toBe('https://discord.com/api/v10/guilds/g1/members?limit=100')
