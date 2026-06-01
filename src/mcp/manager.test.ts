@@ -116,9 +116,38 @@ describe('createMcpManager', () => {
     await manager.connectAll()
     expect(manager.listServers()).toEqual([{ name: 'alpha', connected: true, toolCount: 1 }])
 
-    await manager.refresh()
+    const results = await manager.refresh()
 
+    expect(results).toEqual([{ ok: true, name: 'alpha', toolCount: 2 }])
     expect(manager.listServers()).toEqual([{ name: 'alpha', connected: true, toolCount: 2 }])
+  })
+
+  test('refresh isolates a failing connection so healthy servers still update', async () => {
+    const manager = createMcpManager([server('healthy'), server('broken')], {
+      env: {},
+      async connect(mcpServer) {
+        if (mcpServer.name === 'broken') return failingRefreshConnection(mcpServer.name)
+        return changingConnection(mcpServer.name)
+      },
+    })
+
+    await manager.connectAll()
+    expect(manager.listServers()).toEqual([
+      { name: 'healthy', connected: true, toolCount: 1 },
+      { name: 'broken', connected: true, toolCount: 1 },
+    ])
+
+    const results = await manager.refresh()
+
+    const healthy = results.find((result) => result.name === 'healthy')
+    const broken = results.find((result) => result.name === 'broken')
+    expect(healthy).toEqual({ ok: true, name: 'healthy', toolCount: 2 })
+    if (broken === undefined || broken.ok) throw new Error('expected the broken server to fail refresh')
+    expect(broken.error.message).toMatch(/refresh boom/)
+    expect(manager.listServers()).toEqual([
+      { name: 'healthy', connected: true, toolCount: 2 },
+      { name: 'broken', connected: true, toolCount: 1 },
+    ])
   })
 })
 
@@ -158,6 +187,22 @@ function changingConnection(name: string): McpConnection {
     name,
     listTools,
     refresh: listTools,
+    async callTool() {
+      return { content: [{ type: 'text', text: 'ok' }] }
+    },
+    async close() {},
+  }
+}
+
+function failingRefreshConnection(name: string): McpConnection {
+  return {
+    name,
+    async listTools() {
+      return [{ name: `${name}-tool`, description: '', inputSchema: {} }]
+    },
+    async refresh() {
+      throw new Error('refresh boom')
+    },
     async callTool() {
       return { content: [{ type: 'text', text: 'ok' }] }
     },

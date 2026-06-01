@@ -8,11 +8,13 @@ export type McpConnectResult =
   | { ok: true; name: string; connection: McpConnection; toolCount: number }
   | { ok: false; name: string; error: Error }
 
+export type McpRefreshResult = { ok: true; name: string; toolCount: number } | { ok: false; name: string; error: Error }
+
 export type McpManager = {
   connectAll(opts?: { signal?: AbortSignal }): Promise<McpConnectResult[]>
   getConnection(name: string): McpConnection | undefined
   listServers(): { name: string; description?: string; connected: boolean; toolCount?: number }[]
-  refresh(): Promise<void>
+  refresh(): Promise<McpRefreshResult[]>
   closeAll(): Promise<void>
 }
 
@@ -71,11 +73,21 @@ export function createMcpManager(
         }
       })
     },
-    async refresh(): Promise<void> {
-      const refreshed = await Promise.all(
-        [...connections.entries()].map(async ([name, connection]) => [name, await connection.refresh()] as const),
+    async refresh(): Promise<McpRefreshResult[]> {
+      // One unhealthy connection must not discard healthy servers' tool-count
+      // updates, so each refresh is isolated and reported per-server instead of
+      // letting a single rejection fail the whole batch.
+      return Promise.all(
+        [...connections.entries()].map(async ([name, connection]): Promise<McpRefreshResult> => {
+          try {
+            const tools = await connection.refresh()
+            toolCounts.set(name, tools.length)
+            return { ok: true, name, toolCount: tools.length }
+          } catch (cause) {
+            return { ok: false, name, error: normalizeError(cause) }
+          }
+        }),
       )
-      for (const [name, tools] of refreshed) toolCounts.set(name, tools.length)
     },
     async closeAll(): Promise<void> {
       await Promise.allSettled([...connections.values()].map((connection) => connection.close()))
