@@ -54,6 +54,10 @@ import type {
   OutboundCallback,
   OutboundMessage,
   QuoteAnchorSource,
+  ReactionCallback,
+  ReactionRef,
+  ReactionRequest,
+  ReactionResult,
   ResolvedChannelNames,
   SendErrorCode,
   SendResult,
@@ -108,6 +112,7 @@ export const SESSION_GC_INTERVAL_MS = 60 * 1000
 // Enforced inside router.send for `source: 'tool'` callers; system
 // recovery paths (`source: 'system'`) bypass.
 export const MAX_CHANNEL_SENDS_PER_TURN = 10
+export const ENGAGE_REACTION_EMOJI = 'eyes'
 // Ceiling on tool-source channel sends that a same-turn router policy DENIED
 // without delivering — `skip-locked`, `turn-cap`, or `duplicate`. Such denials
 // return a soft error and do NOT increment `consecutiveSends`, so a model that
@@ -276,6 +281,7 @@ type QueuedInbound = {
   authorName: string
   authorIsBot: boolean
   externalMessageId: string
+  reactionRef?: ReactionRef
   isBotMention: boolean
   replyToBotMessageId: string | null
   isDm: boolean
@@ -334,6 +340,11 @@ type LiveSession = {
   firstUnprocessedAt: number
   currentTurnAuthorId: string | null
   currentTurnAuthorIds: Set<string>
+  // Reaction target of the inbound that triggered THIS turn (the last item in
+  // the drained batch, mirroring `currentTurnAuthorId`). Surfaced on the live
+  // origin so `channel_react` reacts to the triggering message, not whichever
+  // inbound happens to be latest in the queue. Null on reminder-only turns.
+  currentTurnReactionRef: ReactionRef | null
   lastTurnAuthorIds: Set<string>
   // Mirror of currentTurnAuthorId at end-of-turn (the LAST speaker of the
   // prior batch), preserved across the drain finally-block which resets
@@ -511,6 +522,14 @@ export type ChannelRouter = {
   }) => { count: number; windowMs: number }
   registerOutbound: (adapter: ChannelKey['adapter'], cb: OutboundCallback) => void
   unregisterOutbound: (adapter: ChannelKey['adapter'], cb: OutboundCallback) => void
+  // Reaction support is opt-in per adapter: an adapter that never calls
+  // registerReaction makes `react` resolve to `code: 'unsupported'`, and
+  // auto-react-on-engage becomes a silent no-op for it. Kept separate from
+  // the outbound path on purpose — reactions are best-effort side effects, not
+  // messages, so they must not flow through send()'s flood/cap/dup/sticky guards.
+  registerReaction: (adapter: ChannelKey['adapter'], cb: ReactionCallback) => void
+  unregisterReaction: (adapter: ChannelKey['adapter'], cb: ReactionCallback) => void
+  react: (req: ReactionRequest) => Promise<ReactionResult>
   registerTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   unregisterTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   registerChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
@@ -728,6 +747,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // teardown was meant to clear.
   let liveGeneration = 0
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
+  const reactionCallbacks = new Map<ChannelKey['adapter'], Set<ReactionCallback>>()
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
   const membershipResolvers = new Map<ChannelKey['adapter'], Set<MembershipResolver>>()
@@ -1091,6 +1111,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         firstUnprocessedAt: 0,
         currentTurnAuthorId: null,
         currentTurnAuthorIds: new Set(),
+        currentTurnReactionRef: null,
         // `lastTurnAuthorId` (string, used for `lastInboundAuthorId` in
         // origin) and `lastTurnAuthorIds` (Set, used by
         // `grantStickyForReplyTargets` as the fallback when
@@ -1451,6 +1472,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       ...(live.resolvedNames.chatName !== undefined ? { chatName: live.resolvedNames.chatName } : {}),
       thread: live.key.thread,
       ...(live.currentTurnAuthorId !== null ? { lastInboundAuthorId: live.currentTurnAuthorId } : {}),
+      ...(live.currentTurnReactionRef !== null ? { reactionRef: live.currentTurnReactionRef } : {}),
       participants: live.participants,
       ...(membership !== null ? { membership } : {}),
     }
@@ -1498,6 +1520,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         if (batch.length > 0) {
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
+          live.currentTurnReactionRef = batch[batch.length - 1]!.reactionRef ?? null
           live.consecutiveSends.clear()
           live.lastSentText.clear()
           live.pendingQuoteCandidate = captureQuoteCandidate(live.key.adapter, batch, observed)
@@ -1568,6 +1591,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.draining = false
       live.currentTurnAuthorId = null
       live.currentTurnAuthorIds = new Set()
+      live.currentTurnReactionRef = null
       await stopTypingHeartbeat(live)
     }
   }
@@ -1816,6 +1840,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     publishInbound(event, 'engage', live.sessionId)
 
+    autoReactOnEngage(event)
+
     updateLoopGuard(live, event)
 
     enqueue(live, event)
@@ -1908,6 +1934,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       authorName: event.authorName,
       authorIsBot: event.authorIsBot,
       externalMessageId: event.externalMessageId,
+      ...(event.reactionRef !== undefined ? { reactionRef: event.reactionRef } : {}),
       isBotMention: event.isBotMention,
       replyToBotMessageId: event.replyToBotMessageId,
       isDm: event.isDm,
@@ -1923,6 +1950,62 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       outboundCallbacks.set(adapter, set)
     }
     set.add(cb)
+  }
+
+  const registerReaction = (adapter: ChannelKey['adapter'], cb: ReactionCallback): void => {
+    let set = reactionCallbacks.get(adapter)
+    if (!set) {
+      set = new Set()
+      reactionCallbacks.set(adapter, set)
+    }
+    set.add(cb)
+  }
+
+  const unregisterReaction = (adapter: ChannelKey['adapter'], cb: ReactionCallback): void => {
+    reactionCallbacks.get(adapter)?.delete(cb)
+  }
+
+  const react = async (req: ReactionRequest): Promise<ReactionResult> => {
+    if (req.reactionRef.adapter !== req.adapter) {
+      return { ok: false, error: 'reaction ref adapter mismatch', code: 'unsupported' }
+    }
+    const callbacks = reactionCallbacks.get(req.adapter)
+    if (!callbacks || callbacks.size === 0) {
+      return { ok: false, error: `adapter "${req.adapter}" does not support reactions`, code: 'unsupported' }
+    }
+    let lastError: ReactionResult | undefined
+    for (const cb of Array.from(callbacks)) {
+      const result = await cb(req)
+      if (result.ok) return result
+      lastError = result
+    }
+    return lastError ?? { ok: false, error: 'no reaction callback handled request', code: 'unsupported' }
+  }
+
+  // Best-effort acknowledgment: drop an :eyes: on the triggering inbound the
+  // moment we decide to engage, replacing the old "On it" ack comment on
+  // GitHub. Fire-and-forget so a reaction failure (missing permission, the
+  // adapter not supporting reactions, a transient API error) can NEVER block
+  // engagement, enqueueing, or the agent's actual reply. No reactionRef =
+  // nothing reactable (synthetic inbounds, reaction-less adapters) = silent skip.
+  const autoReactOnEngage = (event: InboundMessage): void => {
+    if (event.reactionRef === undefined) return
+    void react({
+      adapter: event.adapter,
+      workspace: event.workspace,
+      chat: event.chat,
+      thread: event.thread,
+      reactionRef: event.reactionRef,
+      emoji: ENGAGE_REACTION_EMOJI,
+    })
+      .then((result) => {
+        if (!result.ok && result.code !== 'unsupported') {
+          logger.info(`[channels] engage-react failed adapter=${event.adapter} chat=${event.chat}: ${result.error}`)
+        }
+      })
+      .catch((err) => {
+        logger.info(`[channels] engage-react threw adapter=${event.adapter} chat=${event.chat}: ${describe(err)}`)
+      })
   }
 
   const unregisterOutbound = (adapter: ChannelKey['adapter'], cb: OutboundCallback): void => {
@@ -2617,6 +2700,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     getSendRate,
     registerOutbound,
     unregisterOutbound,
+    registerReaction,
+    unregisterReaction,
+    react,
     registerTyping,
     unregisterTyping,
     registerChannelNameResolver,

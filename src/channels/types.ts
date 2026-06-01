@@ -94,7 +94,49 @@ export type InboundMessage = {
   // means "unknown" — the formatter renders such lines without a
   // timestamp prefix instead of stamping them with the wrong clock.
   ts: number
+  // Opaque, adapter-owned handle for the entity an emoji reaction would
+  // attach to. The classifier stamps it because only there is the platform-
+  // side target type still known (GitHub: issue body vs issue-comment vs
+  // pr-review-comment — all collapse to the same `chat`/`externalMessageId`
+  // pair downstream). Mirrors the `InboundAttachment.ref` opaque-handle
+  // pattern: ONLY the originating adapter's ReactionCallback knows how to
+  // parse `value`; the router and tools treat it as a pass-through token and
+  // never inspect it. Omitted when the inbound has no reactable target (e.g.
+  // synthetic review-request inbounds, or adapters without reaction support).
+  reactionRef?: ReactionRef
 }
+
+// Opaque reaction target handle. `adapter` lets the router refuse a ref to
+// the wrong adapter's callback; `value` is an adapter-private encoding (for
+// GitHub, a JSON blob distinguishing issue / issue-comment / pr-review-comment
+// / discussion plus the numeric id). Never rendered into prompt context.
+export type ReactionRef = {
+  adapter: AdapterId
+  value: string
+}
+
+// A request to add an emoji reaction to a previously-seen inbound. Distinct
+// from OutboundMessage on purpose: reactions are best-effort side effects, not
+// messages, so they bypass `send()`'s flood guard, per-turn send cap, exact-
+// duplicate guard, sticky-credit grants, and typing heartbeat — all of which
+// are message semantics that would misbehave on a reaction.
+export type ReactionRequest = {
+  adapter: AdapterId
+  workspace: string
+  chat: string
+  thread?: string | null
+  reactionRef: ReactionRef
+  // Bare emoji name, no surrounding colons (e.g. 'eyes', '+1'). Each adapter
+  // maps this to its platform's reaction vocabulary and rejects unsupported
+  // names via `code: 'unsupported'`.
+  emoji: string
+}
+
+export type ReactionErrorCode = 'permission-denied' | 'not-found' | 'unsupported' | 'rate-limited' | 'transient'
+
+export type ReactionResult = { ok: true } | { ok: false; error: string; code?: ReactionErrorCode }
+
+export type ReactionCallback = (req: ReactionRequest) => Promise<ReactionResult>
 
 // File on disk that the agent wants to attach to an outbound message. The
 // agent runs inside a container with /agent bind-mounted from the host;
