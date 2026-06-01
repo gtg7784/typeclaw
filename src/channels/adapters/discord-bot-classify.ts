@@ -141,7 +141,13 @@ function splitInbound(event: DiscordGatewayMessageCreateEvent): SplitInbound {
   return { text, attachments }
 }
 
-function describeDiscordMedia(event: DiscordGatewayMessageCreateEvent): InboundAttachment[] {
+export type DiscordMediaCarrier = {
+  attachments?: DiscordFile[]
+  embeds?: DiscordGatewayEmbed[]
+  sticker_items?: DiscordGatewayStickerItem[]
+}
+
+export function describeDiscordMedia(event: DiscordMediaCarrier): InboundAttachment[] {
   return [
     ...(event.attachments ?? []).map(describeAttachment),
     ...(event.embeds ?? []).map(describeEmbed),
@@ -167,7 +173,7 @@ function describeSticker(sticker: DiscordGatewayStickerItem): Omit<InboundAttach
   return { kind: 'sticker', ref: '', filename: sticker.name }
 }
 
-function renderPlaceholder(attachment: InboundAttachment): string {
+export function renderPlaceholder(attachment: InboundAttachment): string {
   const parts: string[] = [`Discord attachment #${attachment.id}: ${attachment.kind}`]
   if (attachment.mimetype !== undefined) parts.push(attachment.mimetype)
   if (attachment.filename !== undefined) parts.push(`name=${attachment.filename}`)

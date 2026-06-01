@@ -1,8 +1,11 @@
 import { DiscordBotClient, DiscordBotListener } from 'agent-messenger/discordbot'
 import {
   DiscordIntent,
+  type DiscordFile,
+  type DiscordGatewayEmbed,
   type DiscordGatewayInteractionEvent,
   type DiscordGatewayMessageCreateEvent,
+  type DiscordGatewayStickerItem,
 } from 'agent-messenger/discordbot'
 
 import {
@@ -29,7 +32,12 @@ import type {
 } from '@/channels/types'
 
 import { createDiscordChannelResolver } from './discord-bot-channel-resolver'
-import { classifyInbound, type InboundDropReason } from './discord-bot-classify'
+import {
+  classifyInbound,
+  describeDiscordMedia,
+  type InboundDropReason,
+  renderPlaceholder,
+} from './discord-bot-classify'
 import {
   ackInteraction,
   parseInteractionAsCommand,
@@ -487,6 +495,9 @@ type DiscordRawHistoryMessage = {
   content: string
   timestamp: string
   message_reference?: { message_id?: string }
+  attachments?: DiscordFile[]
+  embeds?: DiscordGatewayEmbed[]
+  sticker_items?: DiscordGatewayStickerItem[]
 }
 
 // Discord treats threads as separate channels with their own snowflake ids,
@@ -551,14 +562,28 @@ export function createDiscordHistoryCallback(deps: {
 function mapDiscordMessage(msg: DiscordRawHistoryMessage, botUserId: string | null): ChannelHistoryMessage {
   const isBot = msg.author.bot === true || (botUserId !== null && msg.author.id === botUserId)
   const ts = Date.parse(msg.timestamp)
+  // The REST history fetch bypasses the inbound classifier, so attachments,
+  // embeds, and stickers on already-posted messages (e.g. an image on a thread
+  // root the agent is later @-mentioned under) must be mapped here too —
+  // otherwise they are silently dropped and look_at_channel_attachment can
+  // never resolve them. Mirror the classifier's splitInbound: bake placeholders
+  // into text and carry the structured attachments so the router can resolve ids.
+  const attachments = describeDiscordMedia(msg)
+  const text =
+    attachments.length === 0
+      ? msg.content
+      : msg.content === ''
+        ? attachments.map(renderPlaceholder).join('\n')
+        : `${msg.content}\n${attachments.map(renderPlaceholder).join('\n')}`
   return {
     externalMessageId: msg.id,
     authorId: msg.author.id,
     authorName: msg.author.global_name ?? msg.author.username ?? msg.author.id,
-    text: msg.content,
+    text,
     ts: Number.isFinite(ts) ? ts : 0,
     isBot,
     replyToBotMessageId: msg.message_reference?.message_id ?? null,
+    ...(attachments.length > 0 ? { attachments } : {}),
   }
 }
 
