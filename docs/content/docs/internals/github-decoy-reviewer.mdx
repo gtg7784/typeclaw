@@ -67,6 +67,30 @@ both auth modes on a single, predictable path: explicit `review_requested`
 only, no opened-PR branching. To have the agent review a PR, request its decoy
 reviewer.
 
+## Automatic cleanup after the review
+
+GitHub auto-records the App as a reviewer the instant its formal review posts,
+but leaves the **decoy** user pinned in the requested-reviewers list as a
+perpetual "review requested" — as if the review never happened. The adapter
+clears this deterministically rather than relying on the agent to remember a
+cleanup step.
+
+When the bot's own review lands, GitHub emits a `pull_request_review.submitted`
+webhook authored by the bot. The handler already drops this as self-authored;
+at that same point — App auth only, with a derivable decoy login — it schedules
+a background `DELETE /repos/{owner}/{repo}/pulls/{n}/requested_reviewers` for the
+decoy login (`maybeScheduleDecoyReviewerDrop` →
+`removeRequestedReviewer`, `src/channels/adapters/github/`). The DELETE runs off
+the webhook-ACK path so the 200 stays fast, and is best-effort: a `404`/`422`
+(decoy never on the list, already removed) is a benign no-op; only auth/network
+failures warn.
+
+Because the `DELETE` is authenticated as the App, the `review_request_removed`
+webhook it triggers carries the bot actor (`slug[bot]`) as `sender`, which the
+self-loop guard drops — the cleanup never wakes a fresh session. Under PAT auth,
+or when the trigger was a plain `@`-mention or a team request (no decoy user was
+ever placed), there is nothing to remove and the path is skipped.
+
 ## Why slug-derivation, not config (for now)
 
 The slug-strip is a **heuristic default**: it assumes the decoy account's login

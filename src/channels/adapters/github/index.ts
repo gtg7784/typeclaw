@@ -145,6 +145,8 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
     selfLogin: () => selfLogin,
     authType: () => options.secrets.auth.type,
     isBotInTeam,
+    authToken,
+    fetchImpl,
     logger,
     route: (message) => {
       rememberWorkspace(message.workspace, message.chat)
