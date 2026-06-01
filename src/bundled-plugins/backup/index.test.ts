@@ -24,6 +24,7 @@ function makeCtx(overrides: { config: unknown }): {
       error: (m) => logs.push(`error:${m}`),
     },
     permissions: noopPermissionService,
+    github: { resolveTokenForRepo: async () => ({ kind: 'unavailable', reason: 'test' }) },
     spawnSubagent: async (name, payload) => {
       spawnCalls.push({ name, payload })
     },

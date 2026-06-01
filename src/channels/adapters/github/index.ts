@@ -1,3 +1,4 @@
+import type { GithubTokenBridge } from '@/channels/github-token-bridge'
 import type { ChannelRouter } from '@/channels/router'
 import type { ChannelAdapterConfig, GithubAdapterConfig } from '@/channels/schema'
 import { resolveSecret } from '@/secrets/resolve'
@@ -61,6 +62,12 @@ export type GithubAdapterOptions = {
   // Test-only: replaces `setInterval` so tests can control when the
   // background refresh fires without waiting on real wall-clock time.
   setInterval?: (handler: () => void, ms: number) => { clear: () => void }
+  // Write-side of the GithubTokenBridge. On App-auth start the adapter
+  // registers a per-repo minter here so plugin hooks can resolve a token for
+  // ad-hoc `gh` commands; it unregisters on stop and on start rollback. PAT
+  // auth does not register (the seeded GH_TOKEN already covers every repo a
+  // classic PAT can reach, and a fine-grained PAT cannot be re-minted per repo).
+  githubTokenBridge?: GithubTokenBridge
 }
 
 export type GithubAdapter = {
@@ -93,6 +100,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
   let started = false
   let managedHooks: ReadonlyArray<{ repo: string; hookId: number }> = []
   let tokenRefreshTimer: { clear: () => void } | null = null
+  let unregisterTokenBridge: (() => void) | null = null
   const workspaceByChat = new Map<string, string>()
 
   const rememberWorkspace = (workspace: string, chat: string): void => {
@@ -208,6 +216,9 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
           `${GH_TOKEN_SKIP_LOG[seed.reason]} Ad-hoc \`gh\` commands should set a repo-scoped token explicitly.`,
         )
       }
+      if (options.secrets.auth.type === 'app' && options.githubTokenBridge !== undefined) {
+        unregisterTokenBridge = options.githubTokenBridge.registerResolver((repoSlug) => auth.token({ repoSlug }))
+      }
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
       // Best-effort: App-only preflight that compares the installation's granted
       // permissions against the configured eventAllowlist and warns about gaps.
@@ -287,6 +298,10 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
       if (tokenRefreshTimer !== null) {
         tokenRefreshTimer.clear()
         tokenRefreshTimer = null
+      }
+      if (unregisterTokenBridge !== null) {
+        unregisterTokenBridge()
+        unregisterTokenBridge = null
       }
       await auth.dispose()
       delete process.env.GH_TOKEN

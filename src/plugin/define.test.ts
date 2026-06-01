@@ -39,6 +39,7 @@ describe('definePlugin', () => {
       config: { count: 42 },
       logger: { info: () => {}, warn: () => {}, error: () => {} },
       permissions: noopPermissionService,
+      github: { resolveTokenForRepo: async () => ({ kind: 'unavailable', reason: 'test' }) },
       spawnSubagent: async () => {},
     })
     expect(captured.value).toBe(42)
