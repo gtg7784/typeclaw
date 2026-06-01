@@ -212,6 +212,43 @@ describe('createDiscordMembershipResolver', () => {
     expect(scopedUrls).toContain('https://discord.com/api/v10/guilds/g1')
   })
 
+  test('scopes visibility to key.thread when set, not the parent key.chat', async () => {
+    // given a forward-compatible key shape (chat = parent, thread = thread id);
+    // visibility must be evaluated against the thread channel, not the parent.
+    const { fn, calls } = fakeFetch([
+      jsonResponse({ approximate_member_count: 2 }),
+      jsonResponse([
+        { user: { id: 'u1', bot: false }, roles: [] },
+        { user: { id: 'b1', bot: true }, roles: [] },
+      ]),
+      jsonResponse(publicChannelGuild().channel),
+      jsonResponse(publicChannelGuild().guild),
+    ])
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 100,
+    })
+
+    // when the inbound is anchored at a thread
+    await expect(
+      resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'parent-c1', thread: 'thread-t9' }),
+    ).resolves.toEqual({
+      humans: 1,
+      bots: 1,
+      fetchedAt: 100,
+      truncated: false,
+      humanMemberIds: ['u1'],
+    })
+
+    // then the channel object fetched is the thread, not the parent
+    const scopedUrls = calls.slice(2).map((c) => c.url)
+    expect(scopedUrls).toContain('https://discord.com/api/v10/channels/thread-t9')
+    expect(scopedUrls).not.toContain('https://discord.com/api/v10/channels/parent-c1')
+  })
+
   test('private channel: @everyone denied VIEW_CHANNEL, only the agent bot allowed → bots:1, humans:1', async () => {
     // given: the exact production shape — guild has 1 human (owner) + 3 bots,
     // but #typeey denies @everyone VIEW_CHANNEL (0x400) and allows only the

@@ -324,12 +324,16 @@ export function createDiscordMembershipResolver(deps: {
     // as bots>1 and the grant_role relaxation (provesOnlyAgentBotPresent)
     // false-refuses. Resolve channel visibility for each member; on ANY
     // inability to decide, fall back rather than over- or under-count.
+    // `key.thread ?? key.chat` mirrors the history callback's channel-id
+    // resolution: today Discord stores a thread's own snowflake in `chat` with
+    // `thread` null, but a future caller that passes `chat=parent,
+    // thread=threadId` must scope visibility to the thread, not the parent.
     const scoped = await scopeMembersToChannel({
       fetchFn,
       token: deps.token,
       logger: deps.logger,
       guildId: key.workspace,
-      channelId: key.chat,
+      channelId: key.thread ?? key.chat,
       members: members.value,
     })
     if (scoped === 'fallback') return await fallback()
