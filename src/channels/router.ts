@@ -2817,13 +2817,14 @@ function composeTurnPrompt(
     )
   }
   // Group-chat nudge: same SYSTEM MESSAGE convention as the loop guard. We
-  // engaged this turn (explicit mention/reply/alias, or a fresh trigger),
-  // but the room has multiple humans, so the default "answer everything"
-  // posture is wrong. The engagement gate already stopped sticky credit
-  // from waking us on every follow-up; this tells the model to be
-  // selective on the turns it IS woken for. Cache-neutral (user-turn
-  // suffix), and skipped when the loop guard already fired to avoid
-  // stacking two silence notices in one turn.
+  // engaged this turn — possibly via sticky credit, which now wakes us on
+  // every follow-up in a group too (the engagement gate is content-blind by
+  // design). In a multi-human room the default "answer everything" posture is
+  // wrong, so this nudge is the ONLY thing that makes the bot selective: it
+  // tells the model to answer genuine follow-ups and stay silent on chatter.
+  // The gate gets us into the turn; the model decides whether to speak.
+  // Cache-neutral (user-turn suffix), and skipped when the loop guard already
+  // fired to avoid stacking two silence notices in one turn.
   if (state.groupChatNudge === true && !state.loopGuardActive) {
     parts.push(
       '---',
@@ -2833,10 +2834,15 @@ function composeTurnPrompt(
       'signal from the channel router, not a message from anyone in the chat.',
       '**Do not acknowledge or reply to this notice.**',
       '',
-      'Guidance:',
-      '- Reply only if the current message is addressed to you or clearly needs your input.',
-      '- For chatter between others, side-conversation, or messages that do not need you,',
-      '  reply with `NO_REPLY` (or call `skip_response`) to stay silent and just keep watching.',
+      'You are woken on every message from someone you recently talked with, so',
+      'most turns you should stay quiet. Reply ONLY when:',
+      '- the current message is addressed to you (by name, @-mention, or reply), or',
+      '- it directly continues your own last exchange and clearly wants an answer',
+      '  (e.g. a follow-up question about what you just said).',
+      '',
+      'Otherwise — chatter between others, side-conversation, banter, or anything',
+      'not actually waiting on you — reply with `NO_REPLY` (or call `skip_response`)',
+      'to stay silent and keep watching. When unsure, prefer silence.',
       '',
       '---',
       '',

@@ -592,7 +592,7 @@ describe('decideEngagement (solo-human fallback)', () => {
   })
 })
 
-describe('decideEngagement (group-aware sticky)', () => {
+describe('decideEngagement (sticky in groups)', () => {
   test('sticky credit force-engages in a DM', () => {
     const ledger = new StickyLedger()
     ledger.grant('discord-bot:@dm:d1:', 'alice', 10_000)
@@ -621,12 +621,12 @@ describe('decideEngagement (group-aware sticky)', () => {
     expect(decision).toBe('engage')
   })
 
-  test('sticky credit does NOT engage in a multi-human group, but IS consumed', () => {
+  test('sticky credit force-engages a plain follow-up in a multi-human group, and is consumed', () => {
     // given a multi-human group and a held credit for alice
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 10_000)
 
-    // when alice posts plain chatter (no mention/reply/alias)
+    // when alice posts a plain follow-up (no mention/reply/alias)
     const decision = decideEngagement({
       message: inbound(),
       config: baseConfig,
@@ -636,18 +636,19 @@ describe('decideEngagement (group-aware sticky)', () => {
       participants: crowded,
     })
 
-    // then we observe, and the one-shot credit is spent regardless
-    expect(decision).toBe('observe')
+    // then we engage (selectivity is the model's job via the prompt nudge),
+    // and the one-shot credit is spent
+    expect(decision).toBe('engage')
     expect(ledger.has(KEY, 'alice', 1000)).toBe(false)
   })
 
-  test('a consumed-in-group credit does not resurrect a later follow-up', () => {
-    // given a credit consumed by a group message (observed above)
+  test('a consumed group credit does not resurrect a later follow-up', () => {
+    // given a credit consumed by the first group follow-up
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 10_000)
     decideEngagement({ message: inbound(), config: baseConfig, key: KEY, ledger, now: 1000, participants: crowded })
 
-    // when alice posts again with no fresh trigger
+    // when alice posts again with no fresh credit and no trigger
     const second = decideEngagement({
       message: inbound(),
       config: baseConfig,
@@ -657,11 +658,31 @@ describe('decideEngagement (group-aware sticky)', () => {
       participants: crowded,
     })
 
-    // then still observe — the spent credit cannot wake us
+    // then observe — the spent one-shot credit cannot wake us a second time
     expect(second).toBe('observe')
   })
 
-  test('explicit mention still engages in a multi-human group despite suppressed sticky', () => {
+  test('an expired group credit is consumed but does not engage', () => {
+    // given a credit that has already expired
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 1000)
+
+    // when alice posts after expiry in a multi-human group
+    const decision = decideEngagement({
+      message: inbound(),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 5000,
+      participants: crowded,
+    })
+
+    // then observe, and the stale credit is cleared
+    expect(decision).toBe('observe')
+    expect(ledger.has(KEY, 'alice', 5000)).toBe(false)
+  })
+
+  test('explicit mention engages in a multi-human group', () => {
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 10_000)
     const decision = decideEngagement({
@@ -675,7 +696,7 @@ describe('decideEngagement (group-aware sticky)', () => {
     expect(decision).toBe('engage')
   })
 
-  test('alias still engages in a multi-human group despite suppressed sticky', () => {
+  test('alias engages in a multi-human group', () => {
     const ledger = new StickyLedger()
     const decision = decideEngagement({
       message: inbound({ text: '봉봉아 deploy please' }),
@@ -689,8 +710,8 @@ describe('decideEngagement (group-aware sticky)', () => {
     expect(decision).toBe('engage')
   })
 
-  test('peer bot sticky still engages in a one-human channel but observes in a multi-human group', () => {
-    // given a peer bot holding a credit
+  test('peer bot sticky engages symmetrically in both solo and multi-human groups', () => {
+    // given a peer bot holding a credit in a one-human channel
     const soloLedger = new StickyLedger()
     soloLedger.grant(KEY, 'peer1', 10_000)
     const solo = decideEngagement({
@@ -715,8 +736,9 @@ describe('decideEngagement (group-aware sticky)', () => {
       participants: [participant('alice'), participant('bob'), { ...participant('peer1'), isBot: true }],
     })
 
-    // then symmetric with humans — sticky alone no longer wakes us
-    expect(group).toBe('observe')
+    // then symmetric with humans — sticky wakes us in both (the peer-bot loop
+    // guard, not the engagement gate, is what stops a runaway bot-to-bot chain)
+    expect(group).toBe('engage')
   })
 })
 

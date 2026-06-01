@@ -1248,6 +1248,40 @@ describe('ChannelRouter sticky credits', () => {
     expect(sessions[0]!.prompts).toHaveLength(2)
     expect(sessions[0]!.prompts[1]).toContain('thanks')
   })
+
+  test('sticky engages a plain follow-up in a multi-human group, and the turn carries the nudge', async () => {
+    // given a 2-human group (bob already seen) where the bot just replied in
+    // alice's turn — granting alice sticky credit
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'bob-1', isBotMention: true, text: 'bot hi' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value = 1200
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'ㅇㅇ 방금 보냄' })
+    }
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-1', isBotMention: true, text: 'bot 보냄?' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = undefined
+    sessions[0]!.prompts.length = 0
+
+    // when alice posts a plain follow-up with no mention (the regressed case)
+    nowRef.value = 2000
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-2', isBotMention: false, text: '어디다 보냄' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    // then we engage (sticky woke us) and the nudge rides along so the model
+    // can still self-select silence for true chatter
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sessions[0]!.prompts[0]).toContain('어디다 보냄')
+    expect(sessions[0]!.prompts[0]).toContain('You are in a group chat with multiple people.')
+  })
 })
 
 describe('ChannelRouter outbound', () => {
