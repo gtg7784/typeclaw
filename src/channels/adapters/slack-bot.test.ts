@@ -698,6 +698,85 @@ describe('createSlackHistoryCallback', () => {
     expect(result.messages.map((m) => m.text)).toEqual(['first', 'second'])
   })
 
+  test('maps files on history messages into attachments and bakes placeholders into text', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [
+        {
+          ts: '1700000000.000100',
+          user: 'UALICE',
+          text: '이 사진 머임??',
+          thread_ts: '1700000000.000100',
+          files: [{ id: 'F123', name: 'photo.png', mimetype: 'image/png' }],
+        },
+      ],
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: '1700000000.000100', limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const msg = result.messages[0]!
+    expect(msg.attachments).toEqual([
+      { id: 1, kind: 'file', ref: 'F123', filename: 'photo.png', mimetype: 'image/png' },
+    ])
+    expect(msg.text).toBe('이 사진 머임??\n[Slack attachment #1: file image/png name=photo.png]')
+  })
+
+  test('omits attachments and leaves text untouched when a history message has no files', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [{ ts: '1.1', user: 'UALICE', text: 'plain text' }],
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const msg = result.messages[0]!
+    expect(msg.attachments).toBeUndefined()
+    expect(msg.text).toBe('plain text')
+  })
+
+  test('renders file-only history message (no text) as placeholder-only text', async () => {
+    // given
+    const { fn } = fakeFetch({
+      ok: true,
+      messages: [
+        {
+          ts: '1.1',
+          user: 'UALICE',
+          files: [{ id: 'F9', name: 'doc.pdf', mimetype: 'application/pdf' }],
+        },
+      ],
+    })
+    const cb = createSlackHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'C0', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const msg = result.messages[0]!
+    expect(msg.text).toBe('[Slack attachment #1: file application/pdf name=doc.pdf]')
+    expect(msg.attachments).toHaveLength(1)
+  })
+
   test('marks bot_message subtype as isBot', async () => {
     // given
     const { fn } = fakeFetch({

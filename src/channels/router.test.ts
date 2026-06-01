@@ -5223,6 +5223,41 @@ describe('ChannelRouter cold-start prefetch', () => {
     expect(occurrences).toBe(1)
   })
 
+  test('carries prefetched message attachments into the turn so look_at can resolve them', async () => {
+    // given: a thread root that carried an image, fetched via prefetch
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerHistory('discord-bot', async () => ({
+      ok: true,
+      messages: [
+        historyMessage({
+          externalMessageId: 'root',
+          text: '이 사진 머임??\n[Slack attachment #1: file image/png name=photo.png]',
+          attachments: [{ id: 1, kind: 'file', ref: 'F123', filename: 'photo.png', mimetype: 'image/png' }],
+        }),
+      ],
+    }))
+
+    // The attachment is only resolvable mid-turn (currentTurnAttachments is
+    // reset after prompt() returns), so snapshot it the moment prompt() fires —
+    // exactly when the agent's look_at_channel_attachment tool would run.
+    let resolvedMidTurn: ReturnType<typeof router.lookupInboundAttachment> = null
+    let promptDuringTurn = ''
+
+    // when: the agent is later @-mentioned in that thread
+    await router.route(inbound({ thread: 't-A', externalMessageId: 'engage', text: 'hey bot' }))
+    sessions[0]!.onPrompt = (text) => {
+      promptDuringTurn = text
+      resolvedMidTurn = router.lookupInboundAttachment({ ...THREAD_KEY, id: 1 })
+    }
+    await router.__testing!.flushDebounce(THREAD_KEY)
+
+    // then: the placeholder rendered for the model AND the id resolved to the ref
+    expect(promptDuringTurn).toContain('[Slack attachment #1: file image/png name=photo.png]')
+    expect(resolvedMidTurn).not.toBeNull()
+    expect(resolvedMidTurn!.ref).toBe('F123')
+  })
+
   test('emits an elision marker when thread length exceeds head + tail', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir, {

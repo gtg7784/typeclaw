@@ -1267,6 +1267,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           receivedAt: now(),
           ts: item.message.ts,
           source: 'prefetch',
+          ...(item.message.attachments !== undefined ? { attachments: item.message.attachments } : {}),
         })
       } else {
         observed.push({
