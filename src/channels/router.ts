@@ -730,6 +730,7 @@ export type ClaimHandler = (input: ClaimHandlerInput) => Promise<ClaimHandlerOut
 const GRANT_ALL_PERMISSIONS: PermissionService = {
   has: () => true,
   resolveRole: () => 'owner',
+  compareRoleSeverity: () => 1,
   describe: () => ({ role: 'owner', permissions: [CORE_PERMISSIONS.channelRespond] }),
   replaceRoles: () => {},
 }

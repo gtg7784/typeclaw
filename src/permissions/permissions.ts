@@ -9,6 +9,12 @@ export type PermissionService = {
   has(origin: SessionOrigin | undefined, permission: string): boolean
   resolveRole(origin: SessionOrigin | undefined): string
   describe(origin: SessionOrigin | undefined): { role: string; permissions: readonly string[] }
+  // Orders two role names on the severity tower so callers can cap an
+  // action to the requester's role (a guest turn must not read the output
+  // of a member-spawned subagent). `undefined` means an unknown role on
+  // either side and MUST be treated as deny, never allow — mistreating it
+  // as allow reopens the privilege-escalation hole this gate closes.
+  compareRoleSeverity(a: string, b: string): -1 | 0 | 1 | undefined
   // Rebuilds the resolved role table from the given roles config, preserving
   // the same plugin-permission set captured at construction time. Used by
   // the config reloadable so role match-rule edits (typeclaw role claim,
@@ -25,6 +31,7 @@ export type UnknownPermissionWarning = {
 export const noopPermissionService: PermissionService = {
   has: () => false,
   resolveRole: () => 'guest',
+  compareRoleSeverity: () => undefined,
   describe: () => ({ role: 'guest', permissions: [] }),
   replaceRoles: () => {},
 }
@@ -139,6 +146,15 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
     return 'guest'
   }
 
+  function roleSeverity(name: string): number | undefined {
+    if (name === 'owner') return 4
+    if (name === 'trusted') return 3
+    if (name === 'member') return 1
+    if (name === 'guest') return 0
+    if (byName.has(name)) return 2
+    return undefined
+  }
+
   return {
     has(origin, permission) {
       // Fail-safe floor: an undefined origin holds nothing, regardless of
@@ -156,6 +172,14 @@ export function createPermissionService(opts: CreatePermissionServiceOptions = {
       return role.permissions.includes(permission)
     },
     resolveRole,
+    compareRoleSeverity(a, b) {
+      const aRank = roleSeverity(a)
+      const bRank = roleSeverity(b)
+      if (aRank === undefined || bRank === undefined) return undefined
+      if (aRank < bRank) return -1
+      if (aRank > bRank) return 1
+      return 0
+    },
     describe(origin) {
       const name = resolveRole(origin)
       const role = byName.get(name)

@@ -187,6 +187,7 @@ type SessionFactoryArgs = {
 const grantAllPermissions: PermissionService = {
   has: () => true,
   resolveRole: () => 'owner',
+  compareRoleSeverity: () => 1,
   describe: () => ({ role: 'owner', permissions: ['channel.respond'] }),
   replaceRoles: () => {},
 }
@@ -3320,6 +3321,7 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
     const allowAliceOnly: PermissionService = {
       has: (origin) => origin !== undefined && origin.kind === 'channel' && origin.lastInboundAuthorId === 'alice',
       resolveRole: () => 'member',
+      compareRoleSeverity: () => undefined,
       describe: () => ({ role: 'member', permissions: ['channel.respond'] }),
       replaceRoles: () => {},
     }
@@ -3340,6 +3342,7 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
     const denyAll: PermissionService = {
       has: () => false,
       resolveRole: () => 'guest',
+      compareRoleSeverity: () => undefined,
       describe: () => ({ role: 'guest', permissions: [] }),
       replaceRoles: () => {},
     }
@@ -5349,6 +5352,7 @@ describe('ChannelRouter channel.respond gate', () => {
       return grants.includes(permission)
     },
     resolveRole: () => 'guest',
+    compareRoleSeverity: () => undefined,
     describe: () => ({ role: 'guest', permissions: [] }),
     replaceRoles: () => {},
   })
@@ -5576,6 +5580,7 @@ describe('ChannelRouter channel.respond gate', () => {
     const permissions: PermissionService = {
       has: () => false,
       resolveRole: () => 'guest',
+      compareRoleSeverity: () => undefined,
       describe: () => ({ role: 'guest', permissions: [] }),
       replaceRoles: () => {},
     }
@@ -5595,6 +5600,7 @@ describe('ChannelRouter role-claim bypass', () => {
   const denyAllPermissions: PermissionService = {
     has: () => false,
     resolveRole: () => 'guest',
+    compareRoleSeverity: () => undefined,
     describe: () => ({ role: 'guest', permissions: [] }),
     replaceRoles: () => {},
   }
@@ -6486,6 +6492,7 @@ describe('ChannelRouter per-turn live role anchor', () => {
     const guestPermissions: PermissionService = {
       has: () => true,
       resolveRole: () => 'guest',
+      compareRoleSeverity: () => undefined,
       describe: () => ({ role: 'guest', permissions: [] }),
       replaceRoles: () => {},
     }

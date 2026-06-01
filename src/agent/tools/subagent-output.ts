@@ -5,6 +5,7 @@ import type { PermissionService } from '@/permissions'
 
 import type { LiveSubagentRegistry, StatusSnapshot, SubagentProgressEvent } from '../live-subagents'
 import type { SessionOrigin } from '../session-origin'
+import { authorizeLiveSubagentAccess } from './subagent-access'
 
 export type SubagentOutputToolDetails =
   | {
@@ -64,8 +65,15 @@ export function createSubagentOutputTool(options: CreateSubagentOutputToolOption
     }),
 
     async execute(_toolCallId, params) {
-      if (permissions !== undefined && !permissions.has(getOrigin(), 'subagent.output')) {
-        return errorResult('subagent.output denied: insufficient permissions')
+      const access = authorizeLiveSubagentAccess({
+        permissions,
+        origin: getOrigin(),
+        liveRegistry,
+        taskId: params.task_id,
+        permission: 'subagent.output',
+      })
+      if (!access.ok) {
+        return errorResult(access.message)
       }
       const snap = liveRegistry.snapshot(params.task_id, now())
       if (snap === undefined) {

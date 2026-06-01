@@ -299,6 +299,7 @@ describe('createSpawnSubagentTool — permissions gating', () => {
     return {
       has: (_origin, permission) => allowed.has(permission),
       resolveRole: () => 'tester',
+      compareRoleSeverity: () => undefined,
       describe: () => ({ role: 'tester', permissions: [...allowed] }),
       replaceRoles: () => {},
     }
@@ -466,6 +467,7 @@ describe('createSpawnSubagentTool — role inheritance', () => {
     return {
       has: () => true,
       resolveRole: () => role,
+      compareRoleSeverity: () => undefined,
       describe: () => ({ role, permissions: ['subagent.spawn'] }),
       replaceRoles: () => {},
     }
