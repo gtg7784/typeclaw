@@ -69,6 +69,22 @@ describe('checkGraphqlAuthNudge', () => {
     expect(textOf(result)).not.toContain(GRAPHQL_AUTH_NUDGE_TAG)
   })
 
+  test('does not fire on a graphql resolution error (bad node id / missing repo is not auth)', () => {
+    delete process.env.GH_TOKEN
+    const nodeError = bashResult(
+      "gh api graphql -f query=...\ngh: Could not resolve to a node with the global id of 'PRRT_bad'",
+    )
+    const repoError = bashResult(
+      "gh api graphql -f query=...\ngh: Could not resolve to a Repository with the name 'acme/missing'",
+    )
+
+    checkGraphqlAuthNudge({ tool: 'bash', result: nodeError })
+    checkGraphqlAuthNudge({ tool: 'bash', result: repoError })
+
+    expect(textOf(nodeError)).not.toContain(GRAPHQL_AUTH_NUDGE_TAG)
+    expect(textOf(repoError)).not.toContain(GRAPHQL_AUTH_NUDGE_TAG)
+  })
+
   test('does not double-append when the hint is already present', () => {
     delete process.env.GH_TOKEN
     const result = bashResult('gh api graphql -f query=...\nHTTP 401')

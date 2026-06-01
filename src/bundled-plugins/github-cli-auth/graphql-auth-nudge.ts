@@ -18,9 +18,10 @@ const NUDGE_TEXT =
 // false positive only appends a hint to an unrelated failure.
 const GRAPHQL_INVOCATION = /\bgh\b[^\n]*\bapi\b[^\n]*\bgraphql\b/
 
-// gh / GitHub auth-failure signatures. Kept narrow so a graphql query that merely
-// mentions "401" in its data does not trip the nudge: these are the strings gh and
-// the API emit when the request itself was rejected for auth.
+// Concrete auth-rejection strings only — gh / the API emit these when the
+// request itself was rejected for auth. Deliberately excludes resolution
+// errors like "Could not resolve to ...", which graphql also returns for an
+// ordinary bad node ID or missing repo (not auth) and would misroute the nudge.
 const AUTH_FAILURE_SIGNATURES = [
   'HTTP 401',
   'Bad credentials',
@@ -29,7 +30,6 @@ const AUTH_FAILURE_SIGNATURES = [
   'must be authenticated',
   'authentication required',
   'gh auth login',
-  'Could not resolve to',
 ]
 
 export function checkGraphqlAuthNudge(options: { tool: string; result: ToolResult }): void {
