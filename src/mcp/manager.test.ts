@@ -60,6 +60,38 @@ describe('createMcpManager', () => {
       { name: 'gamma', connected: false },
     ])
   })
+
+  test('threads an abort signal to each connector', async () => {
+    const signals: (AbortSignal | undefined)[] = []
+    const abort = new AbortController()
+    const manager = createMcpManager([server('alpha'), server('gamma')], {
+      env: {},
+      async connect(mcpServer, opts) {
+        signals.push(opts.signal)
+        return fakeConnection(mcpServer.name, [], [])
+      },
+    })
+
+    await manager.connectAll({ signal: abort.signal })
+
+    expect(signals).toEqual([abort.signal, abort.signal])
+  })
+
+  test('refresh updates cached tool counts from live connections', async () => {
+    const manager = createMcpManager([server('alpha')], {
+      env: {},
+      async connect(mcpServer) {
+        return changingConnection(mcpServer.name)
+      },
+    })
+
+    await manager.connectAll()
+    expect(manager.listServers()).toEqual([{ name: 'alpha', connected: true, toolCount: 1 }])
+
+    await manager.refresh()
+
+    expect(manager.listServers()).toEqual([{ name: 'alpha', connected: true, toolCount: 2 }])
+  })
 })
 
 function server(name: string): McpServer {
@@ -72,11 +104,35 @@ function fakeConnection(name: string, tools: McpToolInfo[], closed: string[]): M
     async listTools() {
       return tools
     },
+    async refresh() {
+      return tools
+    },
     async callTool() {
       return { content: [{ type: 'text', text: 'ok' }] }
     },
     async close() {
       closed.push(name)
     },
+  }
+}
+
+function changingConnection(name: string): McpConnection {
+  let calls = 0
+  const listTools = async (): Promise<McpToolInfo[]> => {
+    calls += 1
+    return Array.from({ length: calls }, (_value, index) => ({
+      name: `tool-${index}`,
+      description: '',
+      inputSchema: {},
+    }))
+  }
+  return {
+    name,
+    listTools,
+    refresh: listTools,
+    async callTool() {
+      return { content: [{ type: 'text', text: 'ok' }] }
+    },
+    async close() {},
   }
 }
