@@ -2,6 +2,7 @@ import { TYPECLAW_INTERNAL_BASH_ENV } from '@/agent/plugin-tools'
 import { definePlugin } from '@/plugin'
 
 import { analyzeGhCommand } from './gh-command'
+import { checkGraphqlAuthNudge } from './graphql-auth-nudge'
 import { classifyGhToken } from './token-class'
 
 export default definePlugin({
@@ -35,6 +36,9 @@ export default definePlugin({
           // string, where it could leak through logs or later hooks.
           event.args[TYPECLAW_INTERNAL_BASH_ENV] = { GH_TOKEN: result.token }
           return
+        },
+        'tool.after': async (event) => {
+          checkGraphqlAuthNudge({ tool: event.tool, result: event.result })
         },
       },
     }

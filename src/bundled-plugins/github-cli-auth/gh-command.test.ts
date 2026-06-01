@@ -81,9 +81,24 @@ describe('analyzeGhCommand', () => {
     })
   })
 
-  it('passes through a non-repo gh api endpoint even with -R present', () => {
-    expect(analyzeGhCommand('gh api graphql -f query=x -R acme/widgets')).toEqual({ kind: 'pass-through' })
+  it('passes through a non-graphql, non-repo gh api endpoint even with -R present', () => {
     expect(analyzeGhCommand('gh api /user -R acme/widgets')).toEqual({ kind: 'pass-through' })
+    expect(analyzeGhCommand('gh api /rate_limit -R acme/widgets')).toEqual({ kind: 'pass-through' })
+  })
+
+  it('injects the -R repo for gh api graphql (its repo is not in an inspectable path)', () => {
+    expect(analyzeGhCommand("gh api graphql -f query='mutation { resolveReviewThread }' -R acme/widgets")).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+    expect(analyzeGhCommand('gh api graphql --repo=acme/widgets -f query=x')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+  })
+
+  it('passes through gh api graphql with no -R (nothing to mint for)', () => {
+    expect(analyzeGhCommand('gh api graphql -f query=x')).toEqual({ kind: 'pass-through' })
   })
 
   it('blocks a gh api compare endpoint that reaches a cross-fork head repo', () => {

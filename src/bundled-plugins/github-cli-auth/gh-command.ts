@@ -159,8 +159,9 @@ function classifyGhSegment(args: readonly string[]): GhSegmentDecision {
 // Repo authority for `gh api`: the literal endpoint path wins. A `-R/--repo`
 // that names a DIFFERENT repo than the path is a mint-for-X-but-hit-Y attempt
 // and blocks. A placeholder endpoint (`repos/{owner}/{repo}`) has no literal
-// target, so -R fills it and is authoritative. A non-repo endpoint (`graphql`,
-// `/user`) passes through — -R does not make it repo-scoped, so no mint.
+// target, so -R fills it and is authoritative. A non-repo endpoint without a
+// `-R` (`graphql`, `/user`) passes through — the flag is what makes it
+// repo-scoped, so absent one there is nothing to mint for.
 function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
   const pathRepos = extractReposFromApiPath(args)
   const flagRepo = extractRepoFlag(args)
@@ -176,7 +177,19 @@ function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
     return { kind: 'inject', repoSlugs: [flagRepo] }
   }
 
+  // graphql encodes its repo in the query body / opaque node IDs, never an
+  // inspectable path, so `-R` is taken as the mint hint. Safe because there is
+  // no literal path to conflict with (cf. the API_REPO_CONFLICT_REASON guard
+  // above): the minted token's installation scope, not the flag, bounds reach.
+  if (flagRepo !== null && isGraphqlEndpoint(args)) {
+    return { kind: 'inject', repoSlugs: [flagRepo] }
+  }
+
   return { kind: 'pass-through' }
+}
+
+function isGraphqlEndpoint(args: readonly string[]): boolean {
+  return findApiEndpoint(args) === 'graphql'
 }
 
 function findGhInvocations(tokens: readonly string[]): number[] {
