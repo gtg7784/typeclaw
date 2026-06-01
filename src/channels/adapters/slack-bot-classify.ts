@@ -182,7 +182,7 @@ function describeSlackMedia(event: SlackInboundMessageEvent): InboundAttachment[
   return (event.files ?? []).map((file, index) => describeSlackFile(file, index + 1))
 }
 
-function describeSlackFile(file: SlackFile, id: number): InboundAttachment {
+export function describeSlackFile(file: SlackFile, id: number): InboundAttachment {
   return {
     id,
     kind: 'file',
@@ -192,7 +192,7 @@ function describeSlackFile(file: SlackFile, id: number): InboundAttachment {
   }
 }
 
-function renderPlaceholder(attachment: InboundAttachment): string {
+export function renderPlaceholder(attachment: InboundAttachment): string {
   const parts: string[] = [`Slack attachment #${attachment.id}: ${attachment.kind}`]
   if (attachment.mimetype !== undefined) parts.push(attachment.mimetype)
   if (attachment.filename !== undefined) parts.push(`name=${attachment.filename}`)

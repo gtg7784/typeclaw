@@ -1,4 +1,9 @@
-import { SlackBotClient, SlackBotListener, type SlackSocketModeSlashCommandArgs } from 'agent-messenger/slackbot'
+import {
+  SlackBotClient,
+  SlackBotListener,
+  type SlackFile,
+  type SlackSocketModeSlashCommandArgs,
+} from 'agent-messenger/slackbot'
 
 import {
   MEMBERSHIP_ENUMERATION_CAP,
@@ -28,7 +33,9 @@ import { createSlackAuthorResolver } from './slack-bot-author-resolver'
 import { createSlackChannelResolver } from './slack-bot-channel-resolver'
 import {
   classifyInbound,
+  describeSlackFile,
   type InboundDropReason,
+  renderPlaceholder,
   type SlackInboundAppMentionEvent,
   type SlackInboundMessageEvent,
 } from './slack-bot-classify'
@@ -369,6 +376,7 @@ type SlackRawHistoryMessage = {
   text?: string
   thread_ts?: string
   parent_user_id?: string
+  files?: SlackFile[]
 }
 
 type SlackHistoryResponse = {
@@ -601,14 +609,29 @@ function mapSlackMessage(msg: SlackRawHistoryMessage, botUserId: string | null):
     msg.parent_user_id === botUserId
       ? msg.thread_ts
       : null
+  // The history fetch bypasses the inbound classifier, so files on
+  // already-posted messages (e.g. an image on a thread root the agent is
+  // later @-mentioned under) must be mapped here too — otherwise they are
+  // silently dropped and look_at_channel_attachment can never resolve them.
+  // Mirror splitInbound: bake placeholders into text and carry the structured
+  // attachments so the router can resolve ids.
+  const attachments = (msg.files ?? []).map((file, index) => describeSlackFile(file, index + 1))
+  const rawText = msg.text ?? ''
+  const text =
+    attachments.length === 0
+      ? rawText
+      : rawText === ''
+        ? attachments.map(renderPlaceholder).join('\n')
+        : `${rawText}\n${attachments.map(renderPlaceholder).join('\n')}`
   return {
     externalMessageId: msg.ts,
     authorId: msg.user ?? msg.bot_id ?? 'unknown',
     authorName: msg.user ?? msg.bot_id ?? 'unknown',
-    text: msg.text ?? '',
+    text,
     ts: slackTsToMillis(msg.ts),
     isBot,
     replyToBotMessageId,
+    ...(attachments.length > 0 ? { attachments } : {}),
   }
 }
 
