@@ -3,7 +3,11 @@ import { defineCommand } from 'citty'
 import { type DreamEntry, renderListRow, runDreams, type ViewAction } from '@/dreams'
 import { findAgentDir } from '@/init'
 
+import { createEscController } from './inspect-controller'
 import { c, cancel, errorLine, isCancel } from './ui'
+
+const ESC_DEBOUNCE_MS = 50
+const QUIT_KEY = 0x71
 
 export const dreamsCommand = defineCommand({
   meta: {
@@ -55,34 +59,47 @@ function isInteractive(): boolean {
   return Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY)
 }
 
-// Raw mode is entered only for this wait and always restored, so a thrown
-// error never leaves the terminal stuck (same contract as cli/inspect.ts).
-async function waitForViewerKey(color: boolean): Promise<ViewAction> {
-  const stdin = process.stdin
+type RawInput = Pick<NodeJS.ReadStream, 'isTTY' | 'setRawMode' | 'resume' | 'pause' | 'on' | 'off'>
+
+// Esc routes through createEscController so a standalone Esc returns 'back'
+// while a multi-byte CSI sequence (↑/↓ arrows) does not. Teardown restores
+// raw mode but deliberately does NOT pause stdin: clack cannot re-flow a
+// paused process.stdin under Bun, so the next picker would freeze — the same
+// reason cli/inspect.ts leaves the stream flowing on its return path.
+export async function waitForViewerKey(color: boolean, input: RawInput = process.stdin): Promise<ViewAction> {
+  const stdin = input
   if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') return 'exit'
 
   process.stdout.write(`${viewerHintLine(color)}\n`)
+
+  const ctrl = createEscController({ debounceMs: ESC_DEBOUNCE_MS })
+  const escSignal = ctrl.armForStream()
 
   return new Promise<ViewAction>((resolve) => {
     let settled = false
     const finish = (action: ViewAction): void => {
       if (settled) return
       settled = true
+      escSignal.removeEventListener('abort', onEscAbort)
       stdin.off('data', onData)
+      ctrl.dispose()
       try {
         stdin.setRawMode(false)
       } catch {
         /* terminal already torn down */
       }
-      stdin.pause()
       resolve(action)
     }
+    const onEscAbort = (): void => finish('back')
     const onData = (chunk: Buffer): void => {
-      const byte = chunk[0]
-      if (byte === undefined) return
-      if (byte === 0x1b) finish('back')
-      else if (byte === 0x03 || byte === 0x71) finish('exit')
+      if (chunk[0] === QUIT_KEY) {
+        finish('exit')
+        return
+      }
+      const { sigint } = ctrl.onChunk(chunk)
+      if (sigint) finish('exit')
     }
+    escSignal.addEventListener('abort', onEscAbort, { once: true })
     stdin.setRawMode(true)
     stdin.resume()
     stdin.on('data', onData)
