@@ -78,6 +78,8 @@ export const mcpServerSchema = z
         message: "MCP server name must not contain '__' (reserved as the tool-namespace separator)",
       }),
     description: z.string().optional(),
+    // Default true so omitting the field keeps the server on; set false to keep config but skip connecting.
+    enabled: z.boolean().default(true),
     timeoutMs: z.number().int().positive().max(MCP_MAX_TIMEOUT_MS).optional(),
     command: z.string().trim().min(1).optional(),
     args: z.array(z.string()).default([]),

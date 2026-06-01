@@ -162,6 +162,7 @@ describe('connectMcpServer', () => {
 function server(timeoutMs?: number): McpServer {
   return {
     name: 'server',
+    enabled: true,
     command: 'server-command',
     args: [],
     env: {},

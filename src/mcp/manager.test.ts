@@ -61,6 +61,32 @@ describe('createMcpManager', () => {
     ])
   })
 
+  test('keeps disabled servers invisible to connection lookup and server listing', async () => {
+    const connected: string[] = []
+    const servers: McpServer[] = [server('alpha'), server('disabled', false), server('gamma')]
+    const manager = createMcpManager(servers, {
+      env: {},
+      async connect(mcpServer) {
+        connected.push(mcpServer.name)
+        return fakeConnection(
+          mcpServer.name,
+          [{ name: `${mcpServer.name}-tool`, description: '', inputSchema: {} }],
+          [],
+        )
+      },
+    })
+
+    const results = await manager.connectAll()
+
+    expect(connected).toEqual(['alpha', 'gamma'])
+    expect(results.map((result) => result.name)).toEqual(['alpha', 'gamma'])
+    expect(manager.getConnection('disabled')).toBeUndefined()
+    expect(manager.listServers()).toEqual([
+      { name: 'alpha', connected: true, toolCount: 1 },
+      { name: 'gamma', connected: true, toolCount: 1 },
+    ])
+  })
+
   test('threads an abort signal to each connector', async () => {
     const signals: (AbortSignal | undefined)[] = []
     const abort = new AbortController()
@@ -151,8 +177,8 @@ describe('createMcpManager', () => {
   })
 })
 
-function server(name: string): McpServer {
-  return { name, command: 'server-command', args: [], env: {} }
+function server(name: string, enabled = true): McpServer {
+  return { name, enabled, command: 'server-command', args: [], env: {} }
 }
 
 function fakeConnection(name: string, tools: McpToolInfo[], closed: string[]): McpConnection {

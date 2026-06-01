@@ -27,6 +27,7 @@ export function createMcpManager(
   servers: McpServer[],
   opts: { env: NodeJS.ProcessEnv; connect?: ConnectMcpServerFn },
 ): McpManager {
+  const activeServers = servers.filter((server) => server.enabled)
   const connect = opts.connect ?? connectMcpServer
   const connections = new Map<string, McpConnection>()
   const toolCounts = new Map<string, number>()
@@ -35,7 +36,7 @@ export function createMcpManager(
     async connectAll(connectOpts: { signal?: AbortSignal } = {}): Promise<McpConnectResult[]> {
       const firstIndexByName = new Map<string, number>()
       const results = await Promise.all(
-        servers.map((server, index): Promise<McpConnectResult> => {
+        activeServers.map((server, index): Promise<McpConnectResult> => {
           // The name is the tool namespace and the connections key, so a second
           // server sharing a name would silently shadow the first. Fail the
           // duplicate fast instead of connecting it, keeping routing unambiguous.
@@ -64,7 +65,7 @@ export function createMcpManager(
       return connections.get(name)
     },
     listServers(): { name: string; description?: string; connected: boolean; toolCount?: number }[] {
-      return servers.map((server) => {
+      return activeServers.map((server) => {
         const toolCount = toolCounts.get(server.name)
         return {
           name: server.name,
