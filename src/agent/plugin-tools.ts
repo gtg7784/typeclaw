@@ -1,6 +1,8 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
+
 import type { AgentTool } from '@mariozechner/pi-agent-core'
 import {
-  bashTool as piBashTool,
+  createBashTool as piCreateBashTool,
   defineTool as piDefineTool,
   editTool as piEditTool,
   findTool as piFindTool,
@@ -9,7 +11,7 @@ import {
   readTool as piReadTool,
   writeTool as piWriteTool,
 } from '@mariozechner/pi-coding-agent'
-import type { ToolDefinition } from '@mariozechner/pi-coding-agent'
+import type { BashSpawnContext, ToolDefinition } from '@mariozechner/pi-coding-agent'
 import type { Static, TSchema } from '@sinclair/typebox'
 import { Type } from '@sinclair/typebox'
 import { z } from 'zod'
@@ -45,6 +47,38 @@ import { websearchTool } from './tools/websearch'
 // detector covers every tool category — plugin tools, TypeClaw system tools,
 // and pi-coding-agent builtins — through one chokepoint.
 let sharedLoopGuard: LoopGuard = createLoopGuard()
+
+// Internal, non-model-facing contract: a tool.before hook may set this key on
+// a bash call's args to inject env vars into the spawned process WITHOUT
+// putting them in the command string (where they would leak through logs and
+// later hooks). The wrapper extracts and deletes it before the bash tool runs,
+// then threads it to the spawn (non-sandboxed) and to bwrap --setenv
+// (sandboxed). Used by github-cli-auth to inject a per-repo GH_TOKEN. The key
+// is stripped from client-supplied args before tool.before so only trusted
+// hooks can set it.
+export const TYPECLAW_INTERNAL_BASH_ENV = '__typeclawBashEnv'
+
+type BashEnvOverlay = Record<string, string>
+
+const bashEnvStore = new AsyncLocalStorage<BashEnvOverlay | undefined>()
+
+function readBashEnvOverlay(args: Record<string, unknown>): BashEnvOverlay | undefined {
+  const raw = args[TYPECLAW_INTERNAL_BASH_ENV]
+  if (raw === null || typeof raw !== 'object') return undefined
+  const overlay: BashEnvOverlay = {}
+  for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof value === 'string') overlay[key] = value
+  }
+  return Object.keys(overlay).length > 0 ? overlay : undefined
+}
+
+function bashSpawnHookWithOverlay(context: BashSpawnContext): BashSpawnContext {
+  const overlay = bashEnvStore.getStore()
+  if (overlay === undefined) return context
+  return { ...context, env: { ...context.env, ...overlay } }
+}
+
+const piBashTool = piCreateBashTool(process.cwd(), { spawnHook: bashSpawnHookWithOverlay })
 
 const ACKNOWLEDGE_GUARDS_SCHEMA = Type.Optional(
   Type.Object(
@@ -372,6 +406,9 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
     async execute(toolCallId, params, signal, onUpdate) {
       const mutableArgs = params as Record<string, unknown>
       const liveOrigin = opts.getOrigin?.()
+      // Defense-in-depth: strip any pre-existing internal env-overlay key
+      // before hooks run so only trusted tool.before hooks can set it.
+      delete mutableArgs[TYPECLAW_INTERNAL_BASH_ENV]
       const blockResult = await opts.hooks.runToolBefore({
         tool: tool.name,
         sessionId: opts.sessionId,
@@ -382,6 +419,11 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       if (blockResult !== undefined) {
         throw new Error(`blocked: ${blockResult.reason}`)
       }
+      // Extract and delete before the loop guard serializes args and before
+      // the bash tool destructures them, so the overlay never reaches logs,
+      // loop-detection state, or pi's execute.
+      const bashEnvOverlay = readBashEnvOverlay(mutableArgs)
+      delete mutableArgs[TYPECLAW_INTERNAL_BASH_ENV]
       const loopDecision = sharedLoopGuard.check(opts.sessionId, tool.name, mutableArgs)
       if (loopDecision.kind === 'block') {
         throw new Error(loopDecision.message)
@@ -401,10 +443,12 @@ export function wrapAgentToolAsCustomToolDefinition<TParams extends TSchema, TDe
       stripGuardAcknowledgements(mutableArgs)
 
       if (tool.name === 'bash' && opts.permissions !== undefined) {
-        await applyBashSandbox(mutableArgs, opts.permissions, liveOrigin, opts.agentDir)
+        await applyBashSandbox(mutableArgs, opts.permissions, liveOrigin, opts.agentDir, bashEnvOverlay)
       }
 
-      const result = await tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate)
+      const result = await bashEnvStore.run(bashEnvOverlay, () =>
+        tool.execute(toolCallId, mutableArgs as Static<TParams>, signal, onUpdate),
+      )
       const hookResult: ToolResult = {
         content: result.content as ContentPart[],
         details: result.details,
@@ -446,6 +490,7 @@ async function applyBashSandbox(
   permissions: PermissionService,
   origin: SessionOrigin | undefined,
   agentDir: string,
+  envOverlay: BashEnvOverlay | undefined,
 ): Promise<void> {
   const command = mutableArgs.command
   if (typeof command !== 'string') return
@@ -454,11 +499,15 @@ async function applyBashSandbox(
   if (dirs.length === 0 && files.length === 0) return
 
   await ensureBwrapAvailable()
+  // bwrap does --clearenv, so the overlay must be re-introduced via env.set or
+  // it would never reach the sandboxed process (the non-sandboxed spawnHook
+  // path does not run when the command is rewritten to a bwrap invocation).
   const { commandString } = buildSandboxedCommand(command, {
     mounts: [{ type: 'bind', source: agentDir, dest: agentDir }],
     masks: { dirs, files },
     network: 'inherit',
     cwd: agentDir,
+    ...(envOverlay !== undefined ? { env: { set: envOverlay } } : {}),
   })
   mutableArgs.command = commandString
 }

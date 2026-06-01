@@ -16,6 +16,7 @@ import {
   __resetSharedLoopGuardForTests,
   buildBuiltinPiToolOverrides,
   defaultBuiltinPiAgentTools,
+  TYPECLAW_INTERNAL_BASH_ENV,
   wrapAgentToolAsCustomToolDefinition,
   wrapPluginTool,
   wrapSystemAgentTool,
@@ -664,7 +665,6 @@ describe('resolveBuiltinToolRefs (dual-route)', () => {
     const pi = await import('@mariozechner/pi-coding-agent')
     const cases: { name: string; expected: unknown }[] = [
       { name: 'read', expected: pi.readTool },
-      { name: 'bash', expected: pi.bashTool },
       { name: 'edit', expected: pi.editTool },
       { name: 'write', expected: pi.writeTool },
       { name: 'grep', expected: pi.grepTool },
@@ -677,6 +677,18 @@ describe('resolveBuiltinToolRefs (dual-route)', () => {
       expect(r.toolDefinitions.length).toBe(0)
       expect(r.agentTools[0]).toBe(expected as never)
     }
+  })
+
+  test('bash resolves to a typeclaw-constructed AgentTool (spawnHook-wired), not pi.bashTool', async () => {
+    const { resolveBuiltinToolRefs } = await import('./plugin-tools')
+    const pi = await import('@mariozechner/pi-coding-agent')
+    const r = resolveBuiltinToolRefs([{ __builtinTool: 'bash' }])
+    expect(r.agentTools.length).toBe(1)
+    expect(r.toolDefinitions.length).toBe(0)
+    expect(r.agentTools[0]?.name).toBe('bash')
+    // It is our own instance carrying the env-overlay spawnHook, not the raw
+    // pi export — reference inequality is the observable proof.
+    expect(r.agentTools[0]).not.toBe(pi.bashTool as never)
   })
 
   test('typeclaw-side resolve to the original ToolDefinition imports by reference equality', async () => {
@@ -929,6 +941,51 @@ describe('wrapAgentToolAsCustomToolDefinition bash sandbox (role-derived path hi
     })
     await wrapped.execute('c', { command: 'echo hi' }, undefined, undefined, {} as never)
     expect(record.command).toBe('echo hi')
+  })
+
+  test('a hook-set env overlay is stripped from args and never reaches the command (non-sandboxed)', async () => {
+    const record: { command?: string } = {}
+    const hooks = createHookBus()
+    hooks.registerAll('env-setter', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        ;(event.args as Record<string, unknown>)[TYPECLAW_INTERNAL_BASH_ENV] = { GH_TOKEN: 'ghs_minted' }
+      },
+    })
+    const args: Record<string, unknown> = { command: 'gh pr view -R acme/widgets' }
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+      agentDir: '/agent',
+      sessionId: 's',
+      hooks,
+      getOrigin: () => tui,
+      permissions: createPermissionService(),
+    })
+    await wrapped.execute('c', args as never, undefined, undefined, {} as never)
+    expect(record.command).toBe('gh pr view -R acme/widgets')
+    expect(args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
+  })
+
+  test('a client-supplied env overlay is stripped before hooks run (only trusted hooks may set it)', async () => {
+    const record: { command?: string } = {}
+    let seenInHook: unknown = 'unset'
+    const hooks = createHookBus()
+    hooks.registerAll('observer', '/agent', noopLogger, {
+      'tool.before': (event) => {
+        seenInHook = (event.args as Record<string, unknown>)[TYPECLAW_INTERNAL_BASH_ENV]
+      },
+    })
+    const args: Record<string, unknown> = {
+      command: 'echo hi',
+      [TYPECLAW_INTERNAL_BASH_ENV]: { GH_TOKEN: 'attacker' },
+    }
+    const wrapped = wrapAgentToolAsCustomToolDefinition(fakeBash(record), {
+      agentDir: '/agent',
+      sessionId: 's',
+      hooks,
+      getOrigin: () => tui,
+      permissions: createPermissionService(),
+    })
+    await wrapped.execute('c', args as never, undefined, undefined, {} as never)
+    expect(seenInHook).toBeUndefined()
   })
 })
 
