@@ -842,7 +842,7 @@ describe('createInteractionHandler', () => {
   type CapturedCall = { url: string; init: RequestInit }
   type RouterCall = { key: ChannelKey; name: string; invokerId: string }
   type RouterResult =
-    | { kind: 'handled'; name: string }
+    | { kind: 'handled'; name: string; reply?: string }
     | { kind: 'no-live-session' }
     | { kind: 'permission-denied' }
     | { kind: 'unknown-command'; name: string }
@@ -912,6 +912,18 @@ describe('createInteractionHandler', () => {
     expect(fetchCalls[0]!.url).toBe('https://discord.com/api/v10/interactions/i-1/tok-abc/callback')
     const body = JSON.parse(fetchCalls[0]!.init.body as string)
     expect(body.data.content).toContain('Stopped')
+    expect(body.data.flags).toBe(64)
+  })
+
+  test('/help interaction acks with the handler-provided command list', async () => {
+    const helpText = 'Available commands:\n/help — List available commands\n/stop — Abort the current turn'
+    const { handler, fetchCalls } = setup(async () => ({ kind: 'handled', name: 'help', reply: helpText }))
+
+    await handler(interaction({ data: { name: 'help', type: DISCORD_SLASH_COMMAND_TYPE_CHAT_INPUT } }))
+
+    expect(fetchCalls).toHaveLength(1)
+    const body = JSON.parse(fetchCalls[0]!.init.body as string)
+    expect(body.data.content).toBe(helpText)
     expect(body.data.flags).toBe(64)
   })
 

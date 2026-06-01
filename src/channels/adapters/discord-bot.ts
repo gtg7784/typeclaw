@@ -42,6 +42,7 @@ import {
 // commands here is the documented extension point: declare the entry here,
 // then add the matching handler in createChannelRouter's command registry.
 const SLASH_COMMANDS: readonly DiscordCommandDeclaration[] = [
+  { name: 'help', description: 'List available commands' },
   { name: 'stop', description: 'Abort the current turn in this channel' },
 ]
 const SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set(SLASH_COMMANDS.map((c) => c.name))
@@ -508,7 +509,9 @@ export function createInteractionHandler(
       })
       const replyContent =
         result.kind === 'handled'
-          ? STOP_REPLY_ABORTED
+          ? // Dynamic commands (e.g. /help) carry their own reply; static
+            // control commands (/stop) fall back to the fixed confirmation.
+            (result.reply ?? STOP_REPLY_ABORTED)
           : result.kind === 'no-live-session'
             ? STOP_REPLY_NO_LIVE_SESSION
             : result.kind === 'permission-denied'

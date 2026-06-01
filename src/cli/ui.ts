@@ -153,6 +153,12 @@ export const SLACK_APP_MANIFEST = {
     // than silently routing real slash invocations to a third-party URL.
     slash_commands: [
       {
+        command: '/help',
+        description: 'List available commands',
+        url: 'https://example.invalid/typeclaw-uses-socket-mode',
+        should_escape: false,
+      },
+      {
         command: '/stop',
         description: 'Abort the current turn in this channel',
         // usage_hint is intentionally omitted. Slack's manifest validator

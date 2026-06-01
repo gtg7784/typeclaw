@@ -7,12 +7,13 @@ import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSe
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
-import { createCommandRegistry } from '@/commands'
+import { type Command, createCommandRegistry } from '@/commands'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import { extractClaimCode } from '@/role-claim'
 import type { Stream } from '@/stream'
 
+import { formatChannelCommandHelp } from './commands'
 import { decideEngagement, grantStickyForReplyTargets, StickyLedger, type EngagementDecision } from './engagement'
 import {
   MEMBERSHIP_COLD_FETCH_TIMEOUT_MS,
@@ -439,14 +440,16 @@ type LiveSession = {
 // pipeline (e.g. Discord native slash commands fired from listener.on
 // ('interaction_create')). Handlers that need a real inbound — for some
 // future hypothetical command like `/quote` — must guard on event !== null
-// instead of assuming it.
+// instead of assuming it. `live` is null for session-less commands
+// (requiresLiveSession:false, e.g. /help); session-control handlers run only
+// after the dispatch layer has resolved a live session, so they may assert it.
 type ChannelCommandContext = {
-  live: LiveSession
+  live: LiveSession | null
   event: InboundMessage | null
 }
 
 export type ExecuteCommandResult =
-  | { kind: 'handled'; name: string }
+  | { kind: 'handled'; name: string; reply?: string }
   | { kind: 'unknown-command'; name: string }
   | { kind: 'no-live-session' }
   | { kind: 'permission-denied' }
@@ -721,14 +724,31 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const historyCallbacks = new Map<ChannelKey['adapter'], Set<HistoryCallback>>()
   const fetchAttachmentCallbacks = new Map<ChannelKey['adapter'], Set<FetchAttachmentCallback>>()
   const stickyLedger = new StickyLedger()
-  const commands = createCommandRegistry<ChannelCommandContext>([
+  // The /help handler reads the live registry to enumerate commands, so it
+  // forward-references `commands`. Safe at runtime — the handler only runs on
+  // invocation, long after the assignment below completes.
+  const channelCommands: readonly Command<ChannelCommandContext>[] = [
+    {
+      name: 'help',
+      description: 'List available commands.',
+      permission: 'none',
+      requiresLiveSession: false,
+      handler: () => ({ reply: formatChannelCommandHelp(commands.list()) }),
+    },
     {
       name: 'stop',
+      description: 'Stop the current agent turn in this channel.',
+      permission: 'session.control',
+      requiresLiveSession: true,
       handler: async ({ live }) => {
-        await stopCurrentChannelTurn(live)
+        // requiresLiveSession:true guarantees the dispatch layer resolved a
+        // session before running this handler, so `live` is non-null here.
+        await stopCurrentChannelTurn(live!)
+        return { reply: 'Stopped the current turn.' }
       },
     },
-  ])
+  ]
+  const commands = createCommandRegistry<ChannelCommandContext>(channelCommands)
 
   // Implicit dir-name alias: agent folder basename matches Docker
   // container name (per AGENTS.md), the typical Discord/Slack bot
@@ -1663,22 +1683,43 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       // Commands are control traffic, not engaged inbounds; if the session is stale,
       // the next engaged inbound will perform the rollover before prompting.
       const keyId = channelKeyId(key)
-      if (!commands.has(parsedCommand.name)) {
+      const commandInfo = commands.get(parsedCommand.name)
+      if (commandInfo === undefined) {
         logger.info(`[channels] ${keyId}: ignoring unknown command /${parsedCommand.name}`)
         return
       }
-      if (isSessionControlDenied(event)) {
+      if (commandInfo.permission === 'session.control' && isSessionControlDenied(event)) {
         logger.info(
           `[channels] ${keyId}: denied command /${parsedCommand.name} by permissions (session.control) author=${event.authorId}`,
         )
         return
       }
-      const existingLive = liveSessions.get(keyId)
-      if (!existingLive || existingLive.destroyed) {
-        logger.info(`[channels] ${keyId}: ignoring command /${parsedCommand.name} with no live session`)
-        return
+      // Session-less commands (e.g. /help) are informational and run without a
+      // live session; their handler reply is posted straight back to the channel.
+      let existingLive: LiveSession | null = null
+      if (commandInfo.requiresLiveSession) {
+        existingLive = liveSessions.get(keyId) ?? null
+        if (existingLive === null || existingLive.destroyed) {
+          logger.info(`[channels] ${keyId}: ignoring command /${parsedCommand.name} with no live session`)
+          return
+        }
       }
       const commandResult = await commands.execute(event.text, { live: existingLive, event })
+      if (commandResult.kind === 'handled') {
+        if (commandResult.reply !== undefined) {
+          await send(
+            {
+              adapter: event.adapter,
+              workspace: event.workspace,
+              chat: event.chat,
+              thread: event.thread,
+              text: commandResult.reply,
+            },
+            { source: 'system' },
+          )
+        }
+        return
+      }
       if (commandResult.kind !== 'not-command') return
     }
 
@@ -2416,38 +2457,49 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     options: ExecuteCommandOptions,
   ): Promise<ExecuteCommandResult> => {
     const lowered = name.toLowerCase()
-    if (!commands.has(lowered)) {
+    const commandInfo = commands.get(lowered)
+    if (commandInfo === undefined) {
       return { kind: 'unknown-command', name: lowered }
     }
     // Gates on session.control (not channel.respond) so a respond-capable
     // guest cannot abort another speaker's turn. Runs BEFORE the live-session
     // lookup so an unauthorized invoker gets 'permission-denied' regardless of
     // session state, rather than leaking session presence via the
-    // 'no-live-session' vs 'permission-denied' distinction.
-    const partial: SessionOrigin = {
-      kind: 'channel',
-      adapter: key.adapter,
-      workspace: key.workspace,
-      chat: key.chat,
-      thread: key.thread,
-      lastInboundAuthorId: options.invokerId,
+    // 'no-live-session' vs 'permission-denied' distinction. Session-less
+    // informational commands (e.g. /help) declare permission:'none' and skip
+    // both the gate and the lookup so they work in channels with no live turn.
+    if (commandInfo.permission === 'session.control') {
+      const partial: SessionOrigin = {
+        kind: 'channel',
+        adapter: key.adapter,
+        workspace: key.workspace,
+        chat: key.chat,
+        thread: key.thread,
+        lastInboundAuthorId: options.invokerId,
+      }
+      if (!permissions.has(partial, CORE_PERMISSIONS.sessionControl)) {
+        return { kind: 'permission-denied' }
+      }
     }
-    if (!permissions.has(partial, CORE_PERMISSIONS.sessionControl)) {
-      return { kind: 'permission-denied' }
+    let live: LiveSession | null = null
+    if (commandInfo.requiresLiveSession) {
+      const resolved = resolveLiveSessionForCommand(liveSessions, key)
+      if (resolved.kind === 'none') {
+        return { kind: 'no-live-session' }
+      }
+      if (resolved.kind === 'ambiguous') {
+        return { kind: 'ambiguous', matchCount: resolved.count }
+      }
+      live = resolved.session
     }
-    const resolved = resolveLiveSessionForCommand(liveSessions, key)
-    if (resolved.kind === 'none') {
-      return { kind: 'no-live-session' }
-    }
-    if (resolved.kind === 'ambiguous') {
-      return { kind: 'ambiguous', matchCount: resolved.count }
-    }
-    const result = await commands.execute(`/${lowered}`, { live: resolved.session, event: null })
+    const result = await commands.execute(`/${lowered}`, { live, event: null })
     if (result.kind === 'handled') {
-      return { kind: 'handled', name: result.name }
+      return result.reply !== undefined
+        ? { kind: 'handled', name: result.name, reply: result.reply }
+        : { kind: 'handled', name: result.name }
     }
     // commands.execute can only return not-command (impossible — we pass a
-    // leading slash), unknown-command (impossible — we just checked has()),
+    // leading slash), unknown-command (impossible — we just checked get()),
     // or handled. Any other outcome is a bug.
     return { kind: 'unknown-command', name: lowered }
   }

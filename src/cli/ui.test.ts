@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
+import { SLACK_SLASH_COMMAND_NAMES } from '@/channels/adapters/slack-bot'
+
 import {
   c,
   done,
@@ -452,6 +454,17 @@ describe('printSlackAppManifestSetup', () => {
     const stop = slashCommands.find((c) => c.command === '/stop')
     expect(stop).toBeDefined()
     expect(stop!.description).toBeTruthy()
+  })
+
+  test('manifest declares /help as a slash command with a description', () => {
+    const help = SLACK_APP_MANIFEST.features.slash_commands.find((c) => c.command === '/help')
+    expect(help).toBeDefined()
+    expect(help!.description).toBeTruthy()
+  })
+
+  test('manifest slash commands stay in sync with the runtime allow-list', () => {
+    const manifestNames = new Set(SLACK_APP_MANIFEST.features.slash_commands.map((c) => c.command.replace(/^\//, '')))
+    expect(manifestNames).toEqual(new Set(SLACK_SLASH_COMMAND_NAMES))
   })
 
   test('manifest grants the `commands` scope so slash_commands envelopes can route', () => {
