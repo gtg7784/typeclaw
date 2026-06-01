@@ -9,14 +9,14 @@ const NUDGE_TEXT =
   '`gh api graphql` call. Under a multi-owner GitHub App there is no single ' +
   '`GH_TOKEN`, and graphql carries its repo inside the query — not an inspectable ' +
   'path — so TypeClaw cannot tell which installation token to mint. Re-run with an ' +
-  'explicit repo, e.g. `gh api graphql -R owner/repo -f query=...`; TypeClaw uses ' +
-  '`-R/--repo` only as the hint to inject the right token (`gh` ignores it for ' +
-  'graphql routing).'
+  'explicit repo, e.g. `gh api graphql -R owner/repo -f query=...`. `gh api` does ' +
+  'not accept `-R/--repo`; TypeClaw consumes it as the mint hint and strips it ' +
+  'before running the command with the right token injected.'
 
 // The shell strips quotes/escapes, so we match the raw `gh ... graphql` substring
 // rather than parse — the nudge is advisory, so a loose match is acceptable and a
 // false positive only appends a hint to an unrelated failure. Captured through to
-// end of line so we can inspect the SAME invocation's flags (see hasRepoFlag).
+// end of line so we can inspect the SAME invocation's flags (see REPO_FLAG).
 const GRAPHQL_INVOCATION = /\bgh\b[^\n]*\bapi\b[^\n]*\bgraphql\b[^\n]*/
 
 // `-R foo`, `-R=foo`, `--repo foo`, `--repo=foo`. Word-boundary anchored so a

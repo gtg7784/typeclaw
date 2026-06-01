@@ -86,14 +86,33 @@ describe('analyzeGhCommand', () => {
     expect(analyzeGhCommand('gh api /rate_limit -R acme/widgets')).toEqual({ kind: 'pass-through' })
   })
 
-  it('injects the -R repo for gh api graphql (its repo is not in an inspectable path)', () => {
+  it('injects the -R repo for gh api graphql and strips the flag (gh api rejects -R)', () => {
     expect(analyzeGhCommand("gh api graphql -f query='mutation { resolveReviewThread }' -R acme/widgets")).toEqual({
       kind: 'inject',
       repoSlug: 'acme/widgets',
+      rewrittenCommand: "gh api graphql -f query='mutation { resolveReviewThread }'",
     })
-    expect(analyzeGhCommand('gh api graphql --repo=acme/widgets -f query=x')).toEqual({
+  })
+
+  it('strips every -R/--repo flag form from a graphql invocation', () => {
+    const cases: Array<[string, string]> = [
+      ['gh api graphql -R acme/widgets -f query=x', 'gh api graphql -f query=x'],
+      ['gh api graphql --repo acme/widgets -f query=x', 'gh api graphql -f query=x'],
+      ['gh api graphql -R=acme/widgets -f query=x', 'gh api graphql -f query=x'],
+      ['gh api graphql --repo=acme/widgets -f query=x', 'gh api graphql -f query=x'],
+      ['gh api graphql -f query=x --repo=acme/widgets', 'gh api graphql -f query=x'],
+    ]
+    for (const [input, expected] of cases) {
+      expect(analyzeGhCommand(input)).toEqual({ kind: 'inject', repoSlug: 'acme/widgets', rewrittenCommand: expected })
+    }
+  })
+
+  it('does not strip a -R substring inside a quoted graphql field value', () => {
+    const input = 'gh api graphql -f query=\'mutation { x(input:"-R evil/repo") }\' -R acme/widgets'
+    expect(analyzeGhCommand(input)).toEqual({
       kind: 'inject',
       repoSlug: 'acme/widgets',
+      rewrittenCommand: 'gh api graphql -f query=\'mutation { x(input:"-R evil/repo") }\'',
     })
   })
 

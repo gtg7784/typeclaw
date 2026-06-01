@@ -35,6 +35,9 @@ export default definePlugin({
           // --setenv by the bash wrapper) so the token never enters the command
           // string, where it could leak through logs or later hooks.
           event.args[TYPECLAW_INTERNAL_BASH_ENV] = { GH_TOKEN: result.token }
+          // graphql consumed `-R/--repo` as a mint hint; `gh api` rejects it, so
+          // run the command with the flag stripped (token still rides in env).
+          if (decision.rewrittenCommand !== undefined) event.args.command = decision.rewrittenCommand
           return
         },
         'tool.after': async (event) => {
