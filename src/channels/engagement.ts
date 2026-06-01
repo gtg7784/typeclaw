@@ -81,25 +81,23 @@ export type EngagementInput = {
 export function decideEngagement(input: EngagementInput): EngagementDecision {
   const { message, config, key, ledger, now, participants, selfAliases, botInThread } = input
 
-  // The human count drives both the sticky-credit gate (below) and the
-  // solo-human fallback (bottom). Compute it once, up front. Peer bots are
-  // excluded — a 1-human-N-bot room is still "solo" for engagement purposes.
+  // Peer bots are excluded from the count — a 1-human-N-bot room is still
+  // "solo" for the fallback at the bottom.
   const effectiveHumans = countEffectiveHumans(participants, input.membership, now)
-  const multiHumanGroup = isMultiHumanGroup(message.isDm, effectiveHumans)
 
   if (config.trigger.includes('dm') && message.isDm) return 'engage'
   if (config.trigger.includes('mention') && message.isBotMention) return 'engage'
   if (config.trigger.includes('reply') && message.replyToBotMessageId !== null) return 'engage'
 
-  // Sticky credit. ALWAYS consume when present (the credit stays one-shot,
-  // so a later membership change can't resurrect stale conversational
-  // credit), but only let it FORCE engagement outside a multi-human group.
-  // In a group, sticky alone no longer wakes the bot on every follow-up —
-  // the author must re-address us (mention/reply/alias) to re-engage. This
-  // narrows an existing permissive rule in the exact context where it's
-  // harmful; it is NOT a new bot-specific gate (peer bots and humans are
-  // treated identically, via `multiHumanGroup`). See engagement.mdx.
-  if (config.stickiness !== 'off' && ledger.consume(key, message.authorId, now) && !multiHumanGroup) {
+  // Sticky credit force-engages in EVERY context (groups included) for the
+  // full window. This gate is deliberately content-blind: it answers "am I in
+  // an active conversation with this author?", not "does THIS message need a
+  // reply?" — a boolean over membership cannot tell "where did you send it?"
+  // (reply) from "lol ok" (chatter). Selectivity is the MODEL's job: engaged
+  // group turns get a `composeTurnPrompt` nudge (keyed off `isMultiHumanGroup`)
+  // to answer real follow-ups and `NO_REPLY` chatter. Gating sticky off in
+  // groups instead (the prior approach) dropped genuine follow-ups outright.
+  if (config.stickiness !== 'off' && ledger.consume(key, message.authorId, now)) {
     return 'engage'
   }
 
@@ -197,12 +195,11 @@ export function countEffectiveHumans(
   return resolveEffectiveHumans(persistedHumans, membership, now)
 }
 
-// A multi-human group is the one place where the chatty "reply to every
-// follow-up" behavior (sticky credit, and the prompt's default eagerness) is
-// wrong. DMs — 1:1, or platform group-DMs reached via the `dm` trigger — and
-// solo-human channels keep the back-and-forth. The router reuses this to
-// decide both sticky suppression and the group-chat prompt nudge, so the two
-// stay in lockstep off one definition.
+// A multi-human group is where the prompt's default "answer everything"
+// eagerness needs tempering. The router reads this in `route()` to decide
+// whether to append the group-chat nudge that tells the model to be selective
+// (answer real follow-ups, `NO_REPLY` chatter) on its engaged turns. DMs and
+// solo-human channels skip the nudge — there, replying to everything is right.
 export function isMultiHumanGroup(isDm: boolean, effectiveHumans: number): boolean {
   return !isDm && effectiveHumans > 1
 }

@@ -330,6 +330,14 @@ type LiveSession = {
   originRef: { current: SessionOrigin | undefined }
   promptQueue: QueuedInbound[]
   contextBuffer: ObservedInbound[]
+  // Attachments of the messages composing the in-flight turn. drain()
+  // splices promptQueue/contextBuffer empty BEFORE calling prompt(), but
+  // the model only requests an attachment (look_at_channel_attachment /
+  // channel_fetch_attachment) DURING prompt() — by which point both queues
+  // are empty. This turn-scoped snapshot, populated right after the splice
+  // and cleared when the turn ends, is what the lookup reads so a freshly-
+  // arrived attachment stays resolvable for the whole turn it belongs to.
+  currentTurnAttachments: readonly InboundAttachment[]
   draining: boolean
   debounceTimer: ReturnType<typeof setTimeout> | null
   typingTimer: ReturnType<typeof setInterval> | null
@@ -1101,6 +1109,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         promptQueue: [],
         pendingSystemReminders: [],
         contextBuffer: [],
+        currentTurnAttachments: [],
         draining: false,
         debounceTimer: null,
         typingTimer: null,
@@ -1516,6 +1525,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const batch = live.promptQueue.splice(0, live.promptQueue.length)
         const observed = live.contextBuffer.splice(0, live.contextBuffer.length)
         const reminders = live.pendingSystemReminders.splice(0, live.pendingSystemReminders.length)
+        live.currentTurnAttachments = collectTurnAttachments(observed, batch)
 
         if (batch.length > 0) {
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
@@ -1592,6 +1602,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.currentTurnAuthorId = null
       live.currentTurnAuthorIds = new Set()
       live.currentTurnReactionRef = null
+      live.currentTurnAttachments = []
       await stopTypingHeartbeat(live)
     }
   }
@@ -2141,9 +2152,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // Walk newest → oldest so that when an id collides across messages
     // (e.g. two photos in the same session each labelled `#1`) the agent's
     // `attachment_id: 1` always resolves to the CURRENT inbound's
-    // attachment. promptQueue holds the about-to-be-delivered turn and
-    // is therefore the freshest; within each list, append-order maps to
-    // wall-clock order, so iterating in reverse gives recency.
+    // attachment. currentTurnAttachments holds the in-flight turn — the
+    // only place the about-to-be-viewed attachment lives once drain() has
+    // spliced promptQueue empty — and is therefore the freshest; promptQueue
+    // then holds any inbound that arrived mid-turn. Within each list,
+    // append-order maps to wall-clock order, so iterating in reverse gives
+    // recency.
+    const found = findAttachmentById(live.currentTurnAttachments, args.id)
+    if (found !== null) return found
     const haystacks: ReadonlyArray<ReadonlyArray<{ attachments?: readonly InboundAttachment[] }>> = [
       live.promptQueue,
       live.contextBuffer,
@@ -2151,8 +2167,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     for (const haystack of haystacks) {
       for (let i = haystack.length - 1; i >= 0; i--) {
         const item = haystack[i]
-        const found = item?.attachments?.find((attachment) => attachment.id === args.id)
-        if (found !== undefined) return found
+        const hit = item?.attachments?.find((attachment) => attachment.id === args.id)
+        if (hit !== undefined) return hit
       }
     }
     return null
@@ -2162,6 +2178,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const live = liveSessions.get(channelKeyId(args))
     if (live === undefined) return []
     const ids = new Set<number>()
+    for (const attachment of live.currentTurnAttachments) ids.add(attachment.id)
     for (const item of [...live.promptQueue, ...live.contextBuffer]) {
       for (const attachment of item.attachments ?? []) ids.add(attachment.id)
     }
@@ -2787,6 +2804,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   }
 }
 
+function collectTurnAttachments(
+  observed: readonly ObservedInbound[],
+  batch: readonly QueuedInbound[],
+): readonly InboundAttachment[] {
+  const out: InboundAttachment[] = []
+  for (const item of observed) out.push(...(item.attachments ?? []))
+  for (const item of batch) out.push(...(item.attachments ?? []))
+  return out
+}
+
+function findAttachmentById(attachments: readonly InboundAttachment[], id: number): InboundAttachment | null {
+  for (let i = attachments.length - 1; i >= 0; i--) {
+    const attachment = attachments[i]
+    if (attachment?.id === id) return attachment
+  }
+  return null
+}
+
 function composeTurnPrompt(
   observed: readonly ObservedInbound[],
   batch: readonly QueuedInbound[],
@@ -2868,13 +2903,14 @@ function composeTurnPrompt(
     )
   }
   // Group-chat nudge: same SYSTEM MESSAGE convention as the loop guard. We
-  // engaged this turn (explicit mention/reply/alias, or a fresh trigger),
-  // but the room has multiple humans, so the default "answer everything"
-  // posture is wrong. The engagement gate already stopped sticky credit
-  // from waking us on every follow-up; this tells the model to be
-  // selective on the turns it IS woken for. Cache-neutral (user-turn
-  // suffix), and skipped when the loop guard already fired to avoid
-  // stacking two silence notices in one turn.
+  // engaged this turn — possibly via sticky credit, which now wakes us on
+  // every follow-up in a group too (the engagement gate is content-blind by
+  // design). In a multi-human room the default "answer everything" posture is
+  // wrong, so this nudge is the ONLY thing that makes the bot selective: it
+  // tells the model to answer genuine follow-ups and stay silent on chatter.
+  // The gate gets us into the turn; the model decides whether to speak.
+  // Cache-neutral (user-turn suffix), and skipped when the loop guard already
+  // fired to avoid stacking two silence notices in one turn.
   if (state.groupChatNudge === true && !state.loopGuardActive) {
     parts.push(
       '---',
@@ -2884,10 +2920,15 @@ function composeTurnPrompt(
       'signal from the channel router, not a message from anyone in the chat.',
       '**Do not acknowledge or reply to this notice.**',
       '',
-      'Guidance:',
-      '- Reply only if the current message is addressed to you or clearly needs your input.',
-      '- For chatter between others, side-conversation, or messages that do not need you,',
-      '  reply with `NO_REPLY` (or call `skip_response`) to stay silent and just keep watching.',
+      'You are woken on every message from someone you recently talked with, so',
+      'most turns you should stay quiet. Reply ONLY when:',
+      '- the current message is addressed to you (by name, @-mention, or reply), or',
+      '- it directly continues your own last exchange and clearly wants an answer',
+      '  (e.g. a follow-up question about what you just said).',
+      '',
+      'Otherwise — chatter between others, side-conversation, banter, or anything',
+      'not actually waiting on you — reply with `NO_REPLY` (or call `skip_response`)',
+      'to stay silent and keep watching. When unsure, prefer silence.',
       '',
       '---',
       '',

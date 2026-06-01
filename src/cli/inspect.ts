@@ -75,6 +75,9 @@ export const inspectCommand = defineCommand({
           if (escListener === null) return new AbortController().signal
           return escListener.armForStream()
         },
+        afterEscStream: () => {
+          escListener?.pause()
+        },
         ...(liveHint !== undefined ? { liveHint } : {}),
         stdout: (line) => process.stdout.write(`${line}\n`),
         stderr: (line) => process.stderr.write(`${line}\n`),

@@ -1249,6 +1249,40 @@ describe('ChannelRouter sticky credits', () => {
     expect(sessions[0]!.prompts).toHaveLength(2)
     expect(sessions[0]!.prompts[1]).toContain('thanks')
   })
+
+  test('sticky engages a plain follow-up in a multi-human group, and the turn carries the nudge', async () => {
+    // given a 2-human group (bob already seen) where the bot just replied in
+    // alice's turn — granting alice sticky credit
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'bob-1', isBotMention: true, text: 'bot hi' }))
+    await router.__testing!.flushDebounce(KEY)
+    nowRef.value = 1200
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'ㅇㅇ 방금 보냄' })
+    }
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-1', isBotMention: true, text: 'bot 보냄?' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.onPrompt = undefined
+    sessions[0]!.prompts.length = 0
+
+    // when alice posts a plain follow-up with no mention (the regressed case)
+    nowRef.value = 2000
+    await router.route(
+      inbound({ authorId: 'alice', externalMessageId: 'alice-2', isBotMention: false, text: '어디다 보냄' }),
+    )
+    await router.__testing!.flushDebounce(KEY)
+
+    // then we engage (sticky woke us) and the nudge rides along so the model
+    // can still self-select silence for true chatter
+    expect(sessions[0]!.prompts).toHaveLength(1)
+    expect(sessions[0]!.prompts[0]).toContain('어디다 보냄')
+    expect(sessions[0]!.prompts[0]).toContain('You are in a group chat with multiple people.')
+  })
 })
 
 describe('ChannelRouter outbound', () => {
@@ -6557,5 +6591,51 @@ describe('ChannelRouter output-token cap', () => {
     await invokeStream(sessions[0]!, { maxTokens: 256 })
 
     expect(sessions[0]!.lastStreamMaxTokens).toBe(256)
+  })
+})
+
+describe('ChannelRouter inbound attachment lookup', () => {
+  const PHOTO = {
+    id: 1,
+    kind: 'photo' as const,
+    ref: 'https://example.test/photo.jpg',
+    mimetype: 'image/jpeg',
+  }
+
+  test('resolves the current turn attachment mid-prompt after the queue is drained', async () => {
+    // The attachment lives on the promptQueue item until drain() splices the
+    // queue empty at the top of the turn. The model only calls
+    // look_at_channel_attachment DURING the prompt — by then promptQueue and
+    // contextBuffer are both empty, so the lookup must read from the
+    // turn-scoped snapshot, not the (now-empty) queues.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    let lookedUp: ReturnType<typeof router.lookupInboundAttachment> = null
+    let listedDuringTurn: readonly number[] = []
+    await router.route(inbound({ text: '이거 읽어봐', attachments: [PHOTO] }))
+    sessions[0]!.onPrompt = () => {
+      lookedUp = router.lookupInboundAttachment({ ...KEY, id: 1 })
+      listedDuringTurn = router.listInboundAttachmentIds(KEY)
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(lookedUp).not.toBeNull()
+    expect(lookedUp!.ref).toBe(PHOTO.ref)
+    expect(listedDuringTurn).toEqual([1])
+  })
+
+  test('clears the turn-scoped attachment snapshot after the turn ends', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+
+    await router.route(inbound({ text: '이거 읽어봐', attachments: [PHOTO] }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // After the turn fully drains, the attachment is no longer part of any
+    // pending or in-flight turn, so a late lookup must miss.
+    expect(router.lookupInboundAttachment({ ...KEY, id: 1 })).toBeNull()
+    expect(router.listInboundAttachmentIds(KEY)).toEqual([])
   })
 })
