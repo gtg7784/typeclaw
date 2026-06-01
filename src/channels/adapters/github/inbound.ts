@@ -13,8 +13,8 @@ export type GithubWebhookHandlerOptions = {
   allowlist: () => readonly string[]
   selfId: () => string | null
   selfLogin: () => string | null
-  // Defaults to 'pat' when omitted. Only 'app' promotes an opened PR to a
-  // review request; see classifyOpenedAsReview for why.
+  // Defaults to 'pat' when omitted. In 'app' mode classifyReviewRequest also
+  // matches the App's decoy reviewer login; see resolveDecoyReviewerLogin.
   authType?: () => 'pat' | 'app'
   route: (message: InboundMessage) => void
   logger: GithubInboundLogger
@@ -182,14 +182,6 @@ export function classifyGithubInbound(
         teamIsBotMember: options?.teamIsBotMember,
       })
     }
-    // A GitHub App cannot be added to a PR's requested_reviewers, so it never
-    // receives a review_requested event targeting itself. The opened event is
-    // the only signal it can act on, so in App mode an opened PR is promoted to
-    // a review request. A PAT-backed bot is a real user that can be requested,
-    // so it waits for the explicit request instead of reviewing every PR.
-    if (action === 'opened' && options?.authType === 'app') {
-      return classifyOpenedAsReview({ payload, pr, number, base, selfLogin })
-    }
     return buildInbound(
       { ...base, chat: `pr:${number}`, thread: null },
       pr.body,
@@ -318,47 +310,6 @@ function classifyReviewRequest(input: ReviewRequestInput): InboundMessage | null
     thread: null,
     text,
     externalMessageId,
-    authorId: String(sender.id),
-    authorName: sender.login,
-    authorIsBot: sender.type === 'Bot',
-    isBotMention: true,
-    replyToBotMessageId: null,
-    ts: updatedAt !== '' ? Date.parse(updatedAt) || 0 : 0,
-  }
-}
-
-type OpenedAsReviewInput = {
-  payload: Record<string, unknown>
-  pr: Record<string, unknown>
-  number: number
-  base: Pick<InboundMessage, 'adapter' | 'workspace' | 'isDm' | 'mentionsOthers' | 'replyToOtherMessageId'>
-  selfLogin: string | null
-}
-
-function classifyOpenedAsReview(input: OpenedAsReviewInput): InboundMessage | null {
-  const { payload, pr, number, base, selfLogin } = input
-  if (selfLogin === null) return null
-  const sender = readUser(payload.sender)
-  if (sender === null) return null
-  if (sender.login === selfLogin) return null
-
-  const title = readString(pr, 'title') ?? `#${number}`
-  const head = readString(readRecord(pr.head), 'ref')
-  const baseRef = readString(readRecord(pr.base), 'ref')
-  const branchSegment = head !== null && baseRef !== null ? ` Branch: ${head} → ${baseRef}.` : ''
-  const text =
-    `@${sender.login} requested your review on PR #${number}: "${title}".${branchSegment}` +
-    ' Please review the changes line-by-line and post your feedback.'
-
-  const updatedAt = readString(pr, 'updated_at') ?? ''
-  const prId = readNumber(pr, 'id') ?? number
-
-  return {
-    ...base,
-    chat: `pr:${number}`,
-    thread: null,
-    text,
-    externalMessageId: `pr-${prId}-opened-${updatedAt}`,
     authorId: String(sender.id),
     authorName: sender.login,
     authorIsBot: sender.type === 'Bot',

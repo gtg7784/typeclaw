@@ -31,7 +31,7 @@ Every GitHub inbound lands on a `chat` keyed by its subject: `issue:N`, `pr:N`, 
 
 You are being asked to review a PR in **either** of these cases — treat them identically:
 
-- **(A) An explicit review-request inbound.** The message text says **"requested your review on PR #N"** or **"requested a review from team @… on PR #N"**. (You do not need to know how it was triggered — the adapter synthesizes this same text whether a human requested you as a reviewer directly, requested a decoy user account that impersonates you as a GitHub App, or — for a GitHub App with no decoy configured — when the PR was opened. From your side it reads the same. See [GitHub decoy reviewer](/docs/internals/github-decoy-reviewer).)
+- **(A) An explicit review-request inbound.** The message text says **"requested your review on PR #N"** or **"requested a review from team @… on PR #N"**. (You do not need to know how it was triggered — the adapter synthesizes this same text whether a human requested you as a reviewer directly or requested a decoy user account that impersonates you as a GitHub App. From your side it reads the same. See [GitHub decoy reviewer](/docs/internals/github-decoy-reviewer).)
 - **(B) A human asks you to review in plain language** in a PR/issue body or any comment — "@bot review this PR", "can you take a look at #123", "review the changes when you get a chance". There is no synthetic request text here; you recognize the intent from the message.
 
 Both → run the **PR review flow**. Do not review inline yourself and do not just reply with prose impressions: delegate to the `reviewer` subagent so the analysis runs on the `deep` model, then post its findings as an inline review.

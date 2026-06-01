@@ -16,15 +16,20 @@ TypeClaw agent running under App auth (`channels.github.auth.type: "app"`).
 
 ## The decoy-user pattern
 
-The supported workaround is to create a **real GitHub user account that
-impersonates the App** — same display name, same avatar — and request _that
-account_ as the reviewer. To a human looking at the PR, the reviewer reads as
-the app. Comments the agent posts still come from the App identity (the agent
-authenticates as the App), so the visible identity stays consistent.
+For an App, this is the **recommended way to get on-demand PR reviews**: create
+a **real GitHub user account that impersonates the App** — same display name,
+same avatar — and request _that account_ as the reviewer. To a human looking at
+the PR, the reviewer reads as the app. Comments the agent posts still come from
+the App identity (the agent authenticates as the App), so the visible identity
+stays consistent.
 
 By convention the decoy account is named after the App's **slug**: an App
 whose bot actor is `my-app[bot]` is impersonated by a user account with login
 `my-app`. Requesting `my-app` as a reviewer is what wakes the agent.
+
+Set the decoy account up once, then drive reviews the natural way — request the
+decoy as a reviewer on any PR you want the agent to look at. A PAT-backed bot
+needs no decoy: it is already a real user you can request by its exact login.
 
 ## How the adapter matches it
 
@@ -52,15 +57,15 @@ Under **PAT auth** there is no decoy: the bot is a real user that can be
 requested directly by its exact login, so `resolveDecoyReviewerLogin` returns
 `null` and matching stays strict (`requested_reviewer.login === selfLogin`).
 
-## Relationship to opened-as-review
+## The only review trigger
 
-`classifyOpenedAsReview` (App mode only) promotes a `pull_request.opened` event
-to a review request because, historically, `opened` was the _only_ signal an
-App could act on. The decoy-reviewer path is the more targeted alternative: it
-lets a human explicitly request review on a specific PR rather than the App
-reviewing every opened PR. Both paths coexist — an operator who configures a
-decoy reviewer gets explicit, on-demand review requests; one who does not still
-gets the broad opened-PR behavior.
+The decoy-reviewer path is the **only** way an App is asked to review: a review
+fires when, and only when, someone requests the decoy (or the bot's team).
+There is no implicit "review every opened PR" behavior — a `pull_request.opened`
+event lands as plain awareness-only context, identical to PAT mode. This keeps
+both auth modes on a single, predictable path: explicit `review_requested`
+only, no opened-PR branching. To have the agent review a PR, request its decoy
+reviewer.
 
 ## Why slug-derivation, not config (for now)
 
