@@ -1,3 +1,3 @@
 {
-  "pages": ["index", "---", "guides", "concepts", "reference", "internals"]
+  "pages": ["index", "---", "guides", "recipes", "concepts", "reference", "internals"]
 }
