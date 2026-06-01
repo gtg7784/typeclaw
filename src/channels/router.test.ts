@@ -6471,3 +6471,49 @@ describe('ChannelRouter output-token cap', () => {
     expect(sessions[0]!.lastStreamMaxTokens).toBe(256)
   })
 })
+
+describe('ChannelRouter inbound attachment lookup', () => {
+  const PHOTO = {
+    id: 1,
+    kind: 'photo' as const,
+    ref: 'https://example.test/photo.jpg',
+    mimetype: 'image/jpeg',
+  }
+
+  test('resolves the current turn attachment mid-prompt after the queue is drained', async () => {
+    // The attachment lives on the promptQueue item until drain() splices the
+    // queue empty at the top of the turn. The model only calls
+    // look_at_channel_attachment DURING the prompt — by then promptQueue and
+    // contextBuffer are both empty, so the lookup must read from the
+    // turn-scoped snapshot, not the (now-empty) queues.
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    let lookedUp: ReturnType<typeof router.lookupInboundAttachment> = null
+    let listedDuringTurn: readonly number[] = []
+    await router.route(inbound({ text: '이거 읽어봐', attachments: [PHOTO] }))
+    sessions[0]!.onPrompt = () => {
+      lookedUp = router.lookupInboundAttachment({ ...KEY, id: 1 })
+      listedDuringTurn = router.listInboundAttachmentIds(KEY)
+      sessions[0]!.setAssistantText('NO_REPLY')
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(lookedUp).not.toBeNull()
+    expect(lookedUp!.ref).toBe(PHOTO.ref)
+    expect(listedDuringTurn).toEqual([1])
+  })
+
+  test('clears the turn-scoped attachment snapshot after the turn ends', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+
+    await router.route(inbound({ text: '이거 읽어봐', attachments: [PHOTO] }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // After the turn fully drains, the attachment is no longer part of any
+    // pending or in-flight turn, so a late lookup must miss.
+    expect(router.lookupInboundAttachment({ ...KEY, id: 1 })).toBeNull()
+    expect(router.listInboundAttachmentIds(KEY)).toEqual([])
+  })
+})

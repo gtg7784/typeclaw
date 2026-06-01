@@ -324,6 +324,14 @@ type LiveSession = {
   originRef: { current: SessionOrigin | undefined }
   promptQueue: QueuedInbound[]
   contextBuffer: ObservedInbound[]
+  // Attachments of the messages composing the in-flight turn. drain()
+  // splices promptQueue/contextBuffer empty BEFORE calling prompt(), but
+  // the model only requests an attachment (look_at_channel_attachment /
+  // channel_fetch_attachment) DURING prompt() — by which point both queues
+  // are empty. This turn-scoped snapshot, populated right after the splice
+  // and cleared when the turn ends, is what the lookup reads so a freshly-
+  // arrived attachment stays resolvable for the whole turn it belongs to.
+  currentTurnAttachments: readonly InboundAttachment[]
   draining: boolean
   debounceTimer: ReturnType<typeof setTimeout> | null
   typingTimer: ReturnType<typeof setInterval> | null
@@ -1081,6 +1089,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         promptQueue: [],
         pendingSystemReminders: [],
         contextBuffer: [],
+        currentTurnAttachments: [],
         draining: false,
         debounceTimer: null,
         typingTimer: null,
@@ -1494,6 +1503,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         const batch = live.promptQueue.splice(0, live.promptQueue.length)
         const observed = live.contextBuffer.splice(0, live.contextBuffer.length)
         const reminders = live.pendingSystemReminders.splice(0, live.pendingSystemReminders.length)
+        live.currentTurnAttachments = collectTurnAttachments(observed, batch)
 
         if (batch.length > 0) {
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
@@ -1568,6 +1578,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.draining = false
       live.currentTurnAuthorId = null
       live.currentTurnAuthorIds = new Set()
+      live.currentTurnAttachments = []
       await stopTypingHeartbeat(live)
     }
   }
@@ -2058,9 +2069,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     // Walk newest → oldest so that when an id collides across messages
     // (e.g. two photos in the same session each labelled `#1`) the agent's
     // `attachment_id: 1` always resolves to the CURRENT inbound's
-    // attachment. promptQueue holds the about-to-be-delivered turn and
-    // is therefore the freshest; within each list, append-order maps to
-    // wall-clock order, so iterating in reverse gives recency.
+    // attachment. currentTurnAttachments holds the in-flight turn — the
+    // only place the about-to-be-viewed attachment lives once drain() has
+    // spliced promptQueue empty — and is therefore the freshest; promptQueue
+    // then holds any inbound that arrived mid-turn. Within each list,
+    // append-order maps to wall-clock order, so iterating in reverse gives
+    // recency.
+    const found = findAttachmentById(live.currentTurnAttachments, args.id)
+    if (found !== null) return found
     const haystacks: ReadonlyArray<ReadonlyArray<{ attachments?: readonly InboundAttachment[] }>> = [
       live.promptQueue,
       live.contextBuffer,
@@ -2068,8 +2084,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     for (const haystack of haystacks) {
       for (let i = haystack.length - 1; i >= 0; i--) {
         const item = haystack[i]
-        const found = item?.attachments?.find((attachment) => attachment.id === args.id)
-        if (found !== undefined) return found
+        const hit = item?.attachments?.find((attachment) => attachment.id === args.id)
+        if (hit !== undefined) return hit
       }
     }
     return null
@@ -2079,6 +2095,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     const live = liveSessions.get(channelKeyId(args))
     if (live === undefined) return []
     const ids = new Set<number>()
+    for (const attachment of live.currentTurnAttachments) ids.add(attachment.id)
     for (const item of [...live.promptQueue, ...live.contextBuffer]) {
       for (const attachment of item.attachments ?? []) ids.add(attachment.id)
     }
@@ -2699,6 +2716,24 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       },
     },
   }
+}
+
+function collectTurnAttachments(
+  observed: readonly ObservedInbound[],
+  batch: readonly QueuedInbound[],
+): readonly InboundAttachment[] {
+  const out: InboundAttachment[] = []
+  for (const item of observed) out.push(...(item.attachments ?? []))
+  for (const item of batch) out.push(...(item.attachments ?? []))
+  return out
+}
+
+function findAttachmentById(attachments: readonly InboundAttachment[], id: number): InboundAttachment | null {
+  for (let i = attachments.length - 1; i >= 0; i--) {
+    const attachment = attachments[i]
+    if (attachment?.id === id) return attachment
+  }
+  return null
 }
 
 function composeTurnPrompt(
