@@ -217,7 +217,23 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         )
       }
       if (options.secrets.auth.type === 'app' && options.githubTokenBridge !== undefined) {
-        unregisterTokenBridge = options.githubTokenBridge.registerResolver((repoSlug) => auth.token({ repoSlug }))
+        // Gate ad-hoc `gh` minting on the configured repos[]. The slug arrives
+        // from an attacker-controllable -R/--repo flag (untrusted PR/issue
+        // content can prompt-inject it); without this an injected `-R any/repo`
+        // would mint an installation-wide token for any repo the App is installed
+        // on — a cross-tenant leak under a multi-owner App. Enforced here, not in
+        // the parser, because this adapter is the authority that owns repos[].
+        unregisterTokenBridge = options.githubTokenBridge.registerResolver((repoSlug) => {
+          const allowed = new Set((options.configRef().repos ?? []).map(canonicalRepoSlug))
+          if (!allowed.has(canonicalRepoSlug(repoSlug))) {
+            throw new Error(
+              `repo \`${repoSlug}\` is not in this agent's configured \`channels.github.repos[]\`; ` +
+                'refusing to mint a GitHub App token for it. Target a configured repo, ' +
+                'or add it to `repos[]` if the agent is meant to operate there.',
+            )
+          }
+          return auth.token({ repoSlug })
+        })
       }
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
       // Best-effort: App-only preflight that compares the installation's granted
@@ -466,6 +482,18 @@ function ghTokenSeedDecision(authType: 'pat' | 'app', repos: readonly string[]):
 function isWellFormedSlug(repo: string): boolean {
   const [owner, name, ...rest] = repo.split('/')
   return owner !== undefined && owner !== '' && name !== undefined && name !== '' && rest.length === 0
+}
+
+// Canonical form for repos[] allowlist comparison so the gate can't be bypassed
+// by case, a trailing slash, or a `.git` suffix (GitHub treats owner/name
+// case-insensitively). Applied identically to both configured repos[] and the
+// runtime slug before exact Set membership.
+function canonicalRepoSlug(repo: string): string {
+  return repo
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\.git$/i, '')
+    .toLowerCase()
 }
 
 function defaultSleep(ms: number): Promise<void> {

@@ -12,6 +12,73 @@ const MULTI_OWNER_REASON =
   'This command targets repos under more than one owner; a single GH_TOKEN cannot ' +
   'authenticate all of them. Split it into separate commands, one owner each.'
 
+const API_REPO_CONFLICT_REASON =
+  'This `gh api` call names a repo in its endpoint path that differs from its ' +
+  '`-R/--repo` flag. `gh api` ignores `-R` for a literal `/repos/{owner}/{repo}` ' +
+  'endpoint — the path is where the request actually goes — so the flag cannot be ' +
+  'used to mint a token for one repo while hitting another. Drop the mismatched ' +
+  '`-R`, or target the repo named in the path.'
+
+// A gh segment can legitimately touch more than one repo (a `gh api` compare
+// endpoint references both the base repo and a cross-fork head). The classifier
+// returns EVERY effective target so analyzeGhCommand can allowlist-check and
+// same-owner-check all of them — a single-slug return is what let a literal
+// `gh api /repos/x/y` path slip past an `-R`-derived check.
+type GhSegmentDecision =
+  | { kind: 'pass-through' }
+  | { kind: 'block'; reason: string }
+  | { kind: 'inject'; repoSlugs: readonly string[] }
+
+const COMPOSITION_REASON =
+  'A repo-targeting `gh` command receives a minted GitHub App token in its process ' +
+  'environment, so it must run as a single bare `gh` command — no pipes, `;`, `&&`, ' +
+  '`||`, `&`, newlines, redirections, command/process substitution, subshells, heredocs, ' +
+  'or unquoted `$` expansion (any sibling process or expansion would inherit the token ' +
+  'and could exfiltrate it). jq/JSON metacharacters are fine INSIDE single quotes, e.g. ' +
+  "`gh api repos/o/r --jq '.[] | {id}'`. To feed JSON to `gh api`, write it to a temp " +
+  'file and use `gh api --input <file>`.'
+
+// Shell-active metacharacters that, OUTSIDE single quotes, either spawn another
+// process sharing the shell env (where the minted GH_TOKEN lives) or expand
+// shell state into an argument. `|;&` = pipeline/sequence/background; newline/CR
+// = command separators; `()` `{}` = subshell/group; `<>` = redirection
+// (incl. bash /dev/tcp networking and heredocs); backtick + `$` = command/
+// parameter/arithmetic substitution (covers `$(`, `${`, `$((`, and a bare
+// `$GH_TOKEN`). Single quotes make all of these literal, so jq pipes and JSON
+// braces are allowed when single-quoted. Double quotes do NOT neutralize `$`
+// or backticks, so they are treated as active.
+const SHELL_ACTIVE_METACHARS = new Set(['|', ';', '&', '\n', '\r', '(', ')', '{', '}', '<', '>', '`', '$'])
+
+// Returns true iff `command` is a single simple `gh ...` command: the first
+// non-whitespace word is `gh`, and no shell-active metachar appears outside
+// single quotes. This is the gate for token injection — see COMPOSITION_REASON.
+function isSingleBareGhCommand(command: string): boolean {
+  const trimmed = command.trimStart()
+  if (!/^gh(\s|$)/.test(trimmed)) return false
+
+  let quote: '"' | "'" | null = null
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]
+    if (ch === undefined) continue
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      continue
+    }
+    if (quote === '"') {
+      // Inside double quotes `$` and backtick still expand; only `"` closes.
+      if (ch === '"') quote = null
+      else if (ch === '$' || ch === '`') return false
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (SHELL_ACTIVE_METACHARS.has(ch)) return false
+  }
+  return quote === null
+}
+
 // GENUINELY repo-less subcommands (account/global, no -R/--repo): they need no
 // token injection and pass through. The set is intentionally minimal —
 // anything not listed (label, ruleset, secret, variable, cache, run, workflow,
@@ -56,31 +123,60 @@ export function analyzeGhCommand(command: string): GhCommandDecision {
     const args = tokens.slice(start + 1, end)
     const segment = classifyGhSegment(args)
     if (segment.kind === 'block') return segment
-    if (segment.kind === 'inject') repoSlugs.push(segment.repoSlug)
+    if (segment.kind === 'inject') repoSlugs.push(...segment.repoSlugs)
   }
 
   if (repoSlugs.length === 0) return { kind: 'pass-through' }
   const owners = new Set(repoSlugs.map((slug) => slug.split('/')[0]))
   if (owners.size > 1) return { kind: 'block', reason: MULTI_OWNER_REASON }
+
+  // We would inject a token. Enforce the single-bare-`gh` shape: the token
+  // lands in the shell's env, so any sibling/upstream/downstream process or
+  // shell expansion would inherit it.
+  if (!isSingleBareGhCommand(command)) return { kind: 'block', reason: COMPOSITION_REASON }
+
   return { kind: 'inject', repoSlug: repoSlugs[0] as string }
 }
 
-function classifyGhSegment(args: readonly string[]): GhCommandDecision {
+function classifyGhSegment(args: readonly string[]): GhSegmentDecision {
   const subcommand = args.find((t) => !t.startsWith('-'))
   if (subcommand === undefined) return { kind: 'pass-through' }
 
-  const explicit = extractRepoFlag(args)
-  if (explicit !== null) return { kind: 'inject', repoSlug: explicit }
+  // `gh api` is resolved BEFORE the generic -R extraction: for a literal
+  // `/repos/{owner}/{repo}` endpoint the request goes to the PATH repo and `gh`
+  // ignores -R, so trusting -R here would mint a token for one repo while the
+  // call hits another (the allowlist-bypass this guards against).
+  if (subcommand === 'api') return classifyGhApiSegment(args)
 
-  if (subcommand === 'api') {
-    const apiRepo = extractRepoFromApiPath(args)
-    if (apiRepo !== null) return { kind: 'inject', repoSlug: apiRepo }
-    return { kind: 'pass-through' }
-  }
+  const explicit = extractRepoFlag(args)
+  if (explicit !== null) return { kind: 'inject', repoSlugs: [explicit] }
 
   if (REPO_LESS_SUBCOMMANDS.has(subcommand)) return { kind: 'pass-through' }
 
   return { kind: 'block', reason: MISSING_REPO_REASON }
+}
+
+// Repo authority for `gh api`: the literal endpoint path wins. A `-R/--repo`
+// that names a DIFFERENT repo than the path is a mint-for-X-but-hit-Y attempt
+// and blocks. A placeholder endpoint (`repos/{owner}/{repo}`) has no literal
+// target, so -R fills it and is authoritative. A non-repo endpoint (`graphql`,
+// `/user`) passes through — -R does not make it repo-scoped, so no mint.
+function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
+  const pathRepos = extractReposFromApiPath(args)
+  const flagRepo = extractRepoFlag(args)
+
+  if (pathRepos.length > 0) {
+    if (flagRepo !== null && !pathRepos.includes(flagRepo)) {
+      return { kind: 'block', reason: API_REPO_CONFLICT_REASON }
+    }
+    return { kind: 'inject', repoSlugs: pathRepos }
+  }
+
+  if (flagRepo !== null && apiEndpointHasOwnerRepoPlaceholder(args)) {
+    return { kind: 'inject', repoSlugs: [flagRepo] }
+  }
+
+  return { kind: 'pass-through' }
 }
 
 function findGhInvocations(tokens: readonly string[]): number[] {
@@ -153,33 +249,72 @@ const GH_API_VALUE_FLAGS = new Set([
   '--hostname',
 ])
 
-function extractRepoFromApiPath(args: readonly string[]): string | null {
+// The `gh api` endpoint is the first positional arg after `api` (skipping flags
+// and the tokens that bare value-flags consume). Returns null if there is none.
+function findApiEndpoint(args: readonly string[]): string | null {
   const apiIndex = args.indexOf('api')
   if (apiIndex === -1) return null
   for (let i = apiIndex + 1; i < args.length; i++) {
     const arg = args[i] as string
     if (arg.startsWith('-')) {
-      // `--flag=value` carries its own value; bare value-flags consume the next
-      // token, so skip it too.
       if (!arg.includes('=') && GH_API_VALUE_FLAGS.has(arg)) i += 1
       continue
     }
-    const normalized = arg.startsWith('/') ? arg.slice(1) : arg
-    const segments = normalized.split('/')
-    if (segments[0] === 'repos' && segments[1] !== undefined && segments[2] !== undefined) {
-      const slug = `${segments[1]}/${segments[2]}`
-      if (isRepoSlug(slug)) return slug
-    }
-    // The endpoint is the first positional; if it isn't a /repos/{o}/{r} path,
-    // there is no repo target to extract.
-    return null
+    return arg
   }
   return null
+}
+
+// Every LITERAL repo the endpoint path targets. Normally one (`/repos/{o}/{r}/…`),
+// but a compare endpoint `/repos/{o}/{r}/compare/{base}...{owner}:{branch}` also
+// reaches the cross-fork head repo `{owner}/{r}`, so both are returned and must
+// be allowlisted. `{owner}/{repo}` placeholder segments are NOT literal targets
+// (see apiEndpointHasOwnerRepoPlaceholder) and yield nothing here.
+function extractReposFromApiPath(args: readonly string[]): string[] {
+  const endpoint = findApiEndpoint(args)
+  if (endpoint === null) return []
+  const normalized = endpoint.startsWith('/') ? endpoint.slice(1) : endpoint
+  const segments = normalized.split('/')
+  if (segments[0] !== 'repos') return []
+  const owner = segments[1]
+  const name = segments[2]
+  if (owner === undefined || name === undefined) return []
+  // A `{owner}`/`{repo}` placeholder is not a literal target; -R fills it.
+  if (isPlaceholderSegment(owner) || isPlaceholderSegment(name)) return []
+  const baseSlug = `${owner}/${name}`
+  if (!isRepoSlug(baseSlug)) return []
+
+  const repos = [baseSlug]
+  // compare/{base}...{headOwner}:{headBranch} reaches headOwner's fork.
+  const compareIndex = segments.indexOf('compare', 3)
+  if (compareIndex !== -1) {
+    const spec = segments.slice(compareIndex + 1).join('/')
+    const head = spec.split('...')[1]
+    const headOwner = head?.includes(':') ? head.split(':')[0] : undefined
+    if (headOwner !== undefined && headOwner !== '' && headOwner !== owner) {
+      const headSlug = `${headOwner}/${name}`
+      if (isRepoSlug(headSlug)) repos.push(headSlug)
+    }
+  }
+  return repos
+}
+
+// True when the endpoint uses gh's `{owner}`/`{repo}` template placeholders,
+// which `-R/--repo` fills at runtime — so for these, -R is the authoritative
+// target rather than a conflicting literal.
+function apiEndpointHasOwnerRepoPlaceholder(args: readonly string[]): boolean {
+  const endpoint = findApiEndpoint(args)
+  if (endpoint === null) return false
+  return endpoint.includes('{owner}') || endpoint.includes('{repo}')
 }
 
 function isRepoSlug(value: string): boolean {
   const [owner, name, ...rest] = value.split('/')
   return owner !== undefined && owner !== '' && name !== undefined && name !== '' && rest.length === 0
+}
+
+function isPlaceholderSegment(segment: string): boolean {
+  return segment.includes('{') || segment.includes('}')
 }
 
 // Splits on whitespace AND shell control operators (; | & && ||) so a boundary
