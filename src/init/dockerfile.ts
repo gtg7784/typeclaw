@@ -50,6 +50,16 @@ export type BuildDockerfileOptions = {
 // flag the seccomp default profile blocks `unshare(CLONE_NEWUSER)` and bwrap
 // fails at startup. The two changes are load-bearing together — do not drop
 // one without the other.
+//
+// `jq` is in baseline (not behind a toggle) so it is available to the
+// per-tool bwrap sandbox that wraps agent bash calls. The sandbox only
+// `--ro-bind`s `/usr` + `/bin` from the container (see `src/sandbox/build.ts`),
+// so a binary that is not in the base image is invisible inside the sandbox —
+// there is no per-call install path. JSON munging in one-shot read-only
+// pipelines (`curl ... | jq`, `cat foo.json | jq`) is a baseline expectation
+// for the explorer/reviewer/scout subagents, whose prompts already advertise
+// `jq` as an available pipeline tool, so it ships unconditionally rather than
+// as an opt-in toggle.
 const BASELINE_APT_PACKAGES = [
   'git',
   'ca-certificates',
@@ -58,6 +68,7 @@ const BASELINE_APT_PACKAGES = [
   'iptables',
   'util-linux',
   'bubblewrap',
+  'jq',
 ] as const
 
 // curl-impersonate is the only currently-working way to query DuckDuckGo from
