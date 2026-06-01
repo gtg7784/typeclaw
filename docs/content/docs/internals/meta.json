@@ -10,6 +10,7 @@
     "tunnels",
     "message-stream",
     "engagement",
+    "github-decoy-reviewer",
     "web-search",
     "xvfb",
     "sandbox"

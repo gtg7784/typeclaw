@@ -178,6 +178,7 @@ export function classifyGithubInbound(
         number,
         base,
         selfLogin,
+        authType: options?.authType ?? 'pat',
         teamIsBotMember: options?.teamIsBotMember,
       })
     }
@@ -242,23 +243,46 @@ type ReviewRequestInput = {
   number: number
   base: Pick<InboundMessage, 'adapter' | 'workspace' | 'isDm' | 'mentionsOthers' | 'replyToOtherMessageId'>
   selfLogin: string | null
+  authType: 'pat' | 'app'
   teamIsBotMember: boolean | undefined
 }
 
+// A GitHub App can never be a `requested_reviewer` — that field only holds
+// real user accounts, and the App actor (`slug[bot]`) is not one. The
+// supported workaround is a decoy user account named after the App that an
+// operator requests instead (see docs/content/docs/internals/github-decoy-reviewer.mdx).
+// Its login is, by convention, the App slug — i.e. `selfLogin` with the
+// `[bot]` suffix removed (`my-app[bot]` → `my-app`). This is the single seam
+// where that login is resolved: when the decoy account's real login diverges
+// from the slug, a future config field replaces this derivation without
+// touching the matcher. PAT auth has no decoy (the bot IS a real user that can
+// be requested directly), so it returns null.
+const BOT_LOGIN_SUFFIX = '[bot]'
+
+function resolveDecoyReviewerLogin(selfLogin: string, authType: 'pat' | 'app'): string | null {
+  if (authType !== 'app') return null
+  if (!selfLogin.endsWith(BOT_LOGIN_SUFFIX)) return null
+  const slug = selfLogin.slice(0, -BOT_LOGIN_SUFFIX.length)
+  return slug !== '' ? slug : null
+}
+
 function classifyReviewRequest(input: ReviewRequestInput): InboundMessage | null {
-  const { action, payload, pr, number, base, selfLogin, teamIsBotMember } = input
+  const { action, payload, pr, number, base, selfLogin, authType, teamIsBotMember } = input
   if (selfLogin === null) return null
+  const decoyLogin = resolveDecoyReviewerLogin(selfLogin, authType)
   const sender = readUser(payload.sender)
   if (sender === null) return null
-  // Self-loop guard: if the bot itself requested (or un-requested) the
+  // Self-loop guard: if the bot (or its decoy) requested/un-requested the
   // review, drop the event. The bot adding itself as a reviewer would
   // otherwise wake a fresh session every time it self-assigns.
-  if (sender.login === selfLogin) return null
+  if (sender.login === selfLogin || (decoyLogin !== null && sender.login === decoyLogin)) return null
 
   const requestedUser = readUser(payload.requested_reviewer)
   const requestedTeam = readReviewerTeam(payload.requested_team)
 
-  const isMeAsUser = requestedUser !== null && requestedUser.login === selfLogin
+  const isMeAsUser =
+    requestedUser !== null &&
+    (requestedUser.login === selfLogin || (decoyLogin !== null && requestedUser.login === decoyLogin))
   const isMyTeam = requestedTeam !== null && teamIsBotMember === true
   if (!isMeAsUser && !isMyTeam) return null
 

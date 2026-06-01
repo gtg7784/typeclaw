@@ -141,6 +141,62 @@ describe('classifyGithubInbound', () => {
     })
   })
 
+  describe('pull_request.review_requested — App decoy reviewer', () => {
+    // In App mode selfLogin is the bot actor `slug[bot]`, which can never appear
+    // as a requested_reviewer. The decoy account named after the App (login =
+    // slug, here `typeclaw`) is what an operator actually requests.
+    it('wakes the App when the decoy (slug) account is requested', () => {
+      const msg = classifyGithubInbound(
+        'pull_request',
+        reviewRequestedPayload({ reviewerLogin: 'typeclaw' }),
+        'typeclaw[bot]',
+        { authType: 'app' },
+      )
+      expect(msg?.chat).toBe('pr:7')
+      expect(msg?.text).toContain('requested your review on PR #7')
+      expect(msg?.isBotMention).toBe(true)
+    })
+
+    it('still wakes the App when the exact slug[bot] login is requested', () => {
+      const msg = classifyGithubInbound(
+        'pull_request',
+        reviewRequestedPayload({ reviewerLogin: 'typeclaw[bot]' }),
+        'typeclaw[bot]',
+        { authType: 'app' },
+      )
+      expect(msg?.isBotMention).toBe(true)
+    })
+
+    it('drops decoy requests targeting an unrelated user', () => {
+      const msg = classifyGithubInbound(
+        'pull_request',
+        reviewRequestedPayload({ reviewerLogin: 'someone-else' }),
+        'typeclaw[bot]',
+        { authType: 'app' },
+      )
+      expect(msg).toBe(null)
+    })
+
+    it('does NOT treat the slug as self in PAT mode', () => {
+      // PAT auth has no decoy: the bot is a real user requested by its exact
+      // login. A bare `typeclaw` reviewer must not match a `typeclaw[bot]` self.
+      const msg = classifyGithubInbound(
+        'pull_request',
+        reviewRequestedPayload({ reviewerLogin: 'typeclaw' }),
+        'typeclaw[bot]',
+        { authType: 'pat' },
+      )
+      expect(msg).toBe(null)
+    })
+
+    it('drops self-loop when the decoy account requested the review itself', () => {
+      const payload = reviewRequestedPayload({ reviewerLogin: 'typeclaw' })
+      ;(payload.sender as Record<string, unknown>).login = 'typeclaw'
+      const msg = classifyGithubInbound('pull_request', payload, 'typeclaw[bot]', { authType: 'app' })
+      expect(msg).toBe(null)
+    })
+  })
+
   describe('pull_request.opened', () => {
     it('treats an opened PR as a review request in App mode', () => {
       const msg = classifyGithubInbound('pull_request', openedPayload(), 'typeclaw-bot', { authType: 'app' })
