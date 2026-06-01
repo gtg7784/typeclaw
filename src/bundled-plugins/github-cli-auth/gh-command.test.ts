@@ -74,6 +74,15 @@ describe('analyzeGhCommand', () => {
     })
   })
 
+  it('still detects the path repo (and conflict) when -R precedes a /repos endpoint', () => {
+    // -R before the endpoint must be skipped so the path repo is still found.
+    expect(analyzeGhCommand('gh api -R acme/widgets /repos/acme/widgets/issues')).toMatchObject({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+    expect(analyzeGhCommand('gh api -R acme/widgets /repos/victim/private/issues').kind).toBe('block')
+  })
+
   it('uses -R for a quoted {owner}/{repo} placeholder endpoint', () => {
     expect(analyzeGhCommand("gh api 'repos/{owner}/{repo}/issues' -R acme/widgets")).toEqual({
       kind: 'inject',
@@ -105,6 +114,19 @@ describe('analyzeGhCommand', () => {
     for (const [input, expected] of cases) {
       expect(analyzeGhCommand(input)).toEqual({ kind: 'inject', repoSlug: 'acme/widgets', rewrittenCommand: expected })
     }
+  })
+
+  it('injects and strips when -R appears BEFORE the graphql endpoint', () => {
+    expect(analyzeGhCommand('gh api -R acme/widgets graphql -f query=x')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+      rewrittenCommand: 'gh api graphql -f query=x',
+    })
+    expect(analyzeGhCommand('gh api --repo acme/widgets graphql -f query=x')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+      rewrittenCommand: 'gh api graphql -f query=x',
+    })
   })
 
   it('does not strip a -R substring inside a quoted graphql field value', () => {

@@ -335,6 +335,12 @@ const GH_API_VALUE_FLAGS = new Set([
   '--hostname',
 ])
 
+// `-R`/`--repo` are not real `gh api` flags, but TypeClaw accepts them as a repo
+// hint that can appear BEFORE the endpoint (`gh api -R o/r graphql`). They consume
+// the following token, so findApiEndpoint must skip both — otherwise the slug is
+// misread as the endpoint and the graphql path never runs.
+const REPO_HINT_VALUE_FLAGS = new Set(['-R', '--repo'])
+
 // The `gh api` endpoint is the first positional arg after `api` (skipping flags
 // and the tokens that bare value-flags consume). Returns null if there is none.
 function findApiEndpoint(args: readonly string[]): string | null {
@@ -343,7 +349,7 @@ function findApiEndpoint(args: readonly string[]): string | null {
   for (let i = apiIndex + 1; i < args.length; i++) {
     const arg = args[i] as string
     if (arg.startsWith('-')) {
-      if (!arg.includes('=') && GH_API_VALUE_FLAGS.has(arg)) i += 1
+      if (!arg.includes('=') && (GH_API_VALUE_FLAGS.has(arg) || REPO_HINT_VALUE_FLAGS.has(arg))) i += 1
       continue
     }
     return arg
