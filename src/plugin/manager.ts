@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import type { ResolveGithubTokenForRepo } from '@/channels/github-token-bridge'
 import type { CronJob } from '@/cron'
 import {
   createPermissionService,
@@ -20,6 +21,7 @@ export type LoadPluginsOptions = {
   configsByName: Record<string, unknown>
   loadEntry?: LoadPluginEntryFn
   roles?: RolesConfig
+  resolveGithubTokenForRepo?: ResolveGithubTokenForRepo
   // Bundled plugins resolved by the runtime (not from typeclaw.json). Loaded
   // before user-declared `entries` so a config block named after a bundled
   // plugin (e.g. "memory") is consumed by the bundled plugin, and so plugin-
@@ -101,6 +103,7 @@ export async function loadPlugins(opts: LoadPluginsOptions): Promise<LoadPlugins
       config: validatedConfig as never,
       logger,
       permissions,
+      resolveGithubTokenForRepo: opts.resolveGithubTokenForRepo,
       spawnSubagent: (name, payload, options) => spawnSubagentImpl(name, payload, options),
       isBooted: () => booted,
     })

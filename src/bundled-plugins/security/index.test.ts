@@ -833,6 +833,7 @@ function pluginContext(agentDir: string): PluginContext<undefined> {
     config: undefined,
     logger: noopLogger,
     permissions: noopPermissionService,
+    github: { resolveTokenForRepo: async () => ({ kind: 'unavailable', reason: 'test' }) },
     spawnSubagent: async () => {},
   }
 }

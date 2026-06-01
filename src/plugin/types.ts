@@ -2,6 +2,7 @@ import type { z } from 'zod'
 
 import type { SessionOrigin } from '@/agent/session-origin'
 import type { SubagentShared } from '@/agent/subagents'
+import type { ResolveGithubTokenForRepo } from '@/channels/github-token-bridge'
 import type { PermissionService } from '@/permissions'
 
 export type ContentPart = { type: 'text'; text: string } | { type: 'image'; mimeType: string; data: string }
@@ -273,7 +274,12 @@ export type PluginContext<TConfig = never> = {
   readonly config: TConfig
   readonly logger: PluginLogger
   readonly permissions: PermissionService
+  readonly github: PluginGithubServices
   spawnSubagent: (name: string, payload?: unknown, options?: SpawnSubagentOptions) => Promise<void>
+}
+
+export type PluginGithubServices = {
+  resolveTokenForRepo: ResolveGithubTokenForRepo
 }
 
 export type PluginExports = {

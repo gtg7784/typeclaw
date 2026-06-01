@@ -1,3 +1,4 @@
+import type { ResolveGithubTokenForRepo } from '@/channels/github-token-bridge'
 import type { PermissionService } from '@/permissions'
 
 import type { PluginContext, PluginLogger, SpawnSubagentOptions } from './types'
@@ -11,9 +12,15 @@ export type CreatePluginContextOptions<TConfig> = {
   config: TConfig
   logger: PluginLogger
   permissions: PermissionService
+  resolveGithubTokenForRepo?: ResolveGithubTokenForRepo
   spawnSubagent: SpawnSubagentFn
   isBooted: () => boolean
 }
+
+const githubTokenUnavailable: ResolveGithubTokenForRepo = async () => ({
+  kind: 'unavailable',
+  reason: 'GitHub token resolution is not wired in this context.',
+})
 
 export function createPluginContext<TConfig>(opts: CreatePluginContextOptions<TConfig>): PluginContext<TConfig> {
   return Object.freeze({
@@ -23,6 +30,7 @@ export function createPluginContext<TConfig>(opts: CreatePluginContextOptions<TC
     config: opts.config,
     logger: opts.logger,
     permissions: opts.permissions,
+    github: { resolveTokenForRepo: opts.resolveGithubTokenForRepo ?? githubTokenUnavailable },
     spawnSubagent: async (name: string, payload?: unknown, options?: SpawnSubagentOptions) => {
       if (!opts.isBooted()) {
         throw new Error(
