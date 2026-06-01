@@ -44,8 +44,13 @@ Set in the host stage; injected into the container via `--env-file .env`.
 | Variable             | Provider    | Default                     | Effect                                                            |
 | -------------------- | ----------- | --------------------------- | ----------------------------------------------------------------- |
 | `ANTHROPIC_BASE_URL` | `anthropic` | `https://api.anthropic.com` | Point the Anthropic provider at an Anthropic-compatible endpoint. |
+| `OPENAI_BASE_URL`    | `openai`    | `https://api.openai.com/v1` | Point the OpenAI provider at an OpenAI-compatible endpoint.       |
 
-`ANTHROPIC_BASE_URL` routes the `anthropic` provider through a proxy that speaks the **native Anthropic Messages protocol** (`/v1/messages`, `x-api-key` or OAuth Bearer) — e.g. LiteLLM, Cloudflare AI Gateway, or a corporate gateway. It is a base-URL swap only; it does **not** enable raw AWS Bedrock, which requires SigV4 signing and a different request path. Trailing slashes are stripped; a non-http(s) value fails the agent at boot. The same endpoint is used by `typeclaw init`'s API-key validation probe.
+`ANTHROPIC_BASE_URL` routes the `anthropic` provider through a proxy that speaks the **native Anthropic Messages protocol** (`/v1/messages`, `x-api-key` or OAuth Bearer) — e.g. LiteLLM, Cloudflare AI Gateway, or a corporate gateway. It is a base-URL swap only; it does **not** enable raw AWS Bedrock, which requires SigV4 signing and a different request path.
+
+`OPENAI_BASE_URL` does the same for the `openai` provider, routing it through an **OpenAI-compatible** endpoint (LiteLLM, Azure-style gateways, corporate proxies). It targets the api-key `openai` provider only — the OAuth-only `openai-codex` ChatGPT backend is unaffected.
+
+Both follow the same rules: trailing slashes are stripped; a non-http(s) value fails the agent at boot. The same endpoint is used by `typeclaw init`'s API-key validation probe.
 
 ## Channel credentials (env-wins)
 

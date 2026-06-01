@@ -1,4 +1,4 @@
-import { effectiveAnthropicBaseUrl } from '@/agent/model-overrides'
+import { effectiveBaseUrl } from '@/agent/model-overrides'
 import { KNOWN_PROVIDERS, type KnownProviderId } from '@/config/providers'
 
 const PROVIDER_PROBE: Partial<Record<KnownProviderId, { url: string; authHeader: 'bearer' | 'x-api-key' }>> = {
@@ -9,12 +9,17 @@ const PROVIDER_PROBE: Partial<Record<KnownProviderId, { url: string; authHeader:
   'zai-coding': { url: 'https://api.z.ai/api/coding/paas/v4/models', authHeader: 'bearer' },
 }
 
-// When ANTHROPIC_BASE_URL points at a proxy, probe THAT endpoint — validating
-// the key against api.anthropic.com would test the wrong gateway (and may
-// reject a proxy-only credential). The proxy must expose `/v1/models`.
+// When a base-URL override (ANTHROPIC_BASE_URL / OPENAI_BASE_URL) points at a
+// proxy, probe THAT endpoint — validating against the public API would test the
+// wrong gateway (and may reject a proxy-only credential). The path suffix is
+// whatever the hardcoded default probe URL adds on top of the provider's
+// default baseUrl, so providers with different version-segment conventions
+// (anthropic baseUrl omits `/v1`, openai includes it) each keep their own path.
 function probeUrlFor(providerId: KnownProviderId, defaultUrl: string): string {
-  if (providerId !== 'anthropic') return defaultUrl
-  return `${effectiveAnthropicBaseUrl(KNOWN_PROVIDERS.anthropic.baseUrl)}/v1/models`
+  const defaultBase = KNOWN_PROVIDERS[providerId].baseUrl
+  const base = effectiveBaseUrl(providerId, defaultBase)
+  if (base === undefined) return defaultUrl
+  return `${base}${defaultUrl.slice(defaultBase.length)}`
 }
 
 export type KeyValidationResult =

@@ -145,6 +145,46 @@ describe('validateApiKey', () => {
     }
   })
 
+  test('probes api.openai.com by default', async () => {
+    const prev = process.env.OPENAI_BASE_URL
+    delete process.env.OPENAI_BASE_URL
+    try {
+      let seenUrl: string | null = null
+      await validateApiKey(
+        'openai',
+        'sk-test',
+        fakeFetch((url) => {
+          seenUrl = url
+          return new Response(okBody, { status: 200 })
+        }),
+      )
+      expect(seenUrl!).toBe('https://api.openai.com/v1/models')
+    } finally {
+      if (prev === undefined) delete process.env.OPENAI_BASE_URL
+      else process.env.OPENAI_BASE_URL = prev
+    }
+  })
+
+  test('probes the proxy endpoint when OPENAI_BASE_URL is set', async () => {
+    const prev = process.env.OPENAI_BASE_URL
+    process.env.OPENAI_BASE_URL = 'https://gateway.example.com/openai/'
+    try {
+      let seenUrl: string | null = null
+      await validateApiKey(
+        'openai',
+        'sk-test',
+        fakeFetch((url) => {
+          seenUrl = url
+          return new Response(okBody, { status: 200 })
+        }),
+      )
+      expect(seenUrl!).toBe('https://gateway.example.com/openai/models')
+    } finally {
+      if (prev === undefined) delete process.env.OPENAI_BASE_URL
+      else process.env.OPENAI_BASE_URL = prev
+    }
+  })
+
   test('skips OAuth-only providers without contacting the network', async () => {
     let called = false
     const result = await validateApiKey('openai-codex', 'whatever', async () => {
