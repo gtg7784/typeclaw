@@ -167,6 +167,37 @@ describe('checkBunHygieneGuard — newline is a command separator', () => {
   )
 })
 
+describe('checkBunHygieneGuard — backslash-newline line continuation', () => {
+  // `\<newline>` is a shell line continuation (removed, text joined), so these
+  // are single commands. The `-g`/`--global` after the break must still count,
+  // unlike a real newline which separates commands.
+  test.each([
+    'npm install \\\n-g typescript',
+    'npm install -g \\\ntypescript',
+    'npm \\\n  install -g typescript',
+    'npm install \\\n  --global typescript',
+    'npm install \\\r\n-g typescript',
+  ])('treats %p as one command and blocks the global install', (command) => {
+    expect(bash(command)?.reason).toContain(GUARD_GLOBAL_INSTALL)
+  })
+
+  test('a real newline still separates commands (not a global install)', () => {
+    expect(bash('npm install\n-g typescript')?.reason).toContain(GUARD_NON_BUN_PACKAGE_MANAGER)
+  })
+})
+
+describe('checkBunHygieneGuard — yarn global add is order-sensitive', () => {
+  test('blocks the real `yarn global add` sequence', () => {
+    expect(bash('yarn global add typescript')?.reason).toContain(GUARD_GLOBAL_INSTALL)
+  })
+
+  // `yarn add global foo` installs a package literally named `global`; it is a
+  // local install, not `yarn global add`. Both tokens present but not adjacent.
+  test.each(['yarn add global foo', 'yarn add foo global'])('does not treat %p as a global install', (command) => {
+    expect(bash(command)?.reason).toContain(GUARD_NON_BUN_PACKAGE_MANAGER)
+  })
+})
+
 describe('checkBunHygieneGuard — explicit falsy --global is not a global install', () => {
   test.each(['npm install --global=false lodash', 'npm install --global=0 lodash', 'npm install --global=off lodash'])(
     'treats %p as a local install',

@@ -89,6 +89,18 @@ function splitSegments(command: string): string[][] {
     if (ch === '\\') {
       const next = command[i + 1]
       if (next === undefined) break
+      // `\<newline>` (and `\<CR><newline>`) is a shell line continuation: the
+      // shell removes it entirely, joining the surrounding text. Dropping it
+      // here keeps `npm install \<nl>-g x` tokenized as `install`,`-g` (a global
+      // install) instead of producing a malformed `install\n-g` token.
+      if (next === '\n') {
+        i++
+        continue
+      }
+      if (next === '\r' && command[i + 2] === '\n') {
+        i += 2
+        continue
+      }
       current += next
       hasWord = true
       i++
@@ -200,12 +212,23 @@ function skipWrapperOptions(words: string[], start: number, argTaking: ReadonlyS
 
 function globalInstallLabel(manager: string, words: string[]): string | undefined {
   if (manager === 'yarn') {
-    return words.includes('global') && words.includes('add') ? 'yarn global add' : undefined
+    // Real syntax is `yarn global add <pkg>` — `global` immediately followed by
+    // `add` as a consecutive sequence. Checking for both tokens anywhere would
+    // false-positive on `yarn add global foo` (a local install of a package
+    // literally named `global`), which is not a global install at all.
+    return hasAdjacentSequence(words, 'global', 'add') ? 'yarn global add' : undefined
   }
   const hasInstall = words.some((w) => INSTALL_SUBCOMMANDS.has(w))
   const hasGlobal = words.some(isGlobalFlag)
   if (!hasInstall || !hasGlobal) return undefined
   return manager === 'bun' ? 'bun global install (-g / --global)' : 'npm/pnpm global install (-g / --global)'
+}
+
+function hasAdjacentSequence(words: string[], first: string, second: string): boolean {
+  for (let i = 0; i + 1 < words.length; i++) {
+    if (words[i] === first && words[i + 1] === second) return true
+  }
+  return false
 }
 
 // `-g` / `--global`, including bundled short flags like `-gD` / `-Dg`. An

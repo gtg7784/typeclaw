@@ -39,11 +39,11 @@ Both guards follow the repo-wide `acknowledgeGuards` convention (shared with the
 `checkBunHygieneGuard` in `policy.ts` does not regex the raw command. It runs a small single-pass tokenizer (`splitSegments`) that turns the command into a list of **segments**, each a list of **words**:
 
 - Segments break on real command separators — `;`, `&&`, `||`, `|`, `&`, newline, `\r` — and on subshell / command-substitution openers (`(`, `$(`, backtick).
-- The tokenizer is quote-aware (a separator inside `"..."`/`'...'` is literal) and escape-aware (`\x` is a literal `x`, so `\npm` resolves to `npm` and `\;` is not a separator).
+- The tokenizer is quote-aware (a separator inside `"..."`/`'...'` is literal) and escape-aware (`\x` is a literal `x`, so `\npm` resolves to `npm` and `\;` is not a separator). A `\<newline>` is a POSIX line continuation — it is removed and the surrounding text joined, so `npm install \⏎-g x` is one command (a global install), while a bare newline separates commands.
 
 For each segment, the guard strips leading **preamble wrappers** (`sudo`, `env`, `command`, `exec`, `nice`, `nohup`, `stdbuf`, `setsid`, `time`, `xargs`, and any `VAR=val` assignment) — including their options, and the argument a flag consumes (`sudo -u nobody`, `nice -n 10`, `env -i`) — to find the real command word, then classifies:
 
-1. command word is `npm`/`npx`/`pnpm`/`pnpx`/`yarn` (or `bun`) **and** the segment has an install subcommand **and** a global flag → `globalInstall`;
+1. command word is `npm`/`npx`/`pnpm`/`pnpx`/`yarn` (or `bun`) **and** the segment has an install subcommand **and** a global flag → `globalInstall` (for `yarn`, the `global add` sequence must appear adjacent and in command position, so `yarn add global foo` — a local install of a package named `global` — is not misflagged);
 2. command word is a non-bun manager (not via global) → `nonBunPackageManager`;
 3. otherwise → allowed.
 
