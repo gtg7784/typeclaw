@@ -213,6 +213,27 @@ describe('reviewer skill content', () => {
     expect(lower).toContain('gh pr diff')
   })
 
+  test('code-review skill suppresses false positives the author already owns (drift guard)', () => {
+    // Without these, the reviewer restates the PR body and re-raises self-flagged TODOs as noise.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('restating the change description')
+    expect(lower).toContain('already-acknowledged gaps')
+  })
+
+  test('code-review skill demands blast-radius + pinned evidence on findings (drift guard)', () => {
+    // A line anchor says where; these say how far it reaches and where the evidence lives.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('blast radius')
+    expect(lower).toContain('pin the evidence')
+  })
+
+  test('code-review skill flags change hygiene — stray temporary commits (drift guard)', () => {
+    // Escaped scaffolding (wip/fixup commits, debug logging) the language-neutral base prompt misses.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('change hygiene')
+    expect(lower).toContain('fixup!')
+  })
+
   test('general skill body teaches universal review craft (load-bearing audience-fit phrasing)', () => {
     const lower = GENERAL_REVIEW_SKILL.content.toLowerCase()
     expect(lower).toContain('load-bearing')
