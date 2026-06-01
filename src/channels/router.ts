@@ -51,6 +51,8 @@ import type {
   HistoryCallback,
   InboundAttachment,
   InboundMessage,
+  RemoveReactionCallback,
+  RemoveReactionRequest,
   OutboundCallback,
   OutboundMessage,
   QuoteAnchorSource,
@@ -282,6 +284,7 @@ type QueuedInbound = {
   authorIsBot: boolean
   externalMessageId: string
   reactionRef?: ReactionRef
+  engageReaction?: Promise<ReactionRef | null>
   isBotMention: boolean
   replyToBotMessageId: string | null
   isDm: boolean
@@ -353,6 +356,7 @@ type LiveSession = {
   // origin so `channel_react` reacts to the triggering message, not whichever
   // inbound happens to be latest in the queue. Null on reminder-only turns.
   currentTurnReactionRef: ReactionRef | null
+  currentTurnEngageReaction: Promise<ReactionRef | null> | null
   lastTurnAuthorIds: Set<string>
   // Mirror of currentTurnAuthorId at end-of-turn (the LAST speaker of the
   // prior batch), preserved across the drain finally-block which resets
@@ -538,6 +542,9 @@ export type ChannelRouter = {
   registerReaction: (adapter: ChannelKey['adapter'], cb: ReactionCallback) => void
   unregisterReaction: (adapter: ChannelKey['adapter'], cb: ReactionCallback) => void
   react: (req: ReactionRequest) => Promise<ReactionResult>
+  registerRemoveReaction: (adapter: ChannelKey['adapter'], cb: RemoveReactionCallback) => void
+  unregisterRemoveReaction: (adapter: ChannelKey['adapter'], cb: RemoveReactionCallback) => void
+  removeReaction: (req: RemoveReactionRequest) => Promise<ReactionResult>
   registerTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   unregisterTyping: (adapter: ChannelKey['adapter'], cb: TypingCallback) => void
   registerChannelNameResolver: (adapter: ChannelKey['adapter'], resolver: ChannelNameResolver) => void
@@ -757,6 +764,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   let liveGeneration = 0
   const outboundCallbacks = new Map<ChannelKey['adapter'], Set<OutboundCallback>>()
   const reactionCallbacks = new Map<ChannelKey['adapter'], Set<ReactionCallback>>()
+  const removeReactionCallbacks = new Map<ChannelKey['adapter'], Set<RemoveReactionCallback>>()
   const typingCallbacks = new Map<ChannelKey['adapter'], Set<TypingCallback>>()
   const channelNameResolvers = new Map<ChannelKey['adapter'], Set<ChannelNameResolver>>()
   const membershipResolvers = new Map<ChannelKey['adapter'], Set<MembershipResolver>>()
@@ -1122,6 +1130,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnAuthorId: null,
         currentTurnAuthorIds: new Set(),
         currentTurnReactionRef: null,
+        currentTurnEngageReaction: null,
         // `lastTurnAuthorId` (string, used for `lastInboundAuthorId` in
         // origin) and `lastTurnAuthorIds` (Set, used by
         // `grantStickyForReplyTargets` as the fallback when
@@ -1532,10 +1541,12 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.currentTurnReactionRef = batch[batch.length - 1]!.reactionRef ?? null
+          live.currentTurnEngageReaction = batch[batch.length - 1]!.engageReaction ?? null
           live.consecutiveSends.clear()
           live.lastSentText.clear()
           live.pendingQuoteCandidate = captureQuoteCandidate(live.key.adapter, batch, observed)
         } else if (live.lastTurnAuthorId !== null) {
+          live.currentTurnEngageReaction = null
           // Reminder-only turn (batch.length === 0, reminders.length > 0):
           // restore the author identity from the prior turn so author-
           // scoped role resolution still works on this turn. The drain
@@ -1550,6 +1561,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           // author prior turn like alice→bob restores `bob`, not alice.
           live.currentTurnAuthorId = live.lastTurnAuthorId
           live.currentTurnAuthorIds = new Set(live.lastTurnAuthorIds)
+        } else {
+          live.currentTurnEngageReaction = null
         }
 
         // Update the live origin holder so this turn's tool.before events
@@ -1576,6 +1589,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.info(`[channels] ${live.keyId} prompting batch=${batch.length} text_len=${text.length}`)
         const promptStart = now()
         const successfulSendsBeforePrompt = live.successfulChannelSends
+        const engageAddPromise = live.currentTurnEngageReaction
         live.turnSeq++
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
         live.policyDeniedToolSendsThisTurn.clear()
@@ -1590,6 +1604,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.consecutiveSends.clear()
           live.lastSentText.clear()
         } finally {
+          const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
+          if (sentReplyThisTurn) dropEngageReactionAfterReply(live, engageAddPromise)
           await fireSessionTurnEnd(live)
         }
         await fireSessionIdle(live)
@@ -1603,6 +1619,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.currentTurnAuthorId = null
       live.currentTurnAuthorIds = new Set()
       live.currentTurnReactionRef = null
+      live.currentTurnEngageReaction = null
       live.currentTurnAttachments = []
       await stopTypingHeartbeat(live)
     }
@@ -1852,11 +1869,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     publishInbound(event, 'engage', live.sessionId)
 
-    autoReactOnEngage(event)
+    const engageReaction = autoReactOnEngage(live, event)
 
     updateLoopGuard(live, event)
 
-    enqueue(live, event)
+    enqueue(live, event, engageReaction)
 
     // Start showing "typing..." the moment we know we're going to engage,
     // so users see the indicator during the debounce window — not just
@@ -1938,7 +1955,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
-  const enqueue = (live: LiveSession, event: InboundMessage): void => {
+  const enqueue = (
+    live: LiveSession,
+    event: InboundMessage,
+    engageReaction: Promise<ReactionRef | null> | null,
+  ): void => {
     live.promptQueue.push({
       text: event.text,
       ...(event.attachments !== undefined && event.attachments.length > 0 ? { attachments: event.attachments } : {}),
@@ -1947,6 +1968,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       authorIsBot: event.authorIsBot,
       externalMessageId: event.externalMessageId,
       ...(event.reactionRef !== undefined ? { reactionRef: event.reactionRef } : {}),
+      ...(engageReaction !== null ? { engageReaction } : {}),
       isBotMention: event.isBotMention,
       replyToBotMessageId: event.replyToBotMessageId,
       isDm: event.isDm,
@@ -1977,6 +1999,19 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     reactionCallbacks.get(adapter)?.delete(cb)
   }
 
+  const registerRemoveReaction = (adapter: ChannelKey['adapter'], cb: RemoveReactionCallback): void => {
+    let set = removeReactionCallbacks.get(adapter)
+    if (!set) {
+      set = new Set()
+      removeReactionCallbacks.set(adapter, set)
+    }
+    set.add(cb)
+  }
+
+  const unregisterRemoveReaction = (adapter: ChannelKey['adapter'], cb: RemoveReactionCallback): void => {
+    removeReactionCallbacks.get(adapter)?.delete(cb)
+  }
+
   const react = async (req: ReactionRequest): Promise<ReactionResult> => {
     if (req.reactionRef.adapter !== req.adapter) {
       return { ok: false, error: 'reaction ref adapter mismatch', code: 'unsupported' }
@@ -2001,15 +2036,34 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return lastError ?? { ok: false, error: 'no reaction callback handled request', code: 'unsupported' }
   }
 
+  const removeReaction = async (req: RemoveReactionRequest): Promise<ReactionResult> => {
+    if (req.reactionRef.adapter !== req.adapter) {
+      return { ok: false, error: 'reaction ref adapter mismatch', code: 'unsupported' }
+    }
+    const callbacks = removeReactionCallbacks.get(req.adapter)
+    if (!callbacks || callbacks.size === 0) {
+      return { ok: false, error: `adapter "${req.adapter}" does not support reaction removal`, code: 'unsupported' }
+    }
+    let lastError: ReactionResult | undefined
+    for (const cb of Array.from(callbacks)) {
+      const result = await cb(req).catch(
+        (err): ReactionResult => ({ ok: false, error: describe(err), code: 'transient' }),
+      )
+      if (result.ok) return result
+      lastError = result
+    }
+    return lastError ?? { ok: false, error: 'no reaction removal callback handled request', code: 'unsupported' }
+  }
+
   // Best-effort acknowledgment: drop an :eyes: on the triggering inbound the
   // moment we decide to engage, replacing the old "On it" ack comment on
   // GitHub. Fire-and-forget so a reaction failure (missing permission, the
   // adapter not supporting reactions, a transient API error) can NEVER block
   // engagement, enqueueing, or the agent's actual reply. No reactionRef =
   // nothing reactable (synthetic inbounds, reaction-less adapters) = silent skip.
-  const autoReactOnEngage = (event: InboundMessage): void => {
-    if (event.reactionRef === undefined) return
-    void react({
+  const autoReactOnEngage = (live: LiveSession, event: InboundMessage): Promise<ReactionRef | null> | null => {
+    if (event.reactionRef === undefined) return null
+    const addResult = react({
       adapter: event.adapter,
       workspace: event.workspace,
       chat: event.chat,
@@ -2017,6 +2071,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       reactionRef: event.reactionRef,
       emoji: ENGAGE_REACTION_EMOJI,
     })
+    const addReactionRef = addResult.then((r) => (r.ok ? (r.reactionRef ?? null) : null)).catch(() => null)
+    live.currentTurnEngageReaction = addReactionRef
+    void addResult
       .then((result) => {
         if (!result.ok && result.code !== 'unsupported') {
           logger.info(`[channels] engage-react failed adapter=${event.adapter} chat=${event.chat}: ${result.error}`)
@@ -2024,6 +2081,34 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       })
       .catch((err) => {
         logger.info(`[channels] engage-react threw adapter=${event.adapter} chat=${event.chat}: ${describe(err)}`)
+      })
+    return addReactionRef
+  }
+
+  const dropEngageReactionAfterReply = (live: LiveSession, addPromise: Promise<ReactionRef | null> | null): void => {
+    if (addPromise === null) return
+    void addPromise
+      .then((reactionRef) => {
+        if (reactionRef === null) return undefined
+        return removeReaction({
+          adapter: live.key.adapter,
+          workspace: live.key.workspace,
+          chat: live.key.chat,
+          thread: live.key.thread,
+          reactionRef,
+        })
+      })
+      .then((result) => {
+        if (result && !result.ok && result.code !== 'unsupported' && result.code !== 'not-found') {
+          logger.info(
+            `[channels] engage-unreact failed adapter=${live.key.adapter} chat=${live.key.chat}: ${result.error}`,
+          )
+        }
+      })
+      .catch((err) => {
+        logger.info(
+          `[channels] engage-unreact threw adapter=${live.key.adapter} chat=${live.key.chat}: ${describe(err)}`,
+        )
       })
   }
 
@@ -2728,6 +2813,9 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     registerReaction,
     unregisterReaction,
     react,
+    registerRemoveReaction,
+    unregisterRemoveReaction,
+    removeReaction,
     registerTyping,
     unregisterTyping,
     registerChannelNameResolver,
