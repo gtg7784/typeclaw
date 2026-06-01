@@ -86,9 +86,9 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
 
 export const PR_APPROVAL_DISABLED_NOTE =
   'Operator policy: PR approval is disabled for this agent ' +
-  '(`channels.github.allowApprove: false`). If you review a PR and the verdict ' +
-  'is `approve`, submit a `COMMENT` review instead of `APPROVE` — post the ' +
-  'findings, but never formally approve.'
+  '(`channels.github.review.approve: false`). If you review a PR and the ' +
+  'verdict is `approve`, submit a `COMMENT` review instead of `APPROVE` — post ' +
+  'the findings, but never formally approve.'
 
 // Gating PR approval lives here (inbound text), not at the bash layer: the
 // review is posted via `gh api --input <file>`, so the `event: APPROVE` value

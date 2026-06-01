@@ -77,7 +77,7 @@ function githubConfig(
     webhookPort: 0,
     eventAllowlist: ['issue_comment.created', 'pull_request.opened'],
     repos: [...repos],
-    allowApprove: true,
+    review: { approve: true },
   }
   if (webhookUrl !== null) config.webhookUrl = webhookUrl
   return config
