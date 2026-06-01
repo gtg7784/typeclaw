@@ -245,6 +245,39 @@ describe('mcpServerSchema', () => {
   test('allows single underscores in server names', () => {
     expect(() => mcpServerSchema.parse({ name: 'good_server', command: 'server' })).not.toThrow()
   })
+
+  test('rejects a url that is not http(s)', () => {
+    expect(() => mcpServerSchema.parse({ name: 'ftp-server', url: 'ftp://mcp.example.com/mcp' })).toThrow(
+      /http:\/\/ or https:\/\//,
+    )
+  })
+
+  test('accepts a plain http url', () => {
+    expect(() => mcpServerSchema.parse({ name: 'local-http', url: 'http://localhost:8080/mcp' })).not.toThrow()
+  })
+
+  test('accepts http(s) urls regardless of scheme casing', () => {
+    expect(() => mcpServerSchema.parse({ name: 'upper-https', url: 'HTTPS://mcp.example.com/mcp' })).not.toThrow()
+    expect(() => mcpServerSchema.parse({ name: 'upper-http', url: 'HTTP://localhost:8080/mcp' })).not.toThrow()
+  })
+
+  test('rejects env keys that are not valid identifiers', () => {
+    expect(() => mcpServerSchema.parse({ name: 'bad-env', command: 'server', env: { 'API KEY': 'x' } })).toThrow(
+      /valid identifier/,
+    )
+    expect(() => mcpServerSchema.parse({ name: 'bad-env2', command: 'server', env: { '1LEADING': 'x' } })).toThrow(
+      /valid identifier/,
+    )
+  })
+
+  test('rejects a whitespace-only command', () => {
+    expect(() => mcpServerSchema.parse({ name: 'blank-cmd', command: '   ' })).toThrow()
+  })
+
+  test('rejects a timeout above the 10-minute ceiling', () => {
+    expect(() => mcpServerSchema.parse({ name: 'slow', command: 'server', timeoutMs: 600_001 })).toThrow()
+    expect(() => mcpServerSchema.parse({ name: 'ok-slow', command: 'server', timeoutMs: 600_000 })).not.toThrow()
+  })
 })
 
 describe('configSchema mcpServers field', () => {
@@ -311,6 +344,17 @@ describe('configSchema preserves unknown top-level keys (plugin config blocks)',
     })
 
     expect(configs).toEqual({ agentBrowser: { dashboardProxy: false }, customPlugin: { enabled: true } })
+  })
+
+  test('treats mcpServers and tunnels as known top-level keys, not plugin blocks', () => {
+    const configs = extractPluginConfigs({
+      models: { default: VALID_MODEL },
+      mcpServers: [{ name: 'fs', command: 'server' }],
+      tunnels: [{ provider: 'cloudflare-quick' }],
+      customPlugin: { enabled: true },
+    })
+
+    expect(configs).toEqual({ customPlugin: { enabled: true } })
   })
 })
 

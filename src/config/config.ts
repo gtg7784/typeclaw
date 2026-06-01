@@ -31,6 +31,30 @@ const DEFAULT_PORT = 8973
 // of files like `mounts/.git` or `mounts/Hello`.
 const MOUNT_NAME_PATTERN = /^[a-z0-9][a-z0-9-_]*$/
 
+// Shell-portable env var identifier: a leading letter or underscore followed by
+// letters, digits, or underscores. MCP `env` keys are passed verbatim to a child
+// process environment, so an invalid identifier (spaces, `=`, leading digit)
+// would be silently dropped or corrupt the spawned server's env.
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+// Upper bound for a per-server MCP request timeout: 10 minutes. Long-running
+// MCP tools (large crawls, builds) can legitimately take minutes, but a ceiling
+// guards against fat-finger values that would re-introduce the unbounded-hang
+// failure mode the explicit timeouts exist to prevent.
+const MCP_MAX_TIMEOUT_MS = 600_000
+
+// URL schemes are case-insensitive (RFC 3986), and the WHATWG parser normalizes
+// `.protocol` to lowercase. Checking the parsed protocol instead of a raw
+// `startsWith` keeps `HTTPS://…` valid, which `z.string().url()` already accepts.
+function isHttpProtocol(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol
+    return protocol === 'http:' || protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 export const mountSchema = z.object({
   name: z.string().regex(MOUNT_NAME_PATTERN, 'mount name must be lowercase alphanumeric with - or _'),
   path: z.string().min(1),
@@ -53,11 +77,19 @@ export const mcpServerSchema = z
       .refine((name) => !name.includes('__'), {
         message: "MCP server name must not contain '__' (reserved as the tool-namespace separator)",
       }),
-    timeoutMs: z.number().int().positive().optional(),
-    command: z.string().min(1).optional(),
+    timeoutMs: z.number().int().positive().max(MCP_MAX_TIMEOUT_MS).optional(),
+    command: z.string().trim().min(1).optional(),
     args: z.array(z.string()).default([]),
-    url: z.string().url().optional(),
-    env: z.record(z.string(), secretFieldSchema).default({}),
+    url: z
+      .string()
+      .url()
+      .refine((u) => isHttpProtocol(u), {
+        message: 'MCP server url must use http:// or https://',
+      })
+      .optional(),
+    env: z
+      .record(z.string().regex(ENV_NAME_PATTERN, 'env var name must be a valid identifier'), secretFieldSchema)
+      .default({}),
   })
   .refine((server) => (server.command !== undefined) !== (server.url !== undefined), {
     message: 'MCP server must be either stdio (command) or http (url), not both or neither',
@@ -666,6 +698,8 @@ export function extractPluginConfigs(raw: unknown): Record<string, unknown> {
     'git',
     'roles',
     'permissions',
+    'tunnels',
+    'mcpServers',
   ])
   const result: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(raw as Record<string, unknown>)) {
