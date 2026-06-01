@@ -704,6 +704,92 @@ describe('createDiscordHistoryCallback', () => {
     expect(result.messages.map((m) => m.text)).toEqual(['oldest', 'middle', 'newest'])
   })
 
+  test('maps attachments on history messages into attachments and bakes placeholders into text', async () => {
+    // given
+    const { fn } = fakeFetch([
+      {
+        id: '1',
+        channel_id: 'c1',
+        author: { id: 'u1', username: 'A', bot: false },
+        content: 'what is this?',
+        timestamp: '2026-04-27T00:00:01Z',
+        attachments: [{ url: 'https://cdn.example/photo.png', filename: 'photo.png', content_type: 'image/png' }],
+      },
+    ])
+    const cb = createDiscordHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'c1', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const msg = result.messages[0]!
+    expect(msg.attachments).toEqual([
+      { id: 1, kind: 'file', ref: 'https://cdn.example/photo.png', filename: 'photo.png', mimetype: 'image/png' },
+    ])
+    expect(msg.text).toBe('what is this?\n[Discord attachment #1: file image/png name=photo.png]')
+  })
+
+  test('omits attachments and leaves text untouched when a history message has no media', async () => {
+    // given
+    const { fn } = fakeFetch([
+      {
+        id: '1',
+        channel_id: 'c1',
+        author: { id: 'u1', username: 'A', bot: false },
+        content: 'plain text',
+        timestamp: '2026-04-27T00:00:01Z',
+      },
+    ])
+    const cb = createDiscordHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'c1', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const msg = result.messages[0]!
+    expect(msg.attachments).toBeUndefined()
+    expect(msg.text).toBe('plain text')
+  })
+
+  test('renders media-only history message (no text) as placeholder-only text and numbers across media kinds', async () => {
+    // given
+    const { fn } = fakeFetch([
+      {
+        id: '1',
+        channel_id: 'c1',
+        author: { id: 'u1', username: 'A', bot: false },
+        content: '',
+        timestamp: '2026-04-27T00:00:01Z',
+        attachments: [{ url: 'https://cdn.example/a.jpg', filename: 'a.jpg', content_type: 'image/jpeg' }],
+        sticker_items: [{ id: 's1', name: 'wave', format_type: 1 }],
+      },
+    ])
+    const cb = createDiscordHistoryCallback({
+      token: 'tok',
+      logger: silentLogger(),
+      botUserIdRef: () => null,
+      fetchImpl: fn,
+    })
+    // when
+    const result = await cb({ chat: 'c1', thread: null, limit: 10 })
+    // then
+    if (!result.ok) throw new Error('expected ok')
+    const msg = result.messages[0]!
+    expect(msg.text).toBe(
+      '[Discord attachment #1: file image/jpeg name=a.jpg]\n[Discord attachment #2: sticker name=wave]',
+    )
+    expect(msg.attachments).toHaveLength(2)
+    expect(msg.attachments!.map((a) => a.id)).toEqual([1, 2])
+  })
+
   test('marks author.bot as isBot', async () => {
     // given
     const { fn } = fakeFetch([
