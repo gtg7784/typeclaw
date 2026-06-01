@@ -2,6 +2,12 @@ import { runInspect, type RunInspectOptions, type RunInspectResult } from './ind
 
 export type RunInspectLoopOptions = Omit<RunInspectOptions, 'escSignal'> & {
   newEscSignal: () => AbortSignal
+  // Runs after every runInspect attempt settles. The caller disarms the raw-mode
+  // ESC listener here so the live tail releases stdin before clack re-opens the
+  // picker: an ESC-aborted tail leaves the listener armed (raw mode on, 'data'
+  // handler attached), and handing clack that flowing stream freezes the picker
+  // on SSH/Bun pseudo-TTYs.
+  afterEscStream?: () => void
 }
 
 export async function runInspectLoop(opts: RunInspectLoopOptions): Promise<RunInspectResult> {
@@ -23,7 +29,12 @@ export async function runInspectLoop(opts: RunInspectLoopOptions): Promise<RunIn
     if (sessionArg !== undefined) callOpts.sessionIdOrPrefix = sessionArg
     else delete (callOpts as { sessionIdOrPrefix?: string }).sessionIdOrPrefix
 
-    const result = await runInspect(callOpts)
+    let result: RunInspectResult
+    try {
+      result = await runInspect(callOpts)
+    } finally {
+      opts.afterEscStream?.()
+    }
     if (!result.ok) return result
     if (result.escToPicker !== true) return result
     sessionArg = undefined
