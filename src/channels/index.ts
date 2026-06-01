@@ -1,5 +1,11 @@
 export { createChannelManager, type ChannelManager, type ChannelManagerOptions } from './manager'
 export {
+  createGithubTokenBridge,
+  type GithubTokenBridge,
+  type GithubTokenResolveResult,
+  type ResolveGithubTokenForRepo,
+} from './github-token-bridge'
+export {
   createChannelRouter,
   type ChannelRouter,
   type ClaimHandler,
