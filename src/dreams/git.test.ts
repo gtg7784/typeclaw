@@ -87,6 +87,26 @@ describe('readDreamCommitLog', () => {
     await commit(repo, 'chore: nothing to dream about')
     expect(await readDreamCommitLog(repo)).toEqual([])
   })
+
+  it('excludes a non-dream subject whose body contains a dream: line', async () => {
+    await writeFile(join(repo, 'a.txt'), 'a\n')
+    await git(['add', '-A'], repo)
+    await git(['commit', '-m', 'feat: real subject', '-m', 'dream: 3 fragments 🌙'], repo)
+    expect(await readDreamCommitLog(repo)).toEqual([])
+  })
+
+  it('applies the limit after the subject filter, not before', async () => {
+    await writeFile(join(repo, 'real.txt'), 'x\n')
+    await git(['add', '-A'], repo)
+    await git(['commit', '-m', 'chore: impostor', '-m', 'dream: body line 💤'], repo)
+    await writeFile(join(repo, 'd1.txt'), '1\n')
+    await commit(repo, 'dream: 1 fragment 🧠')
+    await writeFile(join(repo, 'd2.txt'), '2\n')
+    await commit(repo, 'dream: 2 fragments ⭐')
+
+    const limited = await readDreamCommitLog(repo, { limit: 2 })
+    expect(limited.map((c) => c.subject)).toEqual(['dream: 2 fragments ⭐', 'dream: 1 fragment 🧠'])
+  })
 })
 
 describe('readDreamCommitShow', () => {

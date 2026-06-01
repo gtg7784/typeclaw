@@ -24,17 +24,26 @@ export async function resolveGitRepo(cwd: string, spawnGit: SpawnGit = defaultSp
   return { ok: false, reason: 'git-failed' }
 }
 
+const DREAM_SUBJECT_PREFIX = 'dream: '
+
 export async function readDreamCommitLog(
   root: string,
   opts: { limit?: number } = {},
   spawnGit: SpawnGit = defaultSpawnGit,
 ): Promise<RawCommit[]> {
+  // --grep is only a cheap pre-filter: it matches ANY line of the commit
+  // message, so a non-dream commit with a `dream: ...` body line slips
+  // through. The subject is the authoritative contract, so the prefix filter
+  // below is what actually decides membership — and the limit is applied
+  // AFTER it so body-matching impostors can't consume a slot and shrink the
+  // result below the requested count.
   const args = ['log', '--grep=^dream: ', `--format=%H${FIELD_SEP}%h${FIELD_SEP}%cI${FIELD_SEP}%s${RECORD_SEP}`]
-  if (opts.limit !== undefined && opts.limit > 0) args.push(`--max-count=${opts.limit}`)
 
   const res = await spawnGit(args, root)
   if (res.exitCode !== 0) return []
-  return parseLogOutput(res.stdout)
+  const dreams = parseLogOutput(res.stdout).filter((c) => c.subject.startsWith(DREAM_SUBJECT_PREFIX))
+  if (opts.limit !== undefined && opts.limit > 0) return dreams.slice(0, opts.limit)
+  return dreams
 }
 
 export function parseLogOutput(stdout: string): RawCommit[] {
