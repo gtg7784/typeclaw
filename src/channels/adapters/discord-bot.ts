@@ -148,6 +148,116 @@ type DiscordGuildPreview = {
 
 type DiscordGuildMember = {
   user?: { id?: string; bot?: boolean }
+  roles?: string[]
+}
+
+type DiscordPermissionOverwrite = {
+  id?: string
+  type?: number
+  allow?: string
+  deny?: string
+}
+
+// Discord channel `type` values that are threads. A thread's own
+// permission_overwrites are empty and its `parent_id` points at its parent
+// channel (not a category), so the normal "compute from this channel's
+// overwrites" path would treat a thread as fully public. We refuse to count
+// threads channel-scoped and fall back instead — fail-closed.
+const DISCORD_THREAD_CHANNEL_TYPES: ReadonlySet<number> = new Set([10, 11, 12])
+
+type DiscordChannelObject = {
+  type?: number
+  permission_overwrites?: DiscordPermissionOverwrite[]
+}
+
+type DiscordRole = {
+  id?: string
+  permissions?: string
+}
+
+type DiscordGuildObject = {
+  owner_id?: string
+  roles?: DiscordRole[]
+}
+
+// Discord permission bits. Discord serialises permission bitsets as decimal
+// STRINGS that can exceed Number.MAX_SAFE_INTEGER, so all bit math is done in
+// BigInt. Only the two bits this resolver needs are named.
+const DISCORD_PERMISSION_VIEW_CHANNEL = 0x400n
+const DISCORD_PERMISSION_ADMINISTRATOR = 0x8n
+
+function parsePermissionBits(raw: string | undefined): bigint {
+  if (raw === undefined || raw === '') return 0n
+  try {
+    return BigInt(raw)
+  } catch {
+    return 0n
+  }
+}
+
+// Computes whether a single member can VIEW_CHANNEL on a normal guild channel,
+// following Discord's documented resolution order:
+//   base = @everyone role perms OR all of the member's role perms
+//   → owner or ADMINISTRATOR short-circuits to visible
+//   → @everyone channel overwrite (clear deny bits, then set allow bits)
+//   → all matching role overwrites combined (OR every deny, OR every allow;
+//     apply denies then allows)
+//   → member-specific overwrite (clear deny, set allow)
+// Returns null when the data is insufficient to decide (a member references a
+// role absent from the guild role map), so the caller can fail closed rather
+// than guess.
+function memberCanViewChannel(args: {
+  guildId: string
+  ownerId: string | undefined
+  rolePermissions: ReadonlyMap<string, bigint>
+  overwrites: ReadonlyMap<string, { allow: bigint; deny: bigint }>
+  memberId: string | undefined
+  memberRoleIds: readonly string[]
+}): boolean | null {
+  const { guildId, ownerId, rolePermissions, overwrites, memberId, memberRoleIds } = args
+
+  if (memberId !== undefined && ownerId !== undefined && memberId === ownerId) return true
+
+  // Discord's `@everyone` role id always equals the guild id, so the guild id
+  // keys both the base @everyone permissions and the @everyone overwrite.
+  let base = rolePermissions.get(guildId) ?? 0n
+  for (const roleId of memberRoleIds) {
+    const perms = rolePermissions.get(roleId)
+    if (perms === undefined) return null
+    base |= perms
+  }
+
+  if ((base & DISCORD_PERMISSION_ADMINISTRATOR) !== 0n) return true
+
+  let perms = base
+
+  const everyoneOverwrite = overwrites.get(guildId)
+  if (everyoneOverwrite !== undefined) {
+    perms &= ~everyoneOverwrite.deny
+    perms |= everyoneOverwrite.allow
+  }
+
+  let roleDeny = 0n
+  let roleAllow = 0n
+  for (const roleId of memberRoleIds) {
+    const overwrite = overwrites.get(roleId)
+    if (overwrite !== undefined) {
+      roleDeny |= overwrite.deny
+      roleAllow |= overwrite.allow
+    }
+  }
+  perms &= ~roleDeny
+  perms |= roleAllow
+
+  if (memberId !== undefined) {
+    const memberOverwrite = overwrites.get(memberId)
+    if (memberOverwrite !== undefined) {
+      perms &= ~memberOverwrite.deny
+      perms |= memberOverwrite.allow
+    }
+  }
+
+  return (perms & DISCORD_PERMISSION_VIEW_CHANNEL) !== 0n
 }
 
 export function createDiscordMembershipResolver(deps: {
@@ -207,28 +317,132 @@ export function createDiscordMembershipResolver(deps: {
       return members.failure
     }
 
-    let bots = 0
-    let humans = 0
-    const humanMemberIds: string[] = []
-    let everyHumanIdentified = true
-    for (const member of members.value) {
-      if (member.user?.bot === true) {
-        bots++
-        continue
-      }
-      humans++
-      const userId = member.user?.id
-      if (userId === undefined) everyHumanIdentified = false
-      else humanMemberIds.push(userId)
-    }
-    // Only attach identities when every human was identifiable; an
-    // unidentifiable human must not be silently dropped, or a consumer proving
-    // "all humans trusted" would skip an unaccounted member. Falling back to
-    // counts-only keeps that consumer fail-closed.
-    return everyHumanIdentified
-      ? { humans, bots, fetchedAt: now(), truncated: false, humanMemberIds }
-      : { humans, bots, fetchedAt: now(), truncated: false }
+    // Guild `/members` returns the whole guild, not the channel. A bot or
+    // human that cannot VIEW_CHANNEL the target channel is not in the room and
+    // not a prompt-injection surface, so it must not be counted — otherwise a
+    // private channel of "operator + agent bot" inside a multi-bot guild reads
+    // as bots>1 and the grant_role relaxation (provesOnlyAgentBotPresent)
+    // false-refuses. Resolve channel visibility for each member; on ANY
+    // inability to decide, fall back rather than over- or under-count.
+    const scoped = await scopeMembersToChannel({
+      fetchFn,
+      token: deps.token,
+      logger: deps.logger,
+      guildId: key.workspace,
+      channelId: key.chat,
+      members: members.value,
+    })
+    if (scoped === 'fallback') return await fallback()
+
+    return scoped.everyHumanIdentified
+      ? {
+          humans: scoped.humans,
+          bots: scoped.bots,
+          fetchedAt: now(),
+          truncated: false,
+          humanMemberIds: scoped.humanMemberIds,
+        }
+      : { humans: scoped.humans, bots: scoped.bots, fetchedAt: now(), truncated: false }
   }
+}
+
+type ScopedMembership = {
+  humans: number
+  bots: number
+  humanMemberIds: string[]
+  everyHumanIdentified: boolean
+}
+
+// Filters a guild member list down to those who can VIEW_CHANNEL the target
+// channel, then counts humans/bots over that visible set. Returns 'fallback'
+// when channel visibility cannot be computed completely (channel/guild fetch
+// failure, a member referencing an unknown role, or a thread channel whose
+// visibility this resolver does not model) — the caller then derives from
+// history (truncated:true), keeping every security consumer fail-closed.
+async function scopeMembersToChannel(args: {
+  fetchFn: typeof fetch
+  token: string
+  logger: DiscordBotAdapterLogger
+  guildId: string
+  channelId: string
+  members: readonly DiscordGuildMember[]
+}): Promise<ScopedMembership | 'fallback'> {
+  const { fetchFn, token, logger, guildId, channelId, members } = args
+
+  const [channel, guild] = await Promise.all([
+    fetchDiscordJson<DiscordChannelObject>(fetchFn, `${DISCORD_API_BASE}/channels/${channelId}`, token),
+    fetchDiscordJson<DiscordGuildObject>(fetchFn, `${DISCORD_API_BASE}/guilds/${guildId}`, token),
+  ])
+  if (!channel.ok) {
+    logger.warn(
+      `[discord-bot] membership channel=${channelId} fetch failed: ${channel.reason}; deriving from recent message authors`,
+    )
+    return 'fallback'
+  }
+  if (!guild.ok) {
+    logger.warn(
+      `[discord-bot] membership guild=${guildId} fetch failed: ${guild.reason}; deriving from recent message authors`,
+    )
+    return 'fallback'
+  }
+
+  if (channel.value.type !== undefined && DISCORD_THREAD_CHANNEL_TYPES.has(channel.value.type)) {
+    // A thread inherits visibility from its parent channel and (for private
+    // threads) an explicit member list; we do not model either here. Fall
+    // back rather than treat the thread as world-visible.
+    logger.warn(
+      `[discord-bot] membership channel=${channelId} is a thread; deriving from recent message authors instead of channel-scoped enumeration`,
+    )
+    return 'fallback'
+  }
+
+  const rolePermissions = new Map<string, bigint>()
+  for (const role of guild.value.roles ?? []) {
+    if (role.id !== undefined) rolePermissions.set(role.id, parsePermissionBits(role.permissions))
+  }
+
+  const overwrites = new Map<string, { allow: bigint; deny: bigint }>()
+  for (const overwrite of channel.value.permission_overwrites ?? []) {
+    if (overwrite.id === undefined) continue
+    overwrites.set(overwrite.id, {
+      allow: parsePermissionBits(overwrite.allow),
+      deny: parsePermissionBits(overwrite.deny),
+    })
+  }
+
+  let humans = 0
+  let bots = 0
+  const humanMemberIds: string[] = []
+  let everyHumanIdentified = true
+
+  for (const member of members) {
+    const visible = memberCanViewChannel({
+      guildId,
+      ownerId: guild.value.owner_id,
+      rolePermissions,
+      overwrites,
+      memberId: member.user?.id,
+      memberRoleIds: member.roles ?? [],
+    })
+    if (visible === null) {
+      logger.warn(
+        `[discord-bot] membership channel=${channelId} member references unknown role; deriving from recent message authors`,
+      )
+      return 'fallback'
+    }
+    if (!visible) continue
+
+    if (member.user?.bot === true) {
+      bots++
+      continue
+    }
+    humans++
+    const userId = member.user?.id
+    if (userId === undefined) everyHumanIdentified = false
+    else humanMemberIds.push(userId)
+  }
+
+  return { humans, bots, humanMemberIds, everyHumanIdentified }
 }
 
 type DiscordFetchResult<T> =

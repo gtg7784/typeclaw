@@ -469,7 +469,7 @@ describe('renderSessionOrigin', () => {
     expect(out).not.toContain('guild members')
   })
 
-  test('channel origin renders Discord guild-level caveat for exact counts', () => {
+  test('channel origin renders Discord channel-scoped caveat for exact counts', () => {
     const now = 100_000
     const out = renderSessionOrigin(
       {
@@ -484,7 +484,7 @@ describe('renderSessionOrigin', () => {
     )
 
     expect(out).toContain('This channel has 47 members: 12 humans, 35 bots.')
-    expect(out).toContain('this is the count of guild members')
+    expect(out).toContain('counts only members who can view this channel')
   })
 
   test('channel origin renders large-channel truncated summary', () => {
@@ -501,7 +501,7 @@ describe('renderSessionOrigin', () => {
     expect(out).toContain('exceeds the 50-member cap')
   })
 
-  test('channel origin adds Discord caveat to truncated summaries', () => {
+  test('channel origin omits the channel-scoped caveat on truncated (history-derived) summaries', () => {
     const out = renderSessionOrigin({
       kind: 'channel',
       adapter: 'discord-bot',
@@ -512,7 +512,7 @@ describe('renderSessionOrigin', () => {
     })
 
     expect(out).toContain('approximately 200 members')
-    expect(out).toContain('private channels with permission overwrites')
+    expect(out).not.toContain('counts only members who can view this channel')
   })
 
   test('channel origin omits member summary when membership is missing', () => {
