@@ -37,7 +37,9 @@ const TRUSTED_GROUP: SessionOrigin = {
 const TUI: SessionOrigin = { kind: 'tui', sessionId: 's1' }
 
 function trustedGroupWithMembership(
-  membership: { humans: number; bots: number; truncated: boolean; ageMs?: number } | undefined,
+  membership:
+    | { humans: number; bots: number; truncated: boolean; ageMs?: number; humanMemberIds?: readonly string[] }
+    | undefined,
 ): SessionOrigin {
   return {
     kind: 'channel',
@@ -54,6 +56,7 @@ function trustedGroupWithMembership(
             bots: membership.bots,
             truncated: membership.truncated,
             fetchedAt: Date.now() - (membership.ageMs ?? 0),
+            ...(membership.humanMemberIds === undefined ? {} : { humanMemberIds: membership.humanMemberIds }),
           },
         }),
   }
@@ -105,7 +108,7 @@ describe('grant_role gate — origin', () => {
     const dir = freshAgentDir()
     const details = await run(makeTool(dir, TRUSTED_GROUP), { role: 'member', match: 'slack:T0123 author:U_X' })
     expect(details.ok).toBe(false)
-    if (!details.ok) expect(details.error).toContain('one human member')
+    if (!details.ok) expect(details.error).toContain('admits any untrusted human')
     // nothing written
     expect(readRoles(dir).member).toBeUndefined()
   })
@@ -144,7 +147,7 @@ describe('grant_role gate — single-human group channel', () => {
     const origin = trustedGroupWithMembership({ humans: 2, bots: 1, truncated: false })
     const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
     expect(details.ok).toBe(false)
-    if (!details.ok) expect(details.error).toContain('one human member')
+    if (!details.ok) expect(details.error).toContain('admits any untrusted human')
     expect(readRoles(dir).guest?.permissions).toBeUndefined()
   })
 
@@ -186,6 +189,111 @@ describe('grant_role gate — single-human group channel', () => {
     const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
     expect(details.ok).toBe(false)
     if (!details.ok) expect(details.error).toContain('only owner or trusted may grant')
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+})
+
+describe('grant_role gate — all-humans-trusted group channel', () => {
+  test('multi-human group is allowed when every human member resolves to trusted/owner', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({
+      humans: 2,
+      bots: 1,
+      truncated: false,
+      humanMemberIds: ['U_TRENT', 'U_OWNER'],
+    })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(true)
+    expect(readRoles(dir).guest?.permissions).toContain('subagent.spawn')
+  })
+
+  test('multi-human group is refused when any human member resolves below trusted', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({
+      humans: 2,
+      bots: 1,
+      truncated: false,
+      humanMemberIds: ['U_TRENT', 'U_STRANGER'],
+    })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    if (!details.ok) expect(details.error).toContain('admits any untrusted human')
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('refused when humanMemberIds length disagrees with the humans count (unaccounted member)', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({
+      humans: 3,
+      bots: 1,
+      truncated: false,
+      humanMemberIds: ['U_TRENT', 'U_OWNER'],
+    })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('refused when membership carries no humanMemberIds (count-only enumeration)', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({ humans: 2, bots: 1, truncated: false })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('refused when an all-trusted member list is stale', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({
+      humans: 2,
+      bots: 1,
+      truncated: false,
+      ageMs: 5 * 60 * 1000,
+      humanMemberIds: ['U_TRENT', 'U_OWNER'],
+    })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('refused when an all-trusted member list is truncated', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({
+      humans: 2,
+      bots: 1,
+      truncated: true,
+      humanMemberIds: ['U_TRENT', 'U_OWNER'],
+    })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('refused when an all-trusted room exceeds the human-count cap', async () => {
+    const dir = freshAgentDir()
+    // 21 trusted humans (all resolve to trusted via a wildcard match) — over
+    // the cap, so the guard refuses rather than vouch for an oversized room.
+    const ids = Array.from({ length: 21 }, (_, i) => `U_TRENT_${i}`)
+    const permissions = createPermissionService({
+      roles: { trusted: { match: [{ kind: 'channel', platform: 'slack' }] } } as unknown as RolesConfig,
+    })
+    const tool = createGrantRoleTool({
+      agentDir: dir,
+      getOrigin: () => ({
+        kind: 'channel',
+        adapter: 'slack-bot',
+        workspace: 'T0123',
+        chat: 'C_PUBLIC',
+        thread: null,
+        lastInboundAuthorId: ids[0],
+        membership: { humans: ids.length, bots: 1, truncated: false, fetchedAt: Date.now(), humanMemberIds: ids },
+      }),
+      permissions,
+      reloadRoles: () => readRolesFromDisk(dir),
+    })
+    const details = await run(tool, { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    if (!details.ok) expect(details.error).toContain('admits any untrusted human')
     expect(readRoles(dir).guest?.permissions).toBeUndefined()
   })
 })

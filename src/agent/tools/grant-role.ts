@@ -83,6 +83,51 @@ function isSingleHumanGroupChannelOrigin(origin: SessionOrigin | undefined, now:
   return membership.humans === 1
 }
 
+// Caps the per-member role resolution this check performs so it can never do
+// unbounded work on a large room. resolveRole is in-memory (a match-rule walk,
+// no I/O), so the real cost is small, but a trusted-only operational channel is
+// small by nature and past this many humans we refuse rather than iterate an
+// arbitrarily long list on a tool call. Adapters already stop enumerating past
+// their own cap; this is the guard-local ceiling.
+const MAX_TRUSTED_GROUP_HUMANS = 20
+
+// Generalises the single-human case: a group channel where the platform proves
+// EVERY human member resolves to trusted/owner is also injection-equivalent to
+// a DM, because no untrusted human can buffer a message into the turn. The
+// proof requires an authoritative, complete identity enumeration — only a
+// fresh, non-truncated membership read that carries `humanMemberIds` (the
+// adapter listed and classified every member in one pass). `humanMemberIds`
+// length must equal `humans` so an unaccounted member cannot slip past; the
+// resolvers construct it that way and we re-check defensively. The room must
+// also be at most MAX_TRUSTED_GROUP_HUMANS humans. Each id is resolved through
+// the same per-author path the turn anchor uses. Adapters that cannot enumerate
+// identities (Telegram, KakaoTalk) never set the field and so only ever qualify
+// via the single-human branch above — fully fail-closed.
+function isAllHumansTrustedGroupChannelOrigin(
+  origin: SessionOrigin | undefined,
+  permissions: PermissionService,
+  now: number,
+): boolean {
+  if (origin?.kind !== 'channel') return false
+  if (isDmChannelOrigin(origin)) return false
+
+  const membership = origin.membership
+  if (membership === undefined) return false
+  if (membership.truncated) return false
+  if (now - membership.fetchedAt >= MEMBERSHIP_FRESHNESS_MS) return false
+
+  const humanMemberIds = membership.humanMemberIds
+  if (humanMemberIds === undefined) return false
+  if (humanMemberIds.length !== membership.humans) return false
+  if (humanMemberIds.length === 0) return false
+  if (humanMemberIds.length > MAX_TRUSTED_GROUP_HUMANS) return false
+
+  return humanMemberIds.every((authorId) => {
+    const role = permissions.resolveRole({ ...origin, lastInboundAuthorId: authorId })
+    return role === 'owner' || role === 'trusted'
+  })
+}
+
 export function createGrantRoleTool(options: CreateGrantRoleToolOptions) {
   const { agentDir, getOrigin, permissions, reloadRoles } = options
 
@@ -93,8 +138,8 @@ export function createGrantRoleTool(options: CreateGrantRoleToolOptions) {
       'Assign an author to a role (match grant) or give a role a capability (permission grant), by editing typeclaw.json#roles. ' +
       'Use this to onboard a teammate ("respond to author U_X" → grant them member) or to open the agent to a wider audience ' +
       '("let anyone in this channel message you" → grant guest channel.respond). ' +
-      'Only callable by an owner or trusted user from the TUI, a 1:1 DM, or a group channel that currently has ' +
-      'exactly one human member — multi-human channel turns cannot use it. ' +
+      'Only callable by an owner or trusted user from the TUI, a 1:1 DM, or a group channel whose human members ' +
+      'are all trusted (or which has a single human member) — channels that admit untrusted humans cannot use it. ' +
       'Permission grants are restart-required: they land in typeclaw.json but take effect on the next `typeclaw restart`.',
     parameters: Type.Object({
       role: Type.Union(
@@ -122,11 +167,16 @@ export function createGrantRoleTool(options: CreateGrantRoleToolOptions) {
     async execute(_toolCallId, params): Promise<ToolReturn> {
       const origin = getOrigin()
 
-      if (!isSinglePrincipalOrigin(origin) && !isSingleHumanGroupChannelOrigin(origin, Date.now())) {
+      const now = Date.now()
+      if (
+        !isSinglePrincipalOrigin(origin) &&
+        !isSingleHumanGroupChannelOrigin(origin, now) &&
+        !isAllHumansTrustedGroupChannelOrigin(origin, permissions, now)
+      ) {
         return err(
-          'grant_role is only available from the TUI, a 1:1 DM, or a group channel that currently has exactly ' +
-            'one human member. A multi-human channel turn cannot change roles, because it mixes in other ' +
-            'participants\u2019 messages (prompt-injection surface).',
+          'grant_role is only available from the TUI, a 1:1 DM, or a group channel whose human members are all ' +
+            'trusted (or which currently has a single human member). A channel that admits any untrusted human ' +
+            'cannot change roles, because it mixes in other participants\u2019 messages (prompt-injection surface).',
         )
       }
 
