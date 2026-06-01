@@ -52,6 +52,8 @@ import {
 const SLASH_COMMANDS: readonly DiscordCommandDeclaration[] = [
   { name: 'help', description: 'List available commands' },
   { name: 'stop', description: 'Abort the current turn in this channel' },
+  { name: 'reload', description: 'Reload typeclaw config and subsystems from disk' },
+  { name: 'restart', description: 'Restart the typeclaw container' },
 ]
 const SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set(SLASH_COMMANDS.map((c) => c.name))
 

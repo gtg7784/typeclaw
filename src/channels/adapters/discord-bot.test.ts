@@ -1161,6 +1161,12 @@ describe('discord-bot createOutboundCallback', () => {
   })
 })
 
+describe('discord-bot slash command declarations', () => {
+  test('declares help, stop, reload, and restart', () => {
+    expect(DISCORD_SLASH_COMMAND_NAMES).toEqual(new Set(['help', 'stop', 'reload', 'restart']))
+  })
+})
+
 describe('createInteractionHandler', () => {
   type CapturedCall = { url: string; init: RequestInit }
   type RouterCall = { key: ChannelKey; name: string; invokerId: string }
