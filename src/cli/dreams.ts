@@ -1,9 +1,9 @@
 import { defineCommand } from 'citty'
 
-import { type DreamEntry, renderListRow, runDreams } from '@/dreams'
+import { type DreamEntry, renderListRow, runDreams, type ViewAction } from '@/dreams'
 import { findAgentDir } from '@/init'
 
-import { cancel, errorLine, isCancel } from './ui'
+import { c, cancel, errorLine, isCancel } from './ui'
 
 export const dreamsCommand = defineCommand({
   meta: {
@@ -30,6 +30,7 @@ export const dreamsCommand = defineCommand({
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
     const color = useColor()
     const limit = parseLimit(args.limit)
+    const interactive = isInteractive() && args.json !== true
 
     const result = await runDreams({
       agentDir: cwd,
@@ -37,7 +38,8 @@ export const dreamsCommand = defineCommand({
       details: args.details === true,
       color,
       ...(limit !== undefined ? { limit } : {}),
-      selectDream: (entries) => clackSelect(entries, color),
+      selectDream: (entries, selectOpts) => clackSelect(entries, color, selectOpts?.initialSha),
+      ...(interactive ? { viewDream: () => waitForViewerKey(color) } : {}),
       stdout: (line) => process.stdout.write(`${line}\n`),
     })
 
@@ -49,21 +51,69 @@ export const dreamsCommand = defineCommand({
   },
 })
 
+function isInteractive(): boolean {
+  return Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY)
+}
+
+// Raw mode is entered only for this wait and always restored, so a thrown
+// error never leaves the terminal stuck (same contract as cli/inspect.ts).
+async function waitForViewerKey(color: boolean): Promise<ViewAction> {
+  const stdin = process.stdin
+  if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') return 'exit'
+
+  process.stdout.write(`${viewerHintLine(color)}\n`)
+
+  return new Promise<ViewAction>((resolve) => {
+    let settled = false
+    const finish = (action: ViewAction): void => {
+      if (settled) return
+      settled = true
+      stdin.off('data', onData)
+      try {
+        stdin.setRawMode(false)
+      } catch {
+        /* terminal already torn down */
+      }
+      stdin.pause()
+      resolve(action)
+    }
+    const onData = (chunk: Buffer): void => {
+      const byte = chunk[0]
+      if (byte === undefined) return
+      if (byte === 0x1b) finish('back')
+      else if (byte === 0x03 || byte === 0x71) finish('exit')
+    }
+    stdin.setRawMode(true)
+    stdin.resume()
+    stdin.on('data', onData)
+  })
+}
+
+function viewerHintLine(color: boolean): string {
+  const text = '(esc to go back to the list · q to quit)'
+  return color ? c.dim(text) : text
+}
+
 function parseLimit(raw: unknown): number | undefined {
   if (typeof raw !== 'string') return undefined
   const n = Number.parseInt(raw, 10)
   return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
-async function clackSelect(entries: DreamEntry[], color: boolean): Promise<DreamEntry | null> {
+async function clackSelect(
+  entries: DreamEntry[],
+  color: boolean,
+  initialSha: string | undefined,
+): Promise<DreamEntry | null> {
   const { select } = await import('@clack/prompts')
+  const preferred = initialSha !== undefined && entries.some((e) => e.sha === initialSha) ? initialSha : entries[0]?.sha
   const picked = await select<string>({
     message: `Pick a dream to open (${entries.length} total)`,
     options: entries.map((entry) => ({
       value: entry.sha,
       label: renderListRow(entry, { color }),
     })),
-    initialValue: entries[0]?.sha,
+    initialValue: preferred,
   })
   if (isCancel(picked)) {
     cancel('Cancelled.')

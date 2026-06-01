@@ -8,7 +8,15 @@ export type { DreamEntry } from './types'
 export { renderDetail, renderListRow, toJsonShape } from './render'
 export { parseDreamDetail, parseDreamSubject } from './parse'
 
-export type SelectDream = (entries: DreamEntry[]) => Promise<DreamEntry | null>
+export type SelectDreamOptions = {
+  initialSha?: string
+}
+
+export type SelectDream = (entries: DreamEntry[], opts?: SelectDreamOptions) => Promise<DreamEntry | null>
+
+// 'back' re-opens the picker with the just-viewed dream pre-selected.
+export type ViewAction = 'back' | 'exit'
+export type ViewDream = () => Promise<ViewAction>
 
 export type RunDreamsOptions = {
   agentDir: string
@@ -17,6 +25,7 @@ export type RunDreamsOptions = {
   color: boolean
   limit?: number
   selectDream: SelectDream
+  viewDream?: ViewDream
   stdout: (line: string) => void
   spawnGit?: SpawnGit
 }
@@ -83,11 +92,27 @@ export async function runDreams(opts: RunDreamsOptions): Promise<RunDreamsResult
     return { ok: true, exitCode: 0 }
   }
 
-  const picked = await opts.selectDream(entries)
-  if (picked === null) return { ok: true, exitCode: 0 }
-  const hydrated = await hydrateDream(opts.agentDir, picked, opts.spawnGit)
-  opts.stdout(renderDetail(hydrated, renderOpts))
-  return { ok: true, exitCode: 0 }
+  return runInteractiveLoop(opts, entries, renderOpts)
+}
+
+async function runInteractiveLoop(
+  opts: RunDreamsOptions,
+  entries: DreamEntry[],
+  renderOpts: RenderOptions,
+): Promise<RunDreamsResult> {
+  let initialSha: string | undefined
+  while (true) {
+    const picked = await opts.selectDream(entries, initialSha !== undefined ? { initialSha } : {})
+    if (picked === null) return { ok: true, exitCode: 0 }
+    initialSha = picked.sha
+
+    const hydrated = await hydrateDream(opts.agentDir, picked, opts.spawnGit)
+    opts.stdout(renderDetail(hydrated, renderOpts))
+
+    if (opts.viewDream === undefined) return { ok: true, exitCode: 0 }
+    const action = await opts.viewDream()
+    if (action === 'exit') return { ok: true, exitCode: 0 }
+  }
 }
 
 async function runJson(opts: RunDreamsOptions, root: string, entries: DreamEntry[]): Promise<RunDreamsResult> {
