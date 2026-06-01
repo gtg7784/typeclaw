@@ -41,13 +41,17 @@ Both guards follow the repo-wide `acknowledgeGuards` convention (shared with the
 - Segments break on real command separators — `;`, `&&`, `||`, `|`, `&`, newline, `\r` — and on subshell / command-substitution openers (`(`, `$(`, backtick).
 - The tokenizer is quote-aware (a separator inside `"..."`/`'...'` is literal) and escape-aware (`\x` is a literal `x`, so `\npm` resolves to `npm` and `\;` is not a separator).
 
-For each segment, the guard strips leading **preamble words** (`sudo`, `env`, `command`, `exec`, `nice`, and any `VAR=val` assignment) to find the real command word, then classifies:
+For each segment, the guard strips leading **preamble wrappers** (`sudo`, `env`, `command`, `exec`, `nice`, `nohup`, `stdbuf`, `setsid`, `time`, `xargs`, and any `VAR=val` assignment) — including their options, and the argument a flag consumes (`sudo -u nobody`, `nice -n 10`, `env -i`) — to find the real command word, then classifies:
 
 1. command word is `npm`/`npx`/`pnpm`/`pnpx`/`yarn` (or `bun`) **and** the segment has an install subcommand **and** a global flag → `globalInstall`;
 2. command word is a non-bun manager (not via global) → `nonBunPackageManager`;
 3. otherwise → allowed.
 
 A `globalInstall` verdict on any segment wins over a plain non-bun verdict. This is a command-position detector, not a full shell parser — it doesn't interpret redirections or expansions beyond boundary marking — but it is linear-time and closes the structural gaps a single regex left open.
+
+## Scope: not a security boundary
+
+This guard is a **hygiene nudge**, not an isolation mechanism. It deliberately does not chase manager invocations hidden inside a wrapper's code payload — `sh -c 'npm install'`, `bash -lc "pnpm add foo"`, `python -c '...os.system("npx tsc")'`, `node -e`, `eval`, `base64 | sh`, etc. That set is unbounded (any interpreter can reach any binary), and inspecting arbitrary `-c`/`-e` payloads is an arms race with diminishing returns and rising false-positive risk. An agent that genuinely wants a package manager can always reach one; the guard's job is to steer the common, direct invocations toward bun and to stop accidental global installs. The real isolation boundary is the per-tool **bwrap sandbox** (see `/docs/internals/sandbox`), not this policy. Optioned preamble _wrappers_ (`env -i`, `sudo -u`, `nice -n`) are handled because they prefix a real command word that the tokenizer can still see; code-payload wrappers are not, by design.
 
 ## Why a tokenizer, not a regex
 

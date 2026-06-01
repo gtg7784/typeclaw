@@ -127,16 +127,75 @@ function normalizeWord(word: string): string {
   return word.replaceAll('"', '').replaceAll("'", '')
 }
 
-// The command word is the first token that is not a shell preamble: `sudo`,
-// `env`, `command`/`exec`/`nice`, or a `VAR=val` assignment. This is what makes
-// `FOO=bar npm install` resolve to `npm` instead of evading the guard.
+// Preamble wrappers that prefix a real command (`sudo npm …`, `env FOO=bar npm
+// …`, `nice -n 10 npm …`). The value is the set of SHORT option letters that
+// consume the FOLLOWING word as their argument, so `sudo -u nobody npm` skips
+// `nobody` too. Long `--opt=value` forms are self-contained (one token); bare
+// long `--opt` and unknown short flags are skipped as a single token (the safe
+// default — at worst we skip one extra token and still find the manager later).
+const PREAMBLE_WRAPPERS: Record<string, ReadonlySet<string>> = {
+  sudo: new Set(['u', 'g', 'h', 'p', 'C', 'r', 't', 'T', 'U']),
+  env: new Set(['u', 'C', 'S']),
+  nice: new Set(['n']),
+  command: new Set([]),
+  exec: new Set(['a']),
+  nohup: new Set([]),
+  stdbuf: new Set(['i', 'o', 'e']),
+  setsid: new Set([]),
+  time: new Set(['o', 'f']),
+  xargs: new Set([]),
+}
+
+// The command word is the first token that is not a shell preamble: a known
+// wrapper (with its options consumed), or a `VAR=val` assignment. This is what
+// makes `FOO=bar npm install` and `env -i npm install` / `sudo -u nobody pnpm
+// add` resolve to the real manager instead of evading the guard.
 function leadingCommandWord(words: string[]): string | undefined {
-  for (const word of words) {
-    if (word === 'sudo' || word === 'env' || word === 'command' || word === 'exec' || word === 'nice') continue
-    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue
+  let i = 0
+  while (i < words.length) {
+    const word = words[i]
+    if (word === undefined) break
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+      i++
+      continue
+    }
+    const argTakingShortOpts = PREAMBLE_WRAPPERS[word]
+    if (argTakingShortOpts !== undefined) {
+      i = skipWrapperOptions(words, i + 1, argTakingShortOpts)
+      continue
+    }
     return word
   }
   return undefined
+}
+
+// From the token after a wrapper, skip its option tokens. A long `--opt` is one
+// token. A short `-x` (or bundled `-xy`) consumes the next word only when its
+// LAST letter is in `argTaking` (e.g. `-n 10`, `-u nobody`). `VAR=val` between a
+// wrapper and its command (as `env` allows) is also skipped. Stops at the first
+// non-option, non-assignment token — that is the wrapped command word.
+function skipWrapperOptions(words: string[], start: number, argTaking: ReadonlySet<string>): number {
+  let i = start
+  while (i < words.length) {
+    const word = words[i]
+    if (word === undefined) break
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) {
+      i++
+      continue
+    }
+    if (word.startsWith('--')) {
+      i++
+      continue
+    }
+    if (word.startsWith('-') && word.length > 1) {
+      const lastLetter = word[word.length - 1]
+      i++
+      if (lastLetter !== undefined && argTaking.has(lastLetter) && i < words.length) i++
+      continue
+    }
+    break
+  }
+  return i
 }
 
 function globalInstallLabel(manager: string, words: string[]): string | undefined {

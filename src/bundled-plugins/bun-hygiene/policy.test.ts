@@ -131,9 +131,28 @@ describe('checkBunHygieneGuard — leading assignment / preamble words', () => {
     ['FOO=bar BAR=baz npm install -g typescript', GUARD_GLOBAL_INSTALL],
     ['command npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
     ['exec npm install -g x', GUARD_GLOBAL_INSTALL],
+    // Optioned wrappers: the wrapper's own flags (and any flag arguments they
+    // consume) must be skipped so the manager behind them is still found.
+    ['env -i npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
+    ['sudo -u nobody pnpm add foo', GUARD_NON_BUN_PACKAGE_MANAGER],
+    ['nice -n 10 npx create-next-app', GUARD_NON_BUN_PACKAGE_MANAGER],
+    ['env -i npm install -g typescript', GUARD_GLOBAL_INSTALL],
+    ['sudo -u nobody npm install -g x', GUARD_GLOBAL_INSTALL],
+    ['stdbuf -oL npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
+    ['env FOO=bar -i BAR=baz npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
+    ['sudo -E npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
   ])('sees through preamble in %p', (command, guard) => {
     expect(bash(command)?.reason).toContain(guard)
   })
+
+  // The wrapper's consumed argument must not be mistaken for the command word:
+  // `sudo -u nobody ls` runs ls (allowed), not a manager.
+  test.each(['nice -n 10 echo hi', 'sudo -u nobody ls -g', 'env -i sh', 'stdbuf -oL cat x'])(
+    'does not block wrapped non-manager command %p',
+    (command) => {
+      expect(bash(command)).toBeUndefined()
+    },
+  )
 })
 
 describe('checkBunHygieneGuard — newline is a command separator', () => {
