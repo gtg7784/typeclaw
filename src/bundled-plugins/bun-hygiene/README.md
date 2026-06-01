@@ -34,24 +34,39 @@ Both guards follow the repo-wide `acknowledgeGuards` convention (shared with the
 { "command": "npm install -g some-cli", "acknowledgeGuards": { "globalInstall": true } }
 ```
 
-## Escaped / quoted evasion
+## How it works
 
-The shell strips quotes and backslash escapes before deciding which binary to run, so `\npm install`, `"npm" install`, `'npm' install`, and `n\px create-next-app` all execute the real npm/npx. Matching the raw command string misses every one of those.
+`checkBunHygieneGuard` in `policy.ts` does not regex the raw command. It runs a small single-pass tokenizer (`splitSegments`) that turns the command into a list of **segments**, each a list of **words**:
 
-Before matching, the guard normalizes the command **for detection only** (the original command is never executed from the normalized form): each `\x` escape collapses to `x` (and `\<space>` to a space), and quote characters are dropped. Crucially, all whitespace is preserved, so the command-boundary anchoring still distinguishes a manager at command position (`"npm" install` → blocked) from one inside an argument (`echo "npm install"` → allowed). The normalized form is only used to test the manager regexes — it never replaces the command that runs.
+- Segments break on real command separators — `;`, `&&`, `||`, `|`, `&`, newline, `\r` — and on subshell / command-substitution openers (`(`, `$(`, backtick).
+- The tokenizer is quote-aware (a separator inside `"..."`/`'...'` is literal) and escape-aware (`\x` is a literal `x`, so `\npm` resolves to `npm` and `\;` is not a separator).
+
+For each segment, the guard strips leading **preamble words** (`sudo`, `env`, `command`, `exec`, `nice`, and any `VAR=val` assignment) to find the real command word, then classifies:
+
+1. command word is `npm`/`npx`/`pnpm`/`pnpx`/`yarn` (or `bun`) **and** the segment has an install subcommand **and** a global flag → `globalInstall`;
+2. command word is a non-bun manager (not via global) → `nonBunPackageManager`;
+3. otherwise → allowed.
+
+A `globalInstall` verdict on any segment wins over a plain non-bun verdict. This is a command-position detector, not a full shell parser — it doesn't interpret redirections or expansions beyond boundary marking — but it is linear-time and closes the structural gaps a single regex left open.
+
+## Why a tokenizer, not a regex
+
+The earlier implementation matched boundary-anchored regexes against an escape/quote-normalized copy of the command. Review surfaced three structural gaps that are awkward to close with one regex but fall out naturally from the segment model:
+
+- **Escaped / quoted command words.** `\npm install`, `"npm" install`, `'npm' install`, `n\px …` all run the real binary; the tokenizer collapses escapes and quotes at the word level, so each resolves to its bare command word.
+- **Leading assignments.** `FOO=bar npm install` runs npm with `FOO` set. Stripping `VAR=val` (and `sudo`/`env`/`command`/`exec`/`nice`) preamble words finds the manager behind them.
+- **Newline = separate command.** `npm install\n-g typescript` is two commands; the `-g` does not make the install global. Per-segment scoping means a flag in one segment never combines with an install in another, so this classifies as `nonBunPackageManager` (the `npm install` line), not `globalInstall`.
+
+It also recognizes an explicit falsy global flag (`--global=false|0|no|off`) as **not** a global install, and detects managers inside subshells / command substitutions.
 
 ## Option placement in global installs
 
-A global install is recognized regardless of where options sit within the same simple command, in either order: `npm --prefix /tmp install -g x`, `npm install --foo bar -g x`, and `npm -g install x` all attribute to `globalInstall` (the specific guard) rather than falling through to the generic `nonBunPackageManager` guard. Tokens may appear before, between, and after the subcommand and the global flag, as long as no segment separator (`;`, `&&`, `||`, `|`, `&`, newline) intervenes.
+Because classification scans a segment's words as a set (after preamble stripping), options may sit anywhere relative to the subcommand and the global flag, in either order: `npm --prefix /tmp install -g x`, `npm install --foo bar -g x`, `npm -g install x`, `pnpm add --reporter silent -g foo`, and `bun --cwd /x add -g foo` all attribute to `globalInstall`.
 
 ## What is NOT blocked
 
-- `bun`, `bunx`, `bun run`, `bun add`, `bun install` (local) — the intended package commands.
-- A non-bun manager name appearing as a substring or argument: `my-npm-wrapper`, `./npm`, `cat npm-debug.log`, `git commit -m "drop npm"`, `grep -rn npx src/`, `echo "npm install -g foo"`. Matching is anchored to a command boundary (start of line or after `;`, `&&`, `||`, `|`, `&`, newline, or a subshell/substitution opener), with an optional `sudo` / `env VAR=...` preamble, so package-manager names inside quotes, paths, or longer tokens do not trip the guard — even after escape/quote normalization, because normalization preserves whitespace and the boundary still requires command position.
-
-## How it works
-
-The plugin registers a single `tool.before` hook delegating to `checkBunHygieneGuard` in `policy.ts`. The hook returns `{ block: true, reason }` (rejecting the tool call) or `undefined` (passing it through). Detection runs command-boundary-anchored regexes against an escape/quote-normalized copy of the command. The repo has no shell-parsing dependency and the sibling security guards (`secret-exfil-bash.ts`, `git-exfil.ts`) match raw strings; this guard adds a minimal, whitespace-preserving normalization pass rather than a full shell parser, keeping the false-positive surface small while closing the obfuscation hole.
+- `bun`, `bunx`, `bun run`, `bun add`, `bun install` (local) — the intended package commands. (`bun add -g` / `bun install -g` are still blocked as global installs: bun globals live in `~/.bun`, outside `/agent`, and are wiped on restart.)
+- A non-bun manager name appearing as a substring or argument: `my-npm-wrapper`, `./npm`, `cat npm-debug.log`, `git commit -m "drop npm"`, `grep -rn npx src/`, `echo "npm install -g foo"`. Only the **command word** of a segment is classified, so a manager name inside an argument, path, quoted string, or longer token never trips the guard.
 
 ## Ordering against other bundled plugins
 
@@ -59,5 +74,5 @@ Registered after `guard` in `src/run/bundled-plugins.ts`. It guards a disjoint s
 
 ## Tests
 
-- `policy.test.ts` — pure-function unit tests for the detection logic: every global-install form, every non-bun manager, the allowed-command set (bun/bunx, substrings, paths, quoted text), both bypasses, and the global-install-takes-precedence rule.
+- `policy.test.ts` — pure-function unit tests for the detection logic: every global-install form, every non-bun manager, the allowed-command set (bun/bunx, substrings, paths, quoted text), both bypasses, the global-install-takes-precedence rule, escaped/quoted evasions, leading-assignment preambles, newline-as-separator scoping, falsy `--global=`, option placement, and subshell/substitution detection.
 - `index.test.ts` — composition tests: the plugin registers the `tool.before` hook and wires it to the policy (block on global install, block on npx, allow bunx, honor the bypass).

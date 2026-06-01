@@ -3,82 +3,8 @@ import { ACKNOWLEDGE_GUARDS, type GuardBlock, isGuardAcknowledged } from '../gua
 export const GUARD_GLOBAL_INSTALL = 'globalInstall'
 export const GUARD_NON_BUN_PACKAGE_MANAGER = 'nonBunPackageManager'
 
-// The shell strips quotes and backslash escapes before deciding which binary to
-// run, so `\npm`, `"npm"`, `'npm'`, and `n\px` all execute the real npm/npx.
-// Matching the raw string misses every one of those. We can't unquote the whole
-// command (that would turn `echo "npm install"` into a blockable string), so we
-// only neutralize the escapes/quotes while preserving every other character and
-// all whitespace — the command-boundary anchoring in the regexes then still
-// decides whether the manager is at command position vs inside an argument.
-//
-// `\<space>` collapses to a space (it's a literal space, not an escape that
-// glues a token), every other `\x` collapses to `x`, and quote characters are
-// dropped. A trailing lone backslash is dropped. This is normalization for
-// detection only; the original command is never executed from this string.
-function normalizeShellWords(command: string): string {
-  let out = ''
-  for (let i = 0; i < command.length; i++) {
-    const ch = command[i]
-    if (ch === '\\') {
-      const next = command[i + 1]
-      if (next === undefined) break
-      out += next === ' ' || next === '\t' || next === '\n' ? ' ' : next
-      i++
-      continue
-    }
-    if (ch === '"' || ch === "'") continue
-    out += ch
-  }
-  return out
-}
-
-// Regex-on-raw-string (like the sibling secret-exfil guard): match a package
-// manager only at a command boundary — start of line or after a separator that
-// begins a new simple command. This boundary is what stops `my-npm-wrapper`,
-// `./npm`, and `echo "npm install"` from matching.
-const COMMAND_BOUNDARY = String.raw`(?:^|[\n;&|(\`]|&&|\|\||\$\()\s*`
-
-// Allow an optional `sudo` / `env VAR=...` preamble so `env FOO=bar npm ...`
-// still resolves to the npm command behind it.
-const COMMAND_PREAMBLE = String.raw`(?:sudo\s+)?(?:env\s+(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+)?`
-
-const NON_BUN_MANAGERS = ['npm', 'npx', 'pnpm', 'pnpx', 'yarn'] as const
-
-// Zero or more whole extra tokens within the same simple command (no segment
-// separator), each preceded by whitespace. Lets options sit anywhere between
-// the manager and its subcommand/global flag, e.g. `npm --prefix /tmp install
-// -g x` or `npm install --foo -g x`, while still requiring real token breaks.
-const EXTRA_TOKENS = String.raw`(?:\s+[^\s;&|]+)*?`
-
-// `-g` / `--global`, including bundled short flags like `-gD` / `-Dg`. Anchored
-// to a token start (preceding whitespace) so it never matches mid-word.
-const GLOBAL_FLAG = String.raw`-(?:-global\b|[A-Za-z]*g[A-Za-z]*\b)`
-
-const INSTALL_SUBCOMMAND = String.raw`(?:install|i|add)\b`
-
-function globalInstallPattern(manager: string): RegExp {
-  // Two orderings within the same command: subcommand-then-flag and
-  // flag-then-subcommand. Either proves an intent to install globally. Extra
-  // tokens may appear before, between, and after the two anchors.
-  const head = `${COMMAND_BOUNDARY}${COMMAND_PREAMBLE}${manager}${EXTRA_TOKENS}\\s+`
-  return new RegExp(
-    `${head}(?:${INSTALL_SUBCOMMAND}${EXTRA_TOKENS}\\s+${GLOBAL_FLAG}` +
-      `|${GLOBAL_FLAG}${EXTRA_TOKENS}\\s+${INSTALL_SUBCOMMAND})`,
-  )
-}
-
-const GLOBAL_INSTALL_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string }> = [
-  { pattern: globalInstallPattern('(?:npm|pnpm)'), label: 'npm/pnpm global install (-g / --global)' },
-  {
-    pattern: new RegExp(`${COMMAND_BOUNDARY}${COMMAND_PREAMBLE}yarn${EXTRA_TOKENS}\\s+global\\s+add\\b`),
-    label: 'yarn global add',
-  },
-  // bun globals live in ~/.bun outside the bind-mounted /agent, so they vanish
-  // on restart just like the others.
-  { pattern: globalInstallPattern('bun'), label: 'bun global install (-g / --global)' },
-]
-
-const NON_BUN_MANAGER_PATTERN = new RegExp(`${COMMAND_BOUNDARY}${COMMAND_PREAMBLE}(${NON_BUN_MANAGERS.join('|')})\\b`)
+const NON_BUN_MANAGERS = new Set(['npm', 'npx', 'pnpm', 'pnpx', 'yarn'])
+const INSTALL_SUBCOMMANDS = new Set(['install', 'i', 'add'])
 
 export function checkBunHygieneGuard(options: { tool: string; args: Record<string, unknown> }): GuardBlock | undefined {
   const { tool, args } = options
@@ -87,16 +13,149 @@ export function checkBunHygieneGuard(options: { tool: string; args: Record<strin
   const command = args.command
   if (typeof command !== 'string') return undefined
 
-  const normalized = normalizeShellWords(command)
-
-  const globalInstall = matchGlobalInstall(normalized)
-  if (globalInstall) return blockGlobalInstall(globalInstall, args)
-
-  return checkNonBunManager(normalized, args)
+  const verdict = classify(command)
+  if (verdict === undefined) return undefined
+  if (verdict.kind === 'global-install') return blockGlobalInstall(verdict.label, args)
+  return blockNonBunManager(verdict.manager, args)
 }
 
-function matchGlobalInstall(command: string): string | undefined {
-  return GLOBAL_INSTALL_PATTERNS.find(({ pattern }) => pattern.test(command))?.label
+type Verdict = { kind: 'global-install'; label: string } | { kind: 'non-bun'; manager: string }
+
+// Why a segment model instead of one big regex: every gap in a raw-string match
+// is a shell-structure gap. Splitting into segments first means a global flag on
+// a *different* command (`npm install\n-g x` — two commands) can never combine
+// with an install on another, leading assignment words (`FOO=bar npm ...`) are
+// stripped uniformly, and `--global=false` is inspected as a real token. The
+// global-install verdict wins over the plain non-bun verdict (it's the more
+// specific violation, and acknowledging it is meant to let the whole thing run).
+function classify(command: string): Verdict | undefined {
+  let fallback: Verdict | undefined
+  for (const segment of splitSegments(command)) {
+    const words = segment.map(normalizeWord)
+    const manager = leadingCommandWord(words)
+    if (manager === undefined) continue
+
+    // `bun` is the allowed manager, but a `bun add -g` still installs to ~/.bun
+    // (outside /agent) and is wiped on restart, so it is a global install too —
+    // just never a plain non-bun violation.
+    const isBun = manager === 'bun'
+    if (!isBun && !NON_BUN_MANAGERS.has(manager)) continue
+
+    const label = globalInstallLabel(manager, words)
+    if (label !== undefined) return { kind: 'global-install', label }
+    if (!isBun) fallback ??= { kind: 'non-bun', manager }
+  }
+  return fallback
+}
+
+// Split on real command separators (`;`, `&&`, `||`, `|`, `&`, newline, `\r`)
+// and on subshell / command-substitution openers (`(`, `$(`, backtick), then
+// tokenize each segment into whitespace-separated words. Quote-aware so a
+// separator inside quotes stays literal; backslash escapes the next character
+// (so `\;` and `\ ` are literal, not separators/breaks). Word-level only — it
+// does not interpret redirections or expansions beyond boundary marking.
+function splitSegments(command: string): string[][] {
+  const segments: string[][] = []
+  let words: string[] = []
+  let current = ''
+  let hasWord = false
+  let quote: '"' | "'" | null = null
+
+  const flushWord = (): void => {
+    if (hasWord) {
+      words.push(current)
+      current = ''
+      hasWord = false
+    }
+  }
+  const flushSegment = (): void => {
+    flushWord()
+    if (words.length > 0) {
+      segments.push(words)
+      words = []
+    }
+  }
+
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i]
+    if (quote !== null) {
+      if (ch === quote) quote = null
+      else {
+        current += ch
+        hasWord = true
+      }
+      continue
+    }
+    if (ch === '\\') {
+      const next = command[i + 1]
+      if (next === undefined) break
+      current += next
+      hasWord = true
+      i++
+      continue
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch
+      hasWord = true
+      continue
+    }
+    if (ch === ' ' || ch === '\t') {
+      flushWord()
+      continue
+    }
+    if (ch === '\n' || ch === '\r' || ch === ';' || ch === '|' || ch === '&' || ch === '(' || ch === '`') {
+      flushSegment()
+      continue
+    }
+    if (ch === '$' && command[i + 1] === '(') {
+      flushSegment()
+      i++
+      continue
+    }
+    current += ch
+    hasWord = true
+  }
+  flushSegment()
+  return segments
+}
+
+// A word is already quote/escape-collapsed by splitSegments (quotes consumed,
+// backslash-escapes literalized), so the only residue to strip is leftover
+// quote characters that appeared mid-token via concatenation. Keeping this
+// explicit makes `"npm"`, `n\px`, `'npm'` all resolve to their bare binary.
+function normalizeWord(word: string): string {
+  return word.replaceAll('"', '').replaceAll("'", '')
+}
+
+// The command word is the first token that is not a shell preamble: `sudo`,
+// `env`, `command`/`exec`/`nice`, or a `VAR=val` assignment. This is what makes
+// `FOO=bar npm install` resolve to `npm` instead of evading the guard.
+function leadingCommandWord(words: string[]): string | undefined {
+  for (const word of words) {
+    if (word === 'sudo' || word === 'env' || word === 'command' || word === 'exec' || word === 'nice') continue
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(word)) continue
+    return word
+  }
+  return undefined
+}
+
+function globalInstallLabel(manager: string, words: string[]): string | undefined {
+  if (manager === 'yarn') {
+    return words.includes('global') && words.includes('add') ? 'yarn global add' : undefined
+  }
+  const hasInstall = words.some((w) => INSTALL_SUBCOMMANDS.has(w))
+  const hasGlobal = words.some(isGlobalFlag)
+  if (!hasInstall || !hasGlobal) return undefined
+  return manager === 'bun' ? 'bun global install (-g / --global)' : 'npm/pnpm global install (-g / --global)'
+}
+
+// `-g` / `--global`, including bundled short flags like `-gD` / `-Dg`. An
+// explicit falsy value (`--global=false|0|no|off`) is NOT a global install —
+// it disables the flag — so it must not match.
+function isGlobalFlag(word: string): boolean {
+  if (/^--global=(?:false|0|no|off)$/i.test(word)) return false
+  if (/^--global(?:=|$)/.test(word)) return true
+  return /^-[A-Za-z]*g[A-Za-z]*$/.test(word)
 }
 
 function blockGlobalInstall(label: string, args: Record<string, unknown>): GuardBlock | undefined {
@@ -113,13 +172,9 @@ function blockGlobalInstall(label: string, args: Record<string, unknown>): Guard
   }
 }
 
-function checkNonBunManager(command: string, args: Record<string, unknown>): GuardBlock | undefined {
+function blockNonBunManager(manager: string, args: Record<string, unknown>): GuardBlock | undefined {
   if (isGuardAcknowledged(args, GUARD_NON_BUN_PACKAGE_MANAGER)) return undefined
 
-  const matched = NON_BUN_MANAGER_PATTERN.exec(command)
-  if (!matched) return undefined
-
-  const manager = matched[1]
   return {
     block: true,
     reason: [

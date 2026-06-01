@@ -122,6 +122,54 @@ describe('checkBunHygieneGuard — option placement in global installs', () => {
   })
 })
 
+describe('checkBunHygieneGuard — leading assignment / preamble words', () => {
+  // `FOO=bar npm install` runs npm with FOO set, so the manager must be found
+  // behind a bare `VAR=val` assignment, not just behind `sudo` / `env`.
+  test.each([
+    ['FOO=bar npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
+    ['FOO=bar npx tsc', GUARD_NON_BUN_PACKAGE_MANAGER],
+    ['FOO=bar BAR=baz npm install -g typescript', GUARD_GLOBAL_INSTALL],
+    ['command npm install', GUARD_NON_BUN_PACKAGE_MANAGER],
+    ['exec npm install -g x', GUARD_GLOBAL_INSTALL],
+  ])('sees through preamble in %p', (command, guard) => {
+    expect(bash(command)?.reason).toContain(guard)
+  })
+})
+
+describe('checkBunHygieneGuard — newline is a command separator', () => {
+  // `npm install` and `-g typescript` on separate lines are two commands; the
+  // `-g` does NOT make the install global. Misclassifying as globalInstall would
+  // let a globalInstall ack wrongly bypass the npm-install line.
+  test.each(['npm install\n-g typescript', 'npm install\n--global x', 'npm install\nrm -rf x'])(
+    'classifies %p as a plain non-bun manager, not a global install',
+    (command) => {
+      expect(bash(command)?.reason).toContain(GUARD_NON_BUN_PACKAGE_MANAGER)
+    },
+  )
+})
+
+describe('checkBunHygieneGuard — explicit falsy --global is not a global install', () => {
+  test.each(['npm install --global=false lodash', 'npm install --global=0 lodash', 'npm install --global=off lodash'])(
+    'treats %p as a local install',
+    (command) => {
+      expect(bash(command)?.reason).toContain(GUARD_NON_BUN_PACKAGE_MANAGER)
+    },
+  )
+
+  test('still blocks an explicit truthy --global', () => {
+    expect(bash('npm install --global=true lodash')?.reason).toContain(GUARD_GLOBAL_INSTALL)
+  })
+})
+
+describe('checkBunHygieneGuard — subshell / command substitution', () => {
+  test.each(['(npm install -g x)', '$(npm i -g x)', '`npm install -g x`'])(
+    'detects the manager inside %p',
+    (command) => {
+      expect(bash(command)?.reason).toContain(GUARD_GLOBAL_INSTALL)
+    },
+  )
+})
+
 describe('checkBunHygieneGuard — allowed commands', () => {
   test.each([
     'bun install',
