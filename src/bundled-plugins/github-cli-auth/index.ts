@@ -2,6 +2,7 @@ import { TYPECLAW_INTERNAL_BASH_ENV } from '@/agent/plugin-tools'
 import { definePlugin } from '@/plugin'
 
 import { analyzeGhCommand } from './gh-command'
+import { checkGraphqlAuthNudge } from './graphql-auth-nudge'
 import { classifyGhToken } from './token-class'
 
 export default definePlugin({
@@ -34,7 +35,13 @@ export default definePlugin({
           // --setenv by the bash wrapper) so the token never enters the command
           // string, where it could leak through logs or later hooks.
           event.args[TYPECLAW_INTERNAL_BASH_ENV] = { GH_TOKEN: result.token }
+          // graphql consumed `-R/--repo` as a mint hint; `gh api` rejects it, so
+          // run the command with the flag stripped (token still rides in env).
+          if (decision.rewrittenCommand !== undefined) event.args.command = decision.rewrittenCommand
           return
+        },
+        'tool.after': async (event) => {
+          checkGraphqlAuthNudge({ tool: event.tool, result: event.result })
         },
       },
     }

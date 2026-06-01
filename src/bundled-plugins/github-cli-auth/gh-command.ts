@@ -1,7 +1,11 @@
 export type GhCommandDecision =
   | { kind: 'pass-through' }
   | { kind: 'block'; reason: string }
-  | { kind: 'inject'; repoSlug: string }
+  // `rewrittenCommand`, when present, MUST replace the executed command: `gh api`
+  // rejects `-R/--repo` ("unknown shorthand flag"), so for a graphql endpoint the
+  // flag is consumed as our repo hint and stripped before exec. Other inject paths
+  // (REST, non-`api` subcommands) leave the command unchanged and omit it.
+  | { kind: 'inject'; repoSlug: string; rewrittenCommand?: string }
 
 const MISSING_REPO_REASON =
   'This GitHub App spans multiple owners, so `gh` has no single correct token. ' +
@@ -27,7 +31,9 @@ const API_REPO_CONFLICT_REASON =
 type GhSegmentDecision =
   | { kind: 'pass-through' }
   | { kind: 'block'; reason: string }
-  | { kind: 'inject'; repoSlugs: readonly string[] }
+  // `stripRepoFlag` marks a graphql inject whose `-R/--repo` is a TypeClaw-only
+  // hint that `gh api` would reject, so it must be removed from the command.
+  | { kind: 'inject'; repoSlugs: readonly string[]; stripRepoFlag?: boolean }
 
 const COMPOSITION_REASON =
   'A repo-targeting `gh` command receives a minted GitHub App token in its process ' +
@@ -117,13 +123,17 @@ export function analyzeGhCommand(command: string): GhCommandDecision {
   if (ghStarts.length === 0) return { kind: 'pass-through' }
 
   const repoSlugs: string[] = []
+  let stripRepoFlag = false
   for (let i = 0; i < ghStarts.length; i++) {
     const start = ghStarts[i] as number
     const end = ghStarts[i + 1] ?? tokens.length
     const args = tokens.slice(start + 1, end)
     const segment = classifyGhSegment(args)
     if (segment.kind === 'block') return segment
-    if (segment.kind === 'inject') repoSlugs.push(...segment.repoSlugs)
+    if (segment.kind === 'inject') {
+      repoSlugs.push(...segment.repoSlugs)
+      if (segment.stripRepoFlag === true) stripRepoFlag = true
+    }
   }
 
   if (repoSlugs.length === 0) return { kind: 'pass-through' }
@@ -135,7 +145,69 @@ export function analyzeGhCommand(command: string): GhCommandDecision {
   // shell expansion would inherit it.
   if (!isSingleBareGhCommand(command)) return { kind: 'block', reason: COMPOSITION_REASON }
 
+  if (stripRepoFlag) {
+    return { kind: 'inject', repoSlug: repoSlugs[0] as string, rewrittenCommand: stripRepoFlagFromCommand(command) }
+  }
   return { kind: 'inject', repoSlug: repoSlugs[0] as string }
+}
+
+// Removes an unquoted `-R`/`--repo` flag (and its repo-slug value) from a single
+// bare command, preserving everything else byte-for-byte. Quote-aware so a `-R`
+// inside a quoted `-f query='...'` value is never touched; a repo slug is
+// owner/name (no whitespace), so the value is always a single unquoted token.
+// Used only for graphql, where `gh api` rejects the flag we consumed as a hint.
+function stripRepoFlagFromCommand(command: string): string {
+  let out = ''
+  let i = 0
+  while (i < command.length) {
+    const ch = command[i] as string
+    if (ch === '"' || ch === "'") {
+      const close = command.indexOf(ch, i + 1)
+      const endQuote = close === -1 ? command.length : close
+      out += command.slice(i, endQuote + 1)
+      i = endQuote + 1
+      continue
+    }
+    const removed = matchRepoFlagAt(command, i)
+    if (removed !== null) {
+      out = out.replace(/[ \t]+$/, '')
+      i = removed
+      while (command[i] === ' ' || command[i] === '\t') i += 1
+      if (out !== '' && i < command.length) out += ' '
+      continue
+    }
+    out += ch
+    i += 1
+  }
+  return out
+}
+
+// If `command` has an unquoted `-R`/`--repo` repo-flag token starting at `start`
+// (at a word boundary), returns the index just past the flag and its value;
+// otherwise null. Handles `-R o/r`, `--repo o/r`, `-R=o/r`, `--repo=o/r`.
+function matchRepoFlagAt(command: string, start: number): number | null {
+  const before = start === 0 ? '' : (command[start - 1] as string)
+  if (before !== '' && before !== ' ' && before !== '\t') return null
+
+  for (const flag of ['--repo', '-R']) {
+    if (!command.startsWith(flag, start)) continue
+    let i = start + flag.length
+    const sep = command[i]
+    if (sep === '=') {
+      i += 1
+      while (i < command.length && command[i] !== ' ' && command[i] !== '\t') i += 1
+      return i
+    }
+    if (sep === ' ' || sep === '\t') {
+      let j = i
+      while (command[j] === ' ' || command[j] === '\t') j += 1
+      const valueStart = j
+      while (j < command.length && command[j] !== ' ' && command[j] !== '\t') j += 1
+      if (!isRepoSlug(command.slice(valueStart, j))) return null
+      return j
+    }
+  }
+  return null
 }
 
 function classifyGhSegment(args: readonly string[]): GhSegmentDecision {
@@ -159,8 +231,9 @@ function classifyGhSegment(args: readonly string[]): GhSegmentDecision {
 // Repo authority for `gh api`: the literal endpoint path wins. A `-R/--repo`
 // that names a DIFFERENT repo than the path is a mint-for-X-but-hit-Y attempt
 // and blocks. A placeholder endpoint (`repos/{owner}/{repo}`) has no literal
-// target, so -R fills it and is authoritative. A non-repo endpoint (`graphql`,
-// `/user`) passes through — -R does not make it repo-scoped, so no mint.
+// target, so -R fills it and is authoritative. A non-repo endpoint without a
+// `-R` (`graphql`, `/user`) passes through — the flag is what makes it
+// repo-scoped, so absent one there is nothing to mint for.
 function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
   const pathRepos = extractReposFromApiPath(args)
   const flagRepo = extractRepoFlag(args)
@@ -176,7 +249,20 @@ function classifyGhApiSegment(args: readonly string[]): GhSegmentDecision {
     return { kind: 'inject', repoSlugs: [flagRepo] }
   }
 
+  // graphql encodes its repo in the query body / opaque node IDs, never an
+  // inspectable path, so `-R` is taken as the mint hint. Safe because there is
+  // no literal path to conflict with (cf. the API_REPO_CONFLICT_REASON guard
+  // above): the minted token's installation scope, not the flag, bounds reach.
+  // `gh api` rejects `-R`, so the flag must be stripped from the command.
+  if (flagRepo !== null && isGraphqlEndpoint(args)) {
+    return { kind: 'inject', repoSlugs: [flagRepo], stripRepoFlag: true }
+  }
+
   return { kind: 'pass-through' }
+}
+
+function isGraphqlEndpoint(args: readonly string[]): boolean {
+  return findApiEndpoint(args) === 'graphql'
 }
 
 function findGhInvocations(tokens: readonly string[]): number[] {
@@ -249,6 +335,12 @@ const GH_API_VALUE_FLAGS = new Set([
   '--hostname',
 ])
 
+// `-R`/`--repo` are not real `gh api` flags, but TypeClaw accepts them as a repo
+// hint that can appear BEFORE the endpoint (`gh api -R o/r graphql`). They consume
+// the following token, so findApiEndpoint must skip both — otherwise the slug is
+// misread as the endpoint and the graphql path never runs.
+const REPO_HINT_VALUE_FLAGS = new Set(['-R', '--repo'])
+
 // The `gh api` endpoint is the first positional arg after `api` (skipping flags
 // and the tokens that bare value-flags consume). Returns null if there is none.
 function findApiEndpoint(args: readonly string[]): string | null {
@@ -257,7 +349,7 @@ function findApiEndpoint(args: readonly string[]): string | null {
   for (let i = apiIndex + 1; i < args.length; i++) {
     const arg = args[i] as string
     if (arg.startsWith('-')) {
-      if (!arg.includes('=') && GH_API_VALUE_FLAGS.has(arg)) i += 1
+      if (!arg.includes('=') && (GH_API_VALUE_FLAGS.has(arg) || REPO_HINT_VALUE_FLAGS.has(arg))) i += 1
       continue
     }
     return arg

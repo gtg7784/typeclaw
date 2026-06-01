@@ -74,6 +74,15 @@ describe('analyzeGhCommand', () => {
     })
   })
 
+  it('still detects the path repo (and conflict) when -R precedes a /repos endpoint', () => {
+    // -R before the endpoint must be skipped so the path repo is still found.
+    expect(analyzeGhCommand('gh api -R acme/widgets /repos/acme/widgets/issues')).toMatchObject({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+    expect(analyzeGhCommand('gh api -R acme/widgets /repos/victim/private/issues').kind).toBe('block')
+  })
+
   it('uses -R for a quoted {owner}/{repo} placeholder endpoint', () => {
     expect(analyzeGhCommand("gh api 'repos/{owner}/{repo}/issues' -R acme/widgets")).toEqual({
       kind: 'inject',
@@ -81,9 +90,56 @@ describe('analyzeGhCommand', () => {
     })
   })
 
-  it('passes through a non-repo gh api endpoint even with -R present', () => {
-    expect(analyzeGhCommand('gh api graphql -f query=x -R acme/widgets')).toEqual({ kind: 'pass-through' })
+  it('passes through a non-graphql, non-repo gh api endpoint even with -R present', () => {
     expect(analyzeGhCommand('gh api /user -R acme/widgets')).toEqual({ kind: 'pass-through' })
+    expect(analyzeGhCommand('gh api /rate_limit -R acme/widgets')).toEqual({ kind: 'pass-through' })
+  })
+
+  it('injects the -R repo for gh api graphql and strips the flag (gh api rejects -R)', () => {
+    expect(analyzeGhCommand("gh api graphql -f query='mutation { resolveReviewThread }' -R acme/widgets")).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+      rewrittenCommand: "gh api graphql -f query='mutation { resolveReviewThread }'",
+    })
+  })
+
+  it('strips every -R/--repo flag form from a graphql invocation', () => {
+    const cases: Array<[string, string]> = [
+      ['gh api graphql -R acme/widgets -f query=x', 'gh api graphql -f query=x'],
+      ['gh api graphql --repo acme/widgets -f query=x', 'gh api graphql -f query=x'],
+      ['gh api graphql -R=acme/widgets -f query=x', 'gh api graphql -f query=x'],
+      ['gh api graphql --repo=acme/widgets -f query=x', 'gh api graphql -f query=x'],
+      ['gh api graphql -f query=x --repo=acme/widgets', 'gh api graphql -f query=x'],
+    ]
+    for (const [input, expected] of cases) {
+      expect(analyzeGhCommand(input)).toEqual({ kind: 'inject', repoSlug: 'acme/widgets', rewrittenCommand: expected })
+    }
+  })
+
+  it('injects and strips when -R appears BEFORE the graphql endpoint', () => {
+    expect(analyzeGhCommand('gh api -R acme/widgets graphql -f query=x')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+      rewrittenCommand: 'gh api graphql -f query=x',
+    })
+    expect(analyzeGhCommand('gh api --repo acme/widgets graphql -f query=x')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+      rewrittenCommand: 'gh api graphql -f query=x',
+    })
+  })
+
+  it('does not strip a -R substring inside a quoted graphql field value', () => {
+    const input = 'gh api graphql -f query=\'mutation { x(input:"-R evil/repo") }\' -R acme/widgets'
+    expect(analyzeGhCommand(input)).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+      rewrittenCommand: 'gh api graphql -f query=\'mutation { x(input:"-R evil/repo") }\'',
+    })
+  })
+
+  it('passes through gh api graphql with no -R (nothing to mint for)', () => {
+    expect(analyzeGhCommand('gh api graphql -f query=x')).toEqual({ kind: 'pass-through' })
   })
 
   it('blocks a gh api compare endpoint that reaches a cross-fork head repo', () => {
