@@ -234,6 +234,16 @@ describe('reviewer skill content', () => {
     expect(lower).toContain('fixup!')
   })
 
+  test('code-review skill forces a re-decide verdict on re-reviews (regression guard for stuck CHANGES_REQUESTED)', () => {
+    // A re-review must end in approve/request-changes; a `comment` verdict
+    // leaves the PR's blocking state stuck because a plain comment does not
+    // clear CHANGES_REQUESTED on GitHub. Without this, fix-and-re-request
+    // cycles silently leave the bot blocking the PR forever.
+    const lower = CODE_REVIEW_SKILL.content.toLowerCase()
+    expect(lower).toContain('re-review')
+    expect(lower).toContain('do not return `comment` on a re-review')
+  })
+
   test('general skill body teaches universal review craft (load-bearing audience-fit phrasing)', () => {
     const lower = GENERAL_REVIEW_SKILL.content.toLowerCase()
     expect(lower).toContain('load-bearing')
