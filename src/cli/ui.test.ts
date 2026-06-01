@@ -525,6 +525,15 @@ describe('printSlackAppManifestSetup', () => {
     expect(help!.description).toBeTruthy()
   })
 
+  test('manifest declares /reload and /restart as slash commands with descriptions', () => {
+    const slashCommands = SLACK_APP_MANIFEST.features.slash_commands
+    for (const name of ['/reload', '/restart']) {
+      const cmd = slashCommands.find((c) => c.command === name)
+      expect(cmd).toBeDefined()
+      expect(cmd!.description).toBeTruthy()
+    }
+  })
+
   test('manifest slash commands stay in sync with the runtime allow-list', () => {
     const manifestNames = new Set(SLACK_APP_MANIFEST.features.slash_commands.map((c) => c.command.replace(/^\//, '')))
     expect(manifestNames).toEqual(new Set(SLACK_SLASH_COMMAND_NAMES))

@@ -1513,6 +1513,12 @@ describe('slack-bot createOutboundCallback', () => {
   })
 })
 
+describe('slack-bot slash command allow-list', () => {
+  test('includes help, stop, reload, and restart', () => {
+    expect(new Set(SLACK_SLASH_COMMAND_NAMES)).toEqual(new Set(['help', 'stop', 'reload', 'restart']))
+  })
+})
+
 describe('createSlashCommandHandler', () => {
   type AckCall = Record<string, unknown> | undefined
   type RouterCall = { key: ChannelKey; name: string; invokerId: string }

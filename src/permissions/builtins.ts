@@ -16,6 +16,13 @@ export const CORE_PERMISSIONS = {
   // an operator may grant guest channelRespond to let strangers drive masked
   // turns, but session lifecycle control stays member-and-up.
   sessionControl: 'session.control',
+  // Operate-the-agent tier: gates the /reload and /restart channel commands
+  // (both the text-prefix and native-slash paths in the router). Strictly
+  // above sessionControl — reloading config or restarting the container
+  // mutates global agent state and drops every in-flight session, so it is
+  // owner+trusted only (NOT member). A member who can /stop a turn must not
+  // be able to bounce the whole container.
+  sessionAdmin: 'session.admin',
   cronSchedule: 'cron.schedule',
   cronModify: 'cron.modify',
   subagentSpawn: 'subagent.spawn',
@@ -70,6 +77,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
     permissions: [
       CORE_PERMISSIONS.channelRespond,
       CORE_PERMISSIONS.sessionControl,
+      CORE_PERMISSIONS.sessionAdmin,
       CORE_PERMISSIONS.cronSchedule,
       CORE_PERMISSIONS.cronModify,
       CORE_PERMISSIONS.subagentSpawn,
@@ -89,6 +97,7 @@ export const BUILTIN_ROLES: Readonly<Record<BuiltinRoleName, BuiltinRoleSpec>> =
     permissions: [
       CORE_PERMISSIONS.channelRespond,
       CORE_PERMISSIONS.sessionControl,
+      CORE_PERMISSIONS.sessionAdmin,
       CORE_PERMISSIONS.cronSchedule,
       CORE_PERMISSIONS.subagentSpawn,
       CORE_PERMISSIONS.subagentCancel,

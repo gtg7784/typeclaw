@@ -191,6 +191,18 @@ export const SLACK_APP_MANIFEST = {
         url: 'https://example.invalid/typeclaw-uses-socket-mode',
         should_escape: false,
       },
+      {
+        command: '/reload',
+        description: 'Reload typeclaw config and subsystems from disk',
+        url: 'https://example.invalid/typeclaw-uses-socket-mode',
+        should_escape: false,
+      },
+      {
+        command: '/restart',
+        description: 'Restart the typeclaw container',
+        url: 'https://example.invalid/typeclaw-uses-socket-mode',
+        should_escape: false,
+      },
     ],
   },
   oauth_config: {

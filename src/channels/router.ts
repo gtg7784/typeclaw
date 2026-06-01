@@ -7,7 +7,7 @@ import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSe
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
-import { type Command, type CommandResult, createCommandRegistry } from '@/commands'
+import { type Command, type CommandPermission, type CommandResult, createCommandRegistry } from '@/commands'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import { extractClaimCode } from '@/role-claim'
@@ -720,6 +720,17 @@ export type CreateChannelRouterOptions = {
   // can diagnose silent drops from `typeclaw inspect` alone. Omitted in
   // tests that don't care about inspect surfacing.
   stream?: Stream
+  // Operate-the-agent command handlers. When set, the router registers the
+  // matching channel command (/reload, /restart) gated on session.admin
+  // (owner+trusted). Omitted means the command is not registered at all — it
+  // won't appear in /help and a text-prefix or native-slash invocation is
+  // treated as unknown. Production wiring (src/run/index.ts via the channel
+  // manager) supplies both; tests opt in per-case. `onReload` returns a short
+  // human-readable summary posted back to the channel; `onRestart` returns a
+  // confirmation string (the container exits shortly after, so the reply is
+  // best-effort).
+  onReload?: () => Promise<string>
+  onRestart?: () => Promise<string>
 }
 
 export type ClaimHandlerInput = {
@@ -756,6 +767,8 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   const permissions = options.permissions ?? GRANT_ALL_PERMISSIONS
   const claimHandler = options.claimHandler
   const stream = options.stream
+  const onReload = options.onReload
+  const onRestart = options.onRestart
   const liveSessions = new Map<string, LiveSession>()
   const creating = new Map<string, Promise<LiveSession>>()
   // Bumped by tearDownAllLive() and stop() before they tear sessions down. An
@@ -779,7 +792,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // The /help handler reads the live registry to enumerate commands, so it
   // forward-references `commands`. Safe at runtime — the handler only runs on
   // invocation, long after the assignment below completes.
-  const channelCommands: readonly Command<ChannelCommandContext>[] = [
+  const channelCommands: Command<ChannelCommandContext>[] = [
     {
       name: 'help',
       description: 'List available commands.',
@@ -800,6 +813,28 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       },
     },
   ]
+  // /reload and /restart are registered only when the operate-the-agent
+  // callbacks are wired (production via the channel manager). Without them the
+  // capability doesn't exist for this router, so the commands stay absent from
+  // /help and resolve as unknown — never a silent no-op.
+  if (onReload !== undefined) {
+    channelCommands.push({
+      name: 'reload',
+      description: 'Reload typeclaw config and subsystems from disk.',
+      permission: 'session.admin',
+      requiresLiveSession: false,
+      handler: async () => ({ reply: await onReload() }),
+    })
+  }
+  if (onRestart !== undefined) {
+    channelCommands.push({
+      name: 'restart',
+      description: 'Restart the typeclaw container.',
+      permission: 'session.admin',
+      requiresLiveSession: false,
+      handler: async () => ({ reply: await onRestart() }),
+    })
+  }
   const commands = createCommandRegistry<ChannelCommandContext>(channelCommands)
 
   // Implicit dir-name alias: agent folder basename matches Docker
@@ -1800,9 +1835,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.info(`[channels] ${keyId}: ignoring unknown command /${parsedCommand.name}`)
         return
       }
-      if (commandInfo.permission === 'session.control' && isSessionControlDenied(event)) {
+      const requiredPermission = commandPermissionString(commandInfo.permission)
+      if (requiredPermission !== null && !permissions.has(inboundAuthorOrigin(event), requiredPermission)) {
         logger.info(
-          `[channels] ${keyId}: denied command /${parsedCommand.name} by permissions (session.control) author=${event.authorId}`,
+          `[channels] ${keyId}: denied command /${parsedCommand.name} by permissions (${requiredPermission}) author=${event.authorId}`,
         )
         return
       }
@@ -1913,8 +1949,22 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // operator can grant guest channelRespond for masked stranger turns)
   // cannot /stop another speaker's in-flight turn. session.control is
   // member-and-up by default.
-  const isSessionControlDenied = (event: InboundMessage): boolean =>
-    !permissions.has(inboundAuthorOrigin(event), CORE_PERMISSIONS.sessionControl)
+  // Maps a command's declared permission tier to the concrete permission
+  // string gated on both the text-prefix path (route) and the native-slash
+  // path (executeCommand). 'none' is never gated. session.admin (owner+trusted,
+  // not member) covers /reload and /restart, which mutate global agent state
+  // and drop every in-flight session. Centralized so a new tier can't be
+  // honored on one path and silently skipped on the other.
+  const commandPermissionString = (permission: CommandPermission): string | null => {
+    switch (permission) {
+      case 'none':
+        return null
+      case 'session.control':
+        return CORE_PERMISSIONS.sessionControl
+      case 'session.admin':
+        return CORE_PERMISSIONS.sessionAdmin
+    }
+  }
 
   const updateLoopGuard = (live: LiveSession, event: InboundMessage): void => {
     if (!event.authorIsBot) {
@@ -2702,14 +2752,17 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     if (commandInfo === undefined) {
       return { kind: 'unknown-command', name: lowered }
     }
-    // Gates on session.control (not channel.respond) so a respond-capable
-    // guest cannot abort another speaker's turn. Runs BEFORE the live-session
-    // lookup so an unauthorized invoker gets 'permission-denied' regardless of
-    // session state, rather than leaking session presence via the
-    // 'no-live-session' vs 'permission-denied' distinction. Session-less
-    // informational commands (e.g. /help) declare permission:'none' and skip
-    // both the gate and the lookup so they work in channels with no live turn.
-    if (commandInfo.permission === 'session.control') {
+    // Gates on the command's declared tier (session.control for /stop,
+    // session.admin for /reload and /restart) — never channel.respond — so a
+    // respond-capable guest cannot abort another speaker's turn or bounce the
+    // container. Runs BEFORE the live-session lookup so an unauthorized invoker
+    // gets 'permission-denied' regardless of session state, rather than leaking
+    // session presence via the 'no-live-session' vs 'permission-denied'
+    // distinction. Session-less informational commands (e.g. /help) declare
+    // permission:'none' and skip both the gate and the lookup so they work in
+    // channels with no live turn.
+    const requiredPermission = commandPermissionString(commandInfo.permission)
+    if (requiredPermission !== null) {
       const partial: SessionOrigin = {
         kind: 'channel',
         adapter: key.adapter,
@@ -2718,7 +2771,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         thread: key.thread,
         lastInboundAuthorId: options.invokerId,
       }
-      if (!permissions.has(partial, CORE_PERMISSIONS.sessionControl)) {
+      if (!permissions.has(partial, requiredPermission)) {
         return { kind: 'permission-denied' }
       }
     }

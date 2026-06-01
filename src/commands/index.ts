@@ -13,8 +13,11 @@ export type CommandHandler<Context> = (
 // dispatcher, so a new command declares its own requirements in one place:
 // 'session.control' + requiresLiveSession:true is the control-command default
 // (/stop); 'none' + requiresLiveSession:false is the informational default
-// (/help). Both are optional so plain registries (tests, TUI) need not care.
-export type CommandPermission = 'none' | 'session.control'
+// (/help). 'session.admin' + requiresLiveSession:false is the operate-the-agent
+// tier (/reload, /restart) — owner+trusted only, no live session required since
+// it acts on the container, not a channel turn. Both are optional so plain
+// registries (tests, TUI) need not care.
+export type CommandPermission = 'none' | 'session.control' | 'session.admin'
 
 export type Command<Context> = {
   name: string
