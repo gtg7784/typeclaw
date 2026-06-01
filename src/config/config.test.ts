@@ -278,6 +278,16 @@ describe('mcpServerSchema', () => {
     expect(() => mcpServerSchema.parse({ name: 'slow', command: 'server', timeoutMs: 600_001 })).toThrow()
     expect(() => mcpServerSchema.parse({ name: 'ok-slow', command: 'server', timeoutMs: 600_000 })).not.toThrow()
   })
+
+  test('preserves an optional description for the later MCP catalog', () => {
+    const parsed = mcpServerSchema.parse({
+      name: 'github',
+      description: 'GitHub issues, PRs, and code search',
+      command: 'server',
+    })
+
+    expect(parsed.description).toBe('GitHub issues, PRs, and code search')
+  })
 })
 
 describe('configSchema mcpServers field', () => {
@@ -299,6 +309,21 @@ describe('configSchema mcpServers field', () => {
       { name: 'filesystem', command: 'bunx', args: ['@modelcontextprotocol/server-filesystem'], env: {} },
       { name: 'remote-docs', args: [], url: 'https://mcp.example.com/mcp', env: {} },
     ])
+  })
+
+  test('rejects duplicate server names with an indexed path at the offending entry', () => {
+    const result = configSchema.safeParse({
+      models: { default: VALID_MODEL },
+      mcpServers: [
+        { name: 'github', command: 'server' },
+        { name: 'github', url: 'https://mcp.example.com/mcp' },
+      ],
+    })
+
+    expect(result.success).toBe(false)
+    if (result.success) throw new Error('expected duplicate names to be rejected')
+    const issue = result.error.issues.find((i) => i.message.includes('duplicates'))
+    expect(issue?.path).toEqual(['mcpServers', 1, 'name'])
   })
 })
 

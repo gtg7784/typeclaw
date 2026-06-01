@@ -77,6 +77,7 @@ export const mcpServerSchema = z
       .refine((name) => !name.includes('__'), {
         message: "MCP server name must not contain '__' (reserved as the tool-namespace separator)",
       }),
+    description: z.string().optional(),
     timeoutMs: z.number().int().positive().max(MCP_MAX_TIMEOUT_MS).optional(),
     command: z.string().trim().min(1).optional(),
     args: z.array(z.string()).default([]),
@@ -96,6 +97,30 @@ export const mcpServerSchema = z
   })
 
 export type McpServer = z.infer<typeof mcpServerSchema>
+
+// The name becomes the `<server>__<tool>` namespace at dispatch, so duplicates
+// would make tool lookup ambiguous and silently shadow one server behind
+// another. Reject them with an indexed path so the error points at the
+// offending entry instead of the whole array.
+const mcpServersArraySchema = z
+  .array(mcpServerSchema)
+  .default([])
+  .superRefine((entries, ctx) => {
+    const seen = new Map<string, number>()
+    for (let i = 0; i < entries.length; i++) {
+      const name = entries[i]!.name
+      const prev = seen.get(name)
+      if (prev !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: [i, 'name'],
+          message: `mcpServers[${i}].name duplicates mcpServers[${prev}].name ('${name}')`,
+        })
+      } else {
+        seen.set(name, i)
+      }
+    }
+  })
 
 const portNumber = z.number().int().min(1).max(65535)
 
@@ -449,7 +474,7 @@ export const configSchema = z
     // host paths exposed) without failing the whole config load. `typeclaw
     // init` omits this field so users don't see noise for the empty case.
     mounts: z.array(mountSchema).default([]),
-    mcpServers: z.array(mcpServerSchema).default([]),
+    mcpServers: mcpServersArraySchema,
     plugins: z.array(z.string().min(1)).default([]),
     // Additional names the agent answers to in channel engagement, on top
     // of `basename(agentDir)` which is always implicit. Each entry is a
