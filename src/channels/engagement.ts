@@ -89,14 +89,51 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   if (config.trigger.includes('mention') && message.isBotMention) return 'engage'
   if (config.trigger.includes('reply') && message.replyToBotMessageId !== null) return 'engage'
 
-  // Sticky credit force-engages in EVERY context (groups included) for the
-  // full window. This gate is deliberately content-blind: it answers "am I in
-  // an active conversation with this author?", not "does THIS message need a
-  // reply?" — a boolean over membership cannot tell "where did you send it?"
-  // (reply) from "lol ok" (chatter). Selectivity is the MODEL's job: engaged
+  // Multi-human pre-sticky target check. In a busy group the conversational
+  // target shifts every message: the author we're mid-exchange with (and hold
+  // a sticky credit for) may, on THIS turn, structurally address a third party
+  // — "@bob what do you think?", a reply to another human's message, or a
+  // peer bot by name. Sticky below is content-blind by design (it answers "am
+  // I mid-conversation with this author?"), so without this guard it would
+  // force-engage on a message plainly aimed elsewhere and burn the credit.
+  //
+  // This stays inside the pinned content-blind philosophy: it adds NO semantic
+  // text interpretation. It reuses the SAME structural booleans the post-alias
+  // suppressors already trust (`mentionsOthers`, `replyToOtherMessageId`,
+  // `textTargetsAnyPeerBot`) — the adapter classifiers decide "addressed to
+  // someone else", not this gate. The only refinement is ordering: when those
+  // structural signals fire in a multi-human group, observe BEFORE consuming
+  // sticky, and PRESERVE the credit so the author's next untargeted follow-up
+  // still wakes us within the window. A plain follow-up (no suppressor set)
+  // is untouched: it falls through to sticky and engages exactly as before.
+  //
+  // Solo-human channels are deliberately excluded (`effectiveHumans > 1`):
+  // there the sticky-over-mentionsOthers behavior is intentional and tested.
+  // The `!matchesAnyAlias` guard preserves the ladder invariant "explicit
+  // address to us beats structural targeting of others": a message that names
+  // us by alias engages on the alias rule below even when it ALSO tags a third
+  // party (the "봉봉아 펭펭아 둘 다 봐" multi-bot case), so we must not pre-empt
+  // it here. We only step aside for a credited author whose message is aimed
+  // PURELY elsewhere.
+  if (
+    effectiveHumans > 1 &&
+    config.stickiness !== 'off' &&
+    !matchesAnyAlias(message.text, selfAliases) &&
+    targetsSomeoneElse(message, participants, botInThread)
+  ) {
+    return 'observe'
+  }
+
+  // Sticky credit force-engages for the full window. This gate is deliberately
+  // content-blind: it answers "am I in an active conversation with this
+  // author?", not "does THIS message need a reply?" — a boolean over
+  // membership cannot tell "where did you send it?" (reply) from "lol ok"
+  // (chatter). Selectivity for plain follow-ups is the MODEL's job: engaged
   // group turns get a `composeTurnPrompt` nudge (keyed off `isMultiHumanGroup`)
   // to answer real follow-ups and `NO_REPLY` chatter. Gating sticky off in
-  // groups instead (the prior approach) dropped genuine follow-ups outright.
+  // groups wholesale (the prior approach) dropped genuine follow-ups outright;
+  // the pre-check above is narrower — it only steps aside when the message is
+  // STRUCTURALLY addressed elsewhere, leaving plain follow-ups engaged.
   if (config.stickiness !== 'off' && ledger.consume(key, message.authorId, now)) {
     return 'engage'
   }
@@ -155,35 +192,38 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // has rejected that design repeatedly. The right knob is `trigger`
   // (which already applies symmetrically to humans and bots) plus this
   // fallback fix.
-  if (message.mentionsOthers) return 'observe'
-  // The replyToOtherMessageId suppressor exists to keep the bot out of
-  // human-to-human side conversations in busy channels. But Slack's
-  // `parent_user_id` is the THREAD ROOT author, not the immediate parent
-  // author — so a thread the human starts by @-mentioning the bot
-  // produces `replyToOtherMessageId` on every follow-up (root author is
-  // the human, not us), which would silently drop every reply after the
-  // first. Once the bot has actually sent into this thread, subsequent
-  // replies are part of OUR conversation regardless of who started it,
-  // so the suppressor stops applying. The two-humans-in-a-thread case
-  // PR #58 fixed is preserved because the bot never sent into that
-  // thread in the first place.
-  if (message.replyToOtherMessageId !== null && !botInThread) return 'observe'
-
-  // Plain-text peer-bot addressing as a fallback suppressor. We've reached
-  // here because the message lacks a structural mention/reply/dm AND
-  // doesn't contain our own alias. If it DOES contain a known peer bot's
-  // observed display name, the solo-human fallback would still engage us
-  // — same wrong behavior the alias trigger is meant to fix, just for
-  // peers instead of self. Each bot only configures its own aliases, so
-  // the only source of peer names is `participants[]` (observed
-  // authorName once a peer has spoken at least once in this channel).
-  // First-time addressing of a never-seen peer slips through; after that
-  // peer's first message it's caught forever.
-  if (textTargetsAnyPeerBot(message.text, participants)) return 'observe'
+  if (targetsSomeoneElse(message, participants, botInThread)) return 'observe'
 
   if (effectiveHumans <= 1 && !message.authorIsBot) return 'engage'
 
   return 'observe'
+}
+
+// Structural "this message is addressed to someone other than us" test. Pure
+// over adapter-classified booleans + observed peer names — no semantic text
+// interpretation, so it is safe for the content-blind engagement gate. Shared
+// by the multi-human pre-sticky check and the post-alias fallback suppressors
+// so the two can never drift apart.
+//
+//   - `mentionsOthers` — the message tags at least one other user and none of
+//     the mentions resolve to us.
+//   - `replyToOtherMessageId !== null && !botInThread` — the message replies to
+//     a non-bot message AND we haven't sent into this thread yet. Slack's
+//     `parent_user_id` is the THREAD ROOT author, not the immediate parent, so
+//     a thread a human opens by @-mentioning us would otherwise drop every
+//     follow-up; `botInThread` is the escape hatch once we're participating.
+//   - `textTargetsAnyPeerBot` — the text names a known peer bot (observed via
+//     `participants[]`). A never-seen peer's first addressing slips through,
+//     then is caught forever once that peer has spoken once.
+function targetsSomeoneElse(
+  message: InboundMessage,
+  participants: readonly ChannelParticipant[],
+  botInThread: boolean,
+): boolean {
+  if (message.mentionsOthers) return true
+  if (message.replyToOtherMessageId !== null && !botInThread) return true
+  if (textTargetsAnyPeerBot(message.text, participants)) return true
+  return false
 }
 
 export function countEffectiveHumans(

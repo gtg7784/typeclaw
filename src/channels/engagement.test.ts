@@ -1009,7 +1009,11 @@ describe('decideEngagement (targets-others suppressors)', () => {
     expect(decision).toBe('engage')
   })
 
-  test('sticky credit still engages even with mentions-of-others present', () => {
+  test('sticky credit still engages with mentions-of-others present in a SOLO-human channel', () => {
+    // given a solo-human channel (effectiveHumans <= 1): the multi-human
+    // pre-sticky target check does not apply, so sticky engages as before even
+    // when the message tags someone else. The multi-human variant is covered
+    // in the "sticky pre-sticky target check" suite below.
     const ledger = new StickyLedger()
     ledger.grant(KEY, 'alice', 10_000)
     const decision = decideEngagement({
@@ -1021,6 +1025,161 @@ describe('decideEngagement (targets-others suppressors)', () => {
       participants: [participant('alice')],
     })
     expect(decision).toBe('engage')
+  })
+})
+
+describe('decideEngagement (multi-human sticky target check)', () => {
+  test('a credited author who @-mentions a third party observes, and the credit is PRESERVED', () => {
+    // given a credited author in a two-human group
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+
+    // when alice posts a message structurally aimed at bob (mentionsOthers)
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'alice', text: 'hey <@UBOB> what do you think?', mentionsOthers: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+
+    // then we stay out of the third-party-directed message, and the credit
+    // survives for alice's next untargeted follow-up
+    expect(decision).toBe('observe')
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(true)
+  })
+
+  test("a credited author's reply to another human's message observes, credit preserved", () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'alice', replyToOtherMessageId: 'bob-msg', text: 'sounds good' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+    expect(decision).toBe('observe')
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(true)
+  })
+
+  test('a credited author naming a known peer bot observes, credit preserved', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const participants: readonly ChannelParticipant[] = [
+      participant('alice'),
+      participant('bob'),
+      { ...participant('펭펭'), isBot: true },
+    ]
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'alice', text: '펭펭아 그거 어떻게 됐어?' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants,
+    })
+    expect(decision).toBe('observe')
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(true)
+  })
+
+  test("after a suppressed third-party message, the same author's next plain follow-up consumes the preserved credit and engages", () => {
+    // given a credit that survives a third-party-directed message
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    decideEngagement({
+      message: inbound({ authorId: 'alice', text: 'hey <@UBOB>?', mentionsOthers: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+
+    // when alice then posts a plain, untargeted follow-up
+    const second = decideEngagement({
+      message: inbound({ authorId: 'alice', text: 'anyway, back to the deploy' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 2000,
+      participants: crowded,
+    })
+
+    // then the preserved credit wakes us and is consumed
+    expect(second).toBe('engage')
+    expect(ledger.has(KEY, 'alice', 2000)).toBe(false)
+  })
+
+  test('a plain multi-human follow-up from a credited author still engages (no suppressor set)', () => {
+    // regression guard: the pre-check must only step aside for STRUCTURALLY
+    // third-party-directed messages, never for plain follow-ups
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'alice', text: 'and what about staging?' }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+    expect(decision).toBe('engage')
+    expect(ledger.has(KEY, 'alice', 1000)).toBe(false)
+  })
+
+  test('a credited author who names a third party BUT also aliases us engages (alias precedence)', () => {
+    // "봉봉아 펭펭아 둘 다 봐" — names us AND a peer. The alias rule must win;
+    // the pre-sticky check must not steal engagement from an explicit address.
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const participants: readonly ChannelParticipant[] = [
+      participant('alice'),
+      participant('bob'),
+      { ...participant('펭펭'), isBot: true },
+    ]
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'alice', text: '봉봉아 펭펭아 둘 다 봐', mentionsOthers: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants,
+      selfAliases: ['봉봉'],
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('explicit mention-of-us still engages in a multi-human group even when also tagging others', () => {
+    const ledger = new StickyLedger()
+    ledger.grant(KEY, 'alice', 10_000)
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'alice', isBotMention: true, mentionsOthers: true }),
+      config: baseConfig,
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+    expect(decision).toBe('engage')
+  })
+
+  test('with stickiness OFF the pre-check is inert (no credit to protect)', () => {
+    // given stickiness off and a third-party-directed message: the pre-check
+    // is gated on stickiness, so it does not fire here; the existing
+    // post-alias suppressor still observes
+    const ledger = new StickyLedger()
+    const decision = decideEngagement({
+      message: inbound({ authorId: 'alice', text: 'hey <@UBOB>?', mentionsOthers: true }),
+      config: { trigger: ['mention', 'reply', 'dm'], stickiness: 'off' },
+      key: KEY,
+      ledger,
+      now: 1000,
+      participants: crowded,
+    })
+    expect(decision).toBe('observe')
   })
 })
 
