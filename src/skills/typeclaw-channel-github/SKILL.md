@@ -158,10 +158,12 @@ There is no REST endpoint for this. Resolution is a GraphQL mutation that takes 
 1. **Find the node id of the thread you authored.** Query the PR's review threads and pick the one whose root comment is yours and matches the `thread` you're replying in:
 
    ```sh
-   gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId author{login}}}}}}}}' -F owner=OWNER -F name=REPO -F number=N
+   gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved comments(first:1){nodes{databaseId author{login}}}}}}}}' -F owner=OWNER -F name=REPO -F number=N
    ```
 
    Match on the root comment: its `comments.nodes[0].databaseId` equals the root comment id (the `thread` value the inbound carried), and `author.login` is you. Skip threads already `isResolved: true`.
+
+   **Paginate until you find the match — `first:100` is one page, not all threads.** A busy PR can carry more than 100 review threads, and yours may sit past the first page; stopping at page one would silently miss it and leave your thread open. Omit `-F after=…` on the first call, then while `pageInfo.hasNextPage` is true and you have not yet matched the `databaseId`, re-run the same query with `-F after=<endCursor>` from the previous page. Stop the moment the target thread is found (no need to walk the rest) or when `hasNextPage` is false (the thread is genuinely absent — don't fabricate a node id).
 
 2. **Resolve it** with the node id from step 1:
 
