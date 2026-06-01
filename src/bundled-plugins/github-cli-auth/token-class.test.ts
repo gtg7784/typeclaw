@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 
-import { classifyGhToken, rewriteWithToken } from './inject'
+import { classifyGhToken } from './token-class'
 
 describe('classifyGhToken', () => {
   it('classifies a classic PAT as cross-owner', () => {
@@ -22,19 +22,5 @@ describe('classifyGhToken', () => {
 
   it('treats an unknown prefix as app (conservative per-repo resolution)', () => {
     expect(classifyGhToken('gho_oauthtoken')).toBe('app')
-  })
-})
-
-describe('rewriteWithToken', () => {
-  it('prepends a shell-quoted GH_TOKEN assignment', () => {
-    expect(rewriteWithToken('gh pr view -R acme/widgets', 'ghs_tok')).toBe(
-      "GH_TOKEN='ghs_tok' gh pr view -R acme/widgets",
-    )
-  })
-
-  it('escapes single quotes in the token', () => {
-    expect(rewriteWithToken('gh pr view -R acme/widgets', "ab'cd")).toBe(
-      "GH_TOKEN='ab'\\''cd' gh pr view -R acme/widgets",
-    )
   })
 })

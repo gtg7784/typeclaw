@@ -9,11 +9,3 @@ export function classifyGhToken(token: string | undefined): GhTokenClass {
   // a per-repo token rather than silently using a possibly-wrong global one.
   return 'app'
 }
-
-export function rewriteWithToken(command: string, token: string): string {
-  return `GH_TOKEN=${shellQuote(token)} ${command}`
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`
-}

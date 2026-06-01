@@ -1,7 +1,8 @@
+import { TYPECLAW_INTERNAL_BASH_ENV } from '@/agent/plugin-tools'
 import { definePlugin } from '@/plugin'
 
 import { analyzeGhCommand } from './gh-command'
-import { classifyGhToken, rewriteWithToken } from './inject'
+import { classifyGhToken } from './token-class'
 
 export default definePlugin({
   plugin: async (ctx) => {
@@ -29,7 +30,10 @@ export default definePlugin({
 
           const result = await resolveTokenForRepo(decision.repoSlug)
           if (result.kind === 'unavailable') return { block: true, reason: result.reason }
-          event.args.command = rewriteWithToken(command, result.token)
+          // Inject via the internal env overlay (delivered to the spawn / bwrap
+          // --setenv by the bash wrapper) so the token never enters the command
+          // string, where it could leak through logs or later hooks.
+          event.args[TYPECLAW_INTERNAL_BASH_ENV] = { GH_TOKEN: result.token }
           return
         },
       },

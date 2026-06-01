@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 
+import { TYPECLAW_INTERNAL_BASH_ENV } from '@/agent/plugin-tools'
 import type { GithubTokenResolveResult } from '@/channels/github-token-bridge'
 import { noopPermissionService } from '@/permissions'
 import type { PluginContext, ToolBeforeEvent } from '@/plugin'
@@ -46,7 +47,7 @@ const unavailableResolver = async (): Promise<GithubTokenResolveResult> => ({
 })
 
 describe('github-cli-auth plugin', () => {
-  test('App auth: rewrites a repo-targeting gh call with the minted token', async () => {
+  test('App auth: sets the env overlay with the minted token, leaving the command untouched', async () => {
     process.env.GH_TOKEN = 'ghs_seeded'
     const hook = await hookFor(tokenResolver('ghs_minted'))
     const event = bashEvent('gh pr view -R acme/widgets')
@@ -54,7 +55,9 @@ describe('github-cli-auth plugin', () => {
     const result = await hook(event, { agentDir: '/agent', pluginName: 'github-cli-auth', logger: noopLogger })
 
     expect(result).toBeUndefined()
-    expect(event.args.command).toBe("GH_TOKEN='ghs_minted' gh pr view -R acme/widgets")
+    // The token must NOT be in the command string (no leak surface).
+    expect(event.args.command).toBe('gh pr view -R acme/widgets')
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toEqual({ GH_TOKEN: 'ghs_minted' })
   })
 
   test('App auth: blocks a repo-targeting gh call with no repo', async () => {
@@ -107,6 +110,7 @@ describe('github-cli-auth plugin', () => {
 
     expect(result).toBeUndefined()
     expect(event.args.command).toBe('gh pr view -R acme/widgets')
+    expect(event.args[TYPECLAW_INTERNAL_BASH_ENV]).toBeUndefined()
     expect(resolverCalled).toBe(false)
   })
 
