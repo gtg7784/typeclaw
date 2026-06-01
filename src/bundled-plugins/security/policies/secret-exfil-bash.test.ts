@@ -176,6 +176,24 @@ describe('secret-exfil-bash guard', () => {
     expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'cat ~/project/.env' } })?.block).toBe(true)
   })
 
+  test('blocks jq . .env (jq ships in baseline and reads+emits the file like cat)', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'jq . .env' } })?.block).toBe(true)
+  })
+
+  test('blocks yq . .env (yq ships in baseline and reads+emits the file like cat)', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: "yq '.FIREWORKS_API_KEY' .env" } })?.block).toBe(
+      true,
+    )
+  })
+
+  test('blocks jq . .envrc', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'jq . .envrc' } })?.block).toBe(true)
+  })
+
+  test('blocks yq . .envrc', () => {
+    expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'yq . ./.envrc' } })?.block).toBe(true)
+  })
+
   test('blocks ls -la ~/.ssh/ (private-key directory enumeration)', () => {
     expect(checkSecretExfilBashGuard({ tool: 'bash', args: { command: 'ls -la ~/.ssh/' } })?.block).toBe(true)
   })

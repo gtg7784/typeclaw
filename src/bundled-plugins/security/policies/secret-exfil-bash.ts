@@ -49,10 +49,17 @@ const DANGEROUS_COMMAND_PATTERNS: ReadonlyArray<{ pattern: RegExp; label: string
   // `set -e` / `set -euo pipefail`) and require the posix-mode opt-in.
   { pattern: /set\s+-o\s+posix[\s\S]{0,40}(?:^|[\s;|&(`])set(?:[\s;|&)`]|$)/m, label: 'set -o posix; set (env dump)' },
   {
-    pattern: /(cat|less|more|head|tail|bat|xxd|od|hexdump|strings)\s+[^\n;|&`]*\.env(\s|$|[;|&`])/,
+    // jq/yq read+emit arbitrary files just like cat (e.g. `jq . .env`,
+    // `yq '.x' .env`) and both ship in the container baseline, so they are
+    // first-class .env exfil vectors and must be gated here, not just the
+    // pager/dumper family.
+    pattern: /(cat|less|more|head|tail|bat|xxd|od|hexdump|strings|jq|yq)\s+[^\n;|&`]*\.env(\s|$|[;|&`])/,
     label: 'reading .env file',
   },
-  { pattern: /(cat|less|more|head|tail|bat)\s+[^\n;|&`]*\.envrc(\s|$|[;|&`])/, label: 'reading .envrc file' },
+  {
+    pattern: /(cat|less|more|head|tail|bat|jq|yq)\s+[^\n;|&`]*\.envrc(\s|$|[;|&`])/,
+    label: 'reading .envrc file',
+  },
   { pattern: /\.ssh\/(id_[a-z0-9]+|authorized_keys|known_hosts|config)/i, label: '~/.ssh/* private material' },
   {
     pattern: /(cat|less|more|head|tail|ls|find|grep|rg|bat)\s+[^\n;|&`]*~?\/?\.ssh(\/|\s|$|[;|&`])/,
