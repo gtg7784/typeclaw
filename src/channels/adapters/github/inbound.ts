@@ -2,6 +2,8 @@ import { createHmac, timingSafeEqual } from 'node:crypto'
 
 import type { InboundMessage } from '@/channels/types'
 
+import type { GithubAuthContext } from './auth'
+import { removeRequestedReviewer } from './decoy-reviewer'
 import type { DeliveryDedup } from './dedup'
 import { isGithubEventAllowed } from './event-allowlist'
 import { encodeGithubReactionRef, type GithubReactionTarget } from './reactions'
@@ -23,6 +25,13 @@ export type GithubWebhookHandlerOptions = {
   // omitted, team-reviewer requests are silently dropped (the v1 fallback
   // behavior). The adapter wires this in production; tests inject a fake.
   isBotInTeam?: (input: { org: string; slug: string; login: string }) => Promise<boolean>
+  // App-auth only: mints a repo-scoped token used to drop the decoy reviewer
+  // once the bot's own review lands. Omitted under PAT auth (no decoy exists).
+  authToken?: (context?: GithubAuthContext) => Promise<string>
+  // Schedules the decoy-drop off the webhook ACK path so the 200 stays fast.
+  // Defaults to fire-and-forget; tests inject a recorder to await the task.
+  scheduleBackgroundTask?: (task: () => Promise<void>) => void
+  fetchImpl?: typeof fetch
 }
 
 export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions): (req: Request) => Promise<Response> {
@@ -51,6 +60,7 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
     const selfLogin = options.selfLogin()
     const author = readAuthor(event, payload)
     if (author !== null && isSelfAuthor(author, selfId, selfLogin)) {
+      maybeScheduleDecoyReviewerDrop({ event, action, payload, selfLogin, options })
       options.logger.info(
         `[github] dropped self-authored ${event}${action !== null ? `.${action}` : ''} from @${author.login}`,
       )
@@ -68,6 +78,57 @@ export function createGithubWebhookHandler(options: GithubWebhookHandlerOptions)
     options.route(classified)
     return ok()
   }
+}
+
+// GitHub auto-records the App as a reviewer the moment its review posts, but
+// leaves the decoy user pinned as a perpetual "review requested". When the bot
+// drops its own review (the self-authored event we're about to discard), fire a
+// background DELETE to remove the decoy. The DELETE is authenticated as the App,
+// so the resulting review_request_removed webhook has the bot actor as sender
+// and is dropped by classifyReviewRequest's self-loop guard — no fresh session.
+function maybeScheduleDecoyReviewerDrop(input: {
+  event: string
+  action: string | null
+  payload: Record<string, unknown>
+  selfLogin: string | null
+  options: GithubWebhookHandlerOptions
+}): void {
+  const { event, action, payload, selfLogin, options } = input
+  if (event !== 'pull_request_review' || action !== 'submitted') return
+  if (selfLogin === null) return
+  const authToken = options.authToken
+  if (authToken === undefined) return
+  if ((options.authType?.() ?? 'pat') !== 'app') return
+  const decoyLogin = resolveDecoyReviewerLogin(selfLogin, 'app')
+  if (decoyLogin === null) return
+
+  const repository = readRepository(payload)
+  const pr = readRecord(payload.pull_request)
+  const pullNumber = readNumber(pr, 'number')
+  if (repository === null || pullNumber === null) return
+
+  const fetchImpl = options.fetchImpl ?? fetch
+  const schedule = options.scheduleBackgroundTask ?? defaultScheduleBackgroundTask
+  schedule(async () => {
+    const token = await authToken({ repoSlug: `${repository.owner}/${repository.name}` })
+    const result = await removeRequestedReviewer({
+      fetchImpl,
+      token,
+      owner: repository.owner,
+      repo: repository.name,
+      pullNumber,
+      reviewerLogin: decoyLogin,
+    })
+    if (result.kind === 'failed') {
+      options.logger.warn(
+        `[github] failed to drop decoy reviewer @${decoyLogin} from ${repository.owner}/${repository.name}#${pullNumber}: ${result.reason}`,
+      )
+    }
+  })
+}
+
+function defaultScheduleBackgroundTask(task: () => Promise<void>): void {
+  void task().catch(() => {})
 }
 
 export async function verifySignature(body: string, secret: string, sigHeader: string): Promise<boolean> {

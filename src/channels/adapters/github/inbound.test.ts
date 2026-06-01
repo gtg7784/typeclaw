@@ -4,7 +4,12 @@ import { createHmac } from 'node:crypto'
 import type { InboundMessage } from '@/channels/types'
 
 import { createDeliveryDedup } from './dedup'
-import { classifyGithubInbound, createGithubWebhookHandler, verifySignature } from './inbound'
+import {
+  classifyGithubInbound,
+  createGithubWebhookHandler,
+  type GithubWebhookHandlerOptions,
+  verifySignature,
+} from './inbound'
 import { decodeGithubReactionRef } from './reactions'
 
 const logger = { info: () => {}, warn: () => {}, error: () => {} }
@@ -711,6 +716,146 @@ describe('createGithubWebhookHandler — self-author drop', () => {
     expect(routed).toHaveLength(0)
   })
 })
+
+describe('decoy reviewer drop on self-review', () => {
+  type DropCall = { url: string; method: string; body: string }
+
+  function decoyDropHandler(overrides: {
+    authType?: 'pat' | 'app'
+    authToken?: GithubWebhookHandlerOptions['authToken']
+    fetchImpl?: typeof fetch
+    warns?: string[]
+  }): {
+    handler: (req: Request) => Promise<Response>
+    tasks: Array<() => Promise<void>>
+    drops: DropCall[]
+  } {
+    const tasks: Array<() => Promise<void>> = []
+    const drops: DropCall[] = []
+    const fetchImpl =
+      overrides.fetchImpl ??
+      fakeFetch((url, init) => {
+        drops.push({ url, method: init?.method ?? 'GET', body: String(init?.body ?? '') })
+        return new Response('', { status: 200 })
+      })
+    const handler = createGithubWebhookHandler({
+      webhookSecret: 'secret',
+      dedup: createDeliveryDedup(),
+      allowlist: () => ['pull_request_review.submitted'],
+      selfId: () => '99',
+      selfLogin: () => 'typeclaw-bot[bot]',
+      authType: () => overrides.authType ?? 'app',
+      authToken: overrides.authToken ?? (async () => 'tok'),
+      fetchImpl,
+      scheduleBackgroundTask: (task) => {
+        tasks.push(task)
+      },
+      logger: {
+        info: () => {},
+        warn: (m) => overrides.warns?.push(m),
+        error: () => {},
+      },
+      route: () => {},
+    })
+    return { handler, tasks, drops }
+  }
+
+  function selfReviewPayload(): Record<string, unknown> {
+    return {
+      action: 'submitted',
+      repository: repo(),
+      pull_request: { number: 7, id: 700, user: { login: 'alice', id: 10, type: 'User' } },
+      review: {
+        id: 5001,
+        body: 'looks good',
+        submitted_at: '2026-01-01T00:00:00Z',
+        user: { login: 'typeclaw-bot[bot]', id: 99, type: 'Bot' },
+      },
+    }
+  }
+
+  it('fires a DELETE for the decoy login when the bot submits its own review (App auth)', async () => {
+    const { handler, tasks, drops } = decoyDropHandler({})
+    const res = await handler(
+      signedRequest(JSON.stringify(selfReviewPayload()), 'pull_request_review', 'self-review-app'),
+    )
+    // given the 200-fast contract, the ACK returns before the scheduled drop runs
+    expect(res.status).toBe(200)
+    expect(tasks).toHaveLength(1)
+    await tasks[0]?.()
+    expect(drops).toHaveLength(1)
+    expect(drops[0]?.method).toBe('DELETE')
+    expect(drops[0]?.url).toBe('https://api.github.com/repos/acme/project/pulls/7/requested_reviewers')
+    expect(JSON.parse(drops[0]?.body ?? '{}')).toEqual({ reviewers: ['typeclaw-bot'] })
+  })
+
+  it('does not fire under PAT auth (no decoy account exists)', async () => {
+    const { handler, tasks } = decoyDropHandler({ authType: 'pat' })
+    await handler(signedRequest(JSON.stringify(selfReviewPayload()), 'pull_request_review', 'self-review-pat'))
+    expect(tasks).toHaveLength(0)
+  })
+
+  it('does not fire for a non-review self-authored event', async () => {
+    const tasks: Array<() => Promise<void>> = []
+    const handler = createGithubWebhookHandler({
+      webhookSecret: 'secret',
+      dedup: createDeliveryDedup(),
+      allowlist: () => ['issue_comment.created'],
+      selfId: () => '99',
+      selfLogin: () => 'typeclaw-bot[bot]',
+      authType: () => 'app',
+      authToken: async () => 'tok',
+      fetchImpl: fakeFetch(() => new Response('', { status: 200 })),
+      scheduleBackgroundTask: (task) => {
+        tasks.push(task)
+      },
+      logger,
+      route: () => {},
+    })
+    const payload = {
+      action: 'created',
+      repository: repo(),
+      issue: { number: 7, pull_request: {} },
+      comment: {
+        id: 99,
+        body: 'done',
+        created_at: '2026-01-01T00:00:00Z',
+        user: { login: 'typeclaw-bot[bot]', id: 99, type: 'Bot' },
+      },
+    }
+    await handler(signedRequest(JSON.stringify(payload), 'issue_comment', 'self-comment-no-drop'))
+    expect(tasks).toHaveLength(0)
+  })
+
+  it('treats a 422 (reviewer not requested) as a benign no-op without warning', async () => {
+    const warns: string[] = []
+    const { handler, tasks } = decoyDropHandler({
+      warns,
+      fetchImpl: fakeFetch(() => new Response('Reviewers do not have permission', { status: 422 })),
+    })
+    await handler(signedRequest(JSON.stringify(selfReviewPayload()), 'pull_request_review', 'self-review-422'))
+    await tasks[0]?.()
+    expect(warns).toHaveLength(0)
+  })
+
+  it('warns when the DELETE fails for a real reason (e.g. 403 auth)', async () => {
+    const warns: string[] = []
+    const { handler, tasks } = decoyDropHandler({
+      warns,
+      fetchImpl: fakeFetch(() => new Response('Resource not accessible by integration', { status: 403 })),
+    })
+    await handler(signedRequest(JSON.stringify(selfReviewPayload()), 'pull_request_review', 'self-review-403'))
+    await tasks[0]?.()
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('failed to drop decoy reviewer @typeclaw-bot')
+  })
+})
+
+function fakeFetch(fn: (input: string, init?: RequestInit) => Response): typeof fetch {
+  const impl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+    fn(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url, init)
+  return Object.assign(impl, { preconnect: () => {} }) as typeof fetch
+}
 
 function signedRequest(body: string, event: string, delivery: string): Request {
   const sig = `sha256=${createHmac('sha256', 'secret').update(body).digest('hex')}`
