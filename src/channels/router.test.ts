@@ -3069,6 +3069,24 @@ describe('ChannelRouter commands', () => {
 
     expect(sessions).toHaveLength(0)
   })
+
+  test('/help replies with the command list on a cold channel without creating a session', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const { router, sessions } = makeRouter(dir)
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ text: '/help' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions).toHaveLength(0)
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('/help')
+    expect(sent[0]!.text).toContain('/stop')
+  })
 })
 
 describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
@@ -3090,7 +3108,7 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
     releasePrompt!()
     await draining
 
-    expect(result).toEqual({ kind: 'handled', name: 'stop' })
+    expect(result).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
     expect(sessions[0]!.aborted).toBe(1)
   })
 
@@ -3103,7 +3121,7 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
     const result = await router.executeCommand(KEY, 'stop', { invokerId: 'alice' })
     await router.__testing!.flushDebounce(KEY)
 
-    expect(result).toEqual({ kind: 'handled', name: 'stop' })
+    expect(result).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
     expect(sessions[0]!.aborted).toBe(1)
     expect(sessions[0]!.prompts).toEqual([])
     expect(router.__testing!.isTypingActive(KEY)).toBe(false)
@@ -3116,6 +3134,18 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
     const result = await router.executeCommand(KEY, 'stop', { invokerId: 'alice' })
 
     expect(result).toEqual({ kind: 'no-live-session' })
+    expect(sessions).toHaveLength(0)
+  })
+
+  test('help on a cold channel returns the command list (no live session required)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    const result = await router.executeCommand(KEY, 'help', { invokerId: 'alice' })
+
+    expect(result.kind).toBe('handled')
+    expect(result.kind === 'handled' && result.reply).toContain('/help')
+    expect(result.kind === 'handled' && result.reply).toContain('/stop')
     expect(sessions).toHaveLength(0)
   })
 
@@ -3141,7 +3171,7 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
     await router.__testing!.flushDebounce(KEY)
     const result = await router.executeCommand(KEY, 'STOP', { invokerId: 'alice' })
 
-    expect(result).toEqual({ kind: 'handled', name: 'stop' })
+    expect(result).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
     expect(sessions[0]!.aborted).toBe(1)
   })
 
@@ -3190,7 +3220,7 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
 
     const result = await router.executeCommand({ ...KEY, thread: null }, 'stop', { invokerId: 'alice' })
 
-    expect(result).toEqual({ kind: 'handled', name: 'stop' })
+    expect(result).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
     expect(sessions[0]!.aborted).toBe(1)
   })
 
@@ -3205,7 +3235,7 @@ describe('ChannelRouter.executeCommand (native slash-command surface)', () => {
 
     const result = await router.executeCommand({ ...KEY, thread: null }, 'stop', { invokerId: 'alice' })
 
-    expect(result).toEqual({ kind: 'handled', name: 'stop' })
+    expect(result).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
     expect(sessions[0]!.aborted).toBe(1)
     expect(sessions[1]!.aborted).toBe(0)
   })
@@ -5211,6 +5241,122 @@ describe('ChannelRouter channel.respond gate', () => {
     expect(sessions[0]!.aborted).toBe(1)
   })
 
+  test('respond-capable author WITHOUT session.control can still /help via text prefix', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const permissions = buildPermissions({ stranger: ['channel.respond'] })
+    const { router } = makeRouter(dir, { permissions })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'stranger', text: '/help', externalMessageId: 'm-help' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('Available commands')
+  })
+
+  test('author WITHOUT channel.respond can still /help via text prefix (parity with native slash)', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    // nobody is absent from the table → no channel.respond. /help is ungated,
+    // so it must still answer rather than being dropped by the respond gate.
+    const permissions = buildPermissions({})
+    const { router, sessions } = makeRouter(dir, { permissions })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'nobody', text: '/help', externalMessageId: 'm-help' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('Available commands')
+    expect(sessions).toHaveLength(0)
+  })
+
+  test('author WITHOUT channel.respond typing /stop is still denied at the respond gate', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const permissions = buildPermissions({})
+    const { router } = makeRouter(dir, { permissions, logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'nobody', text: '/stop', externalMessageId: 'm-stop' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((l) => l.includes('denied by permissions (channel.respond)'))).toBe(true)
+  })
+
+  test('author WITHOUT channel.respond typing an unknown /foo is still denied at the respond gate', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const permissions = buildPermissions({})
+    const { router } = makeRouter(dir, { permissions, logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'nobody', text: '/foo', externalMessageId: 'm-foo' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((l) => l.includes('denied by permissions (channel.respond)'))).toBe(true)
+    expect(logs.some((l) => l.includes('ignoring unknown command'))).toBe(false)
+  })
+
+  test('escaped //help is not executed as a command and stays subject to the respond gate', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const permissions = buildPermissions({})
+    const { router } = makeRouter(dir, { permissions })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'nobody', text: '//help', externalMessageId: 'm-esc' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(sent).toHaveLength(0)
+  })
+
+  test('authorized author typing /help gets exactly one reply (no double execution)', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const permissions = buildPermissions({ alice: ['channel.respond', 'session.control'] })
+    const { router } = makeRouter(dir, { permissions })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'alice', text: '/help', externalMessageId: 'm-help' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+  })
+
+  test('native executeCommand /help does not require session.control', async () => {
+    const dir = await tempDir()
+    const permissions = buildPermissions({ stranger: ['channel.respond'] })
+    const { router } = makeRouter(dir, { permissions })
+
+    const result = await router.executeCommand(KEY, 'help', { invokerId: 'stranger' })
+
+    expect(result.kind).toBe('handled')
+  })
+
   test('native executeCommand gates on session.control, not channel.respond', async () => {
     const dir = await tempDir()
     const permissions = buildPermissions({
@@ -5228,7 +5374,7 @@ describe('ChannelRouter channel.respond gate', () => {
     expect(sessions[0]!.aborted).toBe(0)
 
     const allowed = await router.executeCommand(KEY, 'stop', { invokerId: 'alice' })
-    expect(allowed).toEqual({ kind: 'handled', name: 'stop' })
+    expect(allowed).toEqual({ kind: 'handled', name: 'stop', reply: 'Stopped the current turn.' })
     expect(sessions[0]!.aborted).toBe(1)
   })
 

@@ -135,7 +135,9 @@ export const SLACK_SLASH_REPLY_AMBIGUOUS =
 export function commandResultReply(result: ExecuteCommandResult): string {
   switch (result.kind) {
     case 'handled':
-      return SLACK_SLASH_REPLY_ABORTED
+      // Dynamic commands (e.g. /help) carry their own reply; static control
+      // commands (/stop) leave it undefined and fall back to the fixed string.
+      return result.reply ?? SLACK_SLASH_REPLY_ABORTED
     case 'no-live-session':
       return SLACK_SLASH_REPLY_NO_LIVE_SESSION
     case 'permission-denied':

@@ -21,6 +21,7 @@ describe('createCommandRegistry', () => {
       {
         name: 'stop',
         aliases: ['abort'],
+        description: 'Stop',
         handler: ({ label }, command) => {
           handled.push(`${label}:${command.name}`)
         },
@@ -42,10 +43,57 @@ describe('createCommandRegistry', () => {
   })
 
   test('reports whether a command or alias is registered', () => {
-    const registry = createCommandRegistry<undefined>([{ name: 'stop', aliases: ['abort'], handler: () => {} }])
+    const registry = createCommandRegistry<undefined>([
+      { name: 'stop', aliases: ['abort'], description: 'Stop', handler: () => {} },
+    ])
 
     expect(registry.has('STOP')).toBe(true)
     expect(registry.has('abort')).toBe(true)
     expect(registry.has('missing')).toBe(false)
+  })
+
+  test('surfaces a handler reply on the handled result', async () => {
+    const registry = createCommandRegistry<undefined>([
+      { name: 'help', description: 'List', handler: () => ({ reply: 'all commands' }) },
+    ])
+
+    await expect(registry.execute('/help', undefined)).resolves.toEqual({
+      kind: 'handled',
+      name: 'help',
+      reply: 'all commands',
+    })
+  })
+
+  test('lists canonical commands with defaulted policy, folding aliases', () => {
+    const registry = createCommandRegistry<undefined>([
+      { name: 'stop', aliases: ['abort'], description: 'Stop the turn', handler: () => {} },
+      {
+        name: 'help',
+        description: 'List commands',
+        permission: 'none',
+        requiresLiveSession: false,
+        handler: () => {},
+      },
+    ])
+
+    expect(registry.list()).toEqual([
+      {
+        name: 'stop',
+        aliases: ['abort'],
+        description: 'Stop the turn',
+        permission: 'session.control',
+        requiresLiveSession: true,
+      },
+      { name: 'help', aliases: [], description: 'List commands', permission: 'none', requiresLiveSession: false },
+    ])
+  })
+
+  test('get() resolves aliases to the canonical command info', () => {
+    const registry = createCommandRegistry<undefined>([
+      { name: 'stop', aliases: ['abort'], description: 'Stop the turn', handler: () => {} },
+    ])
+
+    expect(registry.get('ABORT')?.name).toBe('stop')
+    expect(registry.get('missing')).toBeUndefined()
   })
 })

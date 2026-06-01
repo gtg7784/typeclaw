@@ -4,8 +4,10 @@ import type { SlackSocketModeSlashCommandArgs } from 'agent-messenger/slackbot'
 
 import {
   buildSlashAckPayload,
+  commandResultReply,
   parseSlashCommand,
   parseThreadCommand,
+  SLACK_SLASH_REPLY_ABORTED,
   type ThreadCommandInput,
 } from './slack-bot-slash-commands'
 
@@ -174,5 +176,17 @@ describe('buildSlashAckPayload', () => {
       response_type: 'ephemeral',
       text: 'Stopped.',
     })
+  })
+})
+
+describe('commandResultReply', () => {
+  test('uses a handler-provided reply when present (dynamic commands like /help)', () => {
+    expect(commandResultReply({ kind: 'handled', name: 'help', reply: 'Available commands:\n/help — List' })).toBe(
+      'Available commands:\n/help — List',
+    )
+  })
+
+  test('falls back to the static abort string when no reply is provided (/stop)', () => {
+    expect(commandResultReply({ kind: 'handled', name: 'stop' })).toBe(SLACK_SLASH_REPLY_ABORTED)
   })
 })
