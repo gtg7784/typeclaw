@@ -356,7 +356,11 @@ type LiveSession = {
   // origin so `channel_react` reacts to the triggering message, not whichever
   // inbound happens to be latest in the queue. Null on reminder-only turns.
   currentTurnReactionRef: ReactionRef | null
-  currentTurnEngageReaction: Promise<ReactionRef | null> | null
+  // One engage-:eyes:-add promise per inbound coalesced into THIS turn, each
+  // resolving to its removable per-instance ref (or null). A debounced turn can
+  // batch several inbounds that each got their own :eyes:, so every entry is
+  // removed after the reply. Empty on turns with no reactable inbound.
+  currentTurnEngageReactions: Array<Promise<ReactionRef | null>>
   lastTurnAuthorIds: Set<string>
   // Mirror of currentTurnAuthorId at end-of-turn (the LAST speaker of the
   // prior batch), preserved across the drain finally-block which resets
@@ -1130,7 +1134,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         currentTurnAuthorId: null,
         currentTurnAuthorIds: new Set(),
         currentTurnReactionRef: null,
-        currentTurnEngageReaction: null,
+        currentTurnEngageReactions: [],
         // `lastTurnAuthorId` (string, used for `lastInboundAuthorId` in
         // origin) and `lastTurnAuthorIds` (Set, used by
         // `grantStickyForReplyTargets` as the fallback when
@@ -1541,12 +1545,14 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.currentTurnAuthorId = batch[batch.length - 1]!.authorId
           live.currentTurnAuthorIds = new Set(batch.map((m) => m.authorId))
           live.currentTurnReactionRef = batch[batch.length - 1]!.reactionRef ?? null
-          live.currentTurnEngageReaction = batch[batch.length - 1]!.engageReaction ?? null
+          live.currentTurnEngageReactions = batch.flatMap((m) =>
+            m.engageReaction !== undefined ? [m.engageReaction] : [],
+          )
           live.consecutiveSends.clear()
           live.lastSentText.clear()
           live.pendingQuoteCandidate = captureQuoteCandidate(live.key.adapter, batch, observed)
         } else if (live.lastTurnAuthorId !== null) {
-          live.currentTurnEngageReaction = null
+          live.currentTurnEngageReactions = []
           // Reminder-only turn (batch.length === 0, reminders.length > 0):
           // restore the author identity from the prior turn so author-
           // scoped role resolution still works on this turn. The drain
@@ -1562,7 +1568,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.currentTurnAuthorId = live.lastTurnAuthorId
           live.currentTurnAuthorIds = new Set(live.lastTurnAuthorIds)
         } else {
-          live.currentTurnEngageReaction = null
+          live.currentTurnEngageReactions = []
         }
 
         // Update the live origin holder so this turn's tool.before events
@@ -1589,7 +1595,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
         logger.info(`[channels] ${live.keyId} prompting batch=${batch.length} text_len=${text.length}`)
         const promptStart = now()
         const successfulSendsBeforePrompt = live.successfulChannelSends
-        const engageAddPromise = live.currentTurnEngageReaction
+        const engageAddPromises = live.currentTurnEngageReactions
         live.turnSeq++
         live.successfulSendsAtTurnStart = successfulSendsBeforePrompt
         live.policyDeniedToolSendsThisTurn.clear()
@@ -1605,7 +1611,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           live.lastSentText.clear()
         } finally {
           const sentReplyThisTurn = live.successfulChannelSends > successfulSendsBeforePrompt
-          if (sentReplyThisTurn) dropEngageReactionAfterReply(live, engageAddPromise)
+          if (sentReplyThisTurn) dropEngageReactionsAfterReply(live, engageAddPromises)
           await fireSessionTurnEnd(live)
         }
         await fireSessionIdle(live)
@@ -1619,7 +1625,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       live.currentTurnAuthorId = null
       live.currentTurnAuthorIds = new Set()
       live.currentTurnReactionRef = null
-      live.currentTurnEngageReaction = null
+      live.currentTurnEngageReactions = []
       live.currentTurnAttachments = []
       await stopTypingHeartbeat(live)
     }
@@ -1869,7 +1875,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
 
     publishInbound(event, 'engage', live.sessionId)
 
-    const engageReaction = autoReactOnEngage(live, event)
+    const engageReaction = autoReactOnEngage(event)
 
     updateLoopGuard(live, event)
 
@@ -2061,7 +2067,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
   // adapter not supporting reactions, a transient API error) can NEVER block
   // engagement, enqueueing, or the agent's actual reply. No reactionRef =
   // nothing reactable (synthetic inbounds, reaction-less adapters) = silent skip.
-  const autoReactOnEngage = (live: LiveSession, event: InboundMessage): Promise<ReactionRef | null> | null => {
+  const autoReactOnEngage = (event: InboundMessage): Promise<ReactionRef | null> | null => {
     if (event.reactionRef === undefined) return null
     const addResult = react({
       adapter: event.adapter,
@@ -2072,7 +2078,6 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       emoji: ENGAGE_REACTION_EMOJI,
     })
     const addReactionRef = addResult.then((r) => (r.ok ? (r.reactionRef ?? null) : null)).catch(() => null)
-    live.currentTurnEngageReaction = addReactionRef
     void addResult
       .then((result) => {
         if (!result.ok && result.code !== 'unsupported') {
@@ -2085,8 +2090,11 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     return addReactionRef
   }
 
-  const dropEngageReactionAfterReply = (live: LiveSession, addPromise: Promise<ReactionRef | null> | null): void => {
-    if (addPromise === null) return
+  const dropEngageReactionsAfterReply = (live: LiveSession, addPromises: Array<Promise<ReactionRef | null>>): void => {
+    for (const addPromise of addPromises) dropOneEngageReactionAfterReply(live, addPromise)
+  }
+
+  const dropOneEngageReactionAfterReply = (live: LiveSession, addPromise: Promise<ReactionRef | null>): void => {
     void addPromise
       .then((reactionRef) => {
         if (reactionRef === null) return undefined

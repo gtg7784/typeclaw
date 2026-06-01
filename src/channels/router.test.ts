@@ -1466,6 +1466,38 @@ describe('ChannelRouter drop-eyes-after-reply', () => {
     expect(removed[0]).toMatchObject({ adapter: 'discord-bot', chat: 'c1', reactionRef: INSTANCE_REF })
   })
 
+  test('removes every engage reaction when multiple inbounds coalesce into one turn', async () => {
+    // given two inbounds debounced into a single turn, each with its own :eyes:
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    const instanceFor: Record<string, ReactionRef> = {
+      'msg-a': { adapter: 'discord-bot', value: 'instance-a' },
+      'msg-b': { adapter: 'discord-bot', value: 'instance-b' },
+    }
+    const removed: RemoveReactionRequest[] = []
+    router.registerReaction('discord-bot', async (req) => ({
+      ok: true,
+      reactionRef: instanceFor[req.reactionRef.value]!,
+    }))
+    router.registerRemoveReaction('discord-bot', async (req) => {
+      removed.push(req)
+      return { ok: true }
+    })
+    router.registerOutbound('discord-bot', async () => ({ ok: true }))
+
+    // when both arrive before the debounce flush, then the agent replies once
+    await router.route(inbound({ reactionRef: { adapter: 'discord-bot', value: 'msg-a' } }))
+    await router.route(inbound({ reactionRef: { adapter: 'discord-bot', value: 'msg-b' } }))
+    sessions[0]!.onPrompt = async () => {
+      await router.send({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', text: 'reply' })
+    }
+    await router.__testing!.flushDebounce(KEY)
+
+    // then both engage reactions are removed, not just the last inbound's
+    await waitFor(() => removed.length === 2)
+    expect(removed.map((r) => r.reactionRef.value).sort()).toEqual(['instance-a', 'instance-b'])
+  })
+
   test('keeps the engage reaction when the turn sends no reply', async () => {
     const dir = await tempDir()
     const { router, sessions } = makeRouter(dir)
