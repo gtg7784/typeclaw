@@ -21,6 +21,10 @@ import {
   NETWORK_BLOCK_IPV4_NETS,
   NETWORK_BLOCK_IPV6_NETS,
   TYPECLAW_ENTRYPOINT_PATH,
+  YQ_RELEASE_URL_BASE,
+  YQ_SHA256_AMD64,
+  YQ_SHA256_ARM64,
+  YQ_VERSION,
 } from './dockerfile'
 
 // Layer ordering, cache-mount preservation, and on-disk write behavior are
@@ -960,6 +964,58 @@ describe('curl-impersonate layer', () => {
   })
 })
 
+describe('yq layer', () => {
+  test('embeds the pinned version in the release URL so a bump is a deliberate, reviewable change, not a moving "latest" target', () => {
+    const out = buildDockerfile()
+    expect(out).toContain(`${YQ_RELEASE_URL_BASE}/${YQ_VERSION}/yq_linux_`)
+  })
+
+  test('verifies the binary sha256 so a tampered download fails the build', () => {
+    const out = buildDockerfile()
+    expect(out).toContain(YQ_SHA256_AMD64)
+    expect(out).toContain(YQ_SHA256_ARM64)
+    expect(out).toContain('sha256sum -c -')
+  })
+
+  test('branches by TARGETARCH so the same Dockerfile produces correct binaries on amd64 and arm64', () => {
+    const out = buildDockerfile()
+    expect(out).toMatch(/TARGETARCH.*arm64.*echo arm64.*echo amd64/s)
+  })
+
+  test('installs to /usr/local/bin (on $PATH) and smoke-tests at build time so a broken binary fails the build, not the first sandboxed pipeline', () => {
+    const out = buildDockerfile()
+    expect(out).toContain('mv yq /usr/local/bin/yq')
+    expect(out).toContain('/usr/local/bin/yq --version')
+  })
+
+  test('ships unconditionally regardless of toggles, mirroring jq — a sandbox-visible read-only pipeline tool, not a feature gate', () => {
+    const allOff = buildDockerfile(
+      dockerfileSchema.parse({
+        tmux: false,
+        gh: false,
+        python: false,
+        ffmpeg: false,
+        cjkFonts: false,
+        xvfb: false,
+        cloudflared: false,
+      }),
+    )
+    expect(allOff).toContain('mv yq /usr/local/bin/yq')
+  })
+
+  test('yq layer is between curl-impersonate and agent-browser so an agent-browser bump does not invalidate it and the apt baseline (curl, ca-certificates) is satisfied', () => {
+    const out = buildDockerfile()
+    const curlImpersonateIdx = out.indexOf('curl-impersonate.tar.gz')
+    const yqIdx = out.indexOf('mv yq /usr/local/bin/yq')
+    const agentBrowserIdx = out.indexOf('bun install -g agent-browser')
+    expect(curlImpersonateIdx).toBeGreaterThan(-1)
+    expect(yqIdx).toBeGreaterThan(-1)
+    expect(agentBrowserIdx).toBeGreaterThan(-1)
+    expect(curlImpersonateIdx).toBeLessThan(yqIdx)
+    expect(yqIdx).toBeLessThan(agentBrowserIdx)
+  })
+})
+
 describe('cloudflared layer', () => {
   test('cloudflared: true emits the pinned cloudflared download layer', () => {
     const out = buildDockerfile(dockerfileSchema.parse({ cloudflared: true }))
@@ -1014,6 +1070,14 @@ describe('base ↔ per-agent Dockerfile drift guard', () => {
     expect(base).toContain(CURL_IMPERSONATE_SHA256_AMD64)
     expect(base).toContain(CURL_IMPERSONATE_SHA256_ARM64)
     expect(base).toContain(`/usr/local/bin/curl_${CURL_IMPERSONATE_PROFILE} --version`)
+  })
+
+  test('base Dockerfile pins the same yq version, sha256s, and install path as the per-agent Dockerfile so sandboxed `... | yq` resolves regardless of which Dockerfile produced the image', () => {
+    const base = buildBaseDockerfile()
+    expect(base).toContain(`${YQ_RELEASE_URL_BASE}/${YQ_VERSION}/yq_linux_`)
+    expect(base).toContain(YQ_SHA256_AMD64)
+    expect(base).toContain(YQ_SHA256_ARM64)
+    expect(base).toContain('mv yq /usr/local/bin/yq')
   })
 
   test('base Dockerfile installs the full Playwright-tested chromium runtime dep set on amd64 — same list the per-agent Dockerfile depends on Chrome to find at launch time', () => {
