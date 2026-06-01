@@ -1,5 +1,6 @@
 import agentBrowserPlugin from '@/bundled-plugins/agent-browser'
 import backupPlugin from '@/bundled-plugins/backup'
+import bunHygienePlugin from '@/bundled-plugins/bun-hygiene'
 import explorerPlugin from '@/bundled-plugins/explorer'
 import githubCliAuthPlugin from '@/bundled-plugins/github-cli-auth'
 import guardPlugin from '@/bundled-plugins/guard'
@@ -29,6 +30,11 @@ import type { ResolvedPlugin } from '@/plugin'
 // Reversing this order would make guard advise on the full oversized payload
 // and then tool-result-cap would clobber the advice text along with the rest.
 //
+// `bun-hygiene` is registered after `guard` and guards a disjoint surface
+// (package-manager bash commands: global installs and non-bun managers), so its
+// position relative to security/guard only matters for precedence — keeping it
+// after the two general guards means a security/guard block always wins first.
+//
 // `github-cli-auth` is registered AFTER `security` so security's `tool.before`
 // runs its exfil/secret scanners on the bash command first. github-cli-auth
 // injects the minted token via an env overlay (TYPECLAW_INTERNAL_BASH_ENV), not
@@ -45,6 +51,7 @@ export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'security', version: undefined, source: '<bundled>', defined: securityPlugin },
   { name: 'tool-result-cap', version: undefined, source: '<bundled>', defined: toolResultCapPlugin },
   { name: 'guard', version: undefined, source: '<bundled>', defined: guardPlugin },
+  { name: 'bun-hygiene', version: undefined, source: '<bundled>', defined: bunHygienePlugin },
   { name: 'github-cli-auth', version: undefined, source: '<bundled>', defined: githubCliAuthPlugin },
   { name: 'memory', version: undefined, source: '<bundled>', defined: memoryPlugin },
   { name: 'backup', version: undefined, source: '<bundled>', defined: backupPlugin },
