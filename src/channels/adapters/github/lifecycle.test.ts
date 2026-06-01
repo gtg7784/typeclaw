@@ -892,6 +892,9 @@ describe('createGithubAdapter lifecycle', () => {
       if (url === 'https://api.github.com/repos/acme/widgets/installation' && method === 'GET') {
         return Response.json({ id: 99 })
       }
+      if (url === 'https://api.github.com/orgs/acme/installation' && method === 'GET') {
+        return Response.json({ id: 99 })
+      }
       if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
         return Response.json({
           permissions: { issues: 'write', pull_requests: 'write', metadata: 'read' },
@@ -969,6 +972,166 @@ describe('createGithubAdapter lifecycle', () => {
 
     await adapter.start()
     expect(setIntervalCalls).toBe(0)
+    await adapter.stop()
+  })
+
+  test('App auth: single-owner multi-repo seeds GH_TOKEN via a repo installation lookup', async () => {
+    const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+      if (url === 'https://api.github.com/app' && method === 'GET') return Response.json({ slug: 'typeey-app' })
+      if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
+        return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      if (url.endsWith('/installation') && method === 'GET') return Response.json({ id: 99 })
+      if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
+        return Response.json({ permissions: { metadata: 'read' }, events: [] })
+      }
+      if (url === 'https://api.github.com/app/installations/99/access_tokens' && method === 'POST') {
+        return Response.json({ token: 'ghs_owner', expires_at: '2099-01-01T00:00:00Z' })
+      }
+      if (url.includes('/hooks')) {
+        if (method === 'GET') return Response.json([])
+        if (method === 'POST') return Response.json({ id: 7 }, { status: 201 })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets', 'acme/gadgets']),
+      secrets: appSecrets(),
+      agentDir: '/tmp/agent',
+      logger: silentLogger(),
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
+    })
+
+    await adapter.start()
+    expect(process.env.GH_TOKEN).toBe('ghs_owner')
+    // Seed must use the repo endpoint (works for org- AND user-owned repos),
+    // never orgs/{owner}/installation (404s on personal accounts).
+    expect(calls.some((c) => c.url === 'https://api.github.com/repos/acme/gadgets/installation')).toBe(true)
+    expect(calls.some((c) => c.url.startsWith('https://api.github.com/orgs/'))).toBe(false)
+    await adapter.stop()
+    expect(process.env.GH_TOKEN).toBeUndefined()
+  })
+
+  test('App auth: user-owned (personal account) repo seeds GH_TOKEN via the repo installation', async () => {
+    const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+      if (url === 'https://api.github.com/app' && method === 'GET') return Response.json({ slug: 'typeey-app' })
+      if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
+        return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      // A personal account only resolves through repos/{owner}/{repo}/installation.
+      // orgs/{owner}/installation would 404 here — the regression this guards.
+      if (url === 'https://api.github.com/repos/octocat/hello/installation' && method === 'GET') {
+        return Response.json({ id: 77 })
+      }
+      if (url === 'https://api.github.com/orgs/octocat/installation' && method === 'GET') {
+        return new Response('Not Found', { status: 404 })
+      }
+      if (url === 'https://api.github.com/app/installations/77' && method === 'GET') {
+        return Response.json({ permissions: { metadata: 'read' }, events: [] })
+      }
+      if (url === 'https://api.github.com/app/installations/77/access_tokens' && method === 'POST') {
+        return Response.json({ token: 'ghs_user', expires_at: '2099-01-01T00:00:00Z' })
+      }
+      if (url.includes('/hooks')) {
+        if (method === 'GET') return Response.json([])
+        if (method === 'POST') return Response.json({ id: 7 }, { status: 201 })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['octocat/hello']),
+      secrets: appSecrets(),
+      agentDir: '/tmp/agent',
+      logger: silentLogger(),
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
+    })
+
+    await adapter.start()
+    expect(process.env.GH_TOKEN).toBe('ghs_user')
+    expect(calls.some((c) => c.url === 'https://api.github.com/orgs/octocat/installation')).toBe(false)
+    await adapter.stop()
+    expect(process.env.GH_TOKEN).toBeUndefined()
+  })
+
+  test('App auth: repos spanning multiple owners skip the GH_TOKEN seed and log guidance', async () => {
+    const { fetch: fetchImpl } = fakeFetchRecording(({ url, method }) => {
+      if (url === 'https://api.github.com/app' && method === 'GET') return Response.json({ slug: 'typeey-app' })
+      if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
+        return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      if (url.endsWith('/installation') && method === 'GET') return Response.json({ id: 99 })
+      if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
+        return Response.json({ permissions: { metadata: 'read' }, events: [] })
+      }
+      if (url === 'https://api.github.com/app/installations/99/access_tokens' && method === 'POST') {
+        return Response.json({ token: 'ghs_inst', expires_at: '2099-01-01T00:00:00Z' })
+      }
+      if (url.includes('/hooks')) {
+        if (method === 'GET') return Response.json([])
+        if (method === 'POST') return Response.json({ id: 7 }, { status: 201 })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const logger = recordingLogger()
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig(['acme/widgets', 'globex/gizmos']),
+      secrets: appSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
+    })
+
+    await adapter.start()
+    expect(process.env.GH_TOKEN).toBeUndefined()
+    expect(logger.messages.some((m) => m.includes('repos span multiple owners'))).toBe(true)
+    await adapter.stop()
+  })
+
+  test('App auth: no repos configured skips the GH_TOKEN seed and logs guidance', async () => {
+    const { fetch: fetchImpl, calls } = fakeFetchRecording(({ url, method }) => {
+      if (url === 'https://api.github.com/app' && method === 'GET') return Response.json({ slug: 'typeey-app' })
+      if (url === 'https://api.github.com/users/typeey-app%5Bbot%5D' && method === 'GET') {
+        return Response.json({ id: 42, login: 'typeey-app[bot]' })
+      }
+      if (url === 'https://api.github.com/app/installations' && method === 'GET') return Response.json([{ id: 99 }])
+      if (url === 'https://api.github.com/app/installations/99' && method === 'GET') {
+        return Response.json({ permissions: { metadata: 'read' }, events: [] })
+      }
+      if (url === 'https://api.github.com/app/installations/99/access_tokens' && method === 'POST') {
+        return Response.json({ token: 'ghs_sole', expires_at: '2099-01-01T00:00:00Z' })
+      }
+      return new Response('unexpected', { status: 500 })
+    })
+
+    const logger = recordingLogger()
+    const adapter = createGithubAdapter({
+      router: freshRouter(),
+      configRef: () => githubConfig([], null),
+      secrets: appSecrets(),
+      agentDir: '/tmp/agent',
+      logger,
+      fetchImpl,
+      httpListenImpl: () => ({ stop: async () => {} }),
+      webhookRegistrationDelayMs: 0,
+    })
+
+    await adapter.start()
+    expect(process.env.GH_TOKEN).toBeUndefined()
+    expect(logger.messages.some((m) => m.includes('no repos[] configured'))).toBe(true)
+    // No seed attempt means we never POST for an access token.
+    expect(calls.some((c) => c.url.endsWith('/access_tokens'))).toBe(false)
     await adapter.stop()
   })
 })

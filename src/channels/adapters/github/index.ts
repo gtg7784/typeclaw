@@ -176,17 +176,15 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         throw err
       }
       started = true
-      // GH_TOKEN is a single process-wide env var the container's `gh` CLI
-      // reads, but a GitHub App spanning multiple owners has no single correct
-      // token. Seed/refresh it only when exactly one repo is configured (PAT,
-      // or App with one unambiguous installation). With multiple repos we skip
-      // the global seed: ad-hoc `gh` calls must target a specific repo, and the
-      // adapter's own API calls always resolve a repo-scoped token via authToken.
-      const ghTokenRepo = ghTokenSeedRepo(options.configRef().repos ?? [])
-      const seedGhToken = async (): Promise<void> => {
-        process.env.GH_TOKEN = await auth.token(ghTokenRepo === null ? undefined : { repoSlug: ghTokenRepo })
-      }
-      if (ghTokenRepo !== null || options.secrets.auth.type === 'pat') {
+      // Seed the process-wide GH_TOKEN when it's unambiguous; skip otherwise.
+      // See ghTokenSeedDecision for why one owner is required. On skip, authToken
+      // still resolves a repo-scoped token per call for the adapter's own traffic.
+      const seed = ghTokenSeedDecision(options.secrets.auth.type, options.configRef().repos ?? [])
+      if (seed.kind === 'seed') {
+        const seedContext = seed.context
+        const seedGhToken = async (): Promise<void> => {
+          process.env.GH_TOKEN = await auth.token(seedContext)
+        }
         await seedGhToken()
         const tokenRefreshIntervalMs = options.tokenRefreshIntervalMs ?? DEFAULT_TOKEN_REFRESH_INTERVAL_MS
         if (tokenRefreshIntervalMs > 0) {
@@ -207,8 +205,7 @@ export function createGithubAdapter(options: GithubAdapterOptions): GithubAdapte
         }
       } else {
         logger.info(
-          '[github] multiple repos configured across possibly-different owners; GH_TOKEN not seeded globally. ' +
-            'Ad-hoc `gh` commands should set a repo-scoped token explicitly.',
+          `${GH_TOKEN_SKIP_LOG[seed.reason]} Ad-hoc \`gh\` commands should set a repo-scoped token explicitly.`,
         )
       }
       logger.info(`[github] webhook listening on port ${options.configRef().webhookPort} as @${self.login}`)
@@ -427,11 +424,33 @@ function logDeregistrationOutcome(
   }
 }
 
-// Two repos under the same owner share an installation and could in principle
-// share a global GH_TOKEN, but the marginal value doesn't justify the special
-// case — only a single configured repo yields an unambiguous seed.
-function ghTokenSeedRepo(repos: readonly string[]): string | null {
-  return repos.length === 1 ? (repos[0] ?? null) : null
+type GhTokenSeedDecision =
+  | { kind: 'seed'; context?: GithubAuthContext }
+  | { kind: 'skip'; reason: 'no-repos' | 'multiple-owners' }
+
+const GH_TOKEN_SKIP_LOG: Record<'no-repos' | 'multiple-owners', string> = {
+  'no-repos':
+    '[github] no repos[] configured; GH_TOKEN not seeded globally (cannot prove which App installation to use).',
+  'multiple-owners': '[github] repos span multiple owners (multiple App installations); GH_TOKEN not seeded globally.',
+}
+
+// Decides how to seed the process-wide GH_TOKEN. PATs aren't installation-scoped
+// (seed context-free). For App auth we seed from a configured repo slug, which
+// resolves the installation via repos/{owner}/{repo}/installation — the only
+// lookup that works for both org- and user-owned repos. One owner is required:
+// no-repos can't prove an installation, multi-owner needs >1 token.
+function ghTokenSeedDecision(authType: 'pat' | 'app', repos: readonly string[]): GhTokenSeedDecision {
+  if (authType === 'pat') return { kind: 'seed' }
+  const slugs = [...new Set(repos.filter(isWellFormedSlug))].sort()
+  if (slugs.length === 0) return { kind: 'skip', reason: 'no-repos' }
+  const owners = new Set(slugs.map((slug) => slug.split('/')[0]))
+  if (owners.size > 1) return { kind: 'skip', reason: 'multiple-owners' }
+  return { kind: 'seed', context: { repoSlug: slugs[0] } }
+}
+
+function isWellFormedSlug(repo: string): boolean {
+  const [owner, name, ...rest] = repo.split('/')
+  return owner !== undefined && owner !== '' && name !== undefined && name !== '' && rest.length === 0
 }
 
 function defaultSleep(ms: number): Promise<void> {
