@@ -4,4 +4,5 @@
 # Order matters: the LAST matching pattern wins for a given path.
 
 # Default owner for everything in the repo.
+*       @devxoul
 *       @typeey
