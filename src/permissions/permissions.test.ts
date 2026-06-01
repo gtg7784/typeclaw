@@ -288,3 +288,39 @@ describe('describe()', () => {
     expect(desc.permissions).toEqual([])
   })
 })
+
+describe('PermissionService — compareRoleSeverity', () => {
+  test('built-in tower orders owner > trusted > member > guest', () => {
+    const svc = createPermissionService()
+    expect(svc.compareRoleSeverity('owner', 'trusted')).toBe(1)
+    expect(svc.compareRoleSeverity('trusted', 'member')).toBe(1)
+    expect(svc.compareRoleSeverity('member', 'guest')).toBe(1)
+    expect(svc.compareRoleSeverity('guest', 'owner')).toBe(-1)
+    expect(svc.compareRoleSeverity('member', 'member')).toBe(0)
+  })
+
+  test('configured custom role slots between trusted and member', () => {
+    const roles = parseRoles({
+      partner: { match: ['slack:T0123 author:U_PARTNER'], permissions: ['channel.respond'] },
+    })
+    const svc = createPermissionService({ roles, pluginPermissions: PLUGIN_PERMS })
+    expect(svc.compareRoleSeverity('partner', 'member')).toBe(1)
+    expect(svc.compareRoleSeverity('partner', 'trusted')).toBe(-1)
+    expect(svc.compareRoleSeverity('trusted', 'partner')).toBe(1)
+  })
+
+  test('two configured custom roles compare equal', () => {
+    const roles = parseRoles({
+      partner: { match: ['slack:T0 author:U_A'], permissions: ['channel.respond'] },
+      vendor: { match: ['slack:T0 author:U_B'], permissions: ['channel.respond'] },
+    })
+    const svc = createPermissionService({ roles, pluginPermissions: PLUGIN_PERMS })
+    expect(svc.compareRoleSeverity('partner', 'vendor')).toBe(0)
+  })
+
+  test('unknown role on either side returns undefined (caller must deny)', () => {
+    const svc = createPermissionService()
+    expect(svc.compareRoleSeverity('ghost', 'member')).toBeUndefined()
+    expect(svc.compareRoleSeverity('owner', 'ghost')).toBeUndefined()
+  })
+})

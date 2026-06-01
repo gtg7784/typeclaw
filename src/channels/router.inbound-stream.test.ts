@@ -31,6 +31,7 @@ class FakeSession {
 const grantAll: PermissionService = {
   has: () => true,
   resolveRole: () => 'owner',
+  compareRoleSeverity: () => 1,
   describe: () => ({ role: 'owner', permissions: ['channel.respond'] }),
   replaceRoles: () => {},
 }
@@ -38,6 +39,7 @@ const grantAll: PermissionService = {
 const denyAll: PermissionService = {
   has: () => false,
   resolveRole: () => 'guest',
+  compareRoleSeverity: () => undefined,
   describe: () => ({ role: 'guest', permissions: [] }),
   replaceRoles: () => {},
 }
