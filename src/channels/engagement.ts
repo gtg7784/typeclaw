@@ -81,11 +81,25 @@ export type EngagementInput = {
 export function decideEngagement(input: EngagementInput): EngagementDecision {
   const { message, config, key, ledger, now, participants, selfAliases, botInThread } = input
 
+  // The human count drives both the sticky-credit gate (below) and the
+  // solo-human fallback (bottom). Compute it once, up front. Peer bots are
+  // excluded — a 1-human-N-bot room is still "solo" for engagement purposes.
+  const effectiveHumans = countEffectiveHumans(participants, input.membership, now)
+  const multiHumanGroup = isMultiHumanGroup(message.isDm, effectiveHumans)
+
   if (config.trigger.includes('dm') && message.isDm) return 'engage'
   if (config.trigger.includes('mention') && message.isBotMention) return 'engage'
   if (config.trigger.includes('reply') && message.replyToBotMessageId !== null) return 'engage'
 
-  if (config.stickiness !== 'off' && ledger.consume(key, message.authorId, now)) {
+  // Sticky credit. ALWAYS consume when present (the credit stays one-shot,
+  // so a later membership change can't resurrect stale conversational
+  // credit), but only let it FORCE engagement outside a multi-human group.
+  // In a group, sticky alone no longer wakes the bot on every follow-up —
+  // the author must re-address us (mention/reply/alias) to re-engage. This
+  // narrows an existing permissive rule in the exact context where it's
+  // harmful; it is NOT a new bot-specific gate (peer bots and humans are
+  // treated identically, via `multiHumanGroup`). See engagement.mdx.
+  if (config.stickiness !== 'off' && ledger.consume(key, message.authorId, now) && !multiHumanGroup) {
     return 'engage'
   }
 
@@ -169,11 +183,28 @@ export function decideEngagement(input: EngagementInput): EngagementDecision {
   // peer's first message it's caught forever.
   if (textTargetsAnyPeerBot(message.text, participants)) return 'observe'
 
-  const persistedHumans = participants.filter((p) => p.isBot !== true).length
-  const effectiveHumans = resolveEffectiveHumans(persistedHumans, input.membership, now)
   if (effectiveHumans <= 1 && !message.authorIsBot) return 'engage'
 
   return 'observe'
+}
+
+export function countEffectiveHumans(
+  participants: readonly ChannelParticipant[],
+  membership: MembershipCount | null,
+  now: number,
+): number {
+  const persistedHumans = participants.filter((p) => p.isBot !== true).length
+  return resolveEffectiveHumans(persistedHumans, membership, now)
+}
+
+// A multi-human group is the one place where the chatty "reply to every
+// follow-up" behavior (sticky credit, and the prompt's default eagerness) is
+// wrong. DMs — 1:1, or platform group-DMs reached via the `dm` trigger — and
+// solo-human channels keep the back-and-forth. The router reuses this to
+// decide both sticky suppression and the group-chat prompt nudge, so the two
+// stay in lockstep off one definition.
+export function isMultiHumanGroup(isDm: boolean, effectiveHumans: number): boolean {
+  return !isDm && effectiveHumans > 1
 }
 
 function textTargetsAnyPeerBot(text: string, participants: readonly ChannelParticipant[]): boolean {

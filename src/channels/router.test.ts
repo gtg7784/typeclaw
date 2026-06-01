@@ -4418,12 +4418,14 @@ describe('ChannelRouter peer-bot loop guard', () => {
       )
     }
 
-    // then: a follow-up engaged message must NOT carry the warning
+    // then: a follow-up engaged message must NOT carry the loop-guard warning.
+    // (A group-chat nudge shares the SYSTEM MESSAGE marker in this 2-human
+    // channel, so assert on the loop-guard-specific text, not the marker.)
     nowRef.value += 100
     await router.route(inbound({ authorId: 'alice', externalMessageId: 'alice-2', text: 'follow up' }))
     await router.__testing!.flushDebounce(KEY)
     const lastPrompt = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
-    expect(lastPrompt).not.toContain('[SYSTEM MESSAGE — not from a human]')
+    expect(lastPrompt).not.toContain('peer bots have engaged you')
   })
 
   test('loop guard notice is fenced as SYSTEM MESSAGE so models do not reply to it', async () => {
@@ -4452,6 +4454,56 @@ describe('ChannelRouter peer-bot loop guard', () => {
     // and: the old human-readable H2 heading must NOT appear (it was the
     // structural ambiguity that caused the bug)
     expect(lastPrompt).not.toContain('## ⚠️ Loop guard active')
+  })
+
+  test('engaged turn in a multi-human group carries the group-chat nudge', async () => {
+    // given a 2-human channel
+    const dir = await tempDir()
+    const nowRef = { value: 1000 }
+    const { router, sessions } = makeRouter(dir, { nowRef })
+    await router.route(inbound({ authorId: 'alice', isBotMention: true }))
+    await router.__testing!.flushDebounce(KEY)
+    await router.route(inbound({ authorId: 'bob', externalMessageId: 'bob-1', isBotMention: true }))
+    await router.__testing!.flushDebounce(KEY)
+    sessions[0]!.prompts.length = 0
+
+    // when alice explicitly mentions the bot (engages despite the crowd)
+    nowRef.value += 100
+    await router.route(inbound({ authorId: 'alice', externalMessageId: 'alice-2', isBotMention: true, text: 'bot?' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then the nudge is present and fenced, and current message still renders
+    const lastPrompt = sessions[0]!.prompts[sessions[0]!.prompts.length - 1]!
+    expect(lastPrompt).toContain('You are in a group chat with multiple people.')
+    expect(lastPrompt).toContain('**[SYSTEM MESSAGE — not from a human]**')
+    expect(lastPrompt).toContain('bot?')
+  })
+
+  test('engaged turn in a solo-human channel does NOT carry the group-chat nudge', async () => {
+    // given a single-human channel
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+
+    // when alice posts (solo-human fallback engages)
+    await router.route(inbound({ authorId: 'alice', isBotMention: false, text: 'just me here' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    // then no nudge
+    expect(sessions[0]!.prompts[0]).not.toContain('You are in a group chat with multiple people.')
+  })
+
+  test('engaged DM turn does NOT carry the group-chat nudge', async () => {
+    // given a DM
+    const dir = await tempDir()
+    const dmKey: ChannelKey = { adapter: 'discord-bot', workspace: '@dm', chat: 'd1', thread: null }
+    const { router, sessions } = makeRouter(dir)
+
+    // when a DM message arrives
+    await router.route(inbound({ workspace: '@dm', chat: 'd1', isDm: true, text: 'hey' }))
+    await router.__testing!.flushDebounce(dmKey)
+
+    // then no nudge even though dmMembership reports a bot participant
+    expect(sessions[0]!.prompts[0]).not.toContain('You are in a group chat with multiple people.')
   })
 
   test('peer-bot author lines are tagged with [bot] in the prompt', async () => {
