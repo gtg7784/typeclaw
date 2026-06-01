@@ -21,6 +21,15 @@ export type MembershipCount = {
   bots: number
   fetchedAt: number
   truncated: boolean
+  // Identities of the human members, present ONLY when the adapter enumerated
+  // the COMPLETE current membership and classified every listed member in the
+  // same pass that produced `humans`. When set, `humanMemberIds.length` equals
+  // `humans` by construction, so a consumer can prove "every human in the room
+  // is X" by resolving each id — something the bare `humans` count cannot do.
+  // Left undefined by approximate/truncated/history-derived reads and by
+  // adapters that cannot enumerate members (Telegram, KakaoTalk); consumers
+  // that need a completeness proof must fail closed when it is absent.
+  humanMemberIds?: readonly string[]
 }
 
 export type MembershipResolverFailure = { kind: 'transient' } | { kind: 'permanent' }
