@@ -51,8 +51,10 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
    Then check for a **prior review by you** — this is what makes the current request a _re-review_ (the author pushed fixes and re-requested you after you previously blocked the PR):
 
    ```sh
-   gh api /repos/owner/repo/pulls/<N>/reviews --jq '[.[] | select(.user.login == "<your-login>")] | last | {state, submitted_at}'
+   gh api --paginate --slurp /repos/owner/repo/pulls/<N>/reviews --jq 'add | [.[] | select(.user.login == "<your-login>")] | last | {state, submitted_at}'
    ```
+
+   `--paginate --slurp` is load-bearing: GitHub returns reviews 30 per page, so a bot on a long-lived PR can easily have its prior `CHANGES_REQUESTED` sitting past the first page. Without paginating, that review is invisible and a genuine re-review silently falls back to the plain-comment path — exactly the bug this flow exists to prevent. `--slurp` collects every page into one array of arrays; the `add` in the jq filter concatenates them before selecting your last review.
 
    If that returns a prior review whose `state` is `CHANGES_REQUESTED`, treat the current request as a **re-review** and carry that fact into the spawn in step 2. Only `CHANGES_REQUESTED` matters here: it is the one review state that leaves a _sticky block_ a plain comment cannot clear, which is the whole reason a re-review must end in a formal verdict. A prior `COMMENTED` or `APPROVED` review left no block to unwind, so it does not trigger the re-review path — handle the current request normally. (`<your-login>` is your GitHub App login, typically `name[bot]`.)
 
