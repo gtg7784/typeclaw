@@ -80,22 +80,33 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
    | `request-changes` | `REQUEST_CHANGES` |
    | `comment`         | `COMMENT`         |
 
-   Then submit the review in one API call:
+   Then submit the review. **Write the JSON payload to a file with the `write` tool, then run a single bare `gh api --input <file>`** — two steps:
 
-   ```sh
-   cat <<'JSON' | gh api -X POST /repos/owner/repo/pulls/<N>/reviews --input -
+   First write `/tmp/review.json` (via the `write` tool, not bash):
+
+   ```json
    {
      "event": "COMMENT",
      "body": "<reviewer's <summary> goes here>",
      "comments": [
-       { "path": "src/foo.ts", "line": 42, "side": "RIGHT", "body": "<issue + evidence + suggestion from the reviewer's finding>" },
+       {
+         "path": "src/foo.ts",
+         "line": 42,
+         "side": "RIGHT",
+         "body": "<issue + evidence + suggestion from the reviewer's finding>"
+       },
        { "path": "src/bar.ts", "line": 10, "side": "RIGHT", "body": "..." }
      ]
    }
-   JSON
    ```
 
-   **Always use `--input -` with a quoted heredoc (`<<'JSON'`) for review bodies.** Do **not** use `-f body=...` or `-F 'comments[][body]=...'`: those go through shell argument parsing, so backticks (\`) trigger command substitution and have to be backslash-escaped, which leaks the literal `\` into the rendered comment. The quoted heredoc passes the JSON through untouched — backticks, newlines, and `${...}` all survive verbatim. The same applies to any other `gh api` POST whose body contains backticks, embedded newlines, or shell metacharacters.
+   Then post it:
+
+   ```sh
+   gh api -X POST /repos/owner/repo/pulls/<N>/reviews --input /tmp/review.json
+   ```
+
+   **A repo-targeting `gh` command must be a single bare `gh` invocation — no pipes, `;`, `&&`, heredocs, or command substitution.** The `github-cli-auth` plugin injects the GitHub App token into the command's environment, so any sibling/upstream stage in a pipeline would inherit a live token; the runtime blocks those shapes. That is why the old `cat <<'JSON' | gh api --input -` heredoc-pipe no longer works: write the JSON to a file and feed it with `--input <file>` instead. Do **not** use `-f body=...` or `-F 'comments[][body]=...'`: those go through shell argument parsing, so backticks trigger command substitution. The file passes the JSON through untouched — backticks, newlines, and `${...}` all survive verbatim. The same file-then-`--input` pattern applies to any `gh api` POST whose body contains backticks, embedded newlines, or shell metacharacters.
 
    Anchor mechanics: `line` is a line number **in the file**, not a position in the diff. `side: RIGHT` is the new revision (default for additions); `side: LEFT` is the old revision (use for comments on removed lines). For multi-line comments, also set `start_line` and `start_side` (same semantics). If you need to read whole files at the PR's head SHA to validate an anchor before posting, use `gh api /repos/owner/repo/contents/<path>?ref=<headRefOid>`.
 

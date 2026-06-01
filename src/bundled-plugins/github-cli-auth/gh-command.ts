@@ -12,6 +12,56 @@ const MULTI_OWNER_REASON =
   'This command targets repos under more than one owner; a single GH_TOKEN cannot ' +
   'authenticate all of them. Split it into separate commands, one owner each.'
 
+const COMPOSITION_REASON =
+  'A repo-targeting `gh` command receives a minted GitHub App token in its process ' +
+  'environment, so it must run as a single bare `gh` command — no pipes, `;`, `&&`, ' +
+  '`||`, `&`, newlines, redirections, command/process substitution, subshells, heredocs, ' +
+  'or unquoted `$` expansion (any sibling process or expansion would inherit the token ' +
+  'and could exfiltrate it). jq/JSON metacharacters are fine INSIDE single quotes, e.g. ' +
+  "`gh api repos/o/r --jq '.[] | {id}'`. To feed JSON to `gh api`, write it to a temp " +
+  'file and use `gh api --input <file>`.'
+
+// Shell-active metacharacters that, OUTSIDE single quotes, either spawn another
+// process sharing the shell env (where the minted GH_TOKEN lives) or expand
+// shell state into an argument. `|;&` = pipeline/sequence/background; newline/CR
+// = command separators; `()` `{}` = subshell/group; `<>` = redirection
+// (incl. bash /dev/tcp networking and heredocs); backtick + `$` = command/
+// parameter/arithmetic substitution (covers `$(`, `${`, `$((`, and a bare
+// `$GH_TOKEN`). Single quotes make all of these literal, so jq pipes and JSON
+// braces are allowed when single-quoted. Double quotes do NOT neutralize `$`
+// or backticks, so they are treated as active.
+const SHELL_ACTIVE_METACHARS = new Set(['|', ';', '&', '\n', '\r', '(', ')', '{', '}', '<', '>', '`', '$'])
+
+// Returns true iff `command` is a single simple `gh ...` command: the first
+// non-whitespace word is `gh`, and no shell-active metachar appears outside
+// single quotes. This is the gate for token injection — see COMPOSITION_REASON.
+function isSingleBareGhCommand(command: string): boolean {
+  const trimmed = command.trimStart()
+  if (!/^gh(\s|$)/.test(trimmed)) return false
+
+  let quote: '"' | "'" | null = null
+  for (let i = 0; i < trimmed.length; i++) {
+    const ch = trimmed[i]
+    if (ch === undefined) continue
+    if (quote === "'") {
+      if (ch === "'") quote = null
+      continue
+    }
+    if (quote === '"') {
+      // Inside double quotes `$` and backtick still expand; only `"` closes.
+      if (ch === '"') quote = null
+      else if (ch === '$' || ch === '`') return false
+      continue
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch
+      continue
+    }
+    if (SHELL_ACTIVE_METACHARS.has(ch)) return false
+  }
+  return quote === null
+}
+
 // GENUINELY repo-less subcommands (account/global, no -R/--repo): they need no
 // token injection and pass through. The set is intentionally minimal —
 // anything not listed (label, ruleset, secret, variable, cache, run, workflow,
@@ -62,6 +112,12 @@ export function analyzeGhCommand(command: string): GhCommandDecision {
   if (repoSlugs.length === 0) return { kind: 'pass-through' }
   const owners = new Set(repoSlugs.map((slug) => slug.split('/')[0]))
   if (owners.size > 1) return { kind: 'block', reason: MULTI_OWNER_REASON }
+
+  // We would inject a token. Enforce the single-bare-`gh` shape: the token
+  // lands in the shell's env, so any sibling/upstream/downstream process or
+  // shell expansion would inherit it.
+  if (!isSingleBareGhCommand(command)) return { kind: 'block', reason: COMPOSITION_REASON }
+
   return { kind: 'inject', repoSlug: repoSlugs[0] as string }
 }
 
