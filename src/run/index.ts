@@ -276,19 +276,22 @@ export async function startAgent({
       const { results } = await reloadRegistry.reloadAll()
       return formatChannelReloadSummary(results)
     },
-    ...(containerName !== undefined
-      ? {
-          onRestart: async (): Promise<string> => {
-            // No originatingSessionId/stream/handoff: a channel-invoked restart
-            // must not write a resume hint or fire the "I'm back" broadcast that
-            // a TUI restart does (issue #291 scoping — only TUI origins resume).
-            const result = await requestContainerRestart({ containerName })
-            return result.ok
-              ? 'Restart scheduled; the container will bounce shortly.'
-              : `Restart denied: ${result.reason}`
-          },
-        }
-      : {}),
+    // Always registered so /restart's presence in /help, the Slack manifest,
+    // and the Discord declarations is environment-independent. When there is no
+    // container to bounce (TYPECLAW_CONTAINER_NAME unset — tests, ad-hoc
+    // `typeclaw run` outside Docker), the handler reports that instead of the
+    // command resolving as unknown, which would make the advertised contract
+    // depend on the runtime environment.
+    onRestart: async (): Promise<string> => {
+      if (containerName === undefined) {
+        return 'Restart is unavailable: this agent is not running inside a typeclaw container.'
+      }
+      // No originatingSessionId/stream/handoff: a channel-invoked restart must
+      // not write a resume hint or fire the "I'm back" broadcast that a TUI
+      // restart does (issue #291 scoping — only TUI origins resume).
+      const result = await requestContainerRestart({ containerName })
+      return result.ok ? 'Restart scheduled; the container will bounce shortly.' : `Restart denied: ${result.reason}`
+    },
   })
 
   const createSessionForSubagent: import('@/agent/subagents').CreateSessionForSubagent = async (

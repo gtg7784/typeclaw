@@ -5981,6 +5981,25 @@ describe('ChannelRouter /reload and /restart (session.admin gate)', () => {
     const restart = await router.executeCommand(KEY, 'restart', { invokerId: 'owner' })
     expect(restart).toEqual({ kind: 'handled', name: 'restart', reply: 'restarting' })
   })
+
+  test('a /restart handler that reports unavailability is still handled, not unknown', async () => {
+    const dir = await tempDir()
+    const permissions = buildPermissions({ owner: ['channel.respond', 'session.admin'] })
+    // Models the container-less wiring: the command is registered, so it stays
+    // in /help and the manifest, but the handler reports it cannot act. The
+    // surface must not depend on the environment — the command is always known.
+    const { router } = makeRouter(dir, {
+      permissions,
+      onRestart: async () => 'Restart is unavailable in this environment.',
+    })
+
+    const result = await router.executeCommand(KEY, 'restart', { invokerId: 'owner' })
+    expect(result).toEqual({
+      kind: 'handled',
+      name: 'restart',
+      reply: 'Restart is unavailable in this environment.',
+    })
+  })
 })
 
 describe('ChannelRouter role-claim bypass', () => {
