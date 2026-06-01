@@ -67,4 +67,14 @@ describe('channelsSchema', () => {
     })
     expect(parsed.github?.webhookUrl).toBe('https://agent.example.com/github')
   })
+
+  test('github allowApprove defaults to true', () => {
+    const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'] } })
+    expect(parsed.github?.allowApprove).toBe(true)
+  })
+
+  test('github allowApprove accepts false', () => {
+    const parsed = channelsSchema.parse({ github: { repos: ['owner/repo'], allowApprove: false } })
+    expect(parsed.github?.allowApprove).toBe(false)
+  })
 })

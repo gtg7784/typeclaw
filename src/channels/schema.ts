@@ -146,6 +146,14 @@ const githubChannelSchema = adapterSchema.extend({
   // this session is deleted so a restart with a different webhookUrl (e.g.
   // a tunnel reassigning a URL) doesn't leave orphaned hooks on GitHub.
   repos: z.array(z.string()).default([]),
+  // Whether the agent may submit a formal PR review with `event: APPROVE`.
+  // When `false`, the adapter appends an operator-policy note to inbounds and
+  // the `typeclaw-channel-github` skill downgrades an `approve` verdict to a
+  // `COMMENT` review (findings still posted, no formal approval). Enforced in
+  // the inbound text rather than at the bash layer because the review posts
+  // via `gh api --input <file>`, so the `event` value lives in a temp file the
+  // command interceptor never sees.
+  allowApprove: z.boolean().default(true),
 })
 
 // KakaoTalk uses the same shape as every other adapter. There used to be an

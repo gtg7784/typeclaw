@@ -104,6 +104,7 @@ const enabledGithubCfg = () => ({
   webhookPort: 0,
   eventAllowlist: ['issue_comment.created'],
   repos: [],
+  allowApprove: true,
 })
 
 const writeGithubSecrets = async (dir: string): Promise<void> => {

@@ -8,6 +8,7 @@ import {
   classifyGithubInbound,
   createGithubWebhookHandler,
   type GithubWebhookHandlerOptions,
+  PR_APPROVAL_DISABLED_NOTE,
   verifySignature,
 } from './inbound'
 import { decodeGithubReactionRef } from './reactions'
@@ -871,6 +872,59 @@ function fakeFetch(fn: (input: string, init?: RequestInit) => Response): typeof 
     fn(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url, init)
   return Object.assign(impl, { preconnect: () => {} }) as typeof fetch
 }
+
+describe('createGithubWebhookHandler — allowApprove policy note', () => {
+  const baseOptions = (routed: InboundMessage[], allowApprove?: () => boolean): GithubWebhookHandlerOptions => ({
+    webhookSecret: 'secret',
+    dedup: createDeliveryDedup(),
+    allowlist: () => ['pull_request.review_requested', 'issue_comment.created'],
+    selfId: () => '99',
+    selfLogin: () => 'typeclaw-bot',
+    logger,
+    route: (msg) => {
+      routed.push(msg)
+    },
+    ...(allowApprove !== undefined ? { allowApprove } : {}),
+  })
+
+  it('does not append the note when approval is allowed (review_requested)', async () => {
+    const routed: InboundMessage[] = []
+    const handler = createGithubWebhookHandler(baseOptions(routed, () => true))
+    await handler(
+      signedRequest(JSON.stringify(reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' })), 'pull_request', 'd1'),
+    )
+    expect(routed[0]?.text).toContain('requested your review on PR #7')
+    expect(routed[0]?.text).not.toContain(PR_APPROVAL_DISABLED_NOTE)
+  })
+
+  it('does not append the note when allowApprove is omitted (defaults to allowed)', async () => {
+    const routed: InboundMessage[] = []
+    const handler = createGithubWebhookHandler(baseOptions(routed))
+    await handler(
+      signedRequest(JSON.stringify(reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' })), 'pull_request', 'd2'),
+    )
+    expect(routed[0]?.text).not.toContain(PR_APPROVAL_DISABLED_NOTE)
+  })
+
+  it('appends the note to a review_requested inbound when approval is disabled', async () => {
+    const routed: InboundMessage[] = []
+    const handler = createGithubWebhookHandler(baseOptions(routed, () => false))
+    await handler(
+      signedRequest(JSON.stringify(reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' })), 'pull_request', 'd3'),
+    )
+    expect(routed[0]?.text).toContain('requested your review on PR #7')
+    expect(routed[0]?.text).toContain(PR_APPROVAL_DISABLED_NOTE)
+  })
+
+  it('appends the note to a plain-language inbound (issue comment) when approval is disabled', async () => {
+    const routed: InboundMessage[] = []
+    const handler = createGithubWebhookHandler(baseOptions(routed, () => false))
+    await handler(signedRequest(JSON.stringify(issueCommentPayload({ pullRequest: true })), 'issue_comment', 'd4'))
+    expect(routed[0]?.chat).toBe('pr:7')
+    expect(routed[0]?.text).toContain('@typeclaw-bot hello')
+    expect(routed[0]?.text).toContain(PR_APPROVAL_DISABLED_NOTE)
+  })
+})
 
 function signedRequest(body: string, event: string, delivery: string): Request {
   const sig = `sha256=${createHmac('sha256', 'secret').update(body).digest('hex')}`
