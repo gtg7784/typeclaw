@@ -6,7 +6,12 @@ export type GithubAuthType = 'pat' | 'app'
 // permission-failure response. Each value maps to a distinct GitHub App
 // permission family (and, for PATs, a distinct scope), so each surfaces a
 // different remediation message.
-export type OutboundEndpointKind = 'issue-comment' | 'pr-review-reply' | 'discussion-comment'
+export type OutboundEndpointKind =
+  | 'issue-comment'
+  | 'pr-review-reply'
+  | 'discussion-comment'
+  | 'issue-reaction'
+  | 'pr-review-comment-reaction'
 
 // Parses webhook-register errors of the shape `list hooks failed: <status> <body>`.
 // Returns the status code when it matches the two shapes GitHub emits for
@@ -126,6 +131,20 @@ const OUTBOUND_PERMISSION_FOR_KIND: Record<
     level: 'Read and write',
     patScope: 'repo',
     patFineGrained: 'Discussions',
+  },
+  // Reactions on an issue/PR body or an issue comment go through the Issues
+  // permission family; reactions on a PR review comment go through Pull requests.
+  'issue-reaction': {
+    label: 'Issues',
+    level: 'Read and write',
+    patScope: 'repo (or public_repo for public repos)',
+    patFineGrained: 'Issues',
+  },
+  'pr-review-comment-reaction': {
+    label: 'Pull requests',
+    level: 'Read and write',
+    patScope: 'repo',
+    patFineGrained: 'Pull requests',
   },
 }
 

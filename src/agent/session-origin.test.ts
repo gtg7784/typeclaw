@@ -115,6 +115,32 @@ describe('renderSessionOrigin', () => {
     expect(out).toMatch(/rephrase, restate/i)
   })
 
+  test('github channel origin replaces the "On it" text ack with the engage-reaction guidance', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'github',
+      workspace: 'acme/project',
+      chat: 'pr:7',
+      thread: null,
+    })
+    // GitHub gets the reaction-based ack, not the chat-style "On it." text ack.
+    expect(out).not.toContain('"On it."')
+    expect(out).toMatch(/already added an :eyes: reaction/i)
+    expect(out).toMatch(/channel_react/)
+    expect(out).toMatch(/Do not post an "On it" ack comment/i)
+  })
+
+  test('non-github channel origin keeps the "On it." text ack', () => {
+    const out = renderSessionOrigin({
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0',
+      chat: 'C0',
+      thread: null,
+    })
+    expect(out).toContain('"On it."')
+  })
+
   test('channel origin tells the model that plain-text narration is invisible and must go through channel_reply', () => {
     const out = renderSessionOrigin({
       kind: 'channel',

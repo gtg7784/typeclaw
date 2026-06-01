@@ -1,5 +1,6 @@
 import { MEMBERSHIP_FRESHNESS_MS, type MembershipCount } from '@/channels/membership'
 import type { AdapterId } from '@/channels/schema'
+import type { ReactionRef } from '@/channels/types'
 
 export type ChannelParticipant = {
   authorId: string
@@ -38,6 +39,7 @@ export type SessionOrigin =
       chatName?: string
       thread: string | null
       lastInboundAuthorId?: string
+      reactionRef?: ReactionRef
       participants?: readonly ChannelParticipant[]
       membership?: MembershipCount
     }
@@ -301,6 +303,13 @@ function renderChannelOrigin(
       'audience: post the answer (or review summary) itself, never a status',
       'line about having posted it elsewhere. A narrated "Posted review result',
       'for PR #N: …" inside the PR is exactly the failure to avoid.',
+      '',
+      '**Do not post an "On it" acknowledgment comment.** The runtime already',
+      'adds an :eyes: reaction to the triggering item the moment it engages, so a',
+      'separate "looking into this" comment is redundant noise on the PR. If you',
+      'want to signal acknowledgment explicitly, use `channel_react({ emoji })`',
+      '(it reacts, it does not comment) — never a text ack. Reserve `channel_reply`',
+      'for the actual substantive answer.',
     )
   }
 
@@ -339,12 +348,21 @@ function renderChannelOrigin(
     '`channel_reply` call, not narration. This includes acks.',
     '',
     '**One substantive reply per inbound.** If the answer needs more than one',
-    'tool call, send a one-line ack first via `channel_reply({ text: "On it.",',
-    'continue: true })`, keep working, then send the answer with a final',
-    '`channel_reply`. The ack is not your reply; the answer is. Once the answer',
-    'lands, end your turn. The `continue: true` is not optional on that ack:',
-    'without it the turn ends the instant the ack lands and the rest of your',
-    'work — the fetch, the subagent, the actual answer — is silently dropped.',
+    ...(origin.adapter === 'github'
+      ? [
+          'tool call, keep working and post the answer with a single final',
+          '`channel_reply`. Do not post an "On it" ack comment first — the runtime',
+          'already added an :eyes: reaction on engage; use `channel_react` if you',
+          'want to acknowledge explicitly. The answer is your reply.',
+        ]
+      : [
+          'tool call, send a one-line ack first via `channel_reply({ text: "On it.",',
+          'continue: true })`, keep working, then send the answer with a final',
+          '`channel_reply`. The ack is not your reply; the answer is. Once the answer',
+          'lands, end your turn. The `continue: true` is not optional on that ack:',
+          'without it the turn ends the instant the ack lands and the rest of your',
+          'work — the fetch, the subagent, the actual answer — is silently dropped.',
+        ]),
     '',
     '**Backgrounded work does not end the obligation.** If you spawn a',
     'subagent with `run_in_background: true` to answer the current inbound,',

@@ -40,6 +40,7 @@ import type {
   HistoryCallback,
   InboundMessage,
   OutboundMessage,
+  ReactionRequest,
   SendResult,
 } from './types'
 
@@ -1328,6 +1329,112 @@ describe('ChannelRouter outbound', () => {
     })
     expect(result.ok).toBe(false)
     expect(result.ok === false ? result.error : '').toContain('denied')
+  })
+})
+
+describe('ChannelRouter auto-react on engage', () => {
+  const REACTION_REF = { adapter: 'discord-bot' as const, value: 'msg-ref' }
+
+  test('adds an :eyes: reaction to the triggering inbound when engaging', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const captured: ReactionRequest[] = []
+    router.registerReaction('discord-bot', async (req) => {
+      captured.push(req)
+      return { ok: true }
+    })
+
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+
+    await waitFor(() => captured.length > 0)
+    expect(captured[0]).toMatchObject({ adapter: 'discord-bot', chat: 'c1', emoji: 'eyes', reactionRef: REACTION_REF })
+    await router.__testing!.flushDebounce(KEY)
+  })
+
+  test('does not attempt a reaction when the inbound carries no reactionRef', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    let called = false
+    router.registerReaction('discord-bot', async () => {
+      called = true
+      return { ok: true }
+    })
+
+    await router.route(inbound())
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(called).toBe(false)
+  })
+
+  test('a throwing reaction callback never blocks engagement (session still created, reply still sends)', async () => {
+    const dir = await tempDir()
+    const { router, sessions } = makeRouter(dir)
+    router.registerReaction('discord-bot', async () => {
+      throw new Error('reaction api exploded')
+    })
+    const outbound: string[] = []
+    router.registerOutbound('discord-bot', async (msg) => {
+      outbound.push(msg.text ?? '')
+      return { ok: true }
+    })
+
+    await router.route(inbound({ reactionRef: REACTION_REF }))
+    sessions[0]!.onPrompt = () => sessions[0]!.setAssistantText('NO_REPLY')
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sessions.length).toBe(1)
+  })
+
+  test('react() reports unsupported for an adapter with no reaction callback', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    const result = await router.react({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      thread: null,
+      reactionRef: REACTION_REF,
+      emoji: 'eyes',
+    })
+    expect(result).toEqual({
+      ok: false,
+      error: 'adapter "discord-bot" does not support reactions',
+      code: 'unsupported',
+    })
+  })
+
+  test('react() refuses a ref whose adapter does not match the request adapter', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerReaction('discord-bot', async () => ({ ok: true }))
+    const result = await router.react({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      thread: null,
+      reactionRef: { adapter: 'slack-bot', value: 'x' },
+      emoji: 'eyes',
+    })
+    expect(result).toEqual({ ok: false, error: 'reaction ref adapter mismatch', code: 'unsupported' })
+  })
+
+  test('react() converts a throwing callback into a transient failure result, not a rejection', async () => {
+    const dir = await tempDir()
+    const { router } = makeRouter(dir)
+    router.registerReaction('discord-bot', async () => {
+      throw new Error('reaction api exploded')
+    })
+
+    const result = await router.react({
+      adapter: 'discord-bot',
+      workspace: 'g1',
+      chat: 'c1',
+      thread: null,
+      reactionRef: REACTION_REF,
+      emoji: 'eyes',
+    })
+
+    expect(result).toEqual({ ok: false, error: 'reaction api exploded', code: 'transient' })
   })
 })
 

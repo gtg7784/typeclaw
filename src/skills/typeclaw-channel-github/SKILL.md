@@ -50,7 +50,7 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
 
 2. **Spawn the `reviewer` subagent with the PR target.** Use `run_in_background: true` so you stay responsive while the deep model works. Pass the PR URL (or `owner/repo#N`) plus any context the requester gave you (focus areas, specific files, etc.). The reviewer fetches the diff itself (`gh pr diff`, `gh api /repos/.../pulls/<n>`), loads the `code-review` skill, and returns a `<review>` block whose code findings carry `location="path:line"`.
 
-   If you post an "on it" acknowledgement before spawning the reviewer, it **must** be `channel_reply({ text: "…", continue: true })` — a bare reply ends the turn and the review never starts (see "Mid-turn status replies need `continue: true`" above).
+   Do **not** post an "on it" acknowledgement comment before spawning the reviewer — the runtime already adds an :eyes: reaction to the PR the moment it engages, so a "looking into this" comment is redundant noise. Just spawn the reviewer with `run_in_background: true` and keep working; the formal review is your reply. If you want to acknowledge explicitly, use `channel_react({ emoji: "eyes" })`, which reacts without posting a comment.
 
 3. **Wait for the completion `<system-reminder>`,** then call `subagent_output({ task_id })` to read the reviewer's final assistant message. The structured payload looks like:
 

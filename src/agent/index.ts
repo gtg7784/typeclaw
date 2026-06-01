@@ -49,6 +49,7 @@ import {
 } from './tool-result-budget'
 import { createChannelFetchAttachmentTool } from './tools/channel-fetch-attachment'
 import { createChannelHistoryTool } from './tools/channel-history'
+import { createChannelReactTool } from './tools/channel-react'
 import { createChannelReplyTool } from './tools/channel-reply'
 import { createChannelSendTool } from './tools/channel-send'
 import { createGrantRoleTool } from './tools/grant-role'
@@ -532,6 +533,12 @@ export function buildChannelTools(
     tools.push(createChannelReplyTool({ router: channelRouter, origin: channelOrigin }))
     tools.push(createChannelHistoryTool({ router: channelRouter, origin: channelOrigin }))
     tools.push(createChannelSendTool({ router: channelRouter, origin: channelOrigin }))
+    tools.push(
+      createChannelReactTool({
+        router: channelRouter,
+        origin: { ...channelOrigin, ...(origin.reactionRef !== undefined ? { reactionRef: origin.reactionRef } : {}) },
+      }),
+    )
     tools.push(
       createChannelFetchAttachmentTool({
         router: channelRouter,
