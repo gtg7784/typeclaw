@@ -58,6 +58,40 @@ describe('analyzeGhCommand', () => {
     })
   })
 
+  // For `gh api`, the literal endpoint path is where the request actually goes;
+  // `gh` ignores -R for a literal /repos path. Trusting -R here would mint a
+  // token for the (allowlisted) flag repo while the call hits the path repo.
+  it('blocks gh api when the literal path repo differs from -R (mint-for-X-hit-Y)', () => {
+    const result = analyzeGhCommand('gh api /repos/victim/private/issues -R acme/widgets')
+    expect(result.kind).toBe('block')
+    if (result.kind === 'block') expect(result.reason).toContain('ignores `-R`')
+  })
+
+  it('allows gh api when -R matches the literal path repo', () => {
+    expect(analyzeGhCommand('gh api /repos/acme/widgets/pulls/1 -R acme/widgets')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+  })
+
+  it('uses -R for a quoted {owner}/{repo} placeholder endpoint', () => {
+    expect(analyzeGhCommand("gh api 'repos/{owner}/{repo}/issues' -R acme/widgets")).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+  })
+
+  it('passes through a non-repo gh api endpoint even with -R present', () => {
+    expect(analyzeGhCommand('gh api graphql -f query=x -R acme/widgets')).toEqual({ kind: 'pass-through' })
+    expect(analyzeGhCommand('gh api /user -R acme/widgets')).toEqual({ kind: 'pass-through' })
+  })
+
+  it('blocks a gh api compare endpoint that reaches a cross-fork head repo', () => {
+    // /compare/main...attacker:branch also touches attacker/widgets — a
+    // different owner, so the same-owner invariant refuses the mint.
+    expect(analyzeGhCommand('gh api /repos/acme/widgets/compare/main...attacker:branch').kind).toBe('block')
+  })
+
   it('blocks a repo-targeting subcommand with no repo specified', () => {
     const result = analyzeGhCommand('gh pr view 12')
     expect(result.kind).toBe('block')
