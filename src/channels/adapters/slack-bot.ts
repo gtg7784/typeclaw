@@ -6,6 +6,7 @@ import {
 } from 'agent-messenger/slackbot'
 
 import {
+  MEMBERSHIP_CACHE_TRANSIENT_TTL_MS,
   MEMBERSHIP_CACHE_TTL_MS,
   MEMBERSHIP_ENUMERATION_CAP,
   type MembershipResolver,
@@ -427,14 +428,25 @@ export function createSlackMembershipResolver(deps: {
   const userBotCache = new Map<string, boolean>()
 
   let botSetCache: { ids: ReadonlySet<string>; fetchedAt: number } | null = null
+  let botSetFailedAt: number | null = null
   let botSetInFlight: Promise<ReadonlySet<string> | null> | null = null
 
   const warmBotSet = async (): Promise<ReadonlySet<string> | null> => {
     if (botSetCache !== null && now() - botSetCache.fetchedAt < MEMBERSHIP_CACHE_TTL_MS) return botSetCache.ids
+    // Negative-cache a failed warm so a rate-limited workspace doesn't re-run
+    // the full paginated `users.list` crawl on every membership read — that
+    // would keep the hot path expensive under the exact failure this PR fixes.
+    // Members fall back to per-id `users.info` during the cooldown.
+    if (botSetFailedAt !== null && now() - botSetFailedAt < MEMBERSHIP_CACHE_TRANSIENT_TTL_MS) return null
     if (botSetInFlight !== null) return await botSetInFlight
     botSetInFlight = fetchWorkspaceBotIds(fetchFn, deps.token, deps.logger)
       .then((ids) => {
-        if (ids !== null) botSetCache = { ids, fetchedAt: now() }
+        if (ids !== null) {
+          botSetCache = { ids, fetchedAt: now() }
+          botSetFailedAt = null
+        } else {
+          botSetFailedAt = now()
+        }
         return ids
       })
       .finally(() => {
@@ -557,7 +569,12 @@ async function resolveSlackUserIsBot(
   const info = await slackApi<SlackUserInfoResponse>(fetchFn, token, 'users.info', { user: userId })
   if (!info.ok) {
     logger.warn(`[slack-bot] membership users.info user=${userId} failed: ${info.reason}`)
-    cache.set(userId, false)
+    // Only a definitive answer is cached. A transient failure (429/network)
+    // must not be memoized as "human" — that would poison classification until
+    // restart and let a peer bot read as human, skewing engagement and
+    // `grant_role`'s "no peer bot" proof. Default this read to human (the
+    // safe, count-conservative direction) but let the next read retry.
+    if (info.failure.kind === 'permanent') cache.set(userId, false)
     return false
   }
   const isBot = info.value.user?.is_bot === true
