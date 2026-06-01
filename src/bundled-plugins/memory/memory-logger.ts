@@ -206,7 +206,7 @@ When you evaluated the transcript but found nothing worth a fragment, call the w
 
 You are done the moment BOTH are true: (1) you have read to the end of the transcript (reached \`totalLines\` from \`find_entry\`, or a \`read\` returned no new content), and (2) you have either written your fragment(s) with the final \`latestEntryId\`, or advanced the watermark for the zero-fragment case. When both hold, simply stop. There is no completion message to emit.
 
-Do not loop. If you notice you have called \`read\` more than a handful of times on the same file, or a \`read\` returned nothing new, you are already at the end — stop reading immediately and proceed to your fragment decision. A transcript has a fixed length; re-reading it cannot surface content that is not there. The single most expensive failure mode for this subagent is re-reading the same file in a cycle instead of recognizing end-of-file and stopping.`
+Do not loop. The hard stop is \`totalLines\`: a long transcript may legitimately need many \`read\` chunks to reach it, and that is fine as long as each \`read\` advances the offset toward \`totalLines\`. What is NOT fine is re-reading without progress. If a \`read\` returns no new content, returns the same slice you already saw, or your offset stops advancing, you are at the end — stop reading immediately and proceed to your fragment decision. A transcript has a fixed length; re-reading the same offset cannot surface content that is not there. The single most expensive failure mode for this subagent is re-reading the same file in a cycle instead of recognizing end-of-file and stopping.`
 
 function buildInitialPrompt(payload: MemoryLoggerPayload, streamFile: string, watermark: string | null): string {
   const lines: string[] = [

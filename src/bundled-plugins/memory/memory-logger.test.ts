@@ -237,12 +237,13 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     expect(lower).toMatch(/do not re-?read|do not retry|do not repeat the (same )?read|never re-?read/)
   })
 
-  test('bounds total read calls so a finite transcript cannot loop indefinitely', () => {
+  test('ties the hard stop to find_entry totalLines, not to a read-call count', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
-    expect(lower).toMatch(/find_entry.*totalLines|totallines.*find_entry|total line count/)
+    expect(lower).toMatch(/`find_entry` gives you `totallines=t` up front, so you always know the last line/)
     expect(lower).toMatch(
-      /once you (have )?(read|reach).*totallines|when .*offset.*exceed|past.*totallines|beyond.*last line/,
+      /the hard stop is `totallines`: a long transcript may legitimately need many `read` chunks to reach it/,
     )
+    expect(lower).not.toMatch(/more than a handful of (?:reads|times)/)
   })
 })
 
