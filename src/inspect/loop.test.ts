@@ -323,4 +323,54 @@ describe('runInspectLoop', () => {
     expect(result.ok).toBe(false)
     expect(torn).toBe(1)
   })
+
+  test('ctrl-c (sigint signal) during the tail exits without re-opening the picker', async () => {
+    // Ctrl-C must terminate inspect, not loop back to the session list. The exit
+    // signal (process SIGINT) aborts the same tail as ESC, but streamSession
+    // reports escToPicker=false when opts.signal is aborted, so the loop returns.
+    // afterEscStream still tears the listener down exactly once on the way out.
+    await seedSession(`a_${ID_LOOP_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine('first')], 1000)
+    await seedSession(`b_${ID_LOOP_B}.jsonl`, [metaLine({ kind: 'tui' }), userLine('second')], 2000)
+    const sink = captureSink()
+
+    const sigint = new AbortController()
+    let liveCallCount = 0
+    let pickerCalls = 0
+    let torn = 0
+
+    async function* awaitableLive(signal: AbortSignal | undefined): AsyncGenerator<InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'hello' } }
+      await new Promise<void>((resolve) => {
+        if (signal === undefined || signal.aborted) return resolve()
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    }
+
+    const result = await runInspectLoop({
+      agentDir,
+      sessionIdOrPrefix: ID_LOOP_A,
+      color: false,
+      signal: sigint.signal,
+      selectSession: async (sessions) => {
+        pickerCalls++
+        return sessions.find((s) => s.sessionId === ID_LOOP_B) ?? null
+      },
+      liveSource: (o) => {
+        liveCallCount++
+        // Ctrl-C: abort the SIGINT signal mid-tail (esc was never pressed).
+        queueMicrotask(() => sigint.abort())
+        return awaitableLive(o.signal)
+      },
+      newEscSignal: () => new AbortController().signal,
+      afterEscStream: () => {
+        torn++
+      },
+      ...sink.push,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(pickerCalls).toBe(0)
+    expect(liveCallCount).toBe(1)
+    expect(torn).toBe(1)
+  })
 })
