@@ -243,4 +243,134 @@ describe('runInspectLoop', () => {
     expect(pickerHints[0]).toBeUndefined()
     expect(pickerHints[1]).toBe(ID_LOOP_A)
   })
+
+  test('afterEscStream fires after the esc-aborted tail and before the picker re-opens', async () => {
+    // Regression: pressing ESC during the live tail froze the CLI over SSH/Bun
+    // because the raw-mode ESC listener stayed armed across the abort, so clack
+    // inherited a flowing raw stdin it could not own. The loop must disarm the
+    // listener (afterEscStream) after the tail settles and before re-selecting.
+    await seedSession(`a_${ID_LOOP_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine('first')], 1000)
+    await seedSession(`b_${ID_LOOP_B}.jsonl`, [metaLine({ kind: 'tui' }), userLine('second')], 2000)
+    const sink = captureSink()
+
+    const trace: string[] = []
+    let escController: AbortController | null = null
+    let liveCallCount = 0
+
+    async function* awaitableLive(signal: AbortSignal | undefined): AsyncGenerator<InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'hello' } }
+      await new Promise<void>((resolve) => {
+        if (signal === undefined || signal.aborted) return resolve()
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    }
+    async function* finiteLive(): AsyncGenerator<InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'second-stream' } }
+    }
+
+    const result = await runInspectLoop({
+      agentDir,
+      sessionIdOrPrefix: ID_LOOP_A,
+      color: false,
+      selectSession: async (sessions) => {
+        trace.push('select')
+        return sessions.find((s) => s.sessionId === ID_LOOP_B) ?? null
+      },
+      liveSource: (o) => {
+        liveCallCount++
+        if (liveCallCount === 1) {
+          queueMicrotask(() => escController?.abort())
+          return awaitableLive(o.signal)
+        }
+        return finiteLive()
+      },
+      newEscSignal: () => {
+        escController = new AbortController()
+        return escController.signal
+      },
+      afterEscStream: () => {
+        trace.push('teardown')
+      },
+      ...sink.push,
+    })
+
+    expect(result.ok).toBe(true)
+    // teardown runs after the aborted first tail, then the picker opens, then
+    // teardown runs again after the second (finite) tail settles.
+    expect(trace).toEqual(['teardown', 'select', 'teardown'])
+  })
+
+  test('afterEscStream fires on a non-esc early return (bad filter)', async () => {
+    // The teardown hook must run on every loop exit path, not just esc-to-picker,
+    // so an interrupted run can never leave the listener armed.
+    await seedSession(`a_${ID_LOOP_D}.jsonl`, [metaLine({ kind: 'tui' })], 1000)
+    const sink = captureSink()
+    let torn = 0
+
+    const result = await runInspectLoop({
+      agentDir,
+      sessionIdOrPrefix: ID_LOOP_D,
+      filter: 'not-a-real-category',
+      color: false,
+      selectSession: async () => null,
+      newEscSignal: () => new AbortController().signal,
+      afterEscStream: () => {
+        torn++
+      },
+      ...sink.push,
+    })
+
+    expect(result.ok).toBe(false)
+    expect(torn).toBe(1)
+  })
+
+  test('ctrl-c (sigint signal) during the tail exits without re-opening the picker', async () => {
+    // Ctrl-C must terminate inspect, not loop back to the session list. The exit
+    // signal (process SIGINT) aborts the same tail as ESC, but streamSession
+    // reports escToPicker=false when opts.signal is aborted, so the loop returns.
+    // afterEscStream still tears the listener down exactly once on the way out.
+    await seedSession(`a_${ID_LOOP_A}.jsonl`, [metaLine({ kind: 'tui' }), userLine('first')], 1000)
+    await seedSession(`b_${ID_LOOP_B}.jsonl`, [metaLine({ kind: 'tui' }), userLine('second')], 2000)
+    const sink = captureSink()
+
+    const sigint = new AbortController()
+    let liveCallCount = 0
+    let pickerCalls = 0
+    let torn = 0
+
+    async function* awaitableLive(signal: AbortSignal | undefined): AsyncGenerator<InspectEvent> {
+      yield { cat: 'broadcast', ts: Date.now(), payload: { kind: 'hello' } }
+      await new Promise<void>((resolve) => {
+        if (signal === undefined || signal.aborted) return resolve()
+        signal.addEventListener('abort', () => resolve(), { once: true })
+      })
+    }
+
+    const result = await runInspectLoop({
+      agentDir,
+      sessionIdOrPrefix: ID_LOOP_A,
+      color: false,
+      signal: sigint.signal,
+      selectSession: async (sessions) => {
+        pickerCalls++
+        return sessions.find((s) => s.sessionId === ID_LOOP_B) ?? null
+      },
+      liveSource: (o) => {
+        liveCallCount++
+        // Ctrl-C: abort the SIGINT signal mid-tail (esc was never pressed).
+        queueMicrotask(() => sigint.abort())
+        return awaitableLive(o.signal)
+      },
+      newEscSignal: () => new AbortController().signal,
+      afterEscStream: () => {
+        torn++
+      },
+      ...sink.push,
+    })
+
+    expect(result.ok).toBe(true)
+    expect(pickerCalls).toBe(0)
+    expect(liveCallCount).toBe(1)
+    expect(torn).toBe(1)
+  })
 })
