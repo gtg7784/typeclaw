@@ -28,6 +28,10 @@ export function createGithubMembershipResolver(options: {
         if (user.type === 'Bot') bots++
         else humans++
       }
+      // Counts only, no humanMemberIds: GitHub membership is the repo
+      // collaborator list, a different population from the authors that can
+      // comment into a PR/issue turn, so it is not a basis for the channel
+      // grant-role relaxation (see provesOnlyAgentBotPresent in grant-role.ts).
       return { humans, bots, fetchedAt: Date.now(), truncated: users.length >= 100 }
     } catch {
       return { kind: 'transient' }

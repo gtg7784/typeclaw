@@ -209,11 +209,25 @@ export function createDiscordMembershipResolver(deps: {
 
     let bots = 0
     let humans = 0
+    const humanMemberIds: string[] = []
+    let everyHumanIdentified = true
     for (const member of members.value) {
-      if (member.user?.bot === true) bots++
-      else humans++
+      if (member.user?.bot === true) {
+        bots++
+        continue
+      }
+      humans++
+      const userId = member.user?.id
+      if (userId === undefined) everyHumanIdentified = false
+      else humanMemberIds.push(userId)
     }
-    return { humans, bots, fetchedAt: now(), truncated: false }
+    // Only attach identities when every human was identifiable; an
+    // unidentifiable human must not be silently dropped, or a consumer proving
+    // "all humans trusted" would skip an unaccounted member. Falling back to
+    // counts-only keeps that consumer fail-closed.
+    return everyHumanIdentified
+      ? { humans, bots, fetchedAt: now(), truncated: false, humanMemberIds }
+      : { humans, bots, fetchedAt: now(), truncated: false }
   }
 }
 
