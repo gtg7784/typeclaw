@@ -152,21 +152,22 @@ sleep 30
 
     try {
       await provider.start()
-      // Health flips on first stderr line of any launch (including launch 1
-      // which then crashes), so the load-bearing invariant under test is
-      // "we observed the second launch happen", not "status == healthy".
-      // Polling the count file directly avoids the launch-1-healthy race.
+      // Neither signal is reliable alone: launch 1's stderr ("first crash")
+      // flips health momentarily before it exits (count still 1), and launch 2
+      // writes the count file before emitting its own stderr (count 2 while
+      // status is still 'starting'). The post-restart steady state is the
+      // conjunction, so poll for both rather than asserting one after the other.
       await waitFor(
         async () => {
+          if (provider.snapshot().status !== 'healthy') return false
           try {
             return (await readFile(countFile, 'utf8')) === '2'
           } catch {
             return false
           }
         },
-        { description: 'second launch wrote count file' },
+        { description: 'healthy after second launch' },
       )
-      expect(provider.snapshot().status).toBe('healthy')
     } finally {
       await provider.stop()
       rmSync(scratchDir, { recursive: true, force: true })
