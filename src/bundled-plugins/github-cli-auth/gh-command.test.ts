@@ -74,4 +74,47 @@ describe('analyzeGhCommand', () => {
       repoSlug: 'acme/widgets',
     })
   })
+
+  it('injects the owner when gh follows && and a non-gh command', () => {
+    expect(analyzeGhCommand('echo ok && gh pr view -R acme/widgets')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+  })
+
+  it('injects when gh follows a semicolon', () => {
+    expect(analyzeGhCommand('true; gh issue list -R acme/widgets')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+  })
+
+  it('injects when gh is piped into another command', () => {
+    expect(analyzeGhCommand('gh pr view -R acme/widgets | jq .')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+  })
+
+  it('injects once when multiple gh invocations share an owner', () => {
+    expect(analyzeGhCommand('gh pr view -R acme/widgets && gh issue list -R acme/gadgets')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+  })
+
+  it('blocks when gh invocations span multiple owners', () => {
+    const result = analyzeGhCommand('gh pr view -R acme/widgets && gh issue list -R globex/things')
+    expect(result.kind).toBe('block')
+    if (result.kind === 'block') expect(result.reason).toContain('more than one owner')
+  })
+
+  it('blocks when any gh invocation in a chain lacks a repo', () => {
+    const result = analyzeGhCommand('gh pr view -R acme/widgets && gh pr merge 12')
+    expect(result.kind).toBe('block')
+  })
+
+  it('does not treat gh appearing as an argument as an invocation', () => {
+    expect(analyzeGhCommand('echo gh && ls')).toEqual({ kind: 'pass-through' })
+  })
 })
