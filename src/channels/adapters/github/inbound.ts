@@ -4,6 +4,7 @@ import type { InboundMessage } from '@/channels/types'
 
 import type { DeliveryDedup } from './dedup'
 import { isGithubEventAllowed } from './event-allowlist'
+import { encodeGithubReactionRef, type GithubReactionTarget } from './reactions'
 
 export type GithubInboundLogger = { info: (m: string) => void; warn: (m: string) => void; error: (m: string) => void }
 
@@ -109,6 +110,7 @@ export function classifyGithubInbound(
       user,
       selfLogin,
       comment.created_at,
+      { kind: 'issue-comment', owner: repository.owner, repo: repository.name, commentId: id },
     )
   }
 
@@ -127,6 +129,7 @@ export function classifyGithubInbound(
       readUser(comment.user),
       selfLogin,
       comment.created_at,
+      { kind: 'pr-review-comment', owner: repository.owner, repo: repository.name, commentId: id },
     )
   }
 
@@ -144,6 +147,7 @@ export function classifyGithubInbound(
       readUser(comment.user),
       selfLogin,
       comment.created_at,
+      null,
     )
   }
 
@@ -160,6 +164,7 @@ export function classifyGithubInbound(
       readUser(issue.user),
       selfLogin,
       issue.created_at,
+      { kind: 'issue', owner: repository.owner, repo: repository.name, issueNumber: number },
     )
   }
 
@@ -189,6 +194,7 @@ export function classifyGithubInbound(
       readUser(pr.user),
       selfLogin,
       pr.created_at,
+      { kind: 'issue', owner: repository.owner, repo: repository.name, issueNumber: number },
     )
   }
 
@@ -206,6 +212,7 @@ export function classifyGithubInbound(
       readUser(review.user),
       selfLogin,
       review.submitted_at,
+      null,
     )
   }
 
@@ -222,6 +229,7 @@ export function classifyGithubInbound(
       readUser(discussion.user),
       selfLogin,
       discussion.created_at,
+      null,
     )
   }
 
@@ -340,6 +348,7 @@ function buildInbound(
   user: GithubUser | null,
   selfLogin: string | null,
   rawTs: unknown,
+  reactionTarget: GithubReactionTarget | null,
 ): InboundMessage | null {
   if (user === null) return null
   const text = typeof rawText === 'string' ? rawText : ''
@@ -347,6 +356,7 @@ function buildInbound(
     ...key,
     text,
     externalMessageId: String(id),
+    ...(reactionTarget !== null ? { reactionRef: encodeGithubReactionRef(reactionTarget) } : {}),
     authorId: String(user.id),
     authorName: user.login,
     authorIsBot: user.type === 'Bot',

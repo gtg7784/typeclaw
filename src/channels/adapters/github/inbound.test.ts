@@ -5,6 +5,7 @@ import type { InboundMessage } from '@/channels/types'
 
 import { createDeliveryDedup } from './dedup'
 import { classifyGithubInbound, createGithubWebhookHandler, verifySignature } from './inbound'
+import { decodeGithubReactionRef } from './reactions'
 
 const logger = { info: () => {}, warn: () => {}, error: () => {} }
 
@@ -32,6 +33,82 @@ describe('classifyGithubInbound', () => {
     const msg = classifyGithubInbound('pull_request_review_comment', reviewCommentPayload(), 'typeclaw-bot')
     expect(msg?.chat).toBe('pr:7')
     expect(msg?.thread).toBe('101')
+  })
+
+  describe('reactionRef stamping', () => {
+    it('stamps an issue-comment ref for a comment on a PR (reacts to the comment, not the PR body)', () => {
+      const msg = classifyGithubInbound('issue_comment', issueCommentPayload({ pullRequest: true }), 'typeclaw-bot')
+      expect(decodeGithubReactionRef(msg!.reactionRef!)).toEqual({
+        kind: 'issue-comment',
+        owner: 'acme',
+        repo: 'project',
+        commentId: 99,
+      })
+    })
+
+    it('stamps a pr-review-comment ref for an inline review comment', () => {
+      const msg = classifyGithubInbound('pull_request_review_comment', reviewCommentPayload(), 'typeclaw-bot')
+      expect(decodeGithubReactionRef(msg!.reactionRef!)).toEqual({
+        kind: 'pr-review-comment',
+        owner: 'acme',
+        repo: 'project',
+        commentId: 102,
+      })
+    })
+
+    it('stamps an issue ref (by number) for an issue body', () => {
+      const payload = {
+        action: 'opened',
+        repository: repo(),
+        issue: { number: 7, id: 700, body: 'hi', created_at: '2026-01-01T00:00:00Z', user: user() },
+      }
+      const msg = classifyGithubInbound('issues', payload, 'typeclaw-bot')
+      expect(decodeGithubReactionRef(msg!.reactionRef!)).toEqual({
+        kind: 'issue',
+        owner: 'acme',
+        repo: 'project',
+        issueNumber: 7,
+      })
+    })
+
+    it('stamps an issue ref (by PR number) for a PR body — PR bodies react via the issues endpoint', () => {
+      const payload = {
+        action: 'opened',
+        repository: repo(),
+        pull_request: { number: 7, id: 700, body: 'hi', created_at: '2026-01-01T00:00:00Z', user: user() },
+      }
+      const msg = classifyGithubInbound('pull_request', payload, 'typeclaw-bot')
+      expect(decodeGithubReactionRef(msg!.reactionRef!)).toEqual({
+        kind: 'issue',
+        owner: 'acme',
+        repo: 'project',
+        issueNumber: 7,
+      })
+    })
+
+    it('omits reactionRef for events with no standard reactions endpoint (review, discussion)', () => {
+      const review = classifyGithubInbound(
+        'pull_request_review',
+        {
+          action: 'submitted',
+          repository: repo(),
+          pull_request: { number: 7, id: 700, user: user() },
+          review: { id: 5002, body: 'lgtm', submitted_at: '2026-01-01T00:00:00Z', user: user() },
+        },
+        'typeclaw-bot',
+      )
+      expect(review?.reactionRef).toBeUndefined()
+    })
+
+    it('omits reactionRef on synthetic review-request inbounds', () => {
+      const msg = classifyGithubInbound(
+        'pull_request',
+        reviewRequestedPayload({ reviewerLogin: 'typeclaw-bot' }),
+        'typeclaw-bot',
+      )
+      expect(msg?.text).toContain('requested your review')
+      expect(msg?.reactionRef).toBeUndefined()
+    })
   })
 
   describe('pull_request.review_requested', () => {
