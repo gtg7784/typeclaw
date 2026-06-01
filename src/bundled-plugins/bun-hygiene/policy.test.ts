@@ -77,6 +77,51 @@ describe('checkBunHygieneGuard — non-bun package managers', () => {
   })
 })
 
+describe('checkBunHygieneGuard — escaped/quoted evasion', () => {
+  // The shell strips quotes and backslash escapes before resolving the binary,
+  // so these all run the real npm/npx and must be caught despite obfuscation.
+  test.each([
+    '\\npm install',
+    '"npm" install',
+    "'npm' install",
+    'n\\px create-next-app',
+    '"npx" create-next-app',
+    'cd app && \\npm install',
+  ])('blocks obfuscated non-bun manager %p', (command) => {
+    const result = bash(command)
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain(GUARD_NON_BUN_PACKAGE_MANAGER)
+  })
+
+  test.each([
+    'np\\m install -g typescript',
+    '\\npm install -g typescript',
+    '"npm" install -g typescript',
+    "'pnpm' add --global typescript",
+  ])('blocks obfuscated global install %p', (command) => {
+    const result = bash(command)
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain(GUARD_GLOBAL_INSTALL)
+  })
+})
+
+describe('checkBunHygieneGuard — option placement in global installs', () => {
+  // Options between the manager and its subcommand/flag must still resolve to
+  // globalInstall (the specific guard), not fall through to nonBunPackageManager.
+  test.each([
+    'npm --prefix /tmp install -g typescript',
+    'npm --loglevel warn install -g foo',
+    'npm install --foo-bar baz -g typescript',
+    'pnpm --dir /x add -g foo',
+    'bun --cwd /x add -g foo',
+    'pnpm add --reporter silent -g foo',
+  ])('attributes %p to globalInstall', (command) => {
+    const result = bash(command)
+    expect(result?.block).toBe(true)
+    expect(result?.reason).toContain(GUARD_GLOBAL_INSTALL)
+  })
+})
+
 describe('checkBunHygieneGuard — allowed commands', () => {
   test.each([
     'bun install',

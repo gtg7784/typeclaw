@@ -34,14 +34,24 @@ Both guards follow the repo-wide `acknowledgeGuards` convention (shared with the
 { "command": "npm install -g some-cli", "acknowledgeGuards": { "globalInstall": true } }
 ```
 
+## Escaped / quoted evasion
+
+The shell strips quotes and backslash escapes before deciding which binary to run, so `\npm install`, `"npm" install`, `'npm' install`, and `n\px create-next-app` all execute the real npm/npx. Matching the raw command string misses every one of those.
+
+Before matching, the guard normalizes the command **for detection only** (the original command is never executed from the normalized form): each `\x` escape collapses to `x` (and `\<space>` to a space), and quote characters are dropped. Crucially, all whitespace is preserved, so the command-boundary anchoring still distinguishes a manager at command position (`"npm" install` → blocked) from one inside an argument (`echo "npm install"` → allowed). The normalized form is only used to test the manager regexes — it never replaces the command that runs.
+
+## Option placement in global installs
+
+A global install is recognized regardless of where options sit within the same simple command, in either order: `npm --prefix /tmp install -g x`, `npm install --foo bar -g x`, and `npm -g install x` all attribute to `globalInstall` (the specific guard) rather than falling through to the generic `nonBunPackageManager` guard. Tokens may appear before, between, and after the subcommand and the global flag, as long as no segment separator (`;`, `&&`, `||`, `|`, `&`, newline) intervenes.
+
 ## What is NOT blocked
 
 - `bun`, `bunx`, `bun run`, `bun add`, `bun install` (local) — the intended package commands.
-- A non-bun manager name appearing as a substring or argument: `my-npm-wrapper`, `./npm`, `cat npm-debug.log`, `git commit -m "drop npm"`, `grep -rn npx src/`. Matching is anchored to a command boundary (start of line or after `;`, `&&`, `||`, `|`, `&`, newline, or a subshell/substitution opener), with an optional `sudo` / `env VAR=...` preamble, so package-manager names inside quotes, paths, or longer tokens do not trip the guard.
+- A non-bun manager name appearing as a substring or argument: `my-npm-wrapper`, `./npm`, `cat npm-debug.log`, `git commit -m "drop npm"`, `grep -rn npx src/`, `echo "npm install -g foo"`. Matching is anchored to a command boundary (start of line or after `;`, `&&`, `||`, `|`, `&`, newline, or a subshell/substitution opener), with an optional `sudo` / `env VAR=...` preamble, so package-manager names inside quotes, paths, or longer tokens do not trip the guard — even after escape/quote normalization, because normalization preserves whitespace and the boundary still requires command position.
 
 ## How it works
 
-The plugin registers a single `tool.before` hook delegating to `checkBunHygieneGuard` in `policy.ts`. The hook returns `{ block: true, reason }` (rejecting the tool call) or `undefined` (passing it through). Detection is regex-on-raw-string, deliberately matching the sibling `security/policies/secret-exfil-bash.ts` guard rather than introducing a shell parser — the command-boundary anchoring is what keeps the false-positive surface small.
+The plugin registers a single `tool.before` hook delegating to `checkBunHygieneGuard` in `policy.ts`. The hook returns `{ block: true, reason }` (rejecting the tool call) or `undefined` (passing it through). Detection runs command-boundary-anchored regexes against an escape/quote-normalized copy of the command. The repo has no shell-parsing dependency and the sibling security guards (`secret-exfil-bash.ts`, `git-exfil.ts`) match raw strings; this guard adds a minimal, whitespace-preserving normalization pass rather than a full shell parser, keeping the false-positive surface small while closing the obfuscation hole.
 
 ## Ordering against other bundled plugins
 
