@@ -60,7 +60,7 @@ import { slackTsToMillis } from './slack-bot-time'
 // slash_commands events we route vs drop. The ui.test.ts manifest-drift
 // test asserts equality between this set and SLACK_APP_MANIFEST.features.
 // slash_commands so the two can never silently diverge.
-export const SLACK_SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set(['help', 'stop'])
+export const SLACK_SLASH_COMMAND_NAMES: ReadonlySet<string> = new Set(['help', 'stop', 'reload', 'restart'])
 
 // Resolvers fall back to the raw id on failure, so a name equal to the id
 // means resolution failed; we render the bare id rather than `id(id)`. The
