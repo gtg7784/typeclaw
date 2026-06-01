@@ -149,7 +149,7 @@ Do not resolve on a bare "done" claim. A reply that says "fixed" is a prompt to 
 2. Read the lines your comment anchored to, at that SHA: `gh api /repos/owner/repo/contents/<path>?ref=<headRefOid>` (or `gh pr diff <N>` to see what the new push changed). Confirm the change actually addresses the concern your comment raised — not a different line, not a partial fix.
 3. Only when the code at head genuinely resolves the finding do you resolve the thread. If the fix is partial or misses the point, **reply in the thread** explaining what's still open and leave it unresolved.
 
-If the author merely **replied** without pushing (e.g. "this is intentional because …") and their reasoning settles it, that is also "addressed" — resolve and, if useful, leave a one-line acknowledgement first. If their reasoning does **not** settle it, keep the thread open and answer.
+If the author merely **replied** without pushing (e.g. "this is intentional because …") and their reasoning settles it, that is also "addressed" — **resolve first, then optionally leave a one-line acknowledgement.** Order matters: a bare `channel_reply` ends your turn (see "Mid-turn status replies need `continue: true`" above), so acknowledging _before_ you resolve would stop the turn and the `resolveReviewThread` mutation would never run, leaving the thread open. Resolve, then reply. If you genuinely want to acknowledge before resolving, the acknowledgement must use `channel_reply({ …, continue: true })` so the turn survives long enough to resolve. If their reasoning does **not** settle it, keep the thread open and answer.
 
 ### How to resolve — `resolveReviewThread` GraphQL mutation
 
