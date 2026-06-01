@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { restartHandoffPath } from '@/agent/restart-handoff'
+import { createStream, type StreamMessage } from '@/stream'
 
 import { requestContainerRestart } from './index'
 
@@ -123,6 +124,69 @@ describe('requestContainerRestart', () => {
       originatingSessionId: 'ses-origin',
       originatingSessionFile: 'ses-origin.jsonl',
     })
+  })
+
+  test('publishes a container-restarting broadcast before writing the handoff on a successful ACK', async () => {
+    // given: a stream whose subscriber records broadcasts, and a hostd that
+    // accepts. The broadcast must carry the originating session id so the
+    // matching session's subscribeRestartNotice can append restart-self.
+    server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ ok: true, result: { containerName: 'coder', scheduled: true } })
+      },
+    })
+    const stream = createStream()
+    const received: StreamMessage[] = []
+    stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => received.push(msg))
+
+    // when
+    await requestContainerRestart({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      hostdToken: 'secret',
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      stream,
+      agentDir,
+      originatingSessionId: 'ses-origin',
+      originatingSessionFile: '/tmp/sessions/ses-origin.jsonl',
+      restartedAt: '2026-01-02T03:04:05.000Z',
+    })
+
+    // then
+    expect(received).toHaveLength(1)
+    expect(received[0]?.payload).toEqual({
+      kind: 'container-restarting',
+      restartedAt: '2026-01-02T03:04:05.000Z',
+      originatingSessionId: 'ses-origin',
+    })
+  })
+
+  test('does not publish a broadcast when hostd rejects the restart', async () => {
+    // given
+    server = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ ok: false, reason: 'not registered: coder' })
+      },
+    })
+    const stream = createStream()
+    const received: StreamMessage[] = []
+    stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => received.push(msg))
+
+    // when
+    const result = await requestContainerRestart({
+      containerName: 'coder',
+      hostdUrl: `http://127.0.0.1:${server.port}`,
+      hostdToken: 'secret',
+      ackTimeoutMs: TEST_ACK_TIMEOUT_MS,
+      stream,
+      originatingSessionId: 'ses-origin',
+    })
+
+    // then
+    expect(result.ok).toBe(false)
+    expect(received).toHaveLength(0)
   })
 
   test('still succeeds when the handoff write fails after hostd accepts', async () => {

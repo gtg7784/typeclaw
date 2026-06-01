@@ -1,10 +1,7 @@
-import { basename } from 'node:path'
-
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
 import { requestContainerRestart } from '@/agent/restart'
-import { writeRestartHandoff } from '@/agent/restart-handoff'
 import type { Stream } from '@/stream'
 
 const EXIT_DELAY_MS = 500
@@ -59,11 +56,7 @@ export type CreateRestartToolOptions = {
 
 export type RestartToolDetails = { ok: boolean; containerName: string; reason?: string }
 
-export type ContainerRestartingBroadcast = {
-  kind: 'container-restarting'
-  restartedAt: string
-  originatingSessionId: string
-}
+export type { ContainerRestartingBroadcast } from '@/agent/restart'
 
 export function createRestartTool({
   containerName,
@@ -104,13 +97,23 @@ export function createRestartTool({
     }),
     async execute(_toolCallId, params) {
       const build = params.build === true
+      // requestContainerRestart owns the post-ACK broadcast->handoff ordering:
+      // on a successful ACK it publishes the container-restarting notice (which
+      // every live session's subscribeRestartNotice turns into a transcript
+      // entry) and then writes the handoff. Handoff fields are gated to TUI
+      // origins by the caller passing originatingSessionFile only for those —
+      // see issue #291's scoping concerns.
       const result = await requestContainerRestart({
         containerName,
         build,
+        originatingSessionId,
         ...(socketPath !== undefined ? { socketPath } : {}),
         ...(hostdUrl !== undefined ? { hostdUrl } : {}),
         ...(hostdToken !== undefined ? { hostdToken } : {}),
         ...(ackTimeoutMs !== undefined ? { ackTimeoutMs } : {}),
+        ...(stream !== undefined ? { stream } : {}),
+        ...(agentDir !== undefined ? { agentDir } : {}),
+        ...(originatingSessionFile !== undefined ? { originatingSessionFile } : {}),
       })
       if (!result.ok) {
         const details: RestartToolDetails = { ok: false, containerName, reason: result.reason }
@@ -118,36 +121,6 @@ export function createRestartTool({
           content: [{ type: 'text' as const, text: `restart denied: ${result.reason}` }],
           details,
         }
-      }
-
-      // Hostd ACK == restart is committed. Fan out the notice to every live
-      // session BEFORE arming the exit timer. Stream broker delivery is
-      // synchronous (broker.ts deliver()) and SessionManager.appendCustomMessageEntry
-      // does a synchronous JSONL write, so the fan-out completes inside this
-      // tick — well before the EXIT_DELAY_MS timer fires.
-      const restartedAt = result.restartedAt
-      const broadcast: ContainerRestartingBroadcast = {
-        kind: 'container-restarting',
-        restartedAt,
-        originatingSessionId,
-      }
-      stream?.publish({ target: { kind: 'broadcast' }, payload: broadcast })
-
-      // Write the cross-restart handoff AFTER the broadcast has run so the
-      // originating session's JSONL already contains the `typeclaw.restart-self`
-      // custom message entry that the next container will hydrate on
-      // `SessionManager.open`. Without that ordering, the new container could
-      // theoretically open the JSONL before the entry was flushed and miss
-      // the model-instruction the entry carries. Gated on agentDir +
-      // originatingSessionFile so non-TUI origins (channel/cron/subagent)
-      // skip the file write — see issue #291's scoping concerns.
-      if (agentDir !== undefined && originatingSessionFile !== undefined) {
-        await writeRestartHandoff(agentDir, {
-          schemaVersion: 1,
-          restartedAt,
-          originatingSessionId,
-          originatingSessionFile: basename(originatingSessionFile),
-        })
       }
 
       // Schedule the exit on the next tick so the tool result is delivered to

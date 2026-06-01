@@ -654,7 +654,7 @@ export function createServer({
           }
 
           if (msg.type === 'restart') {
-            await handleRestart(ws, state, containerName, agentDir)
+            await handleRestart(ws, state, containerName, agentDir, stream)
             return
           }
 
@@ -1449,6 +1449,7 @@ async function handleRestart(
   state: SessionState | undefined,
   containerName: string | undefined,
   agentDir: string | undefined,
+  stream: Stream | undefined,
 ): Promise<void> {
   if (containerName === undefined) {
     send(ws, {
@@ -1459,12 +1460,18 @@ async function handleRestart(
     return
   }
 
+  // Pass stream so requestContainerRestart fans out the container-restarting
+  // notice — the originating session's subscribeRestartNotice appends the
+  // typeclaw.restart-self entry to its JSONL before the handoff is written, so
+  // the rebooted container resumes with the "I'm back" instruction (same path
+  // the agent restart tool uses).
   const originatingSessionFile = state?.sessionManager?.getSessionFile()
   const result = await requestContainerRestart({
     containerName,
     ...(agentDir !== undefined ? { agentDir } : {}),
     ...(state?.sessionFileId !== undefined ? { originatingSessionId: state.sessionFileId } : {}),
     ...(originatingSessionFile !== undefined ? { originatingSessionFile } : {}),
+    ...(stream !== undefined ? { stream } : {}),
   })
   if (!result.ok) {
     send(ws, { type: 'restart_result', status: 'failed', error: result.reason })
