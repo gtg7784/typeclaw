@@ -1,9 +1,29 @@
 import { describe, expect, test } from 'bun:test'
 
+import { createPermissionService, rolesConfigSchema } from '@/permissions'
+
 import { LiveSubagentRegistry, type LiveSubagent } from '../live-subagents'
+import type { SessionOrigin } from '../session-origin'
 import { createSubagentCancelTool } from './subagent-cancel'
 
 const ctx = {} as Parameters<ReturnType<typeof createSubagentCancelTool>['execute']>[4]
+
+const guestOrigin: SessionOrigin = {
+  kind: 'channel',
+  adapter: 'slack-bot',
+  workspace: 'T0123',
+  chat: 'C_GEN',
+  thread: null,
+}
+const memberOrigin: SessionOrigin = { ...guestOrigin, lastInboundAuthorId: 'U_MEMBER' }
+
+function capPermissions() {
+  const roles = rolesConfigSchema.parse({
+    guest: { match: [], permissions: ['subagent.cancel'] },
+    member: { match: ['slack:T0123 author:U_MEMBER'], permissions: ['subagent.cancel'] },
+  })
+  return createPermissionService({ roles })
+}
 
 function makeLive(overrides: Partial<LiveSubagent> = {}): LiveSubagent {
   return {
@@ -103,6 +123,7 @@ describe('createSubagentCancelTool', () => {
       permissions: {
         has: () => false,
         resolveRole: () => 'guest',
+        compareRoleSeverity: () => undefined,
         describe: () => ({ role: 'guest', permissions: [] }),
         replaceRoles: () => {},
       },
@@ -111,5 +132,41 @@ describe('createSubagentCancelTool', () => {
     const details = result.details as { ok: boolean; error?: string }
     expect(details.ok).toBe(false)
     expect(details.error).toContain('denied')
+  })
+})
+
+describe('createSubagentCancelTool — provenance cap', () => {
+  function makeTool(registry: LiveSubagentRegistry, origin: SessionOrigin) {
+    return createSubagentCancelTool({ liveRegistry: registry, getOrigin: () => origin, permissions: capPermissions() })
+  }
+
+  test('guest cannot cancel a member-spawned subagent even when granted subagent.cancel', async () => {
+    const registry = new LiveSubagentRegistry()
+    let aborted = 0
+    registry.register(makeLive({ spawnedByRole: 'member', abort: async () => void (aborted += 1) }))
+    const result = await makeTool(registry, guestOrigin).execute('c', { task_id: 'bg_c1' }, undefined, undefined, ctx)
+    const details = result.details as { ok: boolean; error?: string }
+    expect(details.ok).toBe(false)
+    expect(details.error).toContain('higher role')
+    expect(aborted).toBe(0)
+  })
+
+  test('member can cancel a member-spawned subagent', async () => {
+    const registry = new LiveSubagentRegistry()
+    let aborted = 0
+    registry.register(makeLive({ spawnedByRole: 'member', abort: async () => void (aborted += 1) }))
+    const result = await makeTool(registry, memberOrigin).execute('c', { task_id: 'bg_c1' }, undefined, undefined, ctx)
+    const details = result.details as { ok: boolean }
+    expect(details.ok).toBe(true)
+    expect(aborted).toBe(1)
+  })
+
+  test('missing spawn role fails closed', async () => {
+    const registry = new LiveSubagentRegistry()
+    registry.register(makeLive())
+    const result = await makeTool(registry, memberOrigin).execute('c', { task_id: 'bg_c1' }, undefined, undefined, ctx)
+    const details = result.details as { ok: boolean; error?: string }
+    expect(details.ok).toBe(false)
+    expect(details.error).toContain('spawn role unavailable')
   })
 })

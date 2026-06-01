@@ -5,6 +5,7 @@ import type { PermissionService } from '@/permissions'
 
 import type { LiveSubagentRegistry } from '../live-subagents'
 import type { SessionOrigin } from '../session-origin'
+import { denySubagentAccess } from './subagent-access'
 
 export type SubagentCancelToolDetails =
   | { ok: true; taskId: string; subagent: string; alreadyDone: boolean }
@@ -33,12 +34,13 @@ export function createSubagentCancelTool(options: CreateSubagentCancelToolOption
     }),
 
     async execute(_toolCallId, params): Promise<ToolReturn> {
-      if (permissions !== undefined && !permissions.has(getOrigin(), 'subagent.cancel')) {
-        return errorResult('subagent.cancel denied: insufficient permissions')
-      }
       const live = liveRegistry.get(params.task_id)
       if (live === undefined) {
         return errorResult(`Unknown task_id: ${params.task_id}.`)
+      }
+      const denial = denySubagentAccess(permissions, getOrigin(), live, 'subagent.cancel')
+      if (denial !== null) {
+        return errorResult(denial)
       }
       if (live.status !== 'running') {
         const details: SubagentCancelToolDetails = {
