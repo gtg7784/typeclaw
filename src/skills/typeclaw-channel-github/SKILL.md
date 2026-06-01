@@ -1,6 +1,6 @@
 ---
 name: typeclaw-channel-github
-description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `github`, AND before composing replies to GitHub-originated inbounds, AND before opening new issues or PRs with `gh`, AND ALWAYS when you are asked to review a PR — whether the inbound says "requested your review on PR #N" / "requested a review from team @… on PR #N", or a human asks for a review in plain language in an issue/PR body or comment ("@bot review this", "can you take a look at #123"). On a review request you delegate the analysis to the `reviewer` subagent, which produces line-anchored findings, then you post them as an inline review via `gh api`. GitHub renders **real markdown** — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and `inline code` all render natively. Use rich markdown freely. GitHub cannot send file attachments via API — do not call `channel_send` with attachments on github chats. GitHub has no typing indicator. PR review threads use `thread` keyed on the root comment id; reply to a thread to stay in it, or omit `thread` to post a top-level issue/PR comment. To open new issues or PRs use the `gh` CLI — `GH_TOKEN` is pre-set by the adapter. Read this skill before composing anything on GitHub.
+description: Use this skill BEFORE every `channel_reply` or `channel_send` call whose adapter is `github`, AND before composing replies to GitHub-originated inbounds, AND before opening new issues or PRs with `gh`, AND ALWAYS when you are asked to review a PR — whether the inbound says "requested your review on PR #N" / "requested a review from team @… on PR #N", or a human asks for a review in plain language in an issue/PR body or comment ("@bot review this", "can you take a look at #123"). On a review request you delegate the analysis to the `reviewer` subagent, which produces line-anchored findings, then you post them as an inline review via `gh api`. GitHub renders **real markdown** — `**bold**`, `## headings`, `| tables |`, fenced code blocks, and `inline code` all render natively. Use rich markdown freely. GitHub cannot send file attachments via API — do not call `channel_send` with attachments on github chats. GitHub has no typing indicator. PR review threads use `thread` keyed on the root comment id; reply to a thread to stay in it, or omit `thread` to post a top-level issue/PR comment. When a review comment **you authored** gets addressed — the author pushed a fix or replied that resolves it — verify the fix at the PR's head SHA and then resolve the thread with the `resolveReviewThread` GraphQL mutation (see "Resolving review threads you authored" below); resolving is the close-out that tells the author the concern is settled. To open new issues or PRs use the `gh` CLI — `GH_TOKEN` is pre-set by the adapter. Read this skill before composing anything on GitHub.
 ---
 
 GitHub renders normal Markdown in issues, PRs, discussions, and review comments. Use headings, lists, tables, fenced code blocks, links, and inline code when they improve clarity.
@@ -8,6 +8,7 @@ GitHub renders normal Markdown in issues, PRs, discussions, and review comments.
 - Do not send attachments on GitHub chats; the adapter rejects them.
 - There is no typing indicator.
 - For PR review threads, keep `thread` set to reply in-place. Omit `thread` for a top-level PR/issue comment.
+- When a review comment **you authored** has been addressed, resolve its thread — see "Resolving review threads you authored" below. The base principle is **whoever opened the thread closes it**: you resolve only the threads you started, never a human's.
 
 ## Mid-turn status replies need `continue: true`
 
@@ -17,15 +18,15 @@ A successful `channel_reply` ends your turn by default — the runtime stops the
 
 Every GitHub inbound lands on a `chat` keyed by its subject: `issue:N`, `pr:N`, or `discussion:N`. Pick your action from the kind of thing that arrived. The default action for anything addressed to you is a normal `channel_reply` in that thread; the **PR review flow** below is the one exception that requires delegation.
 
-| Inbound                                                  | Looks like                                                                           | What to do                                                                                            |
-| -------------------------------------------------------- | ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
-| **New issue** (`issue:N`)                                | A freshly opened issue body.                                                         | Triage or answer it. `channel_reply` on `issue:N`. Open follow-up issues/PRs with `gh` if needed.     |
-| **Issue comment** (`issue:N`)                            | A comment on an issue.                                                               | Reply in the issue thread with `channel_reply`.                                                       |
-| **PR conversation comment** (`pr:N`, no `thread`)        | A comment on a PR's main conversation (GitHub models PR comments as issue comments). | Reply on the PR with `channel_reply`. **If the text asks you to review → go to the PR review flow.**  |
-| **PR review-thread reply** (`pr:N`, `thread` set)        | A reply on an existing inline review comment thread.                                 | Stay in the thread: `channel_reply` with `thread` kept as-is.                                         |
-| **A submitted review** (`pr:N`)                          | Someone submitted a formal review (approve / changes / comment) on a PR.             | React if a response is warranted (answer a question, acknowledge changes). `channel_reply` on `pr:N`. |
-| **New discussion / discussion comment** (`discussion:N`) | A discussion thread or a comment in one.                                             | Reply with `channel_reply` on `discussion:N`.                                                         |
-| **Review requested** (`pr:N`)                            | See "When you are being asked to review" below.                                      | **PR review flow.**                                                                                   |
+| Inbound                                                  | Looks like                                                                           | What to do                                                                                                                                        |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **New issue** (`issue:N`)                                | A freshly opened issue body.                                                         | Triage or answer it. `channel_reply` on `issue:N`. Open follow-up issues/PRs with `gh` if needed.                                                 |
+| **Issue comment** (`issue:N`)                            | A comment on an issue.                                                               | Reply in the issue thread with `channel_reply`.                                                                                                   |
+| **PR conversation comment** (`pr:N`, no `thread`)        | A comment on a PR's main conversation (GitHub models PR comments as issue comments). | Reply on the PR with `channel_reply`. **If the text asks you to review → go to the PR review flow.**                                              |
+| **PR review-thread reply** (`pr:N`, `thread` set)        | A reply on an existing inline review comment thread.                                 | Stay in the thread: `channel_reply` with `thread` kept as-is. **If it addresses a comment you authored → verify and resolve the thread (below).** |
+| **A submitted review** (`pr:N`)                          | Someone submitted a formal review (approve / changes / comment) on a PR.             | React if a response is warranted (answer a question, acknowledge changes). `channel_reply` on `pr:N`.                                             |
+| **New discussion / discussion comment** (`discussion:N`) | A discussion thread or a comment in one.                                             | Reply with `channel_reply` on `discussion:N`.                                                                                                     |
+| **Review requested** (`pr:N`)                            | See "When you are being asked to review" below.                                      | **PR review flow.**                                                                                                                               |
 
 ### When you are being asked to review
 
@@ -133,6 +134,46 @@ A finding is "actionable" if its severity is `blocker`, `concern`, or `nit`. The
 - `request-changes` → submit `REQUEST_CHANGES` with the `<summary>` as the review body and no `comments[]` array. This combination is rare (the reviewer's contract says `request-changes` requires at least one blocker or load-bearing concern); if it happens, faithfully encode the verdict and trust the reviewer's reasoning is in the summary.
 
 The bundled `agent-browser` is **not** for PR reviews — `gh api` is faster and more reliable. Only use the browser when the API genuinely can't reach what you need.
+
+## Resolving review threads you authored
+
+A review you posted leaves inline comment threads open on the PR. When one of **your** threads is addressed — the author pushed a fix, or replied that they handled it — close it out by **resolving the thread**. Leaving it open after the concern is settled reads as if you never noticed; a resolved thread is the signal that the loop is closed.
+
+**The base principle: whoever opened the thread closes it.** Resolve only threads whose root comment **you** authored. Never resolve a human reviewer's thread on your behalf — that erases their open question. The thread you can resolve is the one you started; the inbound that brings you here is a **review-thread reply on `pr:N` with `thread` set**, replying inside a thread you opened.
+
+### When a thread counts as addressed
+
+Do not resolve on a bare "done" claim. A reply that says "fixed" is a prompt to check, not proof. Before resolving, **verify the fix at the PR's current head SHA**:
+
+1. Re-read the PR head: `gh pr view <N> --repo owner/repo --json headRefOid` gives you the SHA the author's latest push landed on.
+2. Read the lines your comment anchored to, at that SHA: `gh api /repos/owner/repo/contents/<path>?ref=<headRefOid>` (or `gh pr diff <N>` to see what the new push changed). Confirm the change actually addresses the concern your comment raised — not a different line, not a partial fix.
+3. Only when the code at head genuinely resolves the finding do you resolve the thread. If the fix is partial or misses the point, **reply in the thread** explaining what's still open and leave it unresolved.
+
+If the author merely **replied** without pushing (e.g. "this is intentional because …") and their reasoning settles it, that is also "addressed" — resolve and, if useful, leave a one-line acknowledgement first. If their reasoning does **not** settle it, keep the thread open and answer.
+
+### How to resolve — `resolveReviewThread` GraphQL mutation
+
+There is no REST endpoint for this. Resolution is a GraphQL mutation that takes the thread's **node id** (`PRRT_…`), not the comment's numeric id. Two steps: find the thread id, then resolve it.
+
+1. **Find the node id of the thread you authored.** Query the PR's review threads and pick the one whose root comment is yours and matches the `thread` you're replying in:
+
+   ```sh
+   gh api graphql -f query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved comments(first:1){nodes{databaseId author{login}}}}}}}}' -F owner=OWNER -F name=REPO -F number=N
+   ```
+
+   Match on the root comment: its `comments.nodes[0].databaseId` equals the root comment id (the `thread` value the inbound carried), and `author.login` is you. Skip threads already `isResolved: true`.
+
+2. **Resolve it** with the node id from step 1:
+
+   ```sh
+   gh api graphql -f query='mutation($threadId:ID!){resolveReviewThread(input:{threadId:$threadId}){thread{id isResolved}}}' -F threadId=PRRT_xxx
+   ```
+
+   The returned `isResolved: true` is your proof it landed. As with every repo-targeting `gh` call, this is a **single bare `gh` invocation** — no pipes, `;`, `&&`, heredocs, or command substitution (the `github-cli-auth` plugin injects the App token into the command's environment; a pipeline would leak it). `-F` passes the id as a typed variable, so there is no shell-metacharacter hazard for the simple id/number values here.
+
+### Self-loop safety — resolving never wakes you
+
+Resolving your own thread is safe from the self-response loop. The `pull_request_review_thread.resolved` webhook that GitHub emits carries **you** as its `sender`, and the inbound classifier maps `pull_request_review_thread` events to their `sender` (not the PR opener) for the self-author drop — so the bot resolving a thread is recognized as self-authored and dropped, exactly like the decoy-reviewer cleanup in the PR review flow. You will not be re-woken by your own resolution. See "Self-loop safety" below.
 
 ## Opening new issues and PRs
 
