@@ -6,6 +6,8 @@ import {
 } from 'agent-messenger/slackbot'
 
 import {
+  MEMBERSHIP_CACHE_TRANSIENT_TTL_MS,
+  MEMBERSHIP_CACHE_TTL_MS,
   MEMBERSHIP_ENUMERATION_CAP,
   type MembershipResolver,
   type MembershipResolverFailure,
@@ -404,6 +406,16 @@ type SlackUserInfoResponse = {
   user?: { is_bot?: boolean; deleted?: boolean }
 }
 
+type SlackUsersListResponse = {
+  ok: boolean
+  error?: string
+  members?: Array<{ id?: string; is_bot?: boolean }>
+  response_metadata?: { next_cursor?: string }
+}
+
+const USERS_LIST_PAGE_LIMIT = 200
+const USERS_LIST_MAX_PAGES = 50
+
 export function createSlackMembershipResolver(deps: {
   token: string
   logger: SlackBotAdapterLogger
@@ -414,6 +426,43 @@ export function createSlackMembershipResolver(deps: {
   const fetchFn = deps.fetchImpl ?? fetch
   const now = deps.now ?? Date.now
   const userBotCache = new Map<string, boolean>()
+
+  // Keyed by workspace. One resolver instance is bound to a single token/team
+  // today, but the router dispatches by adapter (not by adapter+workspace), so
+  // scoping the warm set by `key.workspace` keeps a set built for one workspace
+  // from ever classifying another's members if a multi-workspace mode is added.
+  const botSetCache = new Map<string, { ids: ReadonlySet<string>; fetchedAt: number }>()
+  const botSetFailedAt = new Map<string, number>()
+  const botSetInFlight = new Map<string, Promise<ReadonlySet<string> | null>>()
+
+  const warmBotSet = async (workspace: string): Promise<ReadonlySet<string> | null> => {
+    const cached = botSetCache.get(workspace)
+    if (cached !== undefined && now() - cached.fetchedAt < MEMBERSHIP_CACHE_TTL_MS) return cached.ids
+    // Negative-cache a failed warm so a rate-limited workspace doesn't re-run
+    // the full paginated `users.list` crawl on every membership read — that
+    // would keep the hot path expensive under the exact failure this PR fixes.
+    // Members fall back to per-id `users.info` during the cooldown.
+    const failedAt = botSetFailedAt.get(workspace)
+    if (failedAt !== undefined && now() - failedAt < MEMBERSHIP_CACHE_TRANSIENT_TTL_MS) return null
+    const inFlight = botSetInFlight.get(workspace)
+    if (inFlight !== undefined) return await inFlight
+    const promise = fetchWorkspaceBotIds(fetchFn, deps.token, deps.logger)
+      .then((ids) => {
+        if (ids !== null) {
+          botSetCache.set(workspace, { ids, fetchedAt: now() })
+          botSetFailedAt.delete(workspace)
+        } else {
+          botSetFailedAt.set(workspace, now())
+        }
+        return ids
+      })
+      .finally(() => {
+        botSetInFlight.delete(workspace)
+      })
+    botSetInFlight.set(workspace, promise)
+    return await promise
+  }
+
   return async (key): Promise<MembershipResolverResult> => {
     if (key.workspace === '@dm') return { humans: 1, bots: 1, fetchedAt: now(), truncated: false }
 
@@ -466,11 +515,22 @@ export function createSlackMembershipResolver(deps: {
       return members.failure
     }
 
+    // Reached only for channels at or under the cap (larger ones returned
+    // `truncated` above). `conversations.members` gives ids with no bot/human
+    // flag and Slack has no bulk-classify-ids call, so per-member `users.info`
+    // is an N+1 that exceeds the router cold-fetch timeout near the cap; the
+    // read then returns null and engagement misreads the busy channel as solo.
+    // Classify against a workspace bot-id set from one paginated `users.list`
+    // (bots are a small set, shared across channels). `users.info` stays as a
+    // per-id fallback for ids minted after the last warm, keeping `bots` and
+    // `humanMemberIds` exact for `grant_role`'s "no peer bot present" proof.
+    const memberIds = members.value.members ?? []
+    const botSet = await warmBotSet(key.workspace)
     let bots = 0
     const humanMemberIds: string[] = []
-    for (const userId of members.value.members ?? []) {
-      const cached = userBotCache.get(userId)
-      const isBot = cached ?? (await resolveSlackUserIsBot(fetchFn, deps.token, userId, deps.logger, userBotCache))
+    for (const userId of memberIds) {
+      const isBot =
+        botSet?.has(userId) ?? (await resolveSlackUserIsBot(fetchFn, deps.token, userId, deps.logger, userBotCache))
       if (isBot) bots++
       else humanMemberIds.push(userId)
     }
@@ -512,15 +572,54 @@ async function resolveSlackUserIsBot(
   logger: SlackBotAdapterLogger,
   cache: Map<string, boolean>,
 ): Promise<boolean> {
+  const cached = cache.get(userId)
+  if (cached !== undefined) return cached
   const info = await slackApi<SlackUserInfoResponse>(fetchFn, token, 'users.info', { user: userId })
   if (!info.ok) {
     logger.warn(`[slack-bot] membership users.info user=${userId} failed: ${info.reason}`)
-    cache.set(userId, false)
+    // Only a definitive answer is cached. A transient failure (429/network)
+    // must not be memoized as "human" — that would poison classification until
+    // restart and let a peer bot read as human, skewing engagement and
+    // `grant_role`'s "no peer bot" proof. Default this read to human (the
+    // safe, count-conservative direction) but let the next read retry.
+    if (info.failure.kind === 'permanent') cache.set(userId, false)
     return false
   }
   const isBot = info.value.user?.is_bot === true
   cache.set(userId, isBot)
   return isBot
+}
+
+// Enumerates the workspace and returns the set of bot user ids. Slack has no
+// server-side `is_bot` filter, so we page the full `users.list` and keep only
+// bots — a complete pass is required so silent lurking bots (never seen in
+// history) are still counted, which `grant_role`'s "no peer bot" proof relies
+// on. Returns null on any failure so the caller can fall back to per-id
+// `users.info` rather than trusting an incomplete set. Page count is bounded so
+// a pathologically large workspace cannot stall the read indefinitely.
+async function fetchWorkspaceBotIds(
+  fetchFn: typeof fetch,
+  token: string,
+  logger: SlackBotAdapterLogger,
+): Promise<ReadonlySet<string> | null> {
+  const botIds = new Set<string>()
+  let cursor: string | undefined
+  for (let page = 0; page < USERS_LIST_MAX_PAGES; page++) {
+    const fields: Record<string, string> = { limit: String(USERS_LIST_PAGE_LIMIT) }
+    if (cursor !== undefined && cursor !== '') fields.cursor = cursor
+    const res = await slackApi<SlackUsersListResponse>(fetchFn, token, 'users.list', fields)
+    if (!res.ok) {
+      logger.warn(`[slack-bot] users.list failed: ${res.reason}; falling back to per-member classification`)
+      return null
+    }
+    for (const member of res.value.members ?? []) {
+      if (member.is_bot === true && typeof member.id === 'string') botIds.add(member.id)
+    }
+    cursor = res.value.response_metadata?.next_cursor
+    if (cursor === undefined || cursor === '') return botIds
+  }
+  logger.warn(`[slack-bot] users.list exceeded ${USERS_LIST_MAX_PAGES} pages; bot set may be incomplete`)
+  return null
 }
 
 function slackFailureForError(error: string): MembershipResolverFailure {
