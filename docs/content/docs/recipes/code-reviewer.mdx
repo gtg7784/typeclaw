@@ -61,7 +61,7 @@ When it finishes, it **installs the repository webhooks for you** and enables th
 
 ## Scope events to pull-request activity
 
-The default GitHub event allowlist already covers reviews. If you want to narrow it to just the review path, the relevant events are `pull_request.review_requested`, `pull_request_review.submitted`, and `pull_request_review_comment.created`. Tell the agent to tighten `channels.github.eventAllowlist`, or adjust it and run `typeclaw reload`. See [/reference/channel-adapters](/docs/reference/channel-adapters) for the full event list.
+The default GitHub event allowlist already covers reviews. If you want to narrow it to just the review path, the relevant events are `pull_request.review_requested`, `pull_request.review_request_removed`, `pull_request_review.submitted`, and `pull_request_review_comment.created` — keep `review_request_removed` so the agent still sees when a review request is withdrawn. Tell the agent to tighten `channels.github.eventAllowlist`, or adjust it and run `typeclaw reload`. See [/reference/channel-adapters](/docs/reference/channel-adapters) for the full event list.
 
 <Callout type="info" title="App auth and contents:write">
   An App only needs **Pull requests: read/write** to post reviews. Grant **Contents: write** _only_ if the agent will
