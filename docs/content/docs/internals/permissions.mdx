@@ -12,18 +12,30 @@ icon: ShieldCheck
 - **Role** — named bundle of `permissions[]` + `match[]`. Declared under `typeclaw.json#roles`.
 - **Permission** — `<plugin>.<verb>.<noun>` string. Plugins declare via `definePlugin({ permissions: [...] })`.
 
-Resolution walks roles in severity-then-declaration order: `owner` → `trusted` → custom (reverse declaration; later wins) → `member` → `guest`. First role with any matching rule wins. Built-in privileged roles always go first, so a broad rule on `member` can't shadow a narrower rule on `owner`. Fallback is built-in `guest` (no permissions).
+Resolution walks roles in severity-then-declaration order: `owner` → `trusted` → custom (reverse declaration; later wins) → `member` → `guest`. First role with any matching rule wins. Built-in privileged roles always go first, so a broad rule on `member` can't shadow a narrower rule on `owner`. Fallback is built-in `guest` (empty by default, but **grantable** — see below).
+
+The fail-safe floor is **not** the `guest` role; it is the `undefined` origin. `has(undefined, …)` always returns `false` regardless of role config, so every downstream check (bypass tiers, `fs.see.*`, `subagent.spawn`) stays closed even after an operator grants `guest` a permission. `resolveRole`/`describe` still report `guest` for audit/display; only authorization is forced closed.
 
 ## Built-in roles (`src/permissions/builtins.ts`)
 
-| Role      | Built-in `match[]` (prepended) | Built-in `permissions[]`                                                                                                                                        |
-| --------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `owner`   | `[{ kind: 'tui' }]`            | `channel.respond`, `cron.schedule`, `cron.modify`, `security.bypass.low/medium/high`, plus the wildcard sentinel expanded to every plugin's `security.bypass.*` |
-| `trusted` | `[]`                           | `channel.respond`, `cron.schedule`, `security.bypass.low/medium`                                                                                                |
-| `member`  | `[]`                           | `channel.respond`, `security.bypass.low`, `subagent.spawn/cancel/output`                                                                                        |
-| `guest`   | `[]`                           | (none)                                                                                                                                                          |
+| Role      | Built-in `match[]` (prepended) | Built-in `permissions[]`                                                                                                                                                                                                                                                          |
+| --------- | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `owner`   | `[{ kind: 'tui' }]`            | `channel.respond`, `session.control`, `cron.schedule`, `cron.modify`, `subagent.spawn/cancel/output`, `subagent.spawn.operator`, `fs.see.private`, `fs.see.secrets`, `security.bypass.low/medium/high`, plus the wildcard sentinel expanded to every plugin's `security.bypass.*` |
+| `trusted` | `[]`                           | `channel.respond`, `session.control`, `cron.schedule`, `subagent.spawn/cancel/output`, `subagent.spawn.operator`, `fs.see.private`, `fs.see.secrets`, `security.bypass.low/medium`                                                                                                |
+| `member`  | `[]`                           | `channel.respond`, `session.control`, `subagent.spawn/cancel/output`, `fs.see.private`, `security.bypass.low`                                                                                                                                                                     |
+| `guest`   | `[]`                           | (none, but grantable)                                                                                                                                                                                                                                                             |
 
 User-declared `match[]` **appends**; user-declared `permissions[]` **replaces** (no merge — `[]` means none). Custom role names must declare both.
+
+The role tower is monotonic on the `fs.see.*` axis: `fsSeePrivate` gates `workspace/` + `memory/` + `sessions/`, `fsSeeSecrets` gates `.env` + `secrets.json`. `resolveHiddenPaths` masks whatever the resolved role lacks, so `member` sees private state but not secrets, and `guest` sees neither.
+
+### Core permission strings
+
+`channel.respond` and `session.control` are distinct on purpose: `session.control` gates the `/stop` command (both text-prefix and native-slash paths in the router), so a respond-capable guest granted `channel.respond` to drive masked turns still cannot abort other speakers' sessions. Session lifecycle control stays member-and-up.
+
+### Per-subagent spawn permission
+
+`subagent.spawn` is the generic grant; `subagent.spawn.<name>` is a per-subagent grant. A subagent that declares `requiresSpecificPermission: true` (the bundled `operator` subagent) can be spawned **only** with `subagent.spawn.<name>` — the generic `subagent.spawn` is ignored for it. Every other subagent (`explorer`, `scout`, `reviewer`) accepts either the specific string or generic `subagent.spawn`. This is why granting `guest` plain `subagent.spawn` lets it spawn the read-only/research subagents but **not** the write-capable `operator`.
 
 ## Match-rule DSL (`src/permissions/match-rule.ts`)
 
@@ -50,10 +62,13 @@ Within one rule, tokens AND. Across rules on the same role, OR. Strict equality 
 
 These origins don't resolve via match-rule walking. They carry stamped provenance:
 
-- **Cron**: `origin.scheduledByRole` + `origin.scheduledByOrigin` (audit snapshot). Role = `scheduledByRole` directly.
-- **Subagent**: `origin.spawnedByRole` + `origin.spawnedByOrigin`. Snapshot at spawn; parent cleanup doesn't affect it.
+- **Cron**: `origin.scheduledByRole` + `origin.scheduledByOrigin` (audit snapshot). Role = `scheduledByRole` directly (falls back to `guest` if the stamped role is missing or unknown).
+- **Subagent**: `origin.spawnedByRole` + `origin.spawnedByOrigin`. Snapshot at spawn; parent cleanup doesn't affect it. Role = `spawnedByRole` directly (same `guest` fallback).
+- **System**: the runtime-owned `system` origin (memory logging/retrieval, backup) resolves to `owner`. It is constructed only by runtime/bundled code — inbound channel/cron content can never produce it — so resolving it to `owner` is not a laundering vector. It acts on the operator's behalf over operator-owned state, with no single user session to inherit authority from.
 
 This closes the laundering attack: a `guest` who asks the agent to schedule a cron gets `scheduledByRole: 'guest'` stamped. When the job fires, the security plugin blocks `bash env` again. Hand-authored `cron.json` entries missing `scheduledByRole` are auto-migrated to `"owner"` by `migrateLegacyCronShape` (one-shot rewrite + git commit) — needed to unstick agents that crash-looped post-PR #171.
+
+**Subagents do not escalate.** At spawn, `createSpawnSubagentTool` stamps `spawnedByRole = permissions.resolveRole(parentOrigin)` — the parent's resolved role, captured by the runtime, not chosen by the caller. The child `subagent` origin then resolves back to that exact role. A `guest` parent spawns a `guest` subagent: no automatic promotion to `member`/`trusted`/`owner`, and every `tool.before` guard fires identically against the child. The subagent also receives only the tool set its definition declares — there is no inheritance of the parent's tools. Granting `guest` `subagent.spawn` is therefore capability amplification (a fresh context window + a specialized prompt for read-only/research subagents), not privilege escalation.
 
 ## Wiring
 
