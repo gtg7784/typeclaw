@@ -23,6 +23,28 @@ describe('renderListRow', () => {
     // eslint-disable-next-line no-control-regex
     expect(row).not.toMatch(/\u001b\[/)
   })
+
+  it('surfaces category badges so the kind of work shows without opening the dream', () => {
+    const row = renderListRow(base, { color: false })
+    expect(row).toContain('[frag]')
+    expect(row).toContain('[skill]')
+  })
+
+  it('shows an absolute date anchor alongside the relative time', () => {
+    const row = renderListRow(base, { color: false })
+    expect(row).toContain('06-14')
+  })
+
+  it('drops the noise-only "other" badge when a meaningful category exists', () => {
+    const row = renderListRow({ ...base, categories: ['fragments', 'other'] }, { color: false })
+    expect(row).toContain('[frag]')
+    expect(row).not.toContain('[other]')
+  })
+
+  it('keeps the "other" badge when it is the only category', () => {
+    const row = renderListRow({ ...base, categories: ['other'] }, { color: false })
+    expect(row).toContain('[other]')
+  })
 })
 
 describe('renderDetail', () => {

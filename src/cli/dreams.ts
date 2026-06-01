@@ -1,9 +1,13 @@
 import { defineCommand } from 'citty'
 
-import { type DreamEntry, renderListRow, runDreams } from '@/dreams'
+import { type DreamEntry, renderListRow, runDreams, type ViewAction } from '@/dreams'
 import { findAgentDir } from '@/init'
 
-import { cancel, errorLine, isCancel } from './ui'
+import { createEscController } from './inspect-controller'
+import { c, cancel, errorLine, isCancel } from './ui'
+
+const ESC_DEBOUNCE_MS = 50
+const QUIT_KEY = 0x71
 
 export const dreamsCommand = defineCommand({
   meta: {
@@ -30,6 +34,7 @@ export const dreamsCommand = defineCommand({
     const cwd = findAgentDir(process.cwd()) ?? process.cwd()
     const color = useColor()
     const limit = parseLimit(args.limit)
+    const interactive = isInteractive() && args.json !== true
 
     const result = await runDreams({
       agentDir: cwd,
@@ -37,7 +42,8 @@ export const dreamsCommand = defineCommand({
       details: args.details === true,
       color,
       ...(limit !== undefined ? { limit } : {}),
-      selectDream: (entries) => clackSelect(entries, color),
+      selectDream: (entries, selectOpts) => clackSelect(entries, color, selectOpts?.initialSha),
+      ...(interactive ? { viewDream: () => waitForViewerKey(color) } : {}),
       stdout: (line) => process.stdout.write(`${line}\n`),
     })
 
@@ -49,21 +55,82 @@ export const dreamsCommand = defineCommand({
   },
 })
 
+function isInteractive(): boolean {
+  return Boolean(process.stdout.isTTY) && Boolean(process.stdin.isTTY)
+}
+
+type RawInput = Pick<NodeJS.ReadStream, 'isTTY' | 'setRawMode' | 'resume' | 'pause' | 'on' | 'off'>
+
+// Esc routes through createEscController so a standalone Esc returns 'back'
+// while a multi-byte CSI sequence (↑/↓ arrows) does not. Teardown restores
+// raw mode but deliberately does NOT pause stdin: clack cannot re-flow a
+// paused process.stdin under Bun, so the next picker would freeze — the same
+// reason cli/inspect.ts leaves the stream flowing on its return path.
+export async function waitForViewerKey(color: boolean, input: RawInput = process.stdin): Promise<ViewAction> {
+  const stdin = input
+  if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') return 'exit'
+
+  process.stdout.write(`${viewerHintLine(color)}\n`)
+
+  const ctrl = createEscController({ debounceMs: ESC_DEBOUNCE_MS })
+  const escSignal = ctrl.armForStream()
+
+  return new Promise<ViewAction>((resolve) => {
+    let settled = false
+    const finish = (action: ViewAction): void => {
+      if (settled) return
+      settled = true
+      escSignal.removeEventListener('abort', onEscAbort)
+      stdin.off('data', onData)
+      ctrl.dispose()
+      try {
+        stdin.setRawMode(false)
+      } catch {
+        /* terminal already torn down */
+      }
+      resolve(action)
+    }
+    const onEscAbort = (): void => finish('back')
+    const onData = (chunk: Buffer): void => {
+      if (chunk[0] === QUIT_KEY) {
+        finish('exit')
+        return
+      }
+      const { sigint } = ctrl.onChunk(chunk)
+      if (sigint) finish('exit')
+    }
+    escSignal.addEventListener('abort', onEscAbort, { once: true })
+    stdin.setRawMode(true)
+    stdin.resume()
+    stdin.on('data', onData)
+  })
+}
+
+function viewerHintLine(color: boolean): string {
+  const text = '(esc to go back to the list · q to quit)'
+  return color ? c.dim(text) : text
+}
+
 function parseLimit(raw: unknown): number | undefined {
   if (typeof raw !== 'string') return undefined
   const n = Number.parseInt(raw, 10)
   return Number.isFinite(n) && n > 0 ? n : undefined
 }
 
-async function clackSelect(entries: DreamEntry[], color: boolean): Promise<DreamEntry | null> {
+async function clackSelect(
+  entries: DreamEntry[],
+  color: boolean,
+  initialSha: string | undefined,
+): Promise<DreamEntry | null> {
   const { select } = await import('@clack/prompts')
+  const preferred = initialSha !== undefined && entries.some((e) => e.sha === initialSha) ? initialSha : entries[0]?.sha
   const picked = await select<string>({
     message: `Pick a dream to open (${entries.length} total)`,
     options: entries.map((entry) => ({
       value: entry.sha,
       label: renderListRow(entry, { color }),
     })),
-    initialValue: entries[0]?.sha,
+    initialValue: preferred,
   })
   if (isCancel(picked)) {
     cancel('Cancelled.')

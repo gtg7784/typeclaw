@@ -1,6 +1,6 @@
 import { styleText } from 'node:util'
 
-import type { DreamEntry, DreamEntryDetail } from './types'
+import type { DreamCategory, DreamEntry, DreamEntryDetail } from './types'
 
 export type RenderOptions = { color: boolean }
 
@@ -11,11 +11,31 @@ function tint(opts: RenderOptions, color: ColorName, text: string): string {
   return styleText(color, text)
 }
 
+const CATEGORY_LABELS: Record<DreamCategory, string> = {
+  fragments: 'frag',
+  skills: 'skill',
+  'watermarks-only': 'watermarks',
+  snapshot: 'snapshot',
+  other: 'other',
+}
+
 export function renderListRow(entry: DreamEntry, opts: RenderOptions): string {
   const emoji = entry.emoji ?? '·'
-  const when = tint(opts, 'dim', formatRelative(entry.committedAt))
+  const sha = tint(opts, 'cyan', entry.shortSha)
+  const date = tint(opts, 'dim', formatShortDate(entry.committedAt))
+  const when = tint(opts, 'dim', `(${formatRelative(entry.committedAt)})`)
   const summary = entry.summary ?? entry.subject
-  return `${emoji}  ${tint(opts, 'cyan', entry.shortSha)}  ${when}  ${summary}`
+  const badges = renderCategoryBadges(entry.categories, opts)
+  const head = `${emoji}  ${sha}  ${date} ${when}  ${summary}`
+  return badges.length > 0 ? `${head}  ${badges}` : head
+}
+
+function renderCategoryBadges(categories: DreamCategory[], opts: RenderOptions): string {
+  if (categories.length === 0) return ''
+  const meaningful = categories.filter((c) => c !== 'other')
+  const shown = meaningful.length > 0 ? meaningful : categories
+  const labels = shown.map((c) => CATEGORY_LABELS[c])
+  return tint(opts, 'magenta', labels.map((l) => `[${l}]`).join(' '))
 }
 
 export function renderDetail(entry: DreamEntry, opts: RenderOptions): string {
@@ -124,4 +144,12 @@ function formatTimestamp(iso: string): string {
   const d = new Date(ms)
   const pad = (n: number): string => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+function formatShortDate(iso: string): string {
+  const ms = Date.parse(iso)
+  if (Number.isNaN(ms)) return iso
+  const d = new Date(ms)
+  const pad = (n: number): string => String(n).padStart(2, '0')
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }

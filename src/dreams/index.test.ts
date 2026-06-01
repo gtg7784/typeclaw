@@ -143,3 +143,67 @@ describe('runDreams', () => {
     expect(parsed.detail.addedFragments[0].id).toBe('frag-9')
   })
 })
+
+describe('runDreams interactive loop', () => {
+  let priorStdoutTty: unknown
+  let priorStdinTty: unknown
+
+  beforeEach(() => {
+    priorStdoutTty = process.stdout.isTTY
+    priorStdinTty = process.stdin.isTTY
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true })
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true })
+  })
+
+  afterEach(() => {
+    Object.defineProperty(process.stdout, 'isTTY', { value: priorStdoutTty, configurable: true })
+    Object.defineProperty(process.stdin, 'isTTY', { value: priorStdinTty, configurable: true })
+  })
+
+  it("re-opens the picker after 'back' with the just-viewed dream preselected", async () => {
+    await dreamCommit('dream: first 💤', [fragment('a', 't', 'b')], {})
+    await dreamCommit('dream: second 🌙', [fragment('c', 't', 'd')], {})
+
+    const seenInitialShas: (string | undefined)[] = []
+    let pickCount = 0
+    const result = await runDreams({
+      agentDir: repo,
+      json: false,
+      details: false,
+      color: false,
+      selectDream: async (entries, opts) => {
+        seenInitialShas.push(opts?.initialSha)
+        pickCount++
+        // First pass: open a dream. Second pass: cancel out of the picker.
+        return pickCount === 1 ? (entries[0] ?? null) : null
+      },
+      viewDream: async () => 'back',
+      stdout: () => {},
+    })
+
+    expect(result).toEqual({ ok: true, exitCode: 0 })
+    expect(seenInitialShas[0]).toBeUndefined()
+    expect(seenInitialShas[1]).toBe((await listDreams(repo))[0]?.sha)
+  })
+
+  it("exits immediately when the viewer returns 'exit'", async () => {
+    await dreamCommit('dream: only 💤', [fragment('a', 't', 'b')], {})
+
+    let pickCount = 0
+    const result = await runDreams({
+      agentDir: repo,
+      json: false,
+      details: false,
+      color: false,
+      selectDream: async (entries) => {
+        pickCount++
+        return entries[0] ?? null
+      },
+      viewDream: async () => 'exit',
+      stdout: () => {},
+    })
+
+    expect(result).toEqual({ ok: true, exitCode: 0 })
+    expect(pickCount).toBe(1)
+  })
+})
