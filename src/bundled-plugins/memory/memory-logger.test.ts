@@ -224,6 +224,27 @@ describe('MEMORY_LOGGER_SYSTEM_PROMPT', () => {
     const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
     expect(lower).toMatch(/never write the same watermark id|advance the watermark|move forward each run/)
   })
+
+  test('defines an explicit stop trigger for when reads are exhausted', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/end of (the )?(file|transcript)|reached the end|no (more|further) (content|lines|entries)/)
+    expect(lower).toMatch(/stop reading|do not (call )?`?read`? again|stop calling read/)
+  })
+
+  test('forbids re-reading the same offset when a read returns nothing new', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/empty|nothing new|no new (content|lines|entries)|same (chunk|content|slice|offset)/)
+    expect(lower).toMatch(/do not re-?read|do not retry|do not repeat the (same )?read|never re-?read/)
+  })
+
+  test('ties the hard stop to find_entry totalLines, not to a read-call count', () => {
+    const lower = MEMORY_LOGGER_SYSTEM_PROMPT.toLowerCase()
+    expect(lower).toMatch(/`find_entry` gives you `totallines=t` up front, so you always know the last line/)
+    expect(lower).toMatch(
+      /the hard stop is `totallines`: a long transcript may legitimately need many `read` chunks to reach it/,
+    )
+    expect(lower).not.toMatch(/more than a handful of (?:reads|times)/)
+  })
 })
 
 describe('memoryLoggerSubagent', () => {
