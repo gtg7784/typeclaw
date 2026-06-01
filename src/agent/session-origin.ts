@@ -1,5 +1,6 @@
 import { MEMBERSHIP_FRESHNESS_MS, type MembershipCount } from '@/channels/membership'
 import type { AdapterId } from '@/channels/schema'
+import type { ReactionRef } from '@/channels/types'
 
 export type ChannelParticipant = {
   authorId: string
@@ -38,6 +39,7 @@ export type SessionOrigin =
       chatName?: string
       thread: string | null
       lastInboundAuthorId?: string
+      reactionRef?: ReactionRef
       participants?: readonly ChannelParticipant[]
       membership?: MembershipCount
     }
