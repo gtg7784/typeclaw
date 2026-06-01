@@ -117,4 +117,42 @@ describe('analyzeGhCommand', () => {
   it('does not treat gh appearing as an argument as an invocation', () => {
     expect(analyzeGhCommand('echo gh && ls')).toEqual({ kind: 'pass-through' })
   })
+
+  it('does not read a /repos path out of a gh api field value', () => {
+    expect(analyzeGhCommand('gh api graphql -f query=/repos/evil/repo')).toEqual({ kind: 'pass-through' })
+  })
+
+  it('does not read a /repos path out of a --jq expression', () => {
+    expect(analyzeGhCommand('gh api /user --jq /repos/evil/repo')).toEqual({ kind: 'pass-through' })
+  })
+
+  it('extracts the repo only from the gh api endpoint arg', () => {
+    expect(analyzeGhCommand('gh api /repos/acme/widgets/pulls -f body=/repos/evil/repo')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+  })
+
+  it('blocks repo-scoped subcommands that lack an explicit repo (label, ruleset, secret)', () => {
+    expect(analyzeGhCommand('gh label list').kind).toBe('block')
+    expect(analyzeGhCommand('gh ruleset list').kind).toBe('block')
+    expect(analyzeGhCommand('gh secret set FOO').kind).toBe('block')
+    expect(analyzeGhCommand('gh variable list').kind).toBe('block')
+    expect(analyzeGhCommand('gh cache list').kind).toBe('block')
+  })
+
+  it('injects when a repo-scoped subcommand carries an explicit -R', () => {
+    expect(analyzeGhCommand('gh label list -R acme/widgets')).toEqual({
+      kind: 'inject',
+      repoSlug: 'acme/widgets',
+    })
+  })
+
+  it('passes through genuinely repo-less subcommands', () => {
+    expect(analyzeGhCommand('gh status')).toEqual({ kind: 'pass-through' })
+    expect(analyzeGhCommand('gh org list')).toEqual({ kind: 'pass-through' })
+    expect(analyzeGhCommand('gh search repos cli')).toEqual({ kind: 'pass-through' })
+    expect(analyzeGhCommand('gh gist list')).toEqual({ kind: 'pass-through' })
+    expect(analyzeGhCommand('gh codespace list')).toEqual({ kind: 'pass-through' })
+  })
 })

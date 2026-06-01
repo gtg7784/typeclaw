@@ -12,24 +12,30 @@ const MULTI_OWNER_REASON =
   'This command targets repos under more than one owner; a single GH_TOKEN cannot ' +
   'authenticate all of them. Split it into separate commands, one owner each.'
 
-// Subcommands that never target a single repo and so need no token injection.
-// `gh api` is handled separately: it targets a repo only when its path is a
-// /repos/{owner}/{repo}/... shape.
+// GENUINELY repo-less subcommands (account/global, no -R/--repo): they need no
+// token injection and pass through. The set is intentionally minimal —
+// anything not listed (label, ruleset, secret, variable, cache, run, workflow,
+// release, browse, pr, issue, repo, ...) is repo-scoped and falls through to
+// the block-unless-explicit-repo rule, so an App-auth `gh label list` cannot
+// silently run with the wrong installation token. Classification verified
+// against gh source (commands using cmdutil.EnableRepoOverride are repo-scoped).
+// `gh api` is handled separately (path-based repo extraction).
 const REPO_LESS_SUBCOMMANDS = new Set([
   'auth',
   'config',
   'extension',
-  'extensions',
-  'gist',
   'alias',
   'completion',
+  'gpg-key',
+  'ssh-key',
   'status',
   'org',
-  'ssh-key',
-  'gpg-key',
-  'label',
-  'ruleset',
+  'gist',
+  'codespace',
+  'search',
+  'preview',
   'accessibility',
+  'attestation',
 ])
 
 // A single GH_TOKEN is injected into the whole bash command's env, so every
@@ -123,15 +129,50 @@ function extractRepoFlag(args: readonly string[]): string | null {
   return null
 }
 
+// `gh api` flags that consume the FOLLOWING token as their value. The endpoint
+// is the first positional arg that is neither a flag nor a flag's value; only
+// THAT arg is parsed for owner/repo. Scanning every arg (as before) would let a
+// `-f q=/repos/a/b` field value or `--jq` expression masquerade as the target.
+const GH_API_VALUE_FLAGS = new Set([
+  '-X',
+  '--method',
+  '-f',
+  '--raw-field',
+  '-F',
+  '--field',
+  '-H',
+  '--header',
+  '-q',
+  '--jq',
+  '-t',
+  '--template',
+  '--input',
+  '--cache',
+  '-i',
+  '--include',
+  '--hostname',
+])
+
 function extractRepoFromApiPath(args: readonly string[]): string | null {
-  for (const arg of args) {
-    if (arg.startsWith('-')) continue
+  const apiIndex = args.indexOf('api')
+  if (apiIndex === -1) return null
+  for (let i = apiIndex + 1; i < args.length; i++) {
+    const arg = args[i] as string
+    if (arg.startsWith('-')) {
+      // `--flag=value` carries its own value; bare value-flags consume the next
+      // token, so skip it too.
+      if (!arg.includes('=') && GH_API_VALUE_FLAGS.has(arg)) i += 1
+      continue
+    }
     const normalized = arg.startsWith('/') ? arg.slice(1) : arg
     const segments = normalized.split('/')
     if (segments[0] === 'repos' && segments[1] !== undefined && segments[2] !== undefined) {
       const slug = `${segments[1]}/${segments[2]}`
       if (isRepoSlug(slug)) return slug
     }
+    // The endpoint is the first positional; if it isn't a /repos/{o}/{r} path,
+    // there is no repo target to extract.
+    return null
   }
   return null
 }
