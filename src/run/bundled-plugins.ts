@@ -30,9 +30,11 @@ import type { ResolvedPlugin } from '@/plugin'
 // and then tool-result-cap would clobber the advice text along with the rest.
 //
 // `github-cli-auth` is registered AFTER `security` so security's `tool.before`
-// scans the ORIGINAL bash command for exfil patterns before github-cli-auth
-// rewrites it to `GH_TOKEN=… gh …`. Rewriting first would feed the injected
-// token through security's outbound/secret scanners.
+// runs its exfil/secret scanners on the bash command first. github-cli-auth
+// injects the minted token via an env overlay (TYPECLAW_INTERNAL_BASH_ENV), not
+// by rewriting the command string, so the token never enters argv or logs — but
+// ordering security first still matters so a blocked command never reaches the
+// mint path at all.
 //
 // `memory` is registered before `backup` so memory's dreaming commits always
 // land in the same git index window before backup's commit-and-push cycle.
