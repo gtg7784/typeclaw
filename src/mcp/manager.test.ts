@@ -77,6 +77,34 @@ describe('createMcpManager', () => {
     expect(signals).toEqual([abort.signal, abort.signal])
   })
 
+  test('fails a duplicate server name fast instead of shadowing the first connection', async () => {
+    const connectCalls: string[] = []
+    const manager = createMcpManager([server('dup'), server('dup'), server('other')], {
+      env: {},
+      async connect(mcpServer) {
+        connectCalls.push(mcpServer.name)
+        return fakeConnection(
+          mcpServer.name,
+          [{ name: `${mcpServer.name}-tool`, description: '', inputSchema: {} }],
+          [],
+        )
+      },
+    })
+
+    const results = await manager.connectAll()
+
+    expect(results.map((result) => ({ name: result.name, ok: result.ok }))).toEqual([
+      { name: 'dup', ok: true },
+      { name: 'dup', ok: false },
+      { name: 'other', ok: true },
+    ])
+    const duplicate = results[1]
+    if (duplicate === undefined || duplicate.ok) throw new Error('expected the second server to fail as a duplicate')
+    expect(duplicate.error.message).toMatch(/mcpServers\[1\]\.name duplicates mcpServers\[0\]\.name/)
+    expect(connectCalls).toEqual(['dup', 'other'])
+    expect(manager.getConnection('dup')?.name).toBe('dup')
+  })
+
   test('refresh updates cached tool counts from live connections', async () => {
     const manager = createMcpManager([server('alpha')], {
       env: {},

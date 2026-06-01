@@ -31,8 +31,25 @@ export function createMcpManager(
 
   return {
     async connectAll(connectOpts: { signal?: AbortSignal } = {}): Promise<McpConnectResult[]> {
+      const firstIndexByName = new Map<string, number>()
       const results = await Promise.all(
-        servers.map((server) => connectOne(server, opts.env, connect, connectOpts.signal)),
+        servers.map((server, index): Promise<McpConnectResult> => {
+          // The name is the tool namespace and the connections key, so a second
+          // server sharing a name would silently shadow the first. Fail the
+          // duplicate fast instead of connecting it, keeping routing unambiguous.
+          const firstIndex = firstIndexByName.get(server.name)
+          if (firstIndex !== undefined) {
+            return Promise.resolve({
+              ok: false,
+              name: server.name,
+              error: new Error(
+                `mcpServers[${index}].name duplicates mcpServers[${firstIndex}].name ('${server.name}')`,
+              ),
+            })
+          }
+          firstIndexByName.set(server.name, index)
+          return connectOne(server, opts.env, connect, connectOpts.signal)
+        }),
       )
       for (const result of results) {
         if (!result.ok) continue

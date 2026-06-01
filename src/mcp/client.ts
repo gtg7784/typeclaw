@@ -204,9 +204,19 @@ function attachCloseCause(cause: unknown, closeCause: unknown): void {
   error.cause = { original: error.cause, close: closeCause }
 }
 
+// A stdio MCP server is a child process the agent spawns, so it must NOT
+// inherit the full parent environment: that env holds unrelated credentials
+// (FIREWORKS_API_KEY, GH_TOKEN, channel tokens) and inheriting them leaks every
+// secret to every server. We start from a minimal allowlist needed to spawn and
+// run a process (PATH/HOME to launch npx/bunx, locale + temp for correctness),
+// then overlay only the secrets the server explicitly declares. This mirrors
+// the bwrap sandbox's `--clearenv` + DEFAULT_SANDBOX_ENV leak guard.
+const BASE_ENV_ALLOWLIST = ['PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'TZ'] as const
+
 export function resolveServerEnv(server: Pick<McpServer, 'env'>, env: NodeJS.ProcessEnv): Record<string, string> {
   const childEnv: Record<string, string> = {}
-  for (const [key, value] of Object.entries(env)) {
+  for (const key of BASE_ENV_ALLOWLIST) {
+    const value = env[key]
     if (value !== undefined) childEnv[key] = value
   }
 

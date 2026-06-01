@@ -22,13 +22,31 @@ describe('resolveServerEnv', () => {
       TARGET_TOKEN: 'from-target-env',
       SOURCE_TOKEN: 'from-source-env',
       SOURCE_ONLY_ENV: 'from-source-only-env',
-      PASSTHROUGH: 'kept',
     })
 
     expect(resolved.TARGET_TOKEN).toBe('from-target-env')
     expect(resolved.SOURCE_ONLY).toBe('from-source-only-env')
     expect(resolved.FILE_ONLY).toBe('from-file-only')
-    expect(resolved.PASSTHROUGH).toBe('kept')
+  })
+
+  test('forwards only allowlisted base env, never undeclared secrets', () => {
+    const server: Pick<McpServer, 'env'> = { env: { DECLARED_TOKEN: { env: 'DECLARED_SOURCE' } } }
+
+    const resolved = resolveServerEnv(server, {
+      PATH: '/usr/bin',
+      HOME: '/home/agent',
+      OPENAI_API_KEY: 'sk-secret',
+      GH_TOKEN: 'ghp-secret',
+      FIREWORKS_API_KEY: 'fw-secret',
+      DECLARED_SOURCE: 'declared-value',
+    })
+
+    expect(resolved.PATH).toBe('/usr/bin')
+    expect(resolved.HOME).toBe('/home/agent')
+    expect(resolved.DECLARED_TOKEN).toBe('declared-value')
+    expect(resolved.OPENAI_API_KEY).toBeUndefined()
+    expect(resolved.GH_TOKEN).toBeUndefined()
+    expect(resolved.FIREWORKS_API_KEY).toBeUndefined()
   })
 })
 
