@@ -4,7 +4,7 @@ import { type DreamEntry, renderListRow, runDreams, type ViewAction } from '@/dr
 import { findAgentDir } from '@/init'
 
 import { createEscController } from './inspect-controller'
-import { c, cancel, errorLine, isCancel } from './ui'
+import { c, cancel, errorLine, isCancel, prepareStdinForClack } from './ui'
 
 const ESC_DEBOUNCE_MS = 50
 const QUIT_KEY = 0x71
@@ -123,6 +123,7 @@ async function clackSelect(
   initialSha: string | undefined,
 ): Promise<DreamEntry | null> {
   const { select } = await import('@clack/prompts')
+  prepareStdinForClack()
   const preferred = initialSha !== undefined && entries.some((e) => e.sha === initialSha) ? initialSha : entries[0]?.sha
   const picked = await select<string>({
     message: `Pick a dream to open (${entries.length} total)`,

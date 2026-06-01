@@ -6,7 +6,7 @@ import { runInspectLoop, streamLive, type LiveSourceFactory, type SessionSummary
 import { originLabel, shortSessionId } from '@/inspect/label'
 
 import { createEscController } from './inspect-controller'
-import { cancel, c, errorLine, isCancel } from './ui'
+import { cancel, c, errorLine, isCancel, prepareStdinForClack } from './ui'
 
 const ESC_LISTEN_DELAY_MS = 50
 
@@ -212,6 +212,7 @@ async function clackSelect(
   initialSessionId: string | undefined,
 ): Promise<SessionSummary | null> {
   const { select } = await import('@clack/prompts')
+  prepareStdinForClack()
   const preferred =
     initialSessionId !== undefined && sessions.some((s) => s.sessionId === initialSessionId)
       ? initialSessionId

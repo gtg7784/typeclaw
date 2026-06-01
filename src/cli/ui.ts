@@ -7,6 +7,28 @@ import { type AutoUpgradeOutcome, describeAutoUpgrade } from '@/init/auto-upgrad
 
 export { cancel, intro, isCancel, log, note, outro }
 
+type ClackInput = Pick<NodeJS.ReadStream, 'isTTY' | 'setRawMode' | 'resume'>
+
+// Hand stdin to a clack picker in a state it can own. Over an SSH pseudo-TTY,
+// Bun's readline keypress wiring only transitions stdin into flowing raw mode
+// reliably once the stream has already been resumed; on a never-resumed stdin
+// the picker renders but arrow keys echo as raw `^[[B` and never advance it.
+// Local terminals dodge this because stdin was already flowing. So before every
+// picker: clear any stale raw mode for a clean baseline, then resume the stream.
+// Never pause() here — a previously-paused process.stdin does not reliably
+// re-flow under Bun, which is the same failure this resume() is fixing.
+export function prepareStdinForClack(input: ClackInput = process.stdin): void {
+  if (!input.isTTY) return
+  if (typeof input.setRawMode === 'function') {
+    try {
+      input.setRawMode(false)
+    } catch {
+      /* terminal already torn down */
+    }
+  }
+  input.resume()
+}
+
 function colorize(modifier: Parameters<typeof styleText>[0], s: string): string {
   if (!colorsEnabled()) return s
   return styleText(modifier, s)
