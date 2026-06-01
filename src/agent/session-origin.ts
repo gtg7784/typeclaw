@@ -418,15 +418,19 @@ function renderMembershipSummary(
   if (membership === undefined) return null
 
   const total = membership.humans + membership.bots
-  const caveat =
-    origin.adapter === 'discord-bot' && origin.workspace !== '@dm'
-      ? ' (Note: this is the count of guild members; private channels with permission overwrites may have fewer actual viewers.)'
-      : ''
+  // Exact Discord counts are channel-scoped (filtered by who can VIEW_CHANNEL),
+  // so the count is the channel's room, not the guild. The truncated branch is
+  // history-derived recent speakers, which is not a channel-membership claim,
+  // so the caveat would mislead there.
   const isExact = !membership.truncated && now - membership.fetchedAt < MEMBERSHIP_FRESHNESS_MS
+  const caveat =
+    isExact && origin.adapter === 'discord-bot' && origin.workspace !== '@dm'
+      ? ' (This counts only members who can view this channel, not the whole guild.)'
+      : ''
   if (isExact) {
     return `This channel has ${total} members: ${membership.humans} humans, ${membership.bots} bots.${caveat} The 10 most recent speakers are listed below.`
   }
-  return `This channel has approximately ${total} members (about ${membership.humans} humans, ${membership.bots} bots — the bot count is approximate, the full member list was not enumerated because it exceeds the 50-member cap).${caveat} The 10 most recent speakers are listed below.`
+  return `This channel has approximately ${total} members (about ${membership.humans} humans, ${membership.bots} bots — the bot count is approximate, the full member list was not enumerated because it exceeds the 50-member cap). The 10 most recent speakers are listed below.`
 }
 
 function renderMentionGuidance(

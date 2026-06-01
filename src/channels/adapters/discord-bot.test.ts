@@ -173,10 +173,22 @@ describe('createDiscordMembershipResolver', () => {
     expect(calls).toHaveLength(0)
   })
 
-  test('small guild enumerates members for an exact bot/human split', async () => {
+  // A fully public channel: @everyone can VIEW_CHANNEL (no deny overwrite),
+  // so the channel-scoped count equals the guild count. Members carry no roles
+  // beyond @everyone; the guild's @everyone role grants VIEW_CHANNEL (0x400).
+  function publicChannelGuild(): { channel: unknown; guild: unknown } {
+    return {
+      channel: { type: 0, permission_overwrites: [] },
+      guild: { owner_id: 'owner', roles: [{ id: 'g1', permissions: String(0x400) }] },
+    }
+  }
+
+  test('small guild enumerates members for an exact bot/human split (public channel)', async () => {
     const { fn, calls } = fakeFetch([
       jsonResponse({ approximate_member_count: 3 }),
       jsonResponse([{ user: { id: 'u1' } }, { user: { id: 'b1', bot: true } }, { user: { id: 'u2', bot: false } }]),
+      jsonResponse(publicChannelGuild().channel),
+      jsonResponse(publicChannelGuild().guild),
     ])
     const resolver = createDiscordMembershipResolver({
       token: 'tok',
@@ -195,6 +207,230 @@ describe('createDiscordMembershipResolver', () => {
     })
     expect(calls[0]!.url).toBe('https://discord.com/api/v10/guilds/g1/preview')
     expect(calls[1]!.url).toBe('https://discord.com/api/v10/guilds/g1/members?limit=100')
+    const scopedUrls = calls.slice(2).map((c) => c.url)
+    expect(scopedUrls).toContain('https://discord.com/api/v10/channels/c1')
+    expect(scopedUrls).toContain('https://discord.com/api/v10/guilds/g1')
+  })
+
+  test('scopes visibility to key.thread when set, not the parent key.chat', async () => {
+    // given a forward-compatible key shape (chat = parent, thread = thread id);
+    // visibility must be evaluated against the thread channel, not the parent.
+    const { fn, calls } = fakeFetch([
+      jsonResponse({ approximate_member_count: 2 }),
+      jsonResponse([
+        { user: { id: 'u1', bot: false }, roles: [] },
+        { user: { id: 'b1', bot: true }, roles: [] },
+      ]),
+      jsonResponse(publicChannelGuild().channel),
+      jsonResponse(publicChannelGuild().guild),
+    ])
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 100,
+    })
+
+    // when the inbound is anchored at a thread
+    await expect(
+      resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'parent-c1', thread: 'thread-t9' }),
+    ).resolves.toEqual({
+      humans: 1,
+      bots: 1,
+      fetchedAt: 100,
+      truncated: false,
+      humanMemberIds: ['u1'],
+    })
+
+    // then the channel object fetched is the thread, not the parent
+    const scopedUrls = calls.slice(2).map((c) => c.url)
+    expect(scopedUrls).toContain('https://discord.com/api/v10/channels/thread-t9')
+    expect(scopedUrls).not.toContain('https://discord.com/api/v10/channels/parent-c1')
+  })
+
+  test('private channel: @everyone denied VIEW_CHANNEL, only the agent bot allowed → bots:1, humans:1', async () => {
+    // given: the exact production shape — guild has 1 human (owner) + 3 bots,
+    // but #typeey denies @everyone VIEW_CHANNEL (0x400) and allows only the
+    // agent's own bot. The owner (human) bypasses overwrites; the two peer
+    // bots have no allow overwrite, so they are not channel-visible.
+    const VIEW = 0x400
+    const { fn } = fakeFetch([
+      jsonResponse({ approximate_member_count: 4 }),
+      jsonResponse([
+        { user: { id: 'owner', bot: false }, roles: [] },
+        { user: { id: 'peerbotA', bot: true }, roles: [] },
+        { user: { id: 'agentbot', bot: true }, roles: [] },
+        { user: { id: 'peerbotB', bot: true }, roles: [] },
+      ]),
+      jsonResponse({
+        type: 0,
+        permission_overwrites: [
+          { id: 'g1', type: 0, allow: '0', deny: String(VIEW) },
+          { id: 'agentbot', type: 1, allow: String(VIEW), deny: '0' },
+        ],
+      }),
+      jsonResponse({ owner_id: 'owner', roles: [{ id: 'g1', permissions: '0' }] }),
+    ])
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 100,
+    })
+
+    // then: only owner (human) + agentbot (bot) are visible → the single-human
+    // grant_role relaxation can fire.
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      humans: 1,
+      bots: 1,
+      fetchedAt: 100,
+      truncated: false,
+      humanMemberIds: ['owner'],
+    })
+  })
+
+  test('ADMINISTRATOR role bypasses a channel deny overwrite', async () => {
+    const VIEW = 0x400
+    const ADMIN = 0x8
+    const { fn } = fakeFetch([
+      jsonResponse({ approximate_member_count: 2 }),
+      jsonResponse([
+        { user: { id: 'admin', bot: false }, roles: ['adminRole'] },
+        { user: { id: 'agentbot', bot: true }, roles: [] },
+      ]),
+      jsonResponse({
+        type: 0,
+        permission_overwrites: [
+          { id: 'g1', type: 0, allow: '0', deny: String(VIEW) },
+          { id: 'agentbot', type: 1, allow: String(VIEW), deny: '0' },
+        ],
+      }),
+      jsonResponse({
+        owner_id: 'someone-else',
+        roles: [
+          { id: 'g1', permissions: '0' },
+          { id: 'adminRole', permissions: String(ADMIN) },
+        ],
+      }),
+    ])
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 100,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      humans: 1,
+      bots: 1,
+      fetchedAt: 100,
+      truncated: false,
+      humanMemberIds: ['admin'],
+    })
+  })
+
+  test('a member referencing an unknown role fails closed to history fallback', async () => {
+    const { fn } = fakeFetch([
+      jsonResponse({ approximate_member_count: 2 }),
+      jsonResponse([{ user: { id: 'u1', bot: false }, roles: ['ghostRole'] }]),
+      jsonResponse({ type: 0, permission_overwrites: [] }),
+      jsonResponse({ owner_id: 'owner', roles: [{ id: 'g1', permissions: String(0x400) }] }),
+    ])
+    const { cb, calls: historyCalls } = fakeHistory({ ok: true, messages: [] })
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: cb,
+      fetchImpl: fn,
+      now: () => 100,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      humans: 0,
+      bots: 0,
+      fetchedAt: 100,
+      truncated: true,
+    })
+    expect(historyCalls).toHaveLength(1)
+  })
+
+  test('a thread channel fails closed to history fallback (visibility not modelled)', async () => {
+    const { fn } = fakeFetch([
+      jsonResponse({ approximate_member_count: 3 }),
+      jsonResponse([{ user: { id: 'u1', bot: false }, roles: [] }]),
+      jsonResponse({ type: 11, permission_overwrites: [] }),
+      jsonResponse({ owner_id: 'owner', roles: [{ id: 'g1', permissions: String(0x400) }] }),
+    ])
+    const { cb, calls: historyCalls } = fakeHistory({ ok: true, messages: [] })
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: cb,
+      fetchImpl: fn,
+      now: () => 100,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      humans: 0,
+      bots: 0,
+      fetchedAt: 100,
+      truncated: true,
+    })
+    expect(historyCalls).toHaveLength(1)
+  })
+
+  test('channel fetch failure fails closed to history fallback', async () => {
+    const { fn } = fakeFetch([
+      jsonResponse({ approximate_member_count: 2 }),
+      jsonResponse([{ user: { id: 'u1', bot: false }, roles: [] }]),
+      new Response(null, { status: 403 }),
+      jsonResponse({ owner_id: 'owner', roles: [{ id: 'g1', permissions: String(0x400) }] }),
+    ])
+    const { cb, calls: historyCalls } = fakeHistory({ ok: true, messages: [] })
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: cb,
+      fetchImpl: fn,
+      now: () => 100,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      humans: 0,
+      bots: 0,
+      fetchedAt: 100,
+      truncated: true,
+    })
+    expect(historyCalls).toHaveLength(1)
+  })
+
+  test('an unidentifiable visible human drops humanMemberIds (counts-only)', async () => {
+    const { fn } = fakeFetch([
+      jsonResponse({ approximate_member_count: 2 }),
+      jsonResponse([
+        { user: { bot: false }, roles: [] },
+        { user: { id: 'b1', bot: true }, roles: [] },
+      ]),
+      jsonResponse(publicChannelGuild().channel),
+      jsonResponse(publicChannelGuild().guild),
+    ])
+    const resolver = createDiscordMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 100,
+    })
+
+    await expect(resolver({ adapter: 'discord-bot', workspace: 'g1', chat: 'c1', thread: null })).resolves.toEqual({
+      humans: 1,
+      bots: 1,
+      fetchedAt: 100,
+      truncated: false,
+    })
   })
 
   test('large guild (>cap) falls back to history-derived count', async () => {
