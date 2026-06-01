@@ -7,7 +7,7 @@ import { createSession, renderTurnRoleAnchor, renderTurnTimeAnchor, type AgentSe
 import { subscribeProviderErrors } from '@/agent/provider-error'
 import type { ChannelParticipant, SessionOrigin } from '@/agent/session-origin'
 import { renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
-import { type Command, createCommandRegistry } from '@/commands'
+import { type Command, type CommandResult, createCommandRegistry } from '@/commands'
 import { CORE_PERMISSIONS, type PermissionService } from '@/permissions'
 import type { HookBus } from '@/plugin'
 import { extractClaimCode } from '@/role-claim'
@@ -1623,6 +1623,28 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
     }
   }
 
+  // Executes a parsed channel command and posts its reply (if any) back to the
+  // originating channel. Shared by the pre-gate public-command fast path and the
+  // post-gate command block so the execute→reply shape can't drift between them.
+  // Gating (channel.respond / session.control) and live-session resolution stay
+  // at the call sites — this helper only runs the handler and delivers the reply.
+  const runChannelCommand = async (event: InboundMessage, live: LiveSession | null): Promise<CommandResult> => {
+    const result = await commands.execute(event.text, { live, event })
+    if (result.kind === 'handled' && result.reply !== undefined) {
+      await send(
+        {
+          adapter: event.adapter,
+          workspace: event.workspace,
+          chat: event.chat,
+          thread: event.thread,
+          text: result.reply,
+        },
+        { source: 'system' },
+      )
+    }
+    return result
+  }
+
   const route = async (event: InboundMessage): Promise<void> => {
     const adapterConfig = options.configForAdapter(event.adapter)
     if (!adapterConfig) return
@@ -1670,6 +1692,25 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       }
     }
 
+    // Parse once, here, so the public-command fast path (below) and the
+    // post-gate command block share one parse and lookup.
+    const parsedCommand = commands.parse(event.text)
+    const commandInfo = parsedCommand === null ? undefined : commands.get(parsedCommand.name)
+
+    // Public-command fast path: a known command that is both ungated
+    // (permission:'none') AND informational (requiresLiveSession:false) runs
+    // BEFORE the channel.respond gate, mirroring the native-slash path where
+    // such commands skip permissions entirely. Both conditions are required so
+    // a future "public but live-session-aware" command can't silently bypass
+    // the gate. It only reveals already-public command names — it never creates
+    // a session or prompts the agent — so it is not a channel.respond bypass in
+    // any meaningful sense. Unknown commands, /stop, //escaped text, and plain
+    // messages all fall through to the gate unchanged.
+    if (parsedCommand !== null && commandInfo?.permission === 'none' && !commandInfo.requiresLiveSession) {
+      await runChannelCommand(event, null)
+      return
+    }
+
     if (isChannelRespondDenied(event)) {
       publishInbound(event, 'denied')
       logger.info(
@@ -1678,12 +1719,10 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
       return
     }
 
-    const parsedCommand = commands.parse(event.text)
     if (parsedCommand !== null) {
       // Commands are control traffic, not engaged inbounds; if the session is stale,
       // the next engaged inbound will perform the rollover before prompting.
       const keyId = channelKeyId(key)
-      const commandInfo = commands.get(parsedCommand.name)
       if (commandInfo === undefined) {
         logger.info(`[channels] ${keyId}: ignoring unknown command /${parsedCommand.name}`)
         return
@@ -1704,22 +1743,7 @@ export function createChannelRouter(options: CreateChannelRouterOptions): Channe
           return
         }
       }
-      const commandResult = await commands.execute(event.text, { live: existingLive, event })
-      if (commandResult.kind === 'handled') {
-        if (commandResult.reply !== undefined) {
-          await send(
-            {
-              adapter: event.adapter,
-              workspace: event.workspace,
-              chat: event.chat,
-              thread: event.thread,
-              text: commandResult.reply,
-            },
-            { source: 'system' },
-          )
-        }
-        return
-      }
+      const commandResult = await runChannelCommand(event, existingLive)
       if (commandResult.kind !== 'not-command') return
     }
 

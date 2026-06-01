@@ -5258,6 +5258,95 @@ describe('ChannelRouter channel.respond gate', () => {
     expect(sent[0]!.text).toContain('Available commands')
   })
 
+  test('author WITHOUT channel.respond can still /help via text prefix (parity with native slash)', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    // nobody is absent from the table → no channel.respond. /help is ungated,
+    // so it must still answer rather than being dropped by the respond gate.
+    const permissions = buildPermissions({})
+    const { router, sessions } = makeRouter(dir, { permissions })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'nobody', text: '/help', externalMessageId: 'm-help' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+    expect(sent[0]!.text).toContain('Available commands')
+    expect(sessions).toHaveLength(0)
+  })
+
+  test('author WITHOUT channel.respond typing /stop is still denied at the respond gate', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const permissions = buildPermissions({})
+    const { router } = makeRouter(dir, { permissions, logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'nobody', text: '/stop', externalMessageId: 'm-stop' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((l) => l.includes('denied by permissions (channel.respond)'))).toBe(true)
+  })
+
+  test('author WITHOUT channel.respond typing an unknown /foo is still denied at the respond gate', async () => {
+    const dir = await tempDir()
+    const logs: string[] = []
+    const sent: Array<{ text: string }> = []
+    const permissions = buildPermissions({})
+    const { router } = makeRouter(dir, { permissions, logs })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'nobody', text: '/foo', externalMessageId: 'm-foo' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(sent).toHaveLength(0)
+    expect(logs.some((l) => l.includes('denied by permissions (channel.respond)'))).toBe(true)
+    expect(logs.some((l) => l.includes('ignoring unknown command'))).toBe(false)
+  })
+
+  test('escaped //help is not executed as a command and stays subject to the respond gate', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const permissions = buildPermissions({})
+    const { router } = makeRouter(dir, { permissions })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'nobody', text: '//help', externalMessageId: 'm-esc' }))
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(sent).toHaveLength(0)
+  })
+
+  test('authorized author typing /help gets exactly one reply (no double execution)', async () => {
+    const dir = await tempDir()
+    const sent: Array<{ text: string }> = []
+    const permissions = buildPermissions({ alice: ['channel.respond', 'session.control'] })
+    const { router } = makeRouter(dir, { permissions })
+    router.registerOutbound('discord-bot', async (msg) => {
+      sent.push({ text: msg.text ?? '' })
+      return { ok: true }
+    })
+
+    await router.route(inbound({ authorId: 'alice', text: '/help', externalMessageId: 'm-help' }))
+    await router.__testing!.flushDebounce(KEY)
+
+    expect(sent).toHaveLength(1)
+  })
+
   test('native executeCommand /help does not require session.control', async () => {
     const dir = await tempDir()
     const permissions = buildPermissions({ stranger: ['channel.respond'] })
