@@ -54,7 +54,7 @@ The `reviewer` subagent is the analyst; you are the integration layer between it
    gh api /repos/owner/repo/pulls/<N>/reviews --jq '[.[] | select(.user.login == "<your-login>")] | last | {state, submitted_at}'
    ```
 
-   If that returns a prior review whose `state` is `CHANGES_REQUESTED` (or `COMMENTED`), treat the current request as a **re-review** and carry that fact into the spawn in step 2. (`<your-login>` is your GitHub App login, typically `name[bot]`.)
+   If that returns a prior review whose `state` is `CHANGES_REQUESTED`, treat the current request as a **re-review** and carry that fact into the spawn in step 2. Only `CHANGES_REQUESTED` matters here: it is the one review state that leaves a _sticky block_ a plain comment cannot clear, which is the whole reason a re-review must end in a formal verdict. A prior `COMMENTED` or `APPROVED` review left no block to unwind, so it does not trigger the re-review path — handle the current request normally. (`<your-login>` is your GitHub App login, typically `name[bot]`.)
 
 2. **Spawn the `reviewer` subagent with the PR target.** Use `run_in_background: true` so you stay responsive while the deep model works. Pass the PR URL (or `owner/repo#N`) plus any context the requester gave you (focus areas, specific files, etc.). The reviewer fetches the diff itself (`gh pr diff`, `gh api /repos/.../pulls/<n>`), loads the `code-review` skill, and returns a `<review>` block whose code findings carry `location="path:line"`.
 
