@@ -12,6 +12,7 @@ import { runPluginDoctorChecks, runPluginDoctorFix } from '@/agent/doctor'
 import type { LiveSessionRegistry } from '@/agent/live-sessions'
 import type { LiveSubagentRegistry } from '@/agent/live-subagents'
 import { detectProviderError } from '@/agent/provider-error'
+import { requestContainerRestart } from '@/agent/restart'
 import { consumeRestartHandoff, type RestartHandoff } from '@/agent/restart-handoff'
 import type { SessionOrigin } from '@/agent/session-origin'
 import { parseSubagentCompletedPayload, renderSubagentCompletionReminder } from '@/agent/subagent-completion-reminder'
@@ -649,6 +650,11 @@ export function createServer({
 
           if (msg.type === 'reload') {
             await handleReload(ws, reloadAll, reloadRegistry, msg.scope)
+            return
+          }
+
+          if (msg.type === 'restart') {
+            await handleRestart(ws, state, containerName, agentDir, stream)
             return
           }
 
@@ -1436,4 +1442,47 @@ async function handleReload(
       results: [{ scope: 'reload', ok: false, reason: err instanceof Error ? err.message : String(err) }],
     })
   }
+}
+
+async function handleRestart(
+  ws: Ws,
+  state: SessionState | undefined,
+  containerName: string | undefined,
+  agentDir: string | undefined,
+  stream: Stream | undefined,
+): Promise<void> {
+  if (containerName === undefined) {
+    send(ws, {
+      type: 'restart_result',
+      status: 'failed',
+      error: 'restart unavailable: no container name configured',
+    })
+    return
+  }
+
+  // Pass stream so requestContainerRestart fans out the container-restarting
+  // notice — the originating session's subscribeRestartNotice appends the
+  // typeclaw.restart-self entry to its JSONL before the handoff is written, so
+  // the rebooted container resumes with the "I'm back" instruction (same path
+  // the agent restart tool uses).
+  const originatingSessionFile = state?.sessionManager?.getSessionFile()
+  const result = await requestContainerRestart({
+    containerName,
+    ...(agentDir !== undefined ? { agentDir } : {}),
+    ...(state?.sessionFileId !== undefined ? { originatingSessionId: state.sessionFileId } : {}),
+    ...(originatingSessionFile !== undefined ? { originatingSessionFile } : {}),
+    ...(stream !== undefined ? { stream } : {}),
+  })
+  if (!result.ok) {
+    send(ws, { type: 'restart_result', status: 'failed', error: result.reason })
+    return
+  }
+
+  // hostd's supervisor ACKs first, then runs stop+start in the background;
+  // this process should not self-exit or it could race the daemon-owned stop.
+  send(ws, {
+    type: 'restart_result',
+    status: 'accepted',
+    message: 'restart scheduled; reconnecting when the new container is up',
+  })
 }

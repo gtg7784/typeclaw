@@ -13,7 +13,7 @@ import { createHookBus, type HookBus, type PluginRegistry } from '@/plugin'
 import { createPluginRuntime, type PluginRuntime } from '@/run/plugin-runtime'
 import { createSessionFactory, type SessionFactory } from '@/sessions'
 import type { ServerMessage, TunnelLogsServerMessage } from '@/shared'
-import { createStream } from '@/stream'
+import { createStream, type StreamMessage } from '@/stream'
 import { expectStable, waitFor as waitForState } from '@/test-helpers/wait-for'
 import type { TunnelManager, TunnelState } from '@/tunnels'
 
@@ -130,6 +130,7 @@ async function startWithSession(
     commandRunnerFactory?: (outbound: CommandOutbound) => CommandRunner
     tunnelManager?: TunnelManager
     runtimeVersion?: string
+    containerName?: string
   } = {},
 ): Promise<{ url: string }> {
   const pluginRuntime =
@@ -147,6 +148,7 @@ async function startWithSession(
     ...(extra.commandRunnerFactory ? { commandRunnerFactory: extra.commandRunnerFactory } : {}),
     ...(extra.tunnelManager ? { tunnelManager: extra.tunnelManager } : {}),
     ...(extra.runtimeVersion !== undefined ? { runtimeVersion: extra.runtimeVersion } : {}),
+    ...(extra.containerName !== undefined ? { containerName: extra.containerName } : {}),
   }).start()
   server = built
   return { url: `ws://localhost:${built.port}` }
@@ -434,6 +436,120 @@ describe('createServer abort handling (no stream — fallback path)', () => {
     await waitForState(() => session.abortCalls > 0)
     expect(session.abortCalls).toBe(1)
     ws.close()
+  })
+})
+
+describe('createServer restart handling', () => {
+  test('reports restart unavailable when no container name is configured', async () => {
+    // given
+    const session = createFakeSession()
+    const { url } = await startWithSession(session)
+    const { ws, waitFor } = await connect(url)
+    await waitFor((m) => m.type === 'connected')
+
+    // when
+    ws.send(JSON.stringify({ type: 'restart' }))
+
+    // then
+    await expect(waitFor((m) => m.type === 'restart_result')).resolves.toEqual({
+      type: 'restart_result',
+      status: 'failed',
+      error: 'restart unavailable: no container name configured',
+    })
+    ws.close()
+  })
+
+  test('accepts restart when hostd ACKs the container restart RPC', async () => {
+    // given
+    const requests: Array<{ auth: string | null; body: unknown }> = []
+    const hostd = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        requests.push({ auth: req.headers.get('authorization'), body: await req.json() })
+        return Response.json({ ok: true, result: { containerName: 'coder', scheduled: true } })
+      },
+    })
+    const oldUrl = process.env.TYPECLAW_HOSTD_URL
+    const oldToken = process.env.TYPECLAW_HOSTD_TOKEN
+    process.env.TYPECLAW_HOSTD_URL = `http://127.0.0.1:${hostd.port}`
+    process.env.TYPECLAW_HOSTD_TOKEN = 'secret'
+    try {
+      const session = createFakeSession()
+      const { url } = await startWithSession(session, { containerName: 'coder' })
+      const { ws, waitFor } = await connect(url)
+      await waitFor((m) => m.type === 'connected')
+
+      // when
+      ws.send(JSON.stringify({ type: 'restart' }))
+
+      // then
+      await expect(waitFor((m) => m.type === 'restart_result')).resolves.toEqual({
+        type: 'restart_result',
+        status: 'accepted',
+        message: 'restart scheduled; reconnecting when the new container is up',
+      })
+      expect(requests).toEqual([
+        {
+          auth: 'Bearer secret',
+          body: { kind: 'restart', containerName: 'coder', build: false },
+        },
+      ])
+      ws.close()
+    } finally {
+      if (oldUrl === undefined) delete process.env.TYPECLAW_HOSTD_URL
+      else process.env.TYPECLAW_HOSTD_URL = oldUrl
+      if (oldToken === undefined) delete process.env.TYPECLAW_HOSTD_TOKEN
+      else process.env.TYPECLAW_HOSTD_TOKEN = oldToken
+      hostd.stop(true)
+    }
+  })
+
+  test('publishes the container-restarting notice so the resumed session gets restart-self', async () => {
+    // given: an accepting hostd and a real stream. The server must fan out the
+    // container-restarting broadcast for the originating session — that
+    // broadcast is what subscribeRestartNotice turns into the
+    // typeclaw.restart-self JSONL entry the rebooted container resumes from.
+    const hostd = Bun.serve({
+      port: 0,
+      fetch() {
+        return Response.json({ ok: true, result: { containerName: 'coder', scheduled: true } })
+      },
+    })
+    const oldUrl = process.env.TYPECLAW_HOSTD_URL
+    const oldToken = process.env.TYPECLAW_HOSTD_TOKEN
+    process.env.TYPECLAW_HOSTD_URL = `http://127.0.0.1:${hostd.port}`
+    process.env.TYPECLAW_HOSTD_TOKEN = 'secret'
+    try {
+      const stream = createStream()
+      const broadcasts: StreamMessage[] = []
+      stream.subscribe({ target: { kind: 'broadcast' } }, (msg) => broadcasts.push(msg))
+
+      const session = createFakeSession()
+      const { url } = await startWithSession(session, { containerName: 'coder', stream })
+      const { ws, waitFor } = await connect(url)
+      const connected = await waitFor((m) => m.type === 'connected')
+      if (connected.type !== 'connected') throw new Error('unreachable')
+
+      // when
+      ws.send(JSON.stringify({ type: 'restart' }))
+      await waitFor((m) => m.type === 'restart_result')
+
+      // then: the broadcast names the originating session so its
+      // subscribeRestartNotice (covered in agent/index.test.ts) appends
+      // restart-self rather than the sibling notice
+      expect(broadcasts).toHaveLength(1)
+      expect(broadcasts[0]?.payload).toMatchObject({
+        kind: 'container-restarting',
+        originatingSessionId: connected.sessionId,
+      })
+      ws.close()
+    } finally {
+      if (oldUrl === undefined) delete process.env.TYPECLAW_HOSTD_URL
+      else process.env.TYPECLAW_HOSTD_URL = oldUrl
+      if (oldToken === undefined) delete process.env.TYPECLAW_HOSTD_TOKEN
+      else process.env.TYPECLAW_HOSTD_TOKEN = oldToken
+      hostd.stop(true)
+    }
   })
 })
 
