@@ -1,7 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
-import { MEMBERSHIP_FRESHNESS_MS } from '@/channels/membership'
+import { MEMBERSHIP_FRESHNESS_MS, type MembershipCount } from '@/channels/membership'
 import {
   grantRole,
   grantRolePermission,
@@ -60,27 +60,47 @@ function isSinglePrincipalOrigin(origin: SessionOrigin | undefined): boolean {
   return false
 }
 
-// A group/open channel that the platform proves contains exactly one human is
-// injection-equivalent to a 1:1 DM: there is no third-party human whose
-// buffered messages could prompt-inject the turn. The lone human is the
-// caller, and the per-turn caller-role check below still requires them to
-// resolve to owner/trusted. We trust ONLY a fresh, complete membership read —
-// `participants` is a bounded, speaker-only, age-filtered list and cannot prove
-// the absence of a silent untrusted lurker, so it is unsuitable for authorizing
-// a write to the access-control table. Every uncertain signal (missing, stale,
-// or truncated membership) fails closed. This mirrors `resolveEffectiveHumans`
-// in src/channels/engagement.ts, which likewise trusts only a fresh complete
-// read to see lurkers.
-function isSingleHumanGroupChannelOrigin(origin: SessionOrigin | undefined, now: number): boolean {
-  if (origin?.kind !== 'channel') return false
-  if (isDmChannelOrigin(origin)) return false
-
+// Shared precondition for treating a non-DM channel as injection-equivalent to
+// a 1:1 DM. A DM is safe because it is "principal + the agent's OWN bot, no
+// third-party content". For a group channel we must independently prove the
+// same room shape from a membership read:
+//   - fresh and NOT truncated, so the count is the complete current membership
+//     (`participants` is speaker-only and cannot see silent lurkers — never
+//     used for authorization here);
+//   - `bots === 1`, i.e. the only non-human is the agent itself. The agent's
+//     own bot is always a member of a chat channel and is never an inbound
+//     author (adapters drop self-authored messages), so a complete read with
+//     exactly one bot proves there are NO peer bots whose buffered messages
+//     could prompt-inject the turn. A peer bot would push the count to >= 2
+//     (or, if misclassified as human, trip the human checks) — fail-closed
+//     either way.
+// GitHub is excluded: its membership is the repo COLLABORATOR list, a different
+// population from the authors that can comment into a PR/issue turn (and the
+// agent App is typically not a collaborator), so `bots === 1` is not a valid
+// "no peer bot" proof there. GitHub grants stay confined to the TUI/DM path.
+function provesOnlyAgentBotPresent(
+  origin: Extract<SessionOrigin, { kind: 'channel' }>,
+  now: number,
+): origin is Extract<SessionOrigin, { kind: 'channel' }> & { membership: MembershipCount } {
+  if (origin.adapter === 'github') return false
   const membership = origin.membership
   if (membership === undefined) return false
   if (membership.truncated) return false
   if (now - membership.fetchedAt >= MEMBERSHIP_FRESHNESS_MS) return false
+  return membership.bots === 1
+}
 
-  return membership.humans === 1
+// A group/open channel that the platform proves contains exactly one human AND
+// no peer bots is injection-equivalent to a 1:1 DM: there is no third-party
+// author (human or bot) whose buffered messages could prompt-inject the turn.
+// The lone human is the caller, and the per-turn caller-role check below still
+// requires them to resolve to owner/trusted.
+function isSingleHumanGroupChannelOrigin(origin: SessionOrigin | undefined, now: number): boolean {
+  if (origin?.kind !== 'channel') return false
+  if (isDmChannelOrigin(origin)) return false
+  if (!provesOnlyAgentBotPresent(origin, now)) return false
+
+  return origin.membership.humans === 1
 }
 
 // Caps the per-member role resolution this check performs so it can never do
@@ -92,17 +112,17 @@ function isSingleHumanGroupChannelOrigin(origin: SessionOrigin | undefined, now:
 const MAX_TRUSTED_GROUP_HUMANS = 20
 
 // Generalises the single-human case: a group channel where the platform proves
-// EVERY human member resolves to trusted/owner is also injection-equivalent to
-// a DM, because no untrusted human can buffer a message into the turn. The
-// proof requires an authoritative, complete identity enumeration — only a
-// fresh, non-truncated membership read that carries `humanMemberIds` (the
-// adapter listed and classified every member in one pass). `humanMemberIds`
-// length must equal `humans` so an unaccounted member cannot slip past; the
-// resolvers construct it that way and we re-check defensively. The room must
-// also be at most MAX_TRUSTED_GROUP_HUMANS humans. Each id is resolved through
-// the same per-author path the turn anchor uses. Adapters that cannot enumerate
-// identities (Telegram, KakaoTalk) never set the field and so only ever qualify
-// via the single-human branch above — fully fail-closed.
+// EVERY human member resolves to trusted/owner AND no peer bots are present is
+// also injection-equivalent to a DM, because no untrusted author (human or bot)
+// can buffer a message into the turn. The human proof requires an authoritative,
+// complete identity enumeration — only a fresh, non-truncated membership read
+// that carries `humanMemberIds` (the adapter listed and classified every member
+// in one pass). `humanMemberIds` length must equal `humans` so an unaccounted
+// member cannot slip past; the resolvers construct it that way and we re-check
+// defensively. The no-peer-bot proof is shared with the single-human branch via
+// provesOnlyAgentBotPresent (also enforces fresh/non-truncated and excludes
+// GitHub). The room must be at most MAX_TRUSTED_GROUP_HUMANS humans. Each id is
+// resolved through the same per-author path the turn anchor uses.
 function isAllHumansTrustedGroupChannelOrigin(
   origin: SessionOrigin | undefined,
   permissions: PermissionService,
@@ -110,12 +130,9 @@ function isAllHumansTrustedGroupChannelOrigin(
 ): boolean {
   if (origin?.kind !== 'channel') return false
   if (isDmChannelOrigin(origin)) return false
+  if (!provesOnlyAgentBotPresent(origin, now)) return false
 
   const membership = origin.membership
-  if (membership === undefined) return false
-  if (membership.truncated) return false
-  if (now - membership.fetchedAt >= MEMBERSHIP_FRESHNESS_MS) return false
-
   const humanMemberIds = membership.humanMemberIds
   if (humanMemberIds === undefined) return false
   if (humanMemberIds.length !== membership.humans) return false
@@ -138,8 +155,9 @@ export function createGrantRoleTool(options: CreateGrantRoleToolOptions) {
       'Assign an author to a role (match grant) or give a role a capability (permission grant), by editing typeclaw.json#roles. ' +
       'Use this to onboard a teammate ("respond to author U_X" → grant them member) or to open the agent to a wider audience ' +
       '("let anyone in this channel message you" → grant guest channel.respond). ' +
-      'Only callable by an owner or trusted user from the TUI, a 1:1 DM, or a group channel whose human members ' +
-      'are all trusted (or which has a single human member) — channels that admit untrusted humans cannot use it. ' +
+      'Only callable by an owner or trusted user from the TUI, a 1:1 DM, or a group channel with no peer bots whose ' +
+      'human members are all trusted (or which has a single human member) — channels that admit untrusted humans or ' +
+      'other bots cannot use it. ' +
       'Permission grants are restart-required: they land in typeclaw.json but take effect on the next `typeclaw restart`.',
     parameters: Type.Object({
       role: Type.Union(
@@ -174,9 +192,10 @@ export function createGrantRoleTool(options: CreateGrantRoleToolOptions) {
         !isAllHumansTrustedGroupChannelOrigin(origin, permissions, now)
       ) {
         return err(
-          'grant_role is only available from the TUI, a 1:1 DM, or a group channel whose human members are all ' +
-            'trusted (or which currently has a single human member). A channel that admits any untrusted human ' +
-            'cannot change roles, because it mixes in other participants\u2019 messages (prompt-injection surface).',
+          'grant_role is only available from the TUI, a 1:1 DM, or a group channel that has no peer bots and whose ' +
+            'human members are all trusted (or which currently has a single human member). A channel that admits any ' +
+            'untrusted human or another bot cannot change roles, because it mixes in other participants\u2019 messages ' +
+            '(prompt-injection surface).',
         )
       }
 

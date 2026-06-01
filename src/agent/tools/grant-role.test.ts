@@ -298,6 +298,56 @@ describe('grant_role gate — all-humans-trusted group channel', () => {
   })
 })
 
+describe('grant_role gate — peer bots', () => {
+  test('single-human group with a peer bot present is refused', async () => {
+    const dir = freshAgentDir()
+    // humans===1 but bots===2 (agent + one peer bot), so a peer bot's messages
+    // can still be buffered into the turn — not DM-equivalent.
+    const origin = trustedGroupWithMembership({ humans: 1, bots: 2, truncated: false })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    if (!details.ok) expect(details.error).toContain('another bot')
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('all-trusted group with a peer bot present is refused', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({
+      humans: 2,
+      bots: 2,
+      truncated: false,
+      humanMemberIds: ['U_TRENT', 'U_OWNER'],
+    })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('github channel is refused (collaborator membership is not a no-peer-bot proof)', async () => {
+    const dir = freshAgentDir()
+    const permissions = createPermissionService({
+      roles: { trusted: { match: [{ kind: 'channel', platform: 'github' }] } } as unknown as RolesConfig,
+    })
+    const tool = createGrantRoleTool({
+      agentDir: dir,
+      getOrigin: () => ({
+        kind: 'channel',
+        adapter: 'github',
+        workspace: 'acme/repo',
+        chat: '1',
+        thread: null,
+        lastInboundAuthorId: 'U_TRENT',
+        membership: { humans: 1, bots: 1, truncated: false, fetchedAt: Date.now(), humanMemberIds: ['U_TRENT'] },
+      }),
+      permissions,
+      reloadRoles: () => readRolesFromDisk(dir),
+    })
+    const details = await run(tool, { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+})
+
 describe('grant_role gate — tier ceiling', () => {
   test('trusted cannot grant owner', async () => {
     const dir = freshAgentDir()

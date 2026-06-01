@@ -21,29 +21,18 @@ export function createGithubMembershipResolver(options: {
         },
       )
       if (!response.ok) return response.status >= 500 ? { kind: 'transient' } : { kind: 'permanent' }
-      const users = (await response.json()) as Array<{ type?: string; id?: number }>
-      const truncated = users.length >= 100
+      const users = (await response.json()) as Array<{ type?: string }>
       let bots = 0
       let humans = 0
-      const humanMemberIds: string[] = []
-      let everyHumanIdentified = true
       for (const user of users) {
-        if (user.type === 'Bot') {
-          bots++
-          continue
-        }
-        humans++
-        // Inbound GitHub turns key authorId on the numeric user id (see
-        // inbound.ts), so the resolvable identity is `String(id)`, not `login`.
-        if (user.id === undefined) everyHumanIdentified = false
-        else humanMemberIds.push(String(user.id))
+        if (user.type === 'Bot') bots++
+        else humans++
       }
-      // Identities are a completeness proof; only attach them on a full,
-      // fully-identified enumeration. A truncated page or an unidentifiable
-      // collaborator drops back to counts-only so consumers fail closed.
-      return truncated || !everyHumanIdentified
-        ? { humans, bots, fetchedAt: Date.now(), truncated }
-        : { humans, bots, fetchedAt: Date.now(), truncated, humanMemberIds }
+      // Counts only, no humanMemberIds: GitHub membership is the repo
+      // collaborator list, a different population from the authors that can
+      // comment into a PR/issue turn, so it is not a basis for the channel
+      // grant-role relaxation (see provesOnlyAgentBotPresent in grant-role.ts).
+      return { humans, bots, fetchedAt: Date.now(), truncated: users.length >= 100 }
     } catch {
       return { kind: 'transient' }
     }
