@@ -343,13 +343,17 @@ describe('createSlackMembershipResolver', () => {
     expect(calls).toHaveLength(0)
   })
 
-  test('small channel enumerates members and classifies bots with users.info', async () => {
+  test('small channel classifies members against the bulk users.list bot set', async () => {
     const { fn, calls } = fakeFetch([
       slackResponse({ ok: true, channel: { num_members: 3 } }),
-      slackResponse({ ok: true, members: ['U1', 'B1', 'U2'] }),
-      slackResponse({ ok: true, user: { is_bot: false } }),
-      slackResponse({ ok: true, user: { is_bot: true } }),
-      slackResponse({ ok: true, user: { is_bot: false } }),
+      slackResponse({ ok: true, members: ['U1', 'UBOT', 'U2'] }),
+      slackResponse({
+        ok: true,
+        members: [
+          { id: 'UBOT', is_bot: true },
+          { id: 'U2', is_bot: false },
+        ],
+      }),
     ])
     const resolver = createSlackMembershipResolver({
       token: 'tok',
@@ -369,10 +373,98 @@ describe('createSlackMembershipResolver', () => {
     expect(calls.map((c) => c.url)).toEqual([
       'https://slack.com/api/conversations.info',
       'https://slack.com/api/conversations.members',
-      'https://slack.com/api/users.info',
-      'https://slack.com/api/users.info',
-      'https://slack.com/api/users.info',
+      'https://slack.com/api/users.list',
     ])
+  })
+
+  test('classifies members with no per-member users.info when the bot set covers them', async () => {
+    const { fn, calls } = fakeFetch([
+      slackResponse({ ok: true, channel: { num_members: 4 } }),
+      slackResponse({ ok: true, members: ['U1', 'U2', 'UBOT', 'U3'] }),
+      slackResponse({ ok: true, members: [{ id: 'UBOT', is_bot: true }] }),
+    ])
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 30,
+    })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toMatchObject({
+      humans: 3,
+      bots: 1,
+      humanMemberIds: ['U1', 'U2', 'U3'],
+    })
+    expect(calls.filter((c) => c.url.endsWith('/users.info'))).toHaveLength(0)
+  })
+
+  test('a lurking bot never seen in history is still counted via the bulk set', async () => {
+    const { fn } = fakeFetch([
+      slackResponse({ ok: true, channel: { num_members: 2 } }),
+      slackResponse({ ok: true, members: ['U_HUMAN', 'U_LURKER_BOT'] }),
+      slackResponse({ ok: true, members: [{ id: 'U_LURKER_BOT', is_bot: true }] }),
+    ])
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 30,
+    })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toMatchObject({
+      humans: 1,
+      bots: 1,
+      humanMemberIds: ['U_HUMAN'],
+    })
+  })
+
+  test('reuses the bulk bot set across calls instead of re-fetching users.list', async () => {
+    const { fn, calls } = fakeFetch([
+      slackResponse({ ok: true, channel: { num_members: 2 } }),
+      slackResponse({ ok: true, members: ['U1', 'UBOT'] }),
+      slackResponse({ ok: true, members: [{ id: 'UBOT', is_bot: true }] }),
+      slackResponse({ ok: true, channel: { num_members: 2 } }),
+      slackResponse({ ok: true, members: ['U1', 'UBOT'] }),
+    ])
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 40,
+    })
+
+    const key = { adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null } as const
+    await resolver(key)
+    await resolver(key)
+
+    expect(calls.filter((c) => c.url.endsWith('/users.list'))).toHaveLength(1)
+  })
+
+  test('falls back to per-member users.info when users.list fails', async () => {
+    const { fn, calls } = fakeFetch([
+      slackResponse({ ok: true, channel: { num_members: 2 } }),
+      slackResponse({ ok: true, members: ['U1', 'UBOT'] }),
+      slackResponse({ ok: false, error: 'ratelimited' }),
+      slackResponse({ ok: true, user: { is_bot: false } }),
+      slackResponse({ ok: true, user: { is_bot: true } }),
+    ])
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 50,
+    })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'T1', chat: 'C1', thread: null })).resolves.toMatchObject({
+      humans: 1,
+      bots: 1,
+      humanMemberIds: ['U1'],
+    })
+    expect(calls.filter((c) => c.url.endsWith('/users.info'))).toHaveLength(2)
   })
 
   test('large channel (>cap) falls back to history-derived count', async () => {
