@@ -220,6 +220,41 @@ describe('checkBunHygieneGuard — subshell / command substitution', () => {
   )
 })
 
+describe('checkBunHygieneGuard — command substitution inside double quotes', () => {
+  // Bash executes `$(...)` and backtick substitutions inside double quotes, so
+  // the manager inside them must be detected.
+  test.each([
+    ['echo "$(npm install)"', GUARD_NON_BUN_PACKAGE_MANAGER],
+    ['echo "$(npm install -g x)"', GUARD_GLOBAL_INSTALL],
+    ['echo "`npm install`"', GUARD_NON_BUN_PACKAGE_MANAGER],
+    ['echo "`npm install -g x`"', GUARD_GLOBAL_INSTALL],
+    ['X="$(npm i -g foo)"', GUARD_GLOBAL_INSTALL],
+    ['echo "$(echo $(npm i -g x))"', GUARD_GLOBAL_INSTALL],
+  ])('detects the manager inside %p', (command, guard) => {
+    expect(bash(command)?.reason).toContain(guard)
+  })
+
+  // The outer double quote must resume after the substitution closes, so a
+  // trailing real command is not swallowed.
+  test('still sees a command after the substitution closes', () => {
+    expect(bash('echo "$(date)" && npm install -g x')?.reason).toContain(GUARD_GLOBAL_INSTALL)
+  })
+
+  // Single quotes do NOT substitute in Bash, so these stay inert.
+  test.each(["echo '$(npm install)'", "echo '`npm install -g x`'"])('leaves single-quoted %p inert', (command) => {
+    expect(bash(command)).toBeUndefined()
+  })
+
+  // A plain double-quoted string that merely mentions a manager (no `$(`/
+  // backtick) must not be misclassified.
+  test.each(['echo "install npm globally please"', 'echo "use npm or yarn"', 'echo "price is $5"', 'echo "$HOME"'])(
+    'does not block plain double-quoted text %p',
+    (command) => {
+      expect(bash(command)).toBeUndefined()
+    },
+  )
+})
+
 describe('checkBunHygieneGuard — allowed commands', () => {
   test.each([
     'bun install',

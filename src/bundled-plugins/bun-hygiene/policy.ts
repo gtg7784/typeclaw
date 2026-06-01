@@ -60,6 +60,11 @@ function splitSegments(command: string): string[][] {
   let current = ''
   let hasWord = false
   let quote: '"' | "'" | null = null
+  // Tracks a command substitution entered from inside a double quote, so the
+  // outer double-quote mode is restored when the substitution closes. Bash runs
+  // `$(...)` and backtick substitutions inside double quotes (but not single),
+  // so `echo "$(npm install)"` must be scanned for a manager.
+  let commandSub: { kind: '`' | '$('; depth: number; resumeQuote: '"' } | null = null
 
   const flushWord = (): void => {
     if (hasWord) {
@@ -79,10 +84,55 @@ function splitSegments(command: string): string[][] {
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]
     if (quote !== null) {
+      // A `$(` or backtick inside a double quote opens a command substitution
+      // that Bash executes; scan its body as a fresh segment, remembering to
+      // resume double-quote mode when it closes.
+      if (quote === '"' && ch === '`') {
+        flushSegment()
+        commandSub = { kind: '`', depth: 0, resumeQuote: '"' }
+        quote = null
+        continue
+      }
+      if (quote === '"' && ch === '$' && command[i + 1] === '(') {
+        flushSegment()
+        commandSub = { kind: '$(', depth: 1, resumeQuote: '"' }
+        quote = null
+        i++
+        continue
+      }
       if (ch === quote) quote = null
       else {
         current += ch
         hasWord = true
+      }
+      continue
+    }
+    // Close of a command substitution opened from inside a double quote:
+    // restore the outer double-quote mode so the rest of the string (and any
+    // trailing `&&`/`;`) is parsed correctly rather than re-quoted.
+    if (commandSub?.kind === '`' && ch === '`') {
+      flushSegment()
+      quote = commandSub.resumeQuote
+      commandSub = null
+      continue
+    }
+    if (commandSub?.kind === '$(' && ch === '$' && command[i + 1] === '(') {
+      flushSegment()
+      commandSub.depth++
+      i++
+      continue
+    }
+    if (commandSub?.kind === '$(' && ch === '(') {
+      flushSegment()
+      commandSub.depth++
+      continue
+    }
+    if (commandSub?.kind === '$(' && ch === ')') {
+      flushSegment()
+      commandSub.depth--
+      if (commandSub.depth === 0) {
+        quote = commandSub.resumeQuote
+        commandSub = null
       }
       continue
     }

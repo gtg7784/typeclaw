@@ -38,7 +38,7 @@ Both guards follow the repo-wide `acknowledgeGuards` convention (shared with the
 
 `checkBunHygieneGuard` in `policy.ts` does not regex the raw command. It runs a small single-pass tokenizer (`splitSegments`) that turns the command into a list of **segments**, each a list of **words**:
 
-- Segments break on real command separators — `;`, `&&`, `||`, `|`, `&`, newline, `\r` — and on subshell / command-substitution openers (`(`, `$(`, backtick).
+- Segments break on real command separators — `;`, `&&`, `||`, `|`, `&`, newline, `\r` — and on subshell / command-substitution openers (`(`, `$(`, backtick), **including `$(`/backtick inside double quotes** (Bash executes those, e.g. `echo "$(npm install -g x)"`; the outer double-quote mode resumes when the substitution closes so a trailing command isn't swallowed). Single-quoted bodies stay literal, matching Bash.
 - The tokenizer is quote-aware (a separator inside `"..."`/`'...'` is literal) and escape-aware (`\x` is a literal `x`, so `\npm` resolves to `npm` and `\;` is not a separator). A `\<newline>` is a POSIX line continuation — it is removed and the surrounding text joined, so `npm install \⏎-g x` is one command (a global install), while a bare newline separates commands.
 
 For each segment, the guard strips leading **preamble wrappers** (`sudo`, `env`, `command`, `exec`, `nice`, `nohup`, `stdbuf`, `setsid`, `time`, `xargs`, and any `VAR=val` assignment) — including their options, and the argument a flag consumes (`sudo -u nobody`, `nice -n 10`, `env -i`) — to find the real command word, then classifies:
