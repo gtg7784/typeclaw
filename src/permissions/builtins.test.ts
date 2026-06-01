@@ -34,6 +34,7 @@ describe('built-in role contract (role-tower model: owner=high, trusted=medium, 
       'fs.see.secrets',
       'security.bypass.low',
       'security.bypass.medium',
+      'session.admin',
       'session.control',
       'subagent.cancel',
       'subagent.output',
@@ -74,6 +75,13 @@ describe('built-in role contract (role-tower model: owner=high, trusted=medium, 
     expect([...BUILTIN_ROLES.trusted.permissions]).toContain('session.control')
     expect([...BUILTIN_ROLES.member.permissions]).toContain('session.control')
     expect([...BUILTIN_ROLES.guest.permissions]).not.toContain('session.control')
+  })
+
+  test('session.admin is owner+trusted ONLY (member cannot /reload or /restart the container)', () => {
+    expect([...BUILTIN_ROLES.owner.permissions]).toContain('session.admin')
+    expect([...BUILTIN_ROLES.trusted.permissions]).toContain('session.admin')
+    expect([...BUILTIN_ROLES.member.permissions]).not.toContain('session.admin')
+    expect([...BUILTIN_ROLES.guest.permissions]).not.toContain('session.admin')
   })
 
   test('member does NOT carry the operator-specific spawn permission (write-capable subagents are owner+trusted only)', () => {
