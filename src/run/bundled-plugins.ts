@@ -1,6 +1,7 @@
 import agentBrowserPlugin from '@/bundled-plugins/agent-browser'
 import backupPlugin from '@/bundled-plugins/backup'
 import explorerPlugin from '@/bundled-plugins/explorer'
+import githubCliAuthPlugin from '@/bundled-plugins/github-cli-auth'
 import guardPlugin from '@/bundled-plugins/guard'
 import memoryPlugin from '@/bundled-plugins/memory'
 import operatorPlugin from '@/bundled-plugins/operator'
@@ -28,6 +29,11 @@ import type { ResolvedPlugin } from '@/plugin'
 // Reversing this order would make guard advise on the full oversized payload
 // and then tool-result-cap would clobber the advice text along with the rest.
 //
+// `github-cli-auth` is registered AFTER `security` so security's `tool.before`
+// scans the ORIGINAL bash command for exfil patterns before github-cli-auth
+// rewrites it to `GH_TOKEN=… gh …`. Rewriting first would feed the injected
+// token through security's outbound/secret scanners.
+//
 // `memory` is registered before `backup` so memory's dreaming commits always
 // land in the same git index window before backup's commit-and-push cycle.
 // They commit disjoint paths today (memory/ vs sessions/ + agent changes),
@@ -37,6 +43,7 @@ export const BUNDLED_PLUGINS: ResolvedPlugin[] = [
   { name: 'security', version: undefined, source: '<bundled>', defined: securityPlugin },
   { name: 'tool-result-cap', version: undefined, source: '<bundled>', defined: toolResultCapPlugin },
   { name: 'guard', version: undefined, source: '<bundled>', defined: guardPlugin },
+  { name: 'github-cli-auth', version: undefined, source: '<bundled>', defined: githubCliAuthPlugin },
   { name: 'memory', version: undefined, source: '<bundled>', defined: memoryPlugin },
   { name: 'backup', version: undefined, source: '<bundled>', defined: backupPlugin },
   { name: 'agent-browser', version: undefined, source: '<bundled>', defined: agentBrowserPlugin },

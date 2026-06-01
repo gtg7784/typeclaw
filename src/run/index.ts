@@ -19,6 +19,7 @@ import { resolveCapOptionsFromConfig } from '@/bundled-plugins/tool-result-cap'
 import {
   createChannelManager,
   createChannelsReloadable,
+  createGithubTokenBridge,
   createSubagentCompletionBridge,
   type ChannelManager,
   type SubagentCompletionBridge,
@@ -138,11 +139,13 @@ export async function startAgent({
 
   const pluginConfigsByName = loadPluginConfigsSync(cwd)
   const cwdConfig = loadConfigSync(cwd)
+  const githubTokenBridge = createGithubTokenBridge()
   const pluginsLoaded = await loadPlugins({
     entries: cwdConfig.plugins,
     agentDir: cwd,
     configsByName: pluginConfigsByName,
     bundled: BUNDLED_PLUGINS,
+    resolveGithubTokenForRepo: githubTokenBridge.resolveTokenForRepo,
     ...(cwdConfig.roles !== undefined ? { roles: cwdConfig.roles } : {}),
   })
 
@@ -255,6 +258,7 @@ export async function startAgent({
     }),
     permissions: pluginsLoaded.permissions,
     claimHandler: claimController.claimHandler,
+    githubTokenBridge,
     stream,
   })
 

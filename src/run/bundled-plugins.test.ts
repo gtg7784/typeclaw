@@ -19,6 +19,7 @@ describe('BUNDLED_PLUGINS', () => {
       'security',
       'tool-result-cap',
       'guard',
+      'github-cli-auth',
       'memory',
       'backup',
       'agent-browser',
