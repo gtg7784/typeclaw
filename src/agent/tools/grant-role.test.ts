@@ -36,6 +36,29 @@ const TRUSTED_GROUP: SessionOrigin = {
 }
 const TUI: SessionOrigin = { kind: 'tui', sessionId: 's1' }
 
+function trustedGroupWithMembership(
+  membership: { humans: number; bots: number; truncated: boolean; ageMs?: number } | undefined,
+): SessionOrigin {
+  return {
+    kind: 'channel',
+    adapter: 'slack-bot',
+    workspace: 'T0123',
+    chat: 'C_PUBLIC',
+    thread: null,
+    lastInboundAuthorId: 'U_TRENT',
+    ...(membership === undefined
+      ? {}
+      : {
+          membership: {
+            humans: membership.humans,
+            bots: membership.bots,
+            truncated: membership.truncated,
+            fetchedAt: Date.now() - (membership.ageMs ?? 0),
+          },
+        }),
+  }
+}
+
 const ROLES: RolesConfig = {
   owner: { match: [{ kind: 'channel', platform: 'slack', author: 'U_OWNER' }] },
   trusted: { match: [{ kind: 'channel', platform: 'slack', author: 'U_TRENT' }] },
@@ -82,7 +105,7 @@ describe('grant_role gate — origin', () => {
     const dir = freshAgentDir()
     const details = await run(makeTool(dir, TRUSTED_GROUP), { role: 'member', match: 'slack:T0123 author:U_X' })
     expect(details.ok).toBe(false)
-    if (!details.ok) expect(details.error).toContain('TUI or a 1:1 DM')
+    if (!details.ok) expect(details.error).toContain('one human member')
     // nothing written
     expect(readRoles(dir).member).toBeUndefined()
   })
@@ -104,6 +127,66 @@ describe('grant_role gate — origin', () => {
     const dir = freshAgentDir()
     const details = await run(makeTool(dir, TUI), { role: 'member', match: 'slack:T0123 author:U_WIFE' })
     expect(details.ok).toBe(true)
+  })
+})
+
+describe('grant_role gate — single-human group channel', () => {
+  test('group channel with exactly one human member is allowed for a trusted caller', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({ humans: 1, bots: 1, truncated: false })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(true)
+    expect(readRoles(dir).guest?.permissions).toContain('subagent.spawn')
+  })
+
+  test('group channel with two humans is refused even when the caller is trusted', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({ humans: 2, bots: 1, truncated: false })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    if (!details.ok) expect(details.error).toContain('one human member')
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('truncated membership is refused (cannot prove the room is single-human)', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({ humans: 1, bots: 1, truncated: true })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('stale membership is refused (count may no longer hold)', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership({ humans: 1, bots: 1, truncated: false, ageMs: 5 * 60 * 1000 })
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('missing membership is refused (no proof of who is in the room)', async () => {
+    const dir = freshAgentDir()
+    const origin = trustedGroupWithMembership(undefined)
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
+  })
+
+  test('single-human group with an untrusted caller is still refused by the caller-role check', async () => {
+    const dir = freshAgentDir()
+    const origin: SessionOrigin = {
+      kind: 'channel',
+      adapter: 'slack-bot',
+      workspace: 'T0123',
+      chat: 'C_PUBLIC',
+      thread: null,
+      lastInboundAuthorId: 'U_STRANGER',
+      membership: { humans: 1, bots: 1, truncated: false, fetchedAt: Date.now() },
+    }
+    const details = await run(makeTool(dir, origin), { role: 'guest', permission: 'subagent.spawn' })
+    expect(details.ok).toBe(false)
+    if (!details.ok) expect(details.error).toContain('only owner or trusted may grant')
+    expect(readRoles(dir).guest?.permissions).toBeUndefined()
   })
 })
 

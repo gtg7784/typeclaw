@@ -1,6 +1,7 @@
 import { Type } from '@mariozechner/pi-ai'
 import { defineTool } from '@mariozechner/pi-coding-agent'
 
+import { MEMBERSHIP_FRESHNESS_MS } from '@/channels/membership'
 import {
   grantRole,
   grantRolePermission,
@@ -48,16 +49,38 @@ function isTierRole(role: string): role is TierRole {
 
 // A single-principal turn carries only the principal's own first-party words:
 // the TUI (a human typing directly) or a 1:1 DM (principal + bot, no
-// third-party messages buffered in). A group/open channel turn always mixes in
-// other authors' messages, which is the confused-deputy surface that lets a
+// third-party messages buffered in). A group/open channel turn normally mixes
+// in other authors' messages, which is the confused-deputy surface that lets a
 // guest prompt-inject a trusted turn into rewriting the access-control table.
-// Role grants are confined to single-principal turns so that surface does not
-// exist.
+// Role grants are confined to turns where that surface does not exist.
 function isSinglePrincipalOrigin(origin: SessionOrigin | undefined): boolean {
   if (origin === undefined) return false
   if (origin.kind === 'tui') return true
   if (origin.kind === 'channel') return isDmChannelOrigin(origin)
   return false
+}
+
+// A group/open channel that the platform proves contains exactly one human is
+// injection-equivalent to a 1:1 DM: there is no third-party human whose
+// buffered messages could prompt-inject the turn. The lone human is the
+// caller, and the per-turn caller-role check below still requires them to
+// resolve to owner/trusted. We trust ONLY a fresh, complete membership read —
+// `participants` is a bounded, speaker-only, age-filtered list and cannot prove
+// the absence of a silent untrusted lurker, so it is unsuitable for authorizing
+// a write to the access-control table. Every uncertain signal (missing, stale,
+// or truncated membership) fails closed. This mirrors `resolveEffectiveHumans`
+// in src/channels/engagement.ts, which likewise trusts only a fresh complete
+// read to see lurkers.
+function isSingleHumanGroupChannelOrigin(origin: SessionOrigin | undefined, now: number): boolean {
+  if (origin?.kind !== 'channel') return false
+  if (isDmChannelOrigin(origin)) return false
+
+  const membership = origin.membership
+  if (membership === undefined) return false
+  if (membership.truncated) return false
+  if (now - membership.fetchedAt >= MEMBERSHIP_FRESHNESS_MS) return false
+
+  return membership.humans === 1
 }
 
 export function createGrantRoleTool(options: CreateGrantRoleToolOptions) {
@@ -70,7 +93,8 @@ export function createGrantRoleTool(options: CreateGrantRoleToolOptions) {
       'Assign an author to a role (match grant) or give a role a capability (permission grant), by editing typeclaw.json#roles. ' +
       'Use this to onboard a teammate ("respond to author U_X" → grant them member) or to open the agent to a wider audience ' +
       '("let anyone in this channel message you" → grant guest channel.respond). ' +
-      'Only callable from the TUI or a 1:1 DM by an owner or trusted user — group-channel turns cannot use it. ' +
+      'Only callable by an owner or trusted user from the TUI, a 1:1 DM, or a group channel that currently has ' +
+      'exactly one human member — multi-human channel turns cannot use it. ' +
       'Permission grants are restart-required: they land in typeclaw.json but take effect on the next `typeclaw restart`.',
     parameters: Type.Object({
       role: Type.Union(
@@ -98,10 +122,11 @@ export function createGrantRoleTool(options: CreateGrantRoleToolOptions) {
     async execute(_toolCallId, params): Promise<ToolReturn> {
       const origin = getOrigin()
 
-      if (!isSinglePrincipalOrigin(origin)) {
+      if (!isSinglePrincipalOrigin(origin) && !isSingleHumanGroupChannelOrigin(origin, Date.now())) {
         return err(
-          'grant_role is only available from the TUI or a 1:1 DM. A group-channel turn cannot change roles, ' +
-            'because it mixes in other participants\u2019 messages (prompt-injection surface).',
+          'grant_role is only available from the TUI, a 1:1 DM, or a group channel that currently has exactly ' +
+            'one human member. A multi-human channel turn cannot change roles, because it mixes in other ' +
+            'participants\u2019 messages (prompt-injection surface).',
         )
       }
 
