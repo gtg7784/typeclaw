@@ -528,6 +528,42 @@ describe('createSlackMembershipResolver', () => {
     expect(calls.filter((u) => u.endsWith('/users.list'))).toHaveLength(1)
   })
 
+  test('does not reuse a bot set warmed for one workspace to classify another', async () => {
+    const usersListCalls: string[] = []
+    const fn = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+      if (url.endsWith('/conversations.info')) return slackResponse({ ok: true, channel: { num_members: 1 } })
+      if (url.endsWith('/conversations.members')) return slackResponse({ ok: true, members: ['UBOT'] })
+      if (url.endsWith('/users.list')) {
+        const body = String((init?.body as string | undefined) ?? '')
+        usersListCalls.push(body)
+        // UBOT is a bot in workspace A only; in B it is an unknown (human).
+        return usersListCalls.length === 1
+          ? slackResponse({ ok: true, members: [{ id: 'UBOT', is_bot: true }] })
+          : slackResponse({ ok: true, members: [] })
+      }
+      return slackResponse({ ok: false, error: 'unexpected' })
+    }) as unknown as typeof fetch
+
+    const resolver = createSlackMembershipResolver({
+      token: 'tok',
+      logger: silentLogger(),
+      historyCallback: emptyHistory(),
+      fetchImpl: fn,
+      now: () => 0,
+    })
+
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'A', chat: 'C1', thread: null })).resolves.toMatchObject({
+      bots: 1,
+      humans: 0,
+    })
+    await expect(resolver({ adapter: 'slack-bot', workspace: 'B', chat: 'C1', thread: null })).resolves.toMatchObject({
+      bots: 0,
+      humans: 1,
+    })
+    expect(usersListCalls).toHaveLength(2)
+  })
+
   test('large channel (>cap) falls back to history-derived count', async () => {
     const { fn, calls } = fakeFetch([slackResponse({ ok: true, channel: { num_members: 80 } })])
     const { cb, calls: historyCalls } = fakeHistory({

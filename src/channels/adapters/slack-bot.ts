@@ -427,32 +427,40 @@ export function createSlackMembershipResolver(deps: {
   const now = deps.now ?? Date.now
   const userBotCache = new Map<string, boolean>()
 
-  let botSetCache: { ids: ReadonlySet<string>; fetchedAt: number } | null = null
-  let botSetFailedAt: number | null = null
-  let botSetInFlight: Promise<ReadonlySet<string> | null> | null = null
+  // Keyed by workspace. One resolver instance is bound to a single token/team
+  // today, but the router dispatches by adapter (not by adapter+workspace), so
+  // scoping the warm set by `key.workspace` keeps a set built for one workspace
+  // from ever classifying another's members if a multi-workspace mode is added.
+  const botSetCache = new Map<string, { ids: ReadonlySet<string>; fetchedAt: number }>()
+  const botSetFailedAt = new Map<string, number>()
+  const botSetInFlight = new Map<string, Promise<ReadonlySet<string> | null>>()
 
-  const warmBotSet = async (): Promise<ReadonlySet<string> | null> => {
-    if (botSetCache !== null && now() - botSetCache.fetchedAt < MEMBERSHIP_CACHE_TTL_MS) return botSetCache.ids
+  const warmBotSet = async (workspace: string): Promise<ReadonlySet<string> | null> => {
+    const cached = botSetCache.get(workspace)
+    if (cached !== undefined && now() - cached.fetchedAt < MEMBERSHIP_CACHE_TTL_MS) return cached.ids
     // Negative-cache a failed warm so a rate-limited workspace doesn't re-run
     // the full paginated `users.list` crawl on every membership read — that
     // would keep the hot path expensive under the exact failure this PR fixes.
     // Members fall back to per-id `users.info` during the cooldown.
-    if (botSetFailedAt !== null && now() - botSetFailedAt < MEMBERSHIP_CACHE_TRANSIENT_TTL_MS) return null
-    if (botSetInFlight !== null) return await botSetInFlight
-    botSetInFlight = fetchWorkspaceBotIds(fetchFn, deps.token, deps.logger)
+    const failedAt = botSetFailedAt.get(workspace)
+    if (failedAt !== undefined && now() - failedAt < MEMBERSHIP_CACHE_TRANSIENT_TTL_MS) return null
+    const inFlight = botSetInFlight.get(workspace)
+    if (inFlight !== undefined) return await inFlight
+    const promise = fetchWorkspaceBotIds(fetchFn, deps.token, deps.logger)
       .then((ids) => {
         if (ids !== null) {
-          botSetCache = { ids, fetchedAt: now() }
-          botSetFailedAt = null
+          botSetCache.set(workspace, { ids, fetchedAt: now() })
+          botSetFailedAt.delete(workspace)
         } else {
-          botSetFailedAt = now()
+          botSetFailedAt.set(workspace, now())
         }
         return ids
       })
       .finally(() => {
-        botSetInFlight = null
+        botSetInFlight.delete(workspace)
       })
-    return await botSetInFlight
+    botSetInFlight.set(workspace, promise)
+    return await promise
   }
 
   return async (key): Promise<MembershipResolverResult> => {
@@ -517,7 +525,7 @@ export function createSlackMembershipResolver(deps: {
     // per-id fallback for ids minted after the last warm, keeping `bots` and
     // `humanMemberIds` exact for `grant_role`'s "no peer bot present" proof.
     const memberIds = members.value.members ?? []
-    const botSet = await warmBotSet()
+    const botSet = await warmBotSet(key.workspace)
     let bots = 0
     const humanMemberIds: string[] = []
     for (const userId of memberIds) {
